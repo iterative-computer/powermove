@@ -40,6 +40,11 @@ pub struct Editor {
     pub tokens: Tokens,
     pub host: Option<Rc<RefCell<Host>>>,
     geometry: Geometry,
+    dock_scroll: HashMap<String, f32>,
+    dock_scroll_max: HashMap<String, f32>,
+    dock_scrolled_at: Option<std::time::Instant>,
+    last_scroll_focus: Option<FocusHandle>,
+    scrollbar_task: Option<Task<()>>,
     /// Panels sliding to a new place after a drop, a maximise or a
     /// workspace switch: each panel's offset from its new rect, springing to
     /// nothing (v1 moved panels the same way). Live resizes never slide.
@@ -125,6 +130,11 @@ impl Editor {
             tokens,
             host,
             geometry: Geometry::default(),
+            dock_scroll: HashMap::new(),
+            dock_scroll_max: HashMap::new(),
+            dock_scrolled_at: None,
+            last_scroll_focus: None,
+            scrollbar_task: None,
             slides: PanelSlides::default(),
             maximized_panel: None,
             parked: HashMap::new(),
@@ -321,8 +331,29 @@ impl Editor {
         self.seen = None;
         self.persist_session();
     }
-    /// Writes the window's layout into its workspace record (the project's
-    /// saved workspace and its entry in `workspaces`), then the session.
+    /// Move a side column without saving transient viewport state (Electron's rule).
+    pub fn scroll_dock(&mut self, id: &str, by: f32) -> bool {
+        if !by.is_finite() { return false; }
+        let old = self.dock_scroll.get(id).copied().unwrap_or(0.);
+        let maximum = self.dock_scroll_max.get(id).copied().unwrap_or(0.);
+        let next = (old + by).clamp(0., maximum);
+        if next == old {
+            return false;
+        }
+        self.dock_scroll.insert(id.into(), next);
+        self.dock_scrolled_at = Some(std::time::Instant::now());
+        true
+    }
+
+    fn dock_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.notify();
+        self.scrollbar_task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(950)).await;
+            let _ = this.update(cx, |this, cx| { this.dock_scrolled_at = None; cx.notify(); });
+        }));
+    }
+
+    /// Save the layout in its workspace record and session.
     pub fn save(&mut self) {
         // A parked panel keeps its place in the workspace (v1 kept a retired
         // panel's spec); only this window's view leaves it out.
@@ -819,6 +850,46 @@ impl Editor {
         true
     }
     pub fn command(&mut self, cmd: Command, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = cmd.name.strip_prefix("dockScroll:") {
+            if let Some((di, _, _)) = self.layout.find(id) {
+                let dock = self.layout.docks[di].id.clone();
+                let by = cmd.args.first().and_then(|v| v.as_f64()).unwrap_or(0.) as f32;
+                if by.is_finite() && self.scroll_dock(&dock, by) {
+                    self.dock_moved(window, cx);
+                }
+            }
+            return;
+        }
+        if let Some(id) = cmd.name.strip_prefix("dockReveal:") {
+            if let Some(p) = self
+                .geometry
+                .panels
+                .iter()
+                .find(|p| {
+                    self.layout.docks[p.dock].groups[p.group]
+                        .tabs
+                        .iter()
+                        .any(|tab| tab == id)
+                })
+                .cloned()
+                && let Some(bounds) = self.geometry.side_docks.get(&p.dock).copied()
+            {
+                let relative = cmd.args.first().and_then(|v| v.as_f64()).unwrap_or(0.) as f32;
+                let height = cmd.args.get(1).and_then(|v| v.as_f64()).unwrap_or(24.) as f32;
+                let y = p.rect.y + self.tokens.metrics.header + relative;
+                let by = if y < bounds.y {
+                    y - bounds.y
+                } else {
+                    (y + height.min(bounds.h) - bounds.y - bounds.h).max(0.)
+                };
+                let dock = self.layout.docks[p.dock].id.clone();
+                if by.is_finite() && self.scroll_dock(&dock, by) {
+                    self.dock_moved(window, cx);
+                }
+            }
+            return;
+        }
+
         self.slides.armed = true;
         // Development builds: `--open reviewViews` with `--save-dir` writes
         // the window's AppKit view tree there.
@@ -1687,6 +1758,7 @@ impl Editor {
         if let Some(h) = &self.host {
             let h = h.borrow();
             h.viewer_rect.set(None);
+            h.native_panel_clips.borrow_mut().clear();
             // Home covers the viewer: its extra 3D views have no place.
             h.viewer_tiles.borrow_mut().clear();
             h.canvas_focus.set(false);
@@ -1781,6 +1853,61 @@ impl Render for Editor {
             &t,
             self.maximized_panel.as_deref(),
         );
+        // Keep input/drop geometry in window coordinates, including the column offset.
+        for (&di, bounds) in &self.geometry.side_docks {
+            let id = &self.layout.docks[di].id;
+            let bottom = self
+                .geometry
+                .panels
+                .iter()
+                .filter(|p| p.dock == di)
+                .map(|p| p.rect.y + p.rect.h)
+                .fold(bounds.y, f32::max);
+            let offset = self.dock_scroll.entry(id.clone()).or_default();
+            let maximum = (bottom - bounds.y - bounds.h).max(0.);
+            self.dock_scroll_max.insert(id.clone(), maximum);
+            *offset = offset.clamp(0., maximum);
+            for p in self.geometry.panels.iter_mut().filter(|p| p.dock == di) {
+                p.rect.y -= *offset;
+            }
+            for d in self
+                .geometry
+                .dividers
+                .iter_mut()
+                .filter(|d| d.dock == di && d.group.is_some())
+            {
+                d.rect.y -= *offset;
+            }
+        }
+        let focused = self
+            .panel_focus
+            .iter()
+            .find(|(_, f)| f.contains_focused(w, cx))
+            .map(|(id, _)| id.clone());
+        let focused_handle = w.focused(cx);
+        if focused_handle != self.last_scroll_focus {
+            self.last_scroll_focus = focused_handle;
+            if let Some(p) = self
+                .geometry
+                .panels
+                .iter()
+                .find(|p| {
+                    Some(self.layout.docks[p.dock].groups[p.group].active()) == focused.as_deref()
+                })
+                .cloned()
+                && let Some(bounds) = self.geometry.side_docks.get(&p.dock).copied()
+            {
+                let by = if p.rect.y < bounds.y {
+                    p.rect.y - bounds.y
+                } else {
+                    (p.rect.y + p.rect.h.min(bounds.h) - bounds.y - bounds.h).max(0.)
+                };
+                let id = self.layout.docks[p.dock].id.clone();
+                if self.scroll_dock(&id, by) {
+                    cx.notify();
+                }
+            }
+        }
         let placed: Vec<(String, Rect)> = self
             .geometry
             .panels
@@ -1871,6 +1998,25 @@ impl Render for Editor {
         };
         let mut root = div()
             .id("editor")
+            .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, window, cx| {
+                if e.modifiers.control || e.modifiers.platform || e.modifiers.shift {
+                    return;
+                }
+                let dock = this
+                    .geometry
+                    .side_docks
+                    .iter()
+                    .find(|(_, r)| r.contains(f32::from(e.position.x), f32::from(e.position.y)))
+                    .map(|(di, _)| this.layout.docks[*di].id.clone());
+                if let Some(id) = dock {
+                    let by = -f32::from(e.delta.pixel_delta(px(16.)).y);
+                    if this.scroll_dock(&id, by) {
+                        cx.stop_propagation();
+                        cx.notify();
+                        this.dock_moved(window, cx);
+                    }
+                }
+            }))
             .role(Role::Group)
             .accessibility_id("shell.editor")
             .aria_label("Powermove editor")
@@ -2454,7 +2600,15 @@ impl Render for Editor {
             }
             panel = panel.child(header);
             if collapsed {
-                root = root.child(panel);
+                if let Some(bounds) = self.geometry.side_docks.get(&p.dock) {
+                    let mut local = self.slides.shown(&id, p.rect);
+                    local.x -= bounds.x;
+                    local.y -= bounds.y;
+                    panel = panel.left(px(local.x)).top(px(local.y));
+                    root = root.child(positioned(*bounds).overflow_hidden().child(panel));
+                } else {
+                    root = root.child(panel);
+                }
                 continue;
             }
             let content = self
@@ -2504,7 +2658,50 @@ impl Render for Editor {
                 }
                 panel = panel.child(empty);
             }
-            root = root.child(panel);
+            if let Some(bounds) = self.geometry.side_docks.get(&p.dock) {
+                let mut local = self.slides.shown(&id, p.rect);
+                local.x -= bounds.x;
+                local.y -= bounds.y;
+                panel = panel.left(px(local.x)).top(px(local.y));
+                root = root.child(positioned(*bounds).overflow_hidden().child(panel));
+            } else {
+                root = root.child(panel);
+            }
+        }
+        let show_scrollbar = !cx.should_auto_hide_scrollbars()
+            || self
+                .dock_scrolled_at
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(900));
+        if show_scrollbar {
+            for (&di, bounds) in &self.geometry.side_docks {
+                let offset = self
+                    .dock_scroll
+                    .get(&self.layout.docks[di].id)
+                    .copied()
+                    .unwrap_or(0.);
+                let bottom = self
+                    .geometry
+                    .panels
+                    .iter()
+                    .filter(|p| p.dock == di)
+                    .map(|p| p.rect.y + p.rect.h + offset)
+                    .fold(bounds.y, f32::max);
+                let content = bottom - bounds.y;
+                if content > bounds.h && bounds.h > 0. {
+                    let length = (bounds.h * bounds.h / content).max(18.).min(bounds.h);
+                    let top = offset / (content - bounds.h) * (bounds.h - length);
+                    root = root.child(
+                        positioned(Rect {
+                            x: bounds.x + bounds.w - 7.,
+                            y: bounds.y + top,
+                            w: 5.,
+                            h: length,
+                        })
+                        .rounded(px(3.))
+                        .bg(tint(c.text, 0.35)),
+                    );
+                }
+            }
         }
         self.geometry.tabs = tab_spans;
         if let Some(integration) = &self.integration {
@@ -2514,6 +2711,18 @@ impl Render for Editor {
             integration.shown_panels(&shown, cx);
         }
         if let Some(h) = &self.host {
+            let clips = native_bodies
+                .iter()
+                .map(|(id, r)| {
+                    let clip = self
+                        .layout
+                        .find(id)
+                        .and_then(|(di, _, _)| self.geometry.side_docks.get(&di))
+                        .map_or(*r, |bounds| r.intersection(*bounds));
+                    (id.clone(), clip)
+                })
+                .collect();
+            *h.borrow().native_panel_clips.borrow_mut() = clips;
             *h.borrow().native_panels.borrow_mut() = native_bodies;
         }
         for (i, d) in self.geometry.dividers.clone().into_iter().enumerate() {
@@ -2588,98 +2797,103 @@ impl Render for Editor {
                     ..d.rect
                 }
             };
-            root = root.child(
-                positioned(hit)
-                    .id(format!("splitter-{i}"))
-                    .role(Role::Splitter)
-                    .aria_label("Resize dock")
-                    .tab_index(1000 + i as isize)
-                    // Only a keyboard focus shows (a press focuses it too).
-                    .focus_visible_style(|s| s.bg(tint(c.focus, 0.5)))
-                    .on_key_down(cx.listener(move |this, e: &KeyDownEvent, _, cx| {
-                        let delta = match e.keystroke.key.as_str() {
-                            "left" | "up" => -this.tokens.metrics.keyboard_step,
-                            "right" | "down" => this.tokens.metrics.keyboard_step,
-                            // Return puts a dock back at its size (the original app).
-                            "enter" if key_divider.group.is_none() => {
-                                this.layout.reset_dock(&key_divider);
-                                0.
-                            }
-                            _ => return,
-                        };
-                        this.layout.resize(&key_divider, delta, this.dock_bounds, &this.tokens);
-                        this.save();
-                        cx.stop_propagation();
-                        cx.notify();
-                    }))
-                    .cursor(if d.horizontal {
-                        CursorStyle::ResizeUpDown
-                    } else {
-                        CursorStyle::ResizeLeftRight
-                    })
-                    // The glow follows the pointer along the gap.
-                    .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
-                        let along = if hover_divider.horizontal {
-                            f32::from(e.position.x) - hover_divider.rect.x
-                        } else {
-                            f32::from(e.position.y) - hover_divider.rect.y
-                        };
-                        this.split_hover = Some((hover_key, along));
-                        cx.notify();
-                    }))
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if !*hovered
-                            && this.split_hover.is_some_and(|(k, _)| k == hover_key)
-                            && !matches!(this.gesture, Some(Gesture::Resize(..)))
-                        {
-                            this.split_hover = None;
-                            cx.notify();
+            let mut splitter = positioned(hit)
+                .id(format!("splitter-{i}"))
+                .role(Role::Splitter)
+                .aria_label("Resize dock")
+                .tab_index(1000 + i as isize)
+                // Only a keyboard focus shows (a press focuses it too).
+                .focus_visible_style(|s| s.bg(tint(c.focus, 0.5)))
+                .on_key_down(cx.listener(move |this, e: &KeyDownEvent, _, cx| {
+                    let delta = match e.keystroke.key.as_str() {
+                        "left" | "up" => -this.tokens.metrics.keyboard_step,
+                        "right" | "down" => this.tokens.metrics.keyboard_step,
+                        // Return puts a dock back at its size (the original app).
+                        "enter" if key_divider.group.is_none() => {
+                            this.layout.reset_dock(&key_divider);
+                            0.
                         }
-                    }))
-                    .children(glow)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                            // The grab reaches over the panels' edges: the
-                            // header or body under it must not also take the
-                            // press (a header would start a panel drag).
-                            cx.stop_propagation();
-                            this.split_focus = Some(divd.clone());
-                            if let Some(h) = &this.host {
-                                h.borrow_mut().splitter_focus = true;
-                            }
-                            // A double-click puts a dock back at its size
-                            // (the original app), and two panels back at
-                            // their heights.
-                            if e.click_count >= 2 {
-                                this.gesture = None;
-                                let (bounds, t) = (this.dock_bounds, this.tokens.clone());
-                                if this.layout.reset_dock(&divd)
-                                    || this.layout.reset_split(&divd, bounds, &t)
-                                {
-                                    this.slides.armed = true;
-                                    this.save();
-                                }
-                                cx.notify();
-                                return;
-                            }
-                            // A folded panel beside it opens first, so the
-                            // drag has room to work with.
-                            if this.layout.expand_beside(&divd) {
+                        _ => return,
+                    };
+                    this.layout
+                        .resize(&key_divider, delta, this.dock_bounds, &this.tokens);
+                    this.save();
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .cursor(if d.horizontal {
+                    CursorStyle::ResizeUpDown
+                } else {
+                    CursorStyle::ResizeLeftRight
+                })
+                // The glow follows the pointer along the gap.
+                .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+                    let along = if hover_divider.horizontal {
+                        f32::from(e.position.x) - hover_divider.rect.x
+                    } else {
+                        f32::from(e.position.y) - hover_divider.rect.y
+                    };
+                    this.split_hover = Some((hover_key, along));
+                    cx.notify();
+                }))
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if !*hovered
+                        && this.split_hover.is_some_and(|(k, _)| k == hover_key)
+                        && !matches!(this.gesture, Some(Gesture::Resize(..)))
+                    {
+                        this.split_hover = None;
+                        cx.notify();
+                    }
+                }))
+                .children(glow)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                        // The grab reaches over the panels' edges: the
+                        // header or body under it must not also take the
+                        // press (a header would start a panel drag).
+                        cx.stop_propagation();
+                        this.split_focus = Some(divd.clone());
+                        if let Some(h) = &this.host {
+                            h.borrow_mut().splitter_focus = true;
+                        }
+                        // A double-click puts a dock back at its size
+                        // (the original app); between panels it does nothing.
+                        if e.click_count >= 2 {
+                            this.gesture = None;
+                            if this.layout.reset_dock(&divd) || this.layout.reset_split(&divd, this.dock_bounds, &this.tokens) {
+                                this.slides.armed = true;
                                 this.save();
                             }
-                            this.resize_live = false;
-                            this.gesture = Some(Gesture::Resize(
-                                divd.clone(),
-                                e.position,
-                                this.layout.clone(),
-                            ));
-                            this.watch_release(cx);
-                            window.focus(&this.focus, cx);
                             cx.notify();
-                        }),
-                    ),
-            );
+                            return;
+                        }
+                        // A folded panel beside it opens first, so the
+                        // drag has room to work with.
+                        if this.layout.expand_beside(&divd) {
+                            this.save();
+                        }
+                        this.resize_live = false;
+                        this.gesture = Some(Gesture::Resize(
+                            divd.clone(),
+                            e.position,
+                            this.layout.clone(),
+                        ));
+                        this.watch_release(cx);
+                        window.focus(&this.focus, cx);
+                        cx.notify();
+                    }),
+                );
+            if d.group.is_some()
+                && let Some(bounds) = self.geometry.side_docks.get(&d.dock)
+            {
+                splitter = splitter
+                    .left(px(hit.x - bounds.x))
+                    .top(px(hit.y - bounds.y));
+                root = root.child(positioned(*bounds).overflow_hidden().child(splitter));
+            } else {
+                root = root.child(splitter);
+            }
         }
         // Drop preview and a card that follows the pointer. Work-surface
         // overlays stay solid tints (no glass below the controls band).

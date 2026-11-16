@@ -1966,6 +1966,7 @@ impl Controller {
         let owners = self.extensions.owners.clone();
         let mut shell = self.host.borrow_mut();
         let bodies = shell.native_panels.clone();
+        let clips = shell.native_panel_clips.clone();
         let stage = self.extensions.stage.clone();
         let sent = self.extensions.sent.clone();
         // The panels' ground under the page (`translucency.panel` over the
@@ -1994,11 +1995,15 @@ impl Controller {
                     .collect();
                 // The page shows through each panel's whole body, on the
                 // panels' ground ...
-                let regions = mine
-                    .iter()
-                    .map(|(_, r)| *r)
-                    .chain(stage.as_ref().map(to_rect))
-                    .collect();
+                let clips = clips.borrow();
+                let clipped = |id: &String, r: Rect| {
+                    clips
+                        .iter()
+                        .find(|(key, _)| key == id)
+                        .map_or(r, |(_, clip)| to_rect(clip))
+                };
+                let panel_regions: Vec<Rect> = mine.iter().map(|(id, r)| clipped(id, *r)).collect();
+                let overlay_regions: Vec<Rect> = stage.as_ref().map(to_rect).into_iter().collect();
                 // ... and its content only within that panel's body and every
                 // place recently sent to the page: a page that has not yet
                 // moved a panel's content (a splitter drag) never shows it
@@ -2007,11 +2012,22 @@ impl Controller {
                     && std::env::var_os("PM_NATIVE_NO_PANEL_MASK").is_some()))
                 .then(|| {
                     mine.iter()
-                        .map(|(id, r)| sent.mask(id, *r))
+                        .map(|(id, r)| {
+                            let mask = sent.mask(id, *r);
+                            let clip = clipped(id, *r);
+                            Rect::new(
+                                mask.x.max(clip.x),
+                                mask.y.max(clip.y),
+                                ((mask.x + mask.w).min(clip.x + clip.w) - mask.x.max(clip.x))
+                                    .max(0.),
+                                ((mask.y + mask.h).min(clip.y + clip.h) - mask.y.max(clip.y))
+                                    .max(0.),
+                            )
+                        })
                         .chain(stage.as_ref().map(to_rect))
                         .collect()
                 });
-                let _ = host.set_regions(regions);
+                let _ = host.set_regions(panel_regions.into_iter().chain(overlay_regions).collect());
                 let _ = host.set_content_regions(content);
                 host.set_bodies(mine.iter().map(|(id, r)| ((*id).clone(), *r)).collect());
                 host.set_fill(Some(fill));
@@ -2213,6 +2229,14 @@ impl Controller {
         for (key, page) in &mut self.extensions.pages {
             for event in page.events.events.borrow_mut().drain(..) {
                 match event {
+                    HostEvent::DockScroll { id, delta } => self
+                        .host
+                        .borrow()
+                        .send_command(&format!("dockScroll:{id}"), vec![json!(delta)]),
+                    HostEvent::DockReveal { id, top, height } => self
+                        .host
+                        .borrow()
+                        .send_command(&format!("dockReveal:{id}"), vec![json!(top), json!(height)]),
                     HostEvent::Ready { .. } => page.ready = true,
                     HostEvent::ProcessTerminated => page.ready = false,
                     HostEvent::Failure(code) => eprintln!("extension page: {code}"),

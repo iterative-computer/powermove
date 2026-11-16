@@ -2569,6 +2569,7 @@ pub struct Host {
     pub contributed_choices: Vec<Choice>,
     /// Rectangles of panel bodies a native surface below GPUI draws.
     pub native_panels: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
+    pub native_panel_clips: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
     /// Runs inside the composition transaction, with the window size.
     pub native_present: Option<Rc<dyn Fn(f64, f64) -> bool>>,
     /// Native views to expose in reading order after GPUI's.
@@ -2762,6 +2763,7 @@ impl Host {
             base_choices: choices,
             contributed_choices: vec![],
             native_panels: Rc::default(),
+            native_panel_clips: Rc::default(),
             native_present: None,
             native_accessibility: vec![],
             restored_project: None,
@@ -2779,7 +2781,7 @@ impl Host {
             sidebar: RefCell::new(None),
         }));
         let weak = Rc::downgrade(&host);
-        let native_rects = host.borrow().native_panels.clone();
+        let native_rects = host.borrow().native_panel_clips.clone();
         let reg = gpui_macos::composition::register_tracked(
             &gpui,
             Rc::new(move || {
