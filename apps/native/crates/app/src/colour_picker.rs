@@ -1258,6 +1258,7 @@ impl Render for Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::prelude::v1::test;
     #[gpui::test]
     fn colour_drag_alpha_and_keyboard_are_one_gesture(cx: &mut TestAppContext) {
         let (picker, mut vcx) = cx.add_window_view(|w, cx| {

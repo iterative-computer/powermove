@@ -4970,6 +4970,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         use crate::v4_view_tests::{PROJECT, project_json, publication, rig_project, settle, window};
+        use gpui::AppContext;
         use pm_surface::kit::Component;
         use serde_json::Value;
         use std::time::Duration;
