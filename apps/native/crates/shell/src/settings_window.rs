@@ -222,6 +222,9 @@ impl Chrome {
 pub struct SettingsChrome {
     chrome: Retained<Chrome>,
     window: Retained<NSWindow>,
+    /// The detail item's view: it carries the page's ground (under the
+    /// toolbar too), so nothing opaque sits under the sidebar.
+    detail: Retained<NSView>,
     /// The window's own keys (⌘F, typing in the sidebar).
     monitor: Option<Retained<AnyObject>>,
 }
@@ -381,6 +384,14 @@ impl SettingsChrome {
             gpui.bottomAnchor().constraintEqualToAnchor(&content.bottomAnchor()),
         ]);
         content.setWantsLayer(true);
+        // The sidebar is the system's own material, blended with what is
+        // behind the window: GPUI made the window opaque with an opaque
+        // background (the window server then has nothing behind it to show),
+        // so the window is clear and only the detail carries the page's ground.
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+            0., 0., 0., 0.0001, // not clearColor: that drops the window's shadow
+        )));
 
         // The split view: the content view leaves the window for the detail
         // item (the window holds a stand-in meanwhile).
@@ -444,7 +455,7 @@ impl SettingsChrome {
         if let Some(content) = window.contentView() {
             content.layoutSubtreeIfNeeded();
         }
-        Some(SettingsChrome { chrome, window, monitor })
+        Some(SettingsChrome { chrome, window, detail: content, monitor })
     }
 
     /// The sidebar lists `sections` with `active` selected; the title names it.
@@ -506,9 +517,9 @@ impl SettingsChrome {
     pub fn set_scheme(&self, dark: bool, ground: u32) {
         let state = self.chrome.ivars();
         if state.ground.replace(Some(ground)) != Some(ground) {
-            let c = |shift: u32| f64::from((ground >> shift) & 0xff) / 255.;
-            let colour = NSColor::colorWithSRGBRed_green_blue_alpha(c(16), c(8), c(0), 1.);
-            self.window.setBackgroundColor(Some(&colour));
+            if let Some(layer) = self.detail.layer() {
+                layer.setBackgroundColor(Some(&crate::native::native_color(ground).CGColor()));
+            }
         }
         if state.dark.replace(dark) == dark {
             return;
