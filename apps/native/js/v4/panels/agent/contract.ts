@@ -108,6 +108,7 @@ export type Action =
   | {
       type:
         | "attach"
+        | "pickRegion"
         | "submit"
         | "stop"
         | "newThread"

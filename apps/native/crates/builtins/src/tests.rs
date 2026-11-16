@@ -1075,6 +1075,32 @@ fn an_export_waiting_to_start_is_cancelled_from_its_panel() {
             thread::sleep(Duration::from_millis(2));
         }
     };
+    // The encoders are checked on a worker; Export is enabled once they
+    // are (the app publishes again when the check wakes it).
+    let checked = Instant::now() + Duration::from_secs(60);
+    loop {
+        for (_, ticket) in panels.publish() {
+            finish(ticket.unwrap());
+        }
+        let p = panels
+            .take_publications()
+            .into_iter()
+            .rfind(|p| p.panel == "export");
+        let enabled = p.as_ref().is_some_and(|p| {
+            p.surface.nodes().values().any(|n| {
+                n.props.get("id").and_then(Value::as_str) == Some("export.start")
+                    && n.props.get("disabled") != Some(&Value::Bool(true))
+            })
+        });
+        if p.is_some() {
+            *shown.borrow_mut() = p;
+        }
+        if enabled {
+            break;
+        }
+        assert!(Instant::now() < checked, "Export never enabled");
+        thread::sleep(Duration::from_millis(20));
+    }
     assert!(press(&panels, "export.start"));
     assert!(
         asked(&panels, "export.begin", Duration::from_secs(10)),
@@ -5619,7 +5645,31 @@ fn the_export_subscription_plans_only_while_the_sheet_is_open() {
         .unwrap();
     let open = sheet.export_publication().unwrap();
     assert_eq!(open["project"]["summary"], "300 frames · 10 s · 640×360");
+    // The encoders are checked on a worker: the plan answers at once and
+    // the formats say "Checking…" until the check ends.
+    let checked = std::time::Instant::now();
+    let open = loop {
+        let open = sheet.export_publication().unwrap();
+        if open["capabilities"]["mp4"]["reason"] != "Checking…" {
+            break open;
+        }
+        assert!(
+            checked.elapsed() < std::time::Duration::from_secs(60),
+            "{open}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
     assert_ne!(open["capabilities"]["mp4"]["reason"], "Checking…");
+    // Another kind checks nothing again: each format's check sets its own.
+    let mut still = open["options"].clone();
+    still["format"] = json!("png");
+    sheet
+        .native_command("export.plan", &json!({"options": still}))
+        .unwrap();
+    assert_ne!(
+        sheet.export_publication().unwrap()["capabilities"]["mp4"]["reason"],
+        "Checking…"
+    );
     sheet.native_command("export.dismiss", &json!({})).unwrap();
     let p = kernel.published("synthetic").unwrap();
     kernel

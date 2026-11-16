@@ -41,6 +41,7 @@ mod settings;
 pub mod speech;
 mod timeline_easing;
 pub mod virtualization;
+mod wakers;
 /// Opt-in panel timings (`PM_NATIVE_MAIN_TRACE=1`).
 pub(crate) fn tracing() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1228,8 +1229,9 @@ impl Builtins {
         carry: Option<AgentCarry>,
     ) -> Result<Self> {
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
-        // Speech model downloads publish Settings › Transcription again.
-        crate::speech::watch(&wake);
+        // Speech model downloads publish Settings › Transcription again, and
+        // the Export sheet's encoder checks the sheet.
+        crate::wakers::watch(&wake);
         let (agent, carried) = match carry.map(AgentCarry::adopt) {
             Some((link, state)) => (link, Some(state)),
             None => Default::default(),
@@ -1622,6 +1624,20 @@ impl Builtins {
             backend.native.facts["playing"] = json!(playing);
         }
         Some(realm.eval("__pmBuiltin.publish()"))
+    }
+    /// The Export sheet's encoder checks end on a worker, which only wakes
+    /// the host: the sheet is published again here, once per finished check,
+    /// so its formats and Export Video leave "Checking…" without waiting for
+    /// some other change. The host calls it on every wake.
+    pub fn publish_finished_checks(&self) -> Option<Result<Ticket<Evaluation>>> {
+        let entry = self.broker.entry("export")?;
+        let backend = entry.shared().backend.clone();
+        let probe = backend.shared().native.export_probe.clone();
+        let finished = std::mem::take(&mut probe.lock().unwrap().unpublished);
+        finished.then(|| {
+            self.realm_of("export")
+                .and_then(|realm| realm.eval("__pmBuiltin.publish()"))
+        })
     }
     pub fn take_publications(&self) -> Vec<Publication> {
         std::mem::take(&mut *self.broker.publications.shared())

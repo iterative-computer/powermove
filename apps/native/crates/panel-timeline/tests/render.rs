@@ -229,6 +229,60 @@ fn a_reaching_prepare_adds_the_rows_past_each_edge_for_the_same_view() {
     assert!(above.bounds.y < 0.);
     assert!(above.clip.is_some_and(|c| c.y <= above.bounds.y));
 }
+/// A surface that replays its tracks shifted while it scrolls sideways
+/// records them a view's width past each side: the frame is the wider view's,
+/// the view's own tracks start that far into it, a strip that runs on past the
+/// view's left edge is drawn on into the reach with its name and the ruler's
+/// first label where the view shows them, and a strip wholly in the reach
+/// keeps its name at its own start.
+#[test]
+fn a_wide_prepare_reaches_sideways_and_keeps_names_where_the_view_shows_them() {
+    let t = tokens();
+    let s = scene(&t);
+    let v = viewport(&t);
+    let rx = v.width - v.layer_column;
+    let near = s.prepare(v, &t).unwrap();
+    let wide = s.prepare_wide(v, &t, 0., rx).unwrap();
+    assert_eq!(wide.viewport.width, v.width + 2. * rx);
+    assert!((wide.viewport.scroll_time - (v.scroll_time - rx / v.pps)).abs() < 1e-9);
+    let op = |f: &Frame, id: &str| f.ops.iter().find(|o| o.id == id).cloned().unwrap();
+    let (a, b) = (op(&near, "clip:selected"), op(&wide, "clip:selected"));
+    // Cut straight at the view's edge in the view; started inside the reach.
+    assert!(a.bounds.x < v.layer_column);
+    assert!(b.bounds.x > v.layer_column && b.bounds.x < v.layer_column + rx);
+    assert_eq!(a.bounds.x + a.bounds.width + rx, b.bounds.x + b.bounds.width);
+    let (a, b) = (
+        op(&near, "clip-content:selected"),
+        op(&wide, "clip-content:selected"),
+    );
+    assert_eq!((a.bounds.x + rx, a.bounds.width), (b.bounds.x, b.bounds.width));
+    assert_eq!(a.text, b.text);
+    // The first label slides clear of the column at the view's edge.
+    let min_x = |f: &Frame| {
+        f.ops
+            .iter()
+            .find(|o| o.id.starts_with("time:"))
+            .map(|o| o.detail["minX"].as_f64().unwrap())
+            .unwrap()
+    };
+    assert_eq!(min_x(&near) + rx, min_x(&wide));
+    // Every strip the view shows is in the wide frame, `rx` to the right.
+    for a in near.ops.iter().filter(|o| o.id.starts_with("clip:")) {
+        let b = op(&wide, &a.id);
+        if a.bounds.x >= v.layer_column {
+            assert_eq!(a.bounds.x + rx, b.bounds.x, "{}", a.id);
+        }
+    }
+    // A strip right of the view, wholly in the reach, keeps its name at its start.
+    let later = s.prepare(Viewport { scroll_time: v.scroll_time + rx / v.pps, ..v }, &t).unwrap();
+    for a in later.ops.iter().filter(|o| o.id.starts_with("clip-content:")) {
+        let strip = op(&later, &format!("clip:{}", &a.id["clip-content:".len()..]));
+        if strip.bounds.x >= v.layer_column && a.shape == "text" {
+            let b = op(&wide, &a.id);
+            assert_eq!((a.bounds.x + 2. * rx, a.bounds.width), (b.bounds.x, b.bounds.width), "{}", a.id);
+        }
+    }
+}
 #[test]
 fn malformed_geometry_and_nan_never_reach_native_painter() {
     let t = tokens();

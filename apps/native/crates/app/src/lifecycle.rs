@@ -65,6 +65,21 @@ fn quit_waits_for(
         CloseState::Dirty | CloseState::Clean => None,
     }
 }
+/// How long a close waits to store the viewer's last picture
+/// (`Controller::store_last_frame`). A quit by signal (logout, shutdown, a
+/// script) has no time to give: it never renders one and never waits, so it
+/// keeps only a picture already stored. A chosen quit and a close wait up to
+/// `LAST_FRAME_WAIT` for one to render.
+fn last_frame_wait(intent: Intent, signal: bool) -> Option<std::time::Duration> {
+    (!(signal && intent == Intent::Quit)).then_some(LAST_FRAME_WAIT)
+}
+/// Whether a window lets go of its project for a quit signal instead of
+/// holding the quit: one that would ask the person something (`Busy` once
+/// [`quit_waits_for`] has nothing to wait for). Work that ends on its own
+/// (a save, an open) is still waited for.
+fn lets_go_unattended(state: CloseState, terminating: bool) -> bool {
+    terminating && state == CloseState::Busy
+}
 struct QuitCoordinator {
     _delegate: objc2::rc::Retained<crate::platform::QuitDelegate>,
     controllers: Vec<gpui::WeakEntity<Controller>>,
@@ -92,6 +107,7 @@ pub fn allow_quit(cx: &App) {
     delegate.resolve_quit_events(false);
 }
 fn cancel_quit(cx: &mut App) {
+    pm_shell::session::set_quitting(false);
     crate::diag::line(serde_json::json!({"quit":"cancelled"}));
     crate::recent_work::quit_cancelled();
     cx.global::<QuitCoordinator>()
@@ -137,6 +153,11 @@ fn running_exports(
 /// An export's worker removes its unfinished file before it reports that;
 /// quitting sooner killed the worker with that file still on disk.
 const EXPORT_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The longest a close waits to store the viewer's last picture
+/// (`Controller::store_last_frame`): a first render of a heavy project took
+/// 4.7 s (Paper, Deep Glow). Only a close whose picture differs from the one
+/// stored (another time or revision since the last save) renders at all.
+const LAST_FRAME_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Whether every export in `stopping` has ended (cancelled, failed or done).
 fn exports_ended(
     tasks: &[pm_promedia::tasks::Task],
@@ -240,7 +261,11 @@ fn start_quit(cx: &mut App) {
             &path,
             pm_shell::session::Change::Keep(pm_shell::live_window_ids()),
         );
+        if let Some(front) = pm_shell::front_window_id() {
+            pm_shell::session::write(&path, pm_shell::session::Change::Front(front));
+        }
     }
+    pm_shell::session::set_quitting(true);
     let q = cx.global_mut::<QuitCoordinator>();
     q.quitting = true;
     q.queue = q.controllers.clone();
@@ -592,6 +617,15 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
             // The key window is where MCP acts.
             if window.is_window_active() {
                 v.mcp.activate_window(v.window_key);
+                // Its history names Undo and Redo now.
+                crate::session::set_menu_editor(cx.entity_id());
+                if let Some(published) = v
+                    .session
+                    .as_ref()
+                    .and_then(|s| v.kernel.published(&s.project))
+                {
+                    crate::session::history_menu(&published.history);
+                }
             }
             if window.is_window_active()
                 && !v.close_pending
@@ -905,6 +939,19 @@ impl Controller {
             .detach();
             return;
         }
+        if intent == Intent::Quit
+            && lets_go_unattended(state, cx.global::<QuitCoordinator>().terminating)
+        {
+            // A quit signal at a window asking a question (a recovery choice,
+            // an edit left open): nobody can answer it, and refusing would
+            // keep the app running through a logout. The window lets go as
+            // after a crash: the journal keeps the work, nothing is saved,
+            // and the next launch asks again.
+            self.session = None;
+            self.mcp.bind_window(self.window_key, None);
+            self.complete_close(intent, cx);
+            return;
+        }
         if quit_now_here
             && let Some((window, sheet)) = cx.global_mut::<QuitCoordinator>().asking_now.take()
         {
@@ -1032,8 +1079,20 @@ impl Controller {
         // is still published here until the close finishes.
         let had_project = session.is_some() || self.published.is_some();
         self.closing_note = Some(closing(intent, "finishing save and recovery data"));
+        // The picture the viewer shows now is what the next launch shows
+        // until its first frame: stored before the project and its effects
+        // go, waited for at most `LAST_FRAME_WAIT`; never by a quit signal.
+        let signal = cx.global::<QuitCoordinator>().terminating;
+        let last_frame = session
+            .is_some()
+            .then(|| last_frame_wait(intent, signal))
+            .flatten()
+            .and_then(|wait| self.store_last_frame(Some(wait), cx));
         cx.spawn(async move |this, cx| {
             let result = async {
+                if let Some(stored) = last_frame {
+                    let _ = stored.recv().await;
+                }
                 if let Some(session) = session {
                     expect_closed(kernel.shell(ShellCall::Close(session)).await)?;
                 }
@@ -1155,6 +1214,18 @@ impl Controller {
 
 #[cfg(test)]
 mod tests {
+    /// A quit by signal never renders or waits for the last picture; a
+    /// chosen quit and a close wait for it (PM-384).
+    #[test]
+    fn a_signal_quit_never_waits_on_the_last_frame() {
+        assert_eq!(super::last_frame_wait(Intent::Quit, true), None);
+        assert_eq!(super::last_frame_wait(Intent::Quit, false), Some(LAST_FRAME_WAIT));
+        for intent in [Intent::Window, Intent::Project] {
+            assert_eq!(super::last_frame_wait(intent, false), Some(LAST_FRAME_WAIT));
+            // Only the quit goes without it.
+            assert_eq!(super::last_frame_wait(intent, true), Some(LAST_FRAME_WAIT));
+        }
+    }
     use super::*;
     use pm_kernel::*;
 
@@ -1244,6 +1315,13 @@ mod tests {
         // A recovery choice or an alert on screen, an open edit, a stopped
         // project, and a window that can simply close.
         assert_eq!(quit_waits_for(Busy, true, true, false), None);
+        // A quit signal never stops at a question nobody can answer; a
+        // person's Quit still does, and nothing else lets go.
+        assert!(lets_go_unattended(Busy, true));
+        assert!(!lets_go_unattended(Busy, false));
+        for state in [Saving, Clean, Dirty, Stopped] {
+            assert!(!lets_go_unattended(state, true), "{state:?}");
+        }
         assert_eq!(quit_waits_for(Busy, false, false, false), None);
         assert_eq!(quit_waits_for(Stopped, false, false, false), None);
         assert_eq!(quit_waits_for(Clean, false, false, false), None);

@@ -31,6 +31,8 @@ pub(crate) struct Recorder {
     pub moved: std::cell::Cell<usize>,
     /// Effects dropped from the Effects panel.
     pub effect_drops: RefCell<Vec<crate::timeline_surface::EffectDrop>>,
+    /// Finder files and Project items dropped on the timeline.
+    pub media_drops: RefCell<Vec<crate::timeline_surface::MediaDrop>>,
 }
 pub(crate) struct Recording(pub Rc<Recorder>);
 impl Delegate for Recording {
@@ -58,6 +60,9 @@ impl Delegate for Recording {
     }
     fn view_moved(&self, _: &mut App) {
         self.0.moved.set(self.0.moved.get() + 1);
+    }
+    fn drop_media(&self, drop: crate::timeline_surface::MediaDrop, _: &mut App) {
+        self.0.media_drops.borrow_mut().push(drop);
     }
     fn drop_effect(&self, drop: crate::timeline_surface::EffectDrop, _: &mut App) {
         self.0.effect_drops.borrow_mut().push(drop);
@@ -1699,15 +1704,120 @@ fn a_wheel_step_moves_the_rows_and_outline_without_rendering_the_panel(cx: &mut 
     assert_eq!(shown.viewport.scroll_y, 30.);
     wheel(&mut s, -20.);
     assert_eq!(renders(&s), rendered);
-    // Once the steps stop: the layers' render and the written view's
-    // publication.
+    // Once the steps stop: the layers' render (each layer's settle, one
+    // frame on screen) and the written view's publication.
     settle(&mut s);
-    assert!((rendered + 1..=rendered + 2).contains(&renders(&s)));
+    assert!((rendered + 1..=rendered + 4).contains(&renders(&s)));
     // Past a viewport of rows: drawn again at once.
     let rendered = renders(&s);
     wheel(&mut s, -2000.);
     assert!(renders(&s) > rendered);
     assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 2050.);
+}
+/// PM-310: a sideways wheel step moves the tracks and the ruler as they were
+/// drawn (their scroll layers), with no render of the panel, as the steps up
+/// and down do; the frame hit-testing reads is at the new time at once. The
+/// first step of a sideways scroll draws them past each side (other draws
+/// leave that out: it costs them); the panel renders once the steps stop and
+/// at once for a step past the tracks' width drawn. A skimmer showing stays
+/// under the pointer at the time there, drawn outside the panel.
+#[gpui::test]
+fn a_sideways_wheel_step_moves_the_tracks_and_ruler_without_rendering_the_panel(
+    cx: &mut TestAppContext,
+) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(200), true);
+    let at = s.at(2, 0.2);
+    let settle = |s: &mut Stage| {
+        s.vcx.executor().advance_clock(Duration::from_millis(400));
+        s.vcx.run_until_parked();
+    };
+    let wheel = |s: &mut Stage, delta: Point<Pixels>, modifiers: Modifiers| {
+        s.vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(delta),
+            modifiers,
+            ..Default::default()
+        });
+        s.vcx.run_until_parked();
+    };
+    let renders = |s: &Stage| s.view.read_with(&s.vcx, |v, _| v.renders);
+    let time = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.scroll_time());
+    s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+    // Zoomed in, so the time has somewhere to scroll; the view it wrote
+    // is back from the worker.
+    wheel(&mut s, point(px(0.), px(300.)), Modifiers::control());
+    settle(&mut s);
+    s.idle(cx);
+    let pps = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap().viewport.pps);
+    let before = time(&s);
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-30.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered, "the first sideways step draws past each side");
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-30.), px(0.)), Modifiers::none());
+    assert_eq!(renders(&s), rendered);
+    assert!((time(&s) - (before + 60. / pps)).abs() < 1e-9);
+    let shown = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    assert_eq!(shown.viewport.scroll_time, time(&s));
+    // Shift with the wheel scrolls sideways too; then up and down.
+    wheel(&mut s, point(px(0.), px(-20.)), Modifiers::shift());
+    assert_eq!(renders(&s), rendered);
+    assert!((time(&s) - (before + 80. / pps)).abs() < 1e-9);
+    wheel(&mut s, point(px(0.), px(-30.)), Modifiers::none());
+    assert_eq!(renders(&s), rendered);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 30.);
+    // Once the steps stop: the layers' render (each layer's settle, one
+    // frame on screen) and the written view's publication.
+    settle(&mut s);
+    assert!((rendered + 1..=rendered + 4).contains(&renders(&s)));
+    // Past the tracks' width drawn: drawn again at once.
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-3000.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered);
+    settle(&mut s);
+    // A zoom draws no further than the view again: the next sideways step
+    // draws.
+    wheel(&mut s, point(px(0.), px(-10.)), Modifiers::control());
+    settle(&mut s);
+    s.idle(cx);
+    let rendered = renders(&s);
+    wheel(&mut s, point(px(-30.), px(0.)), Modifiers::none());
+    assert!(renders(&s) > rendered);
+    settle(&mut s);
+    s.idle(cx);
+    // The skimmer showing (drawn with the playhead, outside the panel): a
+    // step moves the time under it with no panel draw, and the skim follows.
+    // Back at the start, zoomed in, the sideways layers recorded.
+    wheel(&mut s, point(px(5000.), px(0.)), Modifiers::none());
+    wheel(&mut s, point(px(0.), px(300.)), Modifiers::control());
+    wheel(&mut s, point(px(-10.), px(0.)), Modifiers::none());
+    settle(&mut s);
+    s.idle(cx);
+    s.recorder.skimming.set(true);
+    let (pps, start, _) = s.surface.read_with(&s.vcx, |t, _| t.time_mapping());
+    let over = s.at(2, start + 300. / pps);
+    s.vcx.simulate_mouse_move(over, None, Modifiers::none());
+    settle(&mut s);
+    let skimmed = s.surface.read_with(&s.vcx, |t, _| t.skimmer()).unwrap();
+    let (x, _) = s.surface.read_with(&s.vcx, |t, _| t.skimmer_mark()).unwrap();
+    let skims = s.recorder.skims.borrow().len();
+    let rendered = renders(&s);
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: over,
+        delta: ScrollDelta::Pixels(point(px(-120.), px(0.))),
+        ..Default::default()
+    });
+    s.vcx.run_until_parked();
+    assert_eq!(renders(&s), rendered);
+    assert!(s.recorder.skims.borrow().len() > skims);
+    let now = s.surface.read_with(&s.vcx, |t, _| t.skimmer()).unwrap();
+    assert!(now > skimmed, "the time under the pointer: later after a scroll on");
+    // Still under the pointer (within the frame it snaps to).
+    let (moved, _) = s.surface.read_with(&s.vcx, |t, _| t.skimmer_mark()).unwrap();
+    assert!((moved - x).abs() <= pps / 30. + 1., "{x} -> {moved}");
+    // Once the steps stop, the panel draws again.
+    settle(&mut s);
+    assert!(renders(&s) > rendered);
 }
 #[gpui::test]
 fn all_rows_mount_and_the_outline_follows_native_scroll_past_the_old_32_row_cap(
@@ -2228,6 +2338,41 @@ fn clicking_a_layer_name_selects_it_and_a_double_click_renames(cx: &mut TestAppC
     );
     assert_eq!(selected(&s), ["l1".to_string()]);
 }
+/// As the app holds the panel (a cached view in its dock, the outline's rows
+/// in their scroll layer): a double-click on a layer's name opens its field.
+#[gpui::test]
+fn a_docked_panel_opens_a_layers_name_field_on_double_click(cx: &mut TestAppContext) {
+    let mut s = stage_with(cx, crate::v4_view_tests::project_json(2), true);
+    let name = bounds(&mut s.vcx, r#"timeline:name:["layer","l1"]"#).center();
+    s.vcx.simulate_mouse_move(name, None, Modifiers::none());
+    s.vcx.simulate_click(name, Modifiers::none());
+    s.idle(cx);
+    s.vcx.executor().advance_clock(Duration::from_millis(400));
+    s.vcx.run_until_parked();
+    for click_count in [1, 2] {
+        s.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        s.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: name,
+            modifiers: Modifiers::none(),
+            click_count,
+        });
+    }
+    s.idle(cx);
+    s.idle(cx);
+    assert!(
+        s.view
+            .read_with(&s.vcx, |v, _| v.cancellable_field())
+            .is_some(),
+        "the double-click opens the name field"
+    );
+}
 /// A double-click on an unselected layer's name, as a person makes it: the
 /// second click lands before the first one's selection has re-rendered the
 /// row, and still opens the name field, whose name typed is the layer's.
@@ -2526,6 +2671,33 @@ fn a_zoomed_time_scroll_under_a_resting_pointer_skims_nothing_once_the_playhead_
         .simulate_mouse_move(at + point(px(9.), px(0.)), None, Modifiers::none());
     s.idle(cx);
     assert!(s.recorder.skims.borrow().len() > skims, "moving the pointer skims");
+}
+/// Finder files dropped on the tracks land on the timeline (v1.2.0): the
+/// drag reaches the timeline through the window's file drop (the rows'
+/// scroll layer and the canvases over them do not take it).
+#[gpui::test]
+fn finder_files_dropped_on_the_tracks_reach_the_timeline(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 4);
+    let at = s.at(1, 1.0);
+    let paths = vec![
+        std::path::PathBuf::from("/media/drop-a.mov"),
+        std::path::PathBuf::from("/media/drop-b.png"),
+    ];
+    s.vcx.simulate_event(gpui::FileDropEvent::Entered {
+        position: at,
+        paths: gpui::ExternalPaths(paths.clone().into()),
+    });
+    s.vcx
+        .simulate_event(gpui::FileDropEvent::Pending { position: at });
+    s.vcx
+        .simulate_event(gpui::FileDropEvent::Submit { position: at });
+    s.idle(cx);
+    let drops = s.recorder.media_drops.borrow().clone();
+    assert_eq!(drops.len(), 1, "{drops:?}");
+    assert!(
+        matches!(&drops[0].what, crate::timeline_surface::Dropped::Files { paths: p, .. } if *p == paths),
+        "{drops:?}"
+    );
 }
 /// Cmd-Tab (the window stops being active) without moving the pointer
 /// clears the skimmer: the viewer returns to the playhead and Space plays

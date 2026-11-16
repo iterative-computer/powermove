@@ -78,7 +78,15 @@ pub(crate) struct Models {
     /// applied on the panel's next request.
     pub show_missing: bool,
     pub originals: std::collections::BTreeMap<String, std::path::PathBuf>,
+    /// What the encoder checks were last asked for (`export_projection`).
     pub export_probe_stamp: String,
+    /// The checks' worker reports here: the stamp last asked for, and the
+    /// last finished check with its stamp.
+    pub export_probe: std::sync::Arc<std::sync::Mutex<Probe>>,
+    /// The open composition as a value, for the sheet's 3D quality, by
+    /// document, revision and composition: converting a real project's
+    /// composition took 0.2 to 0.3 s, twice on every plan.
+    pub export_comp: Option<(String, std::sync::Arc<Value>)>,
     /// The Export sheet is open (PM-376): only then does its subscription
     /// plan the export and check the encoders, which opened audio decoders
     /// and held the panels' thread half a second on every edit and undo.
@@ -153,6 +161,8 @@ impl Models {
             show_missing: false,
             originals: Default::default(),
             export_probe_stamp: String::new(),
+            export_probe: Default::default(),
+            export_comp: None,
             export_open: false,
         })
     }
@@ -1499,9 +1509,22 @@ impl Backend {
         self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"workArea":work_area.map(|(a, b)| [a, b]),"duration":n("dur", 0.),"hdr":pm_kernel::model::project_output(root).hdr(),"summary":plan.summary});
         // A composition with 3D layers offers a per-export 3D quality; the sheet
         // names the composition's own preset as the default choice.
-        if let Some((_, label)) =
-            pm_panel_studio3d::properties::export_quality(&wire(&comp.to_value()), None)
+        let comp_key = format!(
+            "{}:{}:{:?}",
+            p.snapshot.doc_id,
+            p.revision(),
+            p.snapshot.open_comp()
+        );
+        if self
+            .native
+            .export_comp
+            .as_ref()
+            .is_none_or(|(key, _)| *key != comp_key)
         {
+            self.native.export_comp = Some((comp_key, std::sync::Arc::new(wire(&comp.to_value()))));
+        }
+        let comp_value = self.native.export_comp.as_ref().unwrap().1.clone();
+        if let Some((_, label)) = pm_panel_studio3d::properties::export_quality(&comp_value, None) {
             self.native.export["project"]["studio"] = json!({ "saved": label });
             // Which filter cleans the frames: a build without Open Image
             // Denoise uses the engine's own, and the sheet says so.
@@ -1515,7 +1538,7 @@ impl Backend {
         let choice = options.opaque.get("studioQuality").and_then(Value::as_str);
         if let (Some(settings), Some((policy, label))) = (
             plan.settings.as_ref(),
-            pm_panel_studio3d::properties::export_quality(&wire(&comp.to_value()), choice),
+            pm_panel_studio3d::properties::export_quality(&comp_value, choice),
         ) {
             let (w, h, frames) = (
                 settings.size.width,
@@ -1605,21 +1628,58 @@ impl Backend {
         self.native.export["presets"] = self.export_presets();
         #[cfg(target_os = "macos")]
         {
+            // Each format's check sets its own format, so the chosen one is
+            // not part of what they depend on: switching kind checks nothing.
+            let mut checked = options.clone();
+            checked.format = pm_promedia::export_panel::Format::Mp4;
             let key = format!(
                 "{}:{}:{}:{:?}",
                 p.snapshot.doc_id,
                 p.revision(),
-                serde_json::to_string(&options).map_err(|e| e.to_string())?,
+                serde_json::to_string(&checked).map_err(|e| e.to_string())?,
                 self.native.originals
             );
+            // The checks plan the whole project and start each encoder (0.75
+            // to 3.1 s on a real project): on a worker, so the sheet answers
+            // at once and Escape never waits behind them. Until they end, the
+            // formats say what the last check said ("Checking…" the first time).
             if self.native.export_probe_stamp != key {
-                self.native.export["capabilities"] = crate::delivery::capabilities(
-                    &p.snapshot,
-                    &options,
+                self.native.export_probe_stamp = key.clone();
+                self.native.export_probe.lock().unwrap().asked = key.clone();
+                let (probe, snapshot, time, originals) = (
+                    self.native.export_probe.clone(),
+                    p.snapshot.clone(),
                     self.time(),
-                    &self.native.originals,
+                    self.native.originals.clone(),
                 );
-                self.native.export_probe_stamp = key;
+                std::thread::Builder::new()
+                    .name("pm-export-checks".into())
+                    .spawn(move || {
+                        let found =
+                            crate::delivery::capabilities(&snapshot, &checked, time, &originals);
+                        let mut probe = probe.lock().unwrap();
+                        // A newer check was asked meanwhile: it reports instead.
+                        if probe.asked == key {
+                            probe.done = Some((key, found));
+                            probe.unpublished = true;
+                            drop(probe);
+                            crate::wakers::wake_all();
+                        }
+                    })
+                    .map_err(|e| e.to_string())?;
+            }
+            let probe = self.native.export_probe.lock().unwrap();
+            if let Some((key, found)) = &probe.done
+                && *key == self.native.export_probe_stamp
+            {
+                self.native.export["capabilities"] = found.clone();
+            }
+            drop(probe);
+            for format in crate::delivery::FORMATS {
+                if !self.native.export["capabilities"][*format].is_object() {
+                    self.native.export["capabilities"][*format] =
+                        json!({"available":false,"reason":"Checking…"});
+                }
             }
         }
         #[cfg(not(target_os = "macos"))]
@@ -1919,6 +1979,16 @@ impl Backend {
                             accounts.refresh(provider);
                         }
                         drop(state);
+                        link.touch();
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
+                    if action["type"] == "pickRegion" {
+                        // The window shows a crosshair over the editor; what
+                        // is selected comes back through `agent_attach`.
+                        drop(state);
+                        self.native
+                            .platform
+                            .push(("agent.pickRegion".into(), Value::Null));
                         link.touch();
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
@@ -2436,4 +2506,16 @@ mod store_tests {
             Some(json!(["unknown future shape"]))
         );
     }
+}
+
+/// The Export sheet's encoder checks, between the panel and their worker.
+#[derive(Default)]
+pub struct Probe {
+    /// The stamp the panel last asked to check.
+    pub asked: String,
+    /// The last check that finished while it was still the one asked for.
+    pub done: Option<(String, serde_json::Value)>,
+    /// That check is not on the sheet yet: the host publishes the sheet
+    /// again (`Builtins::publish_finished_checks`).
+    pub unpublished: bool,
 }

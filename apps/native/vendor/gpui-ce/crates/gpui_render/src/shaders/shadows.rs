@@ -235,7 +235,7 @@ pub mod shadow {
         blend_color(
             color,
             shadow_coverage(shadow, input.position.xy())
-                * ContentMask::alpha(shadow.content_mask, input.position.xy()),
+                * content_mask_alpha(shadow.content_mask, input.position.xy()),
         )
     }
 
@@ -338,7 +338,7 @@ pub mod shadow {
         );
         blend_color(
             color,
-            coverage * ContentMask::alpha(shadow.content_mask, input.position.xy()),
+            coverage * content_mask_alpha(shadow.content_mask, input.position.xy()),
         )
     }
 }

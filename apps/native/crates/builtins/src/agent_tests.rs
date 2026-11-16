@@ -1381,6 +1381,26 @@ fn reconfiguring_a_running_thread_restarts_it_and_cancel_stops_it() {
     panel.wait(|state| state.panel.session(&thread).unwrap().run.is_none());
     panel.panels.close();
 }
+/// The composer's Select part of the screen (v1's, PM-399): the panel asks
+/// the window for the crosshair; what is selected comes back as an
+/// attachment through `agent_attach`.
+#[test]
+fn select_part_of_the_screen_asks_the_window_for_a_pick() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    panel.panels.take_platform_requests();
+    panel.click("agent-pick-region");
+    let requests = panel.panels.take_platform_requests();
+    assert_eq!(
+        requests.iter().filter(|r| r.operation == "agent.pickRegion").count(),
+        1,
+        "{:?}",
+        requests.iter().map(|r| &r.operation).collect::<Vec<_>>()
+    );
+    panel.panels.close();
+}
 #[test]
 fn attached_files_reach_the_provider_run() {
     let root = tempfile::tempdir().unwrap();

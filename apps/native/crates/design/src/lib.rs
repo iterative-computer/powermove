@@ -11,6 +11,7 @@
 //! [`Elevation`]); motion is springs ([`motion`]); the timeline's strips are a
 //! drawn material ([`Strip`]).
 pub mod color;
+pub mod corner;
 pub mod motion;
 mod recipe;
 mod strip;
@@ -386,6 +387,8 @@ pub struct Metrics {
     pub export_job_progress_height: f32,
     /// Agent composer grows to this many lines, then scrolls.
     pub composer_max_lines: f32,
+    /// The agent composer's tray around its field (v1's 4 pt).
+    pub composer_tray: f32,
     /// Settings grouped-form card corner (control_radius + inner_radius).
     pub group_radius: f32,
     /// Minimum Settings row height (row + inset).
@@ -908,6 +911,7 @@ impl Tokens {
                 export_job_progress_width: 80.,
                 export_job_progress_height: 2.,
                 composer_max_lines: 10.,
+                composer_tray: space.xs,
                 group_radius: radius.lg,
                 form_row: 40.,
                 section_gap: 40.,

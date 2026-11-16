@@ -302,6 +302,34 @@ impl Pose {
         }
         pose
     }
+    /// This layer turned to `degrees` about its anchor (a locked one stays).
+    /// The turn happens in the parent's space, so a scaled parent skews it
+    /// in the composition exactly as the engine will draw it.
+    fn turned(&self, degrees: f64) -> Pose {
+        let mut pose = self.clone();
+        let Some(parent) = inverse_linear(pose.to_parent) else {
+            return pose;
+        };
+        if pose.locked {
+            return pose;
+        }
+        let (sin, cos) = (degrees - pose.rotation).to_radians().sin_cos();
+        let m = multiply(multiply(parent, [cos, sin, -sin, cos]), pose.to_parent);
+        let about = pose.anchor;
+        let turn = |p: [f64; 2]| {
+            let v = apply(m, [p[0] - about[0], p[1] - about[1]]);
+            [about[0] + v[0], about[1] + v[1]]
+        };
+        for corner in &mut pose.corners {
+            *corner = turn(*corner);
+        }
+        let w = pose.world;
+        let [a, b, c, d] = multiply(m, [w[0], w[1], w[2], w[3]]);
+        let [e, f] = turn([w[4], w[5]]);
+        pose.world = [a, b, c, d, e, f];
+        pose.rotation = degrees;
+        pose
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ShapeSize {
@@ -329,6 +357,13 @@ struct Drag {
     /// An Option-drag of the body: each moved layer and the copy that takes
     /// the move in its place.
     copies: Option<Vec<(String, String)>>,
+}
+impl Drag {
+    /// A move, or one layer's turn, predicts its outline as the pointer
+    /// goes; the rest wait for the kernel's read-back.
+    fn draws_own_outline(&self) -> bool {
+        self.hit == Hit::Body || (self.hit == Hit::Rotate && self.poses.len() == 1)
+    }
 }
 #[derive(Clone, Copy)]
 struct Press {
@@ -488,6 +523,15 @@ fn round(value: f64, digits: i32) -> f64 {
 }
 fn apply(m: [f64; 4], v: [f64; 2]) -> [f64; 2] {
     [m[0] * v[0] + m[2] * v[1], m[1] * v[0] + m[3] * v[1]]
+}
+/// `a · b` for column-major 2×2 matrices `[a, b, c, d]`.
+fn multiply(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    [
+        a[0] * b[0] + a[2] * b[1],
+        a[1] * b[0] + a[3] * b[1],
+        a[0] * b[2] + a[2] * b[3],
+        a[1] * b[2] + a[3] * b[3],
+    ]
 }
 fn lerp(a: [f64; 2], b: [f64; 2], t: f64) -> [f64; 2] {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
@@ -812,12 +856,12 @@ impl GizmoSurface {
                     s.studio.object_axes = axes.as_deref() == Some("object");
                     s.studio.light_kind = kind.unwrap_or_default();
                     s.studio.light_add = add.as_deref() == Some("on");
-                    // A move under way draws its own outline (`moved`): a
+                    // A move or turn under way draws its own outline: a
                     // read of an earlier step would pull it back.
                     if !s
                         .drag
                         .as_ref()
-                        .is_some_and(|d| d.active && d.hit == Hit::Body)
+                        .is_some_and(|d| d.active && d.draws_own_outline())
                     {
                         s.poses = Arc::new(poses);
                     }
@@ -1738,17 +1782,24 @@ impl GizmoSurface {
         if let Some(copies) = &drag.copies {
             commands = on_copies(commands, copies);
         }
-        // A move's outline follows the pointer now, not when the kernel's
-        // next publication has been read back (slow on a large project):
-        // each unlocked layer moves by exactly the composition offset.
-        let moved = (drag.hit == Hit::Body).then(|| {
-            let d = locked_delta(origin, at, mods.shift);
-            let delta = [d[0] + offset[0], d[1] + offset[1]];
-            drag.poses
-                .iter()
-                .map(|pose| pose.moved(delta))
-                .collect::<Vec<_>>()
-        });
+        // A move's or a turn's outline follows the pointer now, not when the
+        // kernel's next publication has been read back (slow on a large
+        // project): each unlocked layer moves by exactly the composition
+        // offset, or turns to exactly the rotation the step writes.
+        let moved = match drag.hit {
+            Hit::Body => {
+                let d = locked_delta(origin, at, mods.shift);
+                let delta = [d[0] + offset[0], d[1] + offset[1]];
+                Some(drag.poses.iter().map(|pose| pose.moved(delta)).collect())
+            }
+            _ if drag.draws_own_outline() => Some(
+                drag.poses
+                    .iter()
+                    .map(|pose| pose.turned(turned_to(pose, origin, at, mods)))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        };
         // The alignment feedback marks catching something new, not each
         // step that stays caught.
         let caught = |g: &[snap::Guide]| g.iter().map(|(_, to)| *to).collect::<Vec<_>>();
@@ -2401,6 +2452,26 @@ fn locked_delta(origin: [f64; 2], at: [f64; 2], shift: bool) -> [f64; 2] {
     }
     delta
 }
+/// The rotation a one-layer turn from `origin` to `at` writes: the pointer's
+/// angle about the anchor in the parent's space, Shift in 15° steps and
+/// Command in 45° steps.
+fn turned_to(pose: &Pose, origin: [f64; 2], at: [f64; 2], mods: Mods) -> f64 {
+    let angle = |p: [f64; 2]| {
+        let v = apply(
+            pose.to_parent,
+            [p[0] - pose.anchor[0], p[1] - pose.anchor[1]],
+        );
+        v[1].atan2(v[0])
+    };
+    let turn = (angle(at) - angle(origin)).to_degrees();
+    let mut degrees = pose.rotation + (turn + 180.).rem_euclid(360.) - 180.;
+    if mods.snap {
+        degrees = (degrees / 45.).round() * 45.;
+    } else if mods.shift {
+        degrees = (degrees / 15.).round() * 15.;
+    }
+    round(degrees, 2)
+}
 fn commands(
     drag: &Drag,
     origin: [f64; 2],
@@ -2433,21 +2504,7 @@ fn commands(
                 out.push(set(id, "position.y", pose.position[1] + d[1], t));
             }
             Hit::Rotate => {
-                let angle = |p: [f64; 2]| {
-                    let v = apply(
-                        pose.to_parent,
-                        [p[0] - pose.anchor[0], p[1] - pose.anchor[1]],
-                    );
-                    v[1].atan2(v[0])
-                };
-                let turn = (angle(at) - angle(origin)).to_degrees();
-                let mut degrees = pose.rotation + (turn + 180.).rem_euclid(360.) - 180.;
-                if mods.snap {
-                    degrees = (degrees / 45.).round() * 45.;
-                } else if mods.shift {
-                    degrees = (degrees / 15.).round() * 15.;
-                }
-                out.push(set(id, "rotation", round(degrees, 2), t));
+                out.push(set(id, "rotation", turned_to(pose, origin, at, mods), t));
             }
             Hit::Anchor => {
                 let Some(to_local) = inverse_linear(pose.linear) else {

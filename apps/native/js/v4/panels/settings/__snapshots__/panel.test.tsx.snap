@@ -1578,7 +1578,7 @@ exports[`shortcuts: six-op tree snapshot passes the real Rust wire and kit valid
                           text
                             text "Save"
                       div
-                        div group label="Save: the menu bar's key"
+                        div group label="Save: the menu bar's key, not assignable"
                           div
                             div
                               text
