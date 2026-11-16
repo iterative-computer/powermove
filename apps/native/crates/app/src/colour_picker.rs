@@ -52,6 +52,8 @@ pub struct Picker {
     subscriptions: Vec<Subscription>,
     tokens: pm_design::Tokens,
     motion: pm_shell::motion::Motion<u64>,
+    #[cfg(test)]
+    renders: usize,
 }
 impl EventEmitter<Edit> for Picker {}
 impl Picker {
@@ -87,6 +89,8 @@ impl Picker {
             subscriptions: vec![],
             tokens,
             motion: Default::default(),
+            #[cfg(test)]
+            renders: 0,
         };
         if pm_shell::text::available(window) {
             for i in 0..10 {
@@ -696,6 +700,10 @@ impl Picker {
 }
 impl Render for Picker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.renders += 1;
+        }
         self.motion.frame(window);
         let t = self.tokens.clone();
         let focus_color = t.colors.focus;
@@ -1145,10 +1153,21 @@ mod tests {
                 assert_eq!(p.color.hex(), "#802020");
                 p.nudge(Track::Alpha, "down", true, cx);
                 assert!((p.color.0[3] - 0.9).abs() < 0.0001);
+                p.edit_rgba([0.5, 0.25, 0.75, 0.5], cx);
+                assert_eq!(p.color.0, [0.5, 0.25, 0.75, 0.5]);
+                p.input_numeric(6, "127.5", cx);
+                assert_eq!(p.color.0[0], 0.5);
                 p.finish(true, cx);
             })
         });
         vcx.run_until_parked();
+        let renders = picker.read_with(&vcx, |p, _| p.renders);
+        vcx.run_until_parked();
+        assert_eq!(
+            picker.read_with(&vcx, |p, _| p.renders),
+            renders,
+            "idle picker schedules no redraw"
+        );
         assert_eq!(
             events
                 .borrow()

@@ -3,7 +3,8 @@
 pub struct Color(pub [f32; 4]);
 impl Color {
     pub fn parse(text: &str) -> Option<Self> {
-        let s = text.trim().trim_start_matches('#');
+        let text = text.trim();
+        let s = text.strip_prefix('#').unwrap_or(text);
         if !matches!(s.len(), 3 | 4 | 6 | 8) || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
             return None;
         }
