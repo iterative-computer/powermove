@@ -169,7 +169,7 @@ fn ground(t: &pm_design::Tokens, build: Option<&panel_build::State>) -> Div {
     let radius=t.radius.lg;
     div().absolute().inset_0().child(canvas(|_,_,_|(),move |bounds,_,window,_| {
         window.with_content_mask(Some(ContentMask{bounds,fade_out:Default::default()}),|window| {
-            if resolve>0. {window.paint_quad(PaintQuad::new(bounds).background(pm_shell::kit::ink(color,resolve)));}
+            if resolve>0. {window.paint_quad(PaintQuad::new(bounds).corner_radii(px(radius)).background(pm_shell::kit::ink(color,resolve)));}
             let dimensions=[f32::from(bounds.size.width),f32::from(bounds.size.height)];
             for dot in pm_design::dots::matrix(dimensions,4.,|_|[1.;4]) {
                 if !inside_ground(dot.center,dimensions,radius) {continue;}
@@ -1429,6 +1429,7 @@ mod panel_build_capture {
         }
         cases.push(("reduced-motion".into(),panel_build::Stage::Ink,1,0.2,Scheme::Dark,true));
         for (name, stage, row, elapsed, scheme, reduced) in cases {
+            if std::env::var_os("PM_PANEL_CAPTURE_READY_ONLY").is_some() && stage!=panel_build::Stage::Ready {continue;}
             objc2::rc::autoreleasepool(|_| {
                 let mut cx = HeadlessAppContext::with_platform(
                     Arc::new(gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load).with_automatic_optical_sizing()),
