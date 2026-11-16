@@ -815,6 +815,7 @@ impl NativeTextSlot {
     pub fn is_editing(&self) -> bool {
         self.state.editing.get()
     }
+    pub fn snapshot_visible(&self)->bool {!self.state.wrapper.isHidden()}
     /// Whether the field has the keyboard now (AppKit's first responder is
     /// it or its field editor), not only asked to take it.
     pub fn has_keyboard(&self) -> bool {
@@ -825,7 +826,6 @@ impl NativeTextSlot {
             }),
         }
     }
-    pub fn snapshot_visible(&self)->bool {!self.state.wrapper.isHidden()}
     pub fn native_view(&self) -> &NSView {
         self.state.editor.view()
     }

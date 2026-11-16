@@ -2166,6 +2166,9 @@ impl Controller {
     pub(crate) fn forget_agent_build(&mut self, id: &str) {
         if let Some(build) = self.agent_panel_builds.remove(id) {
             if let Some(target) = build.target {
+                if let Some(page) = self.extensions.page_of(&target) {
+                    page.borrow_mut().finish_panel_build(&target);
+                }
                 self.panel_builds.remove(&target);
             }
         }
@@ -2216,8 +2219,8 @@ mod slot_regression_tests {
                 finishing: false,
                 owner: Some("retired-session".into()),
                 agent_run: None,
-            snapshot: None,
-            snapshot_key: None,
+                snapshot: None,
+                snapshot_key: None,
             },
         );
         assert_eq!(expired_slots(&builds), vec!["hidden"]);

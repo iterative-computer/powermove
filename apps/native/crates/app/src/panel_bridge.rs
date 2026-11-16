@@ -379,7 +379,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                 state.explicit = true;
                 state.planned.extend(0..planned.len());
                 v.panel_builds.insert(id.clone(), state);
-                v.agent_panel_builds.insert(id.clone(), crate::generated_panel::AgentBuild { title: title.into(), planned, target: None, finishing: false, owner: Some(lease.to_owned()), agent_run: args["_panel_owner"].as_str().map(str::to_owned), snapshot: None, snapshot_key: None });
+                v.agent_panel_builds.insert(id.clone(), crate::generated_panel::AgentBuild { title: title.into(), planned, target: None, finishing: false, owner: Some(lease.to_owned()), agent_run: args["_panel_owner"].as_str().map(str::to_owned), snapshot:None, snapshot_key:None });
                 if !v.agent_panel_sweep {
                     v.agent_panel_sweep = true;
                     cx.spawn(async move |this, cx| {

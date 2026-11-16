@@ -2893,4 +2893,3 @@ fn remember_titles(profile: &std::path::Path, panels: &[(String, String)]) {
         let _ = std::fs::write(file, bytes);
     }
 }
-
