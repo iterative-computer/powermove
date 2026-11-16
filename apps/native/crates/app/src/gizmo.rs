@@ -2036,13 +2036,29 @@ impl GizmoSurface {
             );
             let _ = this.update(cx, |s, cx| {
                 s.busy = false;
-                match result {
+                // A gesture that has finished (or never began) has no id to
+                // step: a later gesture's steps must never reach a committed
+                // one, which would leave the later one empty in the history
+                // (PM-433: two Cmd-Z presses undid one step).
+                let begun = match result {
                     Ok(ack) => match ack.reply {
-                        Reply::Gesture(id) => s.gesture = Some(id),
-                        Reply::Throw(error) => s.host.report(error.to_string(), cx),
-                        _ => {}
+                        Reply::Gesture(id) => {
+                            s.gesture = Some(id);
+                            true
+                        }
+                        Reply::Throw(error) => {
+                            s.host.report(error.to_string(), cx);
+                            false
+                        }
+                        _ => true,
                     },
-                    Err(error) => s.host.report(error, cx),
+                    Err(error) => {
+                        s.host.report(error, cx);
+                        false
+                    }
+                };
+                if kind == "finish" || (kind == "begin" && !begun) {
+                    s.gesture = None;
                 }
                 if s.queue.is_empty()
                     && s.drag.is_none()

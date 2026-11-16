@@ -511,6 +511,27 @@ exports[`wire snapshot: selected video 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -677,6 +698,27 @@ exports[`wire snapshot: selected video 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -866,6 +908,27 @@ exports[`wire snapshot: selected video 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -1094,6 +1157,27 @@ exports[`wire snapshot: selected video 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -1260,6 +1344,27 @@ exports[`wire snapshot: selected video 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -1441,6 +1546,27 @@ exports[`wire snapshot: selected video 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -1817,6 +1943,27 @@ exports[`wire snapshot: selected video 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -1952,6 +2099,27 @@ exports[`wire snapshot: selected video 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -2289,6 +2457,27 @@ exports[`wire snapshot: selected video 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -2689,6 +2878,27 @@ exports[`wire snapshot: selected video 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -3711,6 +3921,27 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -3877,6 +4108,27 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -4066,6 +4318,27 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -4294,6 +4567,27 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -4460,6 +4754,27 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -4641,6 +4956,27 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -5017,6 +5353,27 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -5152,6 +5509,27 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -5489,6 +5867,27 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -5889,6 +6288,27 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -6910,6 +7330,27 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -7076,6 +7517,27 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -7265,6 +7727,27 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -7493,6 +7976,27 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -7659,6 +8163,27 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -7840,6 +8365,27 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -8216,6 +8762,27 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -8351,6 +8918,27 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -8688,6 +9276,27 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -9088,6 +9697,27 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -10108,6 +10738,27 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -10313,6 +10964,27 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -10495,6 +11167,27 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -10723,6 +11416,27 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -10896,6 +11610,27 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -11062,6 +11797,27 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -11422,6 +12178,27 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -11557,6 +12334,27 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -11745,6 +12543,27 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -11880,6 +12699,27 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -12217,6 +13057,27 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -12617,6 +13478,27 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -13627,6 +14509,27 @@ exports[`wire snapshot: PNG sequence 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -13793,6 +14696,27 @@ exports[`wire snapshot: PNG sequence 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -13982,6 +14906,27 @@ exports[`wire snapshot: PNG sequence 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -14203,6 +15148,27 @@ exports[`wire snapshot: PNG sequence 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -14579,6 +15545,27 @@ exports[`wire snapshot: PNG sequence 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -14714,6 +15701,27 @@ exports[`wire snapshot: PNG sequence 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -15270,6 +16278,27 @@ exports[`wire snapshot: PNG sequence 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -16280,6 +17309,27 @@ exports[`wire snapshot: still 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -16446,6 +17496,27 @@ exports[`wire snapshot: still 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -16831,6 +17902,27 @@ exports[`wire snapshot: still 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -17388,6 +18480,27 @@ exports[`wire snapshot: still 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -19037,6 +20150,27 @@ exports[`wire snapshot: no captions 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -19203,6 +20337,27 @@ exports[`wire snapshot: no captions 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -19392,6 +20547,27 @@ exports[`wire snapshot: no captions 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -19620,6 +20796,27 @@ exports[`wire snapshot: no captions 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -19786,6 +20983,27 @@ exports[`wire snapshot: no captions 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -19967,6 +21185,27 @@ exports[`wire snapshot: no captions 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -20343,6 +21582,27 @@ exports[`wire snapshot: no captions 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -20478,6 +21738,27 @@ exports[`wire snapshot: no captions 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -20838,6 +22119,27 @@ exports[`wire snapshot: no captions 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -21858,6 +23160,27 @@ exports[`wire snapshot: multiple captions 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -22024,6 +23347,27 @@ exports[`wire snapshot: multiple captions 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -22213,6 +23557,27 @@ exports[`wire snapshot: multiple captions 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -22441,6 +23806,27 @@ exports[`wire snapshot: multiple captions 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -22607,6 +23993,27 @@ exports[`wire snapshot: multiple captions 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -22788,6 +24195,27 @@ exports[`wire snapshot: multiple captions 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -23164,6 +24592,27 @@ exports[`wire snapshot: multiple captions 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -23299,6 +24748,27 @@ exports[`wire snapshot: multiple captions 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -23636,6 +25106,27 @@ exports[`wire snapshot: multiple captions 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -24036,6 +25527,27 @@ exports[`wire snapshot: multiple captions 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -25056,6 +26568,27 @@ exports[`wire snapshot: custom size 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -25222,6 +26755,27 @@ exports[`wire snapshot: custom size 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -25411,6 +26965,27 @@ exports[`wire snapshot: custom size 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -25681,6 +27256,27 @@ exports[`wire snapshot: custom size 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -25902,6 +27498,27 @@ exports[`wire snapshot: custom size 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -26068,6 +27685,27 @@ exports[`wire snapshot: custom size 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -26249,6 +27887,27 @@ exports[`wire snapshot: custom size 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -26625,6 +28284,27 @@ exports[`wire snapshot: custom size 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -26760,6 +28440,27 @@ exports[`wire snapshot: custom size 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -27097,6 +28798,27 @@ exports[`wire snapshot: custom size 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -27497,6 +29219,27 @@ exports[`wire snapshot: custom size 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -28517,6 +30260,27 @@ exports[`wire snapshot: inline invalid size 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -28683,6 +30447,27 @@ exports[`wire snapshot: inline invalid size 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -28872,6 +30657,27 @@ exports[`wire snapshot: inline invalid size 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -29164,6 +30970,27 @@ exports[`wire snapshot: inline invalid size 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -29385,6 +31212,27 @@ exports[`wire snapshot: inline invalid size 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -29551,6 +31399,27 @@ exports[`wire snapshot: inline invalid size 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -29732,6 +31601,27 @@ exports[`wire snapshot: inline invalid size 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -30108,6 +31998,27 @@ exports[`wire snapshot: inline invalid size 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -30243,6 +32154,27 @@ exports[`wire snapshot: inline invalid size 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -30580,6 +32512,27 @@ exports[`wire snapshot: inline invalid size 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -30980,6 +32933,27 @@ exports[`wire snapshot: inline invalid size 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -32003,6 +33977,27 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -32169,6 +34164,27 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -32358,6 +34374,27 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -32586,6 +34623,27 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -32752,6 +34810,27 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -32933,6 +35012,27 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -33309,6 +35409,27 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -33444,6 +35565,27 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -33781,6 +35923,27 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -34181,6 +36344,27 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -36453,6 +38637,27 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -36619,6 +38824,27 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -36808,6 +39034,27 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -37036,6 +39283,27 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -37202,6 +39470,27 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -37383,6 +39672,27 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -37759,6 +40069,27 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                           "type": "div",
                         },
                         {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
                           "children": [
                             {
                               "children": [
@@ -37894,6 +40225,27 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -38231,6 +40583,27 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
@@ -38631,6 +41004,27 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                               },
                               "paddingTop": {
                                 "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
                               },
                             },
                           },
