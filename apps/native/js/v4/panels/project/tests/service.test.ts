@@ -195,13 +195,13 @@ test("dispose fences late replies and releases host subscription", async () => {
 test("command arguments are copied at submission", async () => {
   const f = fixture();
   await f.service.start();
-  const input: Input = { BeginRename: "authored" };
+  const input: Input = { BeginRename: { Asset: "authored" } };
   const pending = f.service.input(input);
-  input.BeginRename = "mutated";
+  input.BeginRename = { Asset: "mutated" };
   await pending;
   expect(
     (f.requests.at(-1)!.operation as any).args.action.Input.BeginRename,
-  ).toBe("authored");
+  ).toEqual({ Asset: "authored" });
   await f.service.dispose();
 });
 test("invalid, foreign, unsafe-integer and inconsistent projections refuse", () => {

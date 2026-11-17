@@ -83,7 +83,7 @@ test("folder creation and rename wait for kernel; Undo/Redo preserve media", asy
     const id = r!.view.renaming!;
     expect(id).toBeTruthy();
     const named = await m.service.input({
-      CommitRename: { folder: id, value: " Day 2 " },
+      CommitRename: { id, value: " Day 2 " },
     });
     expect(
       named!.view.page.rows.some(

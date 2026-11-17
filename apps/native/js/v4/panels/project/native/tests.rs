@@ -230,7 +230,7 @@ fn voiceover_folder_actions_use_exact_model_inputs_and_refuse_stale_owners() {
         target_node: accesskit::NodeId(2),
         data: Some(accesskit::ActionData::CustomAction(2)),
     };
-    assert!(matches!(f.ax.input(1,&c.stamp,&request),Ok(Input::BeginRename(id)) if id=="f"));
+    assert!(matches!(f.ax.input(1,&c.stamp,&request),Ok(Input::BeginRename(id)) if id==ItemId::Folder("f".into())));
     assert!(f.ax.input(2, &c.stamp, &request).is_err());
     assert!(
         f.ax.input(

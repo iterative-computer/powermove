@@ -1,10 +1,11 @@
 //! Headless pictures of the Project panel on a synthetic project with real
 //! media (review captures; never committed). The media folder is made by
 //! the reviewer (generated test patterns), named by `PM_PROJECT_MEDIA`:
-//! `PM_PROJECT_MEDIA=… PM_PANEL_CAPTURE=… cargo test -p pm-native-app capture_project_panel -- --ignored`
+//! `PM_PROJECT_MEDIA=… PM_PANEL_CAPTURE=… cargo test -p pm-native-app --bin powermove-native capture_project_panel -- --ignored`
 use crate::v4_view::{Natives, SurfaceView};
 use crate::v4_view_tests::{publication, rig_project};
 use gpui::{AppContext, HeadlessAppContext, px, size};
+use pm_builtins::Builtins;
 use pm_design::{Accessibility, Scheme, Tokens};
 use pm_panel_media::{Availability, RuntimeState};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
@@ -230,6 +231,7 @@ fn capture_project_panel() {
                     };
                     r.runtime.update_folder_sync(std::collections::BTreeMap::from([("fFootage".into(), state.clone()), ("fBroll".into(), state)]));
                 }
+                publish_runtime(&r.runtime);
                 let first = publication(&r);
                 let runtime = r.runtime.clone();
                 let mut cx = HeadlessAppContext::with_platform(
@@ -273,6 +275,7 @@ fn capture_project_panel() {
                     if i == 144 && loading {
                         r.runtime.update_media(Default::default(),
                             pm_panel_media::readiness::ObservedRuntime::new(stamp.clone(), states(true)));
+                        publish_runtime(&r.runtime);
                     }
                     // Synthetic pointer delivery in the headless renderer only.
                     // No operating-system window, focus or cursor is involved.
@@ -280,6 +283,31 @@ fn capture_project_panel() {
                         if let Ok(target) = std::env::var("PM_PROJECT_CAPTURE_SELECT") {
                             cx.update(|cx| surface.update(cx, |v, cx| v.review_send(&target, "pointerdown", cx)));
                         }
+                    }
+                    if i == 160 {
+                        if let Ok(target) = std::env::var("PM_CAPTURE_HOVER") {
+                            cx.update(|cx| surface.update(cx, |v, cx| v.review_send(&target, "pointermove", cx)));
+                        }
+                        if let Ok(name) = std::env::var("PM_CAPTURE_RENAME_NAME") {
+                            cx.update(|cx| surface.update(cx, |v, cx| {
+                                let id = v.id_of_text(&name).expect("rename capture name is visible");
+                                v.send(id, "doubleclick", Default::default(), cx);
+                            }));
+                        }
+                    }
+                    if i == 200 {
+                        if let Ok(target) = std::env::var("PM_CAPTURE_RENAME_COMMIT") {
+                            cx.update(|cx| surface.update(cx, |v, cx| v.review_send(&target, "change", cx)));
+                        }
+                    }
+                    if i == 210 && std::env::var_os("PM_CAPTURE_RENAME_COMMIT").is_some() {
+                        // A rename advances the document revision. Match the app's
+                        // next observation publication so its posters remain ready.
+                        let next = r.kernel.published(crate::v4_view_tests::PROJECT).unwrap();
+                        let stamp = pm_panel_media::Catalog::published(&next).unwrap().stamp;
+                        r.runtime.update_media(Default::default(),
+                            pm_panel_media::readiness::ObservedRuntime::new(stamp, states(true)));
+                        publish_runtime(&r.runtime);
                     }
                     // The panel asks for its saved list/grid choice.
                     for request in r.runtime.take_platform_requests() {
@@ -303,6 +331,24 @@ fn capture_project_panel() {
                             frame.save(format!("{dir}/{tag}-{view}-{name}-frame-{i:03}.png")).unwrap();
                         }
                     }
+                    if std::env::var_os("PM_CAPTURE_RENAME_NAME").is_some() {
+                        let stage = match i { 151 => Some("before"), 191 => Some("during"), 239 => Some("after"), _ => None };
+                        if let Some(stage) = stage {
+                            if let Ok(commit) = std::env::var("PM_CAPTURE_RENAME_COMMIT") {
+                                let (field, value) = commit.split_once('=').expect("rename field=value");
+                                if stage == "during" {
+                                    assert!(cx.update(|cx| surface.read(cx).semantic_ids().iter().any(|id| id == field)),
+                                        "name double-click must publish the inline field before capturing");
+                                } else if stage == "after" {
+                                    let value: String = serde_json::from_str(value).expect("rename JSON string");
+                                    assert!(cx.update(|cx| surface.read(cx).id_of_text(&value).is_some()),
+                                        "committing the field must publish the renamed text before capturing");
+                                }
+                            }
+                            let image = cx.capture_screenshot(window.into()).unwrap();
+                            image.save(format!("{dir}/{tag}-{stage}-{view}-{name}.png")).unwrap();
+                        }
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(25));
                 }
                 // The headless harness has no display-link invalidation loop.
@@ -315,6 +361,23 @@ fn capture_project_panel() {
                     .unwrap();
                 drop(r);
             });
+        }
+    }
+}
+
+// Match the app's media refresh: updating observations alone does not ask
+// the panel to project them. Wait only for these in-memory evaluation jobs.
+fn publish_runtime(runtime: &Builtins) {
+    for (_, ticket) in runtime.publish() {
+        let mut ticket = ticket.expect("capture publication queued");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if let Some(result) = ticket.try_take() {
+                result.expect("capture publication evaluated");
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "capture publication timed out");
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
 }

@@ -759,32 +759,32 @@ fn context_menu_selection_emits_preview_cleanup() {
 #[test]
 fn folder_keys_rename_commit_cancel_and_blur_intent() {
     let (c, mut p, r) = setup();
-    p.dispatch(&c, &r, Input::BeginRename("f1".into())).unwrap();
+    p.dispatch(&c, &r, Input::BeginRename(ItemId::Folder("f1".into()))).unwrap();
     let o = p
         .dispatch(
             &c,
             &r,
             Input::CommitRename {
-                folder: "f1".into(),
+                id: ItemId::Folder("f1".into()),
                 value: " New bin ".into(),
             },
         )
         .unwrap();
     assert_eq!(
         o.edit,
-        Some(Edit::RenameFolder {
-            id: "f1".into(),
+        Some(Edit::RenameItem {
+            id: ItemId::Folder("f1".into()),
             name: "New bin".into()
         })
     );
-    p.dispatch(&c, &r, Input::BeginRename("f1".into())).unwrap();
+    p.dispatch(&c, &r, Input::BeginRename(ItemId::Folder("f1".into()))).unwrap();
     p.dispatch(&c, &r, Input::CancelRename).unwrap();
     assert!(
         p.dispatch(
             &c,
             &r,
             Input::CommitRename {
-                folder: "f1".into(),
+                id: ItemId::Folder("f1".into()),
                 value: "ignored".into()
             }
         )
@@ -981,7 +981,7 @@ fn stale_confirmation_does_not_delete_changed_project() {
 fn project_document_switch_resets_all_transient_ownership() {
     let (c, mut p, r) = setup();
     double(&mut p, &c, &r, "a");
-    p.dispatch(&c, &r, Input::BeginRename("f1".into())).unwrap();
+    p.dispatch(&c, &r, Input::BeginRename(ItemId::Folder("f1".into()))).unwrap();
     let other = catalog();
     assert_ne!(c.stamp.document, other.stamp.document);
     assert!(p.refresh(&other, &r).contains(&Effect::ClearPreview));
@@ -1520,7 +1520,7 @@ fn folder_menu_actions_and_move_out_keep_parent_semantics() {
         })
     ));
     invoke(&mut p, &c, &r, MenuCommand::RenameFolder("f2".into()));
-    assert_eq!(p.renaming.as_deref(), Some("f2"));
+    assert_eq!(p.renaming.as_ref(), Some(&ItemId::Folder("f2".into())));
 }
 
 #[test]
@@ -1540,7 +1540,7 @@ fn acknowledged_new_folder_starts_rename_and_failure_does_not() {
     let next = current(&h);
     p.accept_edit(&edit, &ack, &next, &r).unwrap();
     assert_eq!(p.folder.as_deref(), Some("f1"));
-    assert_eq!(p.renaming.as_deref(), Some("new"));
+    assert_eq!(p.renaming.as_ref(), Some(&ItemId::Folder("new".into())));
     assert_eq!(p.selected_item(), Some(&ItemId::Folder("new".into())));
     let mut failed = ack;
     failed.reply = Reply::Throw(pm_kernel::KernelError::Guard("synthetic refusal".into()));
@@ -2173,4 +2173,78 @@ fn linked_folder_rename_is_display_only_and_removal_unlinks_descendants() {
     history(&h, HistoryCall::Undo);
     assert_eq!(current(&h).folders["f1"].link, link);
     assert!(current(&h).folders["f2"].link.is_some());
+}
+
+#[test]
+fn rename_each_kind_is_one_undoable_edit_and_ignores_noops() {
+    let (_actor, h, _) = actor();
+    let r = Runtime::ready();
+    for id in [asset("a"), ItemId::Composition("C2".into()), ItemId::Folder("f1".into())] {
+        let c = current(&h);
+        let old = c.item_name(&id).unwrap().to_owned();
+        let mut panel = MediaPanel::default();
+        panel.refresh(&c, &r);
+        for unchanged in ["   ", old.as_str()] {
+            panel.dispatch(&c, &r, Input::BeginRename(id.clone())).unwrap();
+            let out = panel.dispatch(&c, &r, Input::CommitRename { id: id.clone(), value: unchanged.into() }).unwrap();
+            assert!(out.edit.is_none());
+        }
+        panel.dispatch(&c, &r, Input::BeginRename(id.clone())).unwrap();
+        panel.dispatch(&c, &r, Input::CancelRename).unwrap();
+        assert!(panel.dispatch(&c, &r, Input::CommitRename { id: id.clone(), value: "ignored".into() }).unwrap().edit.is_none());
+        panel.dispatch(&c, &r, Input::BeginRename(id.clone())).unwrap();
+        let out = panel.dispatch(&c, &r, Input::CommitRename { id: id.clone(), value: " Renamed ".into() }).unwrap();
+        let plan = c.prepare(out.edit.unwrap()).unwrap();
+        assert_eq!(plan.label, format!("Rename {old} to Renamed"));
+        applied(&h, &plan);
+        assert_eq!(current(&h).item_name(&id), Some("Renamed"));
+        history(&h, HistoryCall::Undo);
+        assert_eq!(current(&h).item_name(&id), Some(old.as_str()));
+        history(&h, HistoryCall::Redo);
+        assert_eq!(current(&h).item_name(&id), Some("Renamed"));
+        history(&h, HistoryCall::Undo);
+    }
+}
+
+#[test]
+fn rename_contract_keeps_kind_when_ids_collide() {
+    for id in [asset("shared"), ItemId::Composition("shared".into()), ItemId::Folder("shared".into())] {
+        let begin = Input::BeginRename(id.clone());
+        let encoded = serde_json::to_value(&begin).unwrap();
+        assert_eq!(serde_json::from_value::<Input>(encoded).unwrap(), begin);
+        let commit = Input::CommitRename { id, value: "New name".into() };
+        let encoded = serde_json::to_value(&commit).unwrap();
+        assert_eq!(serde_json::from_value::<Input>(encoded).unwrap(), commit);
+    }
+}
+
+#[test]
+fn rename_requires_the_exact_active_row_and_keeps_v2_duplicate_policy() {
+    let (c, mut p, r) = setup();
+    p.dispatch(&c, &r, Input::BeginRename(asset("a"))).unwrap();
+    assert!(p.dispatch(&c, &r, Input::CommitRename { id: asset("b"), value: "Wrong row".into() }).unwrap().edit.is_none());
+    assert_eq!(p.renaming, Some(asset("a")));
+    assert!(p.dispatch(&c, &r, Input::BeginRename(ItemId::Folder("a".into()))).is_err());
+    let (_actor, h, _) = actor();
+    for (id, duplicate) in [(asset("a"), "Beta.wav"), (ItemId::Folder("f1".into()), "Bin 10")] {
+        let c = current(&h);
+        applied(&h, &c.prepare(Edit::RenameItem { id: id.clone(), name: duplicate.into() }).unwrap());
+        assert_eq!(current(&h).item_name(&id), Some(duplicate));
+    }
+}
+
+#[test]
+fn composition_rename_keeps_v2_unique_names_and_labels_the_actual_result() {
+    let (_actor, h, c) = actor();
+    let existing = c.compositions["C1"].name.clone();
+    let id = ItemId::Composition("C2".into());
+    let old = c.item_name(&id).unwrap().to_owned();
+    let plan = c.prepare(Edit::RenameItem { id: id.clone(), name: existing.clone() }).unwrap();
+    applied(&h, &plan);
+    let c = current(&h);
+    let actual = c.item_name(&id).unwrap();
+    assert_ne!(actual, existing);
+    assert_eq!(plan.label, format!("Rename {old} to {actual}"));
+    history(&h, HistoryCall::Undo);
+    assert_eq!(current(&h).item_name(&id), Some(old.as_str()));
 }

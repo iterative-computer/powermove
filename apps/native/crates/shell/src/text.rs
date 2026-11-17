@@ -29,6 +29,7 @@ pub struct TextField {
     /// No well of its own: the field sits inside a control that draws one
     /// (the search field).
     bare: bool,
+    inline_name: bool,
     /// Source text, in this family: one line least, and the face is kept
     /// when the tokens change.
     code: Option<String>,
@@ -117,6 +118,7 @@ impl TextField {
             host_value: 0,
             fill: false,
             bare: false,
+            inline_name: false,
             code: None,
             ink: None,
             width: Rc::default(),
@@ -223,6 +225,10 @@ impl TextField {
     }
     pub fn set_bare(&mut self, bare: bool) {
         self.bare = bare;
+    }
+    /// An inline name keeps the surrounding text's line box while editing.
+    pub fn set_inline_name(&mut self, inline: bool) {
+        self.inline_name = inline;
     }
     pub fn set_unit(&mut self, unit: Option<SharedString>) {
         self.unit = unit;
@@ -343,6 +349,12 @@ impl TextField {
         self.slot.set_selection(0, usize::MAX);
         cx.notify();
     }
+    /// Select a UTF-16 prefix, leaving a filename extension intact.
+    pub fn begin_editing_selecting_to(&mut self, end: usize, cx: &mut Context<Self>) {
+        self.slot.begin_editing();
+        self.slot.set_selection(0, end);
+        cx.notify();
+    }
     pub fn set_tokens(&mut self, tokens: pm_design::Tokens) {
         let resized = self.tokens.typography.body != tokens.typography.body;
         self.tokens = tokens;
@@ -458,6 +470,8 @@ impl Render for TextField {
                     let line = self.tokens.typography.body
                         * gpui_macos::native_text::COMPOSER_LEADING as f32;
                     (lines * line + 6.).max(self.tokens.metrics.hit)
+                } else if self.inline_name {
+                    f32::from(window.line_height())
                 } else if bare {
                     // One line, so the control around it can centre the text.
                     (self.tokens.typography.body * 1.35).ceil()

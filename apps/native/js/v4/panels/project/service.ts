@@ -76,7 +76,17 @@ export function decodeReply(value: unknown, owner: Stamp): Reply {
     !validInteger(r.view.selected_count) ||
     r.view.selected_count > p.total ||
     !nullableString(r.view.folder) ||
-    !nullableString(r.view.renaming) ||
+    !(
+      r.view.renaming === null ||
+      (typeof r.view.renaming === "object" &&
+        Object.entries(r.view.renaming).length === 1 &&
+        Object.entries(r.view.renaming).every(
+          ([kind, id]) =>
+            ["Asset", "Folder", "Composition"].includes(kind) &&
+            typeof id === "string" &&
+            id.length > 0,
+        ))
+    ) ||
     typeof r.view.external_drag !== "boolean" ||
     (r.view.drop_target !== null &&
       (!r.view.drop_target || !nullableString(r.view.drop_target.folder))) ||

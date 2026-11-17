@@ -456,6 +456,13 @@ impl Catalog {
         }
         false
     }
+    pub fn item_name(&self, id: &ItemId) -> Option<&str> {
+        match id {
+            ItemId::Asset(id) => self.assets.get(id).map(|v| v.name.as_str()),
+            ItemId::Folder(id) => self.folders.get(id).map(|v| v.name.as_str()),
+            ItemId::Composition(id) => self.compositions.get(id).map(|v| v.name.as_str()),
+        }
+    }
     pub fn contains(&self, id: &ItemId) -> bool {
         match id {
             ItemId::Asset(id) => self.assets.contains_key(id),

@@ -1164,6 +1164,7 @@ impl SurfaceView {
             // A composer's panel draws the surface it is written on; a
             // colour's hex stands in its row's well.
             field.set_bare(kind == TextKind::Composer || view.bare);
+            field.set_inline_name(node.props.get("metadata").and_then(|m| m.get("inlineRename")) == Some(&Value::Bool(true)));
             if view.code {
                 field.set_code(pm_design::MONO_FONT);
             }
@@ -1306,7 +1307,9 @@ impl SurfaceView {
                 // Escape closes it unchanged (an AppKit field commits on
                 // Escape unless told otherwise).
                 f.set_escape_cancels(true);
-                f.begin_editing_selecting_all(cx);
+                if let Some(end) = node.props.get("metadata").and_then(|m| m.get("selectionEnd")).and_then(Value::as_u64) {
+                    f.begin_editing_selecting_to(end as usize, cx);
+                } else { f.begin_editing_selecting_all(cx); }
             });
         }
         if !self.in_header(id) {

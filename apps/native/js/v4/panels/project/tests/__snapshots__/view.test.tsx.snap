@@ -393,6 +393,9 @@ exports[`linked-Synced-grid: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -475,6 +478,9 @@ exports[`linked-Synced-grid: op tree, real validator and AX projection 1`] = `
                           "data-pm-drop": "files",
                           "id": "media:{"Folder":"f"}",
                           "label": "Shots, folder, 4 items",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -486,6 +492,9 @@ exports[`linked-Synced-grid: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -571,6 +580,9 @@ exports[`linked-Synced-grid: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -583,6 +595,7 @@ exports[`linked-Synced-grid: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Shots",
                                 },
                                 "",
                                 [
@@ -597,6 +610,9 @@ exports[`linked-Synced-grid: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -609,6 +625,7 @@ exports[`linked-Synced-grid: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "4 items",
                                 },
                                 "",
                                 [
@@ -1033,6 +1050,9 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -1115,6 +1135,9 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
                           "data-pm-drop": "files",
                           "id": "media:{"Folder":"f"}",
                           "label": "Shots, folder, 4 items",
+                          "metadata": {
+                            "selectionRingOnly": false,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -1223,6 +1246,9 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -1235,6 +1261,7 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Shots",
                                 },
                                 "",
                                 [
@@ -1681,6 +1708,9 @@ exports[`linked-Syncing-grid: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -1763,6 +1793,9 @@ exports[`linked-Syncing-grid: op tree, real validator and AX projection 1`] = `
                           "data-pm-drop": "files",
                           "id": "media:{"Folder":"f"}",
                           "label": "Shots, folder, 4 items",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -1774,6 +1807,9 @@ exports[`linked-Syncing-grid: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -1859,6 +1895,9 @@ exports[`linked-Syncing-grid: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -1871,6 +1910,7 @@ exports[`linked-Syncing-grid: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Shots",
                                 },
                                 "",
                                 [
@@ -1885,6 +1925,9 @@ exports[`linked-Syncing-grid: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -1897,6 +1940,7 @@ exports[`linked-Syncing-grid: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Syncing…",
                                 },
                                 "",
                                 [
@@ -2321,6 +2365,9 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -2403,6 +2450,9 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
                           "data-pm-drop": "files",
                           "id": "media:{"Folder":"f"}",
                           "label": "Shots, folder, 4 items",
+                          "metadata": {
+                            "selectionRingOnly": false,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -2511,6 +2561,9 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -2523,6 +2576,7 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Shots",
                                 },
                                 "",
                                 [
@@ -2969,6 +3023,9 @@ exports[`linked-NotFound-grid: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -3051,6 +3108,9 @@ exports[`linked-NotFound-grid: op tree, real validator and AX projection 1`] = `
                           "data-pm-drop": "files",
                           "id": "media:{"Folder":"f"}",
                           "label": "Shots, folder, 4 items",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -3062,6 +3122,9 @@ exports[`linked-NotFound-grid: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -3147,6 +3210,9 @@ exports[`linked-NotFound-grid: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -3159,6 +3225,7 @@ exports[`linked-NotFound-grid: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Shots",
                                 },
                                 "",
                                 [
@@ -3173,6 +3240,9 @@ exports[`linked-NotFound-grid: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.danger",
@@ -3185,6 +3255,7 @@ exports[`linked-NotFound-grid: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Folder not found",
                                 },
                                 "",
                                 [
@@ -3609,6 +3680,9 @@ exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -3691,6 +3765,9 @@ exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
                           "data-pm-drop": "files",
                           "id": "media:{"Folder":"f"}",
                           "label": "Shots, folder, 4 items",
+                          "metadata": {
+                            "selectionRingOnly": false,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -3799,6 +3876,9 @@ exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -3811,6 +3891,7 @@ exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Shots",
                                 },
                                 "",
                                 [
@@ -4177,6 +4258,9 @@ exports[`no-project: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "self",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -4608,6 +4692,9 @@ exports[`empty-project: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "self",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -5253,6 +5340,9 @@ exports[`empty-folder: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "self",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -5629,6 +5719,9 @@ exports[`restoring-before-delay: op tree, real validator and AX projection 1`] =
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "self",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -5958,6 +6051,9 @@ exports[`restoring-after-delay: op tree, real validator and AX projection 1`] = 
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "self",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -6437,6 +6533,9 @@ exports[`loading-cards: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -6518,6 +6617,9 @@ exports[`loading-cards: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, loading",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -6529,6 +6631,9 @@ exports[`loading-cards: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -6557,10 +6662,6 @@ exports[`loading-cards: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-Loading media…"
-,
                         },
                         "",
                         [
@@ -6652,6 +6753,9 @@ Loading media…"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -6664,6 +6768,7 @@ Loading media…"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -6678,6 +6783,9 @@ Loading media…"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -6690,6 +6798,7 @@ Loading media…"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Loading media…",
                                 },
                                 "",
                                 [
@@ -7255,6 +7364,9 @@ exports[`importing-cards: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -7336,6 +7448,9 @@ exports[`importing-cards: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -7347,6 +7462,9 @@ exports[`importing-cards: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -7375,10 +7493,6 @@ exports[`importing-cards: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -7480,6 +7594,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -7492,6 +7609,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -7506,6 +7624,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -7518,6 +7639,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -7545,6 +7667,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                           },
                           "id": "media:{"Asset":"b"}",
                           "label": "b.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, loading",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -7556,6 +7681,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -7584,10 +7712,6 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"b.mov
-Loading media…"
-,
                         },
                         "",
                         [
@@ -7679,6 +7803,9 @@ Loading media…"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -7691,6 +7818,7 @@ Loading media…"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "b.mov",
                                 },
                                 "",
                                 [
@@ -7705,6 +7833,9 @@ Loading media…"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -7717,6 +7848,7 @@ Loading media…"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Loading media…",
                                 },
                                 "",
                                 [
@@ -8175,6 +8307,9 @@ exports[`selected: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -8256,6 +8391,9 @@ exports[`selected: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, selected",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -8267,6 +8405,9 @@ exports[`selected: op tree, real validator and AX projection 1`] = `
                             "selected": true,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -8295,10 +8436,6 @@ exports[`selected: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -8420,6 +8557,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -8432,6 +8572,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -8446,6 +8587,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -8458,6 +8602,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -8963,6 +9108,9 @@ exports[`focus: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -9044,6 +9192,9 @@ exports[`focus: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -9055,6 +9206,9 @@ exports[`focus: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -9083,10 +9237,6 @@ exports[`focus: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -9276,6 +9426,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -9288,6 +9441,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -9302,6 +9456,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -9314,6 +9471,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -9958,6 +10116,9 @@ exports[`multi-select: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -10039,6 +10200,9 @@ exports[`multi-select: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, selected",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -10050,6 +10214,9 @@ exports[`multi-select: op tree, real validator and AX projection 1`] = `
                             "selected": true,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -10078,10 +10245,6 @@ exports[`multi-select: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -10203,6 +10366,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -10215,6 +10381,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -10229,6 +10396,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -10241,6 +10411,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -10268,6 +10439,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                           },
                           "id": "media:{"Asset":"b"}",
                           "label": "b.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, selected",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -10279,6 +10453,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             "selected": true,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -10307,10 +10484,6 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"b.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -10432,6 +10605,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -10444,6 +10620,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "b.mov",
                                 },
                                 "",
                                 [
@@ -10458,6 +10635,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -10470,6 +10650,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -11046,6 +11227,9 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -11127,6 +11311,9 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Composition":"C"}",
                           "label": "Launch Film, composition, 1920 by 1080, 20 seconds, open in the timeline",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -11138,6 +11325,9 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -11166,10 +11356,6 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"Launch Film
-1920×1080 · 30 fps · 0:20"
-,
                         },
                         "",
                         [
@@ -11284,14 +11470,14 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                                       "token": "metrics.status_dot",
                                     },
                                     "bottom": {
-                                      "token": "metrics.media_inset",
+                                      "token": "metrics.media_comp_inset",
                                     },
                                     "height": {
                                       "token": "metrics.status_dot",
                                     },
                                     "position": "absolute",
                                     "right": {
-                                      "token": "metrics.media_inset",
+                                      "token": "metrics.media_comp_inset",
                                     },
                                     "width": {
                                       "token": "metrics.status_dot",
@@ -11403,6 +11589,9 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -11415,6 +11604,7 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Launch Film",
                                 },
                                 "",
                                 [
@@ -11429,6 +11619,9 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -11441,6 +11634,7 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "1920×1080 · 30 fps · 0:20",
                                 },
                                 "",
                                 [
@@ -11894,6 +12088,9 @@ exports[`offline: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -11975,6 +12172,9 @@ exports[`offline: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, offline",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -11986,6 +12186,9 @@ exports[`offline: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -12014,10 +12217,6 @@ exports[`offline: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-Missing · /synthetic/a.mov"
-,
                         },
                         "",
                         [
@@ -12108,6 +12307,9 @@ Missing · /synthetic/a.mov"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -12120,6 +12322,7 @@ Missing · /synthetic/a.mov"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -12134,6 +12337,9 @@ Missing · /synthetic/a.mov"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.danger",
@@ -12146,6 +12352,7 @@ Missing · /synthetic/a.mov"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Missing · /synthetic/a.mov",
                                 },
                                 "",
                                 [
@@ -12599,6 +12806,9 @@ exports[`unavailable: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -12680,6 +12890,9 @@ exports[`unavailable: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -12691,6 +12904,9 @@ exports[`unavailable: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -12719,10 +12935,6 @@ exports[`unavailable: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-Couldn’t load · Synthetic decode failure"
-,
                         },
                         "",
                         [
@@ -12813,6 +13025,9 @@ Couldn’t load · Synthetic decode failure"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -12825,6 +13040,7 @@ Couldn’t load · Synthetic decode failure"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -12839,6 +13055,9 @@ Couldn’t load · Synthetic decode failure"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.danger",
@@ -12851,6 +13070,7 @@ Couldn’t load · Synthetic decode failure"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Couldn’t load · Synthetic decode failure",
                                 },
                                 "",
                                 [
@@ -13300,6 +13520,9 @@ exports[`unknown-original: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -13381,6 +13604,9 @@ exports[`unknown-original: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -13392,6 +13618,9 @@ exports[`unknown-original: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -13420,10 +13649,6 @@ exports[`unknown-original: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -13525,6 +13750,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -13537,6 +13765,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -13551,6 +13780,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -13563,6 +13795,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -14012,6 +14245,9 @@ exports[`unknown-after-delay: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -14093,6 +14329,9 @@ exports[`unknown-after-delay: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -14104,6 +14343,9 @@ exports[`unknown-after-delay: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -14132,10 +14374,6 @@ exports[`unknown-after-delay: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-Loading media…"
-,
                         },
                         "",
                         [
@@ -14227,6 +14465,9 @@ Loading media…"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -14239,6 +14480,7 @@ Loading media…"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -14253,6 +14495,9 @@ Loading media…"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -14265,6 +14510,7 @@ Loading media…"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Loading media…",
                                 },
                                 "",
                                 [
@@ -14821,6 +15067,9 @@ exports[`transport-error: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -14902,6 +15151,9 @@ exports[`transport-error: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": true,
@@ -14913,6 +15165,9 @@ exports[`transport-error: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -14941,10 +15196,6 @@ exports[`transport-error: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -15137,6 +15388,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -15149,6 +15403,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -15163,6 +15418,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -15175,6 +15433,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -15628,6 +15887,9 @@ exports[`changed-source: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -15709,6 +15971,9 @@ exports[`changed-source: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, changed",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -15720,6 +15985,9 @@ exports[`changed-source: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -15748,10 +16016,6 @@ exports[`changed-source: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-Changed · /synthetic/changed.mov"
-,
                         },
                         "",
                         [
@@ -15853,6 +16117,9 @@ Changed · /synthetic/changed.mov"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -15865,6 +16132,7 @@ Changed · /synthetic/changed.mov"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -15879,6 +16147,9 @@ Changed · /synthetic/changed.mov"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -15891,6 +16162,7 @@ Changed · /synthetic/changed.mov"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Changed · /synthetic/changed.mov",
                                 },
                                 "",
                                 [
@@ -16355,6 +16627,9 @@ exports[`cloud-stored: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -16436,6 +16711,9 @@ exports[`cloud-stored: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, in cloud",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -16447,6 +16725,9 @@ exports[`cloud-stored: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -16475,10 +16756,6 @@ exports[`cloud-stored: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-Stored in Fixture · /synthetic/a.mov"
-,
                         },
                         "",
                         [
@@ -16587,6 +16864,9 @@ Stored in Fixture · /synthetic/a.mov"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -16599,6 +16879,7 @@ Stored in Fixture · /synthetic/a.mov"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -16613,6 +16894,9 @@ Stored in Fixture · /synthetic/a.mov"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -16625,6 +16909,7 @@ Stored in Fixture · /synthetic/a.mov"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Stored in Fixture · /synthetic/a.mov",
                                 },
                                 "",
                                 [
@@ -17140,6 +17425,9 @@ exports[`cloud-downloading: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -17221,6 +17509,9 @@ exports[`cloud-downloading: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, in cloud",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -17232,6 +17523,9 @@ exports[`cloud-downloading: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -17260,10 +17554,6 @@ exports[`cloud-downloading: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-Downloading from Fixture…"
-,
                         },
                         "",
                         [
@@ -17478,6 +17768,9 @@ Downloading from Fixture…"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -17490,6 +17783,7 @@ Downloading from Fixture…"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -17504,6 +17798,9 @@ Downloading from Fixture…"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -17516,6 +17813,7 @@ Downloading from Fixture…"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Downloading from Fixture…",
                                 },
                                 "",
                                 [
@@ -17980,6 +18278,9 @@ exports[`cloud-error: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -18061,6 +18362,9 @@ exports[`cloud-error: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, in cloud",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -18072,6 +18376,9 @@ exports[`cloud-error: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -18100,10 +18407,6 @@ exports[`cloud-error: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-Download failed · Synthetic failure"
-,
                         },
                         "",
                         [
@@ -18212,6 +18515,9 @@ Download failed · Synthetic failure"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -18224,6 +18530,7 @@ Download failed · Synthetic failure"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -18238,6 +18545,9 @@ Download failed · Synthetic failure"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -18250,6 +18560,7 @@ Download failed · Synthetic failure"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Download failed · Synthetic failure",
                                 },
                                 "",
                                 [
@@ -18722,6 +19033,9 @@ exports[`drag-source: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -18803,6 +19117,9 @@ exports[`drag-source: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes, selected",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -18814,6 +19131,9 @@ exports[`drag-source: op tree, real validator and AX projection 1`] = `
                             "selected": true,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -18842,10 +19162,6 @@ exports[`drag-source: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -18967,6 +19283,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -18979,6 +19298,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -18993,6 +19313,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -19005,6 +19328,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -19622,6 +19946,9 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -19704,6 +20031,9 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                           "data-pm-drop": "files",
                           "id": "media:{"Folder":"f"}",
                           "label": "Shots, folder, 4 items",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -19715,6 +20045,9 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -19743,10 +20076,6 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"Shots
-4 items"
-,
                         },
                         "",
                         [
@@ -19803,6 +20132,9 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -19815,6 +20147,7 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Shots",
                                 },
                                 "",
                                 [
@@ -19829,6 +20162,9 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -19841,6 +20177,7 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "4 items",
                                 },
                                 "",
                                 [
@@ -19868,6 +20205,9 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -19879,6 +20219,9 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -19907,10 +20250,6 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -20012,6 +20351,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -20024,6 +20366,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -20038,6 +20381,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -20050,6 +20396,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -20575,6 +20922,9 @@ exports[`folder-drop: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -20657,6 +21007,9 @@ exports[`folder-drop: op tree, real validator and AX projection 1`] = `
                           "data-pm-drop": "files",
                           "id": "media:{"Folder":"f"}",
                           "label": "Shots, folder, 4 items",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -20668,6 +21021,9 @@ exports[`folder-drop: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -20696,10 +21052,6 @@ exports[`folder-drop: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"Shots
-4 items"
-,
                         },
                         "",
                         [
@@ -20776,6 +21128,9 @@ exports[`folder-drop: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -20788,6 +21143,7 @@ exports[`folder-drop: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "Shots",
                                 },
                                 "",
                                 [
@@ -20802,6 +21158,9 @@ exports[`folder-drop: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -20814,6 +21173,7 @@ exports[`folder-drop: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "4 items",
                                 },
                                 "",
                                 [
@@ -21239,6 +21599,9 @@ exports[`rename: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -21321,6 +21684,9 @@ exports[`rename: op tree, real validator and AX projection 1`] = `
                           "data-pm-drop": "files",
                           "id": "media:{"Folder":"f"}",
                           "label": "Shots, folder, 4 items",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -21332,6 +21698,9 @@ exports[`rename: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -21360,10 +21729,6 @@ exports[`rename: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"Shots
-4 items"
-,
                         },
                         "",
                         [
@@ -21423,9 +21788,14 @@ exports[`rename: op tree, real validator and AX projection 1`] = `
                                   "binding": "test:rename",
                                   "control": "text",
                                   "data-pm-component": "text-field",
-                                  "focusRequest": "media-rename:f",
-                                  "id": "media-rename:f",
+                                  "focusRequest": "media-rename:{"Folder":"f"}",
+                                  "id": "media-rename:{"Folder":"f"}",
                                   "label": "Shots",
+                                  "metadata": {
+                                    "cancelChange": true,
+                                    "inlineRename": true,
+                                    "selectionEnd": 5,
+                                  },
                                   "preventDefault": {
                                     "keydown": [
                                       "Enter",
@@ -21442,6 +21812,7 @@ exports[`rename: op tree, real validator and AX projection 1`] = `
                                     "color": {
                                       "token": "colors.text",
                                     },
+                                    "flexGrow": 1,
                                     "fontSize": {
                                       "token": "typography.body",
                                     },
@@ -21463,6 +21834,9 @@ exports[`rename: op tree, real validator and AX projection 1`] = `
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -21475,6 +21849,7 @@ exports[`rename: op tree, real validator and AX projection 1`] = `
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "4 items",
                                 },
                                 "",
                                 [
@@ -23377,6 +23752,9 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -23458,6 +23836,9 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                           },
                           "id": "media:{"Asset":"a0"}",
                           "label": "a0.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -23469,6 +23850,9 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -23497,10 +23881,6 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a0.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -23602,6 +23982,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -23614,6 +23997,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a0.mov",
                                 },
                                 "",
                                 [
@@ -23628,6 +24012,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -23640,6 +24027,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -23667,6 +24055,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                           },
                           "id": "media:{"Asset":"a1"}",
                           "label": "a1.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -23678,6 +24069,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -23706,10 +24100,6 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a1.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -23811,6 +24201,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -23823,6 +24216,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a1.mov",
                                 },
                                 "",
                                 [
@@ -23837,6 +24231,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -23849,6 +24246,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -23892,6 +24290,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                           },
                           "id": "media:{"Asset":"a2"}",
                           "label": "a2.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -23903,6 +24304,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -23931,10 +24335,6 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a2.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -24036,6 +24436,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -24048,6 +24451,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a2.mov",
                                 },
                                 "",
                                 [
@@ -24062,6 +24466,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -24074,6 +24481,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -24101,6 +24509,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                           },
                           "id": "media:{"Asset":"a3"}",
                           "label": "a3.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -24112,6 +24523,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -24140,10 +24554,6 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a3.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -24245,6 +24655,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -24257,6 +24670,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a3.mov",
                                 },
                                 "",
                                 [
@@ -24271,6 +24685,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -24283,6 +24700,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -24326,6 +24744,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                           },
                           "id": "media:{"Asset":"a4"}",
                           "label": "a4.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -24337,6 +24758,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -24365,10 +24789,6 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a4.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -24470,6 +24890,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -24482,6 +24905,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a4.mov",
                                 },
                                 "",
                                 [
@@ -24496,6 +24920,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -24508,6 +24935,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -24535,6 +24963,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                           },
                           "id": "media:{"Asset":"a5"}",
                           "label": "a5.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -24546,6 +24977,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -24574,10 +25008,6 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a5.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -24679,6 +25109,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -24691,6 +25124,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a5.mov",
                                 },
                                 "",
                                 [
@@ -24705,6 +25139,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -24717,6 +25154,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -24760,6 +25198,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                           },
                           "id": "media:{"Asset":"a6"}",
                           "label": "a6.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -24771,6 +25212,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -24799,10 +25243,6 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a6.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -24904,6 +25344,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -24916,6 +25359,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a6.mov",
                                 },
                                 "",
                                 [
@@ -24930,6 +25374,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -24942,6 +25389,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -24969,6 +25417,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                           },
                           "id": "media:{"Asset":"a7"}",
                           "label": "a7.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -24980,6 +25431,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -25008,10 +25462,6 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a7.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -25113,6 +25563,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -25125,6 +25578,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a7.mov",
                                 },
                                 "",
                                 [
@@ -25139,6 +25593,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -25151,6 +25608,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -25194,6 +25652,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                           },
                           "id": "media:{"Asset":"a8"}",
                           "label": "a8.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -25205,6 +25666,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -25233,10 +25697,6 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a8.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -25338,6 +25798,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -25350,6 +25813,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a8.mov",
                                 },
                                 "",
                                 [
@@ -25364,6 +25828,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -25376,6 +25843,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -25403,6 +25871,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                           },
                           "id": "media:{"Asset":"a9"}",
                           "label": "a9.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -25414,6 +25885,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -25442,10 +25916,6 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a9.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -25547,6 +26017,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -25559,6 +26032,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a9.mov",
                                 },
                                 "",
                                 [
@@ -25573,6 +26047,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -25585,6 +26062,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -25628,6 +26106,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                           },
                           "id": "media:{"Asset":"a10"}",
                           "label": "a10.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -25639,6 +26120,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -25667,10 +26151,6 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a10.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -25772,6 +26252,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -25784,6 +26267,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a10.mov",
                                 },
                                 "",
                                 [
@@ -25798,6 +26282,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -25810,6 +26297,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -25837,6 +26325,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                           },
                           "id": "media:{"Asset":"a11"}",
                           "label": "a11.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -25848,6 +26339,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -25876,10 +26370,6 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a11.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -25981,6 +26471,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -25993,6 +26486,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a11.mov",
                                 },
                                 "",
                                 [
@@ -26007,6 +26501,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -26019,6 +26516,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -26499,6 +26997,9 @@ exports[`hover actions appear, never become Tab stops and disappear during a dra
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "child",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",
@@ -26580,6 +27081,9 @@ exports[`hover actions appear, never become Tab stops and disappear during a dra
                           },
                           "id": "media:{"Asset":"a"}",
                           "label": "a.mov, video, 1920 by 1080, 12 seconds, 48 megabytes",
+                          "metadata": {
+                            "selectionRingOnly": true,
+                          },
                           "role": "cell",
                           "state": {
                             "disabled": false,
@@ -26591,6 +27095,9 @@ exports[`hover actions appear, never become Tab stops and disappear during a dra
                             "selected": false,
                           },
                           "style": {
+                            "borderRadius": {
+                              "token": "metrics.control_radius",
+                            },
                             "color": {
                               "token": "colors.text",
                             },
@@ -26619,10 +27126,6 @@ exports[`hover actions appear, never become Tab stops and disappear during a dra
                             },
                           },
                           "tabIndex": -1,
-                          "title": 
-"a.mov
-MOV · 1920×1080 · 0:12 · 48 MB"
-,
                         },
                         "",
                         [
@@ -26792,6 +27295,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.text",
@@ -26804,6 +27310,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "a.mov",
                                 },
                                 "",
                                 [
@@ -26818,6 +27325,9 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                               [
                                 "text",
                                 {
+                                  "metadata": {
+                                    "tooltipWhenTruncated": true,
+                                  },
                                   "style": {
                                     "color": {
                                       "token": "colors.muted",
@@ -26830,6 +27340,7 @@ MOV · 1920×1080 · 0:12 · 48 MB"
                                     "textOverflow": "ellipsis",
                                     "whiteSpace": "nowrap",
                                   },
+                                  "title": "MOV · 1920×1080 · 0:12 · 48 MB",
                                 },
                                 "",
                                 [
@@ -27240,6 +27751,9 @@ exports[`search Escape clears, then closes; no-results copy uses exact query: no
               "data-pm-component": "list",
               "data-pm-drop": "files",
               "label": "Project media",
+              "metadata": {
+                "scrollOwner": "self",
+              },
               "preventDefault": {
                 "keydown": [
                   "ArrowLeft",

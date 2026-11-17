@@ -200,11 +200,11 @@ export function ProjectView(props: ProjectViewProps) {
     setCrumbFocus(0);
   }, [document]);
   useLayoutEffect(() => {
-    const folder = view?.page.rows.find(
-      (r) => "Folder" in r.id && r.id.Folder === view.renaming,
+    const row = view?.page.rows.find(
+      (r) => view.renaming && itemKey(r.id) === itemKey(view.renaming),
     );
-    if (folder) setRename(itemName(folder));
-  }, [view?.renaming]);
+    if (row) setRename(itemName(row));
+  }, [view?.renaming ? itemKey(view.renaming) : null]);
   const filter = (value: string, missingOnly = !!view?.missing_only) => {
     setTyped(value);
     input({
@@ -295,16 +295,33 @@ export function ProjectView(props: ProjectViewProps) {
       ))}
     </div>
   );
-  const renameField = (folderId: string, name: string) => (
+  const renameField = (row: Row, name: string) => (
     <TextField
       label={name}
       value={rename}
-      id={`media-rename:${folderId}`}
+      id={`media-rename:${itemKey(row.id)}`}
       binding={native.renameBinding}
+      metadata={{
+        cancelChange: true,
+        inlineRename: true,
+        selectionEnd:
+          "Asset" in row.id && name.lastIndexOf(".") > 0
+            ? name.slice(0, name.lastIndexOf(".")).length
+            : name.length,
+      }}
+      style={{ ...text, flexGrow: 1 }}
+      onChange={(e) =>
+        input({
+          CommitRename: {
+            id: row.id,
+            value: typeof e.value === "string" ? e.value : "",
+          },
+        })
+      }
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
       onDoubleClick={(e) => e.stopPropagation()}
-      focusRequest={`media-rename:${folderId}`}
+      focusRequest={`media-rename:${itemKey(row.id)}`}
       onInput={(e) => {
         if (typeof e.value === "string") setRename(e.value);
       }}
@@ -317,12 +334,10 @@ export function ProjectView(props: ProjectViewProps) {
           input("CancelRename");
         }
         if (e.key === "Enter") {
-          input({ CommitRename: { folder: folderId, value: rename } });
+          input({ CommitRename: { id: row.id, value: rename } });
         }
       }}
-      onBlur={() =>
-        input({ CommitRename: { folder: folderId, value: rename } })
-      }
+      onBlur={() => input({ CommitRename: { id: row.id, value: rename } })}
     />
   );
   /** One-column layout: a quiet source-list row (language §9 Lists). The name
@@ -476,9 +491,11 @@ export function ProjectView(props: ProjectViewProps) {
             alt={itemName(row)}
             style={{
               position: "absolute",
-              inset: small ? "fill" : geometry?.frameInset ?? "fill",
+              inset: small ? "fill" : (geometry?.frameInset ?? "fill"),
               overflow: "hidden",
-              borderRadius: small ? geometry?.smallRadius ?? token("metrics.inner_radius") : geometry?.frameRadius ?? token("metrics.inner_radius"),
+              borderRadius: small
+                ? (geometry?.smallRadius ?? token("metrics.inner_radius"))
+                : (geometry?.frameRadius ?? token("metrics.inner_radius")),
               opacity: f.attention
                 ? token("metrics.media_offline_opacity")
                 : f.loading
@@ -651,11 +668,14 @@ export function ProjectView(props: ProjectViewProps) {
     } as const;
   };
   const nameText = (row: Row) => {
-    const f = facts(row);
-    return f.folder && view?.renaming === f.folder.id ? (
-      renameField(f.folder.id, itemName(row))
+    return view?.renaming && itemKey(view.renaming) === itemKey(row.id) ? (
+      renameField(row, itemName(row))
     ) : (
       <text
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          input({ BeginRename: row.id });
+        }}
         title={itemName(row)}
         metadata={{ tooltipWhenTruncated: true }}
         style={{
@@ -814,8 +834,9 @@ export function ProjectView(props: ProjectViewProps) {
     // The list or one of its items: a click focuses the item it lands on,
     // and its keys are the grid's (fields inside keep theirs, below).
     if (event.composing) return;
-    if (event.key === "F2" && view?.focused && "Folder" in view.focused) {
-      input({ BeginRename: view.focused.Folder });
+    if ((event.key === "F2" || event.key === "Enter") && view?.focused) {
+      event.stopPropagation();
+      input({ BeginRename: view.focused });
       return;
     }
     const key =

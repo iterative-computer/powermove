@@ -2120,3 +2120,21 @@ fn project_text_tooltip_follows_measured_truncation_after_resize(cx: &mut TestAp
     vcx.run_until_parked();
     assert_eq!(view.read_with(&vcx, |v, _| v.tooltip_title(1)), None);
 }
+
+#[gpui::test]
+fn project_inline_rename_uses_text_geometry(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(1, 0, "div", json!({}), &[]);
+    ops.extend(node_ops(2, 1, "input", json!({"data-pm-component":"text-field","control":"text","value":"Main 2","metadata":{"inlineRename":true}}), &[]));
+    let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    view.read_with(&vcx, |v, _| {
+        let field = &v.prepared.nodes[&2];
+        assert!(field.bare);
+        assert!(field.style.background.is_none());
+        assert!(field.style.size.height.is_none());
+        assert!(field.style.padding.left.is_none());
+        assert!(field.style.padding.right.is_none());
+    });
+}

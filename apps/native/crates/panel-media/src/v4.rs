@@ -25,7 +25,7 @@ pub struct Projection {
     pub crumbs: Vec<Folder>,
     pub selected_count: usize,
     pub focused: Option<ItemId>,
-    pub renaming: Option<String>,
+    pub renaming: Option<ItemId>,
     pub drag: Option<Drag>,
     // Distinguish no target from an active root target in JSON (Option<Option>
     // loses that distinction because both serialize as null).
