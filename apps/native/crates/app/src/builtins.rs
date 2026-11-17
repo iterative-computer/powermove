@@ -685,7 +685,24 @@ impl Controller {
         let gizmos = self.builtins.gizmos.clone();
         let views: Vec<_> = self.builtins.views.values().cloned().collect();
         timeline.is_some_and(|t| t.update(cx, |t, cx| t.cancel(cx)))
-            || gizmos.is_some_and(|g| g.update(cx, |g, cx| g.cancel(cx)))
+            || gizmos.is_some_and(|g| {
+                // A text session ends here (it reads nothing of this
+                // controller, and its keys keep their order, PM-459); a
+                // pointer gesture's end reads the controller through its
+                // host, so it ends after this update (PM-480).
+                if g.update(cx, |g, cx| g.finish_text(false, cx)) {
+                    return true;
+                }
+                if !g.read(cx).gesture_to_cancel() {
+                    return false;
+                }
+                cx.defer(move |cx| {
+                    g.update(cx, |g, cx| {
+                        g.cancel(cx);
+                    })
+                });
+                true
+            })
             || views
                 .into_iter()
                 .any(|view| view.update(cx, |view, cx| view.cancel_gesture(cx)))
@@ -1887,6 +1904,29 @@ impl Controller {
                                     .collect();
                                     crate::quick_look::toggle(files);
                                 }
+                                // Double-click or Return on a ready item, and the
+                                // item menus (v1 `addFromAsset`, `Comps.fromAsset`,
+                                // `Comps.addToTimeline`).
+                                pm_panel_media::Effect::AddAsset(id) => {
+                                    self.add_to_timeline(&[id], &[], cx)
+                                }
+                                pm_panel_media::Effect::NestComposition(id) => {
+                                    self.add_to_timeline(&[], &[id], cx)
+                                }
+                                pm_panel_media::Effect::NewCompFromAsset(id) => {
+                                    self.new_comp_from_asset(&id, cx)
+                                }
+                                pm_panel_media::Effect::ConfirmDelete {
+                                    token,
+                                    assets,
+                                    references,
+                                } => self.confirm_delete_media(
+                                    effect.owner.clone(),
+                                    token,
+                                    &assets,
+                                    references,
+                                    cx,
+                                ),
                                 pm_panel_media::Effect::Focus(_)
                                 | pm_panel_media::Effect::ClearPreview => {}
                                 other => {
@@ -2547,10 +2587,9 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         }
     }
     fn report(&self, message: String, cx: &mut App) {
-        let _ = self.0.update(cx, |v, cx| {
-            v.message = message;
-            cx.notify();
-        });
+        // A passing note: it clears once its moment is over (PM-476 kept a
+        // timeline view write's failure in the status line for good).
+        let _ = self.0.update(cx, |v, cx| v.note(message, cx));
     }
     fn command(&self, name: &str, cx: &mut App) {
         crate::timeline_surface::Delegate::run(self, name, vec![], cx);
@@ -3699,7 +3738,7 @@ mod project_view_tests {
 
 impl Controller {
     /// The open project's asset names, by id (what the Project shows).
-    fn asset_names(&self) -> std::collections::HashMap<String, String> {
+    pub(crate) fn asset_names(&self) -> std::collections::HashMap<String, String> {
         let Some(published) = &self.published else {
             return Default::default();
         };

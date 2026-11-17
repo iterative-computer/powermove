@@ -308,6 +308,16 @@ pub struct ImportRequest {
     pub keep_folders: bool,
     /// How far the import has come, for the toolbar's task pill.
     pub progress: ImportProgress,
+    /// The files the project's items play from now (the app's resolved
+    /// originals): an item not here is missing. A file that is one of them
+    /// is that item again ([`known`]).
+    pub originals: std::collections::BTreeMap<String, PathBuf>,
+    /// How long a placed still lasts (Settings › Media › Still Duration;
+    /// `None`: until the composition ends).
+    pub still: Option<f64>,
+    /// The Tracks timeline: placed files lie end to end from `place_at`
+    /// instead of on top of each other ([`TrackRun`]).
+    pub track_run: Option<TrackRun>,
 }
 /// How far an import has come: files read of the total, and the file
 /// being read. Shared with whoever shows it; the import only writes.
@@ -372,6 +382,162 @@ pub struct ChosenSequence {
     pub asset: serde_json::Value,
     /// Numbers in the range with no file, as the status line says them.
     pub missing: Option<String>,
+}
+
+/// The Tracks timeline as an import finds it: what each lane holds, so
+/// several files imported at once lie end to end on lanes free for them.
+#[derive(Clone, Debug, Default)]
+pub struct TrackRun {
+    /// Each clip's area (audio or not), lane, start and end.
+    pub occupied: Vec<(bool, u32, f64, f64)>,
+}
+impl TrackRun {
+    /// The lowest lane of the area with nothing in `from..end`.
+    pub fn lane(&self, audio: bool, from: f64, end: f64) -> u32 {
+        (0..)
+            .find(|lane| {
+                !self.occupied.iter().any(|&(a, l, f, e)| {
+                    a == audio && l == *lane && f < end - 1e-6 && e > from + 1e-6
+                })
+            })
+            .unwrap_or(0)
+    }
+}
+/// A file about to be imported: what identifies it.
+#[derive(Debug)]
+pub(crate) struct Facts {
+    pub name: String,
+    pub kind: &'static str,
+    pub size: u64,
+    pub fingerprint: String,
+}
+/// `None` for what is not a plain media file (a folder, an unknown kind).
+fn file_facts(path: &Path, models: bool) -> Option<Facts> {
+    let meta = std::fs::metadata(path).ok().filter(std::fs::Metadata::is_file)?;
+    let kind = kind(path).or((models && model_mime(path).is_some()).then_some("model"))?;
+    Some(Facts {
+        name: path.file_name()?.to_string_lossy().into_owned(),
+        kind,
+        size: meta.len(),
+        fingerprint: pm_kernel::media_archive::sampled_fingerprint(path, meta.len()).ok()?,
+    })
+}
+/// What an imported file already is in the project (v1 `findExistingAsset`).
+#[derive(Debug, PartialEq)]
+pub(crate) enum Known {
+    /// An item that plays from the same content: used again, so a file is
+    /// one Project item however often it is imported.
+    Present(String),
+    /// A missing item this file is: relinked to it.
+    Missing(String),
+}
+/// The item `file` already is, by content (`fingerprint`), which survives a
+/// rename. An item kept without one is the same when it plays from a file
+/// with the same fingerprint, or, when missing, by v1's rule for such items:
+/// the same name, kind and size. A missing match comes first.
+pub(crate) fn known(
+    assets: &Value,
+    originals: &std::collections::BTreeMap<String, PathBuf>,
+    file: &Facts,
+) -> Option<Known> {
+    let mut present = None;
+    for (id, record) in assets.as_object()?.iter() {
+        let id = id.to_string();
+        if record.get("kind").and_then(Value::as_str) != Some(file.kind)
+            || record.get("imageSequence").is_some()
+        {
+            continue;
+        }
+        let size = record.get("size").and_then(Value::as_f64).map(|s| s as u64);
+        let same = match record.get("fingerprint").and_then(Value::as_str) {
+            Some(fingerprint) => fingerprint == file.fingerprint,
+            None => match originals.get(&id) {
+                Some(path) => {
+                    size.is_none_or(|s| s == file.size)
+                        && std::fs::metadata(path).is_ok_and(|m| m.len() == file.size)
+                        && pm_kernel::media_archive::sampled_fingerprint(path, file.size)
+                            .is_ok_and(|f| f == file.fingerprint)
+                }
+                None => {
+                    size == Some(file.size)
+                        && record
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|n| n.eq_ignore_ascii_case(&file.name))
+                }
+            },
+        };
+        if !same {
+            continue;
+        }
+        if !originals.contains_key(&id) {
+            return Some(Known::Missing(id));
+        }
+        present.get_or_insert(id);
+    }
+    present.map(Known::Present)
+}
+/// The project's other missing items whose files are in `folder` (a Locate
+/// just found one there), each with its file: by name first, checked by
+/// content (or v1's size rule for an item kept without a fingerprint), then
+/// any file of its content under another name. Never one file for two items.
+fn siblings(
+    assets: &Value,
+    originals: &std::collections::BTreeMap<String, PathBuf>,
+    located: &str,
+    folder: &Path,
+) -> Vec<(String, PathBuf)> {
+    let Some(records) = assets.as_object() else {
+        return vec![];
+    };
+    let files: Vec<(PathBuf, u64)> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let meta = e.metadata().ok().filter(std::fs::Metadata::is_file)?;
+            Some((e.path(), meta.len()))
+        })
+        .collect();
+    let mut taken = std::collections::HashSet::new();
+    let mut found = vec![];
+    for (id, record) in records.iter() {
+        let id = id.to_string();
+        let kind = record.get("kind").and_then(Value::as_str);
+        if id == located
+            || originals.contains_key(&id)
+            || record.get("imageSequence").is_some()
+            || !matches!(kind, Some("image" | "video" | "audio"))
+        {
+            continue;
+        }
+        let name = record.get("name").and_then(Value::as_str).unwrap_or("");
+        let fingerprint = record.get("fingerprint").and_then(Value::as_str);
+        let size = record.get("size").and_then(Value::as_f64).map(|s| s as u64);
+        let is = |path: &Path, len: u64| match fingerprint {
+            Some(f) => pm_kernel::media_archive::sampled_fingerprint(path, len).is_ok_and(|g| g == f),
+            None => size == Some(len),
+        };
+        let named = files.iter().find(|(path, len)| {
+            !taken.contains(path)
+                && path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name))
+                && self::kind(path) == kind
+                && is(path, *len)
+        });
+        let renamed = || {
+            let wanted: u64 = fingerprint?.split(':').nth(1)?.parse().ok()?;
+            files
+                .iter()
+                .find(|(path, len)| *len == wanted && !taken.contains(path) && is(path, *len))
+        };
+        if let Some((path, _)) = named.or_else(renamed) {
+            taken.insert(path.clone());
+            found.push((id, path.clone()));
+        }
+    }
+    found
 }
 
 /// An image sequence chosen as File ▸ Import Image Sequence chooses it, for
@@ -597,6 +763,10 @@ pub struct Outcome {
     /// What else a person should know (frames missing from a sequence).
     pub notes: Vec<String>,
     pub cancelled: bool,
+    /// Missing items these files were, relinked to them.
+    pub relinked: Vec<String>,
+    /// Files already in the project as an item that plays: used again.
+    pub reused: Vec<String>,
 }
 impl Outcome {
     pub fn summary(&self) -> String {
@@ -605,6 +775,16 @@ impl Outcome {
             0 => {}
             1 => parts.push(format!("Imported {}", self.imported[0])),
             n => parts.push(format!("Imported {n} files")),
+        }
+        match self.relinked.len() {
+            0 => {}
+            1 => parts.push(format!("Relinked {}", self.relinked[0])),
+            n => parts.push(format!("Relinked {n} missing files")),
+        }
+        match self.reused.len() {
+            0 => {}
+            1 => parts.push(format!("{} is already in the project", self.reused[0])),
+            n => parts.push(format!("{n} files are already in the project")),
         }
         parts.extend(self.notes.iter().cloned());
         parts.extend(
@@ -631,7 +811,225 @@ const EDIT_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 impl Builtins {
     /// Blocks the caller for probing, copying and the actor's reply. Run it on
     /// a worker only. Nothing is admitted unless `document` is still open.
+    ///
+    /// As v1 did, a file that is already an item is never a second one: a
+    /// missing item it is gets relinked to it, and one that plays is used
+    /// again (placed, if the import places). A Locate or Replace that
+    /// relinks a missing file then looks in that file's folder for the
+    /// project's other missing files and relinks those too.
     pub fn import_media(
+        &self,
+        document: u64,
+        profile: &Path,
+        mut request: ImportRequest,
+        cancel: &AtomicBool,
+    ) -> Result<Outcome, String> {
+        let assets = || -> Result<Value, String> {
+            let published = self.broker.kernel.published(&self.broker.project).ok_or(SWITCHED)?;
+            Ok(published
+                .snapshot
+                .root()
+                .and_then(|r| r.get("assets"))
+                .map(|a| a.to_value())
+                .unwrap_or(Value::Null))
+        };
+        let originals = request.originals.clone();
+        if let Some(replaced) = request.replace.clone() {
+            let chosen = request.paths.first().cloned();
+            // A Locate that chose other content than the item had: allowed
+            // (it is a Replace then), and said.
+            let differs = request.sequence.is_none()
+                && !originals.contains_key(&replaced)
+                && chosen.as_deref().and_then(|p| file_facts(p, true)).is_some_and(|facts| {
+                    assets().ok().is_some_and(|a| {
+                        a.get(&replaced)
+                            .and_then(|r| r.get("fingerprint"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|f| f != facts.fingerprint)
+                    })
+                });
+            let mut outcome = self.import_once(document, profile, request, cancel)?;
+            if outcome.cancelled || outcome.assets.is_empty() {
+                return Ok(outcome);
+            }
+            if differs {
+                outcome
+                    .notes
+                    .push("The file chosen is not the one that went missing".into());
+            }
+            // A missing item's file found: it is relinked, not imported.
+            if !originals.contains_key(&replaced) {
+                outcome.relinked = std::mem::take(&mut outcome.imported);
+            }
+            let Some(folder) = chosen.as_deref().and_then(Path::parent) else {
+                return Ok(outcome);
+            };
+            let mut more = 0;
+            for (id, path) in siblings(&assets()?, &originals, &replaced, folder) {
+                if cancel.load(Ordering::Acquire) {
+                    break;
+                }
+                let relink = ImportRequest {
+                    paths: vec![path],
+                    replace: Some(id),
+                    ..Default::default()
+                };
+                if self
+                    .import_once(document, profile, relink, cancel)
+                    .is_ok_and(|o| !o.assets.is_empty())
+                {
+                    more += 1;
+                }
+            }
+            if more > 0 {
+                outcome.notes.push(format!(
+                    "Relinked {more} more from the same folder"
+                ));
+            }
+            return Ok(outcome);
+        }
+        if request.sequence.is_some() || request.staged.is_some() {
+            return self.import_once(document, profile, request, cancel);
+        }
+        let known_now = assets()?;
+        let (mut relink, mut reuse) = (vec![], vec![]);
+        let mut fresh = vec![];
+        for path in std::mem::take(&mut request.paths) {
+            match file_facts(&path, request.models)
+                .and_then(|facts| known(&known_now, &originals, &facts).map(|k| (k, facts.name)))
+            {
+                Some((Known::Missing(id), name)) => relink.push((id, path, name)),
+                Some((Known::Present(id), name)) => reuse.push((id, name)),
+                None => fresh.push(path),
+            }
+        }
+        let (place_at, place_index, still) = (request.place_at, request.place_index, request.still);
+        let run = request.track_run.clone();
+        let mut outcome = if fresh.is_empty() {
+            Outcome::default()
+        } else {
+            request.paths = fresh;
+            self.import_once(document, profile, request, cancel)?
+        };
+        let mut placed = vec![];
+        for (id, path, name) in relink {
+            if cancel.load(Ordering::Acquire) {
+                outcome.cancelled = true;
+                break;
+            }
+            let request = ImportRequest {
+                paths: vec![path],
+                replace: Some(id.clone()),
+                ..Default::default()
+            };
+            match self.import_once(document, profile, request, cancel) {
+                Ok(o) if !o.assets.is_empty() => {
+                    outcome.relinked.push(name);
+                    outcome.assets.push(id.clone());
+                    placed.push(id);
+                }
+                Ok(o) => outcome.failed.extend(o.failed),
+                Err(error) => outcome.failed.push((name, error)),
+            }
+        }
+        for (id, name) in reuse {
+            if !outcome.assets.contains(&id) {
+                outcome.assets.push(id.clone());
+                placed.push(id);
+            }
+            if place_at.is_none() {
+                outcome.reused.push(name);
+            }
+        }
+        if let Some(at) = place_at
+            && !placed.is_empty()
+        {
+            // In a Tracks run, after the new files that just landed there.
+            let at = match &run {
+                Some(_) => self.run_end(&outcome.assets, at)?,
+                None => at,
+            };
+            self.place_known(&placed, at, place_index, still, run.as_ref())?;
+        }
+        Ok(outcome)
+    }
+    /// Where the layers of `assets` just placed from `at` end (`at` when none
+    /// did): the next part of a Tracks run starts there.
+    fn run_end(&self, assets: &[String], at: f64) -> Result<f64, String> {
+        let published = self.broker.kernel.published(&self.broker.project).ok_or(SWITCHED)?;
+        let root = published.snapshot.root().ok_or(SWITCHED)?;
+        let layers = pm_kernel::model::comp_node(root, published.snapshot.open_comp().as_deref())
+            .and_then(|c| c.get("layers"))
+            .map(|l| l.to_value())
+            .unwrap_or(Value::Null);
+        let number = |l: &Value, k: &str| l.get(k).and_then(Value::as_f64).unwrap_or(0.);
+        Ok(layers
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|l| {
+                number(l, "from") >= at - 1e-6
+                    && l.get("d")
+                        .and_then(|d| d.get("asset"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|a| assets.iter().any(|x| x == a))
+            })
+            .map(|l| number(l, "from") + number(l, "dur"))
+            .fold(at, f64::max))
+    }
+    /// Items already in the project, placed as an import places its new ones,
+    /// in one Undo step, and selected.
+    fn place_known(
+        &self,
+        assets: &[String],
+        at: f64,
+        index: Option<usize>,
+        still: Option<f64>,
+        run: Option<&TrackRun>,
+    ) -> Result<(), String> {
+        let project = &self.broker.project;
+        let published = self.broker.kernel.published(project).ok_or(SWITCHED)?;
+        let records = published
+            .snapshot
+            .root()
+            .and_then(|r| r.get("assets"))
+            .map(|a| a.to_value())
+            .unwrap_or(Value::Null);
+        let items: Vec<(&str, &Value)> = assets
+            .iter()
+            .filter_map(|id| Some((id.as_str(), records.get(id)?)))
+            .collect();
+        let (layers, commands) = placement(&published, &items, at, index, None, still, run)
+            .ok_or("Open a project first")?;
+        let call = pm_kernel::Call::Transact {
+            label: Some("Add to Timeline".into()),
+            expected_revision: Some(published.revision()),
+            body: pm_kernel::WriteBody::Commands(commands),
+        };
+        match self
+            .broker
+            .kernel
+            .call(project, Request::new(Caller::native(), call))
+            .wait()
+        {
+            Some(Ok(ack)) => {
+                if let Reply::Throw(error) = ack.reply {
+                    return Err(error.to_string());
+                }
+            }
+            Some(Err(error)) => return Err(format!("{error:?}")),
+            None => return Err("Project closed".into()),
+        }
+        let selection = SelectionCall::Layers { ids: layers, add: false };
+        let _ = self
+            .broker
+            .kernel
+            .call(project, Request::new(Caller::native(), selection))
+            .wait();
+        Ok(())
+    }
+    /// One import as asked: each file a new item, or `replace`'s new file.
+    fn import_once(
         &self,
         document: u64,
         profile: &Path,
@@ -754,6 +1152,13 @@ impl Builtins {
                         }
                     }
                 };
+                // Its identity, as v1 kept it: a later import of the same
+                // file finds this item (`known`).
+                if sequence.is_none()
+                    && let Ok(fingerprint) = pm_kernel::media_archive::sampled_fingerprint(&path, size)
+                {
+                    asset["fingerprint"] = json!(fingerprint);
+                }
                 // A new clip's times address the file's presentation. A
                 // relinked asset keeps the reading its edits were made with:
                 // the merge leaves its `timing` member (or its absence) alone.
@@ -851,6 +1256,8 @@ impl Builtins {
                         at,
                         request.place_index,
                         request.placed_as.as_ref(),
+                        request.still,
+                        request.track_run.as_ref(),
                     )
                     .ok_or(SWITCHED)?
                 }
@@ -931,6 +1338,7 @@ pub fn place_items(
     compositions: &[String],
     at: f64,
     index: Option<usize>,
+    still: Option<f64>,
 ) -> Result<(Vec<String>, Vec<Command>), String> {
     let root = published.snapshot.root().ok_or("Open a project first")?;
     let records = root
@@ -942,7 +1350,7 @@ pub fn place_items(
         .filter_map(|id| Some((id.as_str(), records.get(id)?)))
         .collect();
     let (mut layers, mut commands) =
-        placement(published, &items, at, index, None).ok_or("Open a project first")?;
+        placement(published, &items, at, index, None, still, None).ok_or("Open a project first")?;
     let open = published.snapshot.open_comp();
     let comps = root
         .get("comps")
@@ -981,6 +1389,7 @@ pub fn place_items(
                 visible: None,
                 shy: None,
                 collapsed: None,
+                track: None,
                 time: at,
             }))
             .into(),
@@ -992,6 +1401,58 @@ pub fn place_items(
     Ok((layers, commands))
 }
 
+/// Project panel ▸ New Comp from Selection (v1 `PM.Comps.fromAsset`): a
+/// composition the size of the media and as long as it (a still: as long
+/// as the open composition), at the open composition's frame rate, named
+/// after the file, holding the media as its one layer from 0, in one Undo
+/// step. The new composition's id, the layer's, and the commands.
+pub fn comp_from_asset(
+    published: &Published,
+    asset: &str,
+) -> Result<(String, Vec<String>, Vec<Command>), String> {
+    let root = published.snapshot.root().ok_or("Open a project first")?;
+    let record = root
+        .get("assets")
+        .and_then(|a| a.get(asset))
+        .map(|n| n.to_value())
+        .ok_or("That media is no longer in the project")?;
+    if matches!(
+        record.get("kind").and_then(Value::as_str),
+        Some("audio" | "model")
+    ) {
+        return Err("A composition can't be made from audio or a 3D model".into());
+    }
+    let field = |key: &str| record.get(key).and_then(Value::as_f64).filter(|n| *n > 0.);
+    let file = record.get("name").and_then(Value::as_str).unwrap_or("Comp");
+    let name = Path::new(file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(file);
+    let comp_id = pm_kernel::commands::new_id("C");
+    let create = pm_kernel::CompCommand::Create {
+        comp_id: comp_id.clone(),
+        settings: pm_kernel::commands::comps::NewComp {
+            name: Some(name.to_owned()),
+            width: field("w"),
+            height: field("h"),
+            // The open composition's (the kernel's default), as v1.
+            fps: None,
+            duration: field("dur").map(|d| d.clamp(0.1, 3600.)),
+            background: None,
+        },
+    };
+    let (layers, mut commands) = placement(published, &[(asset, &record)], 0., None, None, None, None)
+        .ok_or("Open a project first")?;
+    for command in &mut commands {
+        if let Command::Layer(LayerCommand::Add(add)) = command {
+            add.comp = Some(comp_id.clone());
+        }
+    }
+    commands.insert(0, Command::Comp(create));
+    Ok((comp_id, layers, commands))
+}
+
 /// `PM.commandForAsset` for each asset: new layer ids and the commands
 /// adding them at `at`, from stack `index` down. `None`: no project to
 /// place in.
@@ -1001,6 +1462,8 @@ fn placement(
     at: f64,
     index: Option<usize>,
     placed_as: Option<&PlacedAs>,
+    still: Option<f64>,
+    run: Option<&TrackRun>,
 ) -> Option<(Vec<String>, Vec<Command>)> {
     let root = published.snapshot.root()?;
     let open = published.snapshot.open_comp();
@@ -1017,11 +1480,43 @@ fn placement(
         number("w", 1920.),
         number("h", 1080.),
     );
+    // How long each lasts: the whole source, even past the composition
+    // end; a still as long as Settings › Media › Still Duration says, else
+    // to the composition end.
+    let length = |asset: &Value, from: f64| {
+        asset
+            .get("dur")
+            .and_then(Value::as_f64)
+            .filter(|n| *n > 0.)
+            .unwrap_or_else(|| still.unwrap_or_else(|| (dur - from).max(1. / fps)))
+    };
+    let audio = |asset: &Value| asset.get("kind").and_then(Value::as_str) == Some("audio");
+    // In the Tracks timeline (`run`), one after another from `at`, each
+    // area's files on one lane free across their whole run.
+    let mut starts = vec![at; items.len()];
+    let mut lanes: [Option<u32>; 2] = [None, None];
+    if let Some(run) = run {
+        let mut next = at;
+        for (n, (_, asset)) in items.iter().enumerate() {
+            starts[n] = next;
+            next += length(asset, next);
+        }
+        for area in [false, true] {
+            let span = items
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, asset))| audio(asset) == area)
+                .map(|(n, (_, asset))| (starts[n], starts[n] + length(asset, starts[n])))
+                .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)));
+            lanes[usize::from(area)] = span.map(|(from, end)| run.lane(area, from, end));
+        }
+    }
     let mut commands: Vec<Command> = vec![];
     let mut layers = vec![];
     for (n, &(id, asset)) in items.iter().enumerate() {
         let field = |key: &str| asset.get(key).and_then(Value::as_f64).filter(|n| *n > 0.);
         let kind = asset.get("kind").and_then(Value::as_str).unwrap_or("image");
+        let start = starts[n];
         let mut content = Map::new();
         content.insert("asset", Value::from(id));
         match kind {
@@ -1066,9 +1561,8 @@ fn placement(
                 .into(),
                 comp: None,
                 name,
-                from: None,
-                // The whole source, even past the composition end.
-                duration: Some(field("dur").unwrap_or_else(|| (dur - at).max(1. / fps))),
+                from: run.map(|_| start),
+                duration: Some(length(asset, start)),
                 content,
                 properties: Map::new(),
                 color: None,
@@ -1079,6 +1573,7 @@ fn placement(
                 visible: None,
                 shy: None,
                 collapsed: None,
+                track: lanes[usize::from(kind == "audio")],
                 time: at,
             }))
             .into(),
@@ -1152,6 +1647,234 @@ mod tests {
         };
         (fixture, session)
     }
+    /// Projects opened in turn keep their own items: media imported into
+    /// one, and the archive and library stores it fills, never show up in
+    /// the next, nor does a file already in the first count as known in the
+    /// second (PM-486: a new project listed an item it never had; that was
+    /// an extension importing into each project it mounted in).
+    #[test]
+    fn projects_opened_in_turn_keep_their_own_items() {
+        let f = fixture();
+        let a = write(&f.root, "A.png", PNG);
+        let first = import_with(&f, vec![a.clone()], None, &[], None);
+        assert_eq!(first.assets.len(), 1);
+        let kernel = f.actor.handle();
+        let open = |id: &str| {
+            let project = pm_model::json::parse(&format!(
+                r##"{{"id":"{id}","name":"{id}","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{{}},"comps":{{}},"layers":[]}}"##
+            ))
+            .unwrap();
+            kernel
+                .shell(ShellCall::Open {
+                    id: id.into(),
+                    source: SessionSource::New(project),
+                    electron_profile: None,
+                })
+                .wait()
+                .unwrap()
+                .unwrap();
+        };
+        open("q");
+        let items = |id: &str| {
+            let published = kernel.published(id).unwrap();
+            let catalog = pm_panel_media::Catalog::published(&published).unwrap();
+            catalog.assets.keys().cloned().collect::<Vec<_>>()
+        };
+        assert_eq!(items("p"), first.assets, "the first keeps its item");
+        assert!(items("q").is_empty(), "the second never had one: {:?}", items("q"));
+        // Importing the same file into the second makes its own item there.
+        let second = Builtins::new(kernel.clone(), "q", || {}).unwrap();
+        let document = kernel.published("q").unwrap().snapshot.doc_id;
+        let outcome = second
+            .import_media(
+                document,
+                &f.root,
+                ImportRequest { paths: vec![a], ..Default::default() },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(outcome.imported, ["A.png"], "{outcome:?}");
+        assert!(outcome.reused.is_empty() && outcome.relinked.is_empty());
+        assert_eq!(items("q"), outcome.assets);
+        assert_eq!(items("p"), first.assets, "and the first is untouched");
+    }
+    /// In the Tracks timeline, files imported together lie end to end from
+    /// the playhead in the order chosen, on one lane free across the whole
+    /// run, instead of on top of each other at the playhead (PM-486).
+    #[test]
+    fn files_imported_together_in_tracks_lie_end_to_end_on_a_free_lane() {
+        let f = fixture();
+        let a = write(&f.root, "A.png", PNG);
+        let b = write(&f.root, "B.png", &[PNG, b"other"].concat());
+        // Lane 0 holds a clip across the run; lane 1 is free.
+        let run = TrackRun {
+            occupied: vec![(false, 0, 0., 10.), (true, 0, 0., 10.)],
+        };
+        let outcome = f
+            .runtime
+            .import_media(
+                document(&f),
+                &f.root,
+                ImportRequest {
+                    paths: vec![b, a],
+                    place_at: Some(1.),
+                    still: Some(2.),
+                    track_run: Some(run),
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(outcome.imported, ["B.png", "A.png"], "{outcome:?}");
+        let p = f.actor.handle().published("p").unwrap();
+        let layers = pm_kernel::model::comp_node(p.snapshot.root().unwrap(), p.snapshot.open_comp().as_deref())
+            .unwrap().to_value().get("layers").unwrap().as_array().unwrap().clone();
+        let placed: Vec<(String, f64, f64, f64)> = layers
+            .iter()
+            .map(|l| {
+                let n = |k: &str| l.get(k).and_then(Value::as_f64).unwrap_or(-1.);
+                (l.get("name").and_then(Value::as_str).unwrap_or("").to_owned(), n("from"), n("dur"), n("track"))
+            })
+            .collect();
+        assert!(placed.contains(&("B.png".into(), 1., 2., 1.)), "{placed:?}");
+        assert!(placed.contains(&("A.png".into(), 3., 2., 1.)), "{placed:?}");
+        // Without the Tracks run they stack at the playhead, as v1 did.
+        assert!(TrackRun::default().lane(false, 0., 1.) == 0);
+        // The same files again are the items they are, laid out the same
+        // way: lanes 0 and 1 busy, so lane 2, from 20 s.
+        let ids = outcome.assets.clone();
+        let again = f
+            .runtime
+            .import_media(
+                document(&f),
+                &f.root,
+                ImportRequest {
+                    paths: vec![f.root.join("B.png"), f.root.join("A.png")],
+                    place_at: Some(20.),
+                    still: Some(2.),
+                    originals: [(ids[0].clone(), f.root.join("B.png")), (ids[1].clone(), f.root.join("A.png"))]
+                        .into_iter()
+                        .collect(),
+                    track_run: Some(TrackRun {
+                        occupied: vec![(false, 0, 0., 30.), (false, 1, 0., 30.)],
+                    }),
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(again.imported.is_empty(), "{again:?}");
+        let p = f.actor.handle().published("p").unwrap();
+        let later: Vec<(f64, f64)> = pm_kernel::model::comp_node(p.snapshot.root().unwrap(), p.snapshot.open_comp().as_deref())
+            .unwrap().to_value().get("layers").unwrap().as_array().unwrap().iter()
+            .filter(|l| l.get("from").and_then(Value::as_f64).is_some_and(|t| t >= 20.))
+            .map(|l| (l.get("from").and_then(Value::as_f64).unwrap(), l.get("track").and_then(Value::as_f64).unwrap_or(-1.)))
+            .collect();
+        assert!(later.contains(&(20., 2.)) && later.contains(&(22., 2.)), "{later:?}");
+    }
+    /// Imports `paths` as the Project panel does, with `originals` the
+    /// files the project's items play from now.
+    fn import_with(
+        f: &Fixture,
+        paths: Vec<PathBuf>,
+        replace: Option<&str>,
+        originals: &[(&str, &Path)],
+        place_at: Option<f64>,
+    ) -> Outcome {
+        f.runtime
+            .import_media(
+                document(f),
+                &f.root,
+                ImportRequest {
+                    paths,
+                    replace: replace.map(Into::into),
+                    place_at,
+                    originals: originals
+                        .iter()
+                        .map(|(id, path)| (id.to_string(), path.to_path_buf()))
+                        .collect(),
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap()
+    }
+    fn assets_now(f: &Fixture) -> Value {
+        f.actor.handle().published("p").unwrap().snapshot.root().unwrap()
+            .get("assets").unwrap().to_value()
+    }
+    fn source_of(f: &Fixture, id: &str) -> String {
+        assets_now(f).get(id).and_then(|a| a.get("sourcePath")).and_then(Value::as_str)
+            .unwrap_or_default().to_owned()
+    }
+    /// The same file imported again is the item it already is (v1 kept one
+    /// per file, by content): nothing new in the Project panel, said so;
+    /// imported to the timeline, the item is placed again (PM-486).
+    #[test]
+    fn a_file_imported_again_is_the_item_it_already_is() {
+        let f = fixture();
+        let a = write(&f.root, "A.png", PNG);
+        let first = import_with(&f, vec![a.clone()], None, &[], None);
+        let id = first.assets[0].clone();
+        let again = import_with(&f, vec![a.clone()], None, &[(id.as_str(), a.as_path())], None);
+        assert!(again.imported.is_empty(), "{again:?}");
+        assert_eq!(again.reused, ["A.png"]);
+        assert_eq!(again.assets, [id.clone()]);
+        assert_eq!(again.summary(), "A.png is already in the project");
+        // A copy under another name is the same content.
+        let copy = write(&f.root, "A copy.png", PNG);
+        let placed = import_with(&f, vec![copy], None, &[(id.as_str(), a.as_path())], Some(0.));
+        assert_eq!(placed.assets, [id.clone()]);
+        assert_eq!(assets_now(&f).as_object().unwrap().len(), 1, "one item per file");
+        let p = f.actor.handle().published("p").unwrap();
+        let layers = pm_kernel::model::comp_node(p.snapshot.root().unwrap(), p.snapshot.open_comp().as_deref())
+            .unwrap().to_value().get("layers").unwrap().as_array().unwrap().clone();
+        assert_eq!(layers.len(), 1, "placed again");
+        assert_eq!(layers[0].get("d").and_then(|d| d.get("asset")).and_then(Value::as_str), Some(id.as_str()));
+    }
+    /// A missing item's file imported again, renamed or not, relinks the
+    /// item instead of adding one (v1: "relinked N missing assets") (PM-494).
+    #[test]
+    fn importing_a_missing_items_file_relinks_it() {
+        let f = fixture();
+        let a = write(&f.root, "A.png", PNG);
+        let id = import_with(&f, vec![a], None, &[], None).assets[0].clone();
+        let moved = f.root.join("moved");
+        std::fs::create_dir_all(&moved).unwrap();
+        let renamed = write(&moved, "A renamed.png", PNG);
+        // Nothing plays from a file now: the item is missing.
+        let outcome = import_with(&f, vec![renamed.clone()], None, &[], None);
+        assert_eq!(outcome.relinked, ["A renamed.png"], "{outcome:?}");
+        assert!(outcome.imported.is_empty());
+        assert_eq!(outcome.summary(), "Relinked A renamed.png");
+        assert_eq!(assets_now(&f).as_object().unwrap().len(), 1);
+        assert_eq!(source_of(&f, &id), renamed.to_string_lossy());
+    }
+    /// Locating one missing file relinks the project's other missing files
+    /// in the same folder: by name, and by content under another name; a
+    /// file that is not one of them stays out (PM-494).
+    #[test]
+    fn locating_one_missing_file_relinks_the_others_in_its_folder() {
+        let f = fixture();
+        let b_bytes = [PNG, b"other"].concat();
+        let a = write(&f.root, "A.png", PNG);
+        let b = write(&f.root, "B.png", &b_bytes);
+        let ids = import_with(&f, vec![a, b], None, &[], None).assets;
+        let moved = f.root.join("moved");
+        std::fs::create_dir_all(&moved).unwrap();
+        let a2 = write(&moved, "A.png", PNG);
+        let b2 = write(&moved, "B renamed.png", &b_bytes);
+        write(&moved, "C.png", &[PNG, b"unrelated"].concat());
+        let outcome = import_with(&f, vec![a2.clone()], Some(&ids[0]), &[], None);
+        assert_eq!(outcome.summary(), "Relinked A.png · Relinked 1 more from the same folder");
+        assert!(
+            outcome.notes.contains(&"Relinked 1 more from the same folder".to_owned()),
+            "{outcome:?}"
+        );
+        assert_eq!(source_of(&f, &ids[0]), a2.to_string_lossy());
+        assert_eq!(source_of(&f, &ids[1]), b2.to_string_lossy());
+        assert_eq!(assets_now(&f).as_object().unwrap().len(), 2);
+    }
     fn write(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
         let path = root.join(name);
         std::fs::write(&path, bytes).unwrap();
@@ -1216,12 +1939,13 @@ mod tests {
             visible: None,
             shy: None,
             collapsed: None,
+            track: None,
             time: 0.,
         };
         commit(vec![LayerCommand::Add(Box::new(solid)).into()]);
         let published = kernel.published("p").unwrap();
         let (placed, commands) =
-            place_items(&published, &outcome.assets, &[], 1.5, Some(1)).unwrap();
+            place_items(&published, &outcome.assets, &[], 1.5, Some(1), None).unwrap();
         assert_eq!(placed.len(), 2);
         commit(commands);
         let published = kernel.published("p").unwrap();
@@ -1248,9 +1972,95 @@ mod tests {
             assert_eq!(layer.get("from").unwrap().as_f64(), Some(1.5));
         }
         assert_eq!(
-            place_items(&published, &[], open.as_slice(), 0., None).unwrap_err(),
+            place_items(&published, &[], open.as_slice(), 0., None, None).unwrap_err(),
             "A composition can't be placed inside itself"
         );
+    }
+
+    /// Project panel ▸ New Comp from Selection (v1 `Comps.fromAsset`): a
+    /// composition named after the file, the media's size, as long as the
+    /// open one for a still, at its frame rate, holding the media from 0, in
+    /// one Undo step; the open composition is left as it was.
+    #[test]
+    fn a_new_comp_from_selection_matches_its_media_and_holds_it() {
+        let (f, _) = opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":25,"dur":8,"bg":"#000000","assets":{"a":{"id":"a","name":"Sky.png","kind":"image","w":200,"h":100},"s":{"id":"s","name":"Song.wav","kind":"audio","dur":3}},"comps":{},"layers":[]}"##,
+        );
+        let kernel = f.actor.handle();
+        let p = kernel.published("p").unwrap();
+        assert_eq!(
+            comp_from_asset(&p, "s").unwrap_err(),
+            "A composition can't be made from audio or a 3D model"
+        );
+        let (comp, layers, commands) = comp_from_asset(&p, "a").unwrap();
+        kernel
+            .call(
+                "p",
+                Request::new(
+                    Caller::native(),
+                    pm_kernel::Call::Transact {
+                        label: Some("New Comp from Selection".into()),
+                        expected_revision: Some(p.revision()),
+                        body: pm_kernel::WriteBody::Commands(commands),
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        let p = kernel.published("p").unwrap();
+        let root = p.snapshot.root().unwrap();
+        let made = root.get("comps").unwrap().get(&comp).unwrap().to_value();
+        let n = |key: &str| made.get(key).and_then(Value::as_f64);
+        assert_eq!(made.get("name").and_then(Value::as_str), Some("Sky"));
+        assert_eq!(
+            (n("w"), n("h"), n("fps"), n("dur")),
+            (Some(200.), Some(100.), Some(25.), Some(8.))
+        );
+        let held = made.get("layers").unwrap().as_array().unwrap().clone();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].get("id").and_then(Value::as_str), Some(layers[0].as_str()));
+        assert_eq!(
+            held[0].get("d").and_then(|c| c.get("asset")).and_then(Value::as_str),
+            Some("a")
+        );
+        assert_eq!(held[0].get("from").and_then(Value::as_f64), Some(0.));
+        let open = pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref())
+            .unwrap()
+            .to_value();
+        assert!(
+            open.get("layers").unwrap().as_array().unwrap().is_empty(),
+            "the open composition is left as it was"
+        );
+        kernel
+            .call("p", Request::new(Caller::native(), pm_kernel::HistoryCall::Undo))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let p = kernel.published("p").unwrap();
+        assert!(
+            p.snapshot.root().unwrap().get("comps").unwrap().get(&comp).is_none(),
+            "one Undo step"
+        );
+    }
+
+    /// A placed still lasts Settings › Media › Still Duration, else to the
+    /// composition end (PM-486).
+    #[test]
+    fn a_placed_still_lasts_the_still_duration() {
+        let (f, _) = opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":25,"dur":30,"bg":"#000000","assets":{"a":{"id":"a","name":"Sky.png","kind":"image","w":200,"h":100}},"comps":{},"layers":[]}"##,
+        );
+        let p = f.actor.handle().published("p").unwrap();
+        let length = |still: Option<f64>| {
+            let (_, commands) = place_items(&p, &["a".into()], &[], 2., None, still).unwrap();
+            match &commands[0] {
+                Command::Layer(LayerCommand::Add(add)) => add.duration,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(length(None), Some(28.), "to the composition end");
+        assert_eq!(length(Some(5.)), Some(5.));
     }
 
     #[test]
@@ -1260,7 +2070,7 @@ mod tests {
         );
         let kernel = f.actor.handle();
         let p = kernel.published("p").unwrap();
-        let (ids, commands) = place_items(&p, &[], &["nested".into()], 2.5, None).unwrap();
+        let (ids, commands) = place_items(&p, &[], &["nested".into()], 2.5, None, None).unwrap();
         assert_eq!(ids.len(), 1);
         kernel
             .call(
@@ -1733,7 +2543,7 @@ mod tests {
         });
         assert_eq!(
             relinked.summary(),
-            "Imported shot.[0001-0007].png · frames 1–7, were 1–6 · frame 3 missing"
+            "Relinked shot.[0001-0007].png · frames 1–7, were 1–6 · frame 3 missing"
         );
         assert_eq!(relinked.assets, std::slice::from_ref(&id));
         let published = f.actor.handle().published("p").unwrap();

@@ -747,6 +747,7 @@ fn plan_on(
                     visible: c["visible"].as_bool(),
                     shy: c["shy"].as_bool(),
                     collapsed: c["collapsed"].as_bool(),
+                    track: None,
                     time,
                 }))
                 .into()

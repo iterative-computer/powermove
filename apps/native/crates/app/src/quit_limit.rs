@@ -11,9 +11,11 @@
 //! A quit signal (SIGTERM: a logout, a shutdown, a script) has nobody to ask
 //! and the system ends the process soon anyway: the thread that heard it
 //! bounds it from that moment ([`signalled`]), a quit already under way and
-//! stuck on the main thread included. That path never blocks (no stderr),
-//! tries the journal flush with a bound, stops the engine jobs this app
-//! started, and exits.
+//! stuck on the main thread included. Its end is best effort, not a promise
+//! of durability: it tries every journal's sync at once within a bound,
+//! names each one not confirmed, stops the engine jobs this app started,
+//! and exits, non-zero when any journal was not confirmed. That path never
+//! blocks (no stderr).
 use std::sync::{
     Mutex, OnceLock,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -29,8 +31,10 @@ pub const SIGNAL: Duration = Duration::from_secs(3);
 /// How long making the journals durable may take before Quit Now says it
 /// could not.
 pub const SECURE: Duration = Duration::from_secs(5);
-/// The journal flush a signal's end attempts, within its limit.
+/// The journal syncs a signal's end attempts, within its limit.
 const SIGNAL_FLUSH: Duration = Duration::from_secs(1);
+/// The exit status of a signal's end that could not confirm every journal.
+const UNCONFIRMED: i32 = 1;
 
 /// The chosen quit's current stage; a new stage or a cancel supersedes it.
 static STAGE: AtomicU64 = AtomicU64::new(0);
@@ -38,6 +42,9 @@ static STAGE: AtomicU64 = AtomicU64::new(0);
 static SIGNALLED: AtomicBool = AtomicBool::new(false);
 /// Whose journals are made durable before the process ends.
 static KERNEL: OnceLock<Mutex<Option<pm_kernel::KernelHandle>>> = OnceLock::new();
+/// Where a signal's end writes the journals it could not confirm (the
+/// profile's `diagnostics` folder).
+static LOG_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
 /// Where stalled stages are reported (the app's quit coordinator).
 static STALLS: OnceLock<async_channel::Sender<Stall>> = OnceLock::new();
 
@@ -59,6 +66,10 @@ pub fn set_kernel(kernel: pm_kernel::KernelHandle) {
     *KERNEL.get_or_init(Default::default).lock().unwrap() = Some(kernel);
 }
 
+/// The folder a signal's end writes unconfirmed journals to.
+pub fn set_log_dir(dir: std::path::PathBuf) {
+    let _ = LOG_DIR.set(dir);
+}
 /// The stalls of chosen quits, for the app to ask about.
 pub fn stalls() -> async_channel::Receiver<Stall> {
     let (tx, rx) = async_channel::unbounded();
@@ -101,24 +112,98 @@ fn report(stall: Stall) {
 pub fn signalled() {
     if !SIGNALLED.swap(true, Ordering::AcqRel) {
         let kernel = kernel();
-        arm_signal(SIGNAL, move || kernel.map_or(Ok(()), |k| k.sync_journals()));
+        arm_signal(SIGNAL, move || {
+            kernel.map_or_else(Vec::new, |k| k.sync_each_journal(SIGNAL_FLUSH))
+        });
     }
 }
 /// After `limit`, the signal's end: nobody to ask, and nothing on this path
-/// may block (a stalled stderr pipe included). The journals get a bounded
-/// flush, the engine jobs this app started are stopped, and the process
-/// exits.
-fn arm_signal(limit: Duration, flush: impl FnOnce() -> std::io::Result<()> + Send + 'static) {
+/// may block (a stalled stderr pipe included). Best effort: every journal's
+/// sync is attempted (`sync`, bounded per journal), each one not confirmed
+/// is named, the engine jobs this app started are stopped, and the process
+/// exits non-zero if any journal was not confirmed. A `sync` that does not
+/// return at all counts as none confirmed.
+fn arm_signal(
+    limit: Duration,
+    sync: impl FnOnce() -> Vec<(String, Result<(), String>)> + Send + 'static,
+) {
     watch(
         limit,
         || true,
         move || {
             crate::diag::line(serde_json::json!({"quit":"limit","stage":"signal"}));
-            let _ = flush_within(flush, SIGNAL_FLUSH);
-            stop_jobs_and_exit()
+            stop_jobs_and_exit(signal_exit_status(sync_within(sync, SIGNAL_FLUSH * 2)))
         },
     );
 }
+/// `sync`'s reports, or `None` when it did not return within `bound`.
+fn sync_within(
+    sync: impl FnOnce() -> Vec<(String, Result<(), String>)> + Send + 'static,
+    bound: Duration,
+) -> Option<Vec<(String, Result<(), String>)>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("pm-quit-journals".into())
+        .spawn(move || {
+            let _ = tx.send(sync());
+        })
+        .ok()?;
+    rx.recv_timeout(bound).ok()
+}
+/// Names every journal a signal's end could not confirm and gives the exit
+/// status: 0 only when each one synced.
+fn signal_exit_status(reports: Option<Vec<(String, Result<(), String>)>>) -> i32 {
+    let Some(reports) = reports else {
+        crate::diag::line(serde_json::json!({"quit":"journals_unconfirmed","why":"the sync did not return"}));
+        return UNCONFIRMED;
+    };
+    let mut status = 0;
+    let mut said = String::new();
+    for (project, result) in reports {
+        if let Err(why) = result {
+            crate::diag::line(serde_json::json!({"quit":"journal_unconfirmed","project":project,"why":why}));
+            said.push_str(&format!(
+                "Powermove quit by signal: the recovery journal of project {project} was not confirmed on disk ({why}).\n"
+            ));
+            status = UNCONFIRMED;
+        }
+    }
+    if !said.is_empty() {
+        say_unconfirmed(said);
+    }
+    status
+}
+/// Writes what a signal's end could not confirm to stderr and to the
+/// profile's `quit-journals.log`, whether or not diagnostics are on, before
+/// the process ends: on a thread of its own, waited for at most
+/// [`SAY_WAIT`], so a full stderr pipe or a stalled disk never holds the end.
+fn say_unconfirmed(text: String) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("pm-quit-say".into())
+        .spawn(move || {
+            use std::io::Write;
+            let _ = std::io::stderr().write_all(text.as_bytes());
+            if let Some(dir) = LOG_DIR.get() {
+                let _ = std::fs::create_dir_all(dir);
+                if let Ok(mut log) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dir.join("quit-journals.log"))
+                {
+                    let _ = log.write_all(text.as_bytes());
+                    let _ = log.sync_all();
+                }
+            }
+            let _ = tx.send(());
+        });
+    if spawned.is_ok() {
+        let _ = rx.recv_timeout(SAY_WAIT);
+    }
+}
+/// The longest a signal's end waits to say which journals it could not
+/// confirm.
+const SAY_WAIT: Duration = Duration::from_millis(300);
 
 fn kernel() -> Option<pm_kernel::KernelHandle> {
     KERNEL.get().and_then(|k| k.lock().ok()?.clone())
@@ -171,17 +256,23 @@ fn flush_within(
     }
 }
 
-/// `exit` runs no drops: stops the engine jobs this app started (its
-/// process group, when it leads one, as a launched app does), then exits.
-pub fn stop_jobs_and_exit() -> ! {
+/// Ends the process with `status`, running no drops and no exit handlers:
+/// stops the engine jobs this app started (its process group, when it leads
+/// one, as a launched app does), then exits.
+pub fn stop_jobs_and_exit(status: i32) -> ! {
     // SAFETY: plain process calls; this process ignores the SIGTERM it sends
     // itself (blocked in every thread, waited for by one).
     unsafe {
         if libc::getpgrp() == libc::getpid() {
             libc::killpg(libc::getpgrp(), libc::SIGTERM);
         }
+        // Not `exit`: its handlers (libraries', C++ statics) run on this
+        // thread and can wait forever on a lock the main thread holds in a
+        // long open, so a SIGTERM never ended the app (run 23). Durability
+        // is the caller's: Quit Now ends only after its journals synced; a
+        // signal's end tried them, best effort, and says which it could not.
+        libc::_exit(status)
     }
-    std::process::exit(0);
 }
 
 #[cfg(test)]
@@ -260,7 +351,7 @@ mod tests {
                 );
                 println!("failed={failed:?} hung={hung:?}");
                 if failed.is_ok() || hung.is_ok() {
-                    stop_jobs_and_exit();
+                    stop_jobs_and_exit(0);
                 }
                 std::thread::sleep(Duration::from_secs(30));
             }
@@ -273,14 +364,84 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(50));
                 arm_signal(Duration::from_millis(100), || {
                     std::thread::sleep(Duration::from_secs(60));
-                    Ok(())
+                    vec![]
                 });
+                std::thread::sleep(Duration::from_secs(30));
+            }
+            // A signal quit while something the process would run at exit
+            // never returns (a library's exit handler waiting on a lock the
+            // busy main thread holds, as during a long open).
+            "signal-exit-handler" => {
+                extern "C" fn never_returns() {
+                    std::thread::sleep(Duration::from_secs(60));
+                }
+                // SAFETY: registers a plain C function to run at exit().
+                unsafe { libc::atexit(never_returns) };
+                arm_signal(Duration::from_millis(100), Vec::new);
+                std::thread::sleep(Duration::from_secs(30));
+            }
+            // A signal's end where one journal synced and one did not.
+            "signal-unconfirmed" => {
+                if let Some(dir) = std::env::var_os("PM_QUIT_TEST_LOG") {
+                    set_log_dir(dir.into());
+                }
+                arm_signal(Duration::from_millis(100), || {
+                    vec![
+                        ("Synced".into(), Ok(())),
+                        ("Stalled".into(), Err("not confirmed within 1000 ms".into())),
+                    ]
+                });
+                std::thread::sleep(Duration::from_secs(30));
+            }
+            // A signal's end where every journal synced.
+            "signal-confirmed" => {
+                arm_signal(Duration::from_millis(100), || vec![("Synced".into(), Ok(()))]);
                 std::thread::sleep(Duration::from_secs(30));
             }
             other => panic!("unknown case {other}"),
         }
     }
 
+    /// A signal's end says, by its exit status, whether every journal was
+    /// confirmed: non-zero when one was not, zero when all were.
+    #[test]
+    fn a_signal_end_exits_non_zero_when_a_journal_is_not_confirmed() {
+        let status = |case| {
+            let mut c = child(case, false);
+            assert!(ended_within(&mut c, Duration::from_secs(4)), "{case} did not end");
+            c.wait().unwrap().code()
+        };
+        assert_eq!(status("signal-unconfirmed"), Some(UNCONFIRMED));
+        assert_eq!(status("signal-confirmed"), Some(0));
+    }
+    /// The journals a signal's end could not confirm are written down, to
+    /// the profile's log, with diagnostics off.
+    #[test]
+    fn a_signal_end_writes_down_unconfirmed_journals_without_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "quit_limit::tests::child_case", "--nocapture", "--test-threads=1"])
+            .env("PM_QUIT_CHILD", "signal-unconfirmed")
+            .env("PM_QUIT_TEST_LOG", dir.path())
+            .env_remove("PM_NATIVE_MAIN_TRACE")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(ended_within(&mut c, Duration::from_secs(4)));
+        let log = std::fs::read_to_string(dir.path().join("quit-journals.log")).unwrap_or_default();
+        assert!(log.contains("project Stalled") && !log.contains("project Synced"), "{log:?}");
+    }
+    /// A quit signal ends the process even when an exit handler would never
+    /// return: its end runs none.
+    #[test]
+    fn a_signal_ends_the_process_past_an_exit_handler_that_never_returns() {
+        let mut c = child("signal-exit-handler", false);
+        assert!(
+            ended_within(&mut c, Duration::from_secs(3)),
+            "the signal quit waited on an exit handler"
+        );
+    }
     /// A chosen quit that stops making progress asks; it never exits.
     #[test]
     fn a_stalled_chosen_quit_asks_and_does_not_exit() {

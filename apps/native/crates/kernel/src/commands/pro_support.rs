@@ -17,17 +17,27 @@ pub(super) fn number(n: f64) -> Result<f64, CommandError> {
 pub struct TrackTarget {
     pub group_id: Option<String>,
     pub track: i32,
+    /// The Tracks timeline area the lane counts in (`video` or `audio`,
+    /// whose lanes both start at 0); `None` for any.
+    pub area: Option<String>,
 }
 impl TrackTarget {
     pub fn new(track: i32) -> Self {
         Self {
             group_id: None,
             track,
+            area: None,
         }
     }
     pub(super) fn matches(&self, layer: &Value) -> bool {
+        let area = match values::text(layer, "type") {
+            Some("audio") => "audio",
+            Some("captions") => "captions",
+            _ => "video",
+        };
         values::text(layer, "group") == self.group_id.as_deref()
             && values::num(layer, "track").unwrap_or(0.0) == f64::from(self.track)
+            && self.area.as_deref().is_none_or(|a| a == area)
     }
 }
 
@@ -40,6 +50,10 @@ pub(super) struct Clip {
     pub dur: f64,
     pub trim: f64,
     pub rate: f64,
+    /// Time remapping is on (Time Remap, Freeze Frame, Time-Reverse): the
+    /// keyed `sourceTime` says which source frame shows, not `trim` and
+    /// `speed`; edits move its keys and values instead.
+    pub remap: bool,
 }
 impl Clip {
     pub fn read(cx: &Cx<'_>, id: &str) -> Result<Self, CommandError> {
@@ -53,23 +67,10 @@ impl Clip {
         let from = required(&value, "from")?;
         let dur = required(&value, "dur")?;
         let trim = content_number(&value, "trim", 0.0)?;
-        let speed = content_number(&value, "speed", 1.0)?;
-        let rate = if values::text(&value, "type") == Some("video") {
-            speed
-        } else {
-            if speed != 1.0 {
-                return Err(invalid("Audio clips require unit playback rate."));
-            }
-            1.0
-        };
-        for key in ["sourceTime", "timeRemap"] {
-            let n = content_number(&value, key, 0.0)?;
-            if key == "timeRemap" && n != 0.0 {
-                return Err(invalid(
-                    "Edit time-remapped clips with explicit property commands.",
-                ));
-            }
-        }
+        // A retimed clip trims as any other: its source moves at its speed
+        // (audio follows its speed too), or with its remap keys.
+        let rate = content_number(&value, "speed", 1.0)?;
+        let remap = content_number(&value, "timeRemap", 0.0)? != 0.0;
         if from < 0.0 || dur <= 0.0 || trim < 0.0 || rate <= 0.0 {
             return Err(invalid("The clip has invalid source or timeline timing."));
         }
@@ -81,6 +82,7 @@ impl Clip {
             dur,
             trim,
             rate,
+            remap,
         })
     }
     pub fn editable(cx: &Cx<'_>, id: &str) -> Result<Self, CommandError> {
@@ -119,13 +121,14 @@ impl Clip {
         if self.from < -EPS
             || self.dur + EPS < 1.0 / cx.fps(self.comp.as_deref())
             || self.end() > cx.duration(self.comp.as_deref()) + EPS
-            || self.trim < -EPS
+            || (!self.remap && self.trim < -EPS)
         {
             return Err(invalid(
                 "The edit must retain one frame inside the composition and source.",
             ));
         }
-        if handles {
+        // A remapped clip's source frames come from its keys: no handles.
+        if handles && !self.remap {
             let asset = self
                 .value
                 .get("d")
@@ -148,8 +151,36 @@ impl Clip {
     pub fn trim_in(&mut self, delta: f64) -> Result<(), CommandError> {
         self.from += delta;
         self.dur -= delta;
-        self.trim += delta * self.rate;
+        // A remapped clip's source frames come from its keys, rebased below.
+        if !self.remap {
+            self.trim += delta * self.rate;
+        }
         rebase(&mut self.value, delta)
+    }
+    /// Slip by `delta` seconds of source: the source moves under the clip
+    /// (a remapped clip's every `sourceTime` value moves by it).
+    pub fn slip(&mut self, delta: f64) -> Result<(), CommandError> {
+        if !self.remap {
+            self.trim += delta * self.rate;
+            return Ok(());
+        }
+        let d = values::obj(&mut self.value)
+            .get_mut("d")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| invalid("The clip has no source content."))?;
+        let Some(source) = d.get_mut("sourceTime").and_then(Value::as_object_mut) else {
+            return Err(invalid("The remapped clip has no source time."));
+        };
+        if let Some(v) = source.get("v").and_then(Value::as_f64) {
+            source.insert("v", Value::Number(number(v + delta)?));
+        }
+        if let Some(keys) = source.get_mut("kf").and_then(Value::as_array_mut) {
+            for key in keys {
+                let v = required(key, "v")? + delta;
+                values::obj(key).insert("v", Value::Number(number(v)?));
+            }
+        }
+        Ok(())
     }
     pub fn into_value(mut self, cx: &Cx<'_>, handles: bool) -> Result<Value, CommandError> {
         self.validate(cx, handles)?;

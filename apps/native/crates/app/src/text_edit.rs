@@ -685,8 +685,28 @@ impl GizmoSurface {
             })
             .detach();
             input.focus();
-            // Letters typed before it had the keyboard go to it now, first.
-            pm_shell::typing::field_ready();
+            // Letters typed before it had the keyboard go to it once it has
+            // it. AppKit moves the keyboard at the next present: handed over
+            // before that, they arrived with no field to take them and ran
+            // as shortcuts, so the first texts under load came out empty
+            // (PM-465).
+            if input.focused() {
+                pm_shell::typing::field_ready();
+            } else {
+                let probe = input.clone();
+                cx.spawn(async move |_, cx| {
+                    while pm_shell::typing::expecting() {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(8))
+                            .await;
+                        if probe.focused() {
+                            pm_shell::typing::field_ready();
+                            return;
+                        }
+                    }
+                })
+                .detach();
+            }
         }
         let label = if fresh { None } else { Some("Edit Text") };
         let mut session = TextSession {
@@ -1228,6 +1248,7 @@ fn add_text(
         visible: None,
         shy: None,
         collapsed: None,
+        track: None,
         time,
     };
     let mut commands: Vec<Command> = vec![LayerCommand::Add(Box::new(add)).into()];
@@ -1279,7 +1300,7 @@ async fn call(
         .call(project, Request::new(Caller::native(), call))
         .await
         .ok_or("Kernel closed")?
-        .map_err(|e| format!("{e:?}"))?;
+        .map_err(|e| e.to_string())?;
     match ack.reply {
         Reply::Throw(error) => Err(error.to_string()),
         reply => Ok(reply),
@@ -1398,8 +1419,10 @@ impl GizmoSurface {
     ) {
         // The text opens a turn or more from now (a point click first asks
         // what is under it): letters typed meanwhile wait for it, not run as
-        // shortcuts on the canvas (PM-465).
-        pm_shell::typing::expect();
+        // shortcuts on the canvas (PM-465). Under load the first texts open
+        // slowly (the editor and fonts cold): the letters wait long enough
+        // for them, or an empty text was left and nothing made.
+        pm_shell::typing::expect_for(std::time::Duration::from_secs(6));
         let paragraph = sketch.shape.filter(|b| b.w() >= PARAGRAPH_MIN);
         if let Some(b) = paragraph {
             self.new_text([b.x0, b.y0], Some(b.w()), window, cx);
@@ -1435,23 +1458,46 @@ impl GizmoSurface {
     }
     /// Return with one text layer selected edits it (Edit ▸ Edit Text).
     pub fn edit_selected_text(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(p) = self.kernel.published(&self.project) else {
+        let Some(id) = self.selected_text_layer() else {
             return false;
         };
-        let [id] = p.selection.layers() else {
-            return false;
-        };
-        let is_text = p.snapshot.root().is_some_and(|root| {
-            pm_kernel::model::list_layers(root, None)
-                .iter()
-                .any(|l| &l.id == id && l.kind == "text" && !l.effectively_locked)
-        });
-        if !is_text {
-            return false;
-        }
-        self.edit_text(id.clone(), Entry::End, window, cx);
+        self.edit_text(id, Entry::End, window, cx);
         true
     }
+    /// The one unlocked text layer selected, which Return edits. Read from
+    /// the kernel only: the controller asks this inside its own update,
+    /// where the host (which reads the controller) can't be (PM-480).
+    pub fn selected_text_layer(&self) -> Option<String> {
+        let p = self.kernel.published(&self.project)?;
+        let [id] = p.selection.layers() else {
+            return None;
+        };
+        p.snapshot
+            .root()
+            .is_some_and(|root| {
+                pm_kernel::model::list_layers(root, None)
+                    .iter()
+                    .any(|l| &l.id == id && l.kind == "text" && !l.effectively_locked)
+            })
+            .then(|| id.clone())
+    }
+}
+/// Return with one text layer selected, from the controller's own command:
+/// whether it edits, the edit starting once that update is over. The edit
+/// reads the controller (the time, pausing playback) through the host, and
+/// a second lease while the first is open aborts the app (PM-480).
+pub fn edit_selected_text_after(
+    gizmos: Entity<GizmoSurface>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let Some(id) = gizmos.read(cx).selected_text_layer() else {
+        return false;
+    };
+    window.defer(cx, move |window, cx| {
+        gizmos.update(cx, |g, cx| g.edit_text(id, Entry::End, window, cx));
+    });
+    true
 }
 /// The unlocked, active text layer the pointer is over, deepest first.
 fn text_under(

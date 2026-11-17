@@ -517,6 +517,7 @@ impl GizmoSurface {
                     visible: None,
                     shy: None,
                     collapsed: None,
+                    track: None,
                     time,
                 };
                 commands.push(LayerCommand::Add(Box::new(add)).into());

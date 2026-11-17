@@ -48,6 +48,8 @@ pub struct Controller {
     pub viewer: Option<Viewer>,
     /// The viewer last told whether its window can be seen, and what.
     viewer_shown: Option<(u64, bool)>,
+    /// The extension host last told whether the window can be seen, and what.
+    extensions_shown: Option<(u64, bool)>,
     pub media: MediaCatalog,
     pub(crate) linked_sync: crate::linked_sync::Sync,
     pub(crate) media_refresh: crate::media_refresh::Refresh,
@@ -221,6 +223,10 @@ pub struct Controller {
     /// This window's slot in `mcp`: the project it shows is its own.
     pub window_key: u64,
     pub close_pending: bool,
+    /// This window let go of its project for a quit that is still going:
+    /// a quit cancelled later puts it back to no project, never leaving it
+    /// "closing" (every later quit stopped at it, PM-464).
+    pub closed_for_quit: bool,
     /// The project that opens here once this window's project has closed
     /// (one project per window: an open replaces the one shown).
     pub(crate) replace_with: Option<crate::entry::Pending>,
@@ -832,6 +838,76 @@ impl Controller {
         off
     }
 }
+/// The file name a project's first save or Save As proposes: its own name
+/// (v1), without characters a file name cannot hold.
+fn save_name(project: &str) -> String {
+    let name: String = project
+        .trim()
+        .chars()
+        .map(|c| if matches!(c, '/' | ':') { '-' } else { c })
+        .collect();
+    let name = name.trim_start_matches('.');
+    format!("{}.pmv", if name.is_empty() { "Untitled" } else { name })
+}
+/// The note after a save to a place chosen in the save panel: the file and
+/// the folder it is in, as Finder names them.
+fn saved_where(path: &std::path::Path) -> String {
+    let file = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let folder = path
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "your Mac".into());
+    format!("Saved “{file}” in {folder}. File ▸ Show in Finder shows it.")
+}
+#[cfg(test)]
+mod first_save_tests {
+    #[test]
+    fn a_first_save_proposes_the_projects_own_name() {
+        assert_eq!(super::save_name("Paper"), "Paper.pmv");
+        assert_eq!(super::save_name("Cut 2/3: final"), "Cut 2-3- final.pmv");
+        assert_eq!(super::save_name("  "), "Untitled.pmv");
+        assert_eq!(super::save_name(".hidden"), "hidden.pmv");
+    }
+    #[test]
+    fn a_save_to_a_chosen_place_says_where() {
+        let note = super::saved_where(std::path::Path::new("/Users/someone/Movies/Paper.pmv"));
+        assert_eq!(note, "Saved “Paper.pmv” in Movies. File ▸ Show in Finder shows it.");
+    }
+}
+/// Whether `text` is a program's error value rather than a sentence: a type
+/// or variant name with its fields, as `Storage("Kernel state changed")` or
+/// `Closed { id: 3 }` print.
+fn raw_error(text: &str) -> bool {
+    let text = text.trim();
+    let name: String = text.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    let rest = &text[name.len()..];
+    name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        && !name.contains(' ')
+        && ((rest.starts_with('(') && rest.ends_with(')'))
+            || (rest.starts_with(" {") && rest.ends_with('}')))
+}
+#[cfg(test)]
+mod raw_error_tests {
+    #[test]
+    fn a_program_error_value_never_reads_as_status() {
+        for raw in [r#"Storage("Kernel state changed")"#, "GestureActive()", "Closed { id: 3 }", r#"Kernel("x")"#] {
+            assert!(super::raw_error(raw), "{raw}");
+        }
+        for plain in [
+            "Saved · 868 layers · 26878 keyframes",
+            "Powermove didn’t quit: the Export sheet is open. Answer or close it, then quit again.",
+            "Viewer: the effect (Deep Glow) is missing",
+            "No project",
+            "Couldn’t write the caption file.",
+        ] {
+            assert!(!super::raw_error(plain), "{plain}");
+        }
+    }
+}
 impl Controller {
     /// A passing status note (v1's status toast): shown in the status line,
     /// then the line returns to Saved/Edited unless something replaced it.
@@ -875,6 +951,12 @@ impl Controller {
                     self.keyframes,
                 )
             };
+        let status = if raw_error(&status) {
+            // Never a program's error value in the status line (PM-476).
+            "Something went wrong. Window ▸ Error Log has the details.".to_owned()
+        } else {
+            status
+        };
         match preview_pause {
             Some(pause) => format!("{pause} · {status}"),
             None => status,
@@ -1018,6 +1100,7 @@ impl Controller {
             mirror: None,
             viewer: None,
             viewer_shown: None,
+            extensions_shown: None,
             media: MediaCatalog::default(),
             linked_sync: Default::default(),
             media_refresh: Default::default(),
@@ -1110,6 +1193,7 @@ impl Controller {
             poster_revision: None,
             window_key: 0,
             close_pending: false,
+            closed_for_quit: false,
             replace_with: None,
             unprotected: false,
             closing_note: None,
@@ -1312,6 +1396,15 @@ impl Controller {
         let picture = front || pm_shell::front_restoring().is_none();
         if keep {
             self.stage_open_with(&project, picture);
+            // The project's name, as the window showed it last: the tab,
+            // the bar and the ghost (with the front tab's picture) say it
+            // from the first frame, never an untitled window, while the
+            // library is read (PM-384: ~6 s under load).
+            let name = self.host.borrow().restored_name.clone();
+            if let Some(name) = name {
+                self.message.clear();
+                self.begin_ghost(&name, None, cx);
+            }
         }
         self.front_restore = front;
         let profile = self.profile.clone();
@@ -1343,6 +1436,11 @@ impl Controller {
                 {
                     v.stage_open_with(id, front || pm_shell::front_restoring().is_none());
                     v.begin_ghost(name, None, cx);
+                } else if found.is_none() && v.opening_name.is_some() && !v.opening {
+                    // Named from the session, but the library has no such
+                    // project now: Home, as for any open that ends without one.
+                    v.end_ghost(cx);
+                    v.viewer_poster = None;
                 } else if found.is_none() && v.opening_name.is_none() {
                     v.ghost_retire();
                     v.viewer_poster = None;
@@ -1735,16 +1833,21 @@ impl Controller {
         }
         let (name, args, time) = (name.to_owned(), args.to_vec(), self.time());
         cx.spawn(async move |this, cx| {
-            let plan = cx
+            let (plan, reason) = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::layer_commands::command_plan(&name, &args, &published, time)
+                    let plan = crate::layer_commands::command_plan(&name, &args, &published, time);
+                    let reason = plan
+                        .is_none()
+                        .then(|| crate::layer_commands::nothing_reason(&name, &published))
+                        .flatten();
+                    (plan, reason)
                 })
                 .await;
             let _ = this.update(cx, |v, cx| match plan {
                 Some(plan) => v.run_layer_plan(plan, cx),
                 None => {
-                    v.message = "Nothing to change".into();
+                    v.message = reason.unwrap_or("Nothing to change").into();
                     cx.notify();
                 }
             });
@@ -1882,6 +1985,146 @@ impl Controller {
         );
     }
     /// One Undo step, then the selection it leads to.
+    /// Project items as layers at the playhead, the first on top, in one
+    /// Undo step (Add Layer from Asset, Add Composition to Timeline, a
+    /// double-click in the Project panel).
+    pub(crate) fn add_to_timeline(
+        &mut self,
+        assets: &[String],
+        comps: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(published) = &self.published else {
+            return;
+        };
+        let still = self.pro_media.preferences().still();
+        match pm_builtins::media_import::place_items(published, assets, comps, self.time(), None, still) {
+            Ok((layers, commands)) if !commands.is_empty() => self.run_layer_plan(
+                crate::layer_commands::Plan {
+                    label: "Add to Timeline".into(),
+                    commands,
+                    select: Some(layers),
+                    count_keys: None,
+                },
+                cx,
+            ),
+            Err(why) => {
+                self.message = why;
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+    /// Delete Media… on media that layers use asks first, as v1 did; the
+    /// answer goes back to the Project panel, which deletes the media and
+    /// its layers in one Undo step.
+    pub(crate) fn confirm_delete_media(
+        &mut self,
+        owner: pm_panel_media::Stamp,
+        token: u64,
+        assets: &[String],
+        references: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        let (title, detail) = delete_media_question(
+            assets
+                .first()
+                .filter(|_| assets.len() == 1)
+                .and_then(|id| self.asset_names().get(id).cloned())
+                .as_deref(),
+            assets.len(),
+            references,
+        );
+        use crate::alert::{Alert, Button};
+        let rx = Alert::new(
+            title,
+            detail,
+            vec![
+                Button::new("Delete", true).default().destructive(),
+                Button::new("Cancel", false).cancel(),
+            ],
+        )
+        .sheet(&self.host.borrow().window);
+        cx.spawn(async move |this, cx| {
+            let approved = rx.recv().await == Ok(Some(true));
+            let pending = cx
+                .background_executor()
+                .spawn(async move { runtime.project_confirm_delete(owner, token, approved) })
+                .await;
+            let failed = match pending {
+                Ok(Some(pending)) => match pending.await {
+                    Some(Ok(ack)) => match ack.reply {
+                        Reply::Throw(e) => Some(e.to_string()),
+                        _ => None,
+                    },
+                    Some(Err(e)) => Some(format!("{e:?}")),
+                    None => None,
+                },
+                Ok(None) => None,
+                Err(e) => Some(e.to_string()),
+            };
+            if let Some(message) = failed {
+                let _ = this.update(cx, |v, cx| {
+                    v.message = message;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+    /// Project panel ▸ New Comp from Selection: a composition matching the
+    /// media, holding it, opened (`media_import::comp_from_asset`).
+    pub(crate) fn new_comp_from_asset(&mut self, asset: &str, cx: &mut Context<Self>) {
+        let (Some(published), Some(session)) = (&self.published, &self.session) else {
+            return;
+        };
+        let (comp_id, layers, commands) =
+            match pm_builtins::media_import::comp_from_asset(published, asset) {
+                Ok(plan) => plan,
+                Err(why) => {
+                    self.message = why;
+                    cx.notify();
+                    return;
+                }
+            };
+        let plan = crate::layer_commands::Plan {
+            label: "New Comp from Selection".into(),
+            commands,
+            select: None,
+            count_keys: None,
+        };
+        let Some(call) = crate::layer_commands::transaction(&plan, Some(published.revision()))
+        else {
+            return;
+        };
+        let document = published.snapshot.doc_id;
+        let pending = self
+            .kernel
+            .call(&session.project, Request::new(Caller::native(), call));
+        cx.spawn(async move |this, cx| {
+            let result = pending.await;
+            let _ = this.update(cx, |v, cx| match result {
+                Some(Ok(ack)) => {
+                    if let Reply::Throw(e) = ack.reply {
+                        v.message = e.to_string();
+                        cx.notify();
+                        return;
+                    }
+                    v.call(Call::OpenComposition { comp_id, document }, cx);
+                    v.call(SelectionCall::Layers { ids: layers, add: false }.into(), cx);
+                }
+                Some(Err(e)) => {
+                    v.message = format!("{e:?}");
+                    cx.notify();
+                }
+                None => {}
+            });
+        })
+        .detach();
+    }
     pub(crate) fn run_layer_plan(
         &mut self,
         plan: crate::layer_commands::Plan,
@@ -2140,6 +2383,9 @@ impl Controller {
     }
     /// The ghost's picture goes (its own frame is retired at the next draw).
     pub(crate) fn ghost_retire(&mut self) {
+        if self.ghost_picture.is_some() {
+            crate::diag::line(serde_json::json!({"poster": "retired"}));
+        }
         self.ghost_retired.extend(self.ghost_picture.take());
     }
     /// `project` opening: the picture its viewer last showed stands in the
@@ -2162,6 +2408,9 @@ impl Controller {
             .as_deref()
             .and_then(crate::poster::decode)
             .and_then(|(w, h, rgba)| pm_shell::symbol::picture(w, h, rgba));
+        crate::diag::line(serde_json::json!({"poster": "staged", "project": project,
+            "picture": picture, "file": poster.as_ref().map(|p| p.display().to_string()),
+            "decoded": self.ghost_picture.is_some()}));
         self.viewer_poster = poster;
         self.last_frame_watch.shown = None;
         // Its own panels at their sizes, the viewer's slot included, not
@@ -2876,7 +3125,8 @@ impl Controller {
         cx: &mut Context<Self>,
     ) {
         if let Some(g) = self.builtins.gizmos.clone() {
-            g.update(cx, |g, cx| g.studio_fly_end(false, cx));
+            // It draws, which reads the controller: after this update.
+            cx.defer(move |cx| g.update(cx, |g, cx| g.studio_fly_end(false, cx)));
         }
         if let Some(viewer) = self.viewer.take() {
             viewer.retire();
@@ -2955,10 +3205,19 @@ impl Controller {
     /// Tells the viewer whether its window can be seen: a tab behind
     /// another (or a minimized window) draws nothing until it is shown.
     pub(crate) fn follow_shown(&mut self, cx: &mut Context<Self>) {
+        let shown = pm_shell::window_shown(&self.host.borrow().window);
+        // Its extensions' panels count as not showing while it cannot be
+        // seen: they get no animation frames.
+        if let Some(host) = &self.extensions.host {
+            let now = (host.view(), shown);
+            if self.extensions_shown != Some(now) {
+                host.set_window_shown(shown);
+                self.extensions_shown = Some(now);
+            }
+        }
         let Some(viewer) = &self.viewer else {
             return;
         };
-        let shown = pm_shell::window_shown(&self.host.borrow().window);
         let now = (viewer.identity(), shown);
         if self.viewer_shown == Some(now) {
             return;
@@ -3184,19 +3443,28 @@ impl Controller {
                         displaced,
                     })) => {
                         v.session = Some(session);
-                        if as_path.is_some() {
+                        let chosen = as_path.is_some();
+                        if chosen {
                             v.path = as_path;
                         }
                         v.unprotected = false;
                         v.message = recovery_copy.map_or(String::new(), |_| {
                             "Its file couldn’t be written, so your changes were saved as a recovered copy in your projects.".into()
                         });
+                        // Saved to a place chosen now: where it went is said.
+                        if v.message.is_empty()
+                            && let Some(path) = &v.path
+                            && chosen
+                        {
+                            let note = saved_where(path);
+                            v.note(note, cx);
+                        }
                         v.load_recent(cx);
                         if let Some(kept) = displaced {
                             v.other_version_kept(kept, cx);
                         }
                         v.write_poster(cx);
-                        v.keep_last_frame(None, cx);
+                        v.keep_or_watch_last_frame(cx);
                     }
                     other => {
                         // A Save As whose folder is gone by now (its disk
@@ -3412,8 +3680,21 @@ impl Controller {
             }
         }
     }
+    /// Whether the project saves to a file of its own (not only kept in
+    /// the library).
+    fn has_file(&self) -> bool {
+        self.published.as_ref().is_some_and(|p| {
+            p.session
+                .as_ref()
+                .is_some_and(|s| matches!(s.destination, SessionDestination::File(_)))
+        })
+    }
     pub fn save_dialog(&mut self, cx: &mut Context<Self>) {
-        let rx = platform::paths(&self.host.borrow().window, true);
+        let rx = platform::paths_named(
+            &self.host.borrow().window,
+            true,
+            &save_name(&self.project_name()),
+        );
         cx.spawn(async move |this, cx| {
             if let Ok(Some(path)) = rx.recv().await {
                 let _ = this.update(cx, |v, cx| v.save(Some(path), cx));
@@ -3760,7 +4041,7 @@ impl Controller {
                 let Some(gizmos) = self.builtins.gizmos.clone() else {
                     return false;
                 };
-                return gizmos.update(cx, |g, cx| g.edit_selected_text(window, cx));
+                return crate::gizmo::text::edit_selected_text_after(gizmos, window, cx);
             }
             // The viewer's View-menu actions, for the palette and for keys.
             "viewer.safeAreas"
@@ -3923,37 +4204,18 @@ impl Controller {
                 })
                 .detach();
             }
+            // v1: the first save of a project with no file of its own asks
+            // where it goes, named for the project; later saves go there.
+            "save" if self.session.is_some() && !self.has_file() => self.save_dialog(cx),
             "save" => self.save(None, cx),
             "native.saveTake" => {
                 crate::takes_panel::dispatch(&cmd.name, || self.save_take(cx));
             }
             "native.addCompositionToTimeline" | "native.addLayerFromAsset" => {
-                if let (Some(runtime), Some(published)) = (&self.builtins.runtime, &self.published)
-                {
+                if let Some(runtime) = &self.builtins.runtime {
                     let (assets, comps) = runtime
                         .project_timeline_items(cmd.name == "native.addCompositionToTimeline");
-                    match pm_builtins::media_import::place_items(
-                        published,
-                        &assets,
-                        &comps,
-                        self.time(),
-                        None,
-                    ) {
-                        Ok((layers, commands)) if !commands.is_empty() => self.run_layer_plan(
-                            crate::layer_commands::Plan {
-                                label: "Add to Timeline".into(),
-                                commands,
-                                select: Some(layers),
-                                count_keys: None,
-                            },
-                            cx,
-                        ),
-                        Err(why) => {
-                            self.message = why;
-                            cx.notify();
-                        }
-                        _ => {}
-                    }
+                    self.add_to_timeline(&assets, &comps, cx);
                 }
             }
             "saveAs" => self.save_dialog(cx),
@@ -4309,8 +4571,12 @@ impl Controller {
             // The button came up somewhere in the window (after the views
             // heard it): a pointer gesture whose own view never did ends now.
             "pointerReleased" => {
+                // Ending its gesture reads the controller (the tool, the
+                // frame): after this update (PM-480).
                 if let Some(g) = self.builtins.gizmos.clone() {
-                    g.update(cx, |g, cx| g.release_unheard(window, cx));
+                    window.defer(cx, move |window, cx| {
+                        g.update(cx, |g, cx| g.release_unheard(window, cx));
+                    });
                 }
                 for view in self.builtins.views.values().cloned().collect::<Vec<_>>() {
                     view.update(cx, |v, cx| v.release_unheard(window, cx));
@@ -4890,5 +5156,44 @@ mod restore_tests {
             assert_eq!(restore_step(held), RestoreStep::Wait);
         }
         assert_eq!(restore_step(ready), RestoreStep::Open, "the quit was cancelled");
+    }
+}
+
+/// v1's Delete Media question: one item by name, several by count, and how
+/// many layers go with them.
+fn delete_media_question(name: Option<&str>, count: usize, references: usize) -> (String, String) {
+    match name {
+        Some(name) => (
+            format!("Delete “{name}”?"),
+            format!(
+                "This also removes {references} {} this media. You can undo this.",
+                if references == 1 { "layer that uses" } else { "layers that use" }
+            ),
+        ),
+        None => (
+            format!("Delete {count} media files?"),
+            "This also removes layers that use the selected media. You can undo this.".into(),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod delete_media_question_tests {
+    /// v1's question: one item by name with its layer count, several by
+    /// count.
+    #[test]
+    fn delete_media_asks_as_v1_did() {
+        assert_eq!(
+            super::delete_media_question(Some("Sky.png"), 1, 1),
+            (
+                "Delete “Sky.png”?".to_owned(),
+                "This also removes 1 layer that uses this media. You can undo this.".to_owned()
+            )
+        );
+        assert_eq!(
+            super::delete_media_question(Some("Sky.png"), 1, 3).1,
+            "This also removes 3 layers that use this media. You can undo this."
+        );
+        assert_eq!(super::delete_media_question(None, 4, 2).0, "Delete 4 media files?");
     }
 }

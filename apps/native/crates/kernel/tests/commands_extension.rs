@@ -184,6 +184,7 @@ fn add_extension(content: &str) -> Call {
         visible: None,
         shy: None,
         collapsed: None,
+        track: None,
         time: 0.,
     };
     Call::Transact {

@@ -36,9 +36,20 @@ pub enum ModelError {
     MissingHost(&'static str),
     KernelPlan(String),
 }
+/// A sentence for the status line: never a variant name or an internal id.
 impl std::fmt::Display for ModelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::UnknownId(_) => f.write_str("That item is no longer in the timeline."),
+            Self::UnknownCommand(_) | Self::MissingHost(_) => {
+                f.write_str("The timeline can’t do that here.")
+            }
+            Self::HiddenRow => f.write_str("That row is hidden."),
+            Self::InvalidNumber => f.write_str("That isn’t a number the timeline can use."),
+            Self::Locked(_) => f.write_str("That layer is locked."),
+            Self::InvalidGesture => f.write_str("That timeline edit can’t be made."),
+            Self::KernelPlan(message) => f.write_str(message),
+        }
     }
 }
 impl std::error::Error for ModelError {}
@@ -1055,6 +1066,9 @@ pub struct DragSample {
 #[derive(Clone, Debug)]
 pub struct Drag {
     work_duration: f64,
+    /// Tracks mode: the lanes shown when the drag began, written as tracks
+    /// ahead of a pro edit so it keeps every clip on its track.
+    lanes: Option<Vec<(String, u32)>>,
     pub kind: DragKind,
     pub start: Arc<TimelineIndex>,
     pub snap: DirectionalSnap,
@@ -1120,6 +1134,16 @@ fn key_eases(index: &TimelineIndex, ids: &[String]) -> Vec<(String, EaseSide, Te
     out
 }
 impl Drag {
+    /// Tracks mode: the command writing the lanes shown when the drag began,
+    /// which goes ahead of each step of a pro edit.
+    pub fn pin_command(&self) -> Option<Command> {
+        self.lanes.as_ref().map(|lanes| {
+            pm_kernel::TimingCommand::PinTracks {
+                lanes: lanes.clone(),
+            }
+            .into()
+        })
+    }
     /// Captures identities and baselines once; never keeps a writer lease itself.
     pub fn begin(model: &TimelineModel, mut kind: DragKind) -> Result<Self, ModelError> {
         let index = &model.index;
@@ -1338,7 +1362,14 @@ impl Drag {
             }),
             _ => None,
         };
+        let lanes = (model.mode == crate::TimelineMode::Tracks
+            && matches!(
+                kind,
+                DragKind::ProEdit(_) | DragKind::TrimIn { .. } | DragKind::TrimOut { .. }
+            ))
+        .then(|| crate::tracks::relative_lanes(index, &model.reveal));
         Ok(Self {
+            lanes,
             handle_key,
             speed_eases,
             kind,
@@ -1875,6 +1906,14 @@ impl Drag {
                     .into(),
                 );
             }
+        }
+        // Tracks mode: the lanes shown when the drag began go first, so the
+        // edit keeps every clip on its track (an edge trim that freed room on
+        // a lower lane let an untouched clip drop into it).
+        if !out.is_empty()
+            && let Some(pin) = self.pin_command()
+        {
+            out.insert(0, pin);
         }
         Ok(out)
     }

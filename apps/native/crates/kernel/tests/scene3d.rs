@@ -594,6 +594,7 @@ fn normal_add_layer_and_content_commands_support_registered_3d_definitions() {
             visible: None,
             shy: None,
             collapsed: None,
+            track: None,
             time: 0.,
         }))
         .into(),

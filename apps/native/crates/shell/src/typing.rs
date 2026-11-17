@@ -20,7 +20,28 @@ pub const WAIT: Duration = Duration::from_millis(1500);
 
 /// The person just opened a text field: typing goes to it from now on.
 pub fn expect() {
-    EXPECTED.with(|e| e.set(Some(Instant::now() + WAIT)));
+    expect_for(WAIT);
+}
+
+/// As [`expect`], for a field that takes longer to come: the Text tool's
+/// text opens after asking the kernel what is under the click, and the first
+/// ones under load (fonts and the editor still cold) took longer than
+/// [`WAIT`], so the key typed after the click was dropped and the empty text
+/// left nothing (PM-465).
+pub fn expect_for(wait: Duration) {
+    EXPECTED.with(|e| e.set(Some(Instant::now() + wait)));
+}
+
+/// Whether a key goes to a field the person opened: what it types, and the
+/// editing chords a field answers (Select All, the clipboard, Undo). Typed
+/// before the field had the keyboard, ⌘A selected every layer and the digits
+/// after it moved the playhead (PM-487).
+pub fn for_field(chars: &str, command_or_control: bool, chord: &str) -> bool {
+    is_text(chars, command_or_control)
+        || matches!(
+            chord,
+            "cmd+a" | "cmd+c" | "cmd+v" | "cmd+x" | "cmd+z" | "cmd+shift+z"
+        )
 }
 
 /// Whether a field the person opened is still on its way.
@@ -136,6 +157,10 @@ mod tests {
             "but wait behind letters already held (PM-465)"
         );
         assert_eq!(decide(true, true, true), Hold::Release, "the field has it");
+        assert!(for_field("a", true, "cmd+a"), "Select All is the field's (PM-487)");
+        assert!(for_field("v", true, "cmd+v"));
+        assert!(!for_field("t", true, "cmd+t"), "a tool key is not");
+        assert!(!for_field("\u{1b}", false, "escape"));
         EXPECTED.with(|e| e.set(Some(Instant::now() - Duration::from_millis(1))));
         assert_eq!(decide(true, false, false), Hold::Pass, "the wait ran out");
     }

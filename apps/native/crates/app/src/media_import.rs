@@ -1,7 +1,7 @@
 //! Import Media from the UI. Pickers and drops land here on the main thread;
 //! probing, byte retention and the kernel's reply all wait on a worker.
 use crate::{platform, session::Controller};
-use gpui::Context;
+use gpui::{App, Context};
 use pm_builtins::media_import::{ImportProgress, ImportRequest, Outcome, extensions};
 use serde_json::json;
 use std::{
@@ -42,7 +42,7 @@ impl Controller {
                 && !paths.is_empty()
             {
                 let _ = this.update(cx, |v, cx| {
-                    let place_at = (place && replace.is_none()).then(|| v.time());
+                    let place_at = (place && replace.is_none() && v.places_imports()).then(|| v.time());
                     if replace.is_none() {
                         let plan = plan_import(paths, false);
                         return v.bring(plan, place_at.map(|at| (at, None)), None, cx);
@@ -167,7 +167,7 @@ impl Controller {
         if self.session.is_none() {
             return false;
         }
-        let place_at = Some(self.time());
+        let place_at = self.places_imports().then(|| self.time());
         match media {
             platform::PastedMedia::Files(paths) => {
                 // Files that are no media (a copied document) are not a
@@ -214,8 +214,29 @@ impl Controller {
     }
     /// Files dropped on the window: projects open, media lands at the playhead.
     pub(crate) fn import_dropped(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let at = self.time();
-        self.import_drop(paths, false, Some((at, None)), None, cx);
+        let place = self.places_imports().then(|| (self.time(), None));
+        self.import_drop(paths, false, place, None, cx);
+    }
+    /// Settings › Media › Add Imported Media to the Timeline.
+    pub(crate) fn places_imports(&self) -> bool {
+        self.pro_media.preferences().import_to_timeline
+    }
+    /// The Tracks timeline as it is: several files imported to the
+    /// playhead lie end to end there instead of on top of each other.
+    fn track_run(&self, cx: &App) -> Option<pm_builtins::media_import::TrackRun> {
+        use pm_panel_timeline::{TimelineMode, tracks::Area};
+        let model = self.builtins.timeline.as_ref()?.read(cx).model();
+        if model.mode != TimelineMode::Tracks {
+            return None;
+        }
+        let layout = pm_panel_timeline::tracks::layout(&model.index, &model.reveal);
+        let occupied = layout
+            .items
+            .iter()
+            .filter(|i| i.area != Area::Captions)
+            .map(|i| (i.area == Area::Audio, i.lane as u32, i.from, i.from + i.duration))
+            .collect();
+        Some(pm_builtins::media_import::TrackRun { occupied })
     }
     /// Files dropped on the viewer: placed at the playhead, on top.
     pub(crate) fn drop_on_viewer(
@@ -335,7 +356,8 @@ impl Controller {
             pm_panel_media::ItemId::Composition(id) => (vec![], vec![id.clone()]),
             _ => (drag.assets.clone(), vec![]),
         };
-        match pm_builtins::media_import::place_items(&published, &assets, &compositions, at, index)
+        let still = self.pro_media.preferences().still();
+        match pm_builtins::media_import::place_items(&published, &assets, &compositions, at, index, still)
         {
             Ok((layers, commands)) => {
                 let label = format!("Add {}", drag.name);
@@ -707,9 +729,20 @@ impl Controller {
             self.drop_imports("Open a project before importing media");
             return;
         };
-        let Some((request, extension)) = self.imports.pop_front() else {
+        let Some((mut request, extension)) = self.imports.pop_front() else {
             return;
         };
+        // What plays now: an imported file that is a missing item relinks it.
+        request.originals = self.media_base.originals.clone();
+        request.still = self.pro_media.preferences().still();
+        if request.place_at.is_some()
+            && request.place_index.is_none()
+            && request.replace.is_none()
+            && request.sequence.is_none()
+            && request.paths.len() > 1
+        {
+            request.track_run = self.track_run(cx);
+        }
         // Close and quit wait for this fence, so an import never lands half way.
         let Some(operation) = self.mcp.try_operation() else {
             self.imports.push_front((request, extension));

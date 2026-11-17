@@ -64,6 +64,7 @@ fn add_layer(id: &str) -> Command {
         visible: None,
         shy: None,
         collapsed: None,
+        track: None,
         time: 0.,
     }))
     .into()
