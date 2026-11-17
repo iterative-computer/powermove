@@ -426,7 +426,11 @@ impl Editor {
         if closed && let Some(place) = self.library_places.get(id).cloned() {
             let _ = self.layout.move_panel_to(id, place);
         }
-        if let Some((di, _, _)) = self.layout.find(id) {
+        if let Some((di, gi, ti)) = self.layout.find(id) {
+            // Restoring its last slot may put it in a different folded stack.
+            self.layout.docks[di].collapsed = false;
+            self.layout.docks[di].groups[gi].collapsed = false;
+            self.layout.docks[di].groups[gi].active = ti;
             let dock = self.layout.docks[di].id.clone();
             self.maximized_panel = None;
             self.save();
@@ -3853,6 +3857,26 @@ mod keyboard_tests {
                     v.shell_command("panel:close:notes", cx);
                     assert!(v.show_library_panel("notes", cx).is_ok());
                     assert_eq!(v.layout.find("notes").unwrap(), place);
+                    let (dock, group, _) = v.layout.find("assets").unwrap();
+                    v.layout
+                        .move_panel_to(
+                            "notes",
+                            DropTarget::Tab {
+                                dock,
+                                group,
+                                index: 1,
+                            },
+                        )
+                        .unwrap();
+                    v.shell_command("panel:close:notes", cx);
+                    v.layout.docks[dock].collapsed = true;
+                    v.layout.docks[dock].groups[group].collapsed = true;
+                    assert!(v.show_library_panel("notes", cx).is_ok());
+                    let (di, gi, ti) = v.layout.find("notes").unwrap();
+                    assert_eq!((di, gi), (dock, group));
+                    assert!(!v.layout.docks[di].collapsed);
+                    assert!(!v.layout.docks[di].groups[gi].collapsed);
+                    assert_eq!(v.layout.docks[di].groups[gi].active, ti);
                     let before = v.layout.clone();
                     assert!(v.show_library_panel("missing-panel", cx).is_err());
                     assert_eq!(v.layout, before);
@@ -5138,5 +5162,128 @@ mod slide_tests {
         s.armed = true;
         s.place(&[("viewer".into(), r(8., 52.))], &t);
         assert_eq!(s.shown("viewer", r(8., 52.)), r(8., 52.));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod library_capture_tests {
+    use super::*;
+    use gpui::{AppContext, HeadlessAppContext, size};
+    use std::sync::Arc;
+
+    #[test]
+    #[ignore = "writes headless Library reveal proof; set PM_DOCK_CAPTURE_DIR"]
+    fn capture_library_reveal() {
+        let dir = std::env::var("PM_DOCK_CAPTURE_DIR").unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, scheme) in [
+            ("light", pm_design::Scheme::Light),
+            ("dark", pm_design::Scheme::Dark),
+        ] {
+            for reduced in [false, true] {
+                objc2::rc::autoreleasepool(|_| {
+                    let mut cx = HeadlessAppContext::with_platform(
+                        Arc::new(gpui_parley::ParleyTextSystem::new(
+                            gpui_parley::SystemFonts::Load,
+                        )),
+                        Arc::new(()),
+                        || {
+                            Some(Box::new(
+                                gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                            ))
+                        },
+                    );
+                    let tokens = Tokens::new(
+                        scheme,
+                        pm_design::Accessibility {
+                            reduce_motion: reduced,
+                            ..Default::default()
+                        },
+                    );
+                    let window = cx
+                        .open_window(size(px(1000.), px(600.)), |_, cx| {
+                            cx.new(|cx| {
+                                let mut v = Editor::new(tokens, None, cx);
+                                let right =
+                                    v.layout.docks.iter_mut().find(|d| d.id == "right").unwrap();
+                                right.groups = ["inspector", "easing", "fxbrowser"]
+                                    .into_iter()
+                                    .map(|id| layout::Group {
+                                        tabs: vec![id.into()],
+                                        active: 0,
+                                        size: Some(400.),
+                                        collapsed: false,
+                                    })
+                                    .collect();
+                                v
+                            })
+                        })
+                        .unwrap();
+                    cx.run_until_parked();
+                    let mode = if reduced { "reduced" } else { "motion" };
+                    cx.capture_screenshot(window.into())
+                        .unwrap()
+                        .save(format!("{dir}/{name}-library-{mode}-before.png"))
+                        .unwrap();
+                    window
+                        .update(&mut cx, |v, _, cx| {
+                            v.show_library_panel("fxbrowser", cx).unwrap();
+                        })
+                        .unwrap();
+                    cx.update_window(window.into(), |_, w, cx| {
+                        w.draw(cx).clear(cx);
+                    })
+                    .unwrap();
+                    window
+                        .update(&mut cx, |v, _, cx| {
+                            // Sample the animation clocks deterministically, without OS timers.
+                            if let Some((_, _, _, start)) = &mut v.reveal_motion {
+                                *start =
+                                    std::time::Instant::now() - std::time::Duration::from_secs(1);
+                            }
+                            if !reduced {
+                                v.header_wash =
+                                    Some(("fxbrowser".into(), std::time::Instant::now()));
+                            }
+                            cx.notify();
+                        })
+                        .unwrap();
+                    cx.update_window(window.into(), |_, w, cx| {
+                        w.draw(cx).clear(cx);
+                    })
+                    .unwrap();
+                    window
+                        .update(&mut cx, |v, _, _| {
+                            let r = v.panel_rect("fxbrowser").unwrap();
+                            assert!(r.y >= 0. && r.y + r.h <= 600., "revealed: {r:?}");
+                            assert_eq!(v.header_wash.is_none(), reduced);
+                        })
+                        .unwrap();
+                    cx.capture_screenshot(window.into())
+                        .unwrap()
+                        .save(format!("{dir}/{name}-library-{mode}-shown.png"))
+                        .unwrap();
+                    if !reduced {
+                        window
+                            .update(&mut cx, |v, _, cx| {
+                                v.header_wash = Some((
+                                    "fxbrowser".into(),
+                                    std::time::Instant::now() - std::time::Duration::from_secs(2),
+                                ));
+                                cx.notify();
+                            })
+                            .unwrap();
+                        cx.update_window(window.into(), |_, w, cx| {
+                            w.draw(cx).clear(cx);
+                        })
+                        .unwrap();
+                        cx.capture_screenshot(window.into())
+                            .unwrap()
+                            .save(format!("{dir}/{name}-library-settled.png"))
+                            .unwrap();
+                    }
+                });
+            }
+        }
     }
 }

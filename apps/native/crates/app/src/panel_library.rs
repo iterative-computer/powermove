@@ -1394,7 +1394,13 @@ mod capture_tests {
             ("dark", pm_design::Scheme::Dark, false),
             ("contrast", pm_design::Scheme::Dark, true),
         ] {
+            if std::env::var_os("PM_LIBRARY_CAPTURE_REVIEW").is_some() && name == "contrast" {
+                continue;
+            }
             for (w, h) in [(900., 600.), (1400., 860.)] {
+                if std::env::var_os("PM_LIBRARY_CAPTURE_REVIEW").is_some() && w != 900. {
+                    continue;
+                }
                 objc2::rc::autoreleasepool(|_| {
                     let mut cx = HeadlessAppContext::with_platform(
                         std::sync::Arc::new(
@@ -1442,7 +1448,8 @@ mod capture_tests {
                                 editor: None,
                                 shell: None,
                                 page: super::Page::Panels(None),
-                                query: String::new(),
+                                query: std::env::var("PM_LIBRARY_CAPTURE_QUERY")
+                                    .unwrap_or_default(),
                                 search: None,
                                 tokens,
                                 motion: Default::default(),

@@ -266,6 +266,8 @@ test("empty effects is one quiet row and shows a wash only for accepted drops", 
   await f.root.render(
     <EffectControls controller={f.controller} rowHeight={24} />,
   );
+  const review = process.env.PM_EFFECT_REVIEW_STATES;
+  if (review) await Bun.write(`${review}/empty.json`, JSON.stringify(f.commits));
   const empty = () => find(f.root, (p) => p.id === "layer-effects:empty");
   expect(nodes(f.root).some((n) => n.textContent === "No effects")).toBe(true);
   expect(
@@ -289,6 +291,7 @@ test("empty effects is one quiet row and shows a wash only for accepted drops", 
   expect(empty().props.style).toMatchObject({
     background: { token: "colors.selected_fill" },
   });
+  if (review) await Bun.write(`${review}/drop.json`, JSON.stringify(f.commits));
   await event(f.root, empty().id, "dragleave");
   expect(nodes(f.root).some((n) => n.textContent === "No effects")).toBe(true);
   await f.root.dispose();

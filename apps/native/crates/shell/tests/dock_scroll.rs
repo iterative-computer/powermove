@@ -823,6 +823,7 @@ fn sticky_header_light_and_dark_crops() {
 
 #[test]
 fn toolbar_stays_opaque_above_scrolling_dock() {
+    let mut mismatches = Vec::new();
     for (name, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
         objc2::rc::autoreleasepool(|_| {
             let tokens = Tokens::new(scheme, Accessibility::default());
@@ -858,14 +859,17 @@ fn toolbar_stays_opaque_above_scrolling_dock() {
                         .unwrap();
                 }
                 let pixel = image.get_pixel(950 * scale, 8 * scale).0;
-                assert_eq!(
-                    pixel,
-                    [(fill >> 16) as u8, (fill >> 8) as u8, fill as u8, 255],
-                    "{name}:{position} toolbar must paint opaque window colour"
-                );
+                let expected = [(fill >> 16) as u8, (fill >> 8) as u8, fill as u8, 255];
+                if pixel != expected {
+                    mismatches.push(format!("{name}:{position}: {pixel:?} != {expected:?}"));
+                }
             }
         });
     }
+    assert!(
+        mismatches.is_empty(),
+        "toolbar must paint opaque window colour: {mismatches:?}"
+    );
 }
 
 #[test]
