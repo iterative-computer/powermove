@@ -498,7 +498,6 @@ impl Render for TextField {
         }
         let build = self.build;
         let pixels = self.build_pixels.clone();
-        let snapshot = pixels.borrow().texture(build.and_then(|b| b.revision));
         let slot = self.slot.clone();
         let layer = self.layer.clone();
         let multiline = (self.kind == TextKind::Multiline && !self.fill && !self.bare)
@@ -707,6 +706,8 @@ impl Render for TextField {
                         } else {
                             slot.stage_build_alpha(1.);
                         }
+                        // Use a capture completed in this paint at scroll rest.
+                        let snapshot = pixels.borrow().texture(build.and_then(|b| b.revision));
                         if let Some(image) = snapshot {
                             let _ = window.paint_image(
                                 painted,

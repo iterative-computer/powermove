@@ -143,13 +143,14 @@ mod native_control_picture_tests {
     struct Frame {
         build: Option<BuildSnapshot>,
         y: f32,
+        ground: u32,
         picture: Picture,
     }
     impl Render for Frame {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let painter = self.picture.painter();
             let (filters, alpha) = reveal_paint(self.build);
-            div().size_full().bg(rgb(0x101010)).child(
+            div().size_full().bg(rgb(self.ground)).child(
                 div()
                     .absolute()
                     .left(px(20.))
@@ -201,6 +202,9 @@ mod native_control_picture_tests {
         }
     }
     fn capture(build: Option<BuildSnapshot>, y: f32) -> image::RgbaImage {
+        capture_on_ground(build, y, 0x101010)
+    }
+    fn capture_on_ground(build: Option<BuildSnapshot>, y: f32, ground: u32) -> image::RgbaImage {
         let mut cx = HeadlessAppContext::with_platform(
             Arc::new(gpui_parley::ParleyTextSystem::new(
                 gpui_parley::SystemFonts::Load,
@@ -217,7 +221,12 @@ mod native_control_picture_tests {
                 cx.new(|_| {
                     let picture = Picture::default();
                     picture.hold.set(true);
-                    Frame { build, y, picture }
+                    Frame {
+                        build,
+                        y,
+                        ground,
+                        picture,
+                    }
                 })
             })
             .unwrap();
@@ -227,7 +236,7 @@ mod native_control_picture_tests {
         image::imageops::crop_imm(&image, 20 * scale, y as u32 * scale, 64 * scale, 32 * scale)
             .to_image()
     }
-    #[test]
+    #[::core::prelude::v1::test]
     fn scrolling_picture_gets_dots_and_reveal_alpha() {
         let plain = capture(None, 20.);
         let dotted = capture(Some(build(Some(7), 0.)), 20.);
@@ -242,13 +251,29 @@ mod native_control_picture_tests {
             "uncommitted picture bypassed reveal alpha"
         );
     }
-    #[test]
+    #[::core::prelude::v1::test]
     fn scrolling_moves_dot_grid_without_resampling_or_progress_change() {
         let reveal = Some(build(Some(7), 0.));
         assert_eq!(capture(reveal, 20.), capture(reveal, 37.));
     }
-    #[test]
+    #[::core::prelude::v1::test]
     fn resolved_scroll_picture_matches_integrations_unfiltered_picture() {
-        assert_eq!(capture(Some(build(Some(7), 1.)), 20.), capture(None, 20.));
+        for (scheme, ground) in [("Dark", 0x101010), ("Light", 0xf5f5f5)] {
+            let plain = capture_on_ground(None, 20., ground);
+            let dotted = capture_on_ground(Some(build(Some(7), 0.)), 20., ground);
+            let resolved = capture_on_ground(Some(build(Some(7), 1.)), 20., ground);
+            assert_ne!(dotted, plain, "{scheme} picture bypassed dots");
+            assert_eq!(resolved, plain, "{scheme} resolved picture changed");
+            if let Some(dir) = std::env::var_os("PM_SCROLL_REVEAL_CAPTURE") {
+                let dir = std::path::PathBuf::from(dir);
+                std::fs::create_dir_all(&dir).unwrap();
+                for (stage, image) in [("before", plain), ("dots", dotted), ("resolved", resolved)]
+                {
+                    image
+                        .save(dir.join(format!("{scheme}-{stage}.png")))
+                        .unwrap();
+                }
+            }
+        }
     }
 }

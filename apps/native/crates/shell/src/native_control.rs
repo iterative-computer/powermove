@@ -682,22 +682,27 @@ impl NativeControl {
                     // A glyph segment: the panel's symbol size in a segment a
                     // row high wide, never scaled to fit; a vendored glyph
                     // where one stands for the symbol (`crate::icons`).
-                    let glyph = option.get("symbol").and_then(Value::as_str).and_then(|name| {
-                        if let Some(image) = crate::icons::glyph(name).and_then(|g| {
-                            crate::native::glyph_image(g, t.metrics.symbol_panel as f64, title)
-                        }) {
-                            return Some(image);
-                        }
-                        let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-                            &NSString::from_str(name),
-                            Some(&NSString::from_str(title)),
-                        )?;
-                        let config = NSImageSymbolConfiguration::configurationWithPointSize_weight(
-                            t.metrics.symbol_panel as f64,
-                            unsafe { NSFontWeightRegular },
-                        );
-                        Some(image.imageWithSymbolConfiguration(&config).unwrap_or(image))
-                    });
+                    let glyph = option
+                        .get("symbol")
+                        .and_then(Value::as_str)
+                        .and_then(|name| {
+                            if let Some(image) = crate::icons::glyph(name).and_then(|g| {
+                                crate::native::glyph_image(g, t.metrics.symbol_panel as f64, title)
+                            }) {
+                                return Some(image);
+                            }
+                            let image =
+                                NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                                    &NSString::from_str(name),
+                                    Some(&NSString::from_str(title)),
+                                )?;
+                            let config =
+                                NSImageSymbolConfiguration::configurationWithPointSize_weight(
+                                    t.metrics.symbol_panel as f64,
+                                    unsafe { NSFontWeightRegular },
+                                );
+                            Some(image.imageWithSymbolConfiguration(&config).unwrap_or(image))
+                        });
                     let width = if glyph.is_some() {
                         v.setToolTip_forSegment(Some(&NSString::from_str(title)), i as isize);
                         (t.metrics.row + t.space.xs) as f64
@@ -1168,13 +1173,6 @@ impl Render for NativeControl {
         let build = self.build;
         let pixels = self.build_pixels.clone();
         let owner = cx.entity().downgrade();
-        let snapshot = build.and_then(|b| b.revision).and_then(|revision| {
-            let cached = pixels.borrow();
-            cached
-                .key
-                .filter(|(r, _)| *r == revision)
-                .and(cached.image.clone())
-        });
         let slot = self.slot.clone();
         let focus = self.focus.clone();
         let layer = self.layer.clone();
@@ -1182,6 +1180,11 @@ impl Render for NativeControl {
         // The keyboard is in a search field: it stays the real one.
         let pictures = !self.focused();
         let pressed = cx.listener(|this, _: &MouseDownEvent, window, cx| {
+            // Replaying a picture's press must not activate an AppKit editor
+            // outside the reveal boundary before the panel is ready.
+            if this.build.is_some() {
+                return;
+            }
             if this.picture.press(window) {
                 cx.stop_propagation();
                 cx.notify();
@@ -1233,6 +1236,9 @@ impl Render for NativeControl {
                         } else {
                             slot.stage_alpha(1.);
                         }
+                        // Capture may have completed in this paint (including
+                        // the first frame after a picture hold ends).
+                        let snapshot = pixels.borrow().texture(build.and_then(|b| b.revision));
                         if let Some(image) = snapshot {
                             let _ = window.paint_image(
                                 painted,
@@ -1579,7 +1585,7 @@ fn colour_hex(colour: &NSColor) -> String {
 mod snapshot_bridge_tests {
     use super::{NSBitmapImageRep, NSImage, snapshot_bitmap, snapshot_image};
     use objc2::AnyThread;
-    #[test]
+    #[::core::prelude::v1::test]
     fn cocoa_snapshots_upload_straight_bgra_with_alpha() {
         objc2::rc::autoreleasepool(|_| {
             let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([40, 80, 120, 160]));
@@ -1605,7 +1611,7 @@ mod snapshot_bridge_tests {
 #[cfg(test)]
 mod scroll_reveal_tests {
     use super::*;
-    #[test]
+    #[::core::prelude::v1::test]
     fn scroll_picture_uses_reveal_filter_and_alpha_until_ready() {
         let filter = Filter::DotMatrix {
             detail: 2.2,
@@ -1627,7 +1633,7 @@ mod scroll_reveal_tests {
             0.
         );
     }
-    #[test]
+    #[::core::prelude::v1::test]
     fn scroll_preserves_capture_and_moves_the_content_grid() {
         let before = Bounds::new(point(px(20.), px(100.)), size(px(160.), px(24.)));
         let after = Bounds::new(point(px(20.), px(63.)), before.size);
@@ -1642,7 +1648,7 @@ mod scroll_reveal_tests {
         let wider = Bounds::new(after.origin, size(px(180.), px(24.)));
         assert_ne!(capture_key(after, 7), capture_key(wider, 7));
     }
-    #[test]
+    #[::core::prelude::v1::test]
     fn resolved_picture_has_integration_paint_policy() {
         assert_eq!(reveal_paint(None), (vec![], 1.));
         assert_eq!(
