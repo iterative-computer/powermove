@@ -1066,6 +1066,9 @@ pub struct DragSample {
 #[derive(Clone, Debug)]
 pub struct Drag {
     work_duration: f64,
+    /// Tracks mode: the lanes shown when the drag began, written as tracks
+    /// ahead of a pro edit so it keeps every clip on its track.
+    lanes: Option<Vec<(String, u32)>>,
     pub kind: DragKind,
     pub start: Arc<TimelineIndex>,
     pub snap: DirectionalSnap,
@@ -1131,6 +1134,16 @@ fn key_eases(index: &TimelineIndex, ids: &[String]) -> Vec<(String, EaseSide, Te
     out
 }
 impl Drag {
+    /// Tracks mode: the command writing the lanes shown when the drag began,
+    /// which goes ahead of each step of a pro edit.
+    pub fn pin_command(&self) -> Option<Command> {
+        self.lanes.as_ref().map(|lanes| {
+            pm_kernel::TimingCommand::PinTracks {
+                lanes: lanes.clone(),
+            }
+            .into()
+        })
+    }
     /// Captures identities and baselines once; never keeps a writer lease itself.
     pub fn begin(model: &TimelineModel, mut kind: DragKind) -> Result<Self, ModelError> {
         let index = &model.index;
@@ -1349,7 +1362,14 @@ impl Drag {
             }),
             _ => None,
         };
+        let lanes = (model.mode == crate::TimelineMode::Tracks
+            && matches!(
+                kind,
+                DragKind::ProEdit(_) | DragKind::TrimIn { .. } | DragKind::TrimOut { .. }
+            ))
+        .then(|| crate::tracks::relative_lanes(index, &model.reveal));
         Ok(Self {
+            lanes,
             handle_key,
             speed_eases,
             kind,
@@ -1886,6 +1906,14 @@ impl Drag {
                     .into(),
                 );
             }
+        }
+        // Tracks mode: the lanes shown when the drag began go first, so the
+        // edit keeps every clip on its track (an edge trim that freed room on
+        // a lower lane let an untouched clip drop into it).
+        if !out.is_empty()
+            && let Some(pin) = self.pin_command()
+        {
+            out.insert(0, pin);
         }
         Ok(out)
     }
