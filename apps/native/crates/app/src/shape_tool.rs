@@ -101,15 +101,16 @@ pub fn plan(published: &Published, shape: ShapeBox, time: f64, variant: &str) ->
     let id = new_id("L");
     let mut content = Map::new();
     content.insert("shape", Value::from(kind));
-    content.insert("w", Value::Number(100.));
-    content.insert("h", Value::Number(100.));
+    // The shape is the drawn size at Scale 100%, as After Effects draws it:
+    // a stroke keeps its width and corners stay round. v1 drew a 100 px
+    // shape scaled to the drawn size; its projects open unchanged (a shape
+    // is its own w and h times its Scale either way).
+    content.insert("w", Value::Number(shape.w()));
+    content.insert("h", Value::Number(shape.h()));
     content.insert("radius", Value::Number(radius));
-    // The source shape is 100 px, so Scale in percent is the drawn size.
     let mut properties = Map::new();
     properties.insert("position.x", Value::Number((shape.x0 + shape.x1) / 2.));
     properties.insert("position.y", Value::Number((shape.y0 + shape.y1) / 2.));
-    properties.insert("scale.x", Value::Number(shape.w()));
-    properties.insert("scale.y", Value::Number(shape.h()));
     let add = AddLayer {
         id: id.clone(),
         layer_type: "shape".into(),

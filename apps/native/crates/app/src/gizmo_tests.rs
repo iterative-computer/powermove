@@ -1171,7 +1171,9 @@ fn channel(layer: &pm_model::Value, mask: bool, key: &str) -> Option<f64> {
     owner.get("p")?.get(key)?.get("v")?.as_f64()
 }
 /// Shape tool over a selected shape layer: the drag draws a new shape layer
-/// whose Scale is the drawn size, selected, in one undo step.
+/// of the drawn size at Scale 100% (After Effects; v1 drew a 100 px shape
+/// scaled to it, which stretched strokes and corners), selected, in one
+/// undo step.
 #[gpui::test]
 fn the_shape_tool_draws_a_shape_layer_from_a_drag(cx: &mut TestAppContext) {
     let mut s = stage_on(cx, &project_of("shape"));
@@ -1191,11 +1193,30 @@ fn the_shape_tool_draws_a_shape_layer_from_a_drag(cx: &mut TestAppContext) {
     );
     assert_eq!(channel(&layer, false, "position.x"), Some(330.));
     assert_eq!(channel(&layer, false, "position.y"), Some(220.));
-    assert_eq!(channel(&layer, false, "scale.x"), Some(60.));
-    assert_eq!(channel(&layer, false, "scale.y"), Some(40.));
+    assert_eq!(channel(&layer, false, "scale.x").unwrap_or(100.), 100.);
+    assert_eq!(channel(&layer, false, "scale.y").unwrap_or(100.), 100.);
+    let content = |key: &str| layer.get("d")?.get(key)?.as_f64();
+    assert_eq!((content("w"), content("h")), (Some(60.), Some(40.)));
+    s.refresh(cx);
+    let corners = s.pose().corners;
+    assert_eq!((corners[0], corners[2]), ([300., 200.], [360., 240.]), "where it was drawn");
     let undo = Request::new(Caller::native(), Call::History(HistoryCall::Undo));
     s.rig.kernel.call(PROJECT, undo).wait().unwrap().unwrap();
     assert!(layer_value(&s.rig.kernel, &id).is_none(), "one undo step");
+}
+/// A shape v1 drew (a 100 px source scaled to the drawn size) opens and
+/// stands exactly where it did: only newly drawn shapes changed.
+#[gpui::test]
+fn a_shape_v1_drew_stands_where_it_did(cx: &mut TestAppContext) {
+    let v1 = project_of("shape")
+        .replace(r#""position.x":{"v":200,"#, r#""position.x":{"v":330,"#)
+        .replace(r#""position.y":{"v":150,"#, r#""position.y":{"v":220,"#)
+        .replace(r#""scale.x":{"v":100,"#, r#""scale.x":{"v":60,"#)
+        .replace(r#""scale.y":{"v":100,"#, r#""scale.y":{"v":40,"#);
+    let s = stage_on(cx, &v1);
+    let pose = s.pose();
+    assert_eq!(pose.scale, [60., 40.]);
+    assert_eq!((pose.corners[0], pose.corners[2]), ([300., 200.], [360., 240.]));
 }
 /// With a maskable layer selected the drawn box becomes a mask on it.
 #[gpui::test]
