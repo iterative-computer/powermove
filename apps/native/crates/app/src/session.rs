@@ -1690,8 +1690,12 @@ impl Controller {
             .and_then(|r| r.get("name"))
             .and_then(crate::node_string)
             .unwrap_or("Untitled");
+        // Named as its Home card names it: a project still "Untitled" saved
+        // as "RC Edit.pmv" reads "RC Edit" in its tab, the window title and
+        // the menus from the moment the save lands.
+        let title = crate::library_surface::model::shown_name(title, self.path.as_deref());
         self.host.borrow().set_document_metadata(
-            title,
+            &title,
             &copy_subtitle(
                 p.session.as_ref().map(|s| &s.metadata),
                 if self.unprotected && !saving {
