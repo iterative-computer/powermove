@@ -181,6 +181,13 @@ enum Spec {
         band: pm_panel_timeline::stagger::Band,
         end: bool,
     },
+    /// An audio clip's level line: its gain's place on the fader law when
+    /// pressed, and the height (points) the law spans.
+    Gain {
+        layer: String,
+        start: f64,
+        room: f64,
+    },
     /// A transition's wedge: its duration.
     Transition {
         layer: String,
@@ -339,6 +346,8 @@ enum Gesture {
         quick_limits: Vec<(f64, f64)>,
         /// A handle drag: its key's layer start, for layer-local handle times.
         handle: Option<f64>,
+        /// A level-line drag: the height the fader law spans.
+        gain_room: Option<f64>,
     },
     /// A ruler scrub and the frame time it last sought.
     Scrub(Scrub, f64),
@@ -1977,6 +1986,24 @@ impl TimelineSurface {
             self.pump(cx);
             return;
         }
+        // The level line of an audio clip: a press on it drags the gain.
+        if let Some((layer, start, room)) = level_line_at(&frame, x, y)
+            && !self
+                .model
+                .index
+                .layer(&layer)
+                .is_some_and(|l| l.effectively_locked)
+        {
+            self.queue
+                .push_back(Job::SelectLayer(layer.clone(), Mods::default()));
+            self.gesture = Gesture::Pressed(Press {
+                origin: event.position,
+                spec: Some(Spec::Gain { layer, start, room }),
+                release: None,
+            });
+            self.pump(cx);
+            return;
+        }
         if let Some((layer, edge)) = frame.hit_clip(x, y) {
             let layer = layer.to_owned();
             if self
@@ -2580,6 +2607,10 @@ impl TimelineSurface {
                         .map(|(l, _, _)| l.from),
                     _ => None,
                 };
+                let gain_room = match &spec {
+                    Spec::Gain { room, .. } => Some(*room),
+                    _ => None,
+                };
                 let time = self.delegate.time(cx);
                 // v1: a clip being moved is held (grabbing).
                 if matches!(spec, Spec::Layers | Spec::Duplicate) {
@@ -2593,6 +2624,7 @@ impl TimelineSurface {
                     quick,
                     quick_limits,
                     handle,
+                    gain_room,
                 };
             }
             _ => {}
@@ -2605,7 +2637,9 @@ impl TimelineSurface {
                 quick,
                 quick_limits,
                 handle,
+                gain_room,
             } => {
+                let gain_room = *gain_room;
                 if let Some((at, total, _)) = quick {
                     *at = event.position;
                     *total = f32::from(event.position.x - origin.x) as f64 / self.view.pps;
@@ -2619,6 +2653,9 @@ impl TimelineSurface {
                 }
                 let (origin, proedit, readout, handle) = (*origin, *proedit, *readout, *handle);
                 let mut sample = self.sample(origin, event.position, event.modifiers, cx);
+                if let Some(room) = gain_room.filter(|r| *r > 0.) {
+                    sample.value_delta = -(f32::from(event.position.y - origin.y) as f64) / room;
+                }
                 if let (Some(layer_from), Some(area), Some(graph)) =
                     (handle, self.graph_area(), self.graph.as_ref())
                 {
@@ -3317,7 +3354,16 @@ impl TimelineSurface {
                 (id.clone(), mid.is_some_and(|mid| *x < mid))
             })
         };
-        if side(&hovered) != side(&self.hover_clip) {
+        // Over an audio clip the level line's handle follows the pointer.
+        let level_moves = hovered.as_ref().is_some_and(|(id, x)| {
+            let level = format!("level:{id}");
+            self.hover_clip.as_ref().is_none_or(|(_, seen)| (seen - x).abs() >= 0.5)
+                && self
+                    .frame
+                    .as_ref()
+                    .is_some_and(|f| f.ops.iter().any(|o| o.id == level))
+        });
+        if side(&hovered) != side(&self.hover_clip) || level_moves {
             cx.notify();
         }
         self.hover_clip = hovered;
@@ -3338,6 +3384,9 @@ impl TimelineSurface {
             CursorStyle::OpenHand
         } else if x >= self.view.layer_column && (0. ..m.ruler as f64).contains(&y) {
             CursorStyle::ResizeLeftRight
+        } else if self.frame.as_ref().is_some_and(|f| level_line_at(f, x, y).is_some()) {
+            // The level line moves up and down.
+            CursorStyle::ResizeUpDown
         } else if self.frame.as_ref().is_some_and(|f| f.hit_layer_key_across(x, y, KEY_REACH, m.row as f64).is_some()) {
             // The owner's rule: no pointing hand; a key keeps the arrow.
             CursorStyle::Arrow
@@ -3928,6 +3977,7 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
                 time,
             }
         }
+        Spec::Gain { layer, start, .. } => DragKind::Gain { layer, start },
         Spec::WorkIn => DragKind::WorkIn,
         Spec::WorkOut => DragKind::WorkOut,
         Spec::WorkMove => DragKind::WorkMove,
@@ -4035,10 +4085,10 @@ impl ModelPresenter for Presenter {
             .and_then(|root| root.get("assets")?.get(asset));
         let key = crate::waveforms::Key::of(path.clone(), record);
         Some(match crate::waveforms::lookup(&key)? {
-            Some((peaks, rate)) => Some(pm_panel_timeline::render::Waveform {
-                peaks,
-                rate,
+            Some(levels) => Some(pm_panel_timeline::render::Waveform {
+                levels,
                 trim: layer.trim,
+                map: time_map(&self.published, &layer.id, layer.from, layer.duration),
             }),
             None => {
                 self.wanted.borrow_mut().push(key);
@@ -4751,7 +4801,13 @@ impl Render for TimelineSurface {
                                             bounds,
                                             ..Default::default()
                                         }),
-                                        |w| strip_hover(op, *x + reach, origin, &tracks_tokens, w),
+                                        |w| {
+                                            strip_hover(op, *x + reach, origin, &tracks_tokens, w);
+                                            let level = format!("level:{id}");
+                                            if let Some(line) = frame.ops.iter().find(|o| o.id == level) {
+                                                level_hover(line, *x + reach, origin, w);
+                                            }
+                                        },
                                     );
                                 }
                                 for op in
@@ -5264,6 +5320,52 @@ fn strip_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, t: &Tokens, windo
         .corner_radii(px(grip.width / 2.)),
     );
 }
+/// The level line of the audio clip under the pointer: a 1 pt hairline in
+/// the clip's light tone and, under the pointer, a short rounded pill on
+/// it (the trim grip's language) to show it can be dragged.
+fn level_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, window: &mut Window) {
+    let Some(points) = op.detail["points"].as_array() else {
+        return;
+    };
+    let points: Vec<(f64, f64)> = points
+        .iter()
+        .filter_map(|p| Some((p[0].as_f64()?, p[1].as_f64()?)))
+        .collect();
+    if points.len() < 2 {
+        return;
+    }
+    let at = |x: f64, y: f64| origin + point(px(x as f32), px(y as f32));
+    let color = shade(op.color, op.opacity);
+    let mut path = PathBuilder::stroke(px(1.));
+    path.move_to(at(points[0].0, points[0].1));
+    for (x, y) in &points[1..] {
+        path.line_to(at(*x, *y));
+    }
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
+    // The handle sits on the flat part, under the pointer.
+    let (from, to) = (
+        op.detail["from"].as_f64().unwrap_or(f64::MIN),
+        op.detail["to"].as_f64().unwrap_or(f64::MAX),
+    );
+    let Some(y) = op.detail["y"].as_f64() else {
+        return;
+    };
+    const PILL: (f64, f64) = (14., 4.);
+    if to - from < PILL.0 {
+        return;
+    }
+    let x = pointer_x.clamp(from + PILL.0 / 2., to - PILL.0 / 2.);
+    window.paint_quad(
+        PaintQuad::new(Bounds::new(
+            at(x - PILL.0 / 2., y - PILL.1 / 2.),
+            size(px(PILL.0 as f32), px(PILL.1 as f32)),
+        ))
+        .background(shade(op.color, 1.))
+        .corner_radii(px((PILL.1 / 2.) as f32)),
+    );
+}
 fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &mut App) {
     let at = |x: f64, y: f64| origin + point(px(x as f32), px(y as f32));
     let b = op.bounds;
@@ -5640,42 +5742,115 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 window.paint_path(path, color);
             }
         }
-        // Bars stand on the clip's floor, one point per column; while the
-        // peaks are read a hairline marks the middle (v1).
+        // Light caught inside the glass (pm-design `Strip::wave`): one soft
+        // shape standing on the strip's floor just inside its rim, cut by
+        // its rounded corners, with a thin haze along the whole floor so a
+        // silent stretch never reads as empty. While the levels are read a
+        // hairline marks the middle (v1).
         "waveform" => {
-            let bars = op.detail["bars"].as_array();
-            let inset = op.detail["inset"].as_f64().unwrap_or(2.) as f32;
-            let min_bar = op.detail["minBar"].as_f64().unwrap_or(1.) as f32;
+            use pm_panel_timeline::waveform::{LOUDEST, decode, soften};
+            let d = &op.detail;
+            let per = d["columns"].as_f64().unwrap_or(2.).max(1.) as f32;
+            let tone = d["wave"].as_u64().unwrap_or(0xffffff) as u32;
+            let strength = d["waveAlpha"].as_f64().unwrap_or(0.5) * op.opacity;
             let (x0, top) = (f32::from(area.origin.x), f32::from(area.origin.y));
             let (w, h) = (f32::from(area.size.width), f32::from(area.size.height));
-            let room = (h - 2. * inset).max(0.);
-            match bars.filter(|b| !b.is_empty()) {
-                None => window.paint_quad(
+            let Some(peak) = d["peak"].as_str() else {
+                window.paint_quad(
                     PaintQuad::new(Bounds::new(
                         point(px(x0), px(top + (h / 2.).floor())),
                         size(px(w), px(1.)),
                     ))
-                    .background(color),
-                ),
-                Some(bars) => {
-                    let floor = top + h - inset;
-                    let mut path = PathBuilder::fill();
-                    path.move_to(point(px(x0), px(floor)));
-                    // Silence draws nothing: a bar shorter than `minBar`
-                    // would run along the foot as an underline.
-                    for (i, peak) in bars.iter().enumerate() {
-                        let bar = peak.as_f64().unwrap_or(0.) as f32 * room;
-                        let bar = if bar < min_bar { 0. } else { bar };
-                        let x = x0 + i as f32;
-                        path.line_to(point(px(x), px(floor - bar)));
-                        path.line_to(point(px(x + 1.), px(floor - bar)));
-                    }
-                    path.line_to(point(px(x0 + bars.len() as f32), px(floor)));
-                    path.close();
-                    if let Ok(path) = path.build() {
-                        window.paint_path(path, color);
-                    }
+                    .background(shade(tone, strength)),
+                );
+                return;
+            };
+            let rim = d["rim"].as_f64().unwrap_or(1.) as f32;
+            let radius = (d["radius"].as_f64().unwrap_or(0.) as f32 - rim).max(0.);
+            let ends = |i: usize| d["ends"][i].as_f64().map(|e| f32::from(origin.x) + e as f32);
+            let (start, end) = (ends(0).unwrap_or(x0), ends(1).unwrap_or(x0 + w));
+            let (inner_top, floor) = (top + rim, top + h - rim);
+            // The strip's inside at `x`: its ceiling and floor, lifted
+            // round the rounded corners.
+            let inside = |x: f32| -> (f32, f32) {
+                if x < start || x > end {
+                    return (floor, floor);
                 }
+                let from_end = (x - start).min(end - x);
+                let lift = if from_end < radius {
+                    let d = radius - from_end;
+                    radius - (radius * radius - d * d).max(0.).sqrt()
+                } else {
+                    0.
+                };
+                (inner_top + lift, floor - lift)
+            };
+            let lanes: Vec<(Vec<f32>, f32, f32)> = match d["peak2"].as_str() {
+                // A tall stereo row: the left above, the right below.
+                Some(peak2) => {
+                    let half = (floor - inner_top) / 2.;
+                    vec![
+                        (soften(&decode(peak)), inner_top + half, half),
+                        (soften(&decode(peak2)), floor, half),
+                    ]
+                }
+                None => vec![(soften(&decode(peak)), floor, floor - inner_top)],
+            };
+            // Only the columns the window shows (a frame is prepared wider
+            // than the view): the path's work stays the screen's width.
+            let shown = f32::from(window.viewport_size().width);
+            let first = (((0. - x0) * per).floor().max(0.) as usize).saturating_sub(1);
+            let last = (((shown - x0) * per).ceil().max(0.) as usize) + 2;
+            let x = |i: usize| x0 + (first + i) as f32 / per;
+            for (values, lane_floor, lane_h) in lanes {
+                let end_at = last.min(values.len());
+                if first >= end_at {
+                    continue;
+                }
+                let values = &values[first..end_at];
+                // The haze along the floor, then the shape over it: more
+                // opaque at its base than at its tips.
+                let haze = vec![WAVE_HAZE; values.len()];
+                if let Some(path) = glass_fill(&haze, &x, lane_floor, &inside) {
+                    window.paint_path(path, shade(tone, strength * 0.55));
+                }
+                let heights: Vec<f32> = values.iter().map(|v| v * LOUDEST * lane_h).collect();
+                if let Some(path) = glass_fill(&heights, &x, lane_floor, &inside) {
+                    window.paint_path(
+                        path,
+                        linear_gradient(
+                            180.,
+                            linear_color_stop(shade(tone, strength * 0.78), 0.),
+                            linear_color_stop(shade(tone, strength), 1.),
+                        ),
+                    );
+                }
+            }
+        }
+        // An audio clip's level line: a hairline in its pale tint.
+        // Drawn here only on a selected clip; under the pointer the hover
+        // paints it with its handle (`level_hover`). At rest: nothing.
+        "levelline" => {
+            if op.detail["shown"] != true {
+                return;
+            }
+            let Some(points) = op.detail["points"].as_array() else {
+                return;
+            };
+            let mut path = PathBuilder::stroke(px(1.));
+            for (i, p) in points.iter().enumerate() {
+                let (Some(x), Some(y)) = (p[0].as_f64(), p[1].as_f64()) else {
+                    continue;
+                };
+                let at = at(x, y);
+                if i == 0 {
+                    path.move_to(at);
+                } else {
+                    path.line_to(at);
+                }
+            }
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
             }
         }
         "text" => {
@@ -6007,3 +6182,161 @@ mod transform_box_tests {
     }
 }
 
+/// Samples of a retimed or reversed audio clip's media time over its length
+/// (a time remap, or a speed other than a static 1), as its sound plays them
+/// (`pm_eval`'s `sourceTime`, which the mix follows): its waveform is read
+/// through them (`waveform::mapped`). `None` for a clip at speed 1.
+fn time_map(
+    published: &pm_kernel::Published,
+    layer_id: &str,
+    from: f64,
+    duration: f64,
+) -> Option<std::sync::Arc<[f64]>> {
+    const SAMPLES: usize = 256;
+    let root = published.snapshot.root()?;
+    let loc = pm_kernel::model::find_layer(root, layer_id)?;
+    let layer = pm_kernel::model::layer_at(root, &loc)?;
+    let d = layer.get("d")?;
+    let remapped = d
+        .get("timeRemap")
+        .map(|n| n.to_value())
+        .is_some_and(|v| v.as_bool() == Some(true) || v.get("v").and_then(pm_model::Value::as_bool) == Some(true));
+    let speed = d.get("speed").map(|n| n.to_value());
+    let unit = match &speed {
+        None => true,
+        Some(v) => match v.as_f64() {
+            Some(s) => s == 1.,
+            None => v.get("v").and_then(pm_model::Value::as_f64) == Some(1.)
+                && v.get("kf").and_then(pm_model::Value::as_array).is_none_or(|k| k.is_empty())
+                && v.get("expr").and_then(pm_model::Value::as_str).is_none_or(str::is_empty),
+        },
+    };
+    if !remapped && unit || duration <= 0. {
+        return None;
+    }
+    let comp_id = loc
+        .comp_id
+        .clone()
+        .or_else(|| root.get("id").and_then(|n| n.to_value().as_str().map(str::to_owned)))?;
+    let comp = pm_eval::Comp::in_root(root, &comp_id, published.revision()).ok()?;
+    let mut ev = pm_eval::Evaluator::new();
+    let mut cache = pm_eval::retime::RetimeCache::new();
+    let mut map = Vec::with_capacity(SAMPLES + 1);
+    for i in 0..=SAMPLES {
+        let t = from + duration * i as f64 / SAMPLES as f64;
+        let at = pm_eval::Scope::new(&mut ev, &comp, &comp)
+            .source_time(layer, t, Some(&mut cache))
+            .ok()?;
+        map.push(at);
+    }
+    Some(map.into())
+}
+
+/// `rgb` at `alpha` (0–1).
+fn shade(rgb: u32, alpha: f64) -> Rgba {
+    gpui::rgba((rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32)
+}
+
+/// The waveform's haze along the floor, in points: about two device pixels.
+const WAVE_HAZE: f32 = 0.9;
+
+/// A waveform shape: `heights` (points above `base`, one per column at
+/// `x(i)`) inside the strip as `inside(x)` gives its ceiling and floor, so
+/// the strip's rounded corners cut it. Its top is a monotone cubic through
+/// the columns (no overshoot, no corner); `None` when nothing shows.
+fn glass_fill(
+    heights: &[f32],
+    x: &dyn Fn(usize) -> f32,
+    base: f32,
+    inside: &dyn Fn(f32) -> (f32, f32),
+) -> Option<Path<Pixels>> {
+    let n = heights.len();
+    if n < 2 {
+        return None;
+    }
+    let mut tops = Vec::with_capacity(n);
+    let mut floors = Vec::with_capacity(n);
+    for (i, height) in heights.iter().enumerate() {
+        let (ceiling, floor) = inside(x(i));
+        let floor = floor.min(base);
+        floors.push(floor);
+        tops.push((base - height).max(ceiling).min(floor));
+    }
+    if tops.iter().zip(&floors).all(|(t, f)| f - t < 0.05) {
+        return None;
+    }
+    let xs: Vec<f32> = (0..n).map(x).collect();
+    let tangents = monotone_tangents(&xs, &tops);
+    let mut path = PathBuilder::fill();
+    path.move_to(point(px(xs[0]), px(floors[0])));
+    path.line_to(point(px(xs[0]), px(tops[0])));
+    for k in 0..n - 1 {
+        let third = (xs[k + 1] - xs[k]) / 3.;
+        path.cubic_bezier_to(
+            point(px(xs[k + 1]), px(tops[k + 1])),
+            point(px(xs[k] + third), px(tops[k] + tangents[k] * third)),
+            point(px(xs[k + 1] - third), px(tops[k + 1] - tangents[k + 1] * third)),
+        );
+    }
+    // Back along the floor: only where it bends round a corner.
+    for k in (0..n).rev() {
+        let bent = |j: usize| floors[j] < base - 0.01;
+        if k == n - 1 || k == 0 || bent(k) || bent(k + 1) || bent(k - 1) {
+            path.line_to(point(px(xs[k]), px(floors[k])));
+        }
+    }
+    path.close();
+    path.build().ok()
+}
+
+/// Fritsch–Carlson tangents: a cubic through `(xs, ys)` with them never
+/// overshoots or turns a corner between columns.
+fn monotone_tangents(xs: &[f32], ys: &[f32]) -> Vec<f32> {
+    let n = xs.len();
+    let slope: Vec<f32> = (0..n - 1)
+        .map(|k| (ys[k + 1] - ys[k]) / (xs[k + 1] - xs[k]).max(1e-6))
+        .collect();
+    let mut m: Vec<f32> = (0..n)
+        .map(|k| match k {
+            0 => slope[0],
+            k if k == n - 1 => slope[n - 2],
+            k if slope[k - 1] * slope[k] <= 0. => 0.,
+            k => (slope[k - 1] + slope[k]) / 2.,
+        })
+        .collect();
+    for k in 0..n - 1 {
+        if slope[k] == 0. {
+            m[k] = 0.;
+            m[k + 1] = 0.;
+            continue;
+        }
+        let (a, b) = (m[k] / slope[k], m[k + 1] / slope[k]);
+        let r = a * a + b * b;
+        if r > 9. {
+            let t = 3. / r.sqrt();
+            m[k] = t * a * slope[k];
+            m[k + 1] = t * b * slope[k];
+        }
+    }
+    m
+}
+
+/// The audio clip whose level line (its flat part) is under `x, y`: its
+/// layer, its gain's place on the fader law and the law's height.
+fn level_line_at(frame: &pm_panel_timeline::render::Frame, x: f64, y: f64) -> Option<(String, f64, f64)> {
+    const REACH: f64 = 4.;
+    frame.ops.iter().rev().find_map(|op| {
+        if op.shape != "levelline" {
+            return None;
+        }
+        let d = &op.detail;
+        let (line, from, to) = (d["y"].as_f64()?, d["from"].as_f64()?, d["to"].as_f64()?);
+        if (y - line).abs() > REACH || x < from || x > to {
+            return None;
+        }
+        let start = pm_panel_timeline::level::fader_position(pm_panel_timeline::level::gain_db(
+            d["gain"].as_f64()?,
+        ));
+        Some((op.id.strip_prefix("level:")?.to_owned(), start, d["room"].as_f64()?))
+    })
+}

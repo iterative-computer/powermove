@@ -25,23 +25,26 @@ impl Key {
     }
 }
 
-/// Envelope buckets per second of media (the MCP waveform tool's resolution).
-pub const RATE: f64 = 100.;
+/// Finest buckets per second of media: a clip zoomed in to a few frames
+/// still has real data under each column; coarser zooms read the pyramid
+/// built from it (`pm_panel_timeline::waveform::Levels`).
+pub const RATE: f64 = 400.;
+
+type Levels = Arc<pm_panel_timeline::waveform::Levels>;
 
 enum State {
     Reading(Vec<async_channel::Sender<()>>),
-    /// The envelope and its buckets per second.
-    Ready(Arc<[f32]>, f64),
+    Ready(Levels),
     Failed,
 }
 static CACHE: Mutex<Option<HashMap<Key, State>>> = Mutex::new(None);
 
 /// What a timeline can draw for `key` now: the envelope, `Some(None)` while
 /// it is read (or wanted), `None` when the clip has no readable audio.
-pub fn lookup(key: &Key) -> Option<Option<(Arc<[f32]>, f64)>> {
+pub fn lookup(key: &Key) -> Option<Option<Levels>> {
     let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     match cache.as_ref().and_then(|c| c.get(key)) {
-        Some(State::Ready(peaks, rate)) => Some(Some((peaks.clone(), *rate))),
+        Some(State::Ready(levels)) => Some(Some(levels.clone())),
         Some(State::Failed) => None,
         Some(State::Reading(_)) | None => Some(None),
     }
@@ -66,8 +69,8 @@ pub fn read(key: &Key) -> async_channel::Receiver<()> {
             }
         }
     }
-    let state = match envelope(key) {
-        Some((peaks, rate)) => State::Ready(peaks, rate),
+    let state = match levels(key) {
+        Some(levels) => State::Ready(levels),
         None => State::Failed,
     };
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
@@ -81,12 +84,13 @@ pub fn read(key: &Key) -> async_channel::Receiver<()> {
     wait
 }
 
-/// The largest absolute sample of any channel of any heard stream per
-/// ~1/`RATE` s of clip time, 0–1, and the exact buckets per second.
-fn envelope(key: &Key) -> Option<(Arc<[f32]>, f64)> {
-    let (peaks, rate) =
-        pm_audio::waveform::clip_envelope(&key.path, &key.streams, key.timing, RATE).ok()?;
-    Some((peaks.into(), rate))
+/// The peak and RMS of the heard streams per ~1/`RATE` s of clip time, as
+/// a pyramid for every zoom.
+fn levels(key: &Key) -> Option<Levels> {
+    let l = pm_audio::waveform::clip_levels(&key.path, &key.streams, key.timing, RATE).ok()?;
+    Some(Arc::new(pm_panel_timeline::waveform::Levels::new(
+        l.rate, l.channels, &l.peak, &l.rms,
+    )))
 }
 
 #[cfg(test)]
@@ -121,24 +125,24 @@ mod tests {
         let record =
             |text: &str| pm_model::Document::new(Some(pm_model::json::parse(text).unwrap()), 1);
         let entries = r#"[{"index":0,"channels":1,"sampleRate":48000,"on":false},{"index":1,"channels":1,"sampleRate":48000,"on":true}]"#;
-        // (record, the loudest bucket: clip seconds × 100)
+        // (record, the loudest bucket: clip seconds × 400)
         for (text, at) in [
             (
                 format!(r#"{{"kind":"audio","timing":2,"audioStreams":{entries}}}"#),
-                75,
+                300,
             ),
             (
                 format!(r#"{{"kind":"audio","audioStreams":{entries}}}"#),
-                50,
+                200,
             ),
-            (r#"{"kind":"audio"}"#.to_owned(), 10),
+            (r#"{"kind":"audio"}"#.to_owned(), 40),
         ] {
             let doc = record(&text);
             let key = Key::of(path.clone(), doc.root());
             let _ = read(&key).recv_blocking();
-            let (peaks, rate) = lookup(&key).unwrap().unwrap();
-            assert!((rate - RATE).abs() < 1e-9);
-            let loudest = peaks
+            let levels = lookup(&key).unwrap().unwrap();
+            assert!((levels.rate - RATE).abs() < 1e-9);
+            let loudest = levels.combined.peak[0]
                 .iter()
                 .enumerate()
                 .max_by(|a, b| a.1.total_cmp(b.1))

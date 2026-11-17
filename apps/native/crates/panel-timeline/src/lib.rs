@@ -12,6 +12,8 @@ pub mod render;
 mod reveal;
 mod session;
 pub mod snap;
+pub mod level;
+pub mod waveform;
 mod snapshot;
 pub mod stagger;
 pub mod tracks;

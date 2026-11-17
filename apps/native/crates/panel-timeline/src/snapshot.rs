@@ -87,6 +87,13 @@ pub struct Layer {
     pub asset: Option<String>,
     /// Seconds of the media skipped before the layer starts (`d.trim`).
     pub trim: f64,
+    /// An audio layer's level (`d.gain`, 1 = 0 dB; its base value when
+    /// animated), and its fades in seconds (`d.fadeIn`, `d.fadeOut`).
+    pub gain: f64,
+    /// `d.gain` has keys or an expression: the level line shows the base.
+    pub gain_animated: bool,
+    pub fade_in: f64,
+    pub fade_out: f64,
     /// Effects whose extension is missing (`fx[].missing`): the layer draws
     /// with them bypassed. Their display names, else types.
     pub missing_effects: Vec<String>,
@@ -478,7 +485,21 @@ impl TimelineIndex {
             .iter()
             .filter_map(|m| string(m.get("id")))
             .collect();
+        let field = |key: &str| layer.get("d").and_then(|d| d.get(key));
+        let channel_value = |n: Option<&Node>| {
+            number(n).or_else(|| number(n.and_then(|n| n.get("v"))))
+        };
+        let gain_node = field("gain");
+        let gain_animated = gain_node.is_some_and(|g| {
+            matches!(g.get("kf").map(Node::kind), Some(NodeKind::Array(k)) if !k.is_empty())
+                || string(g.get("expr")).is_some_and(|e| !e.is_empty())
+        });
+        let fade = |key: &str| channel_value(field(key)).filter(|f| *f > 0.).unwrap_or(0.);
         let mut read = Layer {
+            gain: channel_value(gain_node).filter(|g| *g >= 0.).unwrap_or(1.),
+            gain_animated,
+            fade_in: fade("fadeIn"),
+            fade_out: fade("fadeOut"),
             trim: number(layer.get("d").and_then(|d| d.get("trim")))
                 .filter(|t| t.is_finite())
                 .unwrap_or(0.)
