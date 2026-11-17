@@ -174,6 +174,8 @@ enum Input {
     Kernel,
     Sync(Sender<()>),
     Viewport(f32, f32, f32),
+    /// Whether the person can see the window (a tab behind another cannot).
+    WindowShown(bool),
     Realm(Writer, RealmEnvelope),
     Moved,
     /// The viewer presented a frame; the latest waits in `presented`.
@@ -894,6 +896,7 @@ impl ExtensionHost {
             confined: BTreeMap::new(),
             open: BTreeMap::new(),
             viewport: None,
+            window_hidden: false,
             shared: shared.clone(),
             inbox: inbox.clone(),
             transport: transport.clone(),
@@ -1202,6 +1205,12 @@ impl ExtensionHost {
     pub fn set_viewport(&self, width: f32, height: f32, scale: f32) {
         let _ = self.inbox.send(Input::Viewport(width, height, scale));
     }
+    /// Whether the person can see the window: a tab behind another cannot, and
+    /// its extension panels count as not showing (they get no animation
+    /// frames) until it is selected.
+    pub fn set_window_shown(&self, shown: bool) {
+        let _ = self.inbox.send(Input::WindowShown(shown));
+    }
     /// The app's clock moved. Cheap enough for every presented frame.
     pub fn publish_time(&self, time: f64, playing: bool) {
         if let Some(host) = &*self.transport.lock().unwrap() {
@@ -1319,6 +1328,7 @@ struct Owner {
     open: BTreeMap<String, Option<[f32; 4]>>,
     /// The editor window's viewport, replayed into a rebuilt realm before boot.
     viewport: Option<(f32, f32, f32)>,
+    window_hidden: bool,
     config: HostConfig,
     shared: Arc<Shared>,
     inbox: Sender<Input>,
@@ -1584,6 +1594,10 @@ impl Owner {
             Input::Viewport(width, height, scale) => {
                 self.viewport = Some((width, height, scale));
                 self.eval(&format!("__compat.viewport({width},{height},{scale})"));
+            }
+            Input::WindowShown(shown) => {
+                self.window_hidden = !shown;
+                self.eval(&format!("__compat.windowShown({shown})"));
             }
             Input::Place(id, rect) => {
                 if let Some(placed) = self.open.get_mut(&id) {
@@ -1905,7 +1919,7 @@ impl Owner {
         if router.receive(message, &mut delivered).is_err() {
             return;
         }
-        for message in delivered.0 {
+        for message in &delivered.0 {
             // A synchronous layout read is waiting for this answer: it goes to
             // the blocked realm directly (and through its queue as usual).
             if message["kind"] == "layout"
@@ -1915,11 +1929,16 @@ impl Owner {
                     .measuring
                     .lock()
                     .unwrap()
-                    .answer(request, &message);
+                    .answer(request, message);
             }
-            self.eval(&format!(
-                "__compat.dom.receive({message});__compat.dom.flush()"
-            ));
+        }
+        // The realm takes them as data, all that came meanwhile in one task
+        // and one flush, not each as a script it compiles.
+        if !delivered.0.is_empty()
+            && let Some(live) = &self.realm
+            && live.host.push_page_messages(delivered.0)
+        {
+            self.eval("__compat.receivePage()");
         }
         self.drain_dom();
     }
@@ -2602,6 +2621,9 @@ impl Owner {
     fn replay_window(&mut self) {
         if let Some((width, height, scale)) = self.viewport {
             self.eval(&format!("__compat.viewport({width},{height},{scale})"));
+        }
+        if self.window_hidden {
+            self.eval("__compat.windowShown(false)");
         }
         if !self.shell.is_empty() {
             let shell = Value::Object(self.shell.clone());
@@ -5414,6 +5436,51 @@ mod tests {
         inbox.export("job-6", frozen, cancel.clone()).unwrap();
         inbox.ask(1, needs(&fixture), json!({"job":"job-6"}));
         assert_eq!(answer_of(&answered, 1, Duration::from_secs(40)), json!(5));
+        cancel.store(true, Ordering::Release);
+    }
+    /// An export's realm withholds no animation frame: an extension that owns
+    /// a panel (never shown there) and waits for a frame still draws.
+    #[test]
+    fn an_export_realm_gives_a_panel_owner_its_animation_frames() {
+        let source = "export default async function activate(api: any){
+            api.panels.register({id:'waits.panel', title:'Waits', build: (root: any) => { root.textContent = 'panel'; } });
+            await new Promise((done: any) => requestAnimationFrame(done));
+            api.services.register('raster',()=>{
+              const c=document.createElement('canvas'); c.width=4; c.height=1;
+              return {cv:c,w:4,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("waits", source)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frozen = fixture.kernel.published("window").unwrap();
+        inbox.export("job-8", frozen, cancel.clone()).unwrap();
+        inbox.ask(1, needs(&fixture), json!({"job":"job-8"}));
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(40)), json!(4));
+        cancel.store(true, Ordering::Release);
+    }
+    /// An export's realm builds no panel: nothing shows it, and what it
+    /// would start (a search over the network, timers) would only hold the
+    /// export's start. The window's realm builds it as before.
+    #[test]
+    fn an_export_realm_builds_no_panels() {
+        let source = "export default function activate(api: any){
+            globalThis.built = false;
+            api.panels.register({id:'shows.panel', title:'Shows',
+              build: (root: any) => { globalThis.built = true; root.textContent = 'panel';
+                setTimeout(() => {}, 3000); } });
+            api.panels.open('shows.panel');
+            api.services.register('raster',()=>{
+              const c=document.createElement('canvas'); c.width=globalThis.built ? 3 : 1; c.height=1;
+              return {cv:c,w:c.width,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("shows", source)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        let live = fixture.kernel.published("window").unwrap().revision();
+        inbox.ask(1, needs(&fixture), json!({"revision": live}));
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(20)), json!(3));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frozen = fixture.kernel.published("window").unwrap();
+        inbox.export("job-7", frozen, cancel.clone()).unwrap();
+        inbox.ask(2, needs(&fixture), json!({"job":"job-7"}));
+        assert_eq!(answer_of(&answered, 2, Duration::from_secs(40)), json!(1));
         cancel.store(true, Ordering::Release);
     }
     #[test]

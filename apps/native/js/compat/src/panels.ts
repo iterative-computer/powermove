@@ -27,6 +27,9 @@ export class CompatPanels {
     private document: any,
     private sections?: Registry<any>,
     private layerIds: () => string[] = () => [],
+    /** No window shows this realm's panels (an export's): they open and close
+     * as asked, but none is built, so none runs or fetches. */
+    private windowless = false,
   ) {
     this.subscription = registry.onChange(({ id }) => {
       if (this.openPanels.has(id)) this.refresh(id);
@@ -57,12 +60,32 @@ export class CompatPanels {
     };
   }
   list = () => this.registry.ids();
-  isOpen = (id: string) => this.openPanels.has(id);
+  /** Extensions with a panel open and placed (painted): another extension's
+   * animation frames wait, as a hidden page's do in a browser. */
+  showingOwners = () => {
+    const owners = new Set<string>();
+    if (!this.windowShown) return owners;
+    for (const entry of this.registry.entries())
+      if (this.openPanels.has(entry.id) && this.rects.get(entry.id))
+        owners.add(entry.ownerId);
+    return owners;
+  };
+  /** Called when a panel opens, closes or is placed (shown or hidden). */
+  onShowingChange?: () => void;
+  /** Whether the window can be seen (a tab behind another cannot). */
+  private windowShown = true;
+  setWindowShown = (shown: boolean) => {
+    if (this.windowShown === shown) return;
+    this.windowShown = shown;
+    this.onShowingChange?.();
+  };
+  isOpen = (id: string) =>
+    this.openPanels.has(id) || (this.windowless && this.wanted.has(id));
   isHidden = (id: string) => this.hidden.has(id);
   open = (id: string, _dock?: unknown) => {
     this.hidden.delete(id);
     this.wanted.add(id);
-    if (this.openPanels.has(id)) return;
+    if (this.windowless || this.openPanels.has(id)) return;
     const definition =
       id === SECTIONS_PANEL
         ? { build: (root: any) => this.buildSections(root) }
@@ -84,6 +107,7 @@ export class CompatPanels {
     root.append(body);
     const entry: { root: any; cleanup?: () => void } = { root };
     this.openPanels.set(id, entry);
+    this.onShowingChange?.();
     try {
       const cleanup = definition.build(body, { spec: { id, panel: id } });
       if (typeof cleanup === "function") entry.cleanup = cleanup;
@@ -107,8 +131,10 @@ export class CompatPanels {
   /** Window points of the shell's panel body. The root is host-owned geometry;
    * `null` is a tab behind another, which neither paints nor takes pointers. */
   place = (id: string, rect: [number, number, number, number] | null) => {
+    const shown = !!this.rects.get(id);
     this.rects.set(id, rect);
     this.openPanels.get(id)?.root.setAttribute("style", panelStyle(rect));
+    if (shown !== !!rect) this.onShowingChange?.();
   };
   close = (id: string) => {
     this.hidden.add(id);

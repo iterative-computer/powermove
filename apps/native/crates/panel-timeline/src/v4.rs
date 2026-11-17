@@ -107,6 +107,23 @@ fn modifiers(v: &Value) -> Result<Modifiers, Error> {
         control: flag("ctrlKey")?,
     })
 }
+/// `["track", area, lane]` (see `track_window`).
+fn track_row(intent: &Value) -> Option<(crate::tracks::Area, usize)> {
+    use crate::tracks::Area;
+    let parts: Vec<Value> = serde_json::from_str(intent.get("id")?.as_str()?).ok()?;
+    match parts.as_slice() {
+        [kind, area, lane] if kind.as_str() == Some("track") => {
+            let area = match area.as_str()? {
+                "Video" => Area::Video,
+                "Audio" => Area::Audio,
+                "Captions" => Area::Captions,
+                _ => return None,
+            };
+            Some((area, usize::try_from(lane.as_u64()?).ok()?))
+        }
+        _ => None,
+    }
+}
 fn layer_row(intent: &Value) -> Result<String, Error> {
     match parse_row(string(intent, "id")?)? {
         RowId::Layer(id) => Ok(id),
@@ -275,6 +292,13 @@ pub async fn dispatch(
             }
             persist = true;
             Plan::default()
+        }
+        // A track row's switches (Tracks mode) act on every clip on its lane.
+        "switch" if track_row(intent).is_some() => {
+            let (area, lane) = track_row(intent).expect("checked");
+            client
+                .model
+                .track_switch(area, lane, string(intent, "name")?, context.time)?
         }
         "switch" => {
             let id = layer_row(intent)?;
