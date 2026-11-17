@@ -128,6 +128,7 @@ pub fn plan(published: &Published, shape: ShapeBox, time: f64, variant: &str) ->
         visible: None,
         shy: None,
         collapsed: None,
+        track: None,
         time,
     };
     Some(ShapePlan {

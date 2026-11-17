@@ -312,6 +312,12 @@ pub struct ImportRequest {
     /// originals): an item not here is missing. A file that is one of them
     /// is that item again ([`known`]).
     pub originals: std::collections::BTreeMap<String, PathBuf>,
+    /// How long a placed still lasts (Settings › Media › Still Duration;
+    /// `None`: until the composition ends).
+    pub still: Option<f64>,
+    /// The Tracks timeline: placed files lie end to end from `place_at`
+    /// instead of on top of each other ([`TrackRun`]).
+    pub track_run: Option<TrackRun>,
 }
 /// How far an import has come: files read of the total, and the file
 /// being read. Shared with whoever shows it; the import only writes.
@@ -378,6 +384,25 @@ pub struct ChosenSequence {
     pub missing: Option<String>,
 }
 
+/// The Tracks timeline as an import finds it: what each lane holds, so
+/// several files imported at once lie end to end on lanes free for them.
+#[derive(Clone, Debug, Default)]
+pub struct TrackRun {
+    /// Each clip's area (audio or not), lane, start and end.
+    pub occupied: Vec<(bool, u32, f64, f64)>,
+}
+impl TrackRun {
+    /// The lowest lane of the area with nothing in `from..end`.
+    pub fn lane(&self, audio: bool, from: f64, end: f64) -> u32 {
+        (0..)
+            .find(|lane| {
+                !self.occupied.iter().any(|&(a, l, f, e)| {
+                    a == audio && l == *lane && f < end - 1e-6 && e > from + 1e-6
+                })
+            })
+            .unwrap_or(0)
+    }
+}
 /// A file about to be imported: what identifies it.
 #[derive(Debug)]
 pub(crate) struct Facts {
@@ -878,7 +903,8 @@ impl Builtins {
                 None => fresh.push(path),
             }
         }
-        let (place_at, place_index) = (request.place_at, request.place_index);
+        let (place_at, place_index, still) = (request.place_at, request.place_index, request.still);
+        let run = request.track_run.clone();
         let mut outcome = if fresh.is_empty() {
             Outcome::default()
         } else {
@@ -918,16 +944,63 @@ impl Builtins {
         if let Some(at) = place_at
             && !placed.is_empty()
         {
-            self.place_known(&placed, at, place_index)?;
+            // In a Tracks run, after the new files that just landed there.
+            let at = match &run {
+                Some(_) => self.run_end(&outcome.assets, at)?,
+                None => at,
+            };
+            self.place_known(&placed, at, place_index, still, run.as_ref())?;
         }
         Ok(outcome)
     }
+    /// Where the layers of `assets` just placed from `at` end (`at` when none
+    /// did): the next part of a Tracks run starts there.
+    fn run_end(&self, assets: &[String], at: f64) -> Result<f64, String> {
+        let published = self.broker.kernel.published(&self.broker.project).ok_or(SWITCHED)?;
+        let root = published.snapshot.root().ok_or(SWITCHED)?;
+        let layers = pm_kernel::model::comp_node(root, published.snapshot.open_comp().as_deref())
+            .and_then(|c| c.get("layers"))
+            .map(|l| l.to_value())
+            .unwrap_or(Value::Null);
+        let number = |l: &Value, k: &str| l.get(k).and_then(Value::as_f64).unwrap_or(0.);
+        Ok(layers
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|l| {
+                number(l, "from") >= at - 1e-6
+                    && l.get("d")
+                        .and_then(|d| d.get("asset"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|a| assets.iter().any(|x| x == a))
+            })
+            .map(|l| number(l, "from") + number(l, "dur"))
+            .fold(at, f64::max))
+    }
     /// Items already in the project, placed as an import places its new ones,
     /// in one Undo step, and selected.
-    fn place_known(&self, assets: &[String], at: f64, index: Option<usize>) -> Result<(), String> {
+    fn place_known(
+        &self,
+        assets: &[String],
+        at: f64,
+        index: Option<usize>,
+        still: Option<f64>,
+        run: Option<&TrackRun>,
+    ) -> Result<(), String> {
         let project = &self.broker.project;
         let published = self.broker.kernel.published(project).ok_or(SWITCHED)?;
-        let (layers, commands) = place_items(&published, assets, &[], at, index)?;
+        let records = published
+            .snapshot
+            .root()
+            .and_then(|r| r.get("assets"))
+            .map(|a| a.to_value())
+            .unwrap_or(Value::Null);
+        let items: Vec<(&str, &Value)> = assets
+            .iter()
+            .filter_map(|id| Some((id.as_str(), records.get(id)?)))
+            .collect();
+        let (layers, commands) = placement(&published, &items, at, index, None, still, run)
+            .ok_or("Open a project first")?;
         let call = pm_kernel::Call::Transact {
             label: Some("Add to Timeline".into()),
             expected_revision: Some(published.revision()),
@@ -1183,6 +1256,8 @@ impl Builtins {
                         at,
                         request.place_index,
                         request.placed_as.as_ref(),
+                        request.still,
+                        request.track_run.as_ref(),
                     )
                     .ok_or(SWITCHED)?
                 }
@@ -1263,6 +1338,7 @@ pub fn place_items(
     compositions: &[String],
     at: f64,
     index: Option<usize>,
+    still: Option<f64>,
 ) -> Result<(Vec<String>, Vec<Command>), String> {
     let root = published.snapshot.root().ok_or("Open a project first")?;
     let records = root
@@ -1274,7 +1350,7 @@ pub fn place_items(
         .filter_map(|id| Some((id.as_str(), records.get(id)?)))
         .collect();
     let (mut layers, mut commands) =
-        placement(published, &items, at, index, None).ok_or("Open a project first")?;
+        placement(published, &items, at, index, None, still, None).ok_or("Open a project first")?;
     let open = published.snapshot.open_comp();
     let comps = root
         .get("comps")
@@ -1313,6 +1389,7 @@ pub fn place_items(
                 visible: None,
                 shy: None,
                 collapsed: None,
+                track: None,
                 time: at,
             }))
             .into(),
@@ -1365,7 +1442,7 @@ pub fn comp_from_asset(
             background: None,
         },
     };
-    let (layers, mut commands) = placement(published, &[(asset, &record)], 0., None, None)
+    let (layers, mut commands) = placement(published, &[(asset, &record)], 0., None, None, None, None)
         .ok_or("Open a project first")?;
     for command in &mut commands {
         if let Command::Layer(LayerCommand::Add(add)) = command {
@@ -1385,6 +1462,8 @@ fn placement(
     at: f64,
     index: Option<usize>,
     placed_as: Option<&PlacedAs>,
+    still: Option<f64>,
+    run: Option<&TrackRun>,
 ) -> Option<(Vec<String>, Vec<Command>)> {
     let root = published.snapshot.root()?;
     let open = published.snapshot.open_comp();
@@ -1401,11 +1480,43 @@ fn placement(
         number("w", 1920.),
         number("h", 1080.),
     );
+    // How long each lasts: the whole source, even past the composition
+    // end; a still as long as Settings › Media › Still Duration says, else
+    // to the composition end.
+    let length = |asset: &Value, from: f64| {
+        asset
+            .get("dur")
+            .and_then(Value::as_f64)
+            .filter(|n| *n > 0.)
+            .unwrap_or_else(|| still.unwrap_or_else(|| (dur - from).max(1. / fps)))
+    };
+    let audio = |asset: &Value| asset.get("kind").and_then(Value::as_str) == Some("audio");
+    // In the Tracks timeline (`run`), one after another from `at`, each
+    // area's files on one lane free across their whole run.
+    let mut starts = vec![at; items.len()];
+    let mut lanes: [Option<u32>; 2] = [None, None];
+    if let Some(run) = run {
+        let mut next = at;
+        for (n, (_, asset)) in items.iter().enumerate() {
+            starts[n] = next;
+            next += length(asset, next);
+        }
+        for area in [false, true] {
+            let span = items
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, asset))| audio(asset) == area)
+                .map(|(n, (_, asset))| (starts[n], starts[n] + length(asset, starts[n])))
+                .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)));
+            lanes[usize::from(area)] = span.map(|(from, end)| run.lane(area, from, end));
+        }
+    }
     let mut commands: Vec<Command> = vec![];
     let mut layers = vec![];
     for (n, &(id, asset)) in items.iter().enumerate() {
         let field = |key: &str| asset.get(key).and_then(Value::as_f64).filter(|n| *n > 0.);
         let kind = asset.get("kind").and_then(Value::as_str).unwrap_or("image");
+        let start = starts[n];
         let mut content = Map::new();
         content.insert("asset", Value::from(id));
         match kind {
@@ -1450,9 +1561,8 @@ fn placement(
                 .into(),
                 comp: None,
                 name,
-                from: None,
-                // The whole source, even past the composition end.
-                duration: Some(field("dur").unwrap_or_else(|| (dur - at).max(1. / fps))),
+                from: run.map(|_| start),
+                duration: Some(length(asset, start)),
                 content,
                 properties: Map::new(),
                 color: None,
@@ -1463,6 +1573,7 @@ fn placement(
                 visible: None,
                 shy: None,
                 collapsed: None,
+                track: lanes[usize::from(kind == "audio")],
                 time: at,
             }))
             .into(),
@@ -1535,6 +1646,131 @@ mod tests {
             runtime,
         };
         (fixture, session)
+    }
+    /// Projects opened in turn keep their own items: media imported into
+    /// one, and the archive and library stores it fills, never show up in
+    /// the next, nor does a file already in the first count as known in the
+    /// second (PM-486: a new project listed an item it never had; that was
+    /// an extension importing into each project it mounted in).
+    #[test]
+    fn projects_opened_in_turn_keep_their_own_items() {
+        let f = fixture();
+        let a = write(&f.root, "A.png", PNG);
+        let first = import_with(&f, vec![a.clone()], None, &[], None);
+        assert_eq!(first.assets.len(), 1);
+        let kernel = f.actor.handle();
+        let open = |id: &str| {
+            let project = pm_model::json::parse(&format!(
+                r##"{{"id":"{id}","name":"{id}","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{{}},"comps":{{}},"layers":[]}}"##
+            ))
+            .unwrap();
+            kernel
+                .shell(ShellCall::Open {
+                    id: id.into(),
+                    source: SessionSource::New(project),
+                    electron_profile: None,
+                })
+                .wait()
+                .unwrap()
+                .unwrap();
+        };
+        open("q");
+        let items = |id: &str| {
+            let published = kernel.published(id).unwrap();
+            let catalog = pm_panel_media::Catalog::published(&published).unwrap();
+            catalog.assets.keys().cloned().collect::<Vec<_>>()
+        };
+        assert_eq!(items("p"), first.assets, "the first keeps its item");
+        assert!(items("q").is_empty(), "the second never had one: {:?}", items("q"));
+        // Importing the same file into the second makes its own item there.
+        let second = Builtins::new(kernel.clone(), "q", || {}).unwrap();
+        let document = kernel.published("q").unwrap().snapshot.doc_id;
+        let outcome = second
+            .import_media(
+                document,
+                &f.root,
+                ImportRequest { paths: vec![a], ..Default::default() },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(outcome.imported, ["A.png"], "{outcome:?}");
+        assert!(outcome.reused.is_empty() && outcome.relinked.is_empty());
+        assert_eq!(items("q"), outcome.assets);
+        assert_eq!(items("p"), first.assets, "and the first is untouched");
+    }
+    /// In the Tracks timeline, files imported together lie end to end from
+    /// the playhead in the order chosen, on one lane free across the whole
+    /// run, instead of on top of each other at the playhead (PM-486).
+    #[test]
+    fn files_imported_together_in_tracks_lie_end_to_end_on_a_free_lane() {
+        let f = fixture();
+        let a = write(&f.root, "A.png", PNG);
+        let b = write(&f.root, "B.png", &[PNG, b"other"].concat());
+        // Lane 0 holds a clip across the run; lane 1 is free.
+        let run = TrackRun {
+            occupied: vec![(false, 0, 0., 10.), (true, 0, 0., 10.)],
+        };
+        let outcome = f
+            .runtime
+            .import_media(
+                document(&f),
+                &f.root,
+                ImportRequest {
+                    paths: vec![b, a],
+                    place_at: Some(1.),
+                    still: Some(2.),
+                    track_run: Some(run),
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(outcome.imported, ["B.png", "A.png"], "{outcome:?}");
+        let p = f.actor.handle().published("p").unwrap();
+        let layers = pm_kernel::model::comp_node(p.snapshot.root().unwrap(), p.snapshot.open_comp().as_deref())
+            .unwrap().to_value().get("layers").unwrap().as_array().unwrap().clone();
+        let placed: Vec<(String, f64, f64, f64)> = layers
+            .iter()
+            .map(|l| {
+                let n = |k: &str| l.get(k).and_then(Value::as_f64).unwrap_or(-1.);
+                (l.get("name").and_then(Value::as_str).unwrap_or("").to_owned(), n("from"), n("dur"), n("track"))
+            })
+            .collect();
+        assert!(placed.contains(&("B.png".into(), 1., 2., 1.)), "{placed:?}");
+        assert!(placed.contains(&("A.png".into(), 3., 2., 1.)), "{placed:?}");
+        // Without the Tracks run they stack at the playhead, as v1 did.
+        assert!(TrackRun::default().lane(false, 0., 1.) == 0);
+        // The same files again are the items they are, laid out the same
+        // way: lanes 0 and 1 busy, so lane 2, from 20 s.
+        let ids = outcome.assets.clone();
+        let again = f
+            .runtime
+            .import_media(
+                document(&f),
+                &f.root,
+                ImportRequest {
+                    paths: vec![f.root.join("B.png"), f.root.join("A.png")],
+                    place_at: Some(20.),
+                    still: Some(2.),
+                    originals: [(ids[0].clone(), f.root.join("B.png")), (ids[1].clone(), f.root.join("A.png"))]
+                        .into_iter()
+                        .collect(),
+                    track_run: Some(TrackRun {
+                        occupied: vec![(false, 0, 0., 30.), (false, 1, 0., 30.)],
+                    }),
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(again.imported.is_empty(), "{again:?}");
+        let p = f.actor.handle().published("p").unwrap();
+        let later: Vec<(f64, f64)> = pm_kernel::model::comp_node(p.snapshot.root().unwrap(), p.snapshot.open_comp().as_deref())
+            .unwrap().to_value().get("layers").unwrap().as_array().unwrap().iter()
+            .filter(|l| l.get("from").and_then(Value::as_f64).is_some_and(|t| t >= 20.))
+            .map(|l| (l.get("from").and_then(Value::as_f64).unwrap(), l.get("track").and_then(Value::as_f64).unwrap_or(-1.)))
+            .collect();
+        assert!(later.contains(&(20., 2.)) && later.contains(&(22., 2.)), "{later:?}");
     }
     /// Imports `paths` as the Project panel does, with `originals` the
     /// files the project's items play from now.
@@ -1703,12 +1939,13 @@ mod tests {
             visible: None,
             shy: None,
             collapsed: None,
+            track: None,
             time: 0.,
         };
         commit(vec![LayerCommand::Add(Box::new(solid)).into()]);
         let published = kernel.published("p").unwrap();
         let (placed, commands) =
-            place_items(&published, &outcome.assets, &[], 1.5, Some(1)).unwrap();
+            place_items(&published, &outcome.assets, &[], 1.5, Some(1), None).unwrap();
         assert_eq!(placed.len(), 2);
         commit(commands);
         let published = kernel.published("p").unwrap();
@@ -1735,7 +1972,7 @@ mod tests {
             assert_eq!(layer.get("from").unwrap().as_f64(), Some(1.5));
         }
         assert_eq!(
-            place_items(&published, &[], open.as_slice(), 0., None).unwrap_err(),
+            place_items(&published, &[], open.as_slice(), 0., None, None).unwrap_err(),
             "A composition can't be placed inside itself"
         );
     }
@@ -1807,6 +2044,25 @@ mod tests {
         );
     }
 
+    /// A placed still lasts Settings › Media › Still Duration, else to the
+    /// composition end (PM-486).
+    #[test]
+    fn a_placed_still_lasts_the_still_duration() {
+        let (f, _) = opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":25,"dur":30,"bg":"#000000","assets":{"a":{"id":"a","name":"Sky.png","kind":"image","w":200,"h":100}},"comps":{},"layers":[]}"##,
+        );
+        let p = f.actor.handle().published("p").unwrap();
+        let length = |still: Option<f64>| {
+            let (_, commands) = place_items(&p, &["a".into()], &[], 2., None, still).unwrap();
+            match &commands[0] {
+                Command::Layer(LayerCommand::Add(add)) => add.duration,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(length(None), Some(28.), "to the composition end");
+        assert_eq!(length(Some(5.)), Some(5.));
+    }
+
     #[test]
     fn parity_add_composition_uses_drop_placement_at_playhead() {
         let (f, _) = opened(
@@ -1814,7 +2070,7 @@ mod tests {
         );
         let kernel = f.actor.handle();
         let p = kernel.published("p").unwrap();
-        let (ids, commands) = place_items(&p, &[], &["nested".into()], 2.5, None).unwrap();
+        let (ids, commands) = place_items(&p, &[], &["nested".into()], 2.5, None, None).unwrap();
         assert_eq!(ids.len(), 1);
         kernel
             .call(

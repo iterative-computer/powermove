@@ -1248,6 +1248,7 @@ fn add_text(
         visible: None,
         shy: None,
         collapsed: None,
+        track: None,
         time,
     };
     let mut commands: Vec<Command> = vec![LayerCommand::Add(Box::new(add)).into()];

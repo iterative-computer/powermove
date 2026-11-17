@@ -1396,6 +1396,15 @@ impl Controller {
         let picture = front || pm_shell::front_restoring().is_none();
         if keep {
             self.stage_open_with(&project, picture);
+            // The project's name, as the window showed it last: the tab,
+            // the bar and the ghost (with the front tab's picture) say it
+            // from the first frame, never an untitled window, while the
+            // library is read (PM-384: ~6 s under load).
+            let name = self.host.borrow().restored_name.clone();
+            if let Some(name) = name {
+                self.message.clear();
+                self.begin_ghost(&name, None, cx);
+            }
         }
         self.front_restore = front;
         let profile = self.profile.clone();
@@ -1427,6 +1436,11 @@ impl Controller {
                 {
                     v.stage_open_with(id, front || pm_shell::front_restoring().is_none());
                     v.begin_ghost(name, None, cx);
+                } else if found.is_none() && v.opening_name.is_some() && !v.opening {
+                    // Named from the session, but the library has no such
+                    // project now: Home, as for any open that ends without one.
+                    v.end_ghost(cx);
+                    v.viewer_poster = None;
                 } else if found.is_none() && v.opening_name.is_none() {
                     v.ghost_retire();
                     v.viewer_poster = None;
@@ -1983,7 +1997,8 @@ impl Controller {
         let Some(published) = &self.published else {
             return;
         };
-        match pm_builtins::media_import::place_items(published, assets, comps, self.time(), None) {
+        let still = self.pro_media.preferences().still();
+        match pm_builtins::media_import::place_items(published, assets, comps, self.time(), None, still) {
             Ok((layers, commands)) if !commands.is_empty() => self.run_layer_plan(
                 crate::layer_commands::Plan {
                     label: "Add to Timeline".into(),

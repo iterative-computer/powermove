@@ -927,6 +927,7 @@ impl Planner<'_> {
                 visible: Some(node.get("visible").is_none_or(K::truthy)),
                 shy: None,
                 collapsed: Some(false),
+                track: None,
                 time: self.from,
             },
             group: group.map(str::to_owned),
