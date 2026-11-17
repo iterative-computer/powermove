@@ -1944,6 +1944,64 @@ fn the_first_pen_click_makes_a_path_layer_in_one_undo_step(cx: &mut TestAppConte
     s.rig.kernel.call(PROJECT, undo()).wait().unwrap().unwrap();
     assert_eq!(count(&s), before, "two clicks, two steps, nothing left");
 }
+/// Quick clicks with the Pen, each before the last one's edit has landed,
+/// are four corner vertices on one new path layer: none is lost, none makes
+/// a layer of its own, and no tangent follows the pointer afterwards.
+#[gpui::test]
+fn quick_pen_clicks_each_place_a_corner_vertex(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let clear = SelectionCall::Layers {
+        ids: vec![],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), clear))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.recorder.tool.set(Some(Tool::Pen));
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    cx.run_until_parked();
+    let count = |kernel: &pm_kernel::KernelHandle| {
+        let p = kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None).len()
+    };
+    let before = count(&s.rig.kernel);
+    for at in [[300., 100.], [400., 100.], [400., 250.], [300., 250.]] {
+        let p = s.point_of(at);
+        s.vcx.simulate_click(p, Modifiers::none());
+    }
+    let kernel = s.rig.kernel.clone();
+    let vertices = move |kernel: &pm_kernel::KernelHandle| {
+        let p = kernel.published(PROJECT).unwrap();
+        let id = p.selection.layers().first().cloned()?;
+        let layer = layer_value(kernel, &id)?;
+        let paths = layer.get("d")?.get("paths")?.as_array()?.clone();
+        Some(
+            paths
+                .iter()
+                .map(|path| path.get("vertices").and_then(|v| v.as_array()).cloned())
+                .collect::<Option<Vec<_>>>()?,
+        )
+    };
+    let surface = s.surface.clone();
+    settle(cx, move |cx| {
+        surface.read_with(cx, |g, _| g.idle())
+            && vertices(&kernel).is_some_and(|paths| paths.len() == 1 && paths[0].len() == 4)
+    });
+    assert_eq!(count(&s.rig.kernel), before + 1, "one new path layer");
+    let paths = vertices(&s.rig.kernel).unwrap();
+    for v in &paths[0] {
+        for k in ["inX", "inY", "outX", "outY"] {
+            assert_eq!(
+                v.get("p").and_then(|p| p.get(k)?.get("v")?.as_f64()),
+                Some(0.),
+                "a click is a corner: {k}"
+            );
+        }
+    }
+}
 /// A new path layer's path closes on a click on its first vertex, as a
 /// mask path does.
 #[gpui::test]
