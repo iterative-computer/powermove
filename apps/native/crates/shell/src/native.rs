@@ -1545,6 +1545,9 @@ struct TabIvars {
     /// The title's mask: its end fades out under the close button.
     fade: Option<Retained<CAGradientLayer>>,
     edited: bool,
+    /// The project asks something only its tab shows (a Recover question in
+    /// a tab behind): the dot is the accent, before an edited one.
+    attention: bool,
     selected: Cell<bool>,
     hovered: Cell<bool>,
     /// Carried along the strip by the pointer.
@@ -1614,6 +1617,7 @@ impl TabView {
         fade: Option<Retained<CAGradientLayer>>,
         edited: bool,
         selected: bool,
+        attention: bool,
     ) -> Retained<Self> {
         unsafe {
             msg_send![
@@ -1622,6 +1626,7 @@ impl TabView {
                     label,
                     fade,
                     edited,
+                    attention,
                     selected: Cell::new(selected),
                     hovered: Cell::new(false),
                     lifted: Cell::new(false),
@@ -1717,6 +1722,7 @@ impl TabView {
             hovered,
             lifted,
             edited,
+            attention,
             ..
         } = self.ivars();
         let dark = dark_appearance(self);
@@ -1743,8 +1749,10 @@ impl TabView {
             NSColor::colorWithSRGBRed_green_blue_alpha(ink, ink, ink, alpha).setFill();
             shape().fill();
         }
-        if *edited {
-            if active {
+        if *edited || *attention {
+            if *attention {
+                NSColor::controlAccentColor()
+            } else if active {
                 NSColor::secondaryLabelColor()
             } else {
                 NSColor::tertiaryLabelColor()
@@ -2497,6 +2505,13 @@ fn tab_label(tab: &Tab, tabs: &[Tab]) -> (String, bool) {
         }
     }
 }
+thread_local! {
+    /// Windows whose tab carries the attention mark ([`Host::set_attention`]).
+    static ATTENTION: RefCell<std::collections::HashSet<isize>> = RefCell::new(Default::default());
+}
+fn needs_attention(window: isize) -> bool {
+    ATTENTION.with(|a| a.borrow().contains(&window))
+}
 /// A tab's tooltip: its whole name, and where the project is: its file's
 /// full path, or the library.
 fn tab_tooltip(tab: &Tab) -> String {
@@ -2733,6 +2748,7 @@ impl ToolbarDelegate {
                         Retained::into_super(Retained::into_super(home.clone())),
                         None,
                         None,
+                        false,
                         false,
                         false,
                     );
@@ -4258,6 +4274,30 @@ impl Host {
         let title = self.document.borrow().0.clone();
         (!title.is_empty() && title != "Untitled" && title != "Home").then_some(title)
     }
+    /// Marks this window's tab while its project asks something the tab
+    /// shows only once chosen (a Recover question in a tab behind); every
+    /// strip of its group shows the mark.
+    pub fn set_attention(&self, on: bool) {
+        let number = self.window.windowNumber();
+        let changed = ATTENTION.with(|a| {
+            let mut a = a.borrow_mut();
+            if on { a.insert(number) } else { a.remove(&number) }
+        });
+        if changed {
+            for tab in tab_windows(&self.window) {
+                route(tab.windowNumber(), "syncTabs".into());
+            }
+            route(number, "syncTabs".into());
+        }
+    }
+    /// Whether this window's tab is the one its group shows (or it has no
+    /// group).
+    pub fn tab_shown(&self) -> bool {
+        self.window.tabGroup().is_none_or(|g| {
+            g.selectedWindow()
+                .is_some_and(|w| w.windowNumber() == self.window.windowNumber())
+        })
+    }
     pub fn set_document_metadata(
         &self,
         title: &str,
@@ -4432,7 +4472,7 @@ impl Host {
         const LABEL_PAD: f64 = 2.;
         let lead = |tab: &Tab| {
             TAB_PAD
-                + if tab.edited {
+                + if tab.edited || needs_attention(tab.window) {
                     TAB_DOT + TAB_DOT_GAP
                 } else {
                     0.
@@ -4576,6 +4616,7 @@ impl Host {
                 Some(fade),
                 tab.edited,
                 tab.selected,
+                needs_attention(tab.window),
             );
             view.addSubview(label);
             view.addSubview(&button);
@@ -4640,6 +4681,7 @@ impl Host {
                 None,
                 false,
                 selected,
+                false,
             );
             view.addSubview(&label);
             view.addSubview(&button);
@@ -4660,6 +4702,7 @@ impl Host {
                 Retained::into_super(Retained::into_super(objc2::Message::retain(button))),
                 None,
                 None,
+                false,
                 false,
                 false,
             );
