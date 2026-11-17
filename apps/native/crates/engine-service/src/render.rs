@@ -3218,6 +3218,11 @@ mod lifetime_tests {
             ..exact
         };
         assert!(!draw(&mut engine, another_time));
+        assert_eq!(
+            engine.showing.len(),
+            1,
+            "offscreen read dropped the visible frame"
+        );
         assert!(
             draw(&mut engine, viewer),
             "offscreen reads preserve the viewer"
@@ -3254,6 +3259,14 @@ mod lifetime_tests {
             "budget trim dropped the visible frame"
         );
         assert!(Arc::ptr_eq(&surface, &engine.showing[0].1.surface));
+        crate::memory::simulate_pressure(crate::memory::Pressure::Critical);
+        engine.govern_memory();
+        crate::memory::simulate_pressure(crate::memory::Pressure::Normal);
+        assert!(
+            Arc::ptr_eq(&surface, &engine.showing[0].1.surface),
+            "critical pressure dropped the visible frame"
+        );
+        assert!(draw(&mut engine, viewer), "critical pressure forced a reload");
         let edited = Scene {
             doc: Arc::new(pm_model::Document::new(
                 Some(pm_model::canonical::canonical_project(
