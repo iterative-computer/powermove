@@ -7,6 +7,7 @@ pub mod claude_launch;
 pub mod codex;
 pub mod codex_exec;
 pub mod compatible;
+pub mod context;
 pub mod conversation;
 pub mod delivery;
 pub mod history;
