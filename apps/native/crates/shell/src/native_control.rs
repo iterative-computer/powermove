@@ -124,7 +124,7 @@ struct TargetState {
     fill: std::cell::RefCell<Option<RowSource>>,
     kind: Kind,
     /// The window's content view: where the keyboard goes back to.
-    content: Retained<NSView>,
+    content: Option<Retained<NSView>>,
 }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -186,7 +186,7 @@ define_class!(
                 else{None};
             if let Some(key)=key{
                 if let Some(window)=control.window(){
-                    window.makeFirstResponder(Some(&self.ivars().content));
+                    window.makeFirstResponder(self.ivars().content.as_deref().map(AsRef::as_ref));
                 }
                 let _=self.ivars().sender.try_send(json!({"key":key}));
             }
@@ -420,121 +420,191 @@ fn measured(look: Look, control: &NSControl) -> (NSSize, NSSize) {
     MEASURED.with_borrow_mut(|m| m.insert(look, sizes));
     sizes
 }
-impl NativeControl {
+/// The same controls that GPUI hosts, placed directly in an AppKit form.
+pub struct FormControl {
+    control: Control,
+    target: Retained<Target>,
+    seen: std::cell::RefCell<Option<(Value, Vec<Value>, bool)>>,
+}
+
+impl FormControl {
     pub fn new(
-        spec: ControlSpec<'_>,
-        t: &pm_design::Tokens,
-        window: &Window,
-        cx: &mut Context<Self>,
+        spec: &ControlSpec<'_>,
+        tokens: &pm_design::Tokens,
+        sender: async_channel::Sender<Value>,
     ) -> Self {
-        let ControlSpec {
-            kind,
-            label,
-            identifier,
-            value,
-            options,
-            disabled,
-            default,
-            destructive,
-            inline,
-            quiet,
-            pull,
-            tint,
-            symbol,
-            glass,
-            well,
-        } = spec;
-        let glass = glass && objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some();
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        let RawWindowHandle::AppKit(handle) =
-            HasWindowHandle::window_handle(window).unwrap().as_raw()
-        else {
-            unreachable!()
-        };
-        let gpui: Retained<NSView> =
-            unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
-        let mtm = MainThreadMarker::new().unwrap();
-        let (tx, rx) = async_channel::bounded(32);
-        let target: Retained<Target> = unsafe {
-            msg_send![
-                super(Target::alloc(mtm).set_ivars(TargetState {
-                    sender: tx,
-                    options: std::cell::RefCell::new(options.clone()),
-                    tracking: std::cell::Cell::new(false),
-                    pending: std::cell::RefCell::new(None),
-                    popup: std::cell::RefCell::new(None),
-                    fill: std::cell::RefCell::new(None),
-                    kind,
-                    content: gpui.clone(),
-                })),
-                init
-            ]
-        };
-        let control = match kind {
-            Kind::Popup => {
-                let v = NSPopUpButton::initWithFrame_pullsDown(
-                    NSPopUpButton::alloc(mtm),
-                    NSRect::ZERO,
-                    pull,
-                );
-                add_items(&v, &options);
-                unsafe {
-                    v.setTarget(Some(&target));
-                    v.setAction(Some(sel!(act:)));
-                }
-                watch_menu(&target, &v);
-                let font = if pull && inline {
-                    // A header's title (borderless): the name it heads, in
-                    // its type. A bezelled pull-down (Publish) is a button.
-                    unsafe {
-                        NSFont::systemFontOfSize_weight(
-                            t.typography.heading as f64,
-                            objc2_app_kit::NSFontWeightSemibold,
-                        )
-                    }
-                } else {
-                    NSFont::systemFontOfSize(t.typography.body as f64)
-                };
-                v.setFont(Some(&font));
-                if pull && inline {
-                    // The title is a heading; its menu lists in menu type.
-                    if let Some(menu) = v.menu() {
-                        unsafe { menu.setFont(Some(&NSFont::menuFontOfSize(0.))) };
-                    }
-                }
-                if inline || well {
-                    v.setBordered(false);
-                }
-                if inline && quiet {
-                    // An option under the content it qualifies: a caption,
-                    // never the content's own ink.
-                    v.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
-                }
-                // A pop-up in a row's well fills the well: its own size is
-                // never used, and measuring it is a layout pass of its own.
-                if !well {
-                    v.sizeToFit();
-                }
-                Control::Popup(v)
+        let (control, target) = make_control(spec, tokens, None, true, sender);
+        Self {
+            control,
+            target,
+            seen: Default::default(),
+        }
+    }
+
+    pub fn view(&self) -> &NSView {
+        self.control.view()
+    }
+
+    pub fn update(&self, value: &Value, options: &[Value], disabled: bool) {
+        if self
+            .seen
+            .borrow()
+            .as_ref()
+            .is_some_and(|(old_value, old_options, old_disabled)| {
+                old_value == value && old_options == options && *old_disabled == disabled
+            })
+        {
+            return;
+        }
+        *self.seen.borrow_mut() = Some((value.clone(), options.to_vec(), disabled));
+        self.control.enabled(!disabled);
+        match &self.control {
+            Control::Popup(popup) if !popup.pullsDown() => {
+                set_rows(&self.target, popup, options, value);
             }
-            Kind::Segmented => {
-                let v =
-                    NSSegmentedControl::initWithFrame(NSSegmentedControl::alloc(mtm), NSRect::ZERO);
-                v.setSegmentCount(options.len() as isize);
-                v.setTrackingMode(NSSegmentSwitchTracking::SelectOne);
-                let font = v
-                    .font()
-                    .unwrap_or_else(|| NSFont::systemFontOfSize(NSFont::systemFontSize()));
-                for (i, option) in options.iter().enumerate() {
-                    let title = option
-                        .get("label")
-                        .and_then(Value::as_str)
-                        .or_else(|| option.as_str())
-                        .unwrap_or("");
-                    // A glyph segment: the panel's symbol size in a segment a
-                    // row high wide, never scaled to fit; a vendored glyph
-                    // where one stands for the symbol (`crate::icons`).
-                    let glyph = option.get("symbol").and_then(Value::as_str).and_then(|name| {
+            Control::Search(field) if field.currentEditor().is_some() => {}
+            _ => self.control.value(value, options),
+        }
+    }
+
+    pub fn set_title(&self, title: &str) {
+        if let Control::Button(button) = &self.control {
+            let title = NSString::from_str(title);
+            if button.title() != title {
+                button.setTitle(&title);
+            }
+        }
+    }
+
+    pub fn set_placeholder(&self, text: &str) {
+        if let Control::Search(field) = &self.control {
+            field.setPlaceholderString(Some(&NSString::from_str(text)));
+        }
+    }
+}
+
+fn make_control(
+    spec: &ControlSpec<'_>,
+    t: &pm_design::Tokens,
+    content: Option<Retained<NSView>>,
+    form: bool,
+    sender: async_channel::Sender<Value>,
+) -> (Control, Retained<Target>) {
+    let ControlSpec {
+        kind,
+        label,
+        identifier,
+        value,
+        ref options,
+        disabled,
+        default,
+        destructive,
+        inline,
+        quiet,
+        pull,
+        tint,
+        symbol,
+        glass,
+        well,
+    } = *spec;
+    let body_size = if form {
+        NSFont::systemFontSize()
+    } else {
+        t.typography.body as f64
+    };
+    let glass = !form && glass && objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some();
+    let mtm = MainThreadMarker::new().unwrap();
+
+    let target: Retained<Target> = unsafe {
+        msg_send![
+            super(Target::alloc(mtm).set_ivars(TargetState {
+                sender,
+                options: std::cell::RefCell::new(options.clone()),
+                tracking: std::cell::Cell::new(false),
+                pending: std::cell::RefCell::new(None),
+                popup: std::cell::RefCell::new(None),
+                fill: std::cell::RefCell::new(None),
+                kind,
+                content,
+            })),
+            init
+        ]
+    };
+    let control = match kind {
+        Kind::Popup => {
+            let v = NSPopUpButton::initWithFrame_pullsDown(
+                NSPopUpButton::alloc(mtm),
+                NSRect::ZERO,
+                pull,
+            );
+            add_items(&v, options);
+            unsafe {
+                v.setTarget(Some(&target));
+                v.setAction(Some(sel!(act:)));
+            }
+            watch_menu(&target, &v);
+            let font = if pull && inline {
+                // A header's title (borderless): the name it heads, in
+                // its type. A bezelled pull-down (Publish) is a button.
+                unsafe {
+                    NSFont::systemFontOfSize_weight(
+                        t.typography.heading as f64,
+                        objc2_app_kit::NSFontWeightSemibold,
+                    )
+                }
+            } else {
+                NSFont::systemFontOfSize(body_size)
+            };
+            v.setFont(Some(&font));
+            if pull && inline {
+                // The title is a heading; its menu lists in menu type.
+                if let Some(menu) = v.menu() {
+                    unsafe { menu.setFont(Some(&NSFont::menuFontOfSize(0.))) };
+                }
+            }
+            if form {
+                v.setBezelStyle(NSBezelStyle::Push);
+                v.setShowsBorderOnlyWhileMouseInside(true);
+            }
+            if inline || well {
+                v.setBordered(false);
+            }
+            if inline && quiet {
+                // An option under the content it qualifies: a caption,
+                // never the content's own ink.
+                v.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+            }
+            // A pop-up in a row's well fills the well: its own size is
+            // never used, and measuring it is a layout pass of its own.
+            if !well {
+                v.sizeToFit();
+            }
+            Control::Popup(v)
+        }
+        Kind::Segmented => {
+            let v = NSSegmentedControl::initWithFrame(NSSegmentedControl::alloc(mtm), NSRect::ZERO);
+            v.setSegmentCount(options.len() as isize);
+            v.setTrackingMode(NSSegmentSwitchTracking::SelectOne);
+            let font = v
+                .font()
+                .unwrap_or_else(|| NSFont::systemFontOfSize(NSFont::systemFontSize()));
+            for (i, option) in options.iter().enumerate() {
+                let title = option
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .or_else(|| option.as_str())
+                    .unwrap_or("");
+                if form {
+                    v.setLabel_forSegment(&NSString::from_str(title), i as isize);
+                    continue;
+                }
+                // A glyph segment: the panel's symbol size in a segment a
+                // row high wide, never scaled to fit; a vendored glyph
+                // where one stands for the symbol (`crate::icons`).
+                let glyph = option
+                    .get("symbol")
+                    .and_then(Value::as_str)
+                    .and_then(|name| {
                         if let Some(image) = crate::icons::glyph(name).and_then(|g| {
                             crate::native::glyph_image(g, t.metrics.symbol_panel as f64, title)
                         }) {
@@ -550,186 +620,224 @@ impl NativeControl {
                         );
                         Some(image.imageWithSymbolConfiguration(&config).unwrap_or(image))
                     });
-                    let width = if glyph.is_some() {
-                        v.setToolTip_forSegment(Some(&NSString::from_str(title)), i as isize);
-                        (t.metrics.row + t.space.xs) as f64
-                    } else {
-                        0.
-                    };
-                    let face = segment_face(title, glyph, &font);
-                    let width = if width > 0. {
-                        width
-                    } else {
-                        face.size().width + 2. * t.space.lg as f64
-                    };
-                    v.setImage_forSegment(Some(&face), i as isize);
-                    v.setImageScaling_forSegment(NSImageScaling::ScaleNone, i as isize);
-                    v.setWidth_forSegment(width, i as isize);
-                }
-                unsafe {
-                    v.setTarget(Some(&target));
-                    v.setAction(Some(sel!(act:)));
-                }
+                let width = if glyph.is_some() {
+                    v.setToolTip_forSegment(Some(&NSString::from_str(title)), i as isize);
+                    (t.metrics.row + t.space.xs) as f64
+                } else {
+                    0.
+                };
+                let face = segment_face(title, glyph, &font);
+                let width = if width > 0. {
+                    width
+                } else {
+                    face.size().width + 2. * t.space.lg as f64
+                };
+                v.setImage_forSegment(Some(&face), i as isize);
+                v.setImageScaling_forSegment(NSImageScaling::ScaleNone, i as isize);
+                v.setWidth_forSegment(width, i as isize);
+            }
+            unsafe {
+                v.setTarget(Some(&target));
+                v.setAction(Some(sel!(act:)));
+            }
+            if !form {
                 v.setSelectedSegmentBezelColor(Some(&crate::native::selected_color()));
-                // Every segmented control is the system's capsule (macOS 26's
-                // liquid glass control), selection still the neutral pill (the
-                // system's own lights it in the accent); `glass` at the large
-                // size (a header's mode switch), a well's at the small one.
+            }
+            // Every segmented control is the system's capsule (macOS 26's
+            // liquid glass control), selection still the neutral pill (the
+            // system's own lights it in the accent); `glass` at the large
+            // size (a header's mode switch), a well's at the small one.
+            if !form {
                 v.setBorderShape(NSControlBorderShape::Capsule);
+            }
+            if glass {
+                v.setControlSize(NSControlSize::Large);
+            }
+            if well {
+                v.setControlSize(NSControlSize::Small);
+            }
+            v.sizeToFit();
+            Control::Segmented(v)
+        }
+        Kind::Slider => {
+            let v = unsafe {
+                NSSlider::sliderWithValue_minValue_maxValue_target_action(
+                    0.,
+                    0.,
+                    1.,
+                    Some(&target),
+                    Some(sel!(act:)),
+                    mtm,
+                )
+            };
+            // One change per pull, so a drag is one Undo.
+            v.setContinuous(false);
+            Control::Slider(v)
+        }
+        Kind::Checkbox | Kind::Radio | Kind::Push => {
+            // Not `buttonWithTitle:target:action:`, which sizes the
+            // button as it makes it: a measure is a layout pass of its
+            // own on macOS 27, and a list of rows makes the same button
+            // hundreds of times (`measured`).
+            let v = NSButton::initWithFrame(NSButton::alloc(mtm), NSRect::ZERO);
+            unsafe {
+                v.setTarget(Some(&target));
+                v.setAction(Some(sel!(act:)));
+            }
+            v.setTitle(&NSString::from_str(
+                if matches!(kind, Kind::Checkbox | Kind::Radio) {
+                    ""
+                } else {
+                    label
+                },
+            ));
+            if matches!(kind, Kind::Checkbox) {
+                v.setButtonType(NSButtonType::Switch);
+            } else if matches!(kind, Kind::Radio) {
+                v.setButtonType(NSButtonType::Radio);
+            } else {
+                v.setButtonType(NSButtonType::MomentaryPushIn);
+                v.setBezelStyle(if glass {
+                    NSBezelStyle::Glass
+                } else {
+                    NSBezelStyle::Push
+                });
                 if glass {
                     v.setControlSize(NSControlSize::Large);
                 }
-                if well {
-                    v.setControlSize(NSControlSize::Small);
+                v.setHasDestructiveAction(destructive);
+                if let Some(image) = symbol.and_then(|name| {
+                    crate::icons::glyph(name)
+                        .and_then(|g| {
+                            crate::native::glyph_image(g, t.metrics.symbol_panel as f64, "")
+                        })
+                        .or_else(|| {
+                            NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                                &NSString::from_str(name),
+                                None,
+                            )
+                        })
+                }) {
+                    v.setImage(Some(&image));
+                    v.setImagePosition(NSCellImagePosition::ImageLeading);
                 }
-                v.sizeToFit();
-                Control::Segmented(v)
-            }
-            Kind::Slider => {
-                let v = unsafe {
-                    NSSlider::sliderWithValue_minValue_maxValue_target_action(
-                        0.,
-                        0.,
+                if let Some(rgb) = tint {
+                    let channel = |shift: u32| ((rgb >> shift) & 255) as f64 / 255.;
+                    v.setBezelColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
+                        channel(16),
+                        channel(8),
+                        channel(0),
                         1.,
-                        Some(&target),
-                        Some(sel!(act:)),
-                        mtm,
-                    )
-                };
-                // One change per pull, so a drag is one Undo.
-                v.setContinuous(false);
-                Control::Slider(v)
-            }
-            Kind::Checkbox | Kind::Radio | Kind::Push => {
-                // Not `buttonWithTitle:target:action:`, which sizes the
-                // button as it makes it: a measure is a layout pass of its
-                // own on macOS 27, and a list of rows makes the same button
-                // hundreds of times (`measured`).
-                let v = NSButton::initWithFrame(NSButton::alloc(mtm), NSRect::ZERO);
-                unsafe {
-                    v.setTarget(Some(&target));
-                    v.setAction(Some(sel!(act:)));
+                    )));
                 }
-                v.setTitle(&NSString::from_str(
-                    if matches!(kind, Kind::Checkbox | Kind::Radio) {
-                        ""
-                    } else {
-                        label
-                    },
-                ));
-                if matches!(kind, Kind::Checkbox) {
-                    v.setButtonType(NSButtonType::Switch);
-                } else if matches!(kind, Kind::Radio) {
-                    v.setButtonType(NSButtonType::Radio);
-                } else {
-                    v.setButtonType(NSButtonType::MomentaryPushIn);
-                    v.setBezelStyle(if glass {
-                        NSBezelStyle::Glass
-                    } else {
-                        NSBezelStyle::Push
-                    });
-                    if glass {
-                        v.setControlSize(NSControlSize::Large);
-                    }
-                    v.setHasDestructiveAction(destructive);
-                    if let Some(image) = symbol.and_then(|name| {
-                        crate::icons::glyph(name)
-                            .and_then(|g| {
-                                crate::native::glyph_image(g, t.metrics.symbol_panel as f64, "")
-                            })
-                            .or_else(|| {
-                                NSImage::imageWithSystemSymbolName_accessibilityDescription(
-                                    &NSString::from_str(name),
-                                    None,
-                                )
-                            })
-                    }) {
-                        v.setImage(Some(&image));
-                        v.setImagePosition(NSCellImagePosition::ImageLeading);
-                    }
-                    if let Some(rgb) = tint {
-                        let channel = |shift: u32| ((rgb >> shift) & 255) as f64 / 255.;
-                        v.setBezelColor(Some(&NSColor::colorWithSRGBRed_green_blue_alpha(
-                            channel(16),
-                            channel(8),
-                            channel(0),
-                            1.,
-                        )));
-                    }
-                    if default {
-                        v.setKeyEquivalent(&NSString::from_str("\r"));
-                    }
+                if default {
+                    v.setKeyEquivalent(&NSString::from_str("\r"));
                 }
-                v.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
-                Control::Button(v)
             }
-            Kind::Search => {
-                let v = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), NSRect::ZERO);
-                v.setPlaceholderString(Some(&NSString::from_str(label)));
-                // The caret and the clear button say where the keyboard is;
-                // no accent ring.
+            v.setFont(Some(&NSFont::systemFontOfSize(body_size)));
+            Control::Button(v)
+        }
+        Kind::Search => {
+            let v = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), NSRect::ZERO);
+            v.setPlaceholderString(Some(&NSString::from_str(label)));
+            // The caret and the clear button say where the keyboard is;
+            // no accent ring.
+            if !form {
                 v.setFocusRingType(NSFocusRingType::None);
-                v.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
-                v.setSendsSearchStringImmediately(true);
-                v.setSendsWholeSearchString(false);
-                unsafe {
-                    v.setTarget(Some(&target));
-                    v.setAction(Some(sel!(act:)));
+            }
+            v.setFont(Some(&NSFont::systemFontOfSize(body_size)));
+            v.setSendsSearchStringImmediately(true);
+            v.setSendsWholeSearchString(false);
+            unsafe {
+                v.setTarget(Some(&target));
+                v.setAction(Some(sel!(act:)));
+                if !form {
                     let _: () = msg_send![&*v, setDelegate: &*target];
                 }
+            }
+            v.sizeToFit();
+            // A view's one prominent search (Home): the large field, with
+            // its shortcut at the trailing end while it is empty.
+            if let Some(shortcut) = symbol {
+                v.setControlSize(NSControlSize::Large);
+                v.setFont(Some(&NSFont::systemFontOfSize(t.typography.title as f64)));
                 v.sizeToFit();
-                // A view's one prominent search (Home): the large field, with
-                // its shortcut at the trailing end while it is empty.
-                if let Some(shortcut) = symbol {
-                    v.setControlSize(NSControlSize::Large);
-                    v.setFont(Some(&NSFont::systemFontOfSize(t.typography.title as f64)));
-                    v.sizeToFit();
-                    let hint = NSTextField::labelWithString(&NSString::from_str(shortcut), mtm);
-                    hint.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
-                    hint.setTextColor(Some(&NSColor::tertiaryLabelColor()));
-                    hint.setTag(SEARCH_HINT);
-                    hint.setAccessibilityElement(false);
-                    hint.sizeToFit();
-                    let (field, own) = (v.frame().size, hint.frame().size);
-                    hint.setFrameOrigin(NSPoint::new(
-                        field.width - own.width - 12.,
-                        ((field.height - own.height) / 2.).round(),
-                    ));
-                    hint.setAutoresizingMask(
-                        NSAutoresizingMaskOptions::ViewMinXMargin
-                            | NSAutoresizingMaskOptions::ViewMinYMargin
-                            | NSAutoresizingMaskOptions::ViewMaxYMargin,
-                    );
-                    v.addSubview(&hint);
-                }
-                Control::Search(v)
+                let hint = NSTextField::labelWithString(&NSString::from_str(shortcut), mtm);
+                hint.setFont(Some(&NSFont::systemFontOfSize(body_size)));
+                hint.setTextColor(Some(&NSColor::tertiaryLabelColor()));
+                hint.setTag(SEARCH_HINT);
+                hint.setAccessibilityElement(false);
+                hint.sizeToFit();
+                let (field, own) = (v.frame().size, hint.frame().size);
+                hint.setFrameOrigin(NSPoint::new(
+                    field.width - own.width - 12.,
+                    ((field.height - own.height) / 2.).round(),
+                ));
+                hint.setAutoresizingMask(
+                    NSAutoresizingMaskOptions::ViewMinXMargin
+                        | NSAutoresizingMaskOptions::ViewMinYMargin
+                        | NSAutoresizingMaskOptions::ViewMaxYMargin,
+                );
+                v.addSubview(&hint);
             }
-            Kind::Well => {
-                let v = NSColorWell::initWithFrame(NSColorWell::alloc(mtm), NSRect::ZERO);
-                v.setColorWellStyle(NSColorWellStyle::Minimal);
-                unsafe {
-                    v.setTarget(Some(&target));
-                    v.setAction(Some(sel!(act:)));
-                }
-                Control::Well(v)
+            Control::Search(v)
+        }
+        Kind::Well => {
+            let v = NSColorWell::initWithFrame(NSColorWell::alloc(mtm), NSRect::ZERO);
+            v.setColorWellStyle(NSColorWellStyle::Minimal);
+            unsafe {
+                v.setTarget(Some(&target));
+                v.setAction(Some(sel!(act:)));
             }
-            Kind::Switch => {
-                let v = NSSwitch::initWithFrame(NSSwitch::alloc(mtm), NSRect::ZERO);
-                unsafe {
-                    v.setTarget(Some(&target));
-                    v.setAction(Some(sel!(act:)));
-                }
-                Control::Switch(v)
+            Control::Well(v)
+        }
+        Kind::Switch => {
+            let v = NSSwitch::initWithFrame(NSSwitch::alloc(mtm), NSRect::ZERO);
+            unsafe {
+                v.setTarget(Some(&target));
+                v.setAction(Some(sel!(act:)));
             }
+            Control::Switch(v)
+        }
+    };
+    control
+        .view()
+        .setAccessibilityLabel(Some(&NSString::from_str(label)));
+    control
+        .view()
+        .setAccessibilityIdentifier(Some(&NSString::from_str(identifier)));
+    control.enabled(!disabled);
+    control.value(value, options);
+    (control, target)
+}
+
+impl NativeControl {
+    pub fn new(
+        spec: ControlSpec<'_>,
+        t: &pm_design::Tokens,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let RawWindowHandle::AppKit(handle) =
+            HasWindowHandle::window_handle(window).unwrap().as_raw()
+        else {
+            unreachable!()
         };
-        control
-            .view()
-            .setAccessibilityLabel(Some(&NSString::from_str(label)));
-        control
-            .view()
-            .setAccessibilityIdentifier(Some(&NSString::from_str(identifier)));
-        control.enabled(!disabled);
-        control.value(value, &options);
+        let gpui: Retained<NSView> =
+            unsafe { Retained::retain(handle.ns_view.as_ptr().cast()).unwrap() };
+        let (tx, rx) = async_channel::bounded(32);
+        let (control, target) = make_control(&spec, t, Some(gpui.clone()), false, tx);
+        let ControlSpec {
+            kind,
+            label,
+            symbol,
+            glass,
+            inline,
+            well,
+            ..
+        } = spec;
+        let glass = glass && objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some();
         let sized: Option<&NSControl> = match &control {
             Control::Button(v) => Some(v.as_ref()),
             Control::Switch(v) => Some(v.as_ref()),
@@ -1041,28 +1149,28 @@ impl Render for NativeControl {
             .h(px(self.height))
             .on_mouse_down(MouseButton::Left, pressed)
             .child(
-            canvas(
-                |_, _, _| (),
-                move |painted, _, window, _| {
-                    let (bounds, clip) =
-                        layer.painted(painted, window.content_mask().bounds, window);
-                    let size = ns_rect(bounds).size;
-                    if pictures && picture.paint(painted, || slot.picture(size), window) {
-                        slot.hide();
-                        return;
-                    }
-                    slot.stage(ns_rect(bounds), ns_rect(clip));
-                    if focus.get()
-                        && let Some(window) = native.window()
-                    {
-                        focus.set(false);
-                        window.makeFirstResponder(Some(&native));
-                    }
-                },
+                canvas(
+                    |_, _, _| (),
+                    move |painted, _, window, _| {
+                        let (bounds, clip) =
+                            layer.painted(painted, window.content_mask().bounds, window);
+                        let size = ns_rect(bounds).size;
+                        if pictures && picture.paint(painted, || slot.picture(size), window) {
+                            slot.hide();
+                            return;
+                        }
+                        slot.stage(ns_rect(bounds), ns_rect(clip));
+                        if focus.get()
+                            && let Some(window) = native.window()
+                        {
+                            focus.set(false);
+                            window.makeFirstResponder(Some(&native));
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
             )
-            .absolute()
-            .inset_0(),
-        )
     }
 }
 /// A segment's content, drawn by us in the label ink. AppKit paints a title
@@ -1305,7 +1413,7 @@ impl PopupRows {
                     popup: std::cell::RefCell::new(None),
                     fill: std::cell::RefCell::new(None),
                     kind: Kind::Popup,
-                    content,
+                    content: Some(content),
                 })),
                 init
             ]
