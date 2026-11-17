@@ -4221,7 +4221,23 @@ impl Render for TimelineSurface {
                     .border(px(self.tokens.metrics.border * 2.))
                     .border_color(rgb(self.tokens.colors.accent))
             });
-        let landing = self.media_over.map(|position| {
+        // An empty composition has no row to put a line between: the whole
+        // layer area takes the drop, washed and outlined as a group a layer
+        // moves into is (PM-471).
+        let empty = self.scene.as_ref().is_none_or(|s| s.total() == 0);
+        let empty_landing = self.media_over.filter(|_| empty).map(|_| {
+            let accent = self.tokens.colors.accent;
+            div()
+                .absolute()
+                .left(px(0.))
+                .top(px(self.tokens.metrics.ruler))
+                .w(self.bounds.size.width)
+                .h(self.bounds.size.height - px(self.tokens.metrics.ruler))
+                .bg(rgba((accent << 8) | 0x29))
+                .border(px(self.tokens.metrics.drop_stroke))
+                .border_color(rgb(accent))
+        });
+        let landing = self.media_over.filter(|_| !empty).map(|position| {
             let (at, _, y) = self.media_slot(position);
             let x = self.view.layer_column + (at - self.view.scroll_time) * self.view.pps;
             let (width, height) = (self.bounds.size.width, self.bounds.size.height);
@@ -4837,6 +4853,7 @@ impl Render for TimelineSurface {
             )
             // Over the canvas.
             .children(landing.into_iter().flatten())
+            .children(empty_landing)
             .children(reorder.into_iter().flatten().flatten())
             .children(effect_row)
             .children(tip)
