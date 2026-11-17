@@ -9,11 +9,65 @@ use std::{
     rc::Rc,
     sync::Arc,
 };
-type MediaProbeInputs = (
+pub(crate) type MediaProbeInputs = (
     crate::media_refresh::Inputs,
     BTreeMap<String, std::path::PathBuf>,
     BTreeMap<String, std::path::PathBuf>,
 );
+/// At most one readiness read per window. New publications replace the
+/// desired inputs in the controller; completion replans against the latest.
+#[derive(Default)]
+pub(crate) struct MediaProbeRefresh {
+    settled: Option<MediaProbeInputs>,
+    pending: Option<(u64, MediaProbeInputs)>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MediaProbePlan {
+    Reuse,
+    Waiting,
+    Start(u64),
+}
+// A host is replaced with Default on document changes. IDs must still be
+// unique so an old worker cannot finish the new host's read.
+static NEXT_MEDIA_PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+fn same_probe_inputs(a: &MediaProbeInputs, b: &MediaProbeInputs) -> bool {
+    a.0.same(&b.0) && a.1 == b.1 && a.2 == b.2
+}
+impl MediaProbeRefresh {
+    pub(crate) fn plan(&mut self, inputs: MediaProbeInputs) -> MediaProbePlan {
+        if self
+            .settled
+            .as_ref()
+            .is_some_and(|old| same_probe_inputs(old, &inputs))
+        {
+            return MediaProbePlan::Reuse;
+        }
+        if self.pending.is_some() {
+            return MediaProbePlan::Waiting;
+        }
+        let serial = NEXT_MEDIA_PROBE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.pending = Some((serial, inputs));
+        MediaProbePlan::Start(serial)
+    }
+    /// Settle only a current completion. The caller publishes Unknown on a
+    /// current error, so it never rebinds an older observation to new inputs.
+    pub(crate) fn finish(&mut self, serial: u64, latest: Option<&MediaProbeInputs>) -> bool {
+        if self
+            .pending
+            .as_ref()
+            .is_none_or(|(pending, _)| *pending != serial)
+        {
+            return false;
+        }
+        let (_, inputs) = self.pending.take().unwrap();
+        if latest.is_none_or(|latest| !same_probe_inputs(&inputs, latest)) {
+            return false;
+        }
+        self.settled = Some(inputs);
+        true
+    }
+}
+
 /// The viewer overlays a native Metal layer and must join each shell repaint,
 /// including the loading reveal, even when its panel publication is unchanged.
 /// The timeline's body can reuse its retained paint.
@@ -158,10 +212,11 @@ pub struct Host {
     pub export_tasks: Arc<std::sync::Mutex<pm_promedia::tasks::BackgroundTasks>>,
     pub media_runtime: pm_panel_media::readiness::ObservedRuntime,
     media_probes: Arc<pm_builtins::delivery::MediaProbes>,
-    /// The media inputs behind `media_runtime`, and the worker observing them.
-    media_probed: Option<MediaProbeInputs>,
-    media_probe_serial: u64,
-    /// Bumped whenever `media_runtime` is replaced: what the status line's
+    /// The last settled observations and the single worker reading media.
+    media_probe_refresh: MediaProbeRefresh,
+    /// Whether the cached readiness belongs to the current resolved inputs.
+    pub(crate) media_observation_current: bool,
+    /// Bumped whenever published readiness changes: what the status line's
     /// offline count is kept by (`FrameFacts::offline`).
     pub media_observed: u64,
     updating: bool,
@@ -427,6 +482,13 @@ impl Controller {
     }
 }
 impl Host {
+    fn set_media_observation_current(&mut self, current: bool) {
+        if self.media_observation_current != current {
+            self.media_observation_current = current;
+            self.media_observed += 1;
+        }
+    }
+
     /// An unmounted surface: its view and anything it published go with it, so a
     /// rebuilt graph starts from its own first commit.
     /// A panel whose realm is being replaced (a reload or a fork swap) keeps
@@ -466,9 +528,12 @@ impl Controller {
             },
             Status::Failed => ProxyStatus::Failed("The task couldn’t be completed.".into()),
         };
-        self.builtins
-            .media_runtime
-            .clone()
+        let observed = if self.builtins.media_observation_current {
+            self.builtins.media_runtime.clone()
+        } else {
+            pm_panel_media::readiness::ObservedRuntime::default()
+        };
+        observed
             .with_posters(
                 media_stamp(published),
                 self.project_assets()
@@ -496,22 +561,33 @@ impl Controller {
             return;
         };
         let inputs = crate::media_refresh::Inputs::published(&published);
+        if !self.media_refresh.catalog_ready(&inputs) {
+            self.builtins.set_media_observation_current(false);
+            return;
+        }
         let originals = self.media.originals.clone();
         let proxies = self.media.proxies.clone();
         let stamp = media_stamp(&published);
-        if self
-            .builtins
-            .media_probed
-            .as_ref()
-            .is_some_and(|(i, o, p)| i.same(&inputs) && *o == originals && *p == proxies)
-        {
-            self.builtins.media_runtime = self.builtins.media_runtime.clone().rebound(stamp);
-            self.builtins.media_observed += 1;
-            return;
-        }
-        self.builtins.media_probed = Some((inputs, originals.clone(), proxies.clone()));
-        self.builtins.media_probe_serial += 1;
-        let serial = self.builtins.media_probe_serial;
+        let serial = match self.builtins.media_probe_refresh.plan((
+            inputs,
+            originals.clone(),
+            proxies.clone(),
+        )) {
+            MediaProbePlan::Reuse => {
+                self.builtins.set_media_observation_current(true);
+                self.builtins.media_runtime = self.builtins.media_runtime.clone().rebound(stamp);
+                self.builtins.media_observed += 1;
+                return;
+            }
+            MediaProbePlan::Waiting => {
+                self.builtins.set_media_observation_current(false);
+                return;
+            }
+            MediaProbePlan::Start(serial) => {
+                self.builtins.set_media_observation_current(false);
+                serial
+            }
+        };
         let probes = self.builtins.media_probes.clone();
         cx.spawn(async move |this, cx| {
             let observed = cx
@@ -527,7 +603,25 @@ impl Controller {
                 })
                 .await;
             let _ = this.update(cx, |v, cx| {
-                if v.builtins.media_probe_serial != serial {
+                let latest = v
+                    .published
+                    .as_ref()
+                    .map(|p| {
+                        (
+                            crate::media_refresh::Inputs::published(p),
+                            v.media.originals.clone(),
+                            v.media.proxies.clone(),
+                        )
+                    })
+                    .filter(|inputs| v.media_refresh.catalog_ready(&inputs.0));
+                if !v
+                    .builtins
+                    .media_probe_refresh
+                    .finish(serial, latest.as_ref())
+                {
+                    // The one in-flight read finished against older inputs.
+                    // Start only the latest read, never a backlog of imports.
+                    v.update_builtins(cx);
                     return;
                 }
                 match observed {
@@ -536,14 +630,21 @@ impl Controller {
                             Some(p) => observed.rebound(media_stamp(p)),
                             None => observed,
                         };
-                        v.builtins.media_observed += 1;
-                        v.update_builtins(cx);
                     }
                     Err(error) => {
                         v.message = error;
-                        cx.notify();
+                        // A failed read is settled until the inputs change.
+                        // Old readiness is not proof of these new inputs.
+                        let unknown = pm_panel_media::readiness::ObservedRuntime::default();
+                        v.builtins.media_runtime = match &v.published {
+                            Some(p) => unknown.rebound(media_stamp(p)),
+                            None => unknown,
+                        };
                     }
                 }
+                v.builtins.media_observed += 1;
+                v.update_builtins(cx);
+                cx.notify();
             });
         })
         .detach();

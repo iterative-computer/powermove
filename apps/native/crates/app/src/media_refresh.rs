@@ -104,6 +104,7 @@ pub struct Refresh {
     serial: u64,
     visible: Option<Inputs>,
     settled: Option<Inputs>,
+    resolved: bool,
     pending: Option<(u64, Inputs)>,
 }
 pub struct Plan {
@@ -117,6 +118,7 @@ impl Refresh {
         self.serial += 1;
         self.visible = None;
         self.settled = None;
+        self.resolved = false;
         self.pending = None;
     }
     /// Settled at `inputs` (what a finished job leaves).
@@ -125,6 +127,13 @@ impl Refresh {
         self.reset();
         self.visible = Some(inputs.clone());
         self.settled = Some(inputs);
+        self.catalog_adopted();
+    }
+    pub(crate) fn catalog_ready(&self, inputs: &Inputs) -> bool {
+        self.resolved && self.settled.as_ref().is_some_and(|old| old.same(inputs))
+    }
+    fn catalog_adopted(&mut self) {
+        self.resolved = self.settled.is_some();
     }
     pub fn plan(&mut self, inputs: Inputs) -> Plan {
         let retire = match &self.visible {
@@ -136,6 +145,7 @@ impl Refresh {
         self.visible = Some(inputs.clone());
         if changed {
             self.settled = None;
+            self.resolved = false;
         }
         if self.pending.is_some() || self.settled.as_ref().is_some_and(|old| old.same(&inputs)) {
             return Plan { retire, job: None };
@@ -158,6 +168,7 @@ impl Refresh {
             return false;
         }
         let (_, inputs) = self.pending.take().unwrap();
+        self.resolved = false;
         if latest.as_ref().is_none_or(|latest| !inputs.same(latest)) {
             return false;
         }
@@ -279,6 +290,7 @@ impl Controller {
         self.media_resolved = true;
         let before = std::mem::take(&mut self.media);
         self.decorate_media(cx);
+        self.media_refresh.catalog_adopted();
         self.identify_media();
         if self.media != before {
             self.publish_media_catalog();
@@ -452,5 +464,111 @@ mod tests {
         let plan = refresh.plan(after);
         assert_eq!(plan.retire, Some(BTreeSet::new()));
         assert!(plan.job.is_some(), "paths are still re-resolved");
+    }
+    fn probe_inputs(document: u64, asset: &str) -> crate::builtins::MediaProbeInputs {
+        (
+            inputs(document, asset),
+            Default::default(),
+            Default::default(),
+        )
+    }
+    fn started(plan: crate::builtins::MediaProbePlan) -> u64 {
+        match plan {
+            crate::builtins::MediaProbePlan::Start(serial) => serial,
+            other => panic!("expected a new probe, got {other:?}"),
+        }
+    }
+    #[test]
+    fn probe_import_bursts_run_one_read_then_only_the_latest() {
+        use crate::builtins::{MediaProbePlan, MediaProbeRefresh};
+        let mut probe = MediaProbeRefresh::default();
+        let first = probe_inputs(1, "first");
+        let serial = started(probe.plan(first.clone()));
+        assert_eq!(
+            probe.plan(first.clone()),
+            MediaProbePlan::Waiting,
+            "queued work is not an observation that can be rebound"
+        );
+        for revision in 0..50 {
+            assert_eq!(
+                probe.plan(probe_inputs(1, &format!("import-{revision}"))),
+                MediaProbePlan::Waiting,
+                "an import must not add another worker"
+            );
+        }
+        let latest = probe_inputs(1, "last");
+        assert!(
+            !probe.finish(serial, Some(&latest)),
+            "stale observations must not publish"
+        );
+        let serial = started(probe.plan(latest.clone()));
+        assert_eq!(probe.plan(latest.clone()), MediaProbePlan::Waiting);
+        assert!(probe.finish(serial, Some(&latest)));
+        assert_eq!(probe.plan(latest), MediaProbePlan::Reuse);
+    }
+    #[test]
+    fn probe_path_changes_wait_and_undo_reuses_only_settled_inputs() {
+        use crate::builtins::{MediaProbePlan, MediaProbeRefresh};
+        let mut probe = MediaProbeRefresh::default();
+        let mut original = probe_inputs(1, "a");
+        original
+            .1
+            .insert("a".into(), "/synthetic/original.png".into());
+        let serial = started(probe.plan(original.clone()));
+        assert!(probe.finish(serial, Some(&original)));
+        let mut changed = original.clone();
+        changed.2.insert("a".into(), "/synthetic/proxy.png".into());
+        let serial = started(probe.plan(changed.clone()));
+        assert_eq!(probe.plan(changed.clone()), MediaProbePlan::Waiting);
+        // Undo can reuse what was actually observed, even while the other
+        // read finishes. That other read must never rebind its own result.
+        assert_eq!(probe.plan(original.clone()), MediaProbePlan::Reuse);
+        assert!(!probe.finish(serial, Some(&original)));
+        assert_eq!(probe.plan(original), MediaProbePlan::Reuse);
+    }
+    #[test]
+    fn a_probe_from_a_retired_host_cannot_finish_the_new_hosts_read() {
+        use crate::builtins::{MediaProbePlan, MediaProbeRefresh};
+        let mut old = MediaProbeRefresh::default();
+        let stale = started(old.plan(probe_inputs(1, "old")));
+        let mut next = MediaProbeRefresh::default();
+        let current = probe_inputs(2, "new");
+        let serial = started(next.plan(current.clone()));
+        assert_ne!(serial, stale);
+        assert!(!next.finish(stale, Some(&current)));
+        assert_eq!(next.plan(current.clone()), MediaProbePlan::Waiting);
+        assert!(next.finish(serial, Some(&current)));
+        assert_eq!(next.plan(current), MediaProbePlan::Reuse);
+    }
+
+    #[test]
+    fn probes_wait_for_an_adopted_catalog_and_never_probe_failed_resolution() {
+        let original = inputs(1, "original");
+        let changed = inputs(1, "changed");
+        let failed = inputs(1, "failed");
+        let mut refresh = Refresh::default();
+        refresh.adopt(original.clone());
+        assert!(refresh.catalog_ready(&original));
+        let job = refresh.plan(changed.clone()).job.unwrap();
+        assert!(
+            !refresh.catalog_ready(&changed),
+            "held display paths are not new readiness evidence"
+        );
+        assert!(refresh.finish(job, Some(changed.clone())));
+        assert!(
+            !refresh.catalog_ready(&changed),
+            "completion is not catalog adoption"
+        );
+        refresh.catalog_adopted();
+        assert!(refresh.catalog_ready(&changed));
+        assert!(!refresh.catalog_ready(&inputs(2, "changed")));
+        let job = refresh.plan(failed.clone()).job.unwrap();
+        assert!(refresh.finish(job, Some(failed.clone())));
+        // An error never calls catalog_adopted. It stays settled without
+        // launching probes against the retained display-only paths.
+        assert!(!refresh.catalog_ready(&failed));
+        assert!(refresh.plan(failed.clone()).job.is_none());
+        assert!(!refresh.catalog_ready(&failed));
+        assert!(!refresh.catalog_ready(&inputs(2, "failed")));
     }
 }

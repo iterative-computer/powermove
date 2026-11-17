@@ -28,7 +28,8 @@ impl ObservedRuntime {
         }
     }
     /// Carry these observations to a revision that changed no media input.
-    /// The caller proves that; `state` still refuses every other stamp.
+    /// The caller proves that; readiness still refuses every other stamp.
+    /// Only a last-good poster may stand in within the same document.
     pub fn rebound(mut self, stamp: Stamp) -> Self {
         self.stamp = Some(stamp);
         self
@@ -64,7 +65,19 @@ impl MediaRuntime for ObservedRuntime {
     }
     fn state(&self, stamp: &Stamp, asset: &str) -> RuntimeState {
         if self.stamp.as_ref() != Some(stamp) {
-            return RuntimeState::default();
+            // Publications and page reads can overtake the readiness worker.
+            // A same-document poster is still a good picture; none of its
+            // older readiness, progress or rendition facts stand in.
+            let poster = self
+                .stamp
+                .as_ref()
+                .filter(|old| old.project == stamp.project && old.document == stamp.document)
+                .and_then(|_| self.states.get(asset))
+                .and_then(|state| state.poster.clone());
+            return RuntimeState {
+                poster,
+                ..Default::default()
+            };
         }
         self.states.get(asset).cloned().unwrap_or_default()
     }
@@ -73,6 +86,53 @@ impl MediaRuntime for ObservedRuntime {
 mod tests {
     use super::*;
     use crate::Availability;
+    #[test]
+    fn late_page_reads_keep_only_the_same_documents_last_good_poster() {
+        let stamp = Stamp {
+            project: "p".into(),
+            document: 1,
+            revision: 2,
+        };
+        let ready = RuntimeState {
+            availability: Availability::Ready,
+            poster: Some("thumb/last-good".into()),
+            proxy: crate::ProxyStatus::Ready {
+                version: "old".into(),
+            },
+            progress: Some(crate::DownloadProgress {
+                completed: 1,
+                total: 2,
+            }),
+            hdr: Some("HLG".into()),
+            ..Default::default()
+        };
+        let observed = ObservedRuntime::new(stamp.clone(), BTreeMap::from([("a".into(), ready)]));
+        let picture = RuntimeState {
+            poster: Some("thumb/last-good".into()),
+            ..Default::default()
+        };
+        for revision in [1, 3] {
+            let reading = Stamp {
+                revision,
+                ..stamp.clone()
+            };
+            assert_eq!(observed.state(&reading, "a"), picture);
+            assert_eq!(observed.state(&reading, "unseen"), RuntimeState::default());
+        }
+        let other_document = Stamp {
+            document: 2,
+            ..stamp.clone()
+        };
+        assert_eq!(
+            observed.state(&other_document, "a"),
+            RuntimeState::default()
+        );
+        let other_project = Stamp {
+            project: "other".into(),
+            ..stamp
+        };
+        assert_eq!(observed.state(&other_project, "a"), RuntimeState::default());
+    }
     #[test]
     fn posters_survive_republish_and_import_without_stale_readiness() {
         let stamp = Stamp {
@@ -112,7 +172,13 @@ mod tests {
             observed.state(&next, "a").availability,
             RuntimeState::default().availability
         );
-        assert_eq!(observed.state(&stamp, "a"), RuntimeState::default());
+        assert_eq!(
+            observed.state(&stamp, "a"),
+            RuntimeState {
+                poster: Some("thumb/a".into()),
+                ..Default::default()
+            }
+        );
         let other = Stamp {
             project: "other".into(),
             ..next
