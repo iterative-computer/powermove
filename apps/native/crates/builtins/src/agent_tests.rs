@@ -389,18 +389,20 @@ fn steering_a_held_run_reaches_the_provider_and_the_conversation() {
     let agent = panel.agent();
     let thread = thread_id(&agent);
     panel.wait(|state| state.panel.session(&thread).unwrap().run.is_some());
-    // The run's turn has started (its id known) before the steer.
-    thread::sleep(Duration::from_millis(300));
-    panel.send("Steer: use blue instead");
-    panel.wait(|state| {
-        state
-            .panel
-            .session(&thread)
-            .unwrap()
-            .conversation
-            .values()
-            .any(|m| m["role"] == "user" && m["text"] == "Steer: use blue instead" && m["steering"] == true)
-    });
+    // Sent until the run's id has reached the panel (a send before that is
+    // refused as stale, and the person sends again); a fixed pause lost the
+    // race under load.
+    let steered = |agent: &std::sync::Arc<std::sync::Mutex<agent_host::AgentState>>| {
+        agent.lock().unwrap().panel.session(&thread).unwrap().conversation.values().any(|m| {
+            m["role"] == "user" && m["text"] == "Steer: use blue instead" && m["steering"] == true
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !steered(&agent) {
+        assert!(Instant::now() < deadline, "the steer was never taken");
+        panel.send("Steer: use blue instead");
+        thread::sleep(Duration::from_millis(100));
+    }
     let deadline = Instant::now() + Duration::from_secs(10);
     while !std::fs::read_to_string(&log).unwrap_or_default().contains("steer Steer: use blue instead") {
         assert!(Instant::now() < deadline, "the provider never received the steer");
