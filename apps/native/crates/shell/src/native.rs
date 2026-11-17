@@ -825,6 +825,51 @@ define_class!(
                 request_close(&window);
             }
         }
+        /// The tab's menu: its file in Finder, or, kept in the library, the
+        /// project in Home.
+        #[unsafe(method(revealTab:))]
+        fn reveal_tab(&self, sender: &AnyObject) {
+            let number: isize = unsafe { msg_send![sender, tag] };
+            let app = NSApplication::sharedApplication(self.mtm());
+            let Some(window) = app.windowWithWindowNumber(number) else {
+                return;
+            };
+            match window.representedURL() {
+                Some(url) => {
+                    let urls = NSArray::from_retained_slice(&[url]);
+                    NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&urls);
+                }
+                None => {
+                    show_in_tab_group(&window);
+                    route(number, "home".into());
+                }
+            }
+        }
+        /// The tab's menu: the project file's full path, to paste.
+        #[unsafe(method(copyTabPath:))]
+        fn copy_tab_path(&self, sender: &AnyObject) {
+            let number: isize = unsafe { msg_send![sender, tag] };
+            let app = NSApplication::sharedApplication(self.mtm());
+            let path = app
+                .windowWithWindowNumber(number)
+                .and_then(|w| w.representedURL())
+                .and_then(|url| url.path());
+            if let Some(path) = path {
+                let board = NSPasteboard::generalPasteboard();
+                board.clearContents();
+                unsafe { board.setString_forType(&path, NSPasteboardTypeString) };
+            }
+        }
+        /// The tab's menu: Rename… (the Name row of Settings › Project).
+        #[unsafe(method(renameTab:))]
+        fn rename_tab(&self, sender: &AnyObject) {
+            let number: isize = unsafe { msg_send![sender, tag] };
+            let app = NSApplication::sharedApplication(self.mtm());
+            if let Some(window) = app.windowWithWindowNumber(number) {
+                show_in_tab_group(&window);
+            }
+            route(number, "renameProject".into());
+        }
         #[unsafe(method(closeOtherTabs:))]
         fn close_other_tabs(&self, sender: &AnyObject) {
             let number: isize = unsafe { msg_send![sender, tag] };
@@ -2452,19 +2497,24 @@ fn tab_label(tab: &Tab, tabs: &[Tab]) -> (String, bool) {
         }
     }
 }
-/// A tab's tooltip: its whole name, and where its file is.
+/// A tab's tooltip: its whole name, and where the project is: its file's
+/// full path, or the library.
 fn tab_tooltip(tab: &Tab) -> String {
     match &tab.file {
-        Some(file) => {
-            let home = std::env::var("HOME").unwrap_or_default();
-            let shown = match file.strip_prefix(&home) {
-                Some(rest) if !home.is_empty() => format!("~{rest}"),
-                _ => file.clone(),
-            };
-            format!("{}\n{shown}", tab.title)
-        }
-        // Kept in the library, as v1 said it.
-        None => format!("{}\nNot saved to a file", tab.title),
+        Some(file) => format!("{}\n{file}", tab.title),
+        None => format!("{}\nLibrary", tab.title),
+    }
+}
+/// The first items of a tab's menu: where the project is, and Rename.
+fn tab_place_items(file: bool) -> Vec<(&'static str, objc2::runtime::Sel)> {
+    if file {
+        vec![
+            ("Show in Finder", sel!(revealTab:)),
+            ("Copy Path", sel!(copyTabPath:)),
+            ("Rename…", sel!(renameTab:)),
+        ]
+    } else {
+        vec![("Show in Home", sel!(revealTab:)), ("Rename…", sel!(renameTab:))]
     }
 }
 fn distinct_title(title: &str, tabs: &[Tab]) -> Option<String> {
@@ -4440,8 +4490,14 @@ impl Host {
             button.setToolTip(Some(&NSString::from_str(&tab_tooltip(tab))));
             button.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tab")));
             button.setAccessibilitySelected(tab.selected);
-            // Right-click: the tab's own menu (reorder, detach, close).
+            // Right-click: the tab's own menu. Where the project is first
+            // (v1's tab and title said it): Finder for a file, Home for the
+            // library; its path; Rename; then reorder, detach, close.
             let menu = NSMenu::new(mtm);
+            for (label, action) in tab_place_items(tab.file.is_some()) {
+                menu.addItem(&item(label, action, tab.window));
+            }
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
             menu.addItem(&item("Close Tab", sel!(closeTab:), tab.window));
             menu.addItem(&item("Close Other Tabs", sel!(closeOtherTabs:), tab.window));
             menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -8584,7 +8640,7 @@ mod tab_layout_tests {
             file: None,
         };
         let twins = [library(1), library(2)];
-        assert_eq!(tab_tooltip(&twins[0]), "Run6\nNot saved to a file");
+        assert_eq!(tab_tooltip(&twins[0]), "Run6\nLibrary");
         assert_eq!(tab_label(&twins[0], &twins).0, "Run6");
         assert_eq!(tab_label(&twins[1], &twins).0, "Run6 (2)");
         let runs = [
@@ -8595,6 +8651,24 @@ mod tab_layout_tests {
             distinct_title(&runs[1].title, &runs).as_deref(),
             Some("…two - Native")
         );
+    }
+    /// A tab tells where its project is: the file's full path, or the
+    /// library; its menu shows it (Finder or Home), copies the path, renames.
+    #[test]
+    fn a_tab_tells_where_its_project_is() {
+        use crate::native::{Tab, tab_place_items, tab_tooltip};
+        let tab = |file: Option<&str>| Tab {
+            window: 1,
+            title: "Paper".into(),
+            edited: false,
+            selected: true,
+            file: file.map(str::to_owned),
+        };
+        assert_eq!(tab_tooltip(&tab(Some("/Users/someone/Movies/Paper.pmv"))), "Paper\n/Users/someone/Movies/Paper.pmv");
+        assert_eq!(tab_tooltip(&tab(None)), "Paper\nLibrary");
+        let labels = |file| tab_place_items(file).into_iter().map(|(l, _)| l).collect::<Vec<_>>();
+        assert_eq!(labels(true), ["Show in Finder", "Copy Path", "Rename…"]);
+        assert_eq!(labels(false), ["Show in Home", "Rename…"]);
     }
 
     #[test]
