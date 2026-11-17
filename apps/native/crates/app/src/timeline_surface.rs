@@ -1746,9 +1746,13 @@ impl TimelineSurface {
                 f.hit_op("work-area", x, y, 0.).is_some()
                     && (event.modifiers.alt || y <= WORK_BAR_STRIP)
             });
+        // Final Cut's skimming: a press in Tracks mode moves the playhead to
+        // the skimmer. In the Layers timeline a press selects and never moves
+        // the playhead (v1 and After Effects: only the ruler does).
         if let Some(at) = self.skimmer
             && !grabs
             && !scrubs
+            && self.model.mode == TimelineMode::Tracks
         {
             self.delegate.seek(at, cx);
         }
