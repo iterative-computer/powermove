@@ -3506,9 +3506,10 @@ fn g3_capture_trim_review() {
             w.dispatch_event(gpui::PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: position + point(px(35.), px(0.)), ..Default::default() }), cx);
         }).unwrap();
         pump(&mut cx);
+        // Isolate the source-clamped edge after the roll comparison.
         // A media-clamped out edge: 12 s source, trim 2 s, rate 2.
         rig.kernel.call(PROJECT, Request::new(Caller::native(), Call::Transact {
-            body: pm_kernel::WriteBody::Commands(vec![pm_kernel::ContentCommand::Set { layer_id: "a".into(), patch: [("speed".into(), pm_model::Value::from(2.))].into_iter().collect(), time: 0. }.into(), pm_kernel::TimingCommand::TrimOut { layer_ids: vec!["a".into()], time: 200. }.into()]),
+            body: pm_kernel::WriteBody::Commands(vec![pm_kernel::LayerCommand::Delete { layer_ids: vec!["b".into(), "c".into()] }.into(), pm_kernel::ContentCommand::Set { layer_id: "a".into(), patch: [("speed".into(), pm_model::Value::from(2.))].into_iter().collect(), time: 0. }.into(), pm_kernel::TimingCommand::TrimOut { layer_ids: vec!["a".into()], time: 200. }.into()]),
             label: None, expected_revision: None,
         })).wait().unwrap().unwrap();
         cx.update(|cx| surface.update(cx, |s, cx| { s.published(cx); s.fit_time(cx); }));
