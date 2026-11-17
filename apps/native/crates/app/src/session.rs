@@ -48,6 +48,8 @@ pub struct Controller {
     pub viewer: Option<Viewer>,
     /// The viewer last told whether its window can be seen, and what.
     viewer_shown: Option<(u64, bool)>,
+    /// The extension host last told whether the window can be seen, and what.
+    extensions_shown: Option<(u64, bool)>,
     pub media: MediaCatalog,
     pub(crate) linked_sync: crate::linked_sync::Sync,
     pub(crate) media_refresh: crate::media_refresh::Refresh,
@@ -1018,6 +1020,7 @@ impl Controller {
             mirror: None,
             viewer: None,
             viewer_shown: None,
+            extensions_shown: None,
             media: MediaCatalog::default(),
             linked_sync: Default::default(),
             media_refresh: Default::default(),
@@ -2962,10 +2965,19 @@ impl Controller {
     /// Tells the viewer whether its window can be seen: a tab behind
     /// another (or a minimized window) draws nothing until it is shown.
     pub(crate) fn follow_shown(&mut self, cx: &mut Context<Self>) {
+        let shown = pm_shell::window_shown(&self.host.borrow().window);
+        // Its extensions' panels count as not showing while it cannot be
+        // seen: they get no animation frames.
+        if let Some(host) = &self.extensions.host {
+            let now = (host.view(), shown);
+            if self.extensions_shown != Some(now) {
+                host.set_window_shown(shown);
+                self.extensions_shown = Some(now);
+            }
+        }
         let Some(viewer) = &self.viewer else {
             return;
         };
-        let shown = pm_shell::window_shown(&self.host.borrow().window);
         let now = (viewer.identity(), shown);
         if self.viewer_shown == Some(now) {
             return;

@@ -94,6 +94,74 @@ globalThis.__compat = {
         (...args) => call("recorder." + method, { args }),
       ]),
     );
+    // Extensions' animation frames, as a browser gives them: an extension
+    // none of whose panels shows (a dock tab behind another, collapsed or
+    // closed) gets none until one shows, and while the viewer plays a
+    // showing panel's come at most every PLAYING_FRAME_MS, giving way to its
+    // frames. The extension is the one whose code asked (its module on the
+    // stack); the realm's own code is not held.
+    const PLAYING_FRAME_MS = 50;
+    const frames = new Map();
+    let lastFrame = 0;
+    const askedBy = () =>
+      /pmext:\/\/([^/]+)\//.exec(new Error().stack ?? "")?.[1] ?? null;
+    // Whether an extension shows something now. One that owns no panel
+    // keeps its frames (its surface may be a viewer overlay, a gizmo, a tool,
+    // a popover or a service pacing work), as do extensions of API 1 and 2,
+    // whose surfaces are hooks no owner is known for. One that owns panels
+    // keeps them while a panel shows or while it contributes any other
+    // surface: a status item, a theme (it restyles the window), an inspector
+    // section, a palette provider, a viewer overlay or frame listener.
+    const VIEW_EVENTS = ["overlay", "frame:rendered"];
+    const legacy = (owner) =>
+      (this.loader?.records() ?? []).some(
+        (record) => record.id === owner && Number(record.manifest?.apiVersion ?? 1) < 3,
+      );
+    const otherSurface = (owner) => {
+      const kernel = this.realm.kernel;
+      return (
+        kernel.status.ownerEntries(owner).length > 0 ||
+        kernel.themes.ownerEntries(owner).length > 0 ||
+        kernel.inspectorSections.ownerEntries(owner).length > 0 ||
+        kernel.paletteProviders().some((entry) => entry.ownerId === owner) ||
+        VIEW_EVENTS.some((event) =>
+          (kernel.events.map.get(event) ?? []).some((record) => record.ownerId === owner),
+        )
+      );
+    };
+    // An export's realm has no window: none of its frames waits for a panel.
+    const shows = (owner) =>
+      !owner ||
+      !this.panels ||
+      globalThis.__compatWindowless === true ||
+      this.realm.kernel.panels.ownerEntries(owner).length === 0 ||
+      this.panels.showingOwners().has(owner) ||
+      legacy(owner) ||
+      otherSurface(owner);
+    const start = (id, frame) => {
+      const delay = frame.owner && this.realm?.PM?.playing ? PLAYING_FRAME_MS : 16;
+      frame.timer = setTimeout(() => {
+        frames.delete(id);
+        this.realm.task(() => frame.fn(performance.now()));
+      }, delay);
+    };
+    this.requestFrame = (fn) => {
+      const id = ++lastFrame;
+      const frame = { fn, owner: askedBy(), timer: 0 };
+      frames.set(id, frame);
+      if (shows(frame.owner)) start(id, frame);
+      return id;
+    };
+    this.cancelFrame = (id) => {
+      const frame = frames.get(id);
+      if (!frame) return;
+      frames.delete(id);
+      if (frame.timer) clearTimeout(frame.timer);
+    };
+    this.resumeFrames = () => {
+      for (const [id, frame] of frames)
+        if (!frame.timer && shows(frame.owner)) start(id, frame);
+    };
     this.dom = PowermoveCompat.RemoteDOM
       ? new PowermoveCompat.RemoteDOM({
           session: { panel: "compat", generation: 1 },
@@ -104,14 +172,10 @@ globalThis.__compat = {
             call("dom.measureSync", { request, answering: this.answering > 0 }),
           requestAnimationFrame: globalThis.__extcheckClock
             ? requestAnimationFrame
-            : (fn) =>
-                setTimeout(
-                  () => this.realm.task(() => fn(performance.now())),
-                  16,
-                ),
+            : (fn) => this.requestFrame(fn),
           cancelAnimationFrame: globalThis.__extcheckClock
             ? cancelAnimationFrame
-            : (id) => clearTimeout(id),
+            : (id) => this.cancelFrame(id),
           reportError: (error) => host.reportError(error),
           pageAttribute: (node, name, value) =>
             this.pageAttribute ? this.pageAttribute(node, name, value) : value,
@@ -713,6 +777,18 @@ globalThis.__compat = {
     // Rendering demand is immediate; UI and timeline notices coalesce on one frame.
     const dirty = new Set();
     let dirtyFrame = 0;
+    // The playhead moved: only what listens hears it (the controls follow the
+    // time through their own listener; a panel that redraws on `draw` or
+    // `draw:ui`/`draw:timeline` gets those), and the DOM it changed goes out.
+    this.timeMoved = () => {
+      const realm = this.realm;
+      if (realm.listens("draw")) realm.PM.bus.emit("draw");
+      if (["draw:ui", "draw:timeline"].some((name) => realm.listens(name))) {
+        dirty.add("ui").add("timeline");
+        scheduleDirty();
+      }
+      this.dom?.flush();
+    };
     const scheduleDirty = () => {
       if (dirtyFrame) return;
       const flush = () => {
@@ -722,10 +798,7 @@ globalThis.__compat = {
         for (const name of ["timeline", "ui", "status"])
           if (notices.has(name)) this.realm.PM.bus.emit("draw:" + name);
       };
-      dirtyFrame =
-        typeof requestAnimationFrame === "function"
-          ? requestAnimationFrame(flush)
-          : setTimeout(flush, 16);
+      dirtyFrame = setTimeout(flush, 16);
     };
     this.realm = new PowermoveCompat.CompatRealm({
       id: "compat",
@@ -746,8 +819,10 @@ globalThis.__compat = {
         () => [...this.realm.PM.sel.layers],
         globalThis.__compatWindowless === true,
       );
-    if (this.panels)
+    if (this.panels) {
       this.realm.PM.bus.on("sel", () => this.panels.selectionChanged());
+      this.panels.onShowingChange = () => this.resumeFrames();
+    }
     // Transient playback belongs to the native worker, separately from the
     // kernel's document/history writer. Publications are read through getters.
     const transport = (method, extra = {}) =>
@@ -798,10 +873,7 @@ globalThis.__compat = {
         this.realm.task(() => updateTransport(transport("tick")));
         if (this.realm.PM.playing) schedule(frame);
       };
-      const schedule = (fn) =>
-        typeof requestAnimationFrame === "function"
-          ? requestAnimationFrame(fn)
-          : setTimeout(fn, 16);
+      const schedule = (fn) => setTimeout(fn, 16);
       schedule(frame);
     };
     this.realm.PM.pause = () => {
@@ -1487,7 +1559,7 @@ globalThis.__compat = {
     this.realm.task(() => {
       if (timeChanged) this.realm.PM.bus.emit("time", time);
       if (playingChanged) this.realm.PM.bus.emit("transport");
-      this.realm.PM.invalidate();
+      this.timeMoved();
     });
   },
   run(id, args) {
@@ -1496,6 +1568,17 @@ globalThis.__compat = {
         this.realm.reportError(error),
       );
     });
+  },
+  /** Whether the person can see this window (a tab behind another cannot):
+   * its panels count as not showing while it cannot. */
+  windowShown(shown) {
+    this.panels?.setWindowShown(!!shown);
+  },
+  /** The page's messages since the last look, as data, in one flush. */
+  receivePage() {
+    const messages = runtime.engine("dom.takeMessages", {});
+    for (const message of messages) this.dom.receive(message);
+    this.dom.flush();
   },
   openPanel(id) {
     this.realm.task(() => this.panels.open(id));

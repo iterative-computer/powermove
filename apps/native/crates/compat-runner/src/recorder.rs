@@ -98,6 +98,10 @@ pub struct NativeHost {
     /// While a capture runs, override asks for this realm come here: the
     /// waiting realm answers them inline (the capture draws its own project).
     nested: Mutex<Option<std::sync::mpsc::Sender<CaptureEvent>>>,
+    /// The page's messages for the realm, taken together as data
+    /// (`dom.takeMessages`), and whether the realm has been asked to.
+    page_messages: Mutex<Vec<Value>>,
+    page_asked: std::sync::atomic::AtomicBool,
 }
 pub(crate) enum CaptureEvent {
     Frame(std::result::Result<Vec<u8>, String>),
@@ -200,6 +204,8 @@ impl NativeHost {
             code: std::sync::atomic::AtomicU64::new(0),
             vars: Mutex::default(),
             capture: Mutex::new(None),
+            page_messages: Mutex::default(),
+            page_asked: std::sync::atomic::AtomicBool::new(false),
             nested: Mutex::new(None),
         }
     }
@@ -593,6 +599,15 @@ impl NativeHost {
     pub fn diagnostics(&self) -> Value {
         let state = self.state.lock().unwrap();
         json!({"missing":state.missing,"surfaces":state.surfaces.len(),"pins":state.pins.len(),"dom_pending":state.dom.len()})
+    }
+    /// Messages from the page for the realm. Whether the realm must be asked
+    /// to take them: once until it has (`dom.takeMessages`), however many
+    /// arrive meanwhile.
+    pub fn push_page_messages(&self, messages: Vec<Value>) -> bool {
+        self.page_messages.lock().unwrap().extend(messages);
+        !self
+            .page_asked
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
     }
     pub fn take_dom_batches(&self) -> Vec<Value> {
         std::mem::take(&mut self.state.lock().unwrap().dom)
@@ -1695,6 +1710,13 @@ impl EngineProxy for NativeHost {
             drop(state);
             self.events.dom_ready();
             return Ok(json!(true));
+        }
+        if operation == "dom.takeMessages" {
+            self.page_asked
+                .store(false, std::sync::atomic::Ordering::Release);
+            return Ok(Value::Array(std::mem::take(
+                &mut *self.page_messages.lock().unwrap(),
+            )));
         }
         if operation == "recorder.bind" {
             let mut state = self.state.lock().unwrap();

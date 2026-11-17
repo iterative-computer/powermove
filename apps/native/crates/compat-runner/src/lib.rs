@@ -591,6 +591,116 @@ mod tests {
         pixels.truncate(info.buffer_size());
         (info, pixels)
     }
+    /// An extension's animation frames wait while none of its panels shows
+    /// (not open, or placed behind another tab) and run while one does, as a
+    /// hidden page's do in a browser: a collapsed game panel kept the realm
+    /// busy on every frame.
+    #[test]
+    fn a_panel_that_does_not_show_gets_no_animation_frames() {
+        let runner = dom_runner();
+        let manifest =
+            json!({"id":"anim","name":"Anim","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){globalThis.ticks=0;
+                 api.panels.register({id:'anim.panel',title:'Anim',build(){}});
+                 const loop=()=>{globalThis.ticks++;requestAnimationFrame(loop)};requestAnimationFrame(loop);}",
+            )
+            .unwrap();
+        let ticks = || runner.json("globalThis.ticks").unwrap().as_f64().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(ticks(), 0., "no panel of it shows");
+        runner
+            .eval("__compat.openPanel('anim.panel');__compat.placePanel('anim.panel',[0,0,100,100])")
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ticks() < 3. {
+            assert!(std::time::Instant::now() < deadline, "a showing panel's frames run");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        runner.eval("__compat.placePanel('anim.panel',null)").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let held = ticks();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(ticks() <= held + 1., "behind another tab: {} after {held}", ticks());
+    }
+    /// A runner with one extension `id` whose activation runs `setup` and
+    /// then loops on animation frames, counting them in `globalThis.ticks`.
+    fn frame_loop(id: &str, setup: &str) -> CompatRunner {
+        let runner = dom_runner();
+        let manifest =
+            json!({"id":id,"name":id,"version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                &format!(
+                    "export default function activate(api){{globalThis.ticks=0;{setup}
+                     const loop=()=>{{globalThis.ticks++;requestAnimationFrame(loop)}};requestAnimationFrame(loop);}}"
+                ),
+            )
+            .unwrap();
+        runner
+    }
+    fn ticks(runner: &CompatRunner) -> f64 {
+        runner.json("globalThis.ticks").unwrap().as_f64().unwrap()
+    }
+    fn ticking(runner: &CompatRunner, why: &str) {
+        let from = ticks(runner);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ticks(runner) < from + 3. {
+            assert!(std::time::Instant::now() < deadline, "{why}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    /// An extension with no panel keeps its animation frames: its surface may
+    /// be a viewer overlay, a gizmo, a tool or a service pacing work.
+    #[test]
+    fn an_extension_without_panels_keeps_its_animation_frames() {
+        let runner = frame_loop("paced", "");
+        ticking(&runner, "an extension with no panel gets frames");
+    }
+    /// An extension whose panel is collapsed but which draws a viewer overlay
+    /// keeps its animation frames: every surface it contributes counts.
+    #[test]
+    fn an_extension_with_a_viewer_overlay_keeps_its_frames_while_its_panel_is_hidden() {
+        let runner = frame_loop(
+            "overlaid",
+            "api.panels.register({id:'overlaid.panel',title:'O',build(){}});api.events.on('overlay',()=>{});",
+        );
+        ticking(&runner, "its overlay shows");
+    }
+    /// An extension with a hidden panel that also restyles the window with a
+    /// theme keeps its frames (a workspace theme schedules its shell updates
+    /// on them).
+    #[test]
+    fn an_extension_with_a_theme_keeps_its_frames_while_its_panel_is_hidden() {
+        let runner = frame_loop(
+            "themed",
+            "api.panels.register({id:'themed.panel',title:'T',build(){}});api.theme.register({id:'themed.look',name:'Look',tokens:{}});",
+        );
+        ticking(&runner, "its theme shows");
+    }
+    /// A window that is a tab behind another: its panels count as not showing,
+    /// and come back when it is selected.
+    #[test]
+    fn panels_in_a_window_that_cannot_be_seen_get_no_animation_frames() {
+        let runner = frame_loop(
+            "tabbed",
+            "api.panels.register({id:'tabbed.panel',title:'T',build(){}});",
+        );
+        runner
+            .eval("__compat.openPanel('tabbed.panel');__compat.placePanel('tabbed.panel',[0,0,100,100])")
+            .unwrap();
+        ticking(&runner, "a showing panel's frames run");
+        runner.eval("__compat.windowShown(false)").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let held = ticks(&runner);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(ticks(&runner) <= held + 1., "a hidden window's panel kept its frames");
+        runner.eval("__compat.windowShown(true)").unwrap();
+        ticking(&runner, "selected again, its frames run");
+    }
     #[test]
     fn dom_canvas_uses_native_pixels_stable_context_and_immutable_png_resources() {
         let runner = dom_runner();
