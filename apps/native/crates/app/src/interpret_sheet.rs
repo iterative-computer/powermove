@@ -730,6 +730,9 @@ mod tests {
                 tone_mapping: at(tones().len()),
                 alpha: at(ALPHAS.len()),
                 gain_map: at(GAIN_MAPS.len()),
+                frame_rate: at(FRAME_RATES.len()),
+                field_order: at(FIELD_ORDERS.len()),
+                pixel_aspect: at(PIXEL_ASPECTS.len()),
                 matte: None,
             };
             let mut interpret = Map::new();
@@ -742,6 +745,41 @@ mod tests {
             assert_eq!(parsed.range, Some(RANGES[chosen.range - 1].1));
             assert_eq!(parsed.alpha, Some(ALPHAS[chosen.alpha - 1].1));
             assert_eq!(parsed.gain_map, Some(GAIN_MAPS[chosen.gain_map - 1].1));
+        }
+    }
+
+    /// Frame rate, fields and pixel aspect are written as pm-media reads them
+    /// (a rate as its exact rational, an aspect as a ratio), shown again
+    /// when the sheet opens, and removed by Automatic (PM-495).
+    #[test]
+    fn frame_rate_fields_and_pixel_aspect_are_overrides_the_engine_reads() {
+        let at = |list: &[&str], name: &str| 1 + list.iter().position(|l| *l == name).unwrap();
+        let rates: Vec<&str> = FRAME_RATES.iter().map(|(l, _)| *l).collect();
+        let fields: Vec<&str> = FIELD_ORDERS.iter().map(|(l, _)| *l).collect();
+        let aspects: Vec<&str> = PIXEL_ASPECTS.iter().map(|(l, _)| *l).collect();
+        let chosen = Chosen {
+            frame_rate: at(&rates, "23.976 fps"),
+            field_order: at(&fields, "Lower Field First"),
+            pixel_aspect: at(&aspects, "D1/DV NTSC (0.91)"),
+            ..Default::default()
+        };
+        let mut interpret = Map::new();
+        assert!(chosen.write(&Chosen::default(), &mut interpret));
+        let read = parsed(&interpret);
+        let rate = read.frame_rate.unwrap();
+        assert_eq!((rate.num(), rate.den()), (24000, 1001));
+        assert_eq!(read.field_order, pm_media::interlace::FieldOverride::BottomFirst);
+        assert_eq!(read.pixel_aspect, Some((10, 11)));
+        // Opened again, the sheet shows them.
+        let shown = Chosen::shown(&sheet(&read));
+        assert_eq!(
+            (shown.frame_rate, shown.field_order, shown.pixel_aspect),
+            (chosen.frame_rate, chosen.field_order, chosen.pixel_aspect)
+        );
+        // Automatic removes each, its rational included.
+        assert!(Chosen::default().write(&shown, &mut interpret));
+        for key in ["frameRate", "frameRateRational", "fieldOrder", "pixelAspect"] {
+            assert!(interpret.get(key).is_none(), "{key}");
         }
     }
 

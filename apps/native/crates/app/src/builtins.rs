@@ -1916,6 +1916,9 @@ impl Controller {
                                 pm_panel_media::Effect::NewCompFromAsset(id) => {
                                     self.new_comp_from_asset(&id, cx)
                                 }
+                                pm_panel_media::Effect::InterpretFootage(id) => {
+                                    self.interpret_asset_sheet(id, cx)
+                                }
                                 pm_panel_media::Effect::ConfirmDelete {
                                     token,
                                     assets,
