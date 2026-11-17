@@ -64,6 +64,9 @@ pub struct EffectDrop {
     pub layer: Option<String>,
 }
 pub trait Delegate: 'static {
+    /// The immutable model behind the displayed lanes, for native edits
+    /// made outside the timeline (notably speed in Properties).
+    fn tracks_view(&self, _view: Arc<TimelineModel>, _cx: &mut App) {}
     fn time(&self, cx: &App) -> f64;
     /// Media dropped on the timeline (Finder files, Project items).
     fn drop_media(&self, _drop: MediaDrop, _cx: &mut App) {}
@@ -1207,6 +1210,9 @@ impl TimelineSurface {
             }
         }
         self.model = built.model;
+        let delegate = self.delegate.clone();
+        let view = self.model.clone();
+        cx.defer(move |cx| delegate.tracks_view(view, cx));
         self.scene = Some(self.with_focus(built.scene.clone()));
         self.graph = steady_graph(&self.gesture, self.graph.as_deref(), built.graph.clone());
         // A range the wheel panned to stays for its view.

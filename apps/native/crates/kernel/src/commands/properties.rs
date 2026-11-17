@@ -260,8 +260,8 @@ fn numeric_channel(prop: &Value) -> bool {
     }
 }
 
-/// `constantVideoSpeed(layer)`.
-fn constant_video_speed(layer: &Value) -> Option<f64> {
+/// The static video rate, or None for an authored remap/animated rate.
+pub fn constant_video_speed(layer: &Value) -> Option<f64> {
     if values::text(layer, "type") != Some("video") {
         return None;
     }

@@ -33,6 +33,8 @@ type TimelineJob = Pin<
 pub(crate) struct Models {
     pub properties: Properties,
     pub timeline: Option<TimelineClient>,
+    pub(crate) timeline_view:
+        std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<pm_panel_timeline::TimelineModel>>>>,
     /// Where the timeline client comes from, until a panel first asks for it:
     /// indexing every channel of a large project costs seconds, and only the
     /// Timeline panel reads it.
@@ -133,6 +135,7 @@ impl Models {
         Ok(Self {
             properties: Properties::default(),
             timeline: None,
+            timeline_view: Default::default(),
             timeline_source,
             viewer: Default::default(),
             composition_tabs: vec![],
@@ -2503,4 +2506,121 @@ pub struct Probe {
     /// That check is not on the sheet yet: the host publishes the sheet
     /// again (`Builtins::publish_finished_checks`).
     pub unpublished: bool,
+}
+
+/// A speed edit uses the lanes the native timeline actually shows, including
+/// automatically packed lanes. Reify them in the same undoable write.
+pub(crate) fn pin_speed_request(
+    view: Option<std::sync::Arc<pm_panel_timeline::TimelineModel>>,
+    published: &Published,
+    request: &mut Request,
+) -> Result<(), String> {
+    let from_start = matches!(
+        &request.call,
+        Call::Gesture(GestureCall::Step { replace: true, .. })
+    );
+    let commands = match &mut request.call {
+        Call::Transact {
+            body: WriteBody::Commands(commands),
+            ..
+        }
+        | Call::Gesture(GestureCall::Step {
+            body: WriteBody::Commands(commands),
+            ..
+        })
+        | Call::Edit(EditCall::Dispatch {
+            body: WriteBody::Commands(commands),
+        })
+        | Call::Edit(EditCall::Apply {
+            body: WriteBody::Commands(commands),
+            ..
+        })
+        | Call::History(HistoryCall::Do {
+            body: WriteBody::Commands(commands),
+            ..
+        }) => commands,
+        _ => return Ok(()),
+    };
+    if commands
+        .iter()
+        .any(|c| matches!(c, Command::Timing(TimingCommand::PinTracks { .. })))
+    {
+        return Ok(());
+    }
+    fn resized(command: &Command, published: &Published, from_start: bool) -> Option<String> {
+        use pm_kernel::commands::properties::{KeyMode, constant_video_speed};
+        let id = match command {
+            Command::Property(PropertyCommand::Set(c))
+                if c.channel.strip_prefix("properties.").unwrap_or(&c.channel) == "c.speed"
+                    && !matches!(c.mode, KeyMode::Keyframe) =>
+            {
+                &c.layer_id
+            }
+            Command::Content(ContentCommand::Set {
+                layer_id, patch, ..
+            }) if patch.contains_key("speed") => layer_id,
+            _ => return None,
+        };
+        let root = published.snapshot.root()?;
+        let loc = pm_kernel::model::find_layer(root, id)?;
+        let mut layer = pm_kernel::model::layer_at(root, &loc)?.to_value();
+        let before = constant_video_speed(&layer)?;
+        let duration = layer.get("dur")?.as_f64()?;
+        let d = layer.as_object_mut()?.get_mut("d")?.as_object_mut()?;
+        match command {
+            Command::Property(PropertyCommand::Set(c)) => {
+                d.insert("speed", c.value.clone());
+            }
+            Command::Content(ContentCommand::Set { patch, .. }) => {
+                for (key, value) in patch.iter() {
+                    d.insert(key.clone(), value.clone());
+                }
+            }
+            _ => return None,
+        }
+        let after = constant_video_speed(&layer)?;
+        let fps = pm_kernel::model::comp_node(root, loc.comp_id.as_deref())
+            .and_then(|comp| comp.get("fps"))
+            .and_then(|value| value.to_value().as_f64())
+            .filter(|fps| fps.is_finite() && *fps > 0.)
+            .unwrap_or(30.);
+        (from_start || ((duration * before / after).max(1. / fps) - duration).abs() > 1e-8)
+            .then(|| id.clone())
+    }
+    let targets: Vec<_> = commands
+        .iter()
+        .filter_map(|c| resized(c, published, from_start))
+        .collect();
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let mut model = view.as_deref().cloned().unwrap_or_default();
+    model.sync(published);
+    if model.mode != pm_panel_timeline::TimelineMode::Tracks {
+        return Ok(());
+    }
+    let lanes = pm_panel_timeline::tracks::relative_lanes(&model.index, &model.reveal);
+    let by_id: std::collections::HashMap<_, _> = lanes.iter().cloned().collect();
+    let mut visible = false;
+    for id in targets {
+        let (Some(target), Some(lane)) = (model.index.layer(&id), by_id.get(&id)) else {
+            continue;
+        };
+        visible = true;
+        for other in &model.index.layers {
+            if other.effectively_locked
+                && other.group == target.group
+                && pm_panel_timeline::tracks::area(&other.kind)
+                    == pm_panel_timeline::tracks::area(&target.kind)
+                && by_id.get(&other.id) == Some(lane)
+                && other.from >= target.from + target.duration - 1e-8
+            {
+                return Err("Unlock the following clip before changing speed.".into());
+            }
+        }
+    }
+    if visible {
+        commands.insert(0, TimingCommand::PinTracks { lanes }.into());
+    }
+    Ok(())
 }

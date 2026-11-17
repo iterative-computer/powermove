@@ -2587,6 +2587,13 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
             let _ = wake.try_send(());
         }
     }
+    fn tracks_view(&self, view: Arc<pm_panel_timeline::TimelineModel>, cx: &mut App) {
+        if let Some(controller) = self.0.upgrade()
+            && let Some(runtime) = &controller.read(cx).builtins.runtime
+        {
+            runtime.update_timeline_view(view);
+        }
+    }
     fn view_facts(&self, facts: serde_json::Value, cx: &mut App) {
         if let Some(controller) = self.0.upgrade()
             && let Some(host) = &controller.read(cx).extensions.host
