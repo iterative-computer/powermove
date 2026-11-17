@@ -904,6 +904,7 @@ impl Builtins {
             }
         }
         let (place_at, place_index, still) = (request.place_at, request.place_index, request.still);
+        let run = request.track_run.clone();
         let mut outcome = if fresh.is_empty() {
             Outcome::default()
         } else {
@@ -943,9 +944,38 @@ impl Builtins {
         if let Some(at) = place_at
             && !placed.is_empty()
         {
-            self.place_known(&placed, at, place_index, still)?;
+            // In a Tracks run, after the new files that just landed there.
+            let at = match &run {
+                Some(_) => self.run_end(&outcome.assets, at)?,
+                None => at,
+            };
+            self.place_known(&placed, at, place_index, still, run.as_ref())?;
         }
         Ok(outcome)
+    }
+    /// Where the layers of `assets` just placed from `at` end (`at` when none
+    /// did): the next part of a Tracks run starts there.
+    fn run_end(&self, assets: &[String], at: f64) -> Result<f64, String> {
+        let published = self.broker.kernel.published(&self.broker.project).ok_or(SWITCHED)?;
+        let root = published.snapshot.root().ok_or(SWITCHED)?;
+        let layers = pm_kernel::model::comp_node(root, published.snapshot.open_comp().as_deref())
+            .and_then(|c| c.get("layers"))
+            .map(|l| l.to_value())
+            .unwrap_or(Value::Null);
+        let number = |l: &Value, k: &str| l.get(k).and_then(Value::as_f64).unwrap_or(0.);
+        Ok(layers
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|l| {
+                number(l, "from") >= at - 1e-6
+                    && l.get("d")
+                        .and_then(|d| d.get("asset"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|a| assets.iter().any(|x| x == a))
+            })
+            .map(|l| number(l, "from") + number(l, "dur"))
+            .fold(at, f64::max))
     }
     /// Items already in the project, placed as an import places its new ones,
     /// in one Undo step, and selected.
@@ -955,10 +985,22 @@ impl Builtins {
         at: f64,
         index: Option<usize>,
         still: Option<f64>,
+        run: Option<&TrackRun>,
     ) -> Result<(), String> {
         let project = &self.broker.project;
         let published = self.broker.kernel.published(project).ok_or(SWITCHED)?;
-        let (layers, commands) = place_items(&published, assets, &[], at, index, still)?;
+        let records = published
+            .snapshot
+            .root()
+            .and_then(|r| r.get("assets"))
+            .map(|a| a.to_value())
+            .unwrap_or(Value::Null);
+        let items: Vec<(&str, &Value)> = assets
+            .iter()
+            .filter_map(|id| Some((id.as_str(), records.get(id)?)))
+            .collect();
+        let (layers, commands) = placement(&published, &items, at, index, None, still, run)
+            .ok_or("Open a project first")?;
         let call = pm_kernel::Call::Transact {
             label: Some("Add to Timeline".into()),
             expected_revision: Some(published.revision()),
@@ -1698,6 +1740,37 @@ mod tests {
         assert!(placed.contains(&("A.png".into(), 3., 2., 1.)), "{placed:?}");
         // Without the Tracks run they stack at the playhead, as v1 did.
         assert!(TrackRun::default().lane(false, 0., 1.) == 0);
+        // The same files again are the items they are, laid out the same
+        // way: lanes 0 and 1 busy, so lane 2, from 20 s.
+        let ids = outcome.assets.clone();
+        let again = f
+            .runtime
+            .import_media(
+                document(&f),
+                &f.root,
+                ImportRequest {
+                    paths: vec![f.root.join("B.png"), f.root.join("A.png")],
+                    place_at: Some(20.),
+                    still: Some(2.),
+                    originals: [(ids[0].clone(), f.root.join("B.png")), (ids[1].clone(), f.root.join("A.png"))]
+                        .into_iter()
+                        .collect(),
+                    track_run: Some(TrackRun {
+                        occupied: vec![(false, 0, 0., 30.), (false, 1, 0., 30.)],
+                    }),
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert!(again.imported.is_empty(), "{again:?}");
+        let p = f.actor.handle().published("p").unwrap();
+        let later: Vec<(f64, f64)> = pm_kernel::model::comp_node(p.snapshot.root().unwrap(), p.snapshot.open_comp().as_deref())
+            .unwrap().to_value().get("layers").unwrap().as_array().unwrap().iter()
+            .filter(|l| l.get("from").and_then(Value::as_f64).is_some_and(|t| t >= 20.))
+            .map(|l| (l.get("from").and_then(Value::as_f64).unwrap(), l.get("track").and_then(Value::as_f64).unwrap_or(-1.)))
+            .collect();
+        assert!(later.contains(&(20., 2.)) && later.contains(&(22., 2.)), "{later:?}");
     }
     /// Imports `paths` as the Project panel does, with `originals` the
     /// files the project's items play from now.
