@@ -13,8 +13,9 @@ pub(crate) type MediaProbeInputs = (
     crate::media_refresh::Inputs,
     BTreeMap<String, std::path::PathBuf>,
     BTreeMap<String, std::path::PathBuf>,
+    u64,
 );
-/// At most one readiness read per window. New publications replace the
+/// At most one readiness read per host. New publications replace the
 /// desired inputs in the controller; completion replans against the latest.
 #[derive(Default)]
 pub(crate) struct MediaProbeRefresh {
@@ -31,7 +32,7 @@ pub(crate) enum MediaProbePlan {
 // unique so an old worker cannot finish the new host's read.
 static NEXT_MEDIA_PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 fn same_probe_inputs(a: &MediaProbeInputs, b: &MediaProbeInputs) -> bool {
-    a.0.same(&b.0) && a.1 == b.1 && a.2 == b.2
+    a.0.same(&b.0) && a.1 == b.1 && a.2 == b.2 && a.3 == b.3
 }
 impl MediaProbeRefresh {
     pub(crate) fn plan(&mut self, inputs: MediaProbeInputs) -> MediaProbePlan {
@@ -572,6 +573,7 @@ impl Controller {
             inputs,
             originals.clone(),
             proxies.clone(),
+            self.media_refresh.observation_epoch(),
         )) {
             MediaProbePlan::Reuse => {
                 self.builtins.set_media_observation_current(true);
@@ -611,6 +613,7 @@ impl Controller {
                             crate::media_refresh::Inputs::published(p),
                             v.media.originals.clone(),
                             v.media.proxies.clone(),
+                            v.media_refresh.observation_epoch(),
                         )
                     })
                     .filter(|inputs| v.media_refresh.catalog_ready(&inputs.0));

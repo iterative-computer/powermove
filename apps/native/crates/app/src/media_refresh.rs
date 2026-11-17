@@ -105,6 +105,7 @@ pub struct Refresh {
     visible: Option<Inputs>,
     settled: Option<Inputs>,
     resolved: bool,
+    observation_epoch: u64,
     pending: Option<(u64, Inputs)>,
     retry_pending: bool,
 }
@@ -141,8 +142,16 @@ impl Refresh {
     pub(crate) fn catalog_ready(&self, inputs: &Inputs) -> bool {
         self.resolved && self.settled.as_ref().is_some_and(|old| old.same(inputs))
     }
+    pub(crate) fn observation_epoch(&self) -> u64 {
+        self.observation_epoch
+    }
     fn catalog_adopted(&mut self) {
         self.resolved = self.settled.is_some();
+        if self.resolved {
+            // A cloud restore can change readable bytes at the same path.
+            // Only observations made after this adoption can be reused.
+            self.observation_epoch += 1;
+        }
     }
     pub fn plan(&mut self, inputs: Inputs) -> Plan {
         let retire = match &self.visible {
@@ -482,6 +491,7 @@ mod tests {
             inputs(document, asset),
             Default::default(),
             Default::default(),
+            0,
         )
     }
     fn started(plan: crate::builtins::MediaProbePlan) -> u64 {
@@ -552,6 +562,24 @@ mod tests {
         assert!(next.finish(serial, Some(&current)));
         assert_eq!(next.plan(current), MediaProbePlan::Reuse);
     }
+    #[test]
+    fn a_restored_file_at_the_same_path_requires_a_fresh_observation() {
+        use crate::builtins::{MediaProbePlan, MediaProbeRefresh};
+        let mut probe = MediaProbeRefresh::default();
+        let original = probe_inputs(1, "a");
+        let serial = started(probe.plan(original.clone()));
+        assert!(probe.finish(serial, Some(&original)));
+        let mut restored = original.clone();
+        restored.3 += 1;
+        let serial = started(probe.plan(restored.clone()));
+        let mut newer = restored.clone();
+        newer.3 += 1;
+        assert_eq!(probe.plan(newer.clone()), MediaProbePlan::Waiting);
+        assert!(!probe.finish(serial, Some(&newer)));
+        let serial = started(probe.plan(newer.clone()));
+        assert!(probe.finish(serial, Some(&newer)));
+        assert_eq!(probe.plan(newer), MediaProbePlan::Reuse);
+    }
 
     #[test]
     fn probes_wait_for_an_adopted_catalog_and_never_probe_failed_resolution() {
@@ -560,6 +588,7 @@ mod tests {
         let failed = inputs(1, "failed");
         let mut refresh = Refresh::default();
         refresh.adopt(original.clone());
+        let epoch = refresh.observation_epoch();
         assert!(refresh.catalog_ready(&original));
         let job = refresh.plan(changed.clone()).job.unwrap();
         assert!(
@@ -572,6 +601,7 @@ mod tests {
             "completion is not catalog adoption"
         );
         refresh.catalog_adopted();
+        assert!(refresh.observation_epoch() > epoch);
         assert!(refresh.catalog_ready(&changed));
         assert!(!refresh.catalog_ready(&inputs(2, "changed")));
         let job = refresh.plan(failed.clone()).job.unwrap();
@@ -618,5 +648,26 @@ mod tests {
         assert_eq!(refresh.plan(other.clone()).retire, None);
         assert!(!refresh.finish(job, Some(other.clone())));
         assert!(refresh.plan(other).job.is_some());
+    }
+    #[test]
+    fn retry_and_reset_require_observations_after_the_new_catalog_adoption() {
+        let current = inputs(1, "same-path");
+        let mut refresh = Refresh::default();
+        refresh.adopt(current.clone());
+        let first = refresh.observation_epoch();
+        refresh.retry();
+        let job = refresh.plan(current.clone()).job.unwrap();
+        assert!(refresh.finish(job, Some(current.clone())));
+        refresh.catalog_adopted();
+        let restored = refresh.observation_epoch();
+        assert!(restored > first, "same paths can hold newly restored bytes");
+        refresh.reset();
+        let job = refresh.plan(current.clone()).job.unwrap();
+        assert!(refresh.finish(job, Some(current)));
+        refresh.catalog_adopted();
+        assert!(
+            refresh.observation_epoch() > restored,
+            "a reset cannot reuse an old observation identity"
+        );
     }
 }
