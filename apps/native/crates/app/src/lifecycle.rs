@@ -117,6 +117,30 @@ pub(crate) fn quitting(cx: &App) -> bool {
     cx.try_global::<QuitCoordinator>()
         .is_some_and(|q| q.quitting || q.asking_exports)
 }
+/// The quits run so far: each start and each cancel moves to a new
+/// generation, so a window's close that finishes after its quit was cancelled
+/// (another window's close failed meanwhile) is told apart and does nothing
+/// for a quit that is over (Sol w57).
+#[derive(Debug, Default)]
+struct QuitRun {
+    generation: u64,
+    active: bool,
+}
+impl QuitRun {
+    fn start(&mut self) -> u64 {
+        self.generation += 1;
+        self.active = true;
+        self.generation
+    }
+    fn cancel(&mut self) {
+        self.generation += 1;
+        self.active = false;
+    }
+    /// Whether a close begun in `generation` still belongs to a running quit.
+    fn current(&self, generation: u64) -> bool {
+        self.active && self.generation == generation
+    }
+}
 struct QuitCoordinator {
     _delegate: objc2::rc::Retained<crate::platform::QuitDelegate>,
     /// The viewers' last pictures still being written: a quit waits for
@@ -135,6 +159,8 @@ struct QuitCoordinator {
     hidden: bool,
     /// The library's last writing has begun: once only.
     finishing: bool,
+    /// Which quit a window's close belongs to ([`QuitRun`]).
+    run: QuitRun,
     quitting: bool,
     /// The person chose Discard Changes for every project at once.
     discard: bool,
@@ -180,6 +206,7 @@ fn cancel_quit(cx: &mut App) {
         q.queue.clear();
         q.closing.clear();
         q.finishing = false;
+        q.run.cancel();
         let hidden = std::mem::take(&mut q.hidden);
         if hidden {
             show_app();
@@ -439,6 +466,7 @@ fn start_quit(cx: &mut App) {
     pm_shell::session::set_quitting(true);
     let q = cx.global_mut::<QuitCoordinator>();
     q.quitting = true;
+    q.run.start();
     q.queue = q.controllers.clone();
     q.host.closing.store(true, Ordering::Release);
     let controllers = q.controllers.clone();
@@ -481,6 +509,10 @@ fn questions_first<T>(windows: Vec<T>, unsaved: impl Fn(&T) -> bool) -> Vec<T> {
     clean.into_iter().chain(asked).collect()
 }
 fn next_quit(cx: &mut App) {
+    // No quit running (cancelled meanwhile): nothing to arm, hide or close.
+    if !cx.global::<QuitCoordinator>().quitting {
+        return;
+    }
     // Once no window left asks anything (unsaved ones go first), the quit is
     // bounded: each window that closes renews it, so only a quit that stops
     // making progress ends early (`quit_limit`).
@@ -925,6 +957,7 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
             closing: Vec::new(),
             hidden: false,
             finishing: false,
+            run: QuitRun::default(),
             quitting: false,
             discard: false,
             asking_exports: false,
@@ -1513,6 +1546,8 @@ impl Controller {
         // quit waits for the file (`last_frame_keep`), a quit signal keeps
         // only the one already kept.
         let signal = cx.global::<QuitCoordinator>().terminating;
+        // The quit this close belongs to (a later one does not adopt it).
+        let generation = cx.global::<QuitCoordinator>().run.generation;
         let last_frame = session
             .is_some()
             .then(|| last_frame_keep(intent, signal))
@@ -1617,7 +1652,16 @@ impl Controller {
                         }
                     })
                     .detach();
-                    if intent == Intent::Quit {
+                    if intent == Intent::Quit
+                        && !cx.global::<QuitCoordinator>().run.current(generation)
+                    {
+                        // Its quit was cancelled while this close went on
+                        // (another window's close failed): no project here
+                        // now, not "closing" for a quit that is over.
+                        crate::diag::line(serde_json::json!({"quit":"late_release"}));
+                        v.show_no_project(cx);
+                        cx.notify();
+                    } else if intent == Intent::Quit {
                         crate::diag::line(serde_json::json!({"quit":"window_released"}));
                         v.closed_for_quit = true;
                         v.closing_note = Some(closing(Intent::Quit, "finishing up"));
@@ -1733,6 +1777,23 @@ mod tests {
         assert!(alert.buttons[0].default && !alert.buttons[0].action);
         assert!(alert.buttons[1].action);
         assert!(alert.informative.contains("Unsupported window session"));
+    }
+    /// Two windows closing together; the first one's close fails and the
+    /// quit is cancelled; the second's success arrives after: it belongs to
+    /// no running quit, so it does nothing for it. A quit started again later
+    /// does not adopt it either.
+    #[test]
+    fn a_close_finishing_after_its_quit_was_cancelled_is_late() {
+        let mut run = QuitRun::default();
+        let quit = run.start();
+        let (first, second) = (quit, quit);
+        assert!(run.current(first) && run.current(second));
+        // The first window's close fails: the quit is cancelled.
+        run.cancel();
+        assert!(!run.current(second), "the second close's success is late");
+        // A new quit: the old close is still not one of its own.
+        let again = run.start();
+        assert!(!run.current(second) && run.current(again));
     }
     /// What holds a quit is named: a file chooser anywhere, the Recover
     /// question and the Export sheet on an editor, any other question.
