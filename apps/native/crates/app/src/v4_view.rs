@@ -3267,8 +3267,15 @@ impl SurfaceView {
                         | Component::ColourWell
                 )
             );
+        let opens_field = node.opens_field;
         if !disabled && (clickable || events.double_click) {
             element = element.on_click(cx.listener(move |v, event: &ClickEvent, window, cx| {
+                // A click that opens a field (a layer's rename, the typed
+                // time): ⌘A, digits and Return typed from now on are the
+                // field's, even before it has the keyboard (pm_shell::typing).
+                if opens_field.is_some_and(|clicks| event.click_count() >= clicks) {
+                    pm_shell::typing::expect();
+                }
                 // A node that only takes double-clicks (a layer's name) leaves
                 // a single click to what it sits in (its row selects).
                 let double = events.double_click && event.click_count() == 2;

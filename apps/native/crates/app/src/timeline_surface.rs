@@ -2928,6 +2928,9 @@ impl TimelineSurface {
             }
             Gesture::Pressed(press) => {
                 if let Some(Spec::Property { layer, path }) = press.spec {
+                    // The value opens as a field: ⌘A, digits and Return typed
+                    // from now on are its, never shortcuts on the layers.
+                    pm_shell::typing::expect();
                     self.delegate.run(
                         "timeline.propertyEdit",
                         vec![serde_json::json!({"type":"propertyEdit","layer":layer,"path":path})],
