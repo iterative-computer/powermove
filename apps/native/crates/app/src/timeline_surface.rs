@@ -481,6 +481,8 @@ pub struct TimelineSurface {
     /// loss, hide): the pointer may never move out of the timeline.
     activation: Option<Subscription>,
     split_modifiers: Option<Subscription>,
+    /// A click dismisses the cut preview until actual pointer motion.
+    split_preview_hidden: bool,
     /// Where media being dragged over the timeline would land (window
     /// position), for the insertion line.
     media_over: Option<Point<Pixels>>,
@@ -577,6 +579,7 @@ impl TimelineSurface {
             focused: true,
             activation: None,
             split_modifiers: None,
+            split_preview_hidden: false,
             media_over: None,
             effect_over: None,
             late: None,
@@ -1801,6 +1804,8 @@ impl TimelineSurface {
         }
         if self.model.edit_tool == pm_panel_timeline::EditTool::Split
             && y >= self.tokens.metrics.ruler as f64 {
+            self.split_preview_hidden = true;
+            cx.notify();
             if let Some((id, _)) = self.clip_at(x, y) {
                 let at = self.model.split_time(self.time_at(x), self.delegate.time(cx), self.snap_radius());
                 let all = event.modifiers.shift;
@@ -3255,6 +3260,7 @@ impl TimelineSurface {
     /// covered them closes over a resting pointer), only notes where it is.
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let moved = self.pointer.is_some_and(|seen| seen != position);
+        if self.pointer != Some(position) { self.split_preview_hidden = false; }
         self.pointer = Some(position);
         let (x, y) = self.local(position);
         if self.model.edit_tool == pm_panel_timeline::EditTool::Split {
@@ -4844,27 +4850,36 @@ impl Render for TimelineSurface {
                         }
                         if let Some(surface) = this.upgrade() {
                             let surface = surface.read(cx);
-                            if surface.model.edit_tool == pm_panel_timeline::EditTool::Split {
+                            if surface.model.edit_tool == pm_panel_timeline::EditTool::Split && !surface.split_preview_hidden {
                                 if let Some(pointer) = surface.pointer {
                                     let (x, y) = surface.local(pointer);
                                     if let Some((id, _)) = surface.clip_at(x, y)
                                         && (x - surface.view.layer_column).abs() > tokens.metrics.hit as f64 / 4. {
                                         let at = surface.model.split_time(surface.time_at(x), surface.delegate.time(cx), surface.snap_radius());
                                         let cut_x = surface.view.layer_column + (at - surface.view.scroll_time) * surface.view.pps;
+                                        // An explicit foreground paint layer keeps these hairlines
+                                        // above the independently composited clip fills.
+                                        window.paint_layer(bounds, |window| {
                                         for op in surface.frame.iter().flat_map(|f| &f.ops).filter(|o| o.id.starts_with("clip:")) {
                                             let layer = &op.id[5..];
                                             if (window.modifiers().shift || layer == id) && surface.model.index.layer(layer).is_some_and(|l| at > l.from && at < l.from + l.duration) {
                                                 let top = op.bounds.y.max(tokens.metrics.ruler as f64);
                                                 let bottom = (op.bounds.y + op.bounds.height).min(f32::from(surface.bounds.size.height) as f64);
                                                 if bottom > top && cut_x >= surface.view.layer_column && cut_x < f32::from(surface.bounds.size.width) as f64 {
-                                                    window.paint_quad(PaintQuad::new(Bounds::new(bounds.origin + point(px(cut_x as f32), px(top as f32)), size(px(1.), px((bottom - top) as f32)))).background(rgb(tokens.colors.accent)));
+                                                    let line = Bounds::new(bounds.origin + point(px(cut_x.floor() as f32), px(top as f32)), size(px(1.), px((bottom - top) as f32)));
+                                                    // A narrow contrast edge keeps the 1 pt orange line
+                                                    // legible against bright video and clip fills at 1×.
+                                                    window.paint_quad(PaintQuad::new(Bounds::new(line.origin - point(px(1.), px(0.)), size(px(3.), line.size.height))).background(rgb(tokens.colors.panel)));
+                                                    window.paint_quad(PaintQuad::new(line).background(rgb(tokens.colors.accent)));
                                                 }
                                             }
                                         }
+                                        });
                                         let label = format!("{}{}", if at < 0. { "−" } else { "" }, crate::captions_panel::timecode(at.abs(), surface.model.index.fps));
                                         let runs = [TextRun { len: label.len(), font: window.text_style().font(), color: rgb_to_hsla(rgb(tokens.colors.text)), background_color: None, underline: None, strikethrough: None, letter_spacing: None }];
                                         let text = window.text_system().shape_line(label.into(), px(tokens.typography.minimum), &runs);
-                                        let pos = bounds.origin + point(px((cut_x as f32 + 12.).min(f32::from(bounds.size.width) - 100.)), px((y as f32 - 24.).max(tokens.metrics.ruler)));
+                                        let top = surface.frame.iter().flat_map(|f| &f.ops).find(|o| o.id.strip_prefix("clip:") == Some(id.as_str())).map_or(tokens.metrics.ruler, |o| o.bounds.y as f32);
+                                        let pos = bounds.origin + point(px((cut_x as f32 + 12.).min(f32::from(bounds.size.width) - 100.)), px((top - 24.).max(2.)));
                                         window.paint_quad(PaintQuad::new(Bounds::new(pos - point(px(4.), px(2.)), size(px(94.), px(20.)))).background(rgb(tokens.colors.floating)).corner_radii(px(tokens.metrics.control_radius)));
                                         let _ = text.paint(pos, px(16.), TextAlign::Left, None, window, cx);
                                     }

@@ -2551,17 +2551,20 @@ impl TimelineModel {
         };
         let ids = layers.iter().map(|l| l.id.clone()).collect::<Vec<_>>();
         let tails = ids.iter().map(|_| new_id("L")).collect::<Vec<_>>();
-        let mut plan = Plan::edit(
-            vec![
-                TimingCommand::Split {
-                    layer_ids: ids,
-                    time,
-                    new_ids: tails,
-                }
-                .into(),
-            ],
-            self.index.revision,
-        );
+        let mut commands = Vec::new();
+        if self.mode == crate::TimelineMode::Tracks {
+            // Freeze the displayed lanes before Split creates its new pieces.
+            // Otherwise the automatic layout can pack them into another track.
+            commands.push(TimingCommand::PinTracks {
+                lanes: crate::tracks::relative_lanes(&self.index, &self.reveal),
+            }.into());
+        }
+        commands.push(TimingCommand::Split {
+            layer_ids: ids,
+            time,
+            new_ids: tails,
+        }.into());
+        let mut plan = Plan::edit(commands, self.index.revision);
         if let Some(Call::Transact { label: slot, .. }) = plan.calls.first_mut() {
             *slot = Some(label);
         }

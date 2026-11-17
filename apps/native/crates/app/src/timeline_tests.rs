@@ -3749,7 +3749,8 @@ fn g6_capture_split_review() {
         pump(&mut cx);
         cx.update(|cx| surface.update(cx, |s, cx| s.command("timeline.tool:split", 0., None, false, cx)));
         pump(&mut cx);
-        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/tool-{name}.png")).unwrap();
+        let baseline = cx.capture_screenshot(window.into()).unwrap();
+        baseline.save(format!("{dir}/tool-{name}.png")).unwrap();
         let origin = cx.debug_bounds(window.into(), "timeline:surface").unwrap().unwrap().origin;
         let position = cx.update(|cx| {
             let s = surface.read(cx);
@@ -3767,14 +3768,55 @@ fn g6_capture_split_review() {
                 }
             }).unwrap();
             pump(&mut cx);
-            cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/{label}-{name}.png")).unwrap();
+            let image = cx.capture_screenshot(window.into()).unwrap();
+            let (accent, samples) = cx.update(|cx| {
+                let s = surface.read(cx);
+                let f = s.frame().unwrap();
+                let samples: Vec<_> = ["a", "b", "c"].into_iter().map(|id| {
+                    let op = f.ops.iter().find(|o| o.id == format!("clip:{id}")).unwrap();
+                    (id, origin + point(px((f.viewport.layer_column + (1. - f.viewport.scroll_time) * f.viewport.pps).floor() as f32), px((op.bounds.y + op.bounds.height / 2.) as f32)))
+                }).collect();
+                (pm_design::Tokens::new(scheme, Default::default()).colors.accent, samples)
+            });
+            let scale = image.width() as f32 / 1000.;
+            for (id, at) in samples {
+                let pixel = image.get_pixel((f32::from(at.x) * scale) as u32, (f32::from(at.y) * scale) as u32);
+                let orange = pixel[0].abs_diff((accent >> 16) as u8) <= 2 && pixel[1].abs_diff((accent >> 8) as u8) <= 2 && pixel[2].abs_diff(accent as u8) <= 2;
+                assert_eq!(orange, id == "a" || (shift && id == "b"), "{name} {label}: orange preview scope on {id}");
+            }
+            image.save(format!("{dir}/{label}-{name}.png")).unwrap();
         }
         cx.update_window(window.into(), |_, w, cx| {
             w.dispatch_event(gpui::PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position, ..Default::default() }), cx);
             w.dispatch_event(gpui::PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position, ..Default::default() }), cx);
         }).unwrap();
         pump(&mut cx);
-        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/result-{name}.png")).unwrap();
+        let image = cx.capture_screenshot(window.into()).unwrap();
+        // The readout is in the ruler, and a click must restore that region
+        // until the pointer actually moves again.
+        let scale = image.width() / 1000;
+        for y in 0..24 * scale {
+            for x in 390 * scale..490 * scale {
+                assert_eq!(image.get_pixel(x, y), baseline.get_pixel(x, y), "{name}: no lingering readout after click");
+            }
+        }
+        image.save(format!("{dir}/result-{name}.png")).unwrap();
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position: position + point(px(4.), px(0.)), ..Default::default() }), cx);
+        }).unwrap();
+        pump(&mut cx);
+        let moved = cx.capture_screenshot(window.into()).unwrap();
+        assert!((0..24 * scale).any(|y| (390 * scale..490 * scale).any(|x| moved.get_pixel(x, y) != baseline.get_pixel(x, y))), "{name}: readout resumes after pointer motion");
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position: origin + point(px(500.), px(250.)), ..Default::default() }), cx);
+        }).unwrap();
+        pump(&mut cx);
+        let empty = cx.capture_screenshot(window.into()).unwrap();
+        for y in 0..24 * scale {
+            for x in 390 * scale..490 * scale {
+                assert_eq!(empty.get_pixel(x, y), baseline.get_pixel(x, y), "{name}: no readout outside a bar");
+            }
+        }
     }
 }
 
@@ -3799,6 +3841,13 @@ fn g6_pointer_split_in_both_modes_is_one_undo_and_stays_selected(cx: &mut TestAp
             let op = f.ops.iter().find(|o| o.id == "clip:a").unwrap();
             origin + point(px((f.viewport.layer_column + (1. - f.viewport.scroll_time) * f.viewport.pps) as f32), px((op.bounds.y + op.bounds.height / 2.) as f32))
         });
+        let before = s.surface.read_with(&s.vcx, |t, _| {
+            pm_panel_timeline::tracks::relative_lanes(&t.model().index, &t.model().reveal).into_iter().map(|(id, lane)| {
+                let row = t.frame().unwrap().ops.iter().find(|o| o.id == format!("clip:{id}")).unwrap().bounds.y;
+                let name = t.model().index.layer(&id).unwrap().name.to_string_lossy();
+                (id, name, lane as usize, row)
+            }).collect::<Vec<_>>()
+        });
         let modifiers = Modifiers { shift: all, ..Default::default() };
         s.vcx.simulate_mouse_down(at, MouseButton::Left, modifiers);
         s.vcx.simulate_mouse_up(at, MouseButton::Left, modifiers);
@@ -3809,6 +3858,19 @@ fn g6_pointer_split_in_both_modes_is_one_undo_and_stays_selected(cx: &mut TestAp
         assert_eq!(s.out_of("b"), if all { 1. } else { 2. });
         assert_eq!(s.out_of("c"), 2., "locked layer stays intact");
         if all { assert!(s.recorder.reports.borrow().iter().any(|r| r.contains("Locked"))); }
+        if mode == "tracks" {
+            s.surface.read_with(&s.vcx, |t, _| {
+                for (id, name, lane, row) in &before {
+                    let original = t.model().index.layer(id).unwrap();
+                    assert_eq!(original.preferred_track, *lane, "original {id} keeps its track");
+                    for layer in t.model().index.layers.iter().filter(|l| l.id == *id || l.name.to_string_lossy() == format!("{name} 2")) {
+                        assert_eq!(layer.preferred_track, *lane, "{} stays on the source track", layer.id);
+                        let op = t.frame().unwrap().ops.iter().find(|o| o.id == format!("clip:{}", layer.id)).unwrap();
+                        assert_eq!(op.bounds.y, *row, "{} stays in its displayed row", layer.id);
+                    }
+                }
+            });
+        }
         s.undo(cx);
         assert_eq!(s.out_of("a"), 2., "one Undo restores {mode}");
     }
