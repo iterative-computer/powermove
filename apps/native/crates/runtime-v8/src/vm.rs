@@ -385,6 +385,13 @@ struct IsolatePtr(v8::UnsafeRawIsolatePtr);
 // isolate's locked owner thread while the isolate is alive.
 unsafe impl Send for IsolatePtr {}
 unsafe impl Sync for IsolatePtr {}
+/// The young generation's ceiling. V8 starts marking the old generation
+/// whenever its room under the limit is less than the young generation's
+/// capacity, and sets that limit only a third or so above what lives: with
+/// the young generation V8 sizes for a 1 GiB heap (32 MiB of new space), a
+/// realm holding a project's mirror had that room never, and marked in full
+/// over and over while it did almost nothing (PM-469).
+const YOUNG_MAX: usize = 16 * MIB;
 /// An isolate's heap in V8's terms. Admission counts the whole heap limit:
 /// the young generation, fixed from the ceiling, plus the old generation's
 /// current limit, which starts at the initial slice and grows on demand.
@@ -397,7 +404,7 @@ pub(crate) struct HeapPlan {
 impl HeapPlan {
     pub fn new(limits: &Limits) -> Self {
         let params = v8::CreateParams::default().heap_limits(0, limits.heap_bytes);
-        let young = params.max_young_generation_size_in_bytes();
+        let young = params.max_young_generation_size_in_bytes().min(YOUNG_MAX);
         let ceiling_old = params.max_old_generation_size_in_bytes();
         let initial_old = limits
             .initial_heap_bytes
@@ -1057,6 +1064,7 @@ impl Vm {
             v8::CreateParams::default()
                 .snapshot_blob(blob.as_ref().clone().into())
                 .heap_limits(0, limits.heap_bytes)
+                .set_max_young_generation_size_in_bytes(plan.young)
                 .set_max_old_generation_size_in_bytes(plan.initial_old),
         );
         isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
