@@ -74,6 +74,55 @@ const ALPHAS: [(&str, AlphaChoice); 4] = [
     ),
 ];
 
+/// Frame Rate: conform the clip to this rate (frame n shows at n / rate),
+/// as rationals (`frameRate` with `frameRateRational`).
+const FRAME_RATES: [(&str, (i64, i64)); 10] = [
+    ("23.976 fps", (24000, 1001)),
+    ("24 fps", (24, 1)),
+    ("25 fps", (25, 1)),
+    ("29.97 fps", (30000, 1001)),
+    ("30 fps", (30, 1)),
+    ("48 fps", (48, 1)),
+    ("50 fps", (50, 1)),
+    ("59.94 fps", (60000, 1001)),
+    ("60 fps", (60, 1)),
+    ("120 fps", (120, 1)),
+];
+/// Fields: how an interlaced file's two fields are read (`fieldOrder`).
+const FIELD_ORDERS: [(&str, &str); 3] = [
+    ("Progressive (No Fields)", "progressive"),
+    ("Upper Field First", "topFirst"),
+    ("Lower Field First", "bottomFirst"),
+];
+/// Pixel Aspect Ratio, width : height of one pixel (`pixelAspect`), as
+/// After Effects names them.
+const PIXEL_ASPECTS: [(&str, (i64, i64)); 8] = [
+    ("Square Pixels (1.0)", (1, 1)),
+    ("D1/DV NTSC (0.91)", (10, 11)),
+    ("D1/DV NTSC Widescreen (1.21)", (40, 33)),
+    ("D1/DV PAL (1.09)", (59, 54)),
+    ("D1/DV PAL Widescreen (1.46)", (118, 81)),
+    ("HDV 1080/DVCPRO HD 720 (1.33)", (4, 3)),
+    ("DVCPRO HD 1080 (1.5)", (3, 2)),
+    ("Anamorphic 2:1 (2.0)", (2, 1)),
+];
+/// The file's field order as a Fields choice's stored value.
+fn field_value(order: &pm_media::probe::FieldOrder) -> &'static str {
+    match order {
+        pm_media::probe::FieldOrder::TopFirst => "topFirst",
+        pm_media::probe::FieldOrder::BottomFirst => "bottomFirst",
+        _ => "progressive",
+    }
+}
+fn field_override_value(order: &pm_media::interlace::FieldOverride) -> Option<&'static str> {
+    match order {
+        pm_media::interlace::FieldOverride::Auto => None,
+        pm_media::interlace::FieldOverride::TopFirst => Some("topFirst"),
+        pm_media::interlace::FieldOverride::BottomFirst => Some("bottomFirst"),
+        pm_media::interlace::FieldOverride::Progressive => Some("progressive"),
+    }
+}
+
 const GAIN_MAPS: [(&str, Rendition); 2] = [
     ("HDR Picture", Rendition::Hdr),
     ("SDR Base Only", Rendition::SdrBase),
@@ -222,6 +271,35 @@ pub fn surface(
             .map(|_| (&names[1], &automatic)),
     );
     tone.enabled = video && reading.is_some_and(|r| r.tone_map.is_some());
+    // Time and shape: the file's reading, and what is chosen here.
+    let rate_read = reading.map(|r| ((r.frame_rate.automatic.num(), r.frame_rate.automatic.den()), &r.frame_rate.origin));
+    let rate_chosen = chosen.frame_rate.map(|r| (r.num(), r.den()));
+    let mut frame_rate = popup(
+        "frameRate",
+        "Frame Rate",
+        &FRAME_RATES,
+        rate_chosen.as_ref(),
+        rate_read.as_ref().map(|(v, o)| (v, *o)),
+    );
+    frame_rate.enabled = video;
+    let fields_read = reading.map(|r| (field_value(&r.field_order.automatic), &r.field_order.origin));
+    let fields_chosen = field_override_value(&chosen.field_order);
+    let mut field_order = popup(
+        "fieldOrder",
+        "Field Order",
+        &FIELD_ORDERS,
+        fields_chosen.as_ref(),
+        fields_read.as_ref().map(|(v, o)| (v, *o)),
+    );
+    field_order.enabled = video;
+    let aspect_read = reading.map(|r| (&r.pixel_aspect.automatic, &r.pixel_aspect.origin));
+    let pixel_aspect = popup(
+        "pixelAspect",
+        "Pixel Aspect Ratio",
+        &PIXEL_ASPECTS,
+        chosen.pixel_aspect.as_ref(),
+        aspect_read,
+    );
     let fields = vec![
         popup(
             "primaries",
@@ -256,6 +334,9 @@ pub fn surface(
                 vec![matte_hex(chosen.alpha_matte)],
             )
         },
+        frame_rate,
+        field_order,
+        pixel_aspect,
         Field {
             enabled: gain_map,
             description: Some(if gain_map {
@@ -284,11 +365,28 @@ pub fn surface(
             fields: vec!["alpha", "alphaMatte"],
         },
         FieldGroup {
+            title: "Frame Rate",
+            fields: vec!["frameRate"],
+        },
+        FieldGroup {
+            title: "Fields",
+            fields: vec!["fieldOrder"],
+        },
+        FieldGroup {
+            title: "Pixel Aspect",
+            fields: vec!["pixelAspect"],
+        },
+        FieldGroup {
             title: "HDR",
             fields: vec!["gainMap"],
         },
     ];
     surface
+}
+
+/// `[num, den]` as the document stores a rational.
+fn rational(num: i64, den: i64) -> Value {
+    pm_model::json::parse(&format!("[{num},{den}]")).expect("a JSON array")
 }
 
 /// What the pop-ups say, as indexes: 0 is Automatic.
@@ -301,6 +399,9 @@ pub struct Chosen {
     pub tone_mapping: usize,
     pub alpha: usize,
     pub gain_map: usize,
+    pub frame_rate: usize,
+    pub field_order: usize,
+    pub pixel_aspect: usize,
     /// The matte well's colour, once the person has changed it.
     pub matte: Option<String>,
 }
@@ -316,6 +417,9 @@ impl Chosen {
             tone_mapping: at("toneMapping"),
             alpha: at("alpha"),
             gain_map: at("gainMap"),
+            frame_rate: at("frameRate"),
+            field_order: at("fieldOrder"),
+            pixel_aspect: at("pixelAspect"),
             matte,
         }
     }
@@ -391,6 +495,37 @@ impl Chosen {
             &tones(),
             (self.tone_mapping, opened.tone_mapping),
         );
+        // Frame rate: the number and its exact rational; Automatic removes both.
+        if self.frame_rate != opened.frame_rate {
+            match self.frame_rate.checked_sub(1).and_then(|i| FRAME_RATES.get(i)) {
+                Some((_, (num, den))) => {
+                    interpret.insert("frameRate", Value::from(*num as f64 / *den as f64));
+                    interpret.insert("frameRateRational", rational(*num, *den));
+                }
+                None => {
+                    interpret.remove("frameRate");
+                    interpret.remove("frameRateRational");
+                }
+            }
+            changed = true;
+        }
+        changed |= set(
+            interpret,
+            "fieldOrder",
+            &FIELD_ORDERS,
+            (self.field_order, opened.field_order),
+        );
+        if self.pixel_aspect != opened.pixel_aspect {
+            match self.pixel_aspect.checked_sub(1).and_then(|i| PIXEL_ASPECTS.get(i)) {
+                Some((_, (num, den))) => {
+                    interpret.insert("pixelAspect", rational(*num, *den));
+                }
+                None => {
+                    interpret.remove("pixelAspect");
+                }
+            }
+            changed = true;
+        }
         let alpha = set(interpret, "alpha", &ALPHAS, (self.alpha, opened.alpha));
         changed |= alpha;
         // The matte belongs to the matted choice: it leaves with it, and a
@@ -449,17 +584,28 @@ fn as_in_powermove_1(
 impl Controller {
     /// `Interpret Footage…` on the selected clip's asset.
     pub fn interpret_footage_sheet(&mut self, cx: &mut Context<Self>) {
-        const SELECT: &str = "Select a video or image clip to interpret";
-        let (Some(p), Some(layer), Some(session)) = (
-            self.published.clone(),
-            self.selected.clone(),
-            self.session.clone(),
-        ) else {
-            self.message = SELECT.into();
-            cx.notify();
+        let asset = self
+            .published
+            .as_ref()
+            .zip(self.selected.as_ref())
+            .and_then(|(p, layer)| crate::colour::layer_asset(p, layer));
+        match asset {
+            Some(asset) => self.interpret_asset_sheet(asset, cx),
+            None => {
+                self.message = "Select a video or image clip to interpret".into();
+                cx.notify();
+            }
+        }
+    }
+    /// `Interpret Footage…` on media `asset` (a Project panel item, or the
+    /// selected clip's): its colour, alpha, frame rate, fields and pixel
+    /// aspect, as one Undo step.
+    pub fn interpret_asset_sheet(&mut self, asset: String, cx: &mut Context<Self>) {
+        const SELECT: &str = "Only video and images can be interpreted";
+        let (Some(p), Some(session)) = (self.published.clone(), self.session.clone()) else {
             return;
         };
-        let record = crate::colour::layer_asset(&p, &layer).and_then(|asset| {
+        let record = Some(asset).and_then(|asset| {
             let record = p.snapshot.root()?.get("assets")?.get(&asset)?;
             let kind = record.get("kind")?.to_value().as_str()?.to_owned();
             matches!(kind.as_str(), "video" | "image").then(|| {
@@ -529,7 +675,7 @@ impl Controller {
                             let _ = this.update(cx, |v, cx| {
                                 v.change_interpretation(
                                     |p, _| {
-                                        crate::colour::edit_interpretation(p, &layer, |interpret| {
+                                        crate::colour::edit_asset_interpretation(p, &asset, |interpret| {
                                             chosen.write(&opened, interpret);
                                         })
                                     },
