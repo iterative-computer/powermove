@@ -540,3 +540,59 @@ fn the_viewer_opens_on_the_outputs_view_and_keeps_a_chosen_one() {
     assert_eq!(super::next_view(Pq, Hlg, OutputMode::Edr), OutputMode::Edr);
     assert_eq!(super::next_view(Sdr, Pq, OutputMode::Hlg), OutputMode::Hlg);
 }
+
+/// A clip's grade is a stack (PM-504): Color Wheels, a curve and a LUT go on
+/// one clip as three blocks in that order; Load LUT… on a clip that already
+/// has a LUT with its file adds another block instead of replacing it.
+#[test]
+fn wheels_a_curve_and_luts_stack_on_one_clip() {
+    use pm_kernel::commands::effects::{AddEffect, EffectCommand, saved_builtin_definition};
+    let (dir, actor, _session) = fixture();
+    let k = actor.handle();
+    for (id, kind, version) in [("w", "colorWheels", None), ("c", "colorCurves", None)] {
+        let p = published(&k);
+        let definition =
+            saved_builtin_definition(&p.snapshot.document, kind, version.as_ref(), 0., 0.).unwrap();
+        let add = EffectCommand::Add(Box::new(AddEffect {
+            layer_id: "solid".into(),
+            effect_id: id.into(),
+            definition,
+            parameters: Map::new(),
+            inputs: None,
+            open: true,
+            enabled: true,
+            enabled_animation: None,
+            index: None,
+        }));
+        k.call_blocking("test", transact(&p, "Add", vec![add.into()]))
+            .unwrap();
+    }
+    for name in ["One.cube", "Two.cube"] {
+        let p = published(&k);
+        let path = dir.path().join(name);
+        let asset = name.trim_end_matches(".cube").to_lowercase();
+        let commands = lut_commands(&p, "solid", &asset, name, &path, &none()).unwrap();
+        k.call_blocking("test", transact(&p, "Apply LUT", commands))
+            .unwrap();
+    }
+    let effects = effects_of(&k, "solid");
+    let kinds: Vec<_> = effects
+        .iter()
+        .map(|e| e["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "colorWheels",
+            "colorCurves",
+            "applyColorLut",
+            "applyColorLut"
+        ]
+    );
+    let luts: Vec<_> = effects[2..]
+        .iter()
+        .map(|e| e["inputs"]["lut"]["assetId"].as_str().unwrap())
+        .collect();
+    assert_eq!(luts, ["one", "two"]);
+    actor.shutdown();
+}
