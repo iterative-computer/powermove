@@ -140,12 +140,20 @@ fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
                 let media: Value =
                     serde_json::from_str(include_str!("../fixtures/media-native-catalog.json"))
                         .unwrap();
+                // Live viewer guidance is a pinned delta over the frozen catalog.
+                let viewer = include_bytes!("../fixtures/viewer-handles-native-catalog.json");
+                assert_eq!(
+                    pm_model::hash::sha256_hex(viewer),
+                    "166afbdea0e2053bca88ddcb8571a5ff966283facb2d8fbf8326cf813b39f470"
+                );
+                let viewer: Value = serde_json::from_slice(viewer).unwrap();
                 for replacement in studio["tools"]
                     .as_array()
                     .unwrap()
                     .iter()
                     .chain(projects["tools"].as_array().unwrap())
                     .chain(media["tools"].as_array().unwrap())
+                    .chain(viewer["tools"].as_array().unwrap())
                 {
                     *tools
                         .iter_mut()
