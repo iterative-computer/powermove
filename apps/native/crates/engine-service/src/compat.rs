@@ -1427,14 +1427,20 @@ mod tests {
         redrawn_after(fast);
         asked.lock().unwrap().clear();
         store.request(vec![need("fast"), need("slow")]);
+        let mut requests = std::mem::take(&mut *asked.lock().unwrap());
+        assert!(requests.iter().any(|layer| layer == "fast"));
         if Instant::now() < slow {
-            assert_eq!(*asked.lock().unwrap(), ["fast"]);
+            assert_eq!(requests, ["fast"]);
         }
         store.answer_all(7, 1, vec![(need("fast"), draw(1))]);
         redrawn_after(slow);
-        asked.lock().unwrap().clear();
         store.request(vec![need("fast"), need("slow")]);
-        assert_eq!(*asked.lock().unwrap(), ["slow"], "asked at its own time");
+        requests.extend(std::mem::take(&mut *asked.lock().unwrap()));
+        // Under load the first callback can run after both deadlines.
+        // Keep that request in the evidence: each layer is asked once,
+        // whether its wake is handled separately or together.
+        requests.sort();
+        assert_eq!(requests, ["fast", "slow"], "each retry is asked once");
     }
     fn at(layer: &str, seconds: f64) -> CompatNeed {
         let mut n = need(layer);
@@ -1662,12 +1668,14 @@ mod tests {
         assert_eq!(*asked.lock().unwrap(), vec![(1, 2)]);
         // In flight: nothing more.
         assert_eq!(store.ahead(0, 1., 1.), None);
-        std::thread::sleep(Duration::from_millis(20));
         store.answer_all(7, 1, vec![(at("x", 1.), draw(1)), (at("y", 1.), draw(1))]);
-        // About 10 ms a need, two layers: 20 ms a frame, five frames a batch.
+        // Test batching at a known measured cost. A wall-clock sleep can
+        // overshoot under load and change the expected number of frames.
+        store.answers.lock().unwrap().per_need = Some(Duration::from_millis(10));
+        // 10 ms a need, two layers: 20 ms a frame, five frames a batch.
         let (lead, frames) = store.ahead(ticks(1.), 1., 1.).unwrap();
-        assert!((3..=5).contains(&frames), "{frames}");
-        assert!(lead >= Duration::from_millis(60), "{lead:?}");
+        assert_eq!(frames, 5);
+        assert_eq!(lead, Duration::from_millis(100));
         store.request_ahead(vec![at("x", 2.), at("y", 2.)], ticks(2.), frames, frame);
         assert_eq!(asked.lock().unwrap()[1], (1, 2 * frames));
         store.answer_all(7, 1, vec![]);
