@@ -3253,7 +3253,12 @@ impl TimelineSurface {
     fn split_clip_at(&self, x: f64, y: f64) -> Option<String> {
         let (id, _) = self.clip_at(x, y)?;
         self.frame.as_ref()?.ops.iter()
-            .find(|op| op.id.strip_prefix("clip:") == Some(id.as_str()) && op.bounds.contains(x, y))
+            .find(|op| {
+                let b = op.bounds;
+                op.id.strip_prefix("clip:") == Some(id.as_str())
+                    && x >= b.x && x < b.x + b.width
+                    && y >= b.y && y < b.y + b.height
+            })
             .map(|_| id)
     }
     /// The layer bar hovered now (tests).
