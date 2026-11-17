@@ -3902,11 +3902,12 @@ impl Host {
                     if e.r#type() == NSEventType::KeyDown {
                         crate::typing::drop_expired();
                         let flags = e.modifierFlags();
-                        let text = crate::typing::is_text(
+                        let text = crate::typing::for_field(
                             &e.charactersIgnoringModifiers().map(|c| c.to_string()).unwrap_or_default(),
                             flags.intersects(
                                 NSEventModifierFlags::Command | NSEventModifierFlags::Control,
                             ),
+                            &chord,
                         );
                         let retained = || unsafe { Retained::retain(event.as_ptr()).unwrap() };
                         match crate::typing::decide(text, field, crate::typing::held()) {
