@@ -531,25 +531,25 @@ impl NativeControl {
                         .and_then(Value::as_str)
                         .or_else(|| option.as_str())
                         .unwrap_or("");
-                    let glyph = option
-                        .get("symbol")
-                        .and_then(Value::as_str)
-                        .and_then(|name| {
-                            NSImage::imageWithSystemSymbolName_accessibilityDescription(
-                                &NSString::from_str(name),
-                                Some(&NSString::from_str(title)),
-                            )
-                        })
-                        .map(|image| {
-                            // A glyph segment: the panel's symbol size in a
-                            // segment a row high wide, never scaled to fit.
-                            let config =
-                                NSImageSymbolConfiguration::configurationWithPointSize_weight(
-                                    t.metrics.symbol_panel as f64,
-                                    unsafe { NSFontWeightRegular },
-                                );
-                            image.imageWithSymbolConfiguration(&config).unwrap_or(image)
-                        });
+                    // A glyph segment: the panel's symbol size in a segment a
+                    // row high wide, never scaled to fit; a vendored glyph
+                    // where one stands for the symbol (`crate::icons`).
+                    let glyph = option.get("symbol").and_then(Value::as_str).and_then(|name| {
+                        if let Some(image) = crate::icons::glyph(name).and_then(|g| {
+                            crate::native::glyph_image(g, t.metrics.symbol_panel as f64, title)
+                        }) {
+                            return Some(image);
+                        }
+                        let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                            &NSString::from_str(name),
+                            Some(&NSString::from_str(title)),
+                        )?;
+                        let config = NSImageSymbolConfiguration::configurationWithPointSize_weight(
+                            t.metrics.symbol_panel as f64,
+                            unsafe { NSFontWeightRegular },
+                        );
+                        Some(image.imageWithSymbolConfiguration(&config).unwrap_or(image))
+                    });
                     let width = if glyph.is_some() {
                         v.setToolTip_forSegment(Some(&NSString::from_str(title)), i as isize);
                         (t.metrics.row + t.space.xs) as f64
@@ -633,10 +633,16 @@ impl NativeControl {
                     }
                     v.setHasDestructiveAction(destructive);
                     if let Some(image) = symbol.and_then(|name| {
-                        NSImage::imageWithSystemSymbolName_accessibilityDescription(
-                            &NSString::from_str(name),
-                            None,
-                        )
+                        crate::icons::glyph(name)
+                            .and_then(|g| {
+                                crate::native::glyph_image(g, t.metrics.symbol_panel as f64, "")
+                            })
+                            .or_else(|| {
+                                NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                                    &NSString::from_str(name),
+                                    None,
+                                )
+                            })
                     }) {
                         v.setImage(Some(&image));
                         v.setImagePosition(NSCellImagePosition::ImageLeading);

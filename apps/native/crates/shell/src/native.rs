@@ -2640,7 +2640,7 @@ fn symbol(s: &str, label: &str) -> Retained<NSImage> {
 }
 /// A vendored glyph (`crate::icons`) as a template image `points` square, so
 /// AppKit tints it as it tints a symbol (drawn at 3x: crisp on any display).
-fn glyph_image(glyph: crate::icons::Glyph, points: f64, label: &str) -> Option<Retained<NSImage>> {
+pub(crate) fn glyph_image(glyph: crate::icons::Glyph, points: f64, label: &str) -> Option<Retained<NSImage>> {
     use objc2::AnyThread;
     let side = (points * 3.).ceil().max(1.) as u32;
     let coverage = crate::icons::coverage(glyph, side)?;
@@ -2685,11 +2685,18 @@ fn menu_symbol(s: &str, label: &str) -> Retained<NSImage> {
         .and_then(|g| glyph_image(g, 16., label))
         .unwrap_or_else(|| symbol(s, label))
 }
+/// A toolbar item draws an SF Symbol of the toolbar's point size with about
+/// 18 pt of ink (measured at 14 pt: hand, zoom, gear, sparkles); a filled
+/// vendored glyph reads as large at about 16 pt, so its square is this much
+/// larger. A glyph matched to its SF Symbol on its own (Home) keeps its size.
+const TOOLBAR_GLYPH: f64 = 1.4;
 fn toolbar_symbol(s: &str, label: &str, t: &Tokens) -> Retained<NSImage> {
-    if let Some(glyph) = crate::icons::glyph(s)
-        && let Some(image) = glyph_image(glyph, t.metrics.symbol_toolbar as f64, label)
-    {
-        return image;
+    if let Some(glyph) = crate::icons::glyph(s) {
+        let points = t.metrics.symbol_toolbar as f64;
+        let points = if glyph.size == 1. { points * TOOLBAR_GLYPH } else { points };
+        if let Some(image) = glyph_image(glyph, points, label) {
+            return image;
+        }
     }
     let image = symbol(s, label);
     let config = objc2_app_kit::NSImageSymbolConfiguration::configurationWithPointSize_weight(
