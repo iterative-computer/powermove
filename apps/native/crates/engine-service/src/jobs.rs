@@ -712,11 +712,13 @@ impl std::error::Error for OfflineRefusal {}
 /// How long a job waits before asking again for a program still being built.
 const PENDING_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// Registers a job's effects. A program still being built (a passing
-/// compiler failure) is asked again after a wait, never drawn without:
-/// pm-render bounds the attempts and ends them in a refusal with the
-/// compiler's diagnostic. A cancel ends the wait, and the registration
-/// before its next definition, so no further compiler call starts.
+/// Registers a job's effects and builds their programs. One still being
+/// built (waiting its turn for the compiler, or retried after a passing
+/// failure) is asked again after a wait, never drawn without: pm-render
+/// bounds the passing failures per kind and ends them in a refusal with the
+/// compiler's diagnostic, which the job's frames refuse. A cancel ends the
+/// wait, and the registration before its next definition, so no further
+/// compiler call starts.
 pub(crate) fn register_effects(
     renderer: &mut pm_render::Renderer,
     doc: &pm_model::Document,
@@ -735,10 +737,13 @@ pub(crate) fn register_effects(
         if cancel.load(Ordering::Acquire) {
             anyhow::bail!("cancelled");
         }
+        // Registered: its programs are built now, waited out the same way,
+        // so no frame of the job meets one still being built.
         if let Some(failures) = failures
             && !failures
                 .iter()
                 .any(|failure| crate::render::program_pending(&failure.message))
+            && renderer.build_programs(doc).is_none()
         {
             return Ok(failures);
         }
@@ -1414,9 +1419,15 @@ pub fn run_child() -> Result<()> {
         }
         #[cfg(feature = "kernel")]
         crate::studio::attach_with_export_options_fonts(
-            &mut renderer,Arc::new(doc.clone()),&media,composition.as_str(),
-            request.studio_quality,request.studio_render_scale.unwrap_or(1.),Some(&fonts),
-        ).map_err(anyhow::Error::msg)?;
+            &mut renderer,
+            Arc::new(doc.clone()),
+            &media,
+            composition.as_str(),
+            request.studio_quality,
+            request.studio_render_scale.unwrap_or(1.),
+            Some(&fonts),
+        )
+        .map_err(anyhow::Error::msg)?;
         fonts.sync(&mut renderer, &mut None);
         if let Some(fill) = fill {
             let job = request.job.clone();
@@ -3237,6 +3248,36 @@ mod register_tests {
                 .status(pm_protocol::definitions::DefinitionKind::Effect, other)
                 .is_none()
         );
+    }
+
+    /// A built-in (pinned) effect whose compile is pending comes back as an
+    /// error from registration: waited out like a contributed one, never
+    /// the end of the job (Sol's finding B).
+    #[test]
+    fn a_pending_built_in_is_waited_out() {
+        // The document uses the built-in blur; no contribution replaces it.
+        let (scene, _, _) = black("blur");
+        pm_render::test_hooks::fail_compiles(
+            "blur",
+            vec![crate::render::pending_program_tests::failed(
+                pm_glsl::FailureStage::CompilerProcess,
+            )],
+        );
+        let mut renderer = pm_render::Renderer::headless().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let failures = register_effects(&mut renderer, &scene.doc, &[], &cancel).unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(
+            pm_render::test_hooks::left("blur").0,
+            0,
+            "the crash was met"
+        );
+        assert!(matches!(
+            renderer
+                .effects()
+                .status(pm_protocol::definitions::DefinitionKind::Effect, "blur"),
+            Some(pm_render::effects::Status::Ready)
+        ));
     }
 
     /// A busy compiler at registration is waited out, never a bypass.

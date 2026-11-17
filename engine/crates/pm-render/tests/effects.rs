@@ -2027,18 +2027,10 @@ fn a_pending_program_refuses_its_layer_until_it_registers() {
             frame.failures
         );
     }
-    // Asked again within its backoff: still pending, no compiler call.
+    // A busy compiler is no failure and has no backoff: the next
+    // registration compiles in its turn and the effect draws.
     let failures = r
-        .apply_definitions(&update(2, true, vec![gain.clone()], vec![]))
-        .unwrap();
-    assert!(
-        failures[0].message.contains(pm_render::PROGRAM_PENDING),
-        "{failures:?}"
-    );
-    // The compiler answers after it: registered again, the effect draws.
-    std::thread::sleep(Duration::from_millis(150));
-    let failures = r
-        .apply_definitions(&update(3, true, vec![gain], vec![]))
+        .apply_definitions(&update(2, true, vec![gain], vec![]))
         .unwrap();
     assert!(failures.is_empty(), "{failures:?}");
     // Exactly what a renderer that never waited draws; on the image and the

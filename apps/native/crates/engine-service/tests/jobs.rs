@@ -1459,13 +1459,37 @@ fn an_agent_still_never_succeeds_without_a_pending_program() {
     assert_eq!(waited.state, JobState::Done, "{waited:?}");
     assert_eq!(png("waited.png"), png("drawn.png"));
 
-    // Busy while its program is built: the still fails, nothing written.
-    let refused = run(
-        &with_failures("build.sh", &format!("build:{id}:compiler-busy")),
-        still(&project.to_string(), "refused.png"),
+    // A compiler that times out building its program: waited out (its
+    // backoff), the still has the effect.
+    let rebuilt = run(
+        &with_failures("build.sh", &format!("build:{id}:deadline*2")),
+        still(&project.to_string(), "rebuilt.png"),
     );
-    assert_eq!(refused.state, JobState::Failed, "{refused:?}");
-    let message = refused.error.unwrap().message;
-    assert!(message.contains(id), "{message}");
-    assert!(!dir.path().join("refused.png").exists());
+    assert_eq!(rebuilt.state, JobState::Done, "{rebuilt:?}");
+    assert_eq!(png("rebuilt.png"), png("drawn.png"));
+
+    // A compiler that keeps crashing, at registration or at the build: given
+    // up with its own message, the still fails, nothing written.
+    let limit = pm_render::effects::PASSING_LIMIT * 3;
+    for (stage, name) in [
+        ("compile", "gave-up-compile.png"),
+        ("build", "gave-up-build.png"),
+    ] {
+        let refused = run(
+            &with_failures(
+                &format!("{stage}-crash.sh"),
+                &format!("{stage}:{id}:compiler-process*{limit}"),
+            ),
+            still(&project.to_string(), name),
+        );
+        assert_eq!(refused.state, JobState::Failed, "{stage}: {refused:?}");
+        let message = refused.error.unwrap().message;
+        assert!(
+            message.contains(id)
+                && message.contains(pm_render::COMPILER_GAVE_UP)
+                && message.contains("injected compiler-process"),
+            "{stage}: {message}"
+        );
+        assert!(!dir.path().join(name).exists());
+    }
 }

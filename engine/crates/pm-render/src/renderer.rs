@@ -652,6 +652,33 @@ impl Renderer {
         )
     }
 
+    /// Builds the programs `document` uses now, as its frames would (a job,
+    /// before its first frame, so no frame meets a program still being
+    /// built). Returns the definition error of one still pending (its
+    /// compile waiting its turn or retried after a passing failure): the job
+    /// waits and asks again. A program the compiler gave up on is not
+    /// pending: its layers are refused by the frames.
+    pub fn build_programs(
+        &mut self,
+        document: &pm_model::Document,
+    ) -> Option<pm_protocol::error::EngineError> {
+        if self.effect_host.is_some() {
+            return None;
+        }
+        let first = crate::effects::prewarm::document_definitions(document);
+        let precision = document
+            .root()
+            .and_then(|root| crate::composite::color::project_color(root).ok())
+            .map_or(pm_protocol::color::Precision::Float16, |color| {
+                color.precision
+            });
+        self.effects.build_now(
+            &self.device,
+            pm_gpu::target::working_format(precision),
+            &first,
+        )
+    }
+
     /// The draw reuse's counters (with the frames drawn from a kept bottom
     /// and the draws those did not draw again).
     pub fn draw_reuse_stats(&self) -> crate::reuse::ReuseStats {
@@ -1412,6 +1439,7 @@ impl Renderer {
 
     /// Reusable targets currently idle in the pool.
     pub fn target_pool_idle(&self) -> usize {
+
         self.pool.idle()
     }
 
@@ -1438,7 +1466,6 @@ impl Renderer {
     pub fn image_cache_bytes(&self) -> u64 {
         self.media.image_bytes()
     }
-
 
     /// Explicit viewer opt-in, for stills and for video: a copy at the
     /// view's resolution instead of the source's. CLI exact/reference and

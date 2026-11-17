@@ -548,7 +548,7 @@ impl Effects {
         self.drop_entries(|k| !live.contains(k));
         // Definitions sent again (the app's resources, an extension
         // reloaded): one the compiler gave up on is asked afresh.
-        self.retry_given_up();
+        self.forget_given_up();
         let mut failures = Vec::new();
         for snapshot in &snapshot.definitions {
             if self.cancelled() {
@@ -561,9 +561,9 @@ impl Effects {
         Ok(failures)
     }
 
-    /// Asks the compiler afresh for every definition it gave up on (an
-    /// explicit retry; definitions sent again do the same). Returns how many.
-    pub fn retry_given_up(&mut self) -> usize {
+    /// Forgets what the compiler gave up on, so the next registration asks
+    /// it afresh (definitions sent again).
+    fn forget_given_up(&mut self) -> Vec<(DefinitionKind, DefinitionId)> {
         let given_up: Vec<_> = self
             .entries
             .iter()
@@ -573,6 +573,19 @@ impl Effects {
         for key in &given_up {
             self.entries.remove(key);
             self.passing.remove(key);
+        }
+        given_up
+    }
+
+    /// An explicit retry: every definition the compiler gave up on is asked
+    /// afresh now (translated again, its program built by the next draw).
+    /// Returns how many.
+    pub fn retry_given_up(&mut self) -> usize {
+        let given_up = self.forget_given_up();
+        for key in &given_up {
+            if let Some(snapshot) = self.get(key.0, key.1.as_str()).cloned() {
+                let _ = self.translate(&snapshot);
+            }
         }
         given_up.len()
     }
@@ -972,6 +985,38 @@ impl Effects {
             }
         }
         queued
+    }
+
+    /// Builds the programs of `keys` now (a job before its first frame).
+    /// Returns the definition error of the first still pending.
+    pub fn build_now(
+        &mut self,
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        keys: &[(DefinitionKind, DefinitionId)],
+    ) -> Option<EngineError> {
+        let mut pending = None;
+        for (kind, id) in keys {
+            let ready = matches!(
+                self.entries.get(&(*kind, id.clone())),
+                Some(Entry {
+                    status: Status::Ready,
+                    program: None,
+                    ..
+                })
+            );
+            if !ready {
+                continue;
+            }
+            if let Err(f) = self.program(device, *kind, id.as_str(), format)
+                && f.stage.retryable()
+                && matches!(self.status(*kind, id.as_str()), Some(Status::Ready))
+                && pending.is_none()
+            {
+                pending = pending_error(id, &f);
+            }
+        }
+        pending
     }
 
     /// Programs built ahead: (built, their µs, frames that waited, their µs,
@@ -1652,55 +1697,44 @@ mod tests {
         ));
     }
 
-    /// Draws during a busy compiler build once per backoff window (100 ms,
-    /// then 200 ms), not once per draw, and a build that works ends it.
+    /// In the interactive viewer, a program build that cannot start now
+    /// (every compiler slot taken) is no failure: it goes to the background
+    /// in its turn, draws meanwhile build nothing again (they wait, pending),
+    /// and once it lands the program draws, with no retry counted.
     #[test]
-    fn draws_during_a_busy_compiler_build_once_per_backoff_window() {
-        use std::time::Duration;
-        let gpu = pm_gpu::Gpu::new("build backoff test").unwrap();
+    fn a_queued_build_lands_in_the_background_without_rebuilding_per_draw() {
+        use std::time::{Duration, Instant};
+        let gpu = pm_gpu::Gpu::new("queued build test").unwrap();
         let format = wgpu::TextureFormat::Rgba16Float;
+        let id = "test.queued.build";
         let mut effects = Effects::new("test");
-        effects.set_snapshot(&builtin_definitions()).unwrap();
-        let def = builtin_definitions()
-            .definitions
-            .into_iter()
-            .find(|d| d.kind == DefinitionKind::Effect)
-            .unwrap();
-        effects.fail_builds = Some(Failure::new(
-            pm_glsl::FailureStage::CompilerBusy,
-            "all GLSL compiler process slots are occupied; retry later",
-        ));
-        let draw = |effects: &mut Effects, n: usize| {
-            for _ in 0..n {
-                assert!(
-                    effects
-                        .program(&gpu.device, def.kind, def.id.as_str(), format)
-                        .is_err()
-                );
+        assert!(effects.set_snapshot(&one(id)).unwrap().is_empty());
+        effects.interactive = true;
+        crate::test_hooks::fail_builds(
+            id,
+            vec![failure(
+                pm_glsl::FailureStage::CompilerBusy,
+                pm_glsl::QUEUED,
+            )],
+        );
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match effects.program(&gpu.device, DefinitionKind::Effect, id, format) {
+                Ok(_) => break,
+                Err(f) => assert!(f.admission(), "{f}"),
             }
-        };
-        draw(&mut effects, 30);
-        assert_eq!(effects.builds, 1, "one build in the first window");
-        std::thread::sleep(Duration::from_millis(120));
-        draw(&mut effects, 30);
-        assert_eq!(effects.builds, 2);
-        std::thread::sleep(Duration::from_millis(120));
-        draw(&mut effects, 30);
-        assert_eq!(effects.builds, 2, "the second window is 200 ms");
-        std::thread::sleep(Duration::from_millis(100));
-        draw(&mut effects, 30);
-        assert_eq!(effects.builds, 3);
-        assert!(matches!(
-            effects.status(def.kind, def.id.as_str()),
-            Some(Status::Ready)
-        ));
-        // The compiler is back: the next build after the window works.
-        effects.fail_builds = None;
-        std::thread::sleep(Duration::from_millis(420));
-        effects
-            .program(&gpu.device, def.kind, def.id.as_str(), format)
-            .unwrap();
-        assert_eq!(effects.builds, 4);
+            assert!(
+                Instant::now() < deadline,
+                "the background build never landed"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(effects.builds, 1, "only the first draw tried to build");
+        assert!(
+            effects.entries[&(DefinitionKind::Effect, DefinitionId::from(id))]
+                .retry
+                .is_none()
+        );
     }
 
     /// One contributed effect named `id` (a built-in's program), alone in
@@ -1741,7 +1775,7 @@ mod tests {
             let id = format!("test.keeps-failing.{}", stage.name());
             let set = one(&id);
             let said = format!("the compiler said {}", stage.name());
-            crate::test_hooks::fail_compiles(&id, vec![failure(stage, &said); 8]);
+            crate::test_hooks::fail_compiles(&id, vec![failure(stage, &said); 20]);
             let mut effects = Effects::new("test");
             for attempt in 1..PASSING_LIMIT {
                 let failures = effects.set_snapshot(&set).unwrap();
@@ -1753,7 +1787,7 @@ mod tests {
                 assert!(effects.status(DefinitionKind::Effect, &id).is_none());
                 // Asked again within the backoff: no compiler call.
                 effects.set_snapshot(&set).unwrap();
-                assert_eq!(crate::test_hooks::left(&id).0, 8 - attempt as usize);
+                assert_eq!(crate::test_hooks::left(&id).0, 20 - attempt as usize);
                 expire(&mut effects);
             }
             let failures = effects.set_snapshot(&set).unwrap();
@@ -1765,28 +1799,37 @@ mod tests {
             );
             assert!(matches!(
                 effects.status(DefinitionKind::Effect, &id),
-                Some(Status::NeedsFallback(f)) if f.stage == stage
+                Some(Status::GaveUp(f)) if f.stage == stage
             ));
+            // Terminal: frames and reports ask nothing of the compiler.
             let left = crate::test_hooks::left(&id).0;
             for _ in 0..5 {
                 expire(&mut effects);
-                effects.set_snapshot(&set).unwrap();
+                assert!(!effects.failures().is_empty());
+                assert!(matches!(
+                    definition_feature(&effects, DefinitionKind::Effect, &id),
+                    Some(crate::Feature::CompilerGaveUp(..))
+                ));
             }
             assert_eq!(
                 crate::test_hooks::left(&id).0,
                 left,
                 "{stage:?} asked again"
             );
-            // Sent again on its own (an explicit retry): asked afresh.
-            effects
-                .apply(&DefinitionsUpdate {
-                    generation: Seq::new(2).unwrap(),
-                    full: false,
-                    upserts: set.definitions.clone(),
-                    removals: vec![],
-                })
-                .unwrap();
+            // Sent again (the app's resources, an extension reload): asked afresh.
+            effects.set_snapshot(&set).unwrap();
             assert_eq!(crate::test_hooks::left(&id).0, left - 1);
+            // Sent again on its own (an update), and an explicit retry: the same.
+            for _ in 1..PASSING_LIMIT {
+                expire(&mut effects);
+                effects.set_snapshot(&set).unwrap();
+            }
+            assert!(matches!(
+                effects.status(DefinitionKind::Effect, &id),
+                Some(Status::GaveUp(_))
+            ));
+            assert_eq!(effects.retry_given_up(), 1);
+            assert!(effects.status(DefinitionKind::Effect, &id).is_none());
         }
     }
 
@@ -1810,7 +1853,7 @@ mod tests {
         );
         assert!(matches!(
             effects.status(DefinitionKind::Effect, id),
-            Some(Status::NeedsFallback(_))
+            Some(Status::GaveUp(_))
         ));
         let id = "test.unstartable.build";
         let mut effects = Effects::new("test");
@@ -1824,7 +1867,7 @@ mod tests {
         );
         assert!(matches!(
             effects.status(DefinitionKind::Effect, id),
-            Some(Status::NeedsFallback(_))
+            Some(Status::GaveUp(_))
         ));
         let failure = effects.failures().pop().unwrap();
         assert!(failure.message.contains("No such file"), "{failure:?}");
@@ -1863,7 +1906,7 @@ mod tests {
         );
         assert!(matches!(
             effects.status(DefinitionKind::Effect, id),
-            Some(Status::NeedsFallback(_))
+            Some(Status::GaveUp(_))
         ));
         for _ in 0..5 {
             expire(&mut effects);

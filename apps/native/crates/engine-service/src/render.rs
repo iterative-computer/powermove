@@ -5398,16 +5398,13 @@ pub(crate) mod pending_program_tests {
             exact: false,
             ..FrameSpec::exact(Ticks::from_whole_seconds(1), output())
         };
-        pm_render::test_hooks::fail_builds(id, vec![busy()]);
+        // Busy for the background build and for the frame's own: no
+        // failure, but no picture without the effect either.
+        pm_render::test_hooks::fail_builds(id, vec![busy(); 2]);
         let refused = engine.settle_now(&scene, spec, || false).unwrap_err();
         assert!(
             refused.is::<ProgramPending>() && transient(&refused),
             "{refused:#}"
-        );
-        assert_eq!(
-            pm_render::test_hooks::left(id),
-            (0, 0),
-            "the build met the busy compiler"
         );
         assert!(engine.settled.is_none() && engine.cache.is_empty());
         let read = |engine: &Engine| {
@@ -5433,6 +5430,160 @@ pub(crate) mod pending_program_tests {
         assert_ne!(with, read(&bare), "the kept picture has the effect");
     }
 
+    pub(crate) fn failed(stage: pm_glsl::FailureStage) -> pm_glsl::Failure {
+        pm_glsl::Failure::new(stage, format!("injected {}", stage.name()))
+    }
+
+    /// The viewer's "Still waiting" names why: a passing compiler failure's
+    /// own stage and message, not a generic busy compiler.
+    #[test]
+    fn a_pending_frame_names_the_compilers_own_reason() {
+        let id = "synthetic.viewer-reason";
+        let (scene, _, definition) = black(id);
+        let mut engine = engine("viewer-reason", &definition);
+        // Its compile asked here, never queued to the background behind
+        // other tests' builds: the injected failure is the one met.
+        engine.renderer.set_interactive(false);
+        let spec = FrameSpec::exact(Ticks::from_whole_seconds(1), output());
+        pm_render::test_hooks::fail_compiles(id, vec![failed(pm_glsl::FailureStage::Deadline)]);
+        // Built-ins may wait their turn first (their own reason); then ours.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let said = loop {
+            let refused = engine
+                .frame(
+                    &scene,
+                    spec,
+                    None,
+                    &Default::default(),
+                    true,
+                    Arc::default(),
+                )
+                .map(drop)
+                .unwrap_err();
+            assert!(transient(&refused), "{refused:#}");
+            let said = refused.to_string();
+            assert!(said.contains(pm_render::PROGRAM_PENDING), "{said}");
+            if said.contains(id) {
+                break said;
+            }
+            assert!(Instant::now() < deadline, "{said}");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(said.contains("deadline: injected deadline"), "{said}");
+    }
+
+    /// A program build the compiler keeps failing (one kind of failure, its
+    /// budget used up): the viewer shows the layer's refusal with the
+    /// compiler's message, not transient (no automatic redraw loop), and
+    /// nothing of it is kept: no settled picture, no frame cache entry.
+    /// Sending the definitions again asks the compiler afresh.
+    #[test]
+    fn a_program_the_compiler_gave_up_on_is_shown_refused_and_never_kept() {
+        let id = "synthetic.gave-up";
+        let (scene, _, definition) = black(id);
+        let mut engine = engine("gave-up", &definition);
+        let spec = FrameSpec::exact(Ticks::from_whole_seconds(1), output());
+        let crashes = pm_render::effects::PASSING_LIMIT as usize * 3;
+        pm_render::test_hooks::fail_builds(
+            id,
+            vec![failed(pm_glsl::FailureStage::CompilerProcess); crashes],
+        );
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let refusal = loop {
+            match engine
+                .frame(
+                    &scene,
+                    spec,
+                    None,
+                    &Default::default(),
+                    true,
+                    Arc::default(),
+                )
+                .map(drop)
+            {
+                Ok(()) => panic!("a frame was delivered without its effect"),
+                Err(e) if transient(&e) => {
+                    assert!(e.to_string().contains(pm_render::PROGRAM_PENDING), "{e:#}");
+                }
+                Err(e) => break e,
+            }
+            assert!(Instant::now() < deadline, "never given up");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(refusal.is::<EffectGaveUp>(), "{refusal:#}");
+        let said = refusal.to_string();
+        assert!(
+            said.contains(pm_render::COMPILER_GAVE_UP)
+                && said.contains("injected compiler-process"),
+            "{said}"
+        );
+        assert!(engine.settled.is_none() && engine.cache.is_empty());
+        // Terminal: frames ask the compiler nothing more.
+        let left = pm_render::test_hooks::left(id).1;
+        for _ in 0..3 {
+            std::thread::sleep(Duration::from_millis(100));
+            let again = engine
+                .frame(
+                    &scene,
+                    spec,
+                    None,
+                    &Default::default(),
+                    true,
+                    Arc::default(),
+                )
+                .map(drop)
+                .unwrap_err();
+            assert!(again.is::<EffectGaveUp>(), "{again:#}");
+        }
+        assert_eq!(
+            pm_render::test_hooks::left(id).1,
+            left,
+            "built again by itself"
+        );
+        // The settling renderer refuses it too, not transient: no settled picture.
+        let settling = FrameSpec {
+            scale: 4.,
+            exact: false,
+            ..spec
+        };
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            match engine.settle_now(&scene, settling, || false) {
+                Ok(_) => panic!("a settled picture without its effect"),
+                Err(e) if transient(&e) => {}
+                Err(e) => {
+                    assert!(e.is::<EffectGaveUp>(), "{e:#}");
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the settling renderer never gave up"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(engine.settled.is_none() && engine.cache.is_empty());
+        // An explicit retry asks afresh: the remaining injected crashes are
+        // met again, the program is built once they run out.
+        pm_render::test_hooks::fail_builds(id, vec![]);
+        let before = pm_render::test_hooks::left(id).1;
+        assert!(engine.renderer.retry_given_up() >= 1);
+        let _ = engine
+            .frame(
+                &scene,
+                spec,
+                None,
+                &Default::default(),
+                true,
+                Arc::default(),
+            )
+            .map(drop);
+        assert!(
+            pm_render::test_hooks::left(id).1 < before || before == 0,
+            "the retry asked the compiler again"
+        );
+    }
+
     /// A viewer whose effect's compile meets a busy compiler waits without
     /// blocking the render worker: the frame is refused at once as
     /// transient (no sleep in registration), another viewer's frame draws
@@ -5443,7 +5594,7 @@ pub(crate) mod pending_program_tests {
         let (scene, plain, definition) = black(id);
         let mut engine = engine("viewer-pending", &definition);
         let spec = FrameSpec::exact(Ticks::from_whole_seconds(1), output());
-        let mut frame = |engine: &mut Engine, scene: &Scene| {
+        let frame = |engine: &mut Engine, scene: &Scene| {
             engine
                 .frame(scene, spec, None, &Default::default(), true, Arc::default())
                 .map(|sub| {
