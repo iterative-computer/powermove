@@ -193,8 +193,29 @@ struct ScrubDrag {
     active: bool,
     grade: Option<grade::GradeDrag>,
 }
+/// An undo step's name from a control's label: the label without the
+/// accessibility suffix a colour control carries.
+fn undo_name_of(label: &str) -> Option<String> {
+    let name = label
+        .strip_suffix(" colour")
+        .or_else(|| label.strip_suffix(" color"))
+        .unwrap_or(label)
+        .trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+#[cfg(test)]
+mod undo_name_tests {
+    #[test]
+    fn a_colour_drag_undoes_by_its_controls_name() {
+        assert_eq!(super::undo_name_of("Lift colour").as_deref(), Some("Lift"));
+        assert_eq!(super::undo_name_of("Curve").as_deref(), Some("Curve"));
+        assert_eq!(super::undo_name_of("Temperature").as_deref(), Some("Temperature"));
+        assert_eq!(super::undo_name_of(" "), None);
+    }
+}
 enum ScrubOp {
-    Begin,
+    /// The undo step's name: the control's (Lift, Curve, Temperature).
+    Begin(Option<String>),
     Value(SharedString, Value),
     Finish(bool),
 }
@@ -754,6 +775,11 @@ impl SurfaceView {
                 "fields": mounts.2, "fields_ms": mounts.3.as_secs_f64() * 1000.}),
             );
         }
+    }
+    /// A drag's undo step, named for its control: its label without the
+    /// accessibility suffix ("Lift colour" undoes as "Lift").
+    pub(super) fn undo_name(&self, id: Id) -> Option<String> {
+        undo_name_of(self.publication.surface.node(id)?.props.get("label")?.as_str()?)
     }
     /// Whether a disclosure button shows its group open: the press not yet
     /// published, else the publication.
@@ -2138,6 +2164,7 @@ impl SurfaceView {
             return self.grade_move(event, cx);
         }
         let threshold = self.table.tokens.metrics.drag_threshold;
+        let name = self.scrub.as_ref().and_then(|d| self.undo_name(d.id));
         let Some(drag) = &mut self.scrub else {
             return;
         };
@@ -2149,7 +2176,7 @@ impl SurfaceView {
             }
             drag.active = true;
             if drag.binding.is_some() {
-                self.scrub_ops.push_back(ScrubOp::Begin);
+                self.scrub_ops.push_back(ScrubOp::Begin(name));
             }
         }
         let n = drag.number;
@@ -2228,7 +2255,7 @@ impl SurfaceView {
                 .background_executor()
                 .spawn(async move {
                     let pending = match (op, gesture) {
-                        (ScrubOp::Begin, _) => runtime.scrub_begin(&panel),
+                        (ScrubOp::Begin(label), _) => runtime.scrub_begin(&panel, label.as_deref()),
                         (ScrubOp::Value(handle, value), Some(gesture)) => {
                             runtime.scrub_step(&panel, &handle, gesture, value)
                         }

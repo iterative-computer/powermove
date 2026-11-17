@@ -5130,7 +5130,7 @@ fn a_color_wheel_drag_writes_red_green_and_blue_as_one_undo_step() {
     let ack = |pending: Result<
         pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>,
     >| pending.unwrap().wait().unwrap().unwrap();
-    let gesture = match ack(panels.scrub_begin("color")).reply {
+    let gesture = match ack(panels.scrub_begin("color", Some("Lift"))).reply {
         pm_kernel::Reply::Gesture(id) => id,
         other => panic!("no gesture: {other:?}"),
     };
@@ -5146,6 +5146,8 @@ fn a_color_wheel_drag_writes_red_green_and_blue_as_one_undo_step() {
     ack(panels.scrub_finish("color", gesture, true));
     let p = kernel.published("synthetic").unwrap();
     assert_eq!(p.history.entries, before + 1, "one Undo step");
+    // Named for the wheel, as v1's were, not "Change Property".
+    assert_eq!(p.history.undo_label.as_deref(), Some("Lift"));
     let backend = panels
         .broker
         .entry("color")
