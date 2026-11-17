@@ -808,7 +808,12 @@ impl ExportHandle {
             matches!(request.spec, JobSpec::Export { .. }),
             "expected export job"
         );
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        if let Some(ledger) = export_ledger() {
+            // The job records its temporaries there (PM-478).
+            command.env(EXPORT_LEDGER_ENV, ledger);
+        }
+        let mut child = command
             .arg("--engine-job")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1052,8 +1057,27 @@ fn end_with_parent() {
             }
         });
 }
+/// The variable an export job reads its ledger folder from.
+const EXPORT_LEDGER_ENV: &str = "PM_EXPORT_LEDGER";
+static EXPORT_LEDGER: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+fn export_ledger() -> Option<std::path::PathBuf> {
+    EXPORT_LEDGER.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+/// At launch, before any export: removes the export temporaries an earlier
+/// session ended by force left, as its ledger in `dir` names them (and
+/// nothing else), then records every new one there, in this process and in
+/// each export job (PM-478). Returns what it removed.
+pub fn adopt_export_ledger(dir: std::path::PathBuf) -> Vec<std::path::PathBuf> {
+    let removed = pm_export::atomic::clean_ledger(&dir);
+    pm_export::atomic::set_ledger(Some(dir.clone()));
+    *EXPORT_LEDGER.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
+    removed
+}
 pub fn run_child() -> Result<()> {
     end_with_parent();
+    if let Some(ledger) = std::env::var_os(EXPORT_LEDGER_ENV) {
+        pm_export::atomic::set_ledger(Some(ledger.into()));
+    }
     let mut lines = std::io::BufReader::new(std::io::stdin()).lines();
     let first = lines
         .next()

@@ -488,6 +488,13 @@ fn main() -> Result<()> {
             ..Default::default()
         });
         let mcp_host = mcp::Host::new(actor.handle(), worker_profile.clone());
+        // Export files an earlier session ended by force left (only those
+        // its ledger names), before any export runs (PM-478).
+        let removed =
+            pm_engine_service::jobs::adopt_export_ledger(worker_profile.join("exports-in-progress"));
+        if !removed.is_empty() {
+            eprintln!("Powermove removed {} unfinished export file(s) a forced quit left.", removed.len());
+        }
         let gpu = pm_gpu::Gpu::new("powermove-native")?;
         let engine = Arc::new(pm_engine_service::EngineService::start_with_fonts(
             gpu,

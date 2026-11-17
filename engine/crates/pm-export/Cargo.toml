@@ -128,3 +128,6 @@ required-features = ["engine"]
 [[example]]
 name = "throughput"
 required-features = ["engine"]
+
+[[test]]
+name = "temp_ledger"

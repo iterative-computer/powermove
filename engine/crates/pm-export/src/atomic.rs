@@ -27,6 +27,9 @@ use crate::settings::Overwrite;
 pub struct AtomicOutput {
     destination: PathBuf,
     temp: PathBuf,
+    /// Its entry in the app's ledger of export temporaries ([`set_ledger`]),
+    /// written before the temporary exists and removed once it is gone.
+    ledger: Option<PathBuf>,
     overwrite: Overwrite,
     mode: Option<u32>,
     committed: bool,
@@ -77,6 +80,7 @@ impl AtomicOutput {
         };
         let temp = folder.join(format!(".{stem}.{}.partial{ext}", unique_suffix()));
         Ok(Self {
+            ledger: record(&temp, false),
             destination: destination.to_path_buf(),
             temp,
             overwrite,
@@ -113,6 +117,7 @@ impl AtomicOutput {
         };
         let temp = folder.join(format!("{name}.{}.partial{ext}", unique_suffix()));
         Ok(Self {
+            ledger: record(&temp, false),
             destination: host_file.to_path_buf(),
             temp,
             overwrite: Overwrite::InPlace,
@@ -164,9 +169,14 @@ impl AtomicOutput {
             Overwrite::InPlace => parent.join(format!("{name}.{}.partial", unique_suffix())),
             _ => parent.join(format!(".{name}.{}.partial", unique_suffix())),
         };
-        create_private_dir(&temp)?;
+        let ledger = record(&temp, true);
+        if let Err(e) = create_private_dir(&temp) {
+            forget(ledger.as_deref());
+            return Err(e);
+        }
         Ok(Self {
             destination: destination.to_path_buf(),
+            ledger,
             temp,
             overwrite,
             mode,
@@ -229,6 +239,7 @@ impl AtomicOutput {
         }
         self.committed = true;
         remove_sidecars(&self.temp);
+        forget(self.ledger.take().as_deref());
         Ok(self.destination.clone())
     }
 }
@@ -289,6 +300,7 @@ impl AtomicOutput {
             }
         }
         self.committed = true;
+        forget(self.ledger.take().as_deref());
         Ok(self.destination.clone())
     }
 }
@@ -427,15 +439,99 @@ fn create_private_dir(path: &Path) -> Result<(), Error> {
 impl Drop for AtomicOutput {
     fn drop(&mut self) {
         if !self.committed {
-            if self.folder {
-                // Only the output's own temporary folder, which it created.
-                let _ = fs::remove_dir_all(&self.temp);
-            } else {
-                let _ = fs::remove_file(&self.temp);
-                remove_sidecars(&self.temp);
-            }
+            remove_temporary(&self.temp, self.folder);
         }
+        forget(self.ledger.take().as_deref());
     }
+}
+
+fn remove_temporary(temp: &Path, folder: bool) {
+    if folder {
+        // Only the output's own temporary folder, which it created.
+        let _ = fs::remove_dir_all(temp);
+    } else {
+        let _ = fs::remove_file(temp);
+        remove_sidecars(temp);
+    }
+}
+
+/// Where this process records its export temporaries: the app's profile.
+/// A forced end (a quit signal's deadline, a crash) runs no drop, so the
+/// next launch removes what the ledger names, and nothing else (PM-478).
+static LEDGER: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Records every temporary made from now on in `dir` (`None`: stop).
+pub fn set_ledger(dir: Option<PathBuf>) {
+    *LEDGER.lock().unwrap_or_else(|e| e.into_inner()) = dir;
+}
+
+/// Writes the ledger entry naming `temp`, durable before the temporary is
+/// made. `None` when no ledger is set or it cannot be written (the export
+/// goes on; only a forced end then leaves the file).
+fn record(temp: &Path, folder: bool) -> Option<PathBuf> {
+    use std::io::Write;
+    let dir = LEDGER.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
+    fs::create_dir_all(&dir).ok()?;
+    let entry = dir.join(format!("{}.temp", unique_suffix()));
+    let mut file = fs::File::create(&entry).ok()?;
+    let kind = if folder { "folder" } else { "file" };
+    let pid = std::process::id();
+    file.write_all(format!("{kind}\n{}\n{pid}\n", temp.display()).as_bytes()).ok()?;
+    file.sync_all().ok()?;
+    if let Ok(d) = fs::File::open(&dir) {
+        let _ = d.sync_all();
+    }
+    Some(entry)
+}
+
+fn forget(entry: Option<&Path>) {
+    if let Some(entry) = entry {
+        let _ = fs::remove_file(entry);
+    }
+}
+
+fn alive(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    pid > 0 && unsafe { libc::kill(pid, 0) } == 0
+}
+
+/// At launch, before any export runs: removes each temporary an earlier
+/// export recorded in `dir` and never removed (a forced end), then its entry.
+/// Only the recorded path: a temporary's own name (`.partial`), never a
+/// search by pattern; an entry that cannot be read is dropped. Returns what
+/// it removed.
+pub fn clean_ledger(dir: &Path) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return removed;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("temp") {
+            continue;
+        }
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        let mut lines = text.lines();
+        let (kind, temp) = (lines.next(), lines.next().map(PathBuf::from));
+        // The process that made it is still at work (another instance): not
+        // a leftover.
+        let pid = lines.next().and_then(|p| p.parse::<i32>().ok());
+        if pid.is_some_and(|pid| pid != std::process::id() as i32 && alive(pid)) {
+            continue;
+        }
+        if let (Some(kind @ ("file" | "folder")), Some(temp)) = (kind, temp)
+            && temp.is_absolute()
+            && temp
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().contains(".partial"))
+            && fs::symlink_metadata(&temp).is_ok()
+        {
+            remove_temporary(&temp, kind == "folder");
+            removed.push(temp);
+        }
+        let _ = fs::remove_file(&path);
+    }
+    removed
 }
 
 /// Removes files named `<temp file name>.<anything>`: AVAssetWriter keeps a
