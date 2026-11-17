@@ -10,6 +10,8 @@ pub struct ResourceSnapshot {
     /// this generation so a frame or export job never sees a later registration.
     #[serde(default)]
     pub definitions: Vec<pm_protocol::definitions::DefinitionSnapshot>,
+    #[serde(default)]
+    pub audio_effects: Vec<pm_audio::effects::Definition>,
     /// Extensions are still loading: an effect `definitions` lacks may yet be
     /// registered. A frame that would bypass it is not drawn, cached or
     /// exported until a settled snapshot arrives.
@@ -64,7 +66,22 @@ impl ResourceSnapshot {
     pub fn unavailable_owner(&self, effect: &str) -> Option<&Unavailable> {
         self.unavailable.iter().find(|u| u.would_provide(effect))
     }
+    pub fn audio_registry(&self) -> anyhow::Result<pm_audio::effects::Registry> {
+        let mut registry = pm_audio::effects::builtin_registry();
+        let mut seen = std::collections::BTreeSet::new();
+        for definition in &self.audio_effects {
+            let validated = definition.clone().validate()?;
+            anyhow::ensure!(
+                seen.insert(definition.id.clone()),
+                "duplicate audio effect id: {}",
+                definition.id
+            );
+            registry.insert(definition.id.clone(), validated);
+        }
+        Ok(registry)
+    }
     pub fn validate(&self) -> anyhow::Result<()> {
+        self.audio_registry()?;
         // Definitions arrive whole in `definitions`; a pinned extension
         // generation names content nothing here can load.
         anyhow::ensure!(
@@ -88,6 +105,7 @@ impl ResourceSnapshot {
         std::sync::Arc::ptr_eq(a, b)
             || (a.pending == b.pending
                 && a.definitions == b.definitions
+                && a.audio_effects == b.audio_effects
                 && a.extension_generations == b.extension_generations
                 && a.project_fonts == b.project_fonts)
     }

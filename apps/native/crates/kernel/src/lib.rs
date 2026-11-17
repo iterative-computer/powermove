@@ -89,7 +89,7 @@ pub mod text_host;
 pub mod tx;
 
 pub use commands::{
-    CaptionCommand, Command, CompCommand, ContentCommand, EffectCommand, GroupCommand,
+    AudioEffectCommand, CaptionCommand, Command, CompCommand, ContentCommand, EffectCommand, GroupCommand,
     KeyframeCommand, LayerCommand, LibraryCommand, MarkerCommand, MaskCommand, MediaCommand,
     Origin, PropertyCommand, Scene3dCommand, TextCommand, TimingCommand, TransformCommand, new_id,
 };

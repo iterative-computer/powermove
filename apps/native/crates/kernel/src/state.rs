@@ -36,6 +36,7 @@ pub const REGISTRIES: &[&str] = &[
     "inspectorSections",
     "commands",
     "keybindings",
+    "audioEffects",
     "effects",
     "transitions",
     "layerTypes",
@@ -136,6 +137,21 @@ fn builtin_registries() -> Arc<BTreeMap<String, Vec<Registration>>> {
                     .iter()
                     .map(|d| register("transitions", "transition", d)),
             )
+            .chain(pm_fx_defs::audio::builtins().iter().map(|d| {
+                let definition = d.definition();
+                StateOp::Register {
+                    registry: "audioEffects".into(),
+                    entry: Registration {
+                        token: format!("builtin.audio.{}", definition.id),
+                        owner: crate::tx::Caller::native().writer,
+                        id: definition.id.clone(),
+                        definition: parse(
+                            &serde_json::to_string(definition).expect("JSON definition"),
+                        )
+                        .expect("JSON definition"),
+                    },
+                }
+            }))
             .collect();
         let (seeded, _) = StateSnapshot::default()
             .stage(StateTransaction {
@@ -255,6 +271,18 @@ impl StateSnapshot {
                         || entry.token.is_empty()
                     {
                         return Err("Invalid registration".into());
+                    }
+                    if registry == "audioEffects" {
+                        let mut value: serde_json::Value = serde_json::from_str(
+                            &pm_model::json::to_canonical_string(&entry.definition),
+                        ).map_err(|e| format!("audioEffects: {e}"))?;
+                        if let Some(object) = value.as_object_mut() {
+                            object.remove("owner");
+                        }
+                        let valid = pm_fx_defs::audio::parse(value).map_err(|e| e.to_string())?;
+                        if valid.definition().id != entry.id {
+                            return Err("audioEffects.id: definition and registration differ".into());
+                        }
                     }
                     if next
                         .registries

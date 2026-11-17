@@ -126,6 +126,10 @@ export function createKernel() {
   const inspectorSections = new Registry();
   const commands = new Registry();
   const keybindings = new Registry();
+  const audioEffects = new Registry();
+  let validateAudioEffect = () => {
+    throw new Error("audioEffects: native validator is not attached");
+  };
   const effects = new Registry();
   const transitions = new Registry();
   const layerTypes = new Registry();
@@ -159,6 +163,21 @@ export function createKernel() {
     inspectorSections,
     commands,
     keybindings,
+    audioEffects,
+    setAudioEffectValidator: (validate) => {
+      validateAudioEffect = validate;
+    },
+    registerAudioEffect(ownerId, def) {
+      const validated = validateAudioEffect(def);
+      const freeze = (value) => {
+        if (value && typeof value === "object") {
+          for (const child of Object.values(value)) freeze(child);
+          Object.freeze(value);
+        }
+        return value;
+      };
+      return audioEffects.register(ownerId, freeze(validated));
+    },
     effects,
     transitions,
     layerTypes,
@@ -456,6 +475,7 @@ export function createKernel() {
       inspectorSections.disposeOwner(ownerId);
       commands.disposeOwner(ownerId);
       keybindings.disposeOwner(ownerId);
+      audioEffects.disposeOwner(ownerId);
       effects.disposeOwner(ownerId);
       transitions.disposeOwner(ownerId);
       layerTypes.disposeOwner(ownerId);
@@ -478,6 +498,7 @@ export function createKernel() {
       inspectorSections.clear();
       commands.clear();
       keybindings.clear();
+      audioEffects.clear();
       effects.clear();
       transitions.clear();
       layerTypes.clear();

@@ -436,6 +436,17 @@ fn pinned(
         .as_deref()
         .map(definitions)
         .unwrap_or_default();
+    let audio_effects = publication
+        .contributions
+        .as_deref()
+        .map(pm_audio::effects::registrations)
+        .transpose()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .into_values()
+        .map(|v| v.definition().clone())
+        .collect::<Vec<_>>();
     let pending = !publication.settled;
     let loading = if pending {
         publication.loading.clone()
@@ -444,6 +455,7 @@ fn pinned(
     };
     let unavailable = unavailable(publication);
     if definitions == current.definitions
+        && audio_effects == current.audio_effects
         && pending == current.pending
         && loading == current.loading
         && unavailable == current.unavailable
@@ -453,6 +465,7 @@ fn pinned(
     Some(ResourceSnapshot {
         generation: current.generation + 1,
         definitions,
+        audio_effects,
         pending,
         loading,
         unavailable,

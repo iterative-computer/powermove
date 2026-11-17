@@ -26,3 +26,5 @@ export {
 } from "./keychord";
 
 export * as powermove from "./frozen/reference/kernel/editor-helpers";
+
+export { activateAudioEffects } from "./audio-effects-extension";

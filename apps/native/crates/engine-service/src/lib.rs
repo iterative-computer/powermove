@@ -479,6 +479,7 @@ pub struct ViewerStatus {
     pub stale_rejections: u64,
     pub no_drawable: u64,
     pub audio_fallback: bool,
+    pub audio_problems: Vec<String>,
     pub skipped_targets: u64,
     /// Display ticks whose frame was identical to the one already on screen.
     /// The layer keeps showing it; no drawable is spent (see `run`).
@@ -520,6 +521,9 @@ impl ViewerStatus {
     /// What the frame on screen leaves out, for the viewer's status line:
     /// the commonest reason and how many layers it hides. `None`: nothing.
     pub fn notice(&self) -> Option<String> {
+        if let Some(problem) = self.audio_problems.first() {
+            return Some(problem.clone());
+        }
         let mut reasons: Vec<(&str, BTreeSet<&str>)> = Vec::new();
         for f in &self.layer_failures {
             match reasons.iter_mut().find(|(m, _)| *m == f.message) {
@@ -3027,6 +3031,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         v.config.composition.clone(),
                         v.stamp.revision,
                         v.content,
+                        v.resources.clone(),
                     )
                 })
             })
@@ -3034,8 +3039,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         if !stale.is_empty() {
             drop(state);
             let mut failures = Vec::new();
-            for (id, snapshot, media, composition, revision, content) in stale {
+            for (id, snapshot, media, composition, revision, content, resources) in stale {
                 if let Some(r) = runtime.get_mut(&id) {
+                    if let Some(audio) = &r.transport.audio {
+                        match resources.audio_registry() {
+                            Ok(registry) => audio.send(audio::AudioCtl::Effects(registry)),
+                            Err(error) => failures.push((id, error.to_string())),
+                        }
+                    }
                     if let Err(e) = r.transport.update(&snapshot, media, &composition) {
                         failures.push((id, e.to_string()));
                     }
@@ -3089,6 +3100,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                         v.status.error = Some(e.to_string());
                     }
                 }
+                if let Some(audio) = &transport.audio {
+                    match v.resources.audio_registry() {
+                        Ok(registry) => audio.send(audio::AudioCtl::Effects(registry)),
+                        Err(error) => v.status.error = Some(error.to_string()),
+                    }
+                }
                 Runtime {
                     transport,
                     revision: v.stamp.revision,
@@ -3119,6 +3136,12 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 }
             });
             if r.revision != v.stamp.revision || r.content != v.content {
+                if let Some(audio) = &r.transport.audio {
+                    match v.resources.audio_registry() {
+                        Ok(registry) => audio.send(audio::AudioCtl::Effects(registry)),
+                        Err(error) => v.status.error = Some(error.to_string()),
+                    }
+                }
                 if let Err(e) = r.transport.update(
                     &v.config.snapshot,
                     v.config.media.audio_paths(v.media_mode),
@@ -3223,6 +3246,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             v.status.clock = Some(sample);
             v.desired_rate = r.transport.rate();
             v.status.audio_fallback = r.transport.fallback;
+            v.status.audio_problems = r.transport.audio.as_ref()
+                .map(|audio| audio.status().effect_problems).unwrap_or_default();
             changed |= v.status.wants_display != r.transport.running();
             v.status.wants_display = r.transport.running();
             if let Some((_, interval)) = v.phase {

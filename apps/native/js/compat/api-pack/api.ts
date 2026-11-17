@@ -1,3 +1,5 @@
+import type { AudioEffectsAPI } from "./audio-effects";
+export type { AudioBinding, AudioEffectInstance, AudioEffectDefinition, AudioEffectsAPI, AudioFilter, AudioParameter, AudioProcessor } from "./audio-effects";
 /*
  * Powermove kernel API — the surface every extension programs against.
  * FROZEN for apiVersion 1. Additive changes only; breaking changes bump
@@ -1364,6 +1366,7 @@ export interface PowermoveAPI {
   readonly commands: CommandsAPI;
   readonly keybindings: KeybindingsAPI;
   readonly effects: EffectsAPI;
+  readonly audioEffects: AudioEffectsAPI;
   readonly transitions: TransitionsAPI;
   readonly layers: ExtensionLayersAPI;
   readonly scene3d: Scene3DAPI;

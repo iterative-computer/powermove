@@ -9,6 +9,7 @@ publish = false
 macos-sandbox = ["pm-runtime-v8/macos-sandbox"]
 
 [dependencies]
+pm-fx-defs = { path = "../../../../engine/crates/pm-fx-defs" }
 semver = "1"
 pm-runtime-v8 = { path = "../runtime-v8" }
 pm-recorder = { path = "../recorder" }
@@ -28,6 +29,7 @@ ed25519-dalek = "2.2"
 resvg = { version = "=0.48.1", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
 
 [dev-dependencies]
+pm-audio = { path = "../../../../engine/crates/pm-audio" }
 pm-protocol = { path = "../../../../engine/crates/pm-protocol" }
 tempfile = "3"
 libc = "=0.2.186"

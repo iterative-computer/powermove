@@ -84,6 +84,7 @@ fn text<'a>(value: &'a Value, key: &str, max: usize) -> Result<&'a str> {
 fn registry(kind: &str) -> Option<&'static str> {
     Some(match kind {
         "commands" => "commands",
+        "audioEffects" => "audioEffects",
         "effects" => "effects",
         "transitions" => "transitions",
         "layers" => "layerTypes",
@@ -151,6 +152,10 @@ impl StoreDispatch for KernelStoreDispatch {
                 }
                 let id = self.qualify(definition["id"].as_str().unwrap());
                 definition["id"] = json!(id);
+                if registry == "audioEffects" {
+                    pm_fx_defs::audio::parse(definition.clone())
+                        .map_err(|e| Error::Host(e.to_string()))?;
+                }
                 let state = kernel.state();
                 if state
                     .registries

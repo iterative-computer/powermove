@@ -543,6 +543,11 @@ export function createSandboxAPI(rpc, init, mode = "runtime") {
     id: init.id,
     apiVersion: init.apiVersion,
     manifest: init.manifest,
+    audioEffects: {
+      register: simpleRegister("audioEffects"),
+      list: () => list("audioEffects"),
+      get: (id) => list("audioEffects").find((item) => item.id === id),
+    },
     effects: {
       register: simpleRegister("effects"),
       list: () => list("effects"),

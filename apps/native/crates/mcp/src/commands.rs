@@ -38,6 +38,11 @@ pub const OPERATIONS: &[&str] = &[
     "group_layers",
     "ungroup_layers",
     "move_to_group",
+    "add_audio_effect",
+    "remove_audio_effect",
+    "reorder_audio_effect",
+    "enable_audio_effect",
+    "set_audio_effect_parameter",
     "add_effect",
     "remove_effect",
     "set_effect",
@@ -806,6 +811,63 @@ fn plan_on(
                 }
                 .into()
             }
+            "add_audio_effect" => {
+                let id = target()?;
+                let kind = required(&c, "effect")?;
+                let effect_id = pm_kernel::new_id("af");
+                let definition = audio_definition(state, &kind)?;
+                data = json!({"id":id,"effectId":effect_id});
+                pm_kernel::AudioEffectCommand::Add {
+                    layer_id: id,
+                    effect_id,
+                    definition,
+                }
+                .into()
+            }
+            "remove_audio_effect" => pm_kernel::AudioEffectCommand::Remove {
+                layer_id: target()?,
+                effect_id: required(&c, "effect")?,
+            }
+            .into(),
+            "reorder_audio_effect" => pm_kernel::AudioEffectCommand::Reorder {
+                layer_id: target()?,
+                effect_id: required(&c, "effect")?,
+                index: index(&c, "index")?,
+            }
+            .into(),
+            "enable_audio_effect" => pm_kernel::AudioEffectCommand::Enable {
+                layer_id: target()?,
+                effect_id: required(&c, "effect")?,
+                enabled: c["enabled"]
+                    .as_bool()
+                    .ok_or_else(|| Error::invalid("enabled must be boolean"))?,
+            }
+            .into(),
+            "set_audio_effect_parameter" => {
+                let id = target()?;
+                let effect_id = required(&c, "effect")?;
+                let layer = p
+                    .layer(&id)
+                    .ok_or_else(|| Error::invalid("Audio layer not found"))?;
+                let effect = layer["audioFx"]
+                    .as_array()
+                    .and_then(|list| list.iter().find(|e| e["id"] == effect_id))
+                    .ok_or_else(|| Error::invalid("Audio effect not found"))?;
+                let definition = audio_definition(
+                    state,
+                    effect["type"]
+                        .as_str()
+                        .ok_or_else(|| Error::invalid("audioFx.type is required"))?,
+                )?;
+                pm_kernel::AudioEffectCommand::SetParameter {
+                    layer_id: id,
+                    effect_id,
+                    definition,
+                    key: required(&c, "key")?,
+                    value: c["value"].clone(),
+                }
+                .into()
+            }
             "add_effect" => {
                 let id = target()?;
                 let name = required(&c, "effect")?;
@@ -1156,6 +1218,11 @@ pub fn describe(c: &Value) -> String {
         "add_layer" => "Add layer",
         "delete_layers" => "Delete",
         "reorder_layer" => "Reorder layer",
+        "add_audio_effect" => "Add Audio Effect",
+        "remove_audio_effect" => "Remove Audio Effect",
+        "reorder_audio_effect" => "Reorder Audio Effect",
+        "enable_audio_effect" => "Toggle Audio Effect",
+        "set_audio_effect_parameter" => "Set Audio Effect Parameter",
         "add_effect" => "Add effect",
         "remove_effect" => "Remove effect",
         "set_effect" => "Edit effect",
@@ -1347,6 +1414,17 @@ fn definition(
         .and_then(|s| s.provider(registry, id))
         .map(|r| json_value(&r.definition))
         .ok_or_else(|| Error::unavailable(format!("{registry} runtime definition: {id}")))
+}
+fn audio_definition(
+    state: Option<&pm_kernel::state::StateSnapshot>,
+    id: &str,
+) -> Result<pm_kernel::commands::audio_effects::Validated> {
+    let mut value = definition(state, "audioEffects", id)?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("owner");
+    }
+    pm_kernel::commands::audio_effects::validate_definition(value)
+        .map_err(|e| Error::invalid(e.to_string()))
 }
 fn parameters(definition: &Value) -> Result<Vec<pm_kernel::commands::effects::ParamDefinition>> {
     definition["params"]

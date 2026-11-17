@@ -4801,6 +4801,8 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-image-io",
  "objc2-web-kit",
+ "pm-audio",
+ "pm-fx-defs",
  "pm-compat-host",
  "pm-kernel",
  "pm-mcp",

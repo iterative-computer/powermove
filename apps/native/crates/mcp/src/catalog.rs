@@ -56,6 +56,16 @@ pub fn catalog() -> &'static Value {
             Value::String("panel_begin".into()),
             Value::String("panel_build".into()),
         ]);
+        // Additive native audio stack commands; the tagged catalog stays frozen.
+        for (kind, fields) in [
+            ("add_audio_effect", vec!["type","target","effect"]),
+            ("remove_audio_effect", vec!["type","target","effect"]),
+            ("reorder_audio_effect", vec!["type","target","effect","index"]),
+            ("enable_audio_effect", vec!["type","target","effect","enabled"]),
+            ("set_audio_effect_parameter", vec!["type","target","effect","key","value"]),
+        ] {
+            value["commandFields"][kind] = serde_json::json!(fields);
+        }
         value
     })
 }

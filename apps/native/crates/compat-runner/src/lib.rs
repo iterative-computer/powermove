@@ -455,6 +455,48 @@ mod tests {
         );
     }
     #[test]
+    fn builtin_audio_examples_register_in_v8_and_process_audio() {
+        use std::collections::BTreeMap;
+        let runner = runner();
+        let contributions = runner.json("__compat.contributions()").unwrap();
+        let registry = pm_audio::effects::registrations(&contributions).unwrap();
+        assert_eq!(registry.len(), 2);
+        for (id, builtin) in pm_audio::effects::builtin_registry() {
+            assert_eq!(registry[&id].definition(), builtin.definition(), "generated definitions match public API activation");
+        }
+        for (id, parameter, value) in [
+            ("powermove-audio-effects.parametric-eq", "midGain", 12.0),
+            ("powermove-audio-effects.compressor", "threshold", -24.0),
+        ] {
+            let settings = registry[id]
+                .resolve(&BTreeMap::from([(parameter.into(), json!(value))]))
+                .unwrap();
+            let mut chain = pm_audio::effects::Chain::new(&settings, 48_000).unwrap();
+            chain.begin_block(0);
+            let mut difference = 0.0f64;
+            for i in 0..48_000 {
+                let input =
+                    (i as f64 * std::f64::consts::TAU * 1000.0 / 48_000.0).sin() as f32 * 0.5;
+                let output = chain.process_frame([input; 2]);
+                if i > 24_000 {
+                    difference += f64::from(output[0] - input).powi(2);
+                }
+            }
+            assert!(difference > 1.0, "{id} must change the rendered audio");
+        }
+        let edits = runner.json(r#"(()=>{
+            const api=__compat.realm.extension('audio-edit-check',3).api;
+            const made=api.edit.apply([{type:'add_layer',id:'sound',layerType:'audio',from:0,duration:1}]);
+            const added=api.edit.apply([{type:'add_audio_effect',target:'sound',effect:'powermove-audio-effects.compressor'}]);
+            return [made.ok,added.ok,api.model.layer('sound')?.audioFx?.[0]?.type];
+        })()"#).unwrap();
+        assert_eq!(edits, json!([true,true,"powermove-audio-effects.compressor"]));
+        let invalid = runner.activate(&manifest(3), "export default function(api){api.audioEffects.register({id:'bad.delay',label:'Bad',group:'Audio',params:[],graph:[{type:'delay',time:{value:999},feedback:{value:0},mix:{value:1},maxTime:1}]})}").unwrap();
+        assert_eq!(invalid["ok"], false);
+        assert!(invalid.to_string().contains("graph[0].time"), "{invalid}");
+    }
+
+    #[test]
     fn every_legacy_version_activates_and_disposes_real_contributions() {
         let runner = runner();
         for version in 1..=3 {

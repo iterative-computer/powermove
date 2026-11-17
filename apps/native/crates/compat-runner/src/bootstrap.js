@@ -59,7 +59,9 @@ globalThis.__compat = {
       target.devicePixelRatio = scale;
     }
     if (changed && this.realm)
-      this.realm.task(() => globalThis.window?.dispatchEvent?.(new Event("resize")));
+      this.realm.task(() =>
+        globalThis.window?.dispatchEvent?.(new Event("resize")),
+      );
   },
   create(initial) {
     const call = (operation, input = {}) => runtime.engine(operation, input);
@@ -115,7 +117,8 @@ globalThis.__compat = {
     const VIEW_EVENTS = ["overlay", "frame:rendered"];
     const legacy = (owner) =>
       (this.loader?.records() ?? []).some(
-        (record) => record.id === owner && Number(record.manifest?.apiVersion ?? 1) < 3,
+        (record) =>
+          record.id === owner && Number(record.manifest?.apiVersion ?? 1) < 3,
       );
     const otherSurface = (owner) => {
       const kernel = this.realm.kernel;
@@ -125,7 +128,9 @@ globalThis.__compat = {
         kernel.inspectorSections.ownerEntries(owner).length > 0 ||
         kernel.paletteProviders().some((entry) => entry.ownerId === owner) ||
         VIEW_EVENTS.some((event) =>
-          (kernel.events.map.get(event) ?? []).some((record) => record.ownerId === owner),
+          (kernel.events.map.get(event) ?? []).some(
+            (record) => record.ownerId === owner,
+          ),
         )
       );
     };
@@ -148,7 +153,8 @@ globalThis.__compat = {
       }
     };
     const start = (id, frame) => {
-      const delay = frame.owner && this.realm?.PM?.playing ? PLAYING_FRAME_MS : 16;
+      const delay =
+        frame.owner && this.realm?.PM?.playing ? PLAYING_FRAME_MS : 16;
       frame.timer = setTimeout(() => {
         frames.delete(id);
         this.realm.task(() => frame.fn(performance.now()));
@@ -241,9 +247,10 @@ globalThis.__compat = {
       const lists = location
         ? [this.realm.kernel.gatherMenu(location, context)]
         : context.map(([at, value]) => this.realm.kernel.gatherMenu(at, value));
-      showMenu(Promise.all(lists).then((all) => all.flat()), { key }).catch(
-        (error) => this.reportFailure(error),
-      );
+      showMenu(
+        Promise.all(lists).then((all) => all.flat()),
+        { key },
+      ).catch((error) => this.reportFailure(error));
     };
     // One write per realm task, however often an extension saves.
     const unsaved = new Map();
@@ -271,7 +278,8 @@ globalThis.__compat = {
     this.assets = {
       get: (id) => this.realm.PM.proj.assets?.[id],
       import: async (file, options = {}) => {
-        if (!(file instanceof File)) throw Error("assets.import requires a File");
+        if (!(file instanceof File))
+          throw Error("assets.import requires a File");
         const token =
           runtime.fileToken(file) ??
           runtime.bytes("assets.stage", file, { name: file.name }).token;
@@ -281,7 +289,10 @@ globalThis.__compat = {
           name: file.name,
           layerDefinition: options?.layerDefinition ?? null,
         });
-        if (!reply?.id) throw Error(reply?.error ?? `Could not import ${file.name || "asset"}`);
+        if (!reply?.id)
+          throw Error(
+            reply?.error ?? `Could not import ${file.name || "asset"}`,
+          );
         return imported(reply.id, file, reply);
       },
       pick: async (options = {}) => {
@@ -294,14 +305,20 @@ globalThis.__compat = {
       },
       importUrl: async (url) => {
         const target = new URL(String(url));
-        if (target.protocol !== "https:" || target.username || target.password || String(url).length > 2048)
+        if (
+          target.protocol !== "https:" ||
+          target.username ||
+          target.password ||
+          String(url).length > 2048
+        )
           throw new TypeError(
             "assets.importUrl accepts an https URL of at most 2 KB without credentials",
           );
         // The app downloads it as main does: public HTTPS, at most five
         // redirects, 512 MiB, its type from its bytes; then Import Media.
         const reply = await ask({ kind: "download", url: target.href });
-        if (!reply?.id) throw Error(reply?.error ?? "The download could not be imported");
+        if (!reply?.id)
+          throw Error(reply?.error ?? "The download could not be imported");
         return reply.id;
       },
     };
@@ -321,7 +338,12 @@ globalThis.__compat = {
       let byComposition = new Map();
       return (proj, composition, id) => {
         const layers = proj?.layers;
-        if (proj !== project || proj?.comps !== comps || layers !== top || layers?.length !== topLength) {
+        if (
+          proj !== project ||
+          proj?.comps !== comps ||
+          layers !== top ||
+          layers?.length !== topLength
+        ) {
           project = proj;
           comps = proj?.comps;
           top = layers;
@@ -344,7 +366,8 @@ globalThis.__compat = {
         return ids.get(id) ?? null;
       };
     };
-    const failure = (error) => String(error?.message ?? error ?? "The override failed");
+    const failure = (error) =>
+      String(error?.message ?? error ?? "The override failed");
     // The override's own throw: the same revision throws again.
     const thrown = (error) => {
       this.reportFailure(error);
@@ -354,7 +377,10 @@ globalThis.__compat = {
     const canvasAnswer = (result) => {
       const surface = this.nativeSurfaceOf?.(result.cv);
       if (!surface)
-        return { error: "The override returned a canvas the engine cannot read", threw: true };
+        return {
+          error: "The override returned a canvas the engine cannot read",
+          threw: true,
+        };
       return {
         surface,
         w: result.w,
@@ -382,7 +408,8 @@ globalThis.__compat = {
       const layerIn = layerIndex();
       const answers = needs.map((need) => {
         // This realm has not seen the viewer's revision yet: ask again.
-        if (ask.revision !== undefined && ask.revision > realm.revision) return { retry: true };
+        if (ask.revision !== undefined && ask.revision > realm.revision)
+          return { retry: true };
         if (ask.exact && ask.revision < realm.revision) return { moved: true };
         try {
           const layer = layerIn(realm.PM.proj, need.composition, need.layer);
@@ -400,7 +427,8 @@ globalThis.__compat = {
           // The whole base, returned without the frame's crop: passed
           // through too (an export, which never crops, draws it natively),
           // decided once every need ran: a later override may draw into it.
-          if (realm.isUncroppedBase?.(result, need)) return { pending: { value: result, need } };
+          if (realm.isUncroppedBase?.(result, need))
+            return { pending: { value: result, need } };
           return canvasAnswer(result);
         } catch (error) {
           return thrown(error);
@@ -408,7 +436,9 @@ globalThis.__compat = {
           realm.rasterContext = null;
         }
       });
-      const pending = answers.flatMap((answer, i) => (answer.pending ? [[i, answer.pending]] : []));
+      const pending = answers.flatMap((answer, i) =>
+        answer.pending ? [[i, answer.pending]] : [],
+      );
       if (pending.length) {
         let untouched = [];
         try {
@@ -432,7 +462,10 @@ globalThis.__compat = {
       } catch (error) {
         // The asker waits for this batch; say why it never came.
         this.reportFailure(error);
-        call("compat.answers", { batch, answers: answers.map(() => ({ error: failure(error) })) });
+        call("compat.answers", {
+          batch,
+          answers: answers.map(() => ({ error: failure(error) })),
+        });
       }
     };
     // PM.Fonts as on main: this Mac's families, and `ensure`, which gives the
@@ -441,12 +474,31 @@ globalThis.__compat = {
     // families are ensured at boot and as it changes (`projectFonts`).
     const NATIVE = ["SF Pro Text", "SF Pro Display", "SF Mono"];
     const WEB_FALLBACKS = [
-      "Helvetica Neue", "Helvetica", "Arial", "Arial Black", "Arial Narrow",
-      "Avenir", "Avenir Next", "Futura", "Gill Sans", "Optima",
-      "Georgia", "Times New Roman", "Baskerville", "Didot", "American Typewriter",
-      "Courier New", "Menlo", "Monaco", "Andale Mono", "Impact",
+      "Helvetica Neue",
+      "Helvetica",
+      "Arial",
+      "Arial Black",
+      "Arial Narrow",
+      "Avenir",
+      "Avenir Next",
+      "Futura",
+      "Gill Sans",
+      "Optima",
+      "Georgia",
+      "Times New Roman",
+      "Baskerville",
+      "Didot",
+      "American Typewriter",
+      "Courier New",
+      "Menlo",
+      "Monaco",
+      "Andale Mono",
+      "Impact",
     ];
-    const clean = (value) => String(value || "").replace(/[\u0000-\u001f\u007f]/g, "").trim();
+    const clean = (value) =>
+      String(value || "")
+        .replace(/[\u0000-\u001f\u007f]/g, "")
+        .trim();
     const unique = (values) => [...new Set(values.map(clean).filter(Boolean))];
     // Each face settles once the page has loaded it (or it could not be had);
     // `ensure` waits for its own faces only.
@@ -486,7 +538,9 @@ globalThis.__compat = {
       system: [],
       families: unique([...NATIVE, ...WEB_FALLBACKS]),
       setSystemFamilies: (values) => {
-        fonts.system = unique(Array.isArray(values) ? values : []).sort((a, b) => a.localeCompare(b));
+        fonts.system = unique(Array.isArray(values) ? values : []).sort(
+          (a, b) => a.localeCompare(b),
+        );
         fonts.families = unique([...NATIVE, ...fonts.system, ...WEB_FALLBACKS]);
         this.realm?.PM.bus.emit("fonts", fonts.families);
       },
@@ -494,7 +548,9 @@ globalThis.__compat = {
       ensure: async (family, weight = 400) => {
         const name = clean(family);
         if (!name) return;
-        await requestFaces([{ family: name, weight: Number(weight) || 400, italic: false }]);
+        await requestFaces([
+          { family: name, weight: Number(weight) || 400, italic: false },
+        ]);
         this.realm.PM.rasterClear?.();
         this.realm.PM.invalidate();
       },
@@ -505,7 +561,8 @@ globalThis.__compat = {
       const faces = [];
       const scan = (layers) => {
         for (const layer of layers ?? []) {
-          const family = layer?.type === "text" ? clean(value(layer.d?.font)) : "";
+          const family =
+            layer?.type === "text" ? clean(value(layer.d?.font)) : "";
           if (!family) continue;
           const weight = Number(value(layer.d?.weight)) || 500;
           faces.push({ family, weight, italic: !!value(layer.d?.italic) });
@@ -513,7 +570,8 @@ globalThis.__compat = {
       };
       const project = this.realm.PM.proj;
       scan(project?.layers);
-      for (const comp of Object.values(project?.comps ?? {})) scan(comp?.layers);
+      for (const comp of Object.values(project?.comps ?? {}))
+        scan(comp?.layers);
       return requestFaces(faces);
     };
     /** The page settled these faces: layouts measured before now re-measure. */
@@ -533,14 +591,34 @@ globalThis.__compat = {
     // once every face asked for so far has loaded or could not be had (the
     // same bound as PM.Fonts.ensure), and `load` asks for a CSS font's face.
     const faceOf = (font) => {
-      const parts = String(font ?? "").trim().split(/\s+/);
+      const parts = String(font ?? "")
+        .trim()
+        .split(/\s+/);
       // The size always has its unit; a bare number before it is the weight.
-      const size = parts.findIndex((part) => /^[\d.]+(px|pt|em|rem|%)(\/|$)/.test(part));
+      const size = parts.findIndex((part) =>
+        /^[\d.]+(px|pt|em|rem|%)(\/|$)/.test(part),
+      );
       const before = size < 0 ? [] : parts.slice(0, size);
-      const family = clean((size < 0 ? parts : parts.slice(size + 1)).join(" ").split(",")[0].replace(/^["']|["']$/g, ""));
-      const named = before.find((part) => /^(bold|bolder|lighter|\d{3})$/.test(part));
-      const weight = named === "bold" || named === "bolder" ? 700 : named === "lighter" ? 300 : Number(named) || 400;
-      return { family, weight, italic: before.some((part) => part === "italic" || part === "oblique") };
+      const family = clean(
+        (size < 0 ? parts : parts.slice(size + 1))
+          .join(" ")
+          .split(",")[0]
+          .replace(/^["']|["']$/g, ""),
+      );
+      const named = before.find((part) =>
+        /^(bold|bolder|lighter|\d{3})$/.test(part),
+      );
+      const weight =
+        named === "bold" || named === "bolder"
+          ? 700
+          : named === "lighter"
+            ? 300
+            : Number(named) || 400;
+      return {
+        family,
+        weight,
+        italic: before.some((part) => part === "italic" || part === "oblique"),
+      };
     };
     const faceSet = {
       get status() {
@@ -554,7 +632,9 @@ globalThis.__compat = {
       },
       load: (font) => {
         const face = faceOf(font);
-        return (face.family ? requestFaces([face]) : Promise.resolve()).then(() => []);
+        return (face.family ? requestFaces([face]) : Promise.resolve()).then(
+          () => [],
+        );
       },
       check: (font) => {
         const face = faceOf(font);
@@ -574,7 +654,10 @@ globalThis.__compat = {
       removeEventListener() {},
     };
     if (this.dom?.document)
-      Object.defineProperty(this.dom.document, "fonts", { value: faceSet, configurable: true });
+      Object.defineProperty(this.dom.document, "fonts", {
+        value: faceSet,
+        configurable: true,
+      });
     // `navigator.clipboard`'s text, through the app's pasteboard. A realm
     // without one (an export's, an agent's) is refused, as a browser refuses
     // a page without the permission.
@@ -585,12 +668,18 @@ globalThis.__compat = {
       readText: async () => call("clipboard.text", {}),
     };
     // The DOM's window installs its `navigator` as the realm's global.
-    const navigator = this.dom?.window?.navigator ?? (globalThis.navigator ??= {});
-    Object.defineProperty(navigator, "clipboard", { value: textClipboard, configurable: true });
+    const navigator =
+      this.dom?.window?.navigator ?? (globalThis.navigator ??= {});
+    Object.defineProperty(navigator, "clipboard", {
+      value: textClipboard,
+      configurable: true,
+    });
     const capabilities = {
-      rasterProducing: (on, epoch) => call("compat.producing", { on: !!on, epoch }),
+      rasterProducing: (on, epoch) =>
+        call("compat.producing", { on: !!on, epoch }),
       // A capture this realm waits for asks it for overrides: answered inline.
-      answerRasters: (batch, needs, ask) => this.answerRasters(batch, needs, ask),
+      answerRasters: (batch, needs, ask) =>
+        this.answerRasters(batch, needs, ask),
       ui: { controls: PowermoveCompat.controls },
       extensions: {
         list: () => this.loader.records(),
@@ -604,7 +693,8 @@ globalThis.__compat = {
         new Proxy({}, { get: (_, key) => this.realm.PM[key] }),
         (args, meta) => this.realm.scene3dEdit(args, meta),
         (time) => host.query("scene3d.describe", { time }),
-        (selection) => this.realm.kernel.events.emit("scene3d:selection", selection),
+        (selection) =>
+          this.realm.kernel.events.emit("scene3d:selection", selection),
       ),
       panelsBackend: Object.fromEntries(
         ["open", "close", "isOpen", "isHidden", "refresh", "list"].map(
@@ -698,8 +788,14 @@ globalThis.__compat = {
             "data-pm-modal-frame",
             JSON.stringify({
               title: String(options.title ?? ""),
-              width: Math.max(240, Math.min(1200, Number(options.width) || 420)),
-              actions: actions.map((a) => ({ label: String(a?.label ?? ""), pri: !!a?.pri })),
+              width: Math.max(
+                240,
+                Math.min(1200, Number(options.width) || 420),
+              ),
+              actions: actions.map((a) => ({
+                label: String(a?.label ?? ""),
+                pri: !!a?.pri,
+              })),
               dismissible: options.dismissible !== false,
             }),
           );
@@ -761,9 +857,11 @@ globalThis.__compat = {
             return true;
           },
           resize: (width, height, previewViewport = null) => {
-            presenter.viewport = previewViewport?.width > 0 ? previewViewport : null;
+            presenter.viewport =
+              previewViewport?.width > 0 ? previewViewport : null;
             const canvas = presenter.canvas;
-            if (!canvas || (canvas.width === width && canvas.height === height)) return false;
+            if (!canvas || (canvas.width === width && canvas.height === height))
+              return false;
             canvas.width = width;
             canvas.height = height;
             this.present();
@@ -820,6 +918,13 @@ globalThis.__compat = {
       runtimeModules: PowermoveCompat.runtimeModules,
       capabilities,
     });
+    this.realm.kernel.setAudioEffectValidator((definition) =>
+      call("audioEffects.validate", { definition }),
+    );
+    PowermoveCompat.activateAudioEffects(
+      this.realm.extension("powermove-audio-effects", 3, { scope: "builtin" })
+        .api,
+    );
     if (this.dom)
       this.panels = new PowermoveCompat.CompatPanels(
         this.realm.kernel.panels,
@@ -904,7 +1009,8 @@ globalThis.__compat = {
       if (PM.hist.busy()) insert();
       else {
         const done = PM.Edit.mutate("Add Layer", insert);
-        if (!done.ok) throw new Error(done.message ?? "The layer could not be added");
+        if (!done.ok)
+          throw new Error(done.message ?? "The layer could not be added");
       }
       PM.bus.emit("layers");
       return layer;
@@ -913,7 +1019,9 @@ globalThis.__compat = {
     // (composition editing, file import and save, takes, scripting are the
     // editor's own work in main).
     const missing = (member) => () => {
-      throw new Error(`${member} is not available in this version of Powermove`);
+      throw new Error(
+        `${member} is not available in this version of Powermove`,
+      );
     };
     {
       // More of v1's model that an extension can call raw. Pure model work
@@ -924,12 +1032,14 @@ globalThis.__compat = {
       const edited = (label, change) => {
         if (PM.hist.busy()) return change();
         const done = PM.Edit.mutate(label, change);
-        if (!done.ok) throw new Error(done.message ?? `${label} could not be done`);
+        if (!done.ok)
+          throw new Error(done.message ?? `${label} could not be done`);
       };
       // Render scope: nested compositions render natively, so always the project.
       PM.scope = [];
       PM.compOf = (layer) => {
-        if (!layer || layer.type !== "precomp" || !layer.d || !layer.d.comp) return null;
+        if (!layer || layer.type !== "precomp" || !layer.d || !layer.d.comp)
+          return null;
         const comp = PM.proj.comps && PM.proj.comps[layer.d.comp];
         return comp && Array.isArray(comp.layers) ? comp : null;
       };
@@ -957,7 +1067,9 @@ globalThis.__compat = {
         const definition = (type) =>
           typeof type === "string"
             ? (registry.get(type) ??
-              (Object.hasOwn(builtin(kind), type) ? builtin(kind)[type] : undefined))
+              (Object.hasOwn(builtin(kind), type)
+                ? builtin(kind)[type]
+                : undefined))
             : undefined;
         const read = (type) => {
           const item = definition(type);
@@ -970,7 +1082,9 @@ globalThis.__compat = {
           {
             get: (_, type) => read(type),
             has: (_, type) => !!definition(type),
-            ownKeys: () => [...new Set([...registry.ids(), ...Object.keys(builtin(kind))])],
+            ownKeys: () => [
+              ...new Set([...registry.ids(), ...Object.keys(builtin(kind))]),
+            ],
             getOwnPropertyDescriptor: (_, type) =>
               definition(type)
                 ? { value: read(type), enumerable: true, configurable: true }
@@ -979,22 +1093,29 @@ globalThis.__compat = {
         );
       };
       PM.FX = view(kernel.effects, "effects", PowermoveCompat.legacyEffect);
-      PM.TRANSITIONS = view(kernel.transitions, "transitions", PowermoveCompat.legacyTransition);
-      PM.effectDef = (effect) => PM.FX[typeof effect === "string" ? effect : effect?.type];
+      PM.TRANSITIONS = view(
+        kernel.transitions,
+        "transitions",
+        PowermoveCompat.legacyTransition,
+      );
+      PM.effectDef = (effect) =>
+        PM.FX[typeof effect === "string" ? effect : effect?.type];
       PM.transitionDef = (type) => PM.TRANSITIONS[type];
       // As the shipped app: null for a type nobody provides.
       PM.mkEffect = (type) => {
         const definition = PM.FX[type];
         if (!definition) return null;
         const effect = { id: PM.uid("f"), type, on: true, p: {} };
-        for (const param of definition.params) effect.p[param.k] = PM.P(param.def);
+        for (const param of definition.params)
+          effect.p[param.k] = PM.P(param.def);
         return effect;
       };
       PM.mkTransition = (type) => {
         const definition = PM.transitionDef(type);
         if (!definition) return null;
         const transition = { type, dur: 0.5, p: {} };
-        for (const param of definition.params) transition.p[param.k] = PM.P(param.def);
+        for (const param of definition.params)
+          transition.p[param.k] = PM.P(param.def);
         return transition;
       };
       // `// @param default min max` annotations as inspector-ready uniforms.
@@ -1005,7 +1126,8 @@ globalThis.__compat = {
         let m;
         while ((m = re.exec(code))) {
           const [, type, name, ann] = m;
-          if (/^i(Resolution|Time|GlobalTime|Progress|Frame|Mouse)$/.test(name)) continue;
+          if (/^i(Resolution|Time|GlobalTime|Progress|Frame|Mouse)$/.test(name))
+            continue;
           const a = (ann || "").trim().split(/\s+/).filter(Boolean);
           const d = {
             name,
@@ -1021,8 +1143,12 @@ globalThis.__compat = {
           } else {
             d.control = "num";
             d.def = a[0] !== undefined ? parseFloat(a[0]) : 0;
-            d.min = a[1] !== undefined ? parseFloat(a[1]) : d.def < 0 ? d.def * 2 : 0;
-            d.max = a[2] !== undefined ? parseFloat(a[2]) : Math.max(1, Math.abs(d.def) * 2);
+            d.min =
+              a[1] !== undefined ? parseFloat(a[1]) : d.def < 0 ? d.def * 2 : 0;
+            d.max =
+              a[2] !== undefined
+                ? parseFloat(a[2])
+                : Math.max(1, Math.abs(d.def) * 2);
             if (isNaN(d.def)) d.def = 0;
           }
           out.push(d);
@@ -1044,7 +1170,9 @@ globalThis.__compat = {
           {},
           {
             get: (_, member) =>
-              typeof member === "string" ? missing(`PM.${namespace}.${member}`) : undefined,
+              typeof member === "string"
+                ? missing(`PM.${namespace}.${member}`)
+                : undefined,
           },
         );
     }
@@ -1130,7 +1258,12 @@ globalThis.__compat = {
       const x1 = Math.min(project.w, (s[0] + s[2] - f[0]) / scale);
       const y1 = Math.min(project.h, (s[1] + s[3] - f[1]) / scale);
       if (x0 <= 0 && y0 <= 0 && x1 >= project.w && y1 >= project.h) return null;
-      return { x: x0, y: y0, width: Math.max(0, x1 - x0), height: Math.max(0, y1 - y0) };
+      return {
+        x: x0,
+        y: y0,
+        width: Math.max(0, x1 - x0),
+        height: Math.max(0, y1 - y0),
+      };
     };
     // Main's overlay pass: the viewer clears its canvas, then listeners draw.
     // The presenter canvas fills from the engine, its crop drawn from a
@@ -1140,13 +1273,15 @@ globalThis.__compat = {
     // is the frame's revision. Before any frame, or once the project moved
     // past it (init, resize), the playhead now.
     const presenter = { canvas: null, viewport: null, frame: null };
-    this.presenting = () => !!(presenter.canvas?.width && presenter.canvas?.height);
+    this.presenting = () =>
+      !!(presenter.canvas?.width && presenter.canvas?.height);
     this.present = (frame = presenter.frame) => {
       const canvas = presenter.canvas;
       const PM = this.realm.PM;
       if (!this.presenting()) return;
       if (frame) presenter.frame = frame;
-      const time = frame?.version === this.realm.revision ? frame.time : PM.time;
+      const time =
+        frame?.version === this.realm.revision ? frame.time : PM.time;
       const crop = presenter.viewport;
       if (!crop) {
         PM.renderFrameTo(time, canvas.width, canvas.height, {}, canvas);
@@ -1186,14 +1321,25 @@ globalThis.__compat = {
     };
     this.shellState = (state) => {
       const tool = state.tool !== undefined && state.tool !== shell.tool;
-      const placed = ["stage", "frame", "zoom", "pan", "fit", "showControls"].some(
-        (key) => key in state && JSON.stringify(state[key]) !== JSON.stringify(shell[key]),
+      const placed = [
+        "stage",
+        "frame",
+        "zoom",
+        "pan",
+        "fit",
+        "showControls",
+      ].some(
+        (key) =>
+          key in state &&
+          JSON.stringify(state[key]) !== JSON.stringify(shell[key]),
       );
       const resized =
         "stage" in state &&
-        JSON.stringify(state.stage?.slice(2)) !== JSON.stringify(shell.stage?.slice(2));
+        JSON.stringify(state.stage?.slice(2)) !==
+          JSON.stringify(shell.stage?.slice(2));
       const timeline =
-        "timeline" in state && JSON.stringify(state.timeline) !== JSON.stringify(shell.timeline);
+        "timeline" in state &&
+        JSON.stringify(state.timeline) !== JSON.stringify(shell.timeline);
       Object.assign(shell, state);
       if (placed) placeStage();
       this.realm.task(() => {
@@ -1239,7 +1385,8 @@ globalThis.__compat = {
     // Main's timeline service over the native timeline: its view reads back
     // at once and the timeline follows; rows come from what it last drew.
     const lane = () => (shell.timeline ??= {});
-    const timeline = (request) => call("ui.request", { kind: "timeline", ...request });
+    const timeline = (request) =>
+      call("ui.request", { kind: "timeline", ...request });
     const view = (key, min, max) => ({
       get: () => lane()[key] ?? (key === "pps" ? 100 : 0),
       set: (value) => {
@@ -1288,15 +1435,25 @@ globalThis.__compat = {
       layerAtPoint: (clientX, clientY) => {
         const facts = lane();
         const [x, y, w, h] = facts.rect ?? [0, 0, 0, 0];
-        if (clientX < x || clientX > x + w || clientY < y + (facts.ruler ?? 0) || clientY > y + h)
+        if (
+          clientX < x ||
+          clientX > x + w ||
+          clientY < y + (facts.ruler ?? 0) ||
+          clientY > y + h
+        )
           return null;
-        const row = (facts.rows ?? []).find(([, top, bottom]) => clientY >= top && clientY < bottom);
+        const row = (facts.rows ?? []).find(
+          ([, top, bottom]) => clientY >= top && clientY < bottom,
+        );
         return row ? (this.realm.PM.L?.(row[0]) ?? null) : null;
       },
       frameView: () => timeline({ frameView: true }),
       reveal: (layer, keys) => {
         const id = typeof layer === "string" ? layer : layer?.id;
-        if (id) timeline({ reveal: { layer: id, keys: [...(keys ?? [])].map(String) } });
+        if (id)
+          timeline({
+            reveal: { layer: id, keys: [...(keys ?? [])].map(String) },
+          });
       },
     };
     Object.defineProperties(timelineService, {
@@ -1316,13 +1473,17 @@ globalThis.__compat = {
       // As main (inspector/shader.ts:39), with the kernel's parser.
       const PM = this.realm.PM;
       const content = layer.d ?? (layer.d = {});
-      const definitions = host.query("shader.parameters", { code: String(content.code ?? "") });
+      const definitions = host.query("shader.parameters", {
+        code: String(content.code ?? ""),
+      });
       PM.UIState?.setShaderMeta?.(layer, { udefs: definitions });
       const uniforms = content.uniforms ?? (content.uniforms = {});
       for (const definition of definitions)
-        if (!uniforms[definition.name]) uniforms[definition.name] = PM.P(definition.def);
+        if (!uniforms[definition.name])
+          uniforms[definition.name] = PM.P(definition.def);
       for (const name of Object.keys(uniforms))
-        if (!definitions.some((definition) => definition.name === name)) delete uniforms[name];
+        if (!definitions.some((definition) => definition.name === name))
+          delete uniforms[name];
     };
     this.realm.services.register("inspector", {
       refresh: () => this.panels?.refresh(PowermoveCompat.SECTIONS_PANEL),
@@ -1345,8 +1506,10 @@ globalThis.__compat = {
       pasteCopiedEffects: () => {
         const result = clipboard("paste");
         if (result.empty) return false;
-        if (result.reason === "select") toast("Select a layer to paste the effect");
-        else if (result.reason === "unavailable") toast("The copied effect is not available");
+        if (result.reason === "select")
+          toast("Select a layer to paste the effect");
+        else if (result.reason === "unavailable")
+          toast("The copied effect is not available");
         else {
           // As main's edit.apply: the realm reads the pasted effects at once.
           this.realm.receive(runtime.engine("kernel.publication", {}));
@@ -1370,7 +1533,9 @@ globalThis.__compat = {
       // Points per composition pixel on screen.
       get shown() {
         const project = compat.realm.PM.proj;
-        return shell.frame && project?.w ? shell.frame[2] / project.w : shell.zoom;
+        return shell.frame && project?.w
+          ? shell.frame[2] / project.w
+          : shell.zoom;
       },
       // The viewer's layer controls (View ▸ Layer Controls).
       get showControls() {
@@ -1403,16 +1568,26 @@ globalThis.__compat = {
         this.overlay();
       },
       attach: () => undefined,
-      worldBounds: (layer, time) => this.realm.PM.GL?.bounds?.(layer, time) ?? null,
+      worldBounds: (layer, time) =>
+        this.realm.PM.GL?.bounds?.(layer, time) ?? null,
       // As main: the topmost layer under a window point inside the frame.
       layerAtPoint: (clientX, clientY) => {
         const [s, f] = [shell.stage, shell.frame];
         const project = this.realm.PM.proj;
         if (!s || !f || !project?.w) return null;
-        if (clientX < s[0] || clientY < s[1] || clientX > s[0] + s[2] || clientY > s[1] + s[3])
+        if (
+          clientX < s[0] ||
+          clientY < s[1] ||
+          clientX > s[0] + s[2] ||
+          clientY > s[1] + s[3]
+        )
           return null;
         const scale = f[2] / project.w;
-        return this.realm.PM.GL.pick((clientX - f[0]) / scale, (clientY - f[1]) / scale, this.realm.PM.time);
+        return this.realm.PM.GL.pick(
+          (clientX - f[0]) / scale,
+          (clientY - f[1]) / scale,
+          this.realm.PM.time,
+        );
       },
       snapshotSnapCandidates: () => ({ x: [], y: [] }),
       isNavigating: () => false,
@@ -1425,7 +1600,11 @@ globalThis.__compat = {
         if (shell.fit) shell.pan = [0, 0];
         shell.fit = false;
         shell.zoom = Math.min(8, Math.max(0.05, value));
-        call("ui.request", { kind: "viewerZoom", zoom: shell.zoom, pan: [...shell.pan] });
+        call("ui.request", {
+          kind: "viewerZoom",
+          zoom: shell.zoom,
+          pan: [...shell.pan],
+        });
         return shell.zoom;
       },
     });
@@ -1464,6 +1643,7 @@ globalThis.__compat = {
       kernel.commands,
       kernel.panels,
       kernel.inspectorSections,
+      kernel.audioEffects,
       kernel.effects,
       kernel.transitions,
       kernel.layerTypes,
@@ -1500,7 +1680,9 @@ globalThis.__compat = {
    * Store code runs in its helper; nothing confined ever enters this plan. */
   boot(records) {
     this.realm.task(() => {
-      this.realm.PM.Fonts.setSystemFamilies(runtime.engine("fonts.families", {}));
+      this.realm.PM.Fonts.setSystemFamilies(
+        runtime.engine("fonts.families", {}),
+      );
       void this.projectFonts();
     });
     // The loader counts every load it is asked for (this pass, an update, a
@@ -1661,6 +1843,7 @@ globalThis.__compat = {
           : []),
       ],
       inspector: entries(kernel.inspectorSections),
+      audioEffects: entries(kernel.audioEffects),
       effects: entries(kernel.effects),
       transitions: entries(kernel.transitions),
       layers: entries(kernel.layerTypes),
@@ -1700,8 +1883,13 @@ globalThis.__compat = {
   },
   stillLoading() {
     const ids = this.loader?.loading?.() ?? [];
-    const records = new Map((this.loader?.records() ?? []).map((r) => [r.id, r]));
-    return ids.map((id) => ({ id, name: records.get(id)?.manifest?.name ?? id }));
+    const records = new Map(
+      (this.loader?.records() ?? []).map((r) => [r.id, r]),
+    );
+    return ids.map((id) => ({
+      id,
+      name: records.get(id)?.manifest?.name ?? id,
+    }));
   },
   publishContributions() {
     runtime.engine("contributions.publish", { value: this.contributions() });

@@ -16,6 +16,11 @@ export const COMMAND_TYPES = [
   'group_layers',
   'ungroup_layers',
   'move_to_group',
+  'add_audio_effect',
+  'remove_audio_effect',
+  'reorder_audio_effect',
+  'enable_audio_effect',
+  'set_audio_effect_parameter',
   'add_effect',
   'remove_effect',
   'set_effect',
@@ -189,6 +194,13 @@ export interface ReorderLayerCommand extends LayerTargetedCommand {
   index: number;
 }
 
+export type AudioEffectEditCommand =
+  | (LayerTargetedCommand & { type: "add_audio_effect"; effect: string })
+  | (LayerTargetedCommand & { type: "remove_audio_effect"; effect: string })
+  | (LayerTargetedCommand & { type: "reorder_audio_effect"; effect: string; index: number })
+  | (LayerTargetedCommand & { type: "enable_audio_effect"; effect: string; enabled: boolean })
+  | (LayerTargetedCommand & { type: "set_audio_effect_parameter"; effect: string; key: string; value: number | boolean | string });
+
 export interface AddEffectCommand extends LayerTargetedCommand {
   type: 'add_effect';
   effect: string;
@@ -354,6 +366,7 @@ export interface EditCaptionsCommand extends LayerTargetedCommand, LockableComma
 export interface GroupLayersCommand { type: 'group_layers' | 'ungroup_layers' | 'move_to_group'; targets: string[]; name?: string; group?: string | null; }
 
 export type EditCommand =
+  | AudioEffectEditCommand
   | GroupLayersCommand
   | SetPropertyCommand
   | ReplaceKeyframesCommand

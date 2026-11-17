@@ -347,6 +347,11 @@ export function createExtensionAPI(kernel, record, deps, vars = {}) {
     chordOf: (event) => chordOfEvent(event),
   };
   /* ── effects & transitions ─────────────────────────────── */
+  const audioEffects = {
+    register: (def) => contribute(() => kernel.registerAudioEffect(id, def)),
+    list: () => kernel.audioEffects.list(),
+    get: (effectId) => kernel.audioEffects.get(effectId),
+  };
   const effects = {
     register: (def) => contribute(() => kernel.registerEffect(id, def)),
     list: () => kernel.effects.list(),
@@ -497,6 +502,7 @@ export function createExtensionAPI(kernel, record, deps, vars = {}) {
     panels,
     commands,
     keybindings,
+    audioEffects,
     effects,
     transitions,
     layers,

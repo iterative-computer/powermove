@@ -182,6 +182,7 @@ pub enum AudioCtl {
         play: u64,
         at: i64,
     },
+    Effects(pm_audio::effects::Registry),
     Media(MediaMap),
     Composition(String),
     /// Seek to `from` (ticks) and play at `rate`, the first frame heard at
@@ -287,6 +288,8 @@ pub struct AudioStatus {
     pub device_callbacks: u64,
     pub starved_renders: u64,
     pub problems: Vec<String>,
+    /// Current bypass warnings, cleared when a provider returns.
+    pub effect_problems: Vec<String>,
     pub start_timing: Option<pm_audio::playback::StartTiming>,
     pub prepared_starts: Vec<i64>,
 }
@@ -327,6 +330,7 @@ impl AudioLink {
                     plays: 0,
                     pending_commands: VecDeque::new(),
                     dirty: true,
+                    audio_effects: Default::default(),
                     broken: false,
                     loop_range: None,
                     last_project: None,
@@ -428,6 +432,7 @@ struct Control {
     pending_commands: VecDeque<PendingCommand>,
     /// The mixer plays an older revision, media map, or composition.
     dirty: bool,
+    audio_effects: pm_audio::effects::Registry,
     /// An update did not apply; wait for a resync.
     broken: bool,
     loop_range: Option<TickRange>,
@@ -751,6 +756,10 @@ impl Control {
                 self.broken = false;
                 self.dirty = true;
             }
+            AudioCtl::Effects(effects) => {
+                self.audio_effects = effects;
+                self.dirty = true;
+            }
             AudioCtl::Media(media) => {
                 self.media = media;
                 self.dirty = true;
@@ -1059,12 +1068,18 @@ impl Control {
         self.dirty = false;
         let doc = self.doc.clone();
         timing.clone_done_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
-        let result = playback.set_project(doc, &self.composition, &self.media);
+        let result = playback.set_project_with_audio_effects(
+            doc,
+            &self.composition,
+            &self.media,
+            &self.audio_effects,
+        );
         timing.build_send_done_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
         match result {
             Ok(problems) => {
                 let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
                 status.projects += 1;
+                status.effect_problems = problems.iter().filter(|(_,_,message)| message.starts_with("Audio effect")).map(|(_,_,message)| message.clone()).collect();
                 for (asset, path, message) in problems {
                     status.problems.push(format!(
                         "{asset} ({}): {message}",
@@ -1193,6 +1208,7 @@ mod tests {
             plays: 0,
             pending_commands: VecDeque::new(),
             dirty: false,
+            audio_effects: Default::default(),
             broken: false,
             loop_range: None,
             last_project: None,
@@ -1320,6 +1336,7 @@ mod tests {
                 plays: 0,
                 pending_commands: VecDeque::new(),
                 dirty: true,
+                audio_effects: Default::default(),
                 broken: false,
                 loop_range: None,
                 last_project: None,
@@ -1433,6 +1450,7 @@ mod tests {
             plays: 0,
             pending_commands: VecDeque::new(),
             dirty: true,
+            audio_effects: Default::default(),
             broken: false,
             loop_range: None,
             last_project: None,
@@ -1646,6 +1664,7 @@ mod skim_tests {
             plays: 0,
             pending_commands: VecDeque::new(),
             dirty: false,
+            audio_effects: Default::default(),
             broken: false,
             loop_range: None,
             last_project: None,

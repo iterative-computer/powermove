@@ -476,6 +476,7 @@ fn extensions_used(root: &pm_model::Node) -> std::collections::HashSet<String> {
 fn registrations(value: &Value, owner: Writer) -> Vec<StateOp> {
     let mut ops = vec![StateOp::DisposeOwner { owner }];
     for (kind, registry) in [
+        ("audioEffects", "audioEffects"),
         ("effects", "effects"),
         ("transitions", "transitions"),
         ("layers", "layerTypes"),
@@ -1834,6 +1835,7 @@ impl Owner {
             for (kind, registry) in [
                 ("commands", "commands"),
                 ("panels", "panels"),
+                ("audioEffects", "audioEffects"),
                 ("effects", "effects"),
                 ("transitions", "transitions"),
                 ("layers", "layerTypes"),
@@ -2151,7 +2153,7 @@ impl Owner {
     fn provided_now(&self) -> BTreeMap<String, Vec<String>> {
         let mut provided: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let contributions = self.shared.published.lock().unwrap().contributions.clone();
-        for kind in ["effects", "layers", "transitions"] {
+        for kind in ["audioEffects", "effects", "layers", "transitions"] {
             for entry in contributions
                 .as_ref()
                 .and_then(|c| c[kind].as_array())
@@ -3788,6 +3790,30 @@ mod tests {
         fixture.until("an empty boot settles", |host| host.publication().settled);
         assert!(fixture.host.contributions().is_none());
     }
+    #[test]
+    fn disabling_an_audio_extension_removes_its_native_registration() {
+        let root = tempfile::tempdir().unwrap();
+        extension(&root.path().join("extensions"), "synthetic-audio", &[(
+            "index.ts",
+            "export default function(api){api.audioEffects.register({id:'synthetic-audio.gain',label:'Synthetic gain',group:'Audio',params:[],graph:[{type:'gain',gainDb:{value:-6}}]})}",
+        )]);
+        let fixture = Fixture::start(root);
+        fixture.until("audio extension registered", |_| fixture.kernel.state().provider("audioEffects","synthetic-audio.gain").is_some());
+        let off = pm_kernel::state::switch_extension(&fixture.kernel.state(), "synthetic-audio", false).unwrap();
+        fixture.kernel.state_transaction(off).wait().unwrap().unwrap();
+        fixture.until("audio extension disposed", |_| fixture.kernel.state().provider("audioEffects","synthetic-audio.gain").is_none());
+    }
+
+    #[test]
+    fn builtin_audio_effects_reach_the_native_registry() {
+        let fixture = Fixture::start(tempfile::tempdir().unwrap());
+        fixture.until("audio registrations", |host| host.is_ready());
+        let state = fixture.kernel.state();
+        for id in ["powermove-audio-effects.parametric-eq", "powermove-audio-effects.compressor"] {
+            assert!(state.provider("audioEffects", id).is_some(), "{id}");
+        }
+    }
+
     #[test]
     fn contributed_effects_reach_kernel_registries_and_engine_definitions() {
         let root = tempfile::tempdir().unwrap();

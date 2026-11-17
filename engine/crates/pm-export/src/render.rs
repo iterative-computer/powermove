@@ -913,6 +913,8 @@ pub trait FramePost: Send + Sync {
 }
 
 pub struct AudioPlan {
+    /// Preallocated by the job owner with its frozen registration snapshot.
+    pub effects: Option<pm_audio::effects::Prepared>,
     pub graph: Arc<pm_audio::MixGraph>,
     pub cache: Arc<pm_audio::SourceCache>,
     pub sample_rate: u32,
@@ -1405,6 +1407,11 @@ fn plan_export_checked(
             None
         } else {
             Some(AudioPlan {
+                effects: Some(
+                    pm_audio::effects::Prepared::build(
+                        doc, &graph, &pm_audio::effects::builtin_registry(), 48_000,
+                    ).map_err(|e| JobError::Audio(e.to_string()))?,
+                ),
                 // Today's export OfflineAudioContext is always stereo 48 kHz,
                 // independently of the project's playback device/rate.
                 sample_rate: 48_000,
@@ -1639,6 +1646,9 @@ where
             evaluator(),
             a.cache,
         );
+        if let Some(effects) = a.effects {
+            mixer.set_audio_effects(effects);
+        }
         // Today's OfflineAudioContext starts at the range's start.
         mixer.set_today_range(a.range.0.max(0.0), a.range.1, first);
         mixer.set_today_playhead(

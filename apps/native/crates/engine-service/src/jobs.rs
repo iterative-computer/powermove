@@ -1437,7 +1437,23 @@ pub fn run_child() -> Result<()> {
             mode: Some(0o600),
             seed: 1,
         };
-        let plan = pm_export::render::plan_export_for(&job, &renderer)?;
+        let mut plan = pm_export::render::plan_export_for(&job, &renderer)?;
+        let mut audio_notes = Vec::new();
+        if let Some(audio) = &mut plan.audio {
+            let effects = pm_audio::effects::Prepared::build(
+                &job.document,
+                &audio.graph,
+                &request.resources.audio_registry()?,
+                audio.sample_rate,
+            )?;
+            audio_notes.extend(
+                effects
+                    .problems
+                    .iter()
+                    .map(|(_, _, message)| message.clone()),
+            );
+            audio.effects = Some(effects);
+        }
         let sink = FencedSink {
             inner: pm_export::render::sink_for(&plan)?,
             fonts: job_fonts,
@@ -1475,6 +1491,7 @@ pub fn run_child() -> Result<()> {
         let report = delivered.report;
         let notes = left_out
             .into_iter()
+            .chain(audio_notes)
             .chain(report.mix.and_then(|mix| mix.warning()))
             .chain(report.notes)
             .collect();

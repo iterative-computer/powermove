@@ -1622,6 +1622,12 @@ impl EngineProxy for NativeHost {
                     None => Value::String(text),
                 });
             }
+            "audioEffects.validate" => {
+                let validated = pm_fx_defs::audio::parse(input["definition"].clone())
+                    .map_err(|e| Error::Host(e.to_string()))?;
+                return serde_json::to_value(validated.definition())
+                    .map_err(|e| Error::Host(e.to_string()));
+            }
             "effects.clipboard" => {
                 let slot = self.effects.lock().unwrap().clone();
                 let hook = slot.and_then(|slot| slot.lock().unwrap().clone());

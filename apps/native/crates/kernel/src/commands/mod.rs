@@ -91,6 +91,7 @@ mod track;
 pub(crate) use track::js_number;
 mod values;
 
+pub mod audio_effects;
 pub mod captions;
 pub mod comps;
 pub mod content;
@@ -109,6 +110,7 @@ pub mod text;
 pub mod timing;
 pub mod transform;
 
+pub use audio_effects::AudioEffectCommand;
 pub use captions::CaptionCommand;
 pub use comps::CompCommand;
 pub use content::ContentCommand;
@@ -195,6 +197,7 @@ pub enum Command {
     Timing(TimingCommand),
     Group(GroupCommand),
     Comp(CompCommand),
+    AudioEffect(AudioEffectCommand),
     Effect(EffectCommand),
     Mask(MaskCommand),
     Text(TextCommand),
@@ -227,6 +230,7 @@ from_domain!(
     Timing(TimingCommand),
     Group(GroupCommand),
     Comp(CompCommand),
+    AudioEffect(AudioEffectCommand),
     Effect(EffectCommand),
     Mask(MaskCommand),
     Text(TextCommand),
@@ -256,6 +260,7 @@ impl Command {
             Command::Timing(c) => c.label(),
             Command::Group(c) => c.label(),
             Command::Comp(c) => c.label(),
+            Command::AudioEffect(c) => c.label(),
             Command::Effect(c) => c.label(),
             Command::Mask(c) => c.label(),
             Command::Text(c) => c.label(),
@@ -299,6 +304,7 @@ impl Command {
             Command::Timing(c) => c.plan(&mut cx)?,
             Command::Group(c) => c.plan(&mut cx)?,
             Command::Comp(c) => c.plan(&mut cx)?,
+            Command::AudioEffect(c) => c.plan(&mut cx)?,
             Command::Effect(c) => c.plan(&mut cx)?,
             Command::Mask(c) => c.plan(&mut cx)?,
             Command::Text(c) => c.plan(&mut cx)?,

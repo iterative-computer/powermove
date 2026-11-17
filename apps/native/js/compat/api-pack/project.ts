@@ -1,3 +1,4 @@
+import type { AudioEffectInstance } from "./audio-effects";
 import type { StoredExportDefaults } from '../export-defaults';
 import type { CaptionsContent } from './captions';
 
@@ -308,6 +309,7 @@ interface LayerBase<T extends LayerType, D extends object> {
   parent: string | null;
   p: T extends 'audio' ? Record<never, never> : TransformChannels;
   fx: Effect[];
+  audioFx?: AudioEffectInstance[];
   transitionIn?: Transition | null;
   transitionOut?: Transition | null;
   masks: Mask[];
