@@ -418,6 +418,32 @@ test("extension row enters details, back returns without clearing search, Delete
   root.dispose();
   f.model.dispose();
 });
+test("an extension's row turns it on or off with its own switch, without opening its page", async () => {
+  const f = fixture({
+    extensions: [
+      {
+        ...extension(),
+        type: "Effects",
+        binding: "test-lease.extension.fixture-0",
+      },
+    ],
+  });
+  f.model.show();
+  f.model.select("extensions");
+  f.model.viewport(0, 10);
+  const { root } = recorder();
+  await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
+  const toggle = find(root, "Fixture 0", "switch");
+  expect(toggle.props["aria-checked"]).toBe(true);
+  await event(root, toggle.id, "change", { value: false });
+  await Promise.resolve();
+  expect(f.actions).toEqual([
+    { type: "extension.enabled", id: "fixture-0", enabled: false },
+  ]);
+  expect(f.model.detailId).toBeUndefined();
+  root.dispose();
+  f.model.dispose();
+});
 test("AX contract has labelled groups, selected neutral sidebar, search/list first focus and no secrets", async () => {
   const f = fixture();
   f.model.show();

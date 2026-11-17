@@ -507,24 +507,30 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_
     let row = |label: &str, command: &str, args: serde_json::Value, enabled: bool| json!({"id":command,"label":label,"args":args,"disabled":!enabled});
     let plain = |label: &str, command: &str| row(label, command, json!([]), editable);
     let submenu = |label: &str, children: Vec<serde_json::Value>| json!({"id":"","label":label,"disabled":!editable,"children":children});
+    // v1.3.2's layer menu, its words and order: the most-used edits, then
+    // where the layer sits, then its switches, and Delete last on its own.
+    // A title only for a multiple selection, to say what the commands act on.
     let mut rows = Vec::new();
-    // v1: Rename… leads, for one layer (↩ opens the same field).
+    if facts.selected.len() > 1 {
+        rows.push(json!({"header":true,"label":format!("{} Layers", facts.selected.len())}));
+    }
+    // Rename… leads, for one layer (↩ opens the same field).
     if facts.selected.len() == 1 {
         rows.push(plain("Rename…", "renameLayer"));
     }
     rows.extend([
         plain("Duplicate", "duplicate"),
-        plain("Group", "groupLayers"),
-        plain("Simplify Keyframes", "simplifyKeyframes"),
-        plain("Pre-compose…", "precompose"),
+        plain("Group Layers", "groupLayers"),
     ]);
-    if facts.selected.len() == 2 {
-        rows.push(row(
-            "Use Bottom Layer as Mask",
-            "useBottomLayerAsMask",
-            json!([]),
-            editable && matte_pair(published, &facts).is_some(),
-        ));
+    if facts.selected.iter().any(|l| l.kind == "group") {
+        rows.push(plain("Ungroup Layers", "ungroupLayers"));
+    }
+    rows.push(plain("Pre-compose…", "precompose"));
+    // Un-precompose: the pre-comp becomes a group of its layers.
+    if let [only] = facts.selected.as_slice()
+        && only.kind == "precomp"
+    {
+        rows.push(plain("Release Pre-comp", "releasePrecomp"));
     }
     if every(&|l| l.kind == "text") {
         rows.push(submenu(
@@ -536,9 +542,15 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_
             ],
         ));
     }
-    if facts.selected.iter().any(|l| l.kind == "group") {
-        rows.push(plain("Ungroup", "ungroupLayers"));
+    if facts.selected.len() == 2 {
+        rows.push(row(
+            "Use Bottom Layer as Mask",
+            "useBottomLayerAsMask",
+            json!([]),
+            editable && matte_pair(published, &facts).is_some(),
+        ));
     }
+    rows.push(serde_json::Value::Null);
     let groups = facts.groups();
     if !groups.is_empty() || facts.selected.iter().any(|l| l.group.is_some()) {
         let mut children = vec![row(
@@ -566,7 +578,7 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_
                 "checked":every(&|l| l.parent.as_deref() == Some(c.id.as_str()))})
                 }),
         );
-        rows.push(submenu("Parent", items));
+        rows.push(submenu("Link Layers", items));
     }
     if every(&|l| l.kind != "group") {
         let inside = every(&|l| time > l.in_time && time < l.out_time);
@@ -626,6 +638,27 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_
         None if target.locked => row("Unlock", "unlockSelectedLayers", json!([]), true),
         None => row("Lock", "lockSelectedLayers", json!([]), true),
     });
+    // v1's 3D Layer: the same switch as the timeline row's; audio and
+    // adjustment layers have no depth.
+    if every(&|l| !matches!(l.kind.as_str(), "audio" | "adjustment")) {
+        let on = facts.selected.iter().all(|l| {
+            layer(published, &l.id).and_then(|v| v.get("threeD").and_then(Value::as_bool))
+                == Some(true)
+        });
+        let mut depth = row("3D Layer", "toggleThreeD", json!([!on]), editable);
+        depth["checked"] = json!(on);
+        rows.push(depth);
+    }
+    if every(&|l| l.kind == "precomp") {
+        let on = facts.selected.iter().all(|l| {
+            layer(published, &l.id)
+                .and_then(|v| v.get("continuousRaster").and_then(Value::as_bool))
+                == Some(true)
+        });
+        let mut raster = plain("Continuously Rasterize", "toggleContinuousRaster");
+        raster["checked"] = json!(on);
+        rows.push(raster);
+    }
     rows.push(serde_json::Value::Null);
     rows.push(plain("Delete", "delete"));
     rows
@@ -646,7 +679,7 @@ pub fn layer_menu_choice(
     ))
 }
 /// Commands [`command_plan`] answers.
-pub const PLANNED: [&str; 52] = [
+pub const PLANNED: [&str; 54] = [
     "rippleDelete",
     "nudgeLayerTime",
     "rippleTrimIn",
@@ -665,6 +698,7 @@ pub const PLANNED: [&str; 52] = [
     "new3d",
     "newCamera",
     "newShape",
+    "newText",
     "newAdjustment",
     "newNull",
     "selectAll",
@@ -697,6 +731,7 @@ pub const PLANNED: [&str; 52] = [
     "separateAudio",
     "toggleVisibility",
     "toggleSolo",
+    "toggleThreeD",
     "unlockSelectedLayers",
     "unlockGroup",
 ];
@@ -720,10 +755,10 @@ fn comp_number(published: &Published, key: &str) -> Option<f64> {
         .as_f64()
 }
 fn new_layer(published: &Published, kind: &str, name: &str, centred: bool, time: f64) -> Plan {
-    let label = if kind == "null" {
-        "New Null Object".to_owned()
-    } else {
-        format!("New {name}")
+    let label = match kind {
+        "null" => "New Null Object".to_owned(),
+        "text" => "New Text".to_owned(),
+        _ => format!("New {name}"),
     };
     let id = new_id("L");
     let mut properties = Map::new();
@@ -1051,6 +1086,9 @@ pub fn command_plan(
         }
         "newSolid" => Some(new_layer(published, "solid", "Solid", false, time)),
         "newShape" => Some(new_layer(published, "shape", "Shape", true, time)),
+        // v1's "New text layer" (the empty composition's Text button): a
+        // text named Headline at the centre, with the default words.
+        "newText" => Some(new_layer(published, "text", "Headline", true, time)),
         "newAdjustment" => Some(new_layer(
             published,
             "adjustment",
@@ -1163,6 +1201,7 @@ pub fn command_plan(
         | "separateAudio"
         | "toggleVisibility"
         | "toggleSolo"
+        | "toggleThreeD"
         | "unlockSelectedLayers"
         | "unlockGroup" => layer_menu_plan(name, args, published, time),
         "rippleDelete" => ripple_delete(&layers, &selected),
@@ -1636,6 +1675,22 @@ fn layer_menu_plan(
                 }),
             ))
         }
+        "toggleThreeD" => {
+            // On for every selected layer unless all are 3D already.
+            let all = facts.selected.iter().all(|l| {
+                layer(published, &l.id).and_then(|v| v.get("threeD").and_then(Value::as_bool))
+                    == Some(true)
+            });
+            let depth = asked.unwrap_or(!all);
+            Some(plain(
+                "3D Layer",
+                each(&|_| LayerPatch {
+                    three_d: Some(depth),
+                    time,
+                    ..Default::default()
+                }),
+            ))
+        }
         _ => None,
     }
 }
@@ -1667,6 +1722,9 @@ pub fn disabled(
         off.extend(SELECTION.iter().map(|c| (*c).to_owned()));
         off.insert("studio.view".into());
         off.insert("text.editSelected".into());
+        // Nothing to export without a project (v1's File ▸ Export, dimmed
+        // over Home): its row and its keys are off (PM-472).
+        off.insert("export".into());
         return off;
     };
     // Runs on every publication, so the selection is looked up, never scanned for.

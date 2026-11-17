@@ -365,7 +365,9 @@ fn a_font_installed_while_a_project_is_open_retires_its_rendered_frames(
     settled(&viewer, &scope, frame(60));
     settled(&viewer, &scope, frame(30));
     let (report, cached) = settled(&viewer, &scope, frame(31));
-    assert_eq!(report.scale, 1., "in the range: the frame on disk");
+    // Read from disk, not drawn (a frame's scale is the share it was asked
+    // at, which a paused viewer's refinement can raise either way: PM-350).
+    assert!(report.cache_hit, "in the range: the frame on disk");
     assert!(
         cached == drawn,
         "the rendered frame is not the picture drawn with the activated font"
@@ -397,7 +399,7 @@ fn a_font_installed_while_a_project_is_open_retires_its_rendered_frames(
     settled(&viewer, &scope, frame(30));
     settled(&viewer, &scope, frame(60));
     let (report, cached) = settled(&viewer, &scope, frame(61));
-    assert_eq!(report.scale, 2., "nothing kept from the fill: drawn");
+    assert!(!report.cache_hit, "nothing kept from the fill: drawn");
     assert!(
         cached == drawn,
         "the frame drawn again is its time's picture"

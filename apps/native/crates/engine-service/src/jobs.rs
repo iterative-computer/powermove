@@ -168,9 +168,34 @@ static ACTIVITIES: Mutex<Vec<Activity>> = Mutex::new(Vec::new());
 /// work (the background render) waits until they have been idle a while,
 /// as it does after the viewer draws.
 pub fn note_input() {
+    noted_activity();
     for activity in ACTIVITIES.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         activity.touch();
     }
+}
+/// When the person or a viewer last did something, in milliseconds since
+/// [`ACTIVITY_EPOCH`].
+static LAST_ACTIVITY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ACTIVITY_EPOCH: std::sync::LazyLock<std::time::Instant> =
+    std::sync::LazyLock::new(std::time::Instant::now);
+fn noted_activity() {
+    LAST_ACTIVITY_MS.store(
+        ACTIVITY_EPOCH.elapsed().as_millis() as u64,
+        Ordering::Release,
+    );
+}
+/// Whether the person has pressed, scrolled and typed nothing, and no viewer
+/// has drawn or played, for `quiet`: work that can wait for them (projects
+/// of tabs behind the front one) goes now.
+pub fn app_quiet_for(quiet: std::time::Duration) -> bool {
+    let busy = ACTIVITIES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(Activity::busy);
+    let since = (ACTIVITY_EPOCH.elapsed().as_millis() as u64)
+        .saturating_sub(LAST_ACTIVITY_MS.load(Ordering::Acquire));
+    !busy && since >= quiet.as_millis() as u64
 }
 pub(crate) fn watch_activity(activity: &Activity) {
     ACTIVITIES
@@ -198,6 +223,7 @@ impl Activity {
             let _grant = self.quiet.0.lock().unwrap();
             self.busy.store(true, Ordering::Release);
             self.epoch.fetch_add(1, Ordering::AcqRel);
+            noted_activity();
             return;
         }
         self.busy.store(false, Ordering::Release);
@@ -418,9 +444,12 @@ enum Dispute {
     /// Its registry answered a question with another face: why, and the
     /// job's question (to name its font and text).
     Differ(String, Option<pm_text::answers::Query>),
-    /// Its fonts are not the ones the job was asked to draw with any more
-    /// (or it has no registry): nothing can be compared.
+    /// It could not compare (no registry, a question it did not answer):
+    /// what did not answer.
     Moved(String),
+    /// The app's fonts changed since the job was asked: the fonts on this
+    /// Mac changed ([`FONTS_CHANGED`]), nothing left to compare.
+    Changed,
 }
 /// What the child sends the parent, one line each on its stdout.
 #[derive(Serialize, Deserialize)]
@@ -1619,6 +1648,10 @@ impl Faces {
                 *self.uncompared.lock().unwrap() = Some(why.clone());
                 Err(why)
             }
+            // Said as the fonts on this Mac changing (`FONTS_CHANGED`).
+            Ok(Err(Dispute::Changed)) => {
+                Err("the app's fonts changed since the job was asked".into())
+            }
             Err(_) => {
                 let why = "the app did not answer the export's font check".to_owned();
                 *self.uncompared.lock().unwrap() = Some(why.clone());
@@ -1824,10 +1857,7 @@ fn faces_agree(
 ) -> std::result::Result<(), Dispute> {
     let broker = font_broker()
         .ok_or_else(|| Dispute::Moved("the app has no font registry to compare with".into()))?;
-    let moved = || {
-        (Some(broker.generation()) != faces_of)
-            .then(|| Dispute::Moved("the app's fonts changed since the job was asked".into()))
-    };
+    let moved = || (Some(broker.generation()) != faces_of).then_some(Dispute::Changed);
     if let Some(moved) = moved() {
         return Err(moved);
     }

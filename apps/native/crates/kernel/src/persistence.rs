@@ -268,6 +268,9 @@ impl LibraryWriter {
         meta: Value,
         preserve_trash: bool,
     ) -> Result<(), LibraryError> {
+        // Ids given to keys stored without one stay in memory.
+        let mut project = project;
+        crate::model::strip_derived_key_ids(&mut project);
         let (mut rows, mut trash) = self.entry_rows(id, &project, preserve_trash)?;
         named_by_body(id, &project, &mut rows, &mut trash);
         let mut envelope = Map::new();

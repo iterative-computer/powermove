@@ -978,21 +978,41 @@ function SummaryView({
               {value}
             </text>
           ) : (
-            (["channel_red", "channel_green", "channel_blue"] as const).map(
-              (ink, i) => (
-                <text
-                  key={ink}
-                  style={{
-                    color: t(muted ? "colors.muted" : `colors.${ink}`),
-                    fontSize: t("typography.caption"),
-                    fontVariantNumeric: "tabular-nums",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {signed(channels[i]?.value)}
-                </text>
-              ),
-            )
+            // R, G and B keep their own widths a gap apart. In a column too
+            // narrow for all three, a value that does not fit wraps onto a
+            // second line the group's one-line height hides: whole values
+            // only, none run into the next or under the Color button.
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "row",
+                flexWrap: "wrap",
+                alignItems: "center",
+                gap: t("metrics.gap"),
+                height: t("metrics.field"),
+                flexGrow: 1,
+                flexShrink: 1,
+                minWidth: 0,
+                overflow: "hidden",
+              }}
+            >
+              {(["channel_red", "channel_green", "channel_blue"] as const).map(
+                (ink, i) => (
+                  <text
+                    key={ink}
+                    style={{
+                      color: t(muted ? "colors.muted" : `colors.${ink}`),
+                      fontSize: t("typography.caption"),
+                      fontVariantNumeric: "tabular-nums",
+                      whiteSpace: "nowrap",
+                      flexShrink: 0,
+                    }}
+                  >
+                    {signed(channels[i]?.value)}
+                  </text>
+                ),
+              )}
+            </div>
           )}
         </div>
       </UI.InspectorRow>

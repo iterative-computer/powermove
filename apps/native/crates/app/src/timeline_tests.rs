@@ -2689,6 +2689,13 @@ fn hovering_the_tracks_skims_and_a_click_moves_the_playhead_there(cx: &mut TestA
         None,
         "leaving clears it"
     );
+    // A click moves the playhead to the skimmer in Tracks mode (Final Cut);
+    // in the Layers timeline a click only selects (see
+    // a_press_moves_the_playhead_to_the_skimmer_only_in_tracks_mode).
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.mode:tracks", 0., None, false, cx)
+    });
+    s.idle(cx);
     let at = s.at(1, 2.5);
     hover(&mut s, cx, at);
     s.vcx.simulate_click(at, Modifiers::none());
@@ -3324,4 +3331,63 @@ fn a_marker_shows_its_name_and_time_in_a_tooltip(cx: &mut TestAppContext) {
     let tip = s.surface.read_with(&s.vcx, |t, _| t.marker_tip_for_test(marker));
     let tip = tip.expect("a tooltip over the marker");
     assert!(tip.contains(" · 00:00:00:") && tip.ends_with(" · Right-click to remove"), "{tip}");
+}
+
+/// The ruler menu's "Switch to Track Timeline" and the Layers | Tracks
+/// control drive one state: the published view (the header's control and the
+/// layer column draw from it) follows the menu both ways.
+#[gpui::test]
+fn the_ruler_menus_mode_switch_reaches_the_published_view(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let mode = |s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        p.ui_state
+            .timeline
+            .get("mode")
+            .and_then(|m| m.as_str())
+            .map(str::to_owned)
+    };
+    for (action, want) in [("mode.tracks", "tracks"), ("mode.layers", "layers")] {
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.choose_menu(
+                pm_panel_timeline::Context::Ruler { time: 0. },
+                action,
+                cx,
+            )
+        });
+        s.idle(cx);
+        assert_eq!(mode(&s).as_deref(), Some(want), "{action}");
+    }
+}
+/// Run 27: in the Layers timeline a press on a layer selects it and never
+/// moves the playhead, skimming on or off (v1 and After Effects: only the
+/// ruler does). In Tracks mode with skimming on, a press moves the playhead
+/// to the skimmer, as Final Cut does.
+#[gpui::test]
+fn a_press_moves_the_playhead_to_the_skimmer_only_in_tracks_mode(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    s.recorder.skimming.set(true);
+    let press = |s: &mut Stage, cx: &mut TestAppContext| {
+        let at = s.at(0, 1.0);
+        s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        s.idle(cx);
+        s.vcx
+            .simulate_mouse_move(at + point(px(4.), px(0.)), None, Modifiers::none());
+        s.idle(cx);
+        assert!(
+            s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some(),
+            "the pointer skims"
+        );
+        s.vcx
+            .simulate_click(at + point(px(4.), px(0.)), Modifiers::none());
+        s.idle(cx);
+    };
+    press(&mut s, cx);
+    assert!(s.recorder.seeks.borrow().is_empty(), "Layers: no seek");
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.mode:tracks", 0., None, false, cx)
+    });
+    s.idle(cx);
+    press(&mut s, cx);
+    assert_eq!(s.recorder.seeks.borrow().len(), 1, "Tracks: the press seeks");
 }

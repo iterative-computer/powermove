@@ -58,6 +58,9 @@ impl std::error::Error for ModelError {}
 /// Returning an effect does not claim that host work has succeeded.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HostEffect {
+    /// One of the app's own commands, by name (the empty composition's
+    /// Text, Shape, Solid, Null and Import… buttons).
+    Run(String),
     Seek(f64),
     TogglePlayback,
     /// Fit Selected Curves: show this span of composition time.

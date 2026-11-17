@@ -56,6 +56,10 @@ pub trait TextInput {
     fn marked_range(&self) -> Option<(usize, usize)>;
     fn take_events(&self) -> Vec<TextEvent>;
     fn on_event(&self, wake: Rc<dyn Fn()>);
+    /// Keys typed for this text that have not reached it yet (still queued
+    /// in the window, or held while it took the keyboard) reach it now, in
+    /// order: read before the edit ends, its value holds every key typed.
+    fn take_pending(&self);
 }
 
 /// A press this close to the frame (display points) still edits.
@@ -681,6 +685,8 @@ impl GizmoSurface {
             })
             .detach();
             input.focus();
+            // Letters typed before it had the keyboard go to it now, first.
+            pm_shell::typing::field_ready();
         }
         let label = if fresh { None } else { Some("Edit Text") };
         let mut session = TextSession {
@@ -894,6 +900,9 @@ impl GizmoSurface {
         };
         s.finishing = true;
         if let Some(input) = s.input.take() {
+            // Fast typing ended by Escape, Command-Return, a click or another
+            // tool: the last keys may still be on their way. They count.
+            input.take_pending();
             let value = input.value().replace('\r', "");
             if value != s.written {
                 s.written = value.clone();
@@ -906,8 +915,16 @@ impl GizmoSurface {
             fresh: s.fresh,
             rename,
         });
-        if !keep_tool && self.host.tool(cx) == super::Tool::Text {
-            self.host.command("toolSelect", cx);
+        // Afterwards the tool returns to Select. Asked once the update that
+        // ended the edit is over: Escape ends it inside the Controller's own
+        // update (cancel_gesture), and the tool is read from the Controller.
+        if !keep_tool {
+            let host = self.host.clone();
+            cx.defer(move |cx| {
+                if host.tool(cx) == super::Tool::Text {
+                    host.command("toolSelect", cx);
+                }
+            });
         }
         self.text_pump(cx);
         self.refresh(cx);
@@ -1379,6 +1396,10 @@ impl GizmoSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The text opens a turn or more from now (a point click first asks
+        // what is under it): letters typed meanwhile wait for it, not run as
+        // shortcuts on the canvas (PM-465).
+        pm_shell::typing::expect();
         let paragraph = sketch.shape.filter(|b| b.w() >= PARAGRAPH_MIN);
         if let Some(b) = paragraph {
             self.new_text([b.x0, b.y0], Some(b.w()), window, cx);
@@ -1414,23 +1435,46 @@ impl GizmoSurface {
     }
     /// Return with one text layer selected edits it (Edit ▸ Edit Text).
     pub fn edit_selected_text(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(p) = self.kernel.published(&self.project) else {
+        let Some(id) = self.selected_text_layer() else {
             return false;
         };
-        let [id] = p.selection.layers() else {
-            return false;
-        };
-        let is_text = p.snapshot.root().is_some_and(|root| {
-            pm_kernel::model::list_layers(root, None)
-                .iter()
-                .any(|l| &l.id == id && l.kind == "text" && !l.effectively_locked)
-        });
-        if !is_text {
-            return false;
-        }
-        self.edit_text(id.clone(), Entry::End, window, cx);
+        self.edit_text(id, Entry::End, window, cx);
         true
     }
+    /// The one unlocked text layer selected, which Return edits. Read from
+    /// the kernel only: the controller asks this inside its own update,
+    /// where the host (which reads the controller) can't be (PM-480).
+    pub fn selected_text_layer(&self) -> Option<String> {
+        let p = self.kernel.published(&self.project)?;
+        let [id] = p.selection.layers() else {
+            return None;
+        };
+        p.snapshot
+            .root()
+            .is_some_and(|root| {
+                pm_kernel::model::list_layers(root, None)
+                    .iter()
+                    .any(|l| &l.id == id && l.kind == "text" && !l.effectively_locked)
+            })
+            .then(|| id.clone())
+    }
+}
+/// Return with one text layer selected, from the controller's own command:
+/// whether it edits, the edit starting once that update is over. The edit
+/// reads the controller (the time, pausing playback) through the host, and
+/// a second lease while the first is open aborts the app (PM-480).
+pub fn edit_selected_text_after(
+    gizmos: Entity<GizmoSurface>,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
+    let Some(id) = gizmos.read(cx).selected_text_layer() else {
+        return false;
+    };
+    window.defer(cx, move |window, cx| {
+        gizmos.update(cx, |g, cx| g.edit_text(id, Entry::End, window, cx));
+    });
+    true
 }
 /// The unlocked, active text layer the pointer is over, deepest first.
 fn text_under(
@@ -1513,6 +1557,9 @@ impl TextInput for NativeInput {
     }
     fn on_event(&self, wake: Rc<dyn Fn()>) {
         self.0.on_event(wake);
+    }
+    fn take_pending(&self) {
+        pm_shell::flush_typing();
     }
 }
 pub fn native_input(initial: &str, window: &Window) -> Option<Rc<dyn TextInput>> {

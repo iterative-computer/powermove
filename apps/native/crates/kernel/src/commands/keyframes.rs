@@ -507,7 +507,7 @@ fn edit_tracks(
             continue;
         }
         let layer = cx.layer_node(&loc)?.to_value();
-        let hits: Vec<(String, Vec<Step>)> = channels::all(&layer)
+        let hits: Vec<(String, Vec<Step>)> = channels::keyed(&layer)
             .into_iter()
             .filter(|(_, path)| {
                 channels::get(&layer, path).is_some_and(|p| {
@@ -796,7 +796,7 @@ fn move_keys(cx: &mut Cx<'_>, key_ids: &[String], delta: f64) -> Result<(), Comm
         let layer = cx.layer_node(&loc)?.to_value();
         let from = values::num(&layer, "from").unwrap_or(0.0);
         let dur = cx.duration(loc.comp_id.as_deref());
-        for (_, path) in channels::all(&layer) {
+        for (_, path) in channels::keyed(&layer) {
             let Some(prop) = channels::get(&layer, &path) else {
                 continue;
             };
@@ -1104,7 +1104,7 @@ fn replace_keyframes(cx: &mut Cx<'_>, c: &ReplaceKeyframes) -> Result<(), Comman
         let this = (loc.clone(), path.clone());
         for other in cx.all_layers() {
             let node = cx.layer_node(&other)?.to_value();
-            for (_, p) in channels::all(&node) {
+            for (_, p) in channels::keyed(&node) {
                 if other == this.0 && p == this.1 {
                     continue;
                 }
@@ -1339,7 +1339,7 @@ fn graph_edit(cx: &mut Cx<'_>, key_ids: &[String], edit: GraphEdit) -> Result<()
         let layer = cx.layer_node(&loc)?.to_value();
         let from = values::num(&layer, "from").unwrap_or(0.0);
         let dur = cx.duration(loc.comp_id.as_deref());
-        for (_, path) in channels::all(&layer) {
+        for (_, path) in channels::keyed(&layer) {
             let Some(prop) = channels::get(&layer, &path) else {
                 continue;
             };
