@@ -1023,13 +1023,13 @@ impl Kernel {
                     // A layout change is no edit: the project's own workspace
                     // record, which the next open prefers, takes it too, and
                     // both are flushed before the journal holding it goes.
+                    // (One flush: the meta's write below flushes both.)
                     if let Destination::Library(slot) = &self.sessions[&handle.project].destination
                         && let Some(writer) = &self.library
                     {
                         let workspace = self.project(&handle.project).unwrap().workspace().clone();
                         writer
                             .set(&format!("projectWorkspace.{slot}"), workspace)
-                            .and_then(|()| writer.flush())
                             .map_err(failure)?;
                     }
                     self.save_session_meta(&handle.project)?;
@@ -1057,8 +1057,11 @@ impl Kernel {
                     recovery_copy
                 };
                 crate::fault_injection::hit(crate::fault_injection::Stage::InClose);
-                self.flush_project(&handle.project)?;
-                self.durability_barrier()?;
+                // What this close made durable before its journal goes: its
+                // own journal, the library, the queued durability work. Not
+                // every other open project's journal: that made each close
+                // of a quit with nine tabs sync all nine (run 24: 6 s).
+                self.close_barrier(&handle.project)?;
                 let journals = self.project_dir(&handle.project);
                 // A volume that could not prove the save durable may still
                 // lose it: the journal stays (and its local copy, see `local_copy`).

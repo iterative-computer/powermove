@@ -120,6 +120,14 @@ struct QuitCoordinator {
     stage: Option<(&'static str, std::time::Duration)>,
     controllers: Vec<gpui::WeakEntity<Controller>>,
     queue: Vec<gpui::WeakEntity<Controller>>,
+    /// Windows a quit asked to close at once (none asks anything), until
+    /// each has let go of its project.
+    closing: Vec<gpui::WeakEntity<Controller>>,
+    /// The app was hidden for the quit (its windows gone at once); a
+    /// cancelled quit shows it again.
+    hidden: bool,
+    /// The library's last writing has begun: once only.
+    finishing: bool,
     quitting: bool,
     /// The person chose Discard Changes for every project at once.
     discard: bool,
@@ -163,6 +171,12 @@ fn cancel_quit(cx: &mut App) {
         q.terminating = false;
         q.asking_now = None;
         q.queue.clear();
+        q.closing.clear();
+        q.finishing = false;
+        let hidden = std::mem::take(&mut q.hidden);
+        if hidden {
+            show_app();
+        }
         q.frames.clear();
         q.stage = None;
         q.host.closing.store(false, Ordering::Release);
@@ -472,17 +486,44 @@ fn next_quit(cx: &mut App) {
                 .filter_map(|weak| weak.upgrade())
                 .any(|c| c.read(cx).dirty())
     };
-    if !asks {
-        arm(cx, "windows", crate::quit_limit::WINDOWS);
+    if cx.global::<QuitCoordinator>().finishing {
+        return;
     }
-    while let Some(weak) = cx.global_mut::<QuitCoordinator>().queue.pop() {
-        if weak
-            .update(cx, |v, cx| v.request_close(Intent::Quit, cx))
-            .is_ok()
-        {
-            return;
+    if asks {
+        // One window at a time while one may ask a question.
+        while let Some(weak) = cx.global_mut::<QuitCoordinator>().queue.pop() {
+            if weak
+                .update(cx, |v, cx| v.request_close(Intent::Quit, cx))
+                .is_ok()
+            {
+                return;
+            }
+        }
+    } else {
+        arm(cx, "windows", crate::quit_limit::WINDOWS);
+        // Nothing is asked any more: the windows go at once (the app hides),
+        // and every one left closes together, not one after another (nine
+        // tabs took 6 s, run 24). Their writing finishes behind.
+        hide_for_quit(cx);
+        let rest = std::mem::take(&mut cx.global_mut::<QuitCoordinator>().queue);
+        for weak in rest.into_iter().rev() {
+            cx.global_mut::<QuitCoordinator>().closing.push(weak.clone());
+            let _ = weak.update(cx, |v, cx| v.request_close(Intent::Quit, cx));
         }
     }
+    // A window still closing calls this again once it has let go.
+    let closing = cx.global::<QuitCoordinator>().closing.clone();
+    if closing
+        .iter()
+        .filter_map(|weak| weak.upgrade())
+        .any(|c| !c.read(cx).closed_for_quit)
+    {
+        return;
+    }
+    if !cx.global::<QuitCoordinator>().quitting {
+        return;
+    }
+    cx.global_mut::<QuitCoordinator>().finishing = true;
     // The window session's queued writes land first; a failed one is asked
     // about while the library is still held, so Cancel leaves all as it was.
     cx.spawn(async move |cx| {
@@ -496,6 +537,25 @@ fn next_quit(cx: &mut App) {
         });
     })
     .detach();
+}
+/// Hides the app for a quit that asks nothing more: its windows are gone at
+/// once while the projects close behind. Never for a quit signal (nobody is
+/// watching) or a development lane in the background.
+fn hide_for_quit(cx: &mut App) {
+    let q = cx.global_mut::<QuitCoordinator>();
+    if q.hidden || q.terminating || gpui_macos::child_window::would_hold() {
+        return;
+    }
+    q.hidden = true;
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        objc2_app_kit::NSApplication::sharedApplication(mtm).hide(None);
+    }
+}
+/// The app shown again after a quit hid it (cancelled, or about to ask).
+fn show_app() {
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        objc2_app_kit::NSApplication::sharedApplication(mtm).unhide(None);
+    }
 }
 /// What a second Quit does while the first one runs.
 #[derive(Debug, PartialEq)]
@@ -552,6 +612,9 @@ fn ask_quit_now(cx: &mut App) {
     };
     // Nobody is hurried while asked: the bound waits for the answer.
     crate::quit_limit::cancel();
+    if std::mem::take(&mut cx.global_mut::<QuitCoordinator>().hidden) {
+        show_app();
+    }
     let mut sheet = None;
     let answer = quit_now_alert(&note).sheet_with(&window, |alert| sheet = Some(alert.window()));
     cx.global_mut::<QuitCoordinator>().asking_now = sheet.map(|sheet| (window, sheet));
@@ -687,6 +750,9 @@ fn session_failed_alert(error: &str) -> crate::alert::Alert<bool> {
 }
 fn ask_session_failed(error: &str, cx: &mut App) {
     crate::quit_limit::cancel();
+    if std::mem::take(&mut cx.global_mut::<QuitCoordinator>().hidden) {
+        show_app();
+    }
     let window = cx
         .global::<QuitCoordinator>()
         .controllers
@@ -792,8 +858,13 @@ fn finish_quit(cx: &mut App) {
                 cx.quit();
             }
             other => {
-                // A question follows: nobody is hurried while asked.
+                // A question follows: nobody is hurried while asked, and the
+                // app the quit hid is shown to ask it.
                 crate::quit_limit::cancel();
+                if std::mem::take(&mut cx.global_mut::<QuitCoordinator>().hidden) {
+                    show_app();
+                }
+                cx.global_mut::<QuitCoordinator>().finishing = false;
                 let reason = reason(other);
                 eprintln!("Couldn’t quit: {reason}. Your work is kept.");
                 crate::error_log::shared(cx).borrow_mut().push(
@@ -844,6 +915,9 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
             stage: None,
             controllers: Vec::new(),
             queue: Vec::new(),
+            closing: Vec::new(),
+            hidden: false,
+            finishing: false,
             quitting: false,
             discard: false,
             asking_exports: false,
@@ -1216,8 +1290,15 @@ impl Controller {
         // A quit is not refused because of work that ends on its own: it
         // waits (saying what for) and goes on when the work has ended.
         crate::diag::line(serde_json::json!({"quit":"close_state", "state":format!("{state:?}"), "opening":self.opening, "asking":asking, "operation":self.mcp.operation_in_progress()}));
+        // The quit's own windows closing together (nothing asks any more)
+        // are not fenced by each other's operation: agents are already
+        // refused while quitting (`Host::closing`), and each close holding
+        // the one operation made nine tabs close one at a time (run 24).
+        let together = intent == Intent::Quit
+            && !cx.global::<QuitCoordinator>().closing.is_empty();
         let fenced = matches!(state, CloseState::Dirty | CloseState::Clean)
-            && self.mcp.operation_in_progress();
+            && self.mcp.operation_in_progress()
+            && !together;
         if intent == Intent::Quit
             && let Some(work) = quit_waits_for(state, self.opening, asking, fenced)
         {
@@ -1278,14 +1359,19 @@ impl Controller {
             }
             _ => {}
         }
-        let Some(operation) = self.mcp.try_operation() else {
-            self.message =
-                "A project operation is in progress. Try closing again when it finishes.".into();
-            cancel_quit(cx);
-            cx.notify();
-            return;
+        let operation = match self.mcp.try_operation() {
+            Some(operation) => Some(operation),
+            None if together => None,
+            None => {
+                self.message =
+                    "A project operation is in progress. Try closing again when it finishes."
+                        .into();
+                cancel_quit(cx);
+                cx.notify();
+                return;
+            }
         };
-        self.close_operation = Some(operation);
+        self.close_operation = operation;
         self.close_pending = true;
         self.mcp.closing.store(true, Ordering::Release);
         if state == CloseState::Stopped || p.as_ref().is_none_or(|p| !p.dirty) {
