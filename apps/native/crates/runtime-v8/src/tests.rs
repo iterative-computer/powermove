@@ -1225,6 +1225,39 @@ fn a_heap_given_room_to_start_with_does_not_collect_in_full_over_and_over() {
         "32 MiB start {tight}, 256 MiB start {roomy}"
     );
 }
+/// A window's realm holding a project's mirror (40 MiB live) that then
+/// does a little at a time, as a launch's extensions do: hundreds of small
+/// turns of a few kilobytes each. V8 starts marking whenever the old
+/// generation's room is less than the young generation's capacity; with
+/// V8's young generation for a 1 GiB heap (32 MiB of new space), a limit
+/// half again above what lives never had that room, so the realm marked in
+/// full over and over, about 30 times a second through Paper's launch
+/// (PM-469).
+#[test]
+fn a_heap_at_rest_beside_a_large_mirror_does_not_mark_over_and_over() {
+    let f = fixture_with(|c| {
+        c.limits.heap_bytes = 1024 * 1024 * 1024;
+        c.limits.initial_heap_bytes = 128 * 1024 * 1024;
+        c.admission = Admission::new(2 * 1024 * 1024 * 1024);
+    });
+    let r = f.pool.realm(RealmKind::V4Extension("mirror".into())).unwrap();
+    // The mirror, then enough garbage that V8 sets its limit from it.
+    eval(
+        &r,
+        "globalThis.kept=[];for(let i=0;i<40;i++)kept.push(new Array(131072).fill(i));\
+         let n=0;for(let i=0;i<200;i++){const g=new Array(131072).fill(i);n+=g.length}n",
+    );
+    let majors = |r: &Realm| wait(r.measure().unwrap()).unwrap()[0].memory.major_collections;
+    let settled = majors(&r);
+    for i in 0..400 {
+        eval(&r, &format!("globalThis.t=[];for(let j=0;j<64;j++)t.push({{i:{i},j}});t.length"));
+        thread::sleep(Duration::from_millis(2));
+    }
+    let at_rest = majors(&r) - settled;
+    close(&r);
+    eprintln!("full collections in 400 small turns: {at_rest}");
+    assert!(at_rest <= 2, "{at_rest} full collections in 400 small turns");
+}
 const IDLE_WAIT: Duration = Duration::from_secs(20);
 #[test]
 fn full_account_child() {
