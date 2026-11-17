@@ -1983,7 +1983,8 @@ impl Controller {
         let Some(published) = &self.published else {
             return;
         };
-        match pm_builtins::media_import::place_items(published, assets, comps, self.time(), None) {
+        let still = self.pro_media.preferences().still();
+        match pm_builtins::media_import::place_items(published, assets, comps, self.time(), None, still) {
             Ok((layers, commands)) if !commands.is_empty() => self.run_layer_plan(
                 crate::layer_commands::Plan {
                     label: "Add to Timeline".into(),
