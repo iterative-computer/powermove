@@ -77,9 +77,6 @@ pub fn glyph(name: &str) -> Option<Glyph> {
         "magnifyingglass" => g(pierre!("Search")),
         "gearshape" => g(pierre!("GearFill")),
         "sparkles" => g(pierre!("Sparkles")),
-        // Export: the box with the arrow up out of it (Pierre's Share, an
-        // arrow to the upper right, reads as opening a new window).
-        "square.and.arrow.up" => g(drawn!("export")),
         "square.grid.2x2" => g(drawn!("grid")),
         "trash" => g(pierre!("BinFill")),
         "folder" => g(pierre!("Folder")),
@@ -101,7 +98,6 @@ pub fn glyph(name: &str) -> Option<Glyph> {
         "chevron.right" => turned(pierre!("Chevron"), 3),
         // Tools (the toolbar's segments and the Shape tool's kinds).
         "cursorarrow" => g(pierre!("Cursor")),
-        "hand.raised" => g(drawn!("hand")),
         "crop.rotate" => g(pierre!("Reload")),
         "scope" => g(drawn!("anchor")),
         "square.on.circle" => g(drawn!("shape")),
@@ -217,7 +213,6 @@ mod tests {
         "magnifyingglass",
         "gearshape",
         "sparkles",
-        "square.and.arrow.up",
         "square.grid.2x2",
         "trash",
         "folder",
@@ -232,7 +227,6 @@ mod tests {
         "chevron.up",
         "chevron.right",
         "cursorarrow",
-        "hand.raised",
         "crop.rotate",
         "scope",
         "square.on.circle",

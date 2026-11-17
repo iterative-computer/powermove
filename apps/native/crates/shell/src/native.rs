@@ -1388,7 +1388,7 @@ fn workspace_menu(state: &MenuState) -> Vec<Retained<NSMenuItem>> {
 }
 const TOOLS: [(&str, &str, &str); 8] = [
     ("toolSelect", "cursorarrow", "Select (V)"),
-    ("toolHand", "hand.raised", "Hand (H)"),
+    ("toolHand", "hand.raised.fill", "Hand (H)"),
     ("toolZoom", "magnifyingglass", "Zoom (Z)"),
     ("toolRotate", "crop.rotate", "Rotate (W)"),
     ("toolAnchor", "scope", "Anchor (Y)"),
@@ -2690,6 +2690,12 @@ fn menu_symbol(s: &str, label: &str) -> Retained<NSImage> {
 /// vendored glyph reads as large at about 16 pt, so its square is this much
 /// larger. A glyph matched to its SF Symbol on its own (Home) keeps its size.
 const TOOLBAR_GLYPH: f64 = 1.4;
+/// Apple's own drawings stand in the toolbar where the vendored family has no
+/// good one: the filled hand for the Hand tool, and Export's box and arrow at
+/// semibold (its filled twin closes into a block on the accent button at 1x).
+/// At the toolbar's 14 pt an SF Symbol draws about 18 pt of ink; among the
+/// vendored glyphs (about 16 pt) these are drawn at this size instead.
+const SF_AMONG_GLYPHS: f64 = 12.5;
 fn toolbar_symbol(s: &str, label: &str, t: &Tokens) -> Retained<NSImage> {
     if let Some(glyph) = crate::icons::glyph(s) {
         let points = t.metrics.symbol_toolbar as f64;
@@ -2699,10 +2705,13 @@ fn toolbar_symbol(s: &str, label: &str, t: &Tokens) -> Retained<NSImage> {
         }
     }
     let image = symbol(s, label);
-    let config = objc2_app_kit::NSImageSymbolConfiguration::configurationWithPointSize_weight(
-        t.metrics.symbol_toolbar as f64,
-        unsafe { objc2_app_kit::NSFontWeightRegular },
-    );
+    let (points, weight) = match s {
+        "hand.raised.fill" => (SF_AMONG_GLYPHS, unsafe { objc2_app_kit::NSFontWeightRegular }),
+        "square.and.arrow.up" => (SF_AMONG_GLYPHS, unsafe { objc2_app_kit::NSFontWeightSemibold }),
+        _ => (t.metrics.symbol_toolbar as f64, unsafe { objc2_app_kit::NSFontWeightRegular }),
+    };
+    let config =
+        objc2_app_kit::NSImageSymbolConfiguration::configurationWithPointSize_weight(points, weight);
     image.imageWithSymbolConfiguration(&config).unwrap_or(image)
 }
 impl ToolbarDelegate {

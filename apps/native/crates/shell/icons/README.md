@@ -4,7 +4,9 @@ Glyphs the app draws in place of an SF Symbol of the same meaning (`src/icons.rs
 maps symbol names to these files). They are compiled into the binary; nothing is
 fetched at run time. SF Symbols remain where AppKit itself draws the glyph inside a
 control (pop-up chevrons, switches, menu marks, the window buttons) and for symbols
-not mapped yet.
+not mapped yet. The Hand tool and Export use Apple's own filled drawings
+(`hand.raised.fill`, and `square.and.arrow.up` at semibold), drawn at the vendored
+glyphs' size.
 
 ## `pierre/`
 
@@ -37,7 +39,5 @@ bars, knockouts by mask, no thinner strokes or outlines.
   while on, small and dim while off (the timeline tints them).
 - `pen.svg`: the Pen tool's nib (filled, with its slit and point); Pierre's pencil means
   rename.
-- `export.svg`: the box with an arrow up out of it; Pierre's `IconShare` (an arrow to the
-  upper right) reads as opening a new window.
 - `plus.svg`: drawn full size in a 2 px line; Pierre's plus (10 of 16 px, 1.5 px) reads
   small beside the search glass.
