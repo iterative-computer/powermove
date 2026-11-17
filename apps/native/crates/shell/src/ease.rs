@@ -179,6 +179,9 @@ pub fn paint_editor(graph: Graph, curve: &Curve, look: Look, t: &Tokens, window:
         crate::kit::ink(c.text, t.translucency.line * 2. * alpha * strong),
         window,
     );
+    if look.disabled {
+        return;
+    }
     let ink = crate::kit::ink(c.accent, alpha);
     let handles = [(curve[0], curve[1]), (curve[2], curve[3])];
     let ends = [(0., 0.), (1., 1.)];
@@ -283,6 +286,24 @@ pub fn paint_thumbnail(bounds: Bounds<Pixels>, curve: &Curve, t: &Tokens, window
     );
     if let Ok(path) = path.build() {
         window.paint_path(path, crate::kit::ink(c.text, 1.));
+    }
+}
+
+/// A dashed hover preview, independent of the editor's bound value and handles.
+pub fn paint_ghost(graph: Graph, curve: &Curve, t: &Tokens, window: &mut Window) {
+    for i in 0..60 {
+        if i % 3 == 2 {
+            continue;
+        }
+        let a = i as f64 / 60.;
+        let b = (i + 1) as f64 / 60.;
+        line(
+            graph.to_point(at(curve, a)),
+            graph.to_point(at(curve, b)),
+            t.metrics.border * 2.,
+            crate::kit::ink(t.colors.secondary, 1.),
+            window,
+        );
     }
 }
 

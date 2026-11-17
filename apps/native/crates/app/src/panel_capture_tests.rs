@@ -138,7 +138,8 @@ fn capture_agent_states() {
     };
     let dir = std::env::var("PM_PANEL_CAPTURE").unwrap_or_else(|_| "/tmp/pm-shots/panels".into());
     std::fs::create_dir_all(&dir).unwrap();
-    let r = rig("agent", 1);
+    let panel = std::env::var("PM_CAPTURE_PANEL").unwrap_or_else(|_| "agent".into());
+    let r = rig(&panel, 1);
     let mut files: Vec<_> = std::fs::read_dir(&states)
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -157,9 +158,9 @@ fn capture_agent_states() {
         for (scheme_name, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
             objc2::rc::autoreleasepool(|_| {
                 let tokens = Tokens::new(scheme, Accessibility::default());
-                let (w, h) = (tokens.metrics.agent_width, tokens.metrics.agent_height);
+                let (w, h) = if panel == "easing" {(320., 1500.)} else {(tokens.metrics.agent_width, tokens.metrics.agent_height)};
                 let first = pm_builtins::Publication {
-                    panel: "agent".into(),
+                    panel: panel.clone(),
                     generation: 1,
                     surface: surface.clone(),
                 };
@@ -191,7 +192,7 @@ fn capture_agent_states() {
                 }
                 let image = cx.capture_screenshot(window.into()).unwrap();
                 image
-                    .save(format!("{dir}/agent-{name}-{scheme_name}.png"))
+                    .save(format!("{dir}/{panel}-{name}-{scheme_name}.png"))
                     .unwrap();
             });
         }

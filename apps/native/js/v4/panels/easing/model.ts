@@ -18,12 +18,17 @@ export interface EasingState {
   /** Selected keyframes: what every action changes. */
   count: number;
   presets: Preset[];
+  library?: { stateRevision: string; source: any };
+  curve?: Curve | null;
+  mixed?: boolean;
+  interpolation?: Interpolation | null;
 }
 export type Side = "both" | "in" | "out";
 export type Interpolation = "linear" | "bezier" | "hold" | "auto";
 export type EasingAction =
   | { type: "preset"; preset: string }
-  | { type: "curve"; curve: Curve }
+  | { type: "save"; name: string; curve: Curve }
+  | { type: "curve"; curve: Curve; name?: string }
   | { type: "easyEase"; side: Side }
   | { type: "interpolation"; interpolation: Interpolation; side: Side };
 
@@ -99,4 +104,106 @@ export class EasingModel {
       this.refresh();
     });
   }
+}
+
+function librarySource(source: any) {
+  return typeof source === "string" ? JSON.parse(source) : source;
+}
+/** The stored library remains authoritative; cubic tiles are a projection. */
+export function customPresets(source: any): (Preset & { name: string })[] {
+  let library;
+  try {
+    library = librarySource(source);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(library?.groups)) return [];
+  return library.groups.flatMap((g: any) =>
+    (Array.isArray(g?.presets) ? g.presets : []).flatMap((p: any) => {
+      const points = p?.curve?.points;
+      if (
+        !Array.isArray(points) ||
+        points.length !== 2 ||
+        typeof p.id !== "string" ||
+        typeof p.name !== "string"
+      )
+        return [];
+      const [a, b] = points;
+      if (
+        !a ||
+        !b ||
+        !["linear", "bezier"].includes(a.outInterp) ||
+        !["linear", "bezier"].includes(b.inInterp)
+      )
+        return [];
+      // v1's resolved linear handle uses one third, regardless of stored ease.
+      const x = a.outInterp === "linear" ? 1 / 3 : a.outEase?.influence / 100,
+        incoming = b.inInterp === "linear" ? 1 / 3 : b.inEase?.influence / 100;
+      const curve: Curve = [
+        x,
+        a.outInterp === "bezier" ? x * a.outEase?.speed : x,
+        1 - incoming,
+        b.inInterp === "bezier" ? 1 - incoming * b.inEase?.speed : 1 - incoming,
+      ];
+      return curve.every(Number.isFinite)
+        ? [{ id: `saved:${p.id}`, name: p.name, curve }]
+        : [];
+    }),
+  );
+}
+export function librarySave(state: EasingState, name: string, curve: Curve) {
+  const point = (t: number, v: number) => ({
+    t,
+    v,
+    inInterp: "bezier",
+    outInterp: "bezier",
+    inEase: { speed: 0, influence: 33 },
+    outEase: { speed: 0, influence: 33 },
+  });
+  const a = point(0, 0),
+    b = point(1, 1);
+  a.outEase = {
+    speed: curve[1] / Math.max(0.001, curve[0]),
+    influence: Math.max(0.1, curve[0] * 100),
+  };
+  b.inEase = {
+    speed: (1 - curve[3]) / Math.max(0.001, 1 - curve[2]),
+    influence: Math.max(0.1, (1 - curve[2]) * 100),
+  };
+  const existing = librarySource(state.library?.source);
+  if (state.library?.source != null && !Array.isArray(existing?.groups))
+    throw new Error(
+      "The saved easing library could not be read; it has been retained.",
+    );
+  const source = structuredClone(
+    existing ?? {
+      version: 1,
+      active: "custom",
+      groups: [{ id: "custom", name: "Custom", presets: [] }],
+    },
+  );
+  const group =
+    source.groups.find((g: any) => g.id === source.active) ?? source.groups[0];
+  const preset = {
+    id: `curve-${Date.now()}`,
+    name,
+    color: "",
+    curve: { points: [a, b] },
+  };
+  if (state.library?.source)
+    return {
+      type: "easingLibrary",
+      action: "save",
+      stateRevision: state.library.stateRevision,
+      group: group.id,
+      ...preset,
+    };
+  group.presets.push(preset);
+  return {
+    type: "easingLibrary",
+    action: "import",
+    stateRevision: state.library?.stateRevision,
+    source,
+    ids: [],
+  };
 }

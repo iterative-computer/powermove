@@ -2023,3 +2023,381 @@ fn a_header_alone_in_its_row_takes_the_rows_width(cx: &mut TestAppContext) {
     let pop = bounds(&mut vcx, "pop");
     assert!(pop.right() > px(590.), "the trailing pop-up stands at the row's end: {pop:?}");
 }
+
+/// Easing contributes one stable content height to its scrolling dock body.
+/// This uses the real V8 panel and GPUI layout, with no desktop window.
+#[gpui::test]
+fn easing_selection_and_preset_preserve_height_and_body_offset(cx: &mut TestAppContext) {
+    let mut project: Value = serde_json::from_str(&project_json(1)).unwrap();
+    project["layers"][0]["p"]["x"]["kf"] = json!([
+        {"i":"k0","t":0,"v":0,"eo":[0,0],"ei":[1,1]},
+        {"i":"k1","t":1,"v":100,"eo":[0,0],"ei":[1,1]},
+        {"i":"k2","t":2,"v":200,"eo":[0,0],"ei":[1,1]}
+    ]);
+    let rig = rig_project("easing", &project.to_string());
+    let mut current = publication(&rig);
+    let first = current.clone();
+    let runtime = rig.runtime.clone();
+    let scroll = gpui::ScrollHandle::new();
+    let handle = scroll.clone();
+    cx.executor().allow_parking();
+    let (body, mut vcx) = cx.add_window_view(move |window, cx| {
+        let view = cx.new(|cx| {
+            let mut view =
+                SurfaceView::new(runtime, first, tokens(), Default::default(), window, cx);
+            view.grows = true;
+            view
+        });
+        ScrollingBody {
+            view,
+            scroll: handle,
+        }
+    });
+    let view = body.read_with(vcx, |b, _| b.view.clone());
+    vcx.simulate_resize(size(px(400.), px(300.)));
+    fn repaint(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+    }
+    fn receive(
+        rig: &Rig,
+        view: &Entity<SurfaceView>,
+        current: &mut Publication,
+        vcx: &mut VisualTestContext,
+    ) {
+        for (_, ticket) in rig.runtime.publish() {
+            let ticket = ticket.unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(result) = ticket.try_take() {
+                    result.unwrap();
+                    break;
+                }
+                assert!(Instant::now() < deadline, "easing publication timed out");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        for next in rig.runtime.take_publications() {
+            *current = next.clone();
+            view.update(vcx, |view, cx| view.publish(next, cx));
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            vcx.run_until_parked();
+            if !view.read_with(vcx, |view, _| view.compiling()) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "easing host compilation timed out"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        repaint(vcx);
+    }
+    repaint(&mut vcx);
+    let height = bounds(&mut vcx, "easing").size.height;
+    assert!(scroll.max_offset().y > px(100.));
+    scroll.set_offset(point(px(0.), px(-80.)));
+    repaint(&mut vcx);
+    let offset = scroll.offset();
+    for ids in [vec!["k0"], vec!["k0", "k1", "k2"]] {
+        rig.kernel
+            .call(
+                PROJECT,
+                pm_kernel::Request::new(
+                    pm_kernel::Caller::native(),
+                    pm_kernel::SelectionCall::Keys(ids.into_iter().map(str::to_owned).collect()),
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        receive(&rig, &view, &mut current, &mut vcx);
+        let editor = current.surface.nodes().values().find(|n|
+            n.props.get("id").and_then(Value::as_str) == Some("easing:curve")
+        ).unwrap();
+        assert_ne!(editor.props.get("disabled"), Some(&json!(true)), "key-only selection enables Easing");
+        assert_eq!(bounds(&mut vcx, "easing").size.height, height);
+        assert_eq!(scroll.offset(), offset);
+    }
+    let target = current
+        .surface
+        .nodes()
+        .values()
+        .find(|n| n.props.get("id").and_then(Value::as_str) == Some("easing:preset:easeOut"))
+        .unwrap()
+        .id;
+    let ticket = rig
+        .runtime
+        .event(
+            "easing",
+            current.generation,
+            current.surface.revision(),
+            target,
+            "click",
+            Default::default(),
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(result) = ticket.try_take() {
+            result.unwrap();
+            break;
+        }
+        assert!(Instant::now() < deadline, "easing preset timed out");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    receive(&rig, &view, &mut current, &mut vcx);
+    assert_eq!(bounds(&mut vcx, "easing").size.height, height);
+    assert_eq!(scroll.offset(), offset);
+}
+
+#[gpui::test]
+fn easing_local_scrub_phases_commit_or_cancel_once(cx: &mut TestAppContext) {
+    for (curve, commit) in [(false, true), (false, false), (true, true), (true, false)] {
+        let r = rig("viewer", 1);
+        let _ = publication(&r);
+        let value = if curve {
+            json!([0., 0., 1., 1.])
+        } else {
+            json!(10.)
+        };
+        let mut ops = node_ops(
+            1,
+            0,
+            "div",
+            json!({"style":{"width":240,"height":240}}),
+            &[],
+        );
+        let mut props = json!({
+            "id":"local-scrub","label":"Local scrub","data-pm-component":if curve {"ease-curve"} else {"number-field"},
+            "control":if curve {"ease-curve"} else {"number"},"binding":"local","value":value,
+            "metadata":{"commitOnRelease":true},
+            "style":{"width":200,"height":if curve {200} else {30}}
+        });
+        if !curve {
+            props["min"] = json!(0);
+            props["max"] = json!(100);
+            props["step"] = json!(1);
+        }
+        ops.extend(node_ops(
+            2,
+            1,
+            if curve { "div" } else { "input" },
+            props,
+            &["input", "change"],
+        ));
+        let (view, mut vcx) = window(cx, &r, synthetic(&r, ops), Default::default());
+        vcx.run_until_parked();
+        let b = bounds(&mut vcx, "local-scrub");
+        let at = if curve {
+            let t = tokens();
+            let inset = px(t.metrics.keyframe / 2. + t.metrics.border);
+            let area = Bounds::new(
+                b.origin + point(inset, inset),
+                size(b.size.width - inset * 2., b.size.height - inset * 2.),
+            );
+            pm_shell::ease::Graph::new(area, pm_shell::ease::range(&[0., 0., 1., 1.]))
+                .to_point((0., 0.))
+        } else {
+            b.center()
+        };
+        vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        for step in [1., 2.] {
+            vcx.simulate_mouse_move(
+                at + point(px(20. * step), px(-10. * step)),
+                MouseButton::Left,
+                Modifiers::none(),
+            );
+        }
+        let before = events(&view, &mut vcx);
+        assert!(
+            before.iter().filter(|(_, event)| event == "input").count() >= 2,
+            "{before:?}"
+        );
+        assert!(
+            !before.iter().any(|(_, event)| event == "change"),
+            "preview must not commit"
+        );
+        if !commit {
+            assert!(view.update(&mut vcx, |view, cx| view.cancel_gesture(cx)));
+        }
+        vcx.simulate_mouse_up(
+            at + point(px(40.), px(-20.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        let after = view.update(&mut vcx, |view, _| std::mem::take(&mut view.log));
+        assert_eq!(
+            after
+                .iter()
+                .filter(|(_, event, _)| event == "change")
+                .count(),
+            if commit { 1 } else { 0 }
+        );
+        if !commit {
+            let restored = after
+                .iter()
+                .find(|(_, event, _)| event == "input")
+                .unwrap()
+                .2
+                .value
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                restored,
+                &if curve {
+                    json!([0., 0., 1., 1.])
+                } else {
+                    json!("10")
+                }
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn easing_handle_release_is_one_real_undo_step(cx: &mut TestAppContext) {
+    let mut project: Value = serde_json::from_str(&project_json(1)).unwrap();
+    project["layers"][0]["p"]["x"]["kf"] = json!([
+        {"i":"k0","t":0,"v":0,"eo":[0,0],"ei":[1,1]},
+        {"i":"k1","t":1,"v":100,"eo":[0,0],"ei":[1,1]}
+    ]);
+    let r = rig_project("easing", &project.to_string());
+    r.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::SelectionCall::Keys(vec!["k0".into()]),
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in r.runtime.publish() {
+        let ticket = ticket.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(result) = ticket.try_take() {
+                result.unwrap();
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let mut first = publication(&r);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let initial: [f64; 4] = loop {
+        let node = first
+            .surface
+            .nodes()
+            .values()
+            .find(|n| n.props.get("id").and_then(Value::as_str) == Some("easing:curve"))
+            .unwrap();
+        if node.props.get("disabled") != Some(&json!(true)) {
+            break serde_json::from_value(node.props["value"].clone()).unwrap();
+        }
+        if let Some(next) = r.runtime.take_publications().pop() {
+            first = next;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "selected easing editor was not enabled"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    let before = r
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .snapshot
+        .root()
+        .unwrap()
+        .to_value();
+    let (view, mut vcx) = window(cx, &r, first, Default::default());
+    vcx.run_until_parked();
+    let b = bounds(&mut vcx, "easing:curve");
+    let t = tokens();
+    let inset = px(t.metrics.keyframe / 2. + t.metrics.border);
+    let area = Bounds::new(
+        b.origin + point(inset, inset),
+        size(b.size.width - inset * 2., b.size.height - inset * 2.),
+    );
+    let range = pm_shell::ease::range(&initial);
+    let graph = pm_shell::ease::Graph::new(area, range);
+    let at = graph.to_point((initial[0], initial[1]));
+    let end = at + point(px(40.), px(-20.));
+    let here = graph.to_value(end);
+    let pressed = graph.to_value(at);
+    let expected = pm_shell::ease::place(
+        (
+            initial[0] + here.0 - pressed.0,
+            initial[1] + here.1 - pressed.1,
+        ),
+        range,
+        false,
+    )
+    .0 * 100.;
+    vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    for step in [1., 2.] {
+        vcx.simulate_mouse_move(
+            at + point(px(20. * step), px(-10. * step)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+    }
+    let preview = view.read_with(&vcx, |v, _| v.log.clone());
+    assert!(
+        preview.iter().any(|(_, event, _)| event == "input"),
+        "handle must receive a drag: {preview:?}"
+    );
+    assert!(!preview.iter().any(|(_, event, _)| event == "change"));
+    assert!(!r.kernel.published(PROJECT).unwrap().history.can_undo);
+    vcx.simulate_mouse_up(end, MouseButton::Left, Modifiers::none());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        cx.run_until_parked();
+        let (error, log) = view.read_with(&vcx, |v, _| (v.error.clone(), v.log.clone()));
+        assert!(
+            error.is_none(),
+            "gesture delivery failed: {error:?}; events: {log:?}"
+        );
+        let p = r.kernel.published(PROJECT).unwrap();
+        let index = pm_panel_timeline::TimelineIndex::from_snapshot(&p.snapshot);
+        let key = index.key("k0").unwrap().2.stored.to_value();
+        let influence = key
+            .get("outEase")
+            .and_then(|e| e.get("influence"))
+            .and_then(|n| n.as_f64());
+        if influence.is_some_and(|n| (n - expected).abs() < 1e-8) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected outgoing influence {expected}, key {key:?}; events {log:?}"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(r.kernel.published(PROJECT).unwrap().history.can_undo);
+    r.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::Call::History(pm_kernel::HistoryCall::Undo),
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let p = r.kernel.published(PROJECT).unwrap();
+    assert_eq!(p.snapshot.root().unwrap().to_value(), before);
+    assert!(
+        !p.history.can_undo,
+        "handle preview must not create intermediate undo entries"
+    );
+}

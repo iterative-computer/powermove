@@ -1,13 +1,19 @@
 import { createRoot } from "../../src";
 import type { BuiltinEnv, Mounted } from "../../src/builtin";
-import { COMMAND, EasingModel, type EasingState } from "./model";
+import { COMMAND, EasingModel, librarySave, type EasingState } from "./model";
 import { EasingPanel } from "./panel";
 
 export async function mount(env: BuiltinEnv): Promise<Mounted> {
   const { native, host, transport, rootOptions, command, fields, report } = env;
-  const model = new EasingModel(
+  const model: EasingModel = new EasingModel(
     () => native("easing.state") as EasingState,
-    (action) => command(COMMAND, action),
+    (action) =>
+      action.type === "save"
+        ? command(
+            "panel.timeline",
+            librarySave(model.snapshot(), action.name, action.curve),
+          )
+        : command(COMMAND, action),
     report,
   );
   const root = createRoot(transport, report, rootOptions);
@@ -23,7 +29,15 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
     await root.render(
       <EasingPanel
         model={model}
-        bindings={fields(["curve", "outX", "outY", "inX", "inY"])}
+        bindings={fields([
+          "curve",
+          "outX",
+          "outY",
+          "inX",
+          "inY",
+          "interpolation",
+          "name",
+        ])}
       />,
     );
   } catch (error) {
@@ -33,6 +47,9 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
   }
   return {
     root,
+    // The shared selection query tracks layers, not keyframe-only changes.
+    // Read the native key selection on each publication wake too.
+    publish: () => model.refresh(),
     settle: () => model.settled(),
     refresh: async () => model.refresh(),
     async dispose() {

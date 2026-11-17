@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   EasingModel,
+  customPresets,
+  librarySave,
   presetName,
   status,
   type EasingAction,
@@ -72,4 +74,49 @@ describe("Easing panel model", () => {
     model.refresh();
     expect(model.message).toBe("");
   });
+});
+
+test("custom save round trips the native stored cubic and retains other groups", () => {
+  const initial = {
+    ...state(2),
+    library: { stateRevision: "1", source: null },
+  };
+  const saved = librarySave(initial, "My curve", [0.4, 0.2, 0.6, 0.8]);
+  expect(saved.action).toBe("import");
+  const presets = customPresets(saved.source);
+  expect(presets[0]!.name).toBe("My curve");
+  presets[0]!.curve.forEach((n, i) =>
+    expect(n).toBeCloseTo([0.4, 0.2, 0.6, 0.8][i]!, 10),
+  );
+  const next = librarySave(
+    { ...initial, library: { stateRevision: "2", source: saved.source } },
+    "Second",
+    [0.5, 0, 0.5, 1],
+  );
+  expect(next.action).toBe("save");
+  expect("group" in next && next.group).toBe("custom");
+  expect(customPresets(saved.source)).toHaveLength(1);
+  const serialized = JSON.stringify(saved.source);
+  expect(customPresets(serialized)).toEqual(presets);
+  const storedSave = librarySave(
+    { ...initial, library: { stateRevision: "3", source: serialized } },
+    "Stored",
+    [0.5, 0, 0.5, 1],
+  );
+  expect(storedSave.action).toBe("save");
+  expect("group" in storedSave && storedSave.group).toBe("custom");
+  const vertical = librarySave(initial, "Vertical", [0, 1, 1, 0]);
+  const normalized = customPresets(vertical.source)[0]!.curve;
+  [0.001, 1, 0.999, 0].forEach((n, i) =>
+    expect(normalized[i]).toBeCloseTo(n, 10),
+  );
+  const mixed = structuredClone(saved.source);
+  mixed.groups[0].presets[0].curve.points[0].outInterp = "linear";
+  const projected = customPresets(mixed)[0]!.curve;
+  [1 / 3, 1 / 3, 0.6, 0.8].forEach((n, i) =>
+    expect(projected[i]).toBeCloseTo(n, 10),
+  );
+  mixed.groups[0].presets[0].curve.points[0].outInterp = "hold";
+  expect(customPresets(mixed)).toEqual([]);
+  expect(mixed.groups[0].presets).toHaveLength(1);
 });

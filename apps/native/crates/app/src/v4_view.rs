@@ -192,6 +192,8 @@ struct ScrubDrag {
     binding: Option<SharedString>,
     active: bool,
     grade: Option<grade::GradeDrag>,
+    // Local input previews, then one change on release; opt-in controls only.
+    local_commit: Option<(Value, Value)>,
 }
 enum ScrubOp {
     Begin,
@@ -2131,6 +2133,10 @@ impl SurfaceView {
             binding: node.binding.clone().filter(|_| !node.local_change),
             active: false,
             grade: None,
+            local_commit: node.commit_on_release.then(|| {
+                let value = json!(number.value);
+                (value.clone(), value)
+            }),
         });
     }
     fn scrub_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
@@ -2165,6 +2171,12 @@ impl SurfaceView {
             return;
         };
         let id = drag.id;
+        let deferred = if let Some((_, last)) = &mut drag.local_commit {
+            *last = json!(value);
+            true
+        } else {
+            false
+        };
         self.scrub_shown = Some((id, value));
         match drag.binding.clone() {
             Some(binding) => {
@@ -2172,6 +2184,15 @@ impl SurfaceView {
                     .push_back(ScrubOp::Value(binding, json!(value)));
                 self.scrub_pump(cx);
             }
+            None if deferred => self.pointer(
+                id,
+                "input",
+                EventDetail {
+                    value: Some(json!(n.text(value))),
+                    ..Default::default()
+                },
+                cx,
+            ),
             None => self.change(id, json!(value), cx),
         }
         if let Some(field) = self.fields.get(&id) {
@@ -2184,6 +2205,62 @@ impl SurfaceView {
         let Some(drag) = self.scrub.take() else {
             return;
         };
+        if let Some((from, live)) = drag.local_commit {
+            if !drag.active && drag.grade.is_none() {
+                if commit && let Some(field) = self.fields.get(&drag.id) {
+                    field.update(cx, |field, cx| field.begin_editing(cx));
+                }
+                return;
+            }
+            let changed = from != live;
+            let value = if commit { live } else { from };
+            if drag.grade.is_some()
+                && let Ok(curve) = serde_json::from_value::<[f64; 4]>(value.clone())
+            {
+                self.ease
+                    .pending
+                    .borrow_mut()
+                    .insert(drag.id, (curve, std::time::Instant::now()));
+            }
+            if !commit {
+                self.scrub_shown = None;
+                if let Some(number) = value.as_f64()
+                    && let Some(field) = self.fields.get(&drag.id)
+                {
+                    let text = drag.number.text(number);
+                    field.update(cx, |field, cx| field.set_value(&text, cx));
+                }
+                let observed = if drag.grade.is_none() {
+                    value
+                        .as_f64()
+                        .map(|n| json!(drag.number.text(n)))
+                        .unwrap_or(value)
+                } else {
+                    value
+                };
+                self.pointer(
+                    drag.id,
+                    "input",
+                    EventDetail {
+                        value: Some(observed),
+                        ..Default::default()
+                    },
+                    cx,
+                );
+            } else if changed {
+                self.pointer(
+                    drag.id,
+                    "change",
+                    EventDetail {
+                        value: Some(value),
+                        ..Default::default()
+                    },
+                    cx,
+                );
+            }
+            cx.notify();
+            return;
+        }
         if drag.active {
             if drag.binding.is_some() {
                 self.scrub_ops.push_back(ScrubOp::Finish(commit));
