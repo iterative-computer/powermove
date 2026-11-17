@@ -3552,7 +3552,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -3581,7 +3581,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -4496,7 +4496,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -4525,7 +4525,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -7556,7 +7556,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -7585,7 +7585,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",

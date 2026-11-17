@@ -576,7 +576,19 @@ function Layer({
               id={`timeline:${item.name}:${row.id}`}
               label={item.label}
               symbol={item.symbol}
-              tint={lit ? "colors.accent_text" : undefined}
+              tint={
+                lit
+                  ? "colors.accent_text"
+                  : // Solo and shy show their state in ink: solo's dot
+                    // takes the accent while on, both are dim while off.
+                    item.name === "solo" || item.name === "shy"
+                    ? item.on
+                      ? item.name === "solo"
+                        ? "colors.accent"
+                        : undefined
+                      : "colors.muted"
+                    : undefined
+              }
               active={item.active}
               tabIndex={-1}
               send={send}

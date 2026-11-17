@@ -11,7 +11,8 @@ not mapped yet.
 From Pierre's icon set: <https://github.com/pierrecomputer/icons>, npm
 `@pierre/icons` 0.9.0 (commit 1c93d61bb031, 2026-09-16), licensed under the Apache
 License 2.0 (`pierre/LICENSE`). The files are copied unchanged. The filled variant is
-used wherever the set has one (`IconHomeFill`, `IconGearFill`, `IconBinFill`, …);
+used wherever the set has one (`IconHomeFill`, `IconGearFill`, `IconBinFill`, …; the shy
+switch uses `IconEmojiSmileFill` in both states, as its dashed twin reads as a sun at 1x);
 icons it draws only in line form (`IconEye`, `IconLock`, `IconLink`, …) are used as
 they are. Turns and mirrors (align top, middle and bottom are align left, centre and
 right turned 90°; the counter-clockwise arrow is `IconReload` mirrored) are applied
@@ -32,4 +33,11 @@ bars, knockouts by mask, no thinner strokes or outlines.
   `IconAlignLeft` / `IconAlignRight` paths) and one 5 px bar between them at equal
   gaps; distribute vertically is the same glyph turned a quarter. Two bars fit only
   with 1 px gaps and read as one block at 1x.
-- `solo.svg` / `solo-off.svg`: After Effects' solo switch, a dot.
+- `solo.svg` / `solo-off.svg`: After Effects' solo switch, a dot: larger and in the accent
+  while on, small and dim while off (the timeline tints them).
+- `pen.svg`: the Pen tool's nib (filled, with its slit and point); Pierre's pencil means
+  rename.
+- `export.svg`: the box with an arrow up out of it; Pierre's `IconShare` (an arrow to the
+  upper right) reads as opening a new window.
+- `plus.svg`: drawn full size in a 2 px line; Pierre's plus (10 of 16 px, 1.5 px) reads
+  small beside the search glass.

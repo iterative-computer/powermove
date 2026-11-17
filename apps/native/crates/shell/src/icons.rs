@@ -68,14 +68,18 @@ pub fn glyph(name: &str) -> Option<Glyph> {
         "distribute.horizontal.center" => g(drawn!("distribute-horizontal")),
         "distribute.vertical.center" => turned(drawn!("distribute-horizontal"), 1),
         // Chrome.
-        "plus" => g(pierre!("Plus")),
+        // Pierre's plus spans 10 of 16 px in a 1.5 px line: beside the
+        // search glass it reads small and thin, so it is drawn full size.
+        "plus" => g(drawn!("plus")),
         "minus" => g(pierre!("Minus")),
         "xmark" => g(pierre!("X")),
         "ellipsis" => g(pierre!("Ellipsis")),
         "magnifyingglass" => g(pierre!("Search")),
         "gearshape" => g(pierre!("GearFill")),
         "sparkles" => g(pierre!("Sparkles")),
-        "square.and.arrow.up" => g(pierre!("Share")),
+        // Export: the box with the arrow up out of it (Pierre's Share, an
+        // arrow to the upper right, reads as opening a new window).
+        "square.and.arrow.up" => g(drawn!("export")),
         "square.grid.2x2" => g(drawn!("grid")),
         "trash" => g(pierre!("BinFill")),
         "folder" => g(pierre!("Folder")),
@@ -101,7 +105,8 @@ pub fn glyph(name: &str) -> Option<Glyph> {
         "crop.rotate" => g(pierre!("Reload")),
         "scope" => g(drawn!("anchor")),
         "square.on.circle" => g(drawn!("shape")),
-        "pencil.tip" => g(pierre!("Pencil")),
+        // The Pen tool draws paths: a nib, not Pierre's pencil (rename).
+        "pencil.tip" => g(drawn!("pen")),
         "textformat" => g(pierre!("Type")),
         "square" | "square.fill" => g(drawn!("rectangle")),
         "app" => g(pierre!("Squircle")),
@@ -115,11 +120,13 @@ pub fn glyph(name: &str) -> Option<Glyph> {
         "lock.open" => g(pierre!("LockOpen")),
         "speaker.wave.2" => g(drawn!("speaker")),
         "speaker.slash" => g(drawn!("speaker-off")),
-        // Solo, as After Effects shows it: a dot.
+        // Solo, as After Effects shows it: a dot, small while off (the
+        // timeline dims it), larger in the accent while on.
         "s.circle.fill" => g(drawn!("solo")),
         "s.circle" => g(drawn!("solo-off")),
-        "face.dashed" => g(pierre!("EmojiSmileDashed")),
-        "face.dashed.fill" => g(pierre!("EmojiSmileFill")),
+        // Shy: the filled face in both states (its dashed twin reads as a
+        // sun at 1x); the timeline dims it while off.
+        "face.dashed" | "face.dashed.fill" => g(pierre!("EmojiSmileFill")),
         "play.fill" => g(drawn!("play")),
         "pause.fill" => g(drawn!("pause")),
         "backward.end.fill" => g(drawn!("backward-end")),
