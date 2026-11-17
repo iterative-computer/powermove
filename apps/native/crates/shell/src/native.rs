@@ -2638,9 +2638,52 @@ fn symbol(s: &str, label: &str) -> Retained<NSImage> {
     )
     .expect("SF Symbol")
 }
+/// A vendored glyph (`crate::icons`) as a template image `points` square, so
+/// AppKit tints it as it tints a symbol (drawn at 3x: crisp on any display).
+fn glyph_image(glyph: crate::icons::Glyph, points: f64, label: &str) -> Option<Retained<NSImage>> {
+    use objc2::AnyThread;
+    let side = (points * 3.).ceil().max(1.) as u32;
+    let coverage = crate::icons::coverage(glyph, side)?;
+    let rep = unsafe {
+        objc2_app_kit::NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            objc2_app_kit::NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            side as isize,
+            side as isize,
+            8,
+            4,
+            true,
+            false,
+            objc2_app_kit::NSDeviceRGBColorSpace,
+            side as isize * 4,
+            32,
+        )?
+    };
+    let data = rep.bitmapData();
+    if data.is_null() {
+        return None;
+    }
+    let pixels = unsafe { std::slice::from_raw_parts_mut(data, (side * side * 4) as usize) };
+    // Black at the glyph's coverage, premultiplied: a template takes its shape.
+    for (p, a) in pixels.chunks_exact_mut(4).zip(coverage) {
+        p.copy_from_slice(&[0, 0, 0, a]);
+    }
+    let size = NSSize::new(points, points);
+    rep.setSize(size);
+    let image = NSImage::initWithSize(NSImage::alloc(), size);
+    image.addRepresentation(&rep);
+    image.setTemplate(true);
+    image.setAccessibilityDescription(Some(&NSString::from_str(label)));
+    Some(image)
+}
 /// A toolbar glyph: every item draws its symbol at `metrics.symbol_toolbar`
 /// in one weight, whichever control hosts it.
 fn toolbar_symbol(s: &str, label: &str, t: &Tokens) -> Retained<NSImage> {
+    if let Some(glyph) = crate::icons::glyph(s)
+        && let Some(image) = glyph_image(glyph, t.metrics.symbol_toolbar as f64, label)
+    {
+        return image;
+    }
     let image = symbol(s, label);
     let config = objc2_app_kit::NSImageSymbolConfiguration::configurationWithPointSize_weight(
         t.metrics.symbol_toolbar as f64,
