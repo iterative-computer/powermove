@@ -870,3 +870,17 @@ fn camera_command_creates_one_selects_and_undoes(cx: &mut TestAppContext) {
     undo(&mut s, cx);
     assert_eq!(layers(&s).len(), 1);
 }
+/// Slip with a layer that has no video or audio selected stays enabled and
+/// says why in the status line, instead of a key that does nothing (PM-477).
+#[gpui::test]
+fn slip_on_a_layer_with_no_media_says_why(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    select(&mut s, cx, &["l0"]);
+    let p = published(&s.rig.kernel);
+    assert!(!disabled(Some(&p), &layers(&s), &Clipboard::Empty).contains("slipLayers"));
+    assert!(crate::layer_commands::command_plan("slipLayers", &[serde_json::json!(1)], &p, 0.).is_none());
+    assert_eq!(
+        crate::layer_commands::nothing_reason("slipLayers", &p),
+        Some("Slip moves a clip's video or audio; the selected layers have none")
+    );
+}

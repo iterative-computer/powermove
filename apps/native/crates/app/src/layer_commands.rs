@@ -1860,7 +1860,13 @@ pub fn disabled(
                 .any(|l| !l.effectively_locked && l.kind != "group"),
         );
     }
-    set("slipLayers", free(&["video", "audio"]));
+    // Enabled for any unlocked layer: with no video or audio clip selected,
+    // Slip says why in the status line instead of doing nothing (a disabled
+    // command's key was silent).
+    set(
+        "slipLayers",
+        selected.iter().any(|l| !l.effectively_locked && l.kind != "group"),
+    );
     for name in ["timeRemapLayers", "freezeFrame", "reverseLayers"] {
         set(name, free(&["video", "precomp"]));
     }
