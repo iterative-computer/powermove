@@ -82,6 +82,11 @@ impl TabLayout {
     }
 }
 
+fn wheel_delta(precise: bool, x: f64, y: f64) -> f64 {
+    let delta = if x != 0. { x } else { y };
+    delta * if precise { 1. } else { WHEEL_STEP }
+}
+
 #[derive(Clone, Copy, Default)]
 struct ScrollPosition {
     x: f64,
@@ -96,6 +101,7 @@ thread_local! {
 pub(super) struct ScrollState {
     fade: Retained<CAGradientLayer>,
     last_fade: Cell<Option<(NSSize, f64, f64)>>,
+    wheel_fraction: Cell<f64>,
     layout: TabLayout,
     group: Cell<Option<isize>>,
     active: Option<(isize, NSRect)>,
@@ -126,15 +132,21 @@ define_class!(
 
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
-            if event.hasPreciseScrollingDeltas() || self.ivars().layout.limit() == 0. {
-                // Trackpad phases, direction and momentum belong to AppKit.
+            let state = self.ivars();
+            if state.layout.limit() == 0. {
                 unsafe { let _: () = msg_send![super(self), scrollWheel: event]; }
-            } else {
-                // A mouse with one wheel can scroll this horizontal strip.
-                let x = event.scrollingDeltaX();
-                let delta = if x == 0. { event.scrollingDeltaY() } else { x };
-                self.scroll_to(self.offset() - WHEEL_STEP * delta);
+                return;
             }
+            // Precise events already include trackpad momentum. A mouse's
+            // vertical wheel also moves along the strip.
+            let delta = wheel_delta(event.hasPreciseScrollingDeltas(),
+                event.scrollingDeltaX(), event.scrollingDeltaY());
+            let target = (self.offset() + state.wheel_fraction.get() - delta)
+                .clamp(0., state.layout.limit());
+            self.scroll_to(target);
+            // NSClipView aligns to backing pixels. Keep the part that
+            // did not move so very small trackpad deltas still add up.
+            state.wheel_fraction.set(target - self.offset());
         }
     }
 );
@@ -155,6 +167,7 @@ impl TabScroll {
                 super(Self::alloc(mtm).set_ivars(ScrollState {
                     fade,
                     last_fade: Cell::new(None),
+                    wheel_fraction: Cell::new(0.),
                     layout,
                     group: Cell::new(None),
                     active,
@@ -327,6 +340,13 @@ mod tests {
         assert_eq!(layout.reveal(offset, tab(0.)), 0.);
         let far_edge = 92. + 2. * (28. + TAB_GAP) + layout.viewport + 28. + TAB_GAP;
         assert_eq!(far_edge, 1512. / 2. - 300. / 2. - TAB_CLEAR);
+    }
+
+    #[test]
+    fn wheel_reuses_precise_deltas_and_scales_mouse_steps() {
+        assert_eq!(wheel_delta(true, -0.25, 0.), -0.25);
+        assert_eq!(wheel_delta(true, 1.25, -3.), 1.25);
+        assert_eq!(wheel_delta(false, 0., -2.), -2. * WHEEL_STEP);
     }
 
     #[test]
