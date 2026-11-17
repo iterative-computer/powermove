@@ -139,8 +139,8 @@ pub fn composition(comp: &Value, time: f64, ev: &mut impl Evaluator) -> Result<V
             continue;
         };
         let visible = ev.active(l, time)?;
-        if !visible
-            && !(role == Role::Object
+        if !(visible
+            || role == Role::Object
                 && sources.contains(l["id"].as_str().unwrap_or(""))
                 && source_in_range(l, time))
         {
@@ -814,8 +814,8 @@ pub fn resolve(comp: &Value, time: f64, ev: &mut impl WorldEvaluator) -> Result<
         let Some(role) = schema::role(l) else {
             continue;
         };
-        if !ev.active(l, time)?
-            && !(role == Role::Object
+        if !(ev.active(l, time)?
+            || role == Role::Object
                 && sources.contains(l["id"].as_str().unwrap_or(""))
                 && source_in_range(l, time))
         {

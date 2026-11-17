@@ -339,9 +339,8 @@ pub fn geometry_key(g: &Geometry) -> String {
 /// and keeps reuse across immutable source replacement, even beyond 16 maps.
 pub fn texture_rgba(bytes: &[u8]) -> Result<Arc<Vec<u8>>> {
     use sha2::{Digest, Sha256};
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<[u8; 32], std::sync::Weak<Vec<u8>>>>,
-    > = std::sync::OnceLock::new();
+    type Pixels = HashMap<[u8; 32], std::sync::Weak<Vec<u8>>>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Pixels>> = std::sync::OnceLock::new();
     let key: [u8; 32] = Sha256::digest(bytes).into();
     let mut cache = CACHE
         .get_or_init(Default::default)

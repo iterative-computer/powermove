@@ -420,7 +420,9 @@ fn material_pixels_cache_by_content_and_preserve_alpha_on_replacement() {
     let red = include_bytes!("../../../../../engine/fixtures/still-red.png");
     let alpha = include_bytes!("../../../../../engine/fixtures/still-alpha.png");
     let first = pm_scene3d::render::texture_rgba(red).unwrap();
-    let repeated = pm_scene3d::render::texture_rgba(&red.to_vec()).unwrap();
+    // Same content in a different allocation: the cache keys by content, not by pointer.
+    let copy = red.to_vec();
+    let repeated = pm_scene3d::render::texture_rgba(&copy).unwrap();
     assert!(std::sync::Arc::ptr_eq(&first, &repeated));
     let replaced = pm_scene3d::render::texture_rgba(alpha).unwrap();
     assert!(!std::sync::Arc::ptr_eq(&first, &replaced));
