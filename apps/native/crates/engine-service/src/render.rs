@@ -1179,7 +1179,9 @@ impl Engine {
         self.settler = None;
         self.fonts = Some(fonts);
         self.font_generation = None;
-        self.invalidate_cache();
+        // A replacement broker can reuse generation numbers. It is an
+        // explicit engine reset, unlike a generation update on that broker.
+        self.clear_cache();
     }
     /// The font registry generation the next frame draws with: fonts sync
     /// from the broker first, so the disk render cache observes a font
