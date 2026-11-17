@@ -1762,6 +1762,11 @@ impl Controller {
                         let (list, keyframes) = list;
                         if v.rows.finish(key, list, latest) {
                             v.keyframes = keyframes;
+                            // Menus and keys follow the rows they were built
+                            // from: a layer added to a large project is
+                            // selectable before its rows land, and its Layer
+                            // menu stayed off until something else changed.
+                            v.update_disabled();
                             cx.notify();
                         }
                         if let Some(p) = v.published.clone() {

@@ -3107,3 +3107,141 @@ fn a_tracks_move_reorders_only_the_moved_clip_and_never_past_a_lock() {
         Some(s(&["t", "l", "m", "u"]))
     );
 }
+
+/// A transition's wedge drags its duration (keeping its type, values and
+/// keys) as one step named for it; selected, Delete removes it and leaves
+/// the clip; an audio clip's fade drags and deletes the same way.
+#[test]
+fn a_transition_drags_its_duration_and_delete_removes_only_it() {
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":20,"comps":{},"assets":{},"layers":[
+        {"id":"a","name":"A","type":"solid","from":0,"dur":6,"on":true,"d":{"color":"#ff0000","w":100,"h":100},"p":{},
+         "transitionIn":{"type":"wipe","dur":0.5,"p":{"angle":{"v":45,"kf":[{"t":0,"v":10},{"t":0.4,"v":80}],"expr":null}}},
+         "transitionOut":null},
+        {"id":"s","name":"S","type":"audio","from":0,"dur":6,"on":true,"d":{"fadeIn":0,"fadeOut":1},"p":{}}]}"##,
+    )
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.sync().unwrap();
+    let transition = |c: &TimelineClient, id: &str, slot: usize| {
+        c.model.index.layer(id).unwrap().transitions[slot].clone()
+    };
+    assert_eq!(transition(&c, "a", 0).unwrap().duration, 0.5);
+    assert!(transition(&c, "a", 1).is_none());
+    assert_eq!(transition(&c, "s", 1).unwrap().duration, 1.);
+    assert!(transition(&c, "s", 0).is_none(), "no fade, no wedge");
+    let kind = DragKind::Transition {
+        layer: "a".into(),
+        edge: render::Edge::In,
+    };
+    assert_eq!(
+        Drag::begin(&c.model, kind.clone()).unwrap().label(),
+        "Transition Duration"
+    );
+    block_on(c.begin_drag(kind)).unwrap();
+    block_on(c.drag(sample(0.5))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    let t = transition(&c, "a", 0).unwrap();
+    assert!((t.duration - 1.).abs() < 1e-9, "{t:?}");
+    assert_eq!(t.kind, "wipe");
+    assert_eq!(t.params, vec!["angle".to_owned()]);
+    let channel = c
+        .model
+        .index
+        .layer("a")
+        .unwrap()
+        .channels
+        .iter()
+        .find(|ch| ch.path == "transitionIn.p.angle")
+        .cloned()
+        .expect("its keys survive");
+    assert_eq!(channel.keys.len(), 2);
+    // Never past the clip, never under the kernel's least.
+    block_on(c.begin_drag(DragKind::Transition {
+        layer: "a".into(),
+        edge: render::Edge::In,
+    }))
+    .unwrap();
+    block_on(c.drag(sample(30.))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    assert!((transition(&c, "a", 0).unwrap().duration - 6.).abs() < 1e-9);
+    undo(&mut c);
+    c.sync().unwrap();
+    assert!((transition(&c, "a", 0).unwrap().duration - 1.).abs() < 1e-9);
+    // An Out fade drags from the clip's end: left makes it longer.
+    block_on(c.begin_drag(DragKind::Transition {
+        layer: "s".into(),
+        edge: render::Edge::Out,
+    }))
+    .unwrap();
+    block_on(c.drag(sample(-1.))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    assert!((transition(&c, "s", 1).unwrap().duration - 2.).abs() < 1e-9);
+    // Selected, Delete takes the transition and leaves the clip.
+    select(&mut c, &["a"]);
+    c.sync().unwrap();
+    c.model.transition = Some(("a".into(), render::Edge::In));
+    let plan = c
+        .model
+        .command("delete", 0., None, false, 0, &PropertyFacts::default())
+        .unwrap();
+    assert!(matches!(
+        &plan.calls[0],
+        Call::Transact { label: Some(l), .. } if l == "Remove Transition"
+    ));
+    run(&mut c, plan);
+    c.sync().unwrap();
+    assert!(c.model.index.layer("a").is_some(), "the clip stays");
+    assert!(transition(&c, "a", 0).is_none());
+    assert_eq!(c.model.transition, None, "nothing left selected");
+    // A selected fade goes the same way.
+    select(&mut c, &["s"]);
+    c.sync().unwrap();
+    c.model.transition = Some(("s".into(), render::Edge::Out));
+    let plan = c
+        .model
+        .command("delete", 0., None, false, 0, &PropertyFacts::default())
+        .unwrap();
+    assert!(matches!(
+        &plan.calls[0],
+        Call::Transact { label: Some(l), .. } if l == "Remove Fade"
+    ));
+    run(&mut c, plan);
+    c.sync().unwrap();
+    assert!(c.model.index.layer("s").is_some());
+    assert!(transition(&c, "s", 1).is_none());
+    // With no transition selected, Delete is the clip's again.
+    command(&mut c, "delete", 0.);
+    c.sync().unwrap();
+    assert!(c.model.index.layer("s").is_none());
+}
+
+/// Two clips that run into each other across a cut under a transition share
+/// their track in Tracks mode: the overlap is the transition's, not a clash.
+/// The same overlap without a transition stacks them, as before.
+#[test]
+fn clips_crossing_a_cut_under_a_transition_stay_on_one_track() {
+    let lanes = |transition: &str| {
+        let project = parse(&format!(
+            r##"{{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":20,"comps":{{}},"assets":{{}},"layers":[
+            {{"id":"b","name":"B","type":"solid","from":4.5,"dur":4,"on":true,"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}},"transitionIn":{transition}}},
+            {{"id":"a","name":"A","type":"solid","from":0,"dur":5,"on":true,"d":{{"color":"#00ff00","w":100,"h":100}},"p":{{}}}}]}}"##
+        ))
+        .unwrap();
+        let (_a, mut c) = client_with(project);
+        c.model.mode = TimelineMode::Tracks;
+        c.sync().unwrap();
+        let layout = tracks::layout(&c.model.index, &c.model.reveal);
+        (
+            layout.item("a").unwrap().lane,
+            layout.item("b").unwrap().lane,
+        )
+    };
+    let (a, b) = lanes(r#"{"type":"crossfade","dur":1,"p":{}}"#);
+    assert_eq!(a, b, "one track across the cut");
+    let (a, b) = lanes("null");
+    assert_ne!(a, b, "an overlap with no transition stacks");
+}
