@@ -197,3 +197,72 @@ fn capture_agent_states() {
         }
     }
 }
+
+// G4: snapshots of the real ColorPanel, before and after, painted headlessly.
+#[test]
+#[ignore = "writes PNGs; set PM_COLOUR_STATES and PM_PANEL_CAPTURE"]
+fn capture_colour_stack_states() {
+    let Ok(states) = std::env::var("PM_COLOUR_STATES") else {
+        return;
+    };
+    let dir = std::env::var("PM_PANEL_CAPTURE").unwrap_or_else(|_| "/tmp/pm-shots/panels".into());
+    std::fs::create_dir_all(&dir).unwrap();
+    let r = rig("agent", 1);
+    let mut files: Vec<_> = std::fs::read_dir(&states)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.sort();
+    for file in files {
+        let commits: Vec<pm_surface::Commit> =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let mut surface = pm_surface::Surface::default();
+        for commit in commits {
+            surface.apply(commit).unwrap();
+        }
+        let surface = Arc::new(surface);
+        let name = file.file_stem().unwrap().to_string_lossy().to_string();
+        for (scheme_name, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
+            objc2::rc::autoreleasepool(|_| {
+                let tokens = Tokens::new(scheme, Accessibility::default());
+                let (w, h) = (360., 1600.);
+                let first = pm_builtins::Publication {
+                    panel: "agent".into(),
+                    generation: 1,
+                    surface: surface.clone(),
+                };
+                let runtime = r.runtime.clone();
+                let mut cx = HeadlessAppContext::with_platform(
+                    Arc::new(
+                        gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                            .with_automatic_optical_sizing(),
+                    ),
+                    Arc::new(()),
+                    || {
+                        Some(Box::new(
+                            gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                        ))
+                    },
+                );
+                let fill = tokens.colors.floating;
+                let window = cx
+                    .open_window(size(px(w), px(h)), |window, cx| {
+                        let view = cx.new(|cx| {
+                            SurfaceView::new(runtime, first, tokens, Natives::default(), window, cx)
+                        });
+                        cx.new(|_| Frame { view, fill })
+                    })
+                    .unwrap();
+                for _ in 0..20 {
+                    cx.run_until_parked();
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                let image = cx.capture_screenshot(window.into()).unwrap();
+                image
+                    .save(format!("{dir}/colour-{name}-{scheme_name}.png"))
+                    .unwrap();
+            });
+        }
+    }
+}

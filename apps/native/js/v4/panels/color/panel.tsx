@@ -209,9 +209,6 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
           style={{ display: "flex", flexDirection: "column" }}
         >
           <Heading title={p.name} detail={p.typeLabel} locked={p.locked} />
-          {tools.length === 0 ? (
-            <Ungraded editable={editable} onAdd={add} />
-          ) : null}
           {tools.map((g, i) => {
             const id = g.header.id;
             const title = titles[i];
@@ -292,6 +289,11 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
               </UI.DisclosureGroup>
             );
           })}
+          <AddGrade
+            editable={editable}
+            empty={tools.length === 0}
+            onAdd={add}
+          />
         </scroll>
       )}
     </div>
@@ -367,17 +369,20 @@ function Header({
   );
 }
 
-/** A layer with no grade yet: what can be added, as quiet actions. */
-function Ungraded({
+/** Always last: another grade can be added below the current stack. */
+function AddGrade({
   editable,
+  empty,
   onAdd,
 }: {
   editable: boolean;
+  empty: boolean;
   onAdd: (choice: string) => void;
 }) {
   return (
     <div
       role="group"
+      id={`${PANEL_ID}:add-row`}
       label="Add a Grade"
       style={{
         display: "flex",
@@ -386,13 +391,20 @@ function Ungraded({
         paddingLeft: t("metrics.inset"),
         paddingRight: t("metrics.inset"),
         paddingTop: t("metrics.gap"),
+        paddingBottom: t("metrics.inset"),
+        flexShrink: 0,
       }}
     >
-      <text
-        style={{ color: t("colors.muted"), fontSize: t("typography.minimum") }}
-      >
-        No grade on this layer.
-      </text>
+      {empty ? (
+        <text
+          style={{
+            color: t("colors.muted"),
+            fontSize: t("typography.minimum"),
+          }}
+        >
+          No grade on this layer.
+        </text>
+      ) : null}
       <div
         style={{
           display: "flex",
