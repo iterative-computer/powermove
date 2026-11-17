@@ -327,7 +327,16 @@ impl Shared {
 fn passes_detached(event: &str) -> bool {
     matches!(
         event,
-        "focus" | "blur" | "focusin" | "focusout" | "selectionchange" | "scroll"
+        "focus"
+            | "blur"
+            | "focusin"
+            | "focusout"
+            | "selectionchange"
+            | "scroll"
+            | "visibilitychange"
+            | "pagehide"
+            | "pageshow"
+            | "resize"
     )
 }
 define_class!(
@@ -2089,12 +2098,17 @@ mod admission_tests {
     fn a_detached_page_still_hears_its_own_focus_and_blur() {
         let (s, h) = shared(Trust::Trusted);
         s.panels.borrow_mut().get(1).unwrap().slot = None;
-        for event in ["blur", "focusout", "focus", "focusin", "selectionchange", "scroll"] {
+        // visibilitychange: the 17-tab run's page stopped on it (PM-509/513).
+        let own = [
+            "blur", "focusout", "focus", "focusin", "selectionchange", "scroll",
+            "visibilitychange", "pagehide", "pageshow", "resize",
+        ];
+        for event in own {
             let message =
                 INPUT.replace(r#"{"kind":"event"}"#, &format!(r#"{{"kind":"event","event":"{event}"}}"#));
             assert_eq!(s.handle(&message), Ok(Value::Null), "{event}");
         }
-        assert_eq!(h.feedback.get(), 6);
+        assert_eq!(h.feedback.get() as usize, own.len());
     }
     #[test]
     fn stopped_hosts_reject_requests() {
