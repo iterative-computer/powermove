@@ -540,12 +540,12 @@ fn route(method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
         _ => (404, br#"{"error":"not_found"}"#.to_vec()),
     }
 }
-/// Serves the fixture Store on 127.0.0.1; returns its origin.
-pub fn serve(port: u16) -> String {
-    serve_with(port, Arc::default())
-}
-/// As [`serve`], with the account the test reads back.
+/// Serves the fixture Store on loopback, with the account the test reads back.
 pub fn serve_with(port: u16, account: Arc<Mutex<Account>>) -> String {
+    serve_delayed(port, account, Duration::ZERO)
+}
+
+fn serve_delayed(port: u16, account: Arc<Mutex<Account>>, delay: Duration) -> String {
     let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
     let origin = format!(
         "http://127.0.0.1:{}/",
@@ -586,6 +586,9 @@ pub fn serve_with(port: u16, account: Arc<Mutex<Account>>) -> String {
                 };
                 let mut line = head.lines().next().unwrap_or_default().split(' ');
                 let (method, path) = (line.next().unwrap_or(""), line.next().unwrap_or(""));
+                if method == "GET" && path.starts_with("/v1/store/") && !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
                 let replay = account.lock().unwrap().replay;
                 let path = &match replay {
                     Some((asked, served)) => path.replace(asked, served),
@@ -633,7 +636,11 @@ fn serve_fixture_store() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(4170);
-    let origin = serve(port);
+    let delay = std::env::var("PM_FIXTURE_STORE_DELAY_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map_or(Duration::ZERO, Duration::from_millis);
+    let origin = serve_delayed(port, Arc::default(), delay);
     println!("--dev-store-origin {origin} --dev-store-key {}", key_spec());
     println!("emailed sign-in code: {CODE}");
     loop {
@@ -777,6 +784,33 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
 }
 fn ready<T>(load: &crate::store_window::Load<T>) -> bool {
     matches!(load, crate::store_window::Load::Ready(_))
+}
+
+#[::core::prelude::v1::test]
+fn slow_detail_keeps_its_page_shape_and_stale_replies_cannot_replace_it() {
+    let f = Fixture {
+        origin: Box::leak(
+            serve_delayed(0, Arc::default(), Duration::from_millis(350)).into_boxed_str(),
+        ),
+        ..fixture()
+    };
+    let mut cx = TestAppContext::single();
+    let (view, cx) = open(&mut cx, services(&f, true));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("store-skeleton").is_some());
+    settle(&view, cx, "storefront", |v| ready(&v.shelves));
+    click(cx, "store-row-soft-glow");
+    assert!(cx.debug_bounds("store-back").is_some());
+    assert!(cx.debug_bounds("store-skeleton").is_some());
+    click(cx, "store-back");
+    click(cx, "store-row-shot-notes");
+    assert!(cx.debug_bounds("store-skeleton").is_some());
+    settle(&view, cx, "second detail", |v| {
+        v.detail
+            .as_ref()
+            .is_some_and(|(item, load)| item.slug == "shot-notes" && ready(load))
+    });
+    assert!(cx.debug_bounds("store-skeleton").is_none());
 }
 
 #[::core::prelude::v1::test]
