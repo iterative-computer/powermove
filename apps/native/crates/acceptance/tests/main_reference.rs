@@ -470,6 +470,15 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
                     .unwrap()
                     .starts_with(tool["description"].as_str().unwrap())
             );
+        } else if tool["name"] == "validate_effect" {
+            let viewer = include_bytes!("../../mcp/fixtures/viewer-handles-native-catalog.json");
+            assert_eq!(
+                pm_model::hash::sha256_hex(viewer),
+                "166afbdea0e2053bca88ddcb8571a5ff966283facb2d8fbf8326cf813b39f470"
+            );
+            let viewer: serde_json::Value = serde_json::from_slice(viewer).unwrap();
+            assert_eq!(actual, &viewer["tools"][0]);
+            assert_eq!(tool["inputSchema"], actual["inputSchema"]);
         } else {
             assert_eq!(tool, actual);
         }
