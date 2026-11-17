@@ -9,6 +9,19 @@ use std::{
     sync::{Arc, Mutex, atomic::Ordering},
 };
 
+/// The session fence, taken as soon as no other transition holds it. An
+/// open the Library already made for this window (a new tab's project)
+/// waits its turn behind another tab's open, a recovery question, say,
+/// rather than being dropped (PM-454).
+pub(crate) async fn take_fence(host: &Host, executor: &gpui::BackgroundExecutor) -> Operation {
+    loop {
+        if let Some(operation) = host.try_operation() {
+            return operation;
+        }
+        executor.timer(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// The app's own way to the agent's render path, for a still the person
 /// selects (the composer's Select part of the screen).
 static STILLS: std::sync::OnceLock<Arc<Mutex<Automation>>> = std::sync::OnceLock::new();
