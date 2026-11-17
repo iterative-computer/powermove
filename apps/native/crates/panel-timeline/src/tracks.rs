@@ -114,7 +114,7 @@ pub fn layout(index: &TimelineIndex, reveal: &RevealState) -> Layout {
                 .map(|d| d.group_collapsed)
                 .unwrap_or(l.group_collapsed);
             let inner = if open {
-                pack(&kids, &mut units, index)
+                pack(&kids, &mut units, index, &reveal.held)
             } else {
                 0
             };
@@ -142,7 +142,7 @@ pub fn layout(index: &TimelineIndex, reveal: &RevealState) -> Layout {
             }
             roots.len()
         } else {
-            pack(&roots, &mut units, index)
+            pack(&roots, &mut units, index, &reveal.held)
         };
         match current {
             Area::Video => out.video = height,
@@ -190,7 +190,66 @@ pub fn layout(index: &TimelineIndex, reveal: &RevealState) -> Layout {
     }
     out
 }
-fn pack(ids: &[usize], units: &mut [Unit], index: &TimelineIndex) -> usize {
+fn pack(
+    ids: &[usize],
+    units: &mut [Unit],
+    index: &TimelineIndex,
+    held: &HashMap<String, crate::reveal::Held>,
+) -> usize {
+    let holds: HashMap<usize, usize> = ids
+        .iter()
+        .filter_map(|&i| {
+            let u = &units[i];
+            held.get(&index.layers[i].id)
+                .filter(|h| (h.from - u.from).abs() < 1e-6 && (h.end - u.end).abs() < 1e-6)
+                .map(|h| (i, h.lane))
+        })
+        .collect();
+    if holds.is_empty() {
+        return pack_fresh(ids, units, index);
+    }
+    // Held clips first, each on its lane when free there (an edited clip
+    // keeps its lane only if its time is unchanged); then every other one
+    // above whatever it overlaps (a new clip, or one an edit moved).
+    let overlap = |a: &Unit, b: (f64, f64)| a.from < b.1 - 1e-5 && b.0 < a.end - 1e-5;
+    let mut placed: Vec<(f64, f64, usize, usize)> = Vec::new();
+    let mut rest = Vec::new();
+    for &i in ids.iter().rev() {
+        let u = &units[i];
+        match holds.get(&i).copied() {
+            Some(lane)
+                if !placed.iter().any(|&(f, e, lo, hi)| {
+                    overlap(u, (f, e)) && lane < hi && lo < lane + u.height
+                }) =>
+            {
+                placed.push((u.from, u.end, lane, lane + u.height));
+                units[i].base = lane;
+            }
+            _ => rest.push(i),
+        }
+    }
+    for i in rest {
+        let u = &units[i];
+        let mut base = index.layers[i].preferred_track;
+        // The lowest lane at or above its preferred track free over its time.
+        loop {
+            let top = base + u.height;
+            match placed
+                .iter()
+                .filter(|&&(f, e, lo, hi)| overlap(u, (f, e)) && base < hi && lo < top)
+                .map(|&(_, _, _, hi)| hi)
+                .max()
+            {
+                Some(hi) => base = hi,
+                None => break,
+            }
+        }
+        placed.push((u.from, u.end, base, base + u.height));
+        units[i].base = base;
+    }
+    placed.iter().map(|&(_, _, _, hi)| hi).max().unwrap_or(0)
+}
+fn pack_fresh(ids: &[usize], units: &mut [Unit], index: &TimelineIndex) -> usize {
     let mut starts: Vec<_> = ids.iter().map(|i| Total(units[*i].from)).collect();
     starts.sort();
     starts.dedup();
@@ -285,6 +344,26 @@ pub struct MovedLayer {
     pub from: f64,
     pub track: usize,
 }
+/// The lanes the Tracks timeline shows now, with each clip's time, to hold
+/// through the next change (`RevealState::held`).
+pub fn shown(index: &TimelineIndex, reveal: &RevealState) -> HashMap<String, crate::reveal::Held> {
+    let current = layout(index, reveal);
+    relative_lanes(index, reveal)
+        .into_iter()
+        .filter_map(|(id, lane)| {
+            let item = current.item(&id)?;
+            Some((
+                id,
+                crate::reveal::Held {
+                    lane: lane as usize,
+                    from: item.from,
+                    end: item.from + item.duration,
+                },
+            ))
+        })
+        .collect()
+}
+
 /// Every layer's lane as the Tracks timeline shows it, relative to its group
 /// (a layer's stored `track`), for an edit that must keep clips on their
 /// tracks (`TimingCommand::InTracks`).
