@@ -3109,19 +3109,20 @@ fn a_tracks_move_reorders_only_the_moved_clip_and_never_past_a_lock() {
 }
 
 #[test]
-fn g3_roll_key_toggles_existing_tool() {
-    let key = resolve_key(&KeyInput {
-        key: "r",
-        modifiers: mods(),
-        repeat: false,
-        in_field: false,
-    })
-    .unwrap();
-    assert_eq!(key.command, "timeline.toggleRoll");
+fn g3_roll_tool_preserves_rotation_and_work_area_shortcuts() {
+    for (key, expected) in [("r", "timeline.revealProperty:r"), ("n", "workOut")] {
+        let resolved = resolve_key(&KeyInput {
+            key,
+            modifiers: mods(),
+            repeat: false,
+            in_field: false,
+        }).unwrap();
+        assert_eq!(resolved.command, expected);
+    }
     let (_a, mut c) = client();
-    command(&mut c, &key.command, 0.);
+    command(&mut c, "timeline.tool:roll", 0.);
     assert_eq!(c.model.edit_tool, EditTool::Roll);
-    command(&mut c, &key.command, 0.);
+    command(&mut c, "timeline.tool:selection", 0.);
     assert_eq!(c.model.edit_tool, EditTool::Selection);
 }
 #[test]
