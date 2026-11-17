@@ -950,6 +950,7 @@ mod tests {
             false,
             None,
         );
+        a11y.sync_active_flag();
         a11y.begin_frame();
         a11y
     }
