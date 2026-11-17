@@ -43,6 +43,19 @@ pub fn catalog() -> &'static Value {
                 .expect("existing media tool");
             *tool = replacement.clone();
         }
+        // Live viewer-handle guidance extends the frozen compatibility catalog.
+        let viewer_handles: Value =
+            serde_json::from_str(include_str!("../fixtures/viewer-handles-native-catalog.json"))
+                .expect("viewer-handle authoring catalog");
+        for replacement in viewer_handles["tools"].as_array().unwrap() {
+            let tool = value["tools"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|t| t["name"] == replacement["name"])
+                .expect("existing viewer-handle authoring tool");
+            *tool = replacement.clone();
+        }
         for tool in value["tools"].as_array_mut().unwrap() {
             if COMPOSITION_TOOLS.contains(&tool["name"].as_str().unwrap_or("")) {
                 tool["inputSchema"]["properties"]["compositionId"] = serde_json::json!({
