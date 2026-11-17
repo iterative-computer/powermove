@@ -344,6 +344,83 @@ pub struct MovedLayer {
     pub from: f64,
     pub track: usize,
 }
+/// The stack after a Tracks move: the moved layers (with their groups'
+/// members) taken out as one block and put back where `planned` (the lanes'
+/// order) puts them, every other layer keeping its order. `None` keeps the
+/// stack as it is: when the block would end where it was, or would cross a
+/// locked layer, a layer of another area (a caption composites in the same
+/// stack), a layer of another group, a 3D layer or any layer when the block is
+/// 3D (a 3D run's separators stay), or a track matte pair. Then only the
+/// lane changes.
+pub fn move_order(index: &TimelineIndex, ids: &[String], planned: &[String]) -> Option<Vec<String>> {
+    let moved: HashSet<String> = index.expanded_ids(ids).into_iter().collect();
+    let original: Vec<&str> = index.layers.iter().map(|l| l.id.as_str()).collect();
+    let block: Vec<&str> = original.iter().copied().filter(|id| moved.contains(*id)).collect();
+    let first = *block.first()?;
+    let rest: Vec<&str> = original.iter().copied().filter(|id| !moved.contains(*id)).collect();
+    // Where the lanes put the block: before the first untouched layer that
+    // follows it in `planned`, else at the end.
+    let at = planned.iter().position(|id| id == first)?;
+    let anchor = planned[at..].iter().find(|id| !moved.contains(*id));
+    let insert = anchor.and_then(|a| rest.iter().position(|id| id == a)).unwrap_or(rest.len());
+    let mut candidate = rest.clone();
+    for (i, id) in block.iter().enumerate() {
+        candidate.insert(insert + i, id);
+    }
+    if candidate == original {
+        return None;
+    }
+    // The untouched layers the block passes.
+    let before = |order: &[&str], id: &str| {
+        order.iter().position(|x| *x == id) < order.iter().position(|x| *x == first)
+    };
+    let root = index.layer(first)?;
+    let matte = |id: &str| {
+        index.source.as_ref().and_then(|s| {
+            let root = s.root()?;
+            let loc = pm_kernel::model::find_layer(root, id)?;
+            let node = pm_kernel::model::layer_at(root, &loc)?;
+            Some(node.get("matteMode").is_some_and(|m| !matches!(m.kind(), pm_model::NodeKind::Null)))
+        })
+        .unwrap_or(false)
+    };
+    let three_d = block.iter().any(|id| index.layer(id).is_some_and(|l| l.three_d));
+    let block_matte = block.iter().any(|id| matte(id));
+    for id in &rest {
+        if before(&original, id) == before(&candidate, id) {
+            continue;
+        }
+        let Some(x) = index.layer(id) else { return None };
+        if x.effectively_locked
+            || area(&x.kind) != area(&root.kind)
+            || x.group != root.group
+            || x.three_d
+            || three_d
+            || block_matte
+            || matte(id)
+        {
+            return None;
+        }
+    }
+    // A track matte reads the layer directly above it: the layer that now
+    // sits below the block, or below where it was, must not use one.
+    let last = *block.last()?;
+    for order in [&original, &candidate] {
+        let next = order
+            .iter()
+            .position(|x| *x == last)
+            .and_then(|i| order.get(i + 1))
+            .copied();
+        if let Some(next) = next
+            && !moved.contains(next)
+            && matte(next)
+        {
+            return None;
+        }
+    }
+    Some(candidate.into_iter().map(str::to_owned).collect())
+}
+
 /// The lanes the Tracks timeline shows now, with each clip's time, to hold
 /// through the next change (`RevealState::held`).
 pub fn shown(index: &TimelineIndex, reveal: &RevealState) -> HashMap<String, crate::reveal::Held> {

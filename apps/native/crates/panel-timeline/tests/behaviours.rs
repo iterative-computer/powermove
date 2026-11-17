@@ -3012,3 +3012,97 @@ fn a_track_rows_lock_and_eye_act_on_its_clips() {
             .all(|id| c.model.index.layer(id).unwrap().visible)
     );
 }
+/// Sol's review of the stack write (w58): a Tracks edge trim on E, which
+/// nobody else touches, leaves the stack exactly as it was in each
+/// arrangement: a collapsed locked group's children, lanes held after an
+/// outside edit, a caption between video layers, a 2D layer between two 3D
+/// runs (so the runs stay split).
+#[test]
+fn a_tracks_trim_never_changes_the_stack() {
+    use pm_kernel::commands::layers::LayerPatch;
+    let order = |c: &TimelineClient| -> Vec<String> {
+        c.model.index.layers.iter().map(|l| l.id.clone()).collect()
+    };
+    let solid = |id: &str, from: f64, dur: f64, extra: &str| {
+        format!(r##"{{"id":"{id}","name":"{id}","type":"solid","from":{from},"dur":{dur},"on":true,"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}}{extra}}}"##)
+    };
+    let arrangements: Vec<(&str, Vec<String>, bool)> = vec![
+        ("locked group", vec![
+            r#"{"id":"g","name":"G","type":"group","from":0,"dur":20,"on":true,"lock":true,"collapsed":true,"groupCollapsed":true,"p":{}}"#.into(),
+            solid("a", 0., 10., r#","group":"g","track":0"#),
+            solid("b", 0., 10., r#","group":"g","track":1"#),
+            solid("e", 12., 3., ""),
+        ], false),
+        ("held after an outside edit", vec![
+            solid("a", 0., 4., ""),
+            solid("b", 5., 4., ""),
+            solid("e", 12., 3., ""),
+        ], true),
+        ("caption between video", vec![
+            solid("r", 3., 2., ""),
+            r#"{"id":"c","name":"C","type":"captions","from":0,"dur":10,"on":true,"d":{"cues":[{"id":"q","start":4,"end":5,"text":"Hi"}]},"p":{}}"#.into(),
+            solid("b", 0., 2., ""),
+            solid("x", 0., 2., ""),
+            solid("e", 12., 3., ""),
+        ], false),
+        ("3D runs", vec![
+            solid("a", 0., 10., r#","threeD":true"#),
+            solid("d", 20., 1., r#","track":2"#),
+            solid("b", 0., 10., r#","threeD":true"#),
+            solid("e", 30., 5., ""),
+        ], false),
+    ];
+    for (what, layers, outside) in arrangements {
+        let project = parse(&format!(
+            r##"{{"id":"P","compId":"C","name":"Stack","w":200,"h":100,"fps":30,"dur":40,"comps":{{}},"assets":{{}},"layers":[{}]}}"##,
+            layers.join(",")
+        ))
+        .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        let (_a, mut c) = client_with(project);
+        c.model.mode = TimelineMode::Tracks;
+        c.sync().unwrap();
+        if outside {
+            // Properties or an agent moves B over A: the stack stays.
+            edit(
+                &mut c,
+                vec![pm_kernel::LayerCommand::Set {
+                    layer_id: "b".into(),
+                    patch: LayerPatch { from: Some(2.), ..Default::default() },
+                }
+                .into()],
+            );
+            c.sync().unwrap();
+        }
+        let before = order(&c);
+        block_on(c.begin_drag(DragKind::TrimOut { ids: vec!["e".into()] })).unwrap();
+        block_on(c.drag(sample(-1.))).unwrap();
+        block_on(c.finish_drag(true)).unwrap();
+        c.sync().unwrap();
+        assert_eq!(order(&c), before, "{what}");
+    }
+}
+
+/// A Tracks move to another lane changes only the moved clip's place in the
+/// stack, and never across a locked layer: then only its lane changes.
+#[test]
+fn a_tracks_move_reorders_only_the_moved_clip_and_never_past_a_lock() {
+    use pm_panel_timeline::tracks::move_order;
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"Move","w":200,"h":100,"fps":30,"dur":20,"comps":{},"assets":{},"layers":[
+        {"id":"t","name":"T","type":"shape","from":0,"dur":5,"on":true,"p":{}},
+        {"id":"l","name":"L","type":"shape","from":0,"dur":5,"on":true,"lock":true,"p":{}},
+        {"id":"u","name":"U","type":"shape","from":0,"dur":5,"on":true,"p":{}},
+        {"id":"m","name":"M","type":"shape","from":0,"dur":5,"on":true,"p":{}}
+        ]}"##,
+    )
+    .unwrap();
+    let (_a, c) = client_with(project);
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    // M to just under T, past U and locked L: refused, the stack stays.
+    assert_eq!(move_order(&c.model.index, &s(&["m"]), &s(&["t", "m", "l", "u"])), None);
+    // M just above U (past nothing locked): only M moves.
+    assert_eq!(
+        move_order(&c.model.index, &s(&["m"]), &s(&["t", "l", "m", "u"])),
+        Some(s(&["t", "l", "m", "u"]))
+    );
+}

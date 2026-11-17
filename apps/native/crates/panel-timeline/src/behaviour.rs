@@ -895,15 +895,17 @@ impl TimelineModel {
                 ops.push(Op::Leaf(Patch::set(path, Value::Number(l.track as f64))));
             }
         }
-        let mut path = model::comp_path(self.index.comp_id.as_deref());
-        path.push("layers".into());
-        ops.push(Op::Order {
-            path,
-            ids: planned
-                .iter()
-                .map(|l| JsString::from(l.id.as_str()))
-                .collect(),
-        });
+        // Only the moved clips change place in the stack, and only where no
+        // untouched relation changes (see `tracks::move_order`).
+        let order: Vec<String> = planned.iter().map(|l| l.id.clone()).collect();
+        if let Some(stack) = crate::tracks::move_order(&self.index, ids, &order) {
+            let mut path = model::comp_path(self.index.comp_id.as_deref());
+            path.push("layers".into());
+            ops.push(Op::Order {
+                path,
+                ids: stack.iter().map(|id| JsString::from(id.as_str())).collect(),
+            });
+        }
         Ok(Plan {
             calls: vec![Call::Transact {
                 label: Some("Move Clips".into()),
