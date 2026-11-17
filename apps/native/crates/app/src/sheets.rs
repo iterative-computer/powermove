@@ -158,6 +158,14 @@ impl OpenSheet {
         if let Some(editor) = self.sheet.editors.get(id) {
             return editor.string().to_string();
         }
+        if let Some(switch) = self
+            .sheet
+            .controls
+            .get(id)
+            .and_then(|c| c.downcast_ref::<objc2_app_kit::NSSwitch>())
+        {
+            return (switch.state() == objc2_app_kit::NSControlStateValueOn).to_string();
+        }
         self.sheet
             .fields
             .get(id)
@@ -278,6 +286,11 @@ pub fn from_surface(
                 popup.selectItemAtIndex(field.selected as isize);
                 popup.setEnabled(field.enabled);
                 sheet.control(&field.id, &field.label, popup.into_super().into_super());
+            }
+            // A yes-or-no field: the system switch, read back as "true" or
+            // "false" (`OpenSheet::text`).
+            NativePiece::Checkbox => {
+                sheet.toggle(&field.id, &field.label, value == "true", field.enabled)
             }
             _ if surface.expression_editor => {
                 sheet.editor(&field.id, &field.label, value, EXPRESSION_LINES)
