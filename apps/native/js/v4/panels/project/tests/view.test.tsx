@@ -149,7 +149,10 @@ for (const [state, view, extra] of cases)
       expect(
         Object.values(report.nodes).some(
           // The quiet line says it (no glyph: lists are quiet text).
-          (node: any) => node.text === "Syncing…" || node.props?.text === "Syncing…" || node.props?.label === "Syncing…",
+          (node: any) =>
+            node.text === "Syncing…" ||
+            node.props?.text === "Syncing…" ||
+            node.props?.label === "Syncing…",
         ),
       ).toBe(true);
     }
@@ -786,7 +789,16 @@ test("virtual project viewport has a single scroll owner across thumbnail refres
   const { root } = recorder();
   let previous: number | undefined;
   for (const status of ["Loading", "Ready"] as const) {
-    await root.render(<ProjectView view={projection([asset("a", status), asset("b")])} input={() => {}} menu={() => {}} page={() => {}} native={native} layout={layout} />);
+    await root.render(
+      <ProjectView
+        view={projection([asset("a", status), asset("b")])}
+        input={() => {}}
+        menu={() => {}}
+        page={() => {}}
+        native={native}
+        layout={layout}
+      />,
+    );
     const list = root.inspect().nodes.find((n) => n.type === "virtual-list")!;
     const outer = find(root, "Project media");
     expect(outer.props.metadata?.scrollOwner).toBe("child");
@@ -794,5 +806,40 @@ test("virtual project viewport has a single scroll owner across thumbnail refres
     if (previous !== undefined) expect(list.id).toBe(previous);
     previous = list.id;
   }
+  await root.dispose();
+});
+
+test("grid selection uses a clipped ring and text-only truncation tooltips", async () => {
+  const { root } = recorder();
+  const row = { ...comp(), selected: true };
+  await root.render(
+    <ProjectView
+      view={projection([row])}
+      input={() => {}}
+      menu={() => {}}
+      page={() => {}}
+      native={native}
+      layout={{
+        ...layout,
+        cardGeometry: {
+          radius: 10,
+          frameRadius: 2,
+          smallRadius: 6,
+          dotInset: 11,
+        },
+      }}
+    />,
+  );
+  const nodes = root.inspect().nodes;
+  const cell = nodes.find((n) => n.props.role === "cell")!;
+  expect(cell.props.title).toBeUndefined();
+  expect(cell.props.metadata?.selectionRingOnly).toBe(true);
+  expect(cell.props.style?.borderRadius).toBe(10);
+  const dot = find(root, "Open in the timeline");
+  expect(dot.props.style?.right).toBe(11);
+  expect(dot.props.style?.bottom).toBe(11);
+  expect(
+    nodes.filter((n) => n.props.metadata?.tooltipWhenTruncated).length,
+  ).toBe(2);
   await root.dispose();
 });

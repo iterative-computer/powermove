@@ -68,6 +68,13 @@ export interface GridLayout {
   /** A grid card's thumbnail, in points (16:9 of its column). */
   thumbWidth?: number;
   thumbHeight?: number;
+  cardGeometry?: {
+    radius: number;
+    frameRadius: number;
+    frameInset?: number;
+    smallRadius: number;
+    dotInset: number;
+  };
 }
 /** The panel's two layouts: source-list rows, or a grid of thumbnails. */
 export type ViewMode = "list" | "grid";
@@ -373,6 +380,7 @@ export function ProjectView(props: ProjectViewProps) {
   /** A composition's frame on its tile (v1.2.0 `.comp-frame`): inset in
    * the tile, holding its thumbnail. A comp is the tile's 16:9 as a rule;
    * the frame takes the tile's shape inside its inset. */
+  const geometry = layout.cardGeometry;
   const compFrame = (poster: string | undefined) => (
     <div
       style={{
@@ -387,7 +395,7 @@ export function ProjectView(props: ProjectViewProps) {
           position: "relative",
           flexGrow: 1,
           overflow: "hidden",
-          borderRadius: token("metrics.inner_radius"),
+          borderRadius: geometry?.frameRadius ?? token("metrics.inner_radius"),
           borderWidth: token("metrics.border"),
           borderColor: token("colors.hairline"),
           background: token("colors.media_badge"),
@@ -426,15 +434,11 @@ export function ProjectView(props: ProjectViewProps) {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          borderRadius: token(
-            small ? "metrics.inner_radius" : "metrics.control_radius",
-          ),
+          borderRadius: small
+            ? (geometry?.smallRadius ?? token("metrics.inner_radius"))
+            : (geometry?.radius ?? token("metrics.control_radius")),
           background: token(
-            dropTarget
-              ? "colors.accent_wash"
-              : f.asset?.[0].kind === "audio" && !f.attention
-                ? "colors.labels.green"
-                : "colors.fill",
+            dropTarget ? "colors.accent_wash" : "colors.fill",
           ),
           ...(small
             ? {
@@ -472,7 +476,9 @@ export function ProjectView(props: ProjectViewProps) {
             alt={itemName(row)}
             style={{
               position: "absolute",
-              inset: "fill",
+              inset: small ? "fill" : geometry?.frameInset ?? "fill",
+              overflow: "hidden",
+              borderRadius: small ? geometry?.smallRadius ?? token("metrics.inner_radius") : geometry?.frameRadius ?? token("metrics.inner_radius"),
               opacity: f.attention
                 ? token("metrics.media_offline_opacity")
                 : f.loading
@@ -502,9 +508,9 @@ export function ProjectView(props: ProjectViewProps) {
             style={{
               position: "absolute",
               inset: "fill",
-              borderRadius: token(
-                small ? "metrics.inner_radius" : "metrics.control_radius",
-              ),
+              borderRadius: small
+                ? (geometry?.smallRadius ?? token("metrics.inner_radius"))
+                : (geometry?.radius ?? token("metrics.control_radius")),
               borderWidth: token(
                 small ? "metrics.border" : "metrics.media_ring",
               ),
@@ -527,7 +533,7 @@ export function ProjectView(props: ProjectViewProps) {
                   paddingRight: token("metrics.media_inset"),
                   height: token("metrics.media_badge_height"),
                   background: token("colors.media_badge"),
-                  borderRadius: token("metrics.inner_radius"),
+                  borderRadius: geometry?.smallRadius ?? token("metrics.inner_radius"),
                   fontSize: token("typography.minimum"),
                   color: token("colors.selected_text"),
                   fontVariantNumeric: "tabular-nums",
@@ -558,8 +564,10 @@ export function ProjectView(props: ProjectViewProps) {
                 label="Open in the timeline"
                 style={{
                   position: "absolute",
-                  right: token("metrics.media_inset"),
-                  bottom: token("metrics.media_inset"),
+                  right:
+                    geometry?.dotInset ?? token("metrics.media_comp_inset"),
+                  bottom:
+                    geometry?.dotInset ?? token("metrics.media_comp_inset"),
                   width: token("metrics.status_dot"),
                   height: token("metrics.status_dot"),
                   borderRadius: token("metrics.status_dot"),
@@ -616,21 +624,18 @@ export function ProjectView(props: ProjectViewProps) {
   };
   const itemProps = (row: Row) => {
     const f = facts(row);
-    const name = itemName(row);
-    const detail = detailLine(row);
     return {
       id: `media:${itemKey(row.id)}`,
       role: "cell",
       label: accessibleName(row),
       title: f.folder?.link
         ? `Linked to ${f.folder.link.path}. Changes in Finder appear here. Renaming it here doesn't rename the folder on disk.`
-        : detail
-          ? `${name}\n${detail}`
-          : name,
+        : null,
       tabIndex: -1,
       "aria-selected": row.selected,
       attr: { item: row.id },
       "aria-disabled": !!props.transportFailed,
+      metadata: { selectionRingOnly: !asList },
       state: {
         selected: row.selected,
         focused: row.focused,
@@ -651,6 +656,8 @@ export function ProjectView(props: ProjectViewProps) {
       renameField(f.folder.id, itemName(row))
     ) : (
       <text
+        title={itemName(row)}
+        metadata={{ tooltipWhenTruncated: true }}
         style={{
           ...text,
           flexShrink: 1,
@@ -765,6 +772,7 @@ export function ProjectView(props: ProjectViewProps) {
           flexBasis: token("metrics.thumbnail_min"),
           overflow: "hidden",
           paddingBottom: token("metrics.inset"),
+          borderRadius: geometry?.radius ?? token("metrics.control_radius"),
         }}
         {...rowHandlers(row)}
       >
@@ -772,6 +780,8 @@ export function ProjectView(props: ProjectViewProps) {
         <div style={{ display: "flex", flexDirection: "column" }}>
           {nameText(row)}
           <text
+            title={detailLine(row)}
+            metadata={{ tooltipWhenTruncated: true }}
             style={{
               ...muted,
               color: token(
@@ -1046,7 +1056,9 @@ export function ProjectView(props: ProjectViewProps) {
       )}
       <List
         label="Project media"
-        metadata={{ scrollOwner: view && view.page.total > 0 ? "child" : "self" }}
+        metadata={{
+          scrollOwner: view && view.page.total > 0 ? "child" : "self",
+        }}
         tabIndex={0}
         attr={{ rowCount: view?.page.total ?? 0, multiselectable: true }}
         style={{

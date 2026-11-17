@@ -266,6 +266,7 @@ pub struct SurfaceView {
     subscriptions: BTreeMap<Id, Vec<Subscription>>,
     origin: Rc<Cell<Point<Pixels>>>,
     anchors: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
+    truncated: Rc<RefCell<HashMap<Id, bool>>>,
     /// The height a sheet's body wants, measured as it is laid out.
     sheet_fit: Rc<std::cell::Cell<f32>>,
     /// End-anchored scrollers' tokens and whether the reader is away, by node.
@@ -412,6 +413,7 @@ impl SurfaceView {
             subscriptions: BTreeMap::new(),
             origin: Rc::new(Cell::new(Point::default())),
             anchors: Default::default(),
+            truncated: Default::default(),
             sheet_fit: Default::default(),
             follow: Default::default(),
             probing: false,
@@ -626,6 +628,7 @@ impl SurfaceView {
         self.focus.clear();
         self.subscriptions.clear();
         self.anchors.borrow_mut().clear();
+        self.truncated.borrow_mut().clear();
         self.capture = None;
         self.scrub = None;
         self.queued_move = None;
@@ -640,6 +643,7 @@ impl SurfaceView {
             self.pressed = None;
         }
         self.cull.retain(|id| live(id));
+        self.truncated.borrow_mut().retain(|id, _| live(id));
         self.row_sources.retain(|id, _| live(id));
         self.scrolls.retain(|id, _| prepared.node(*id).is_some_and(|n| n.scroll_y || n.scroll_x));
         self.subscriptions.retain(|id, _| live(id));
@@ -2794,7 +2798,7 @@ impl SurfaceView {
                 .tab_index(tab.max(0));
         }
         element = self.interactive(element, node, cx);
-        element = self.decorate(element, node, window);
+        element = self.decorate(element, node, window, cx);
         if let Some(drawing) = self.grade_canvas(id, &node.kit, node.disabled) {
             element = element.relative().child(drawing);
             if let Some(h) = self.grade_height(id, &node.kit) {
@@ -2848,8 +2852,12 @@ impl SurfaceView {
                     .into_any_element(),
             );
         }
-        let wash = self.motion.hovers.amount(id);
-        let pressed = self.pressed == Some(id);
+        let ring_only = self.publication.surface.node(id).and_then(|n| n.props.get("metadata"))
+            .and_then(|m| m.get("selectionRingOnly")) == Some(&Value::Bool(true));
+        // A cell can keep its id when list switches to grid. Its old hover
+        // animation must not paint a wash behind a ring-only grid card.
+        let wash = if ring_only { 0. } else { self.motion.hovers.amount(id) };
+        let pressed = self.pressed == Some(id) && !ring_only;
         if (wash > 0. || pressed) && !node.disabled {
             let t = &self.table.tokens;
             let alpha = if pressed {
@@ -3424,7 +3432,8 @@ impl SurfaceView {
                     )
                 })
         });
-        let wash = clickable && (node.component.is_some() || control_role);
+        let ring_only = props.and_then(|p| p.get("metadata")).and_then(|m| m.get("selectionRingOnly")) == Some(&Value::Bool(true));
+        let wash = clickable && (node.component.is_some() || control_role) && !ring_only;
         if wash {
             // Pressed while the button is down on it; any release ends it.
             element = element
@@ -3598,8 +3607,30 @@ impl SurfaceView {
         mut element: Stateful<Div>,
         node: &NodeView,
         window: &Window,
+        cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let t = &self.table.tokens;
+        if self.publication.surface.node(node.id).and_then(|n| n.props.get("metadata"))
+            .and_then(|m| m.get("tooltipWhenTruncated")) == Some(&Value::Bool(true)) {
+            let text: SharedString = self.shown_text(node.id, 3).into();
+            let mut style = window.text_style();
+            // The surface's root font is applied after its children are built.
+            style.font_family = pm_design::TEXT_FONT.into();
+            style.font_size = px(t.typography.body).into();
+            style.refine(&node.style.text);
+            let size = style.font_size.to_pixels(window.rem_size());
+            let run = style.to_run(text.len());
+            let width = window.text_system().shape_line(text, size, &[run]).width;
+            let truncated = self.truncated.clone();
+            let id = node.id;
+            let view = cx.entity().downgrade();
+            element = element.child(canvas(move |bounds, _, cx| {
+                let clipped = width > bounds.size.width;
+                if truncated.borrow_mut().insert(id, clipped) != Some(clipped) {
+                    cx.defer(move |cx| { let _ = view.update(cx, |_, cx| cx.notify()); });
+                }
+            }, |_, _, _, _| {}).absolute().inset_0());
+        }
         if self.prepared.anchors.contains(&node.id) {
             let (id, anchors) = (node.id, self.anchors.clone());
             element = element.child(
@@ -4357,6 +4388,9 @@ impl SurfaceView {
         let menu_value = props.is_some_and(|p| p.contains_key("aria-haspopup"))
             && (!shown.trim().is_empty()
                 || props.is_some_and(|p| p.get("value").is_some_and(|v| !v.is_null())));
+        if props.and_then(|p| p.get("metadata")).and_then(|m| m.get("tooltipWhenTruncated")) == Some(&Value::Bool(true)) {
+            return self.truncated.borrow().get(&id).copied().unwrap_or(false).then(|| node.title.clone()).flatten();
+        }
         node.title
             .clone()
             .filter(|title| title.trim() != shown.trim())

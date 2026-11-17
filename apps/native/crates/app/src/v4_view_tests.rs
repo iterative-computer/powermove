@@ -2101,3 +2101,22 @@ fn project_virtual_page_keeps_rows_and_offset_after_refresh(cx: &mut TestAppCont
     assert!((offset + 1600. - (expected - line)).abs() < 0.01, "line delta: offset={offset}, expected {}", expected - line - 1600.);
     assert!((actual - (expected - line)).abs() <= 1., "painted row={actual}, expected {} within one pixel", expected - line);
 }
+
+#[gpui::test]
+fn project_text_tooltip_follows_measured_truncation_after_resize(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let title = "Composition with a long name";
+    let tree = |width| {
+        let mut ops = node_ops(1, 0, "text", json!({"title":title,"metadata":{"tooltipWhenTruncated":true},"style":{"width":width,"height":24,"fontSize":13,"whiteSpace":"nowrap","overflow":"hidden","textOverflow":"ellipsis"}}), &[]);
+        ops.push(Op::SetText { id: 1, text: title.into() });
+        synthetic(&rig, ops)
+    };
+    let (view, mut vcx) = window(cx, &rig, tree(40), Default::default());
+    vcx.run_until_parked();
+    assert_eq!(view.read_with(&vcx, |v, _| v.tooltip_title(1).map(|t| t.to_string())), Some(title.into()));
+    view.update(&mut vcx, |v, cx| v.publish(tree(500), cx));
+    settle(cx, |cx| !view.read_with(cx, |v, _| v.compiling()));
+    vcx.run_until_parked();
+    assert_eq!(view.read_with(&vcx, |v, _| v.tooltip_title(1)), None);
+}

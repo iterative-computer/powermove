@@ -165,19 +165,26 @@ fn capture_project_panel() {
     let dir = std::env::var("PM_PANEL_CAPTURE").expect("PM_PANEL_CAPTURE");
     let tag = std::env::var("PM_CAPTURE_TAG").unwrap_or_else(|_| "capture".into());
     std::fs::create_dir_all(&dir).unwrap();
+    let source = std::env::var("PM_PROJECT_CAPTURE_JSON").ok()
+        .map(|p| std::fs::read_to_string(p).unwrap()).unwrap_or_else(|| project(&media));
+    let data: serde_json::Value = serde_json::from_str(&source).unwrap();
+    let assets: Vec<(String, String, std::path::PathBuf, f64)> = data["assets"].as_object().unwrap()
+        .iter().map(|(id, a)| (id.clone(), a["kind"].as_str().unwrap().to_owned(),
+            a["sourcePath"].as_str().unwrap().into(), a["dur"].as_f64().unwrap_or(0.))).collect();
+    let loading = std::env::var_os("PM_CAPTURE_LOADING").is_some();
     // Thumbnails as the app makes them, registered for the view to draw.
     let mut thumbs = crate::media_thumbs::Thumbs::default();
     let cache = Path::new(&dir).join(".thumbs");
     let ffmpeg = std::env::var_os("PM_FFMPEG").map(std::path::PathBuf::from);
     let mut posters = BTreeMap::new();
-    for (id, _, kind, file, _, _, dur, _, _) in ASSETS {
-        let path = media.join(file);
+    for (id, kind, path, dur) in &assets {
+        let path = path.clone();
         if !path.is_file() {
             continue;
         }
         let item = crate::media_thumbs::Item {
-            asset: id.into(),
-            kind: kind.into(),
+            asset: id.clone(),
+            kind: kind.clone(),
             path,
             at: (kind == "video").then(|| (dur * 0.1).min(0.5)),
         };
@@ -185,7 +192,7 @@ fn capture_project_panel() {
         if let Some((key, _)) = &made {
             posters.insert(id.to_owned(), key.clone());
         }
-        thumbs.done(thumbs.generation(), id.into(), made);
+        thumbs.done(thumbs.generation(), id.clone(), made);
     }
     if media.join("moving-color.mp4").is_file() {
         let key = posters.get("a2").expect("the real video fixture must generate a poster");
@@ -193,35 +200,28 @@ fn capture_project_panel() {
     }
     for (view, w, h) in [("grid", 300., 640.), ("list", 300., 640.)] {
         for (name, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
+            if std::env::var("PM_CAPTURE_ONLY").ok().is_some_and(|v| v != format!("{view}-{name}")) { continue; }
             objc2::rc::autoreleasepool(|_| {
                 let tokens = Tokens::new(scheme, Accessibility::default());
-                let r = rig_project("assets", &project(&media));
+                let r = rig_project("assets", &source);
                 let published = r.kernel.published(crate::v4_view_tests::PROJECT).unwrap();
                 let stamp = pm_panel_media::Catalog::published(&published)
                     .unwrap()
                     .stamp;
-                let states = ASSETS
-                    .iter()
-                    .map(|(id, _, _, file, ..)| {
-                        let availability = if media.join(file).is_file() {
-                            Availability::Ready
-                        } else if file.ends_with(".svg") {
+                let states = |ready: bool| -> BTreeMap<String, RuntimeState> {
+                    assets.iter().map(|(id, _, path, _)| {
+                        let availability = if path.is_file() {
+                            if ready { Availability::Ready } else { Availability::Loading }
+                        } else if path.extension().is_some_and(|v| v == "svg") {
                             Availability::Failed("The picture could not be read".into())
-                        } else {
-                            Availability::Offline
-                        };
-                        let state = RuntimeState {
-                            availability,
-                            poster: posters.get(*id).cloned(),
-                            ..Default::default()
-                        };
-                        (id.to_string(), state)
-                    })
-                    .collect();
-                r.runtime.update_media(
-                    Default::default(),
-                    pm_panel_media::readiness::ObservedRuntime::new(stamp, states),
-                );
+                        } else { Availability::Offline };
+                        (id.clone(), RuntimeState { availability,
+                            poster: ready.then(|| posters.get(id).cloned()).flatten(),
+                            ..Default::default() })
+                    }).collect()
+                };
+                r.runtime.update_media(Default::default(),
+                    pm_panel_media::readiness::ObservedRuntime::new(stamp.clone(), states(!loading)));
                 if std::env::var("PM_PROJECT_LINKED").is_ok() {
                     let state = match std::env::var("PM_PROJECT_SYNC").as_deref() {
                         Ok("missing") => pm_panel_media::FolderSync::NotFound,
@@ -256,8 +256,31 @@ fn capture_project_panel() {
                         cx.new(|_| Frame { view, fill })
                     })
                     .unwrap();
+                if let Ok(scale) = std::env::var("PM_CAPTURE_SCALE") {
+                    cx.simulate_scale_change(window.into(), scale.parse().expect("PM_CAPTURE_SCALE"));
+                }
                 let surface = surface.borrow().clone().unwrap();
                 for i in 0..240 {
+                    if i == 80 {
+                        if let Ok(delta) = std::env::var("PM_CAPTURE_WHEEL") {
+                            let position = gpui::point(px(100.), px(100.));
+                            cx.simulate_event(window.into(), gpui::MouseMoveEvent { position, ..Default::default() });
+                            cx.simulate_event(window.into(), gpui::ScrollWheelEvent { position,
+                                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(delta.parse::<f32>().unwrap()))),
+                                ..Default::default() });
+                        }
+                    }
+                    if i == 144 && loading {
+                        r.runtime.update_media(Default::default(),
+                            pm_panel_media::readiness::ObservedRuntime::new(stamp.clone(), states(true)));
+                    }
+                    // Synthetic pointer delivery in the headless renderer only.
+                    // No operating-system window, focus or cursor is involved.
+                    if i == 120 {
+                        if let Ok(target) = std::env::var("PM_PROJECT_CAPTURE_SELECT") {
+                            cx.update(|cx| surface.update(cx, |v, cx| v.review_send(&target, "pointerdown", cx)));
+                        }
+                    }
                     // The panel asks for its saved list/grid choice.
                     for request in r.runtime.take_platform_requests() {
                         let answer = match request.operation.as_str() {
@@ -275,7 +298,10 @@ fn capture_project_panel() {
                     // A frame lays the list out, which reports its width
                     // (the grid's columns) and visible rows.
                     if i % 8 == 7 {
-                        let _ = cx.capture_screenshot(window.into());
+                        let frame = cx.capture_screenshot(window.into()).unwrap();
+                        if std::env::var_os("PM_CAPTURE_FRAMES").is_some() {
+                            frame.save(format!("{dir}/{tag}-{view}-{name}-frame-{i:03}.png")).unwrap();
+                        }
                     }
                     std::thread::sleep(std::time::Duration::from_millis(25));
                 }

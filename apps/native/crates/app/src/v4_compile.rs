@@ -827,7 +827,7 @@ fn compile(
     }
     let selected = node.props.get("aria-selected") == Some(&Value::Bool(true))
         || node.props.get("state").and_then(|s| s.get("selected")) == Some(&Value::Bool(true));
-    if selected {
+    if selected && node.props.get("metadata").and_then(|m| m.get("selectionRingOnly")) != Some(&Value::Bool(true)) {
         compiled.sheet = compiled.sheet.bg(rgb(t.colors.selected_fill));
     }
     let header_id = node.props.get("id").and_then(Value::as_str);
