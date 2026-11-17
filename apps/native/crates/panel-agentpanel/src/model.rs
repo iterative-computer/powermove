@@ -83,6 +83,8 @@ pub struct Session {
     pub trace: Trace,
     pub run: Option<Run>,
     last_run: Option<String>,
+    /// An unacknowledged completion: true for failure; session-local only.
+    toolbar_notice: Option<bool>,
     settings_dirty: bool,
     access_dirty: bool,
     /// The person accepted Full access for this thread in this session (its
@@ -158,6 +160,7 @@ impl Session {
             conversation,
             trace,
             run: None,
+            toolbar_notice: None,
             last_run: v["lastRunId"].as_str().map(str::to_owned),
             settings_dirty: false,
             access_dirty: false,
@@ -777,6 +780,24 @@ impl Panel {
             })
             .collect()
     }
+    /// Session-local notices: opening the panel acknowledges finished work.
+    pub fn toolbar_notice(&self) -> (bool, bool) {
+        let failed = self
+            .sessions
+            .values()
+            .any(|s| s.toolbar_notice == Some(true));
+        let unread = !failed
+            && self
+                .sessions
+                .values()
+                .any(|s| s.toolbar_notice == Some(false));
+        (unread, failed)
+    }
+    pub fn mark_toolbar_seen(&mut self) {
+        for session in self.sessions.values_mut() {
+            session.toolbar_notice = None;
+        }
+    }
     pub fn background_runs(&self) -> usize {
         self.sessions
             .iter()
@@ -1084,6 +1105,7 @@ impl Panel {
                     s.append(json!({"role":"assistant","text":text,"error":error}))?;
                 }
                 self.retired_runs.insert(run_id.into());
+                s.toolbar_notice = (!cancelled).then_some(error);
                 s.run = None;
                 s.activity.clear();
                 s.phase = if s.plan.is_some() {

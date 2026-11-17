@@ -1324,3 +1324,70 @@ fn an_effort_is_carried_to_a_new_model_that_takes_it_else_its_default() {
         );
     }
 }
+
+#[test]
+fn toolbar_completion_notices_clear_on_view_and_cancel_does_not_badge() {
+    for (error, cancelled, expected) in [
+        (false, false, (true, false)),
+        (true, false, (false, true)),
+        (false, true, (false, false)),
+    ] {
+        let mut p = panel();
+        start(&mut p);
+        p.receive(
+            "t",
+            "run1",
+            1,
+            Update::Complete {
+                text: "Finished".into(),
+                error,
+                cancelled,
+            },
+            20,
+        )
+        .unwrap();
+        assert_eq!(p.toolbar_notice(), expected);
+        p.mark_toolbar_seen();
+        assert_eq!(p.toolbar_notice(), (false, false));
+    }
+}
+
+#[test]
+fn hidden_background_failures_win_over_unread_success_without_switching_threads() {
+    let mut p = panel();
+    start(&mut p);
+    p.new_thread("other", 11).unwrap();
+    p.draft_mut("other")
+        .unwrap()
+        .insert_text("another task", 12, false);
+    p.submit("other", "run2", "request2", 13).unwrap();
+    p.receive(
+        "t",
+        "run1",
+        1,
+        Update::Complete {
+            text: "Done".into(),
+            error: false,
+            cancelled: false,
+        },
+        20,
+    )
+    .unwrap();
+    assert_eq!(p.toolbar_notice(), (true, false));
+    p.receive(
+        "other",
+        "run2",
+        1,
+        Update::Complete {
+            text: "Failed".into(),
+            error: true,
+            cancelled: false,
+        },
+        21,
+    )
+    .unwrap();
+    assert_eq!(p.active_id(), "other");
+    assert_eq!(p.toolbar_notice(), (false, true));
+    p.mark_toolbar_seen();
+    assert_eq!(p.toolbar_notice(), (false, false));
+}

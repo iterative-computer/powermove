@@ -942,14 +942,18 @@ impl Builtins {
     /// The toolbar Agent item's facts: a run going (in view or behind),
     /// a question or approval waiting, the run in view's time, and how many
     /// threads run behind the one in view.
-    pub fn agent_status(&self) -> (bool, bool, Option<u64>, usize) {
+    pub fn agent_status(&self, shown: bool) -> (bool, bool, Option<u64>, usize, bool, bool) {
         let Ok((agent, _)) = self.agent_state() else {
-            return (false, false, None, 0);
+            return (false, false, None, 0, false, false);
         };
-        let state = agent.shared();
-        let panel = &state.panel;
+        let mut state = agent.shared();
+        let panel = &mut state.panel;
+        if shown {
+            panel.mark_toolbar_seen();
+        }
+        let (unread, failed) = panel.toolbar_notice();
         let Ok(session) = panel.session(panel.active_id()) else {
-            return (false, false, None, 0);
+            return (false, false, None, 0, false, false);
         };
         let background = panel.background_runs();
         (
@@ -957,6 +961,8 @@ impl Builtins {
             session.needs_answer(),
             session.elapsed_ms(agent_host::now_ms()),
             background,
+            unread,
+            failed,
         )
     }
     /// Adding the effect `definition` to `layer` at `time` as the Effects

@@ -75,6 +75,7 @@ pub struct Host {
     /// The Agent panel is in the workspace's docks (pinned), and whether its
     /// toolbar item has parked it (hidden, its place kept).
     pub agent_docked: bool,
+    pub agent_shown: bool,
     pub agent_parked: bool,
     /// Where the Agent popover was last put down, from its editor's
     /// top-left corner (GPUI points): it reopens there in this window.
@@ -1030,12 +1031,17 @@ impl Controller {
         for error in runtime.take_errors() {
             eprintln!("v4: {error}");
         }
-        let (working, attention, elapsed, background) = runtime.agent_status();
+        // A requested popover is not acknowledged until its window exists.
+        let shown = self.builtins.agent_shown || self.builtins.windows.get("agent")
+            .is_some_and(|window| cx.windows().contains(window));
+        let (working, attention, elapsed, background, unread, failed) = runtime.agent_status(shown);
         self.host
             .borrow_mut()
             .set_agent_status(pm_shell::AgentStatus {
                 working,
                 attention,
+                unread,
+                failed,
                 elapsed: elapsed.map(|ms| format!("{}:{:02}", ms / 60_000, ms / 1000 % 60)),
                 background,
             });

@@ -659,6 +659,13 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn shown_panels(&self, shown: &[&str], cx: &mut App) {
         self.0.update(cx, |v, cx| {
+            let agent_shown = shown.contains(&"agent");
+            if v.builtins.agent_shown != agent_shown {
+                v.builtins.agent_shown = agent_shown;
+                cx.spawn(async move |this, cx| {
+                    let _ = this.update(cx, |v, cx| v.update_builtins(cx));
+                }).detach();
+            }
             let mut effective: Vec<String> = shown.iter().map(|id| (*id).to_owned()).collect();
             for id in shown {
                 if let Some(target) = v.agent_panel_builds.get(*id).and_then(|b| b.target.clone()) {
