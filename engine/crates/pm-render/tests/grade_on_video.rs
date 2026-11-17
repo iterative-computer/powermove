@@ -183,3 +183,74 @@ fn a_graded_video_frame_differs_and_matches_the_grade_on_its_still() {
     let change = mean_abs(&plain, &read_as_log);
     assert!(change > 0.01, "S-Log3 changed the video frame by {change}");
 }
+
+/// A grade is a stack (PM-504): Color Wheels, then a curve, then a LUT on one
+/// video clip equal the three applied in turn, each on a still of the frame
+/// the one before made; and the order is the stack's (reversed, the picture
+/// differs).
+#[test]
+fn wheels_curve_and_lut_on_one_clip_apply_in_their_order() {
+    let named = |id: &str, mut fx: Value| {
+        fx["id"] = json!(id);
+        fx
+    };
+    let clip = fixture("h264-709-limited.mp4");
+    let dir = tempfile::tempdir().unwrap();
+    // A LUT that keeps red, swaps green and blue and darkens a little: not
+    // its own inverse, so its place in the stack shows.
+    let lut = dir.path().join("swap.cube");
+    let cube: String = (0..8)
+        .map(|i| {
+            let (r, g, b) = (i & 1, (i >> 1) & 1, (i >> 2) & 1);
+            format!("{} {} {}\n", 0.9 * r as f64, 0.9 * b as f64, 0.9 * g as f64)
+        })
+        .collect();
+    std::fs::write(&lut, format!("LUT_3D_SIZE 2\n{cube}")).unwrap();
+    let wheels = named(
+        "wheels",
+        effect("colorWheels", &json!({"gammaRed": 0.12, "gammaBlue": -0.08})),
+    );
+    let curve = named(
+        "curve",
+        effect(
+            "colorCurves",
+            &json!({"count": 3, "x1": 0.5, "y1": 0.62, "x2": 1.0, "y2": 1.0}),
+        ),
+    );
+    let look = named(
+        "lut",
+        effect_with(
+            "applyColorLut",
+            &json!({"amount": 100}),
+            json!({"lut": {"kind": "asset", "assetId": "lut"}}),
+        ),
+    );
+    let mut renderer = Renderer::headless().unwrap();
+    let stacked = render(
+        &mut renderer,
+        document(
+            "video",
+            &clip,
+            vec![wheels.clone(), curve.clone(), look.clone()],
+            &lut,
+        ),
+    );
+    // In turn: each block on a still of what the one before it made.
+    let mut step = render(&mut renderer, document("video", &clip, vec![wheels.clone()], &lut));
+    for (i, fx) in [curve.clone(), look.clone()].into_iter().enumerate() {
+        let still = dir.path().join(format!("step{i}.png"));
+        write_png(&still, &step);
+        step = render(&mut renderer, document("image", &still, vec![fx], &lut));
+    }
+    let apart = mean_abs(&stacked, &step);
+    assert!(apart < 4e-3, "the stack is {apart} from its blocks in turn");
+    let plain = render(&mut renderer, document("video", &clip, vec![], &lut));
+    let change = mean_abs(&plain, &stacked);
+    assert!(change > 0.01, "the stack changed the frame by {change}");
+    let reversed = render(
+        &mut renderer,
+        document("video", &clip, vec![look, curve, wheels], &lut),
+    );
+    let moved = mean_abs(&stacked, &reversed);
+    assert!(moved > 4. * apart.max(1e-3), "reordering moved the picture by {moved}");
+}
