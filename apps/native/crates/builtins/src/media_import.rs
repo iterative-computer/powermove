@@ -1320,6 +1320,58 @@ pub fn place_items(
     Ok((layers, commands))
 }
 
+/// Project panel ▸ New Comp from Selection (v1 `PM.Comps.fromAsset`): a
+/// composition the size of the media and as long as it (a still: as long
+/// as the open composition), at the open composition's frame rate, named
+/// after the file, holding the media as its one layer from 0, in one Undo
+/// step. The new composition's id, the layer's, and the commands.
+pub fn comp_from_asset(
+    published: &Published,
+    asset: &str,
+) -> Result<(String, Vec<String>, Vec<Command>), String> {
+    let root = published.snapshot.root().ok_or("Open a project first")?;
+    let record = root
+        .get("assets")
+        .and_then(|a| a.get(asset))
+        .map(|n| n.to_value())
+        .ok_or("That media is no longer in the project")?;
+    if matches!(
+        record.get("kind").and_then(Value::as_str),
+        Some("audio" | "model")
+    ) {
+        return Err("A composition can't be made from audio or a 3D model".into());
+    }
+    let field = |key: &str| record.get(key).and_then(Value::as_f64).filter(|n| *n > 0.);
+    let file = record.get("name").and_then(Value::as_str).unwrap_or("Comp");
+    let name = Path::new(file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(file);
+    let comp_id = pm_kernel::commands::new_id("C");
+    let create = pm_kernel::CompCommand::Create {
+        comp_id: comp_id.clone(),
+        settings: pm_kernel::commands::comps::NewComp {
+            name: Some(name.to_owned()),
+            width: field("w"),
+            height: field("h"),
+            // The open composition's (the kernel's default), as v1.
+            fps: None,
+            duration: field("dur").map(|d| d.clamp(0.1, 3600.)),
+            background: None,
+        },
+    };
+    let (layers, mut commands) = placement(published, &[(asset, &record)], 0., None, None)
+        .ok_or("Open a project first")?;
+    for command in &mut commands {
+        if let Command::Layer(LayerCommand::Add(add)) = command {
+            add.comp = Some(comp_id.clone());
+        }
+    }
+    commands.insert(0, Command::Comp(create));
+    Ok((comp_id, layers, commands))
+}
+
 /// `PM.commandForAsset` for each asset: new layer ids and the commands
 /// adding them at `at`, from stack `index` down. `None`: no project to
 /// place in.
@@ -1680,6 +1732,73 @@ mod tests {
         assert_eq!(
             place_items(&published, &[], open.as_slice(), 0., None).unwrap_err(),
             "A composition can't be placed inside itself"
+        );
+    }
+
+    /// Project panel ▸ New Comp from Selection (v1 `Comps.fromAsset`): a
+    /// composition named after the file, the media's size, as long as the
+    /// open one for a still, at its frame rate, holding the media from 0, in
+    /// one Undo step; the open composition is left as it was.
+    #[test]
+    fn a_new_comp_from_selection_matches_its_media_and_holds_it() {
+        let (f, _) = opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":25,"dur":8,"bg":"#000000","assets":{"a":{"id":"a","name":"Sky.png","kind":"image","w":200,"h":100},"s":{"id":"s","name":"Song.wav","kind":"audio","dur":3}},"comps":{},"layers":[]}"##,
+        );
+        let kernel = f.actor.handle();
+        let p = kernel.published("p").unwrap();
+        assert_eq!(
+            comp_from_asset(&p, "s").unwrap_err(),
+            "A composition can't be made from audio or a 3D model"
+        );
+        let (comp, layers, commands) = comp_from_asset(&p, "a").unwrap();
+        kernel
+            .call(
+                "p",
+                Request::new(
+                    Caller::native(),
+                    pm_kernel::Call::Transact {
+                        label: Some("New Comp from Selection".into()),
+                        expected_revision: Some(p.revision()),
+                        body: pm_kernel::WriteBody::Commands(commands),
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        let p = kernel.published("p").unwrap();
+        let root = p.snapshot.root().unwrap();
+        let made = root.get("comps").unwrap().get(&comp).unwrap().to_value();
+        let n = |key: &str| made.get(key).and_then(Value::as_f64);
+        assert_eq!(made.get("name").and_then(Value::as_str), Some("Sky"));
+        assert_eq!(
+            (n("w"), n("h"), n("fps"), n("dur")),
+            (Some(200.), Some(100.), Some(25.), Some(8.))
+        );
+        let held = made.get("layers").unwrap().as_array().unwrap().clone();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].get("id").and_then(Value::as_str), Some(layers[0].as_str()));
+        assert_eq!(
+            held[0].get("d").and_then(|c| c.get("asset")).and_then(Value::as_str),
+            Some("a")
+        );
+        assert_eq!(held[0].get("from").and_then(Value::as_f64), Some(0.));
+        let open = pm_kernel::model::comp_node(root, p.snapshot.open_comp().as_deref())
+            .unwrap()
+            .to_value();
+        assert!(
+            open.get("layers").unwrap().as_array().unwrap().is_empty(),
+            "the open composition is left as it was"
+        );
+        kernel
+            .call("p", Request::new(Caller::native(), pm_kernel::HistoryCall::Undo))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let p = kernel.published("p").unwrap();
+        assert!(
+            p.snapshot.root().unwrap().get("comps").unwrap().get(&comp).is_none(),
+            "one Undo step"
         );
     }
 
