@@ -364,12 +364,12 @@ pub fn host_rows(
             .and_then(|v| v.as_bool())
             == Some(true)
     };
+    // By stack number and name, as After Effects lists them: two layers
+    // named alike ("Rect", "Rect") are told apart (PM-502).
+    let number = |l: &LayerInfo| layers.iter().position(|o| o.id == l.id).map_or(0, |i| i + 1);
     let label = |l: &LayerInfo| {
-        if l.name.is_empty() {
-            l.id.clone()
-        } else {
-            l.name.clone()
-        }
+        let name = if l.name.is_empty() { &l.id } else { &l.name };
+        format!("{}. {name}", number(l))
     };
     let mut rows = vec![json!({"v": null, "label": "None"})];
     match source.get("source")?.as_str()? {

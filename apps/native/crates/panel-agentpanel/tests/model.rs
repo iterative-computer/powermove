@@ -1324,3 +1324,17 @@ fn an_effort_is_carried_to_a_new_model_that_takes_it_else_its_default() {
         );
     }
 }
+
+/// PM-507: a run whose edits were rolled back after it ended says so in its
+/// thread, after its own last words; another run's news changes nothing.
+#[test]
+fn a_rolled_back_run_says_so_in_its_thread() {
+    let mut p = panel();
+    start(&mut p);
+    event(&mut p, 1, json!({"kind":"answer","text":"Done: the rect is orange."}));
+    assert!(!p.note_rolled_back("some-other-run", "rolled back").unwrap());
+    assert!(p.note_rolled_back("run1", "This run's changes were rolled back.").unwrap());
+    let last = p.session("t").unwrap().conversation.values().last().unwrap().clone();
+    assert_eq!(last["text"], "This run's changes were rolled back.");
+    assert_eq!(last["rolledBack"], true);
+}

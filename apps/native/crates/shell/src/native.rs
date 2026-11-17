@@ -1001,9 +1001,34 @@ define_class!(
                 let command = toolbar_click_command(command, double_click);
                 let _ = tx.try_send(Command { name: command.to_string(), args: vec![], token: None });
             }
+            // A click on the Shape segment's menu indicator lists the
+            // variants at once; holding still does (PM-502).
+            if sender.selectedSegment() == SHAPE_SEGMENT
+                && let Some(event) = NSApplication::sharedApplication(self.mtm()).currentEvent()
+            {
+                let at = sender.convertPoint_fromView(event.locationInWindow(), None);
+                let widths: Vec<f64> = (0..sender.segmentCount())
+                    .map(|i| sender.widthForSegment(i))
+                    .collect();
+                if let Some(start) = on_menu_indicator(at.x, &widths, SHAPE_SEGMENT as usize) {
+                    let menu: Option<Retained<NSMenu>> =
+                        unsafe { msg_send![sender, menuForSegment: SHAPE_SEGMENT] };
+                    if let Some(menu) = menu {
+                        let below = objc2_foundation::NSPoint::new(start, sender.bounds().size.height + 2.);
+                        menu.popUpMenuPositioningItem_atLocation_inView(None, below, Some(sender));
+                    }
+                }
+            }
         }
     }
 );
+/// Where the Shape segment starts when `x` (in the control) falls on its
+/// menu indicator, the right `TOOL_MENU_INDICATOR` points of the segment.
+fn on_menu_indicator(x: f64, widths: &[f64], segment: usize) -> Option<f64> {
+    let start: f64 = widths.iter().take(segment).sum();
+    let end = start + *widths.get(segment)?;
+    (x >= end - TOOL_MENU_INDICATOR - 2. && x <= end + 2.).then_some(start)
+}
 impl Target {
     fn new(
         mtm: MainThreadMarker,
@@ -1477,6 +1502,18 @@ mod strip_page_tests {
         // The front tab without it: the other tab's cell, unlit.
         let cells = super::strip_pages(1, &[], None, &[(2, vec![store()]), (3, vec![store()])]);
         assert_eq!(cells, vec![(2, 0, "Store".into(), false)]);
+    }
+}
+#[cfg(test)]
+mod shape_indicator_tests {
+    /// A click on the Shape segment's indicator opens its variants; one on
+    /// its glyph only picks the tool (PM-502).
+    #[test]
+    fn the_shape_menu_opens_on_a_click_on_its_indicator() {
+        let widths = [30., 30., 30., 30., 30., 42., 30.];
+        assert_eq!(super::on_menu_indicator(185., &widths, 5), Some(150.));
+        assert_eq!(super::on_menu_indicator(165., &widths, 5), None, "the glyph");
+        assert_eq!(super::on_menu_indicator(200., &widths, 5), None, "the next tool");
     }
 }
 #[cfg(test)]

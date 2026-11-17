@@ -60,13 +60,16 @@ export class CompatPanels {
     };
   }
   list = () => this.registry.ids();
-  /** Extensions with a panel open and placed (painted): another extension's
-   * animation frames wait, as a hidden page's do in a browser. */
+  /** Extensions with a panel that may show: open and not known to be hidden
+   * (a panel the shell has not placed yet counts as showing). Withholding an
+   * extension's animation frames needs positive knowledge that none of its
+   * panels shows: closed, behind another tab, or in a window that cannot be
+   * seen. */
   showingOwners = () => {
     const owners = new Set<string>();
     if (!this.windowShown) return owners;
     for (const entry of this.registry.entries())
-      if (this.openPanels.has(entry.id) && this.rects.get(entry.id))
+      if (this.openPanels.has(entry.id) && this.rects.get(entry.id) !== null)
         owners.add(entry.ownerId);
     return owners;
   };

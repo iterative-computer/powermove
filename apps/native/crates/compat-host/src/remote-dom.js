@@ -389,10 +389,15 @@
         for (const event of message.events) await apply(event);
         after = message.seq;
       }
-    } catch (_) {
+    } catch (error) {
       stopped = true;
+      // What stopped it, for the app's log: every panel of this page is blank from here.
       try {
-        call({ kind: "failure", panel: 0, payload: "remote_dom_stopped" });
+        call({
+          kind: "failure",
+          panel: 0,
+          payload: "remote_dom_stopped: " + String(error?.message ?? error).slice(0, 300),
+        });
       } catch (_) {}
     }
   }

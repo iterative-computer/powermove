@@ -237,7 +237,7 @@ pub fn parse(raw: &Value) -> Result<Value, String> {
     if let Some(author) = m.get("author")
         && !matches!(author.as_str(), Some("powermove" | "user" | "agent"))
     {
-        return Err("invalid \"author\"".into());
+        return Err("invalid \"author\" (use \"user\", \"agent\" or \"powermove\")".into());
     }
     let mut out = Map::new();
     out.insert("id".into(), json!(id));

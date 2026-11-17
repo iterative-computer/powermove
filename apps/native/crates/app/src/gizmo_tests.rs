@@ -1177,19 +1177,40 @@ fn channel(layer: &pm_model::Value, mask: bool, key: &str) -> Option<f64> {
     };
     owner.get("p")?.get(key)?.get("v")?.as_f64()
 }
-/// Shape tool over a selected shape layer: the drag draws a new shape layer
-/// of the drawn size at Scale 100% (After Effects; v1 drew a 100 px shape
+/// Shape tool with nothing selected: the drag draws a new shape layer of
+/// the drawn size at Scale 100% (After Effects; v1 drew a 100 px shape
 /// scaled to it, which stretched strokes and corners), selected, in one
 /// undo step.
 #[gpui::test]
 fn the_shape_tool_draws_a_shape_layer_from_a_drag(cx: &mut TestAppContext) {
     let mut s = stage_on(cx, &project_of("shape"));
+    let none = SelectionCall::Layers {
+        ids: vec![],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), none))
+        .wait()
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
     s.recorder.tool.set(Some(Tool::Shape));
     let at = s.point_of([300., 200.]);
-    s.drag(cx, at, point(px(60.), px(40.)), Modifiers::none());
+    // The stage's drag waits for a selected layer's box; there is none yet.
+    let m = Modifiers::none();
+    s.vcx.simulate_mouse_down(at, MouseButton::Left, m);
+    for step in 1..=3 {
+        let by = step as f32 / 3.;
+        s.vcx
+            .simulate_mouse_move(at + point(px(60. * by), px(40. * by)), MouseButton::Left, m);
+        cx.run_until_parked();
+    }
+    s.vcx
+        .simulate_mouse_up(at + point(px(60.), px(40.)), MouseButton::Left, m);
     let kernel = s.rig.kernel.clone();
     settle(cx, move |_| {
-        kernel.published(PROJECT).unwrap().selection.layers() != ["l0"]
+        !kernel.published(PROJECT).unwrap().selection.layers().is_empty()
     });
     let p = s.rig.kernel.published(PROJECT).unwrap();
     let id = p.selection.layers()[0].clone();
@@ -1244,6 +1265,25 @@ fn the_shape_tool_draws_a_mask_on_a_selected_image(cx: &mut TestAppContext) {
     assert_eq!(p.selection.layers(), ["l0".to_string()]);
 }
 
+/// Acceptance run 27 (PM-502): with a shape layer selected the Shape tool
+/// draws a mask on it, as over any other layer (After Effects), not a new
+/// layer as v1 did.
+#[gpui::test]
+fn the_shape_tool_draws_a_mask_on_a_selected_shape_layer(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &project_of("shape"));
+    s.recorder.tool.set(Some(Tool::Shape));
+    let at = s.point_of([300., 200.]);
+    s.drag(cx, at, point(px(60.), px(40.)), Modifiers::none());
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        layer_value(&kernel, "l0").is_some_and(|l| channel(&l, true, "w").is_some())
+    });
+    let layer = layer_value(&s.rig.kernel, "l0").unwrap();
+    assert_eq!(channel(&layer, true, "w"), Some(60.));
+    assert_eq!(channel(&layer, true, "h"), Some(40.));
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(p.selection.layers(), ["l0".to_string()], "no new layer");
+}
 fn text_of(layer: &pm_model::Value) -> Option<String> {
     layer.get("d")?.get("text")?.as_str().map(str::to_owned)
 }

@@ -63,6 +63,7 @@ fn edit(kind: &str, layer: &str, n: usize) -> Command {
             visible: None,
             shy: None,
             collapsed: None,
+            track: None,
             time: 0.,
         }))
         .into(),

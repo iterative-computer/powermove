@@ -653,6 +653,50 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
+    /// A panel the workspace restored (opened before its extension
+    /// registered it) shows before the shell places it: its frames run
+    /// without waiting for a placement (when in doubt a panel gets them).
+    #[test]
+    fn a_restored_panel_gets_its_frames_before_it_is_placed() {
+        let runner = dom_runner();
+        runner.eval("__compat.openPanel('restored.panel')").unwrap();
+        let manifest = json!({"id":"restored","name":"restored","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){globalThis.ticks=0;
+                 api.panels.register({id:'restored.panel',title:'R',build(root){root.textContent='drawn'}});
+                 const loop=()=>{globalThis.ticks++;requestAnimationFrame(loop)};requestAnimationFrame(loop);}",
+            )
+            .unwrap();
+        ticking(&runner, "a restored, not yet placed panel gets frames");
+        // Placed behind another tab: now it is known not to show.
+        runner.eval("__compat.placePanel('restored.panel',null)").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let held = ticks(&runner);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(ticks(&runner) <= held + 1., "behind another tab it waits");
+        runner
+            .eval("__compat.placePanel('restored.panel',[0,0,100,100])")
+            .unwrap();
+        ticking(&runner, "shown again, its frames run");
+    }
+    /// An extension of API 1 (whose panels are hooks no owner is known for)
+    /// keeps its animation frames while its panel is closed.
+    #[test]
+    fn an_old_api_panel_keeps_its_frames() {
+        let runner = dom_runner();
+        let manifest = json!({"id":"oldpanel","name":"oldpanel","version":"1.0.0","apiVersion":1,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){globalThis.ticks=0;
+                 api.panels.register({id:'oldpanel.panel',title:'O',build(root){root.textContent='drawn'}});
+                 const loop=()=>{globalThis.ticks++;requestAnimationFrame(loop)};requestAnimationFrame(loop);}",
+            )
+            .unwrap();
+        ticking(&runner, "an old-API extension's frames run");
+    }
     /// An extension with no panel keeps its animation frames: its surface may
     /// be a viewer overlay, a gizmo, a tool or a service pacing work.
     #[test]
