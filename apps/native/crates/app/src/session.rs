@@ -48,6 +48,12 @@ pub struct Controller {
     pub viewer: Option<Viewer>,
     /// The viewer last told whether its window can be seen, and what.
     viewer_shown: Option<(u64, bool)>,
+    /// When this window was last seen (a tab in front): the hidden tab shown
+    /// longest ago gives its realms back first (`hibernation`).
+    last_shown: Option<std::time::Instant>,
+    /// Its panels' and extensions' realms were closed while it was hidden;
+    /// shown again, they start (`hibernation`, PM-513).
+    pub(crate) hibernated: bool,
     /// The extension host last told whether the window can be seen, and what.
     extensions_shown: Option<(u64, bool)>,
     pub media: MediaCatalog,
@@ -863,6 +869,8 @@ fn saved_where(path: &std::path::Path) -> String {
         .unwrap_or_else(|| "your Mac".into());
     format!("Saved “{file}” in {folder}. File ▸ Show in Finder shows it.")
 }
+#[path = "hibernation.rs"]
+pub(crate) mod hibernation;
 #[cfg(test)]
 mod first_save_tests {
     #[test]
@@ -1122,6 +1130,8 @@ impl Controller {
             mirror: None,
             viewer: None,
             viewer_shown: None,
+            last_shown: None,
+            hibernated: false,
             extensions_shown: None,
             media: MediaCatalog::default(),
             linked_sync: Default::default(),
@@ -3286,6 +3296,13 @@ impl Controller {
     /// another (or a minimized window) draws nothing until it is shown.
     pub(crate) fn follow_shown(&mut self, cx: &mut Context<Self>) {
         let shown = pm_shell::window_shown(&self.host.borrow().window);
+        if shown {
+            self.last_shown = Some(std::time::Instant::now());
+            // Hibernated while hidden: its panels and extensions start now.
+            if self.hibernated {
+                self.wake(cx);
+            }
+        }
         // Its extensions' panels count as not showing while it cannot be
         // seen: they get no animation frames.
         if let Some(host) = &self.extensions.host {

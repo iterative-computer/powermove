@@ -1287,6 +1287,14 @@ impl Builtins {
             None => self.mount_builtin(panel),
         })
     }
+    /// A built-in whose realm the heap account had no room for, started
+    /// again from its first commit (PM-513). Waits (bounded) for the old
+    /// isolate: call off the main thread.
+    pub fn restart_builtin(&self, panel: &str) -> Result<Ticket<Evaluation>> {
+        self.retire(panel);
+        self.broker.parked.shared().remove(panel);
+        self.mount_builtin(panel)
+    }
     pub fn is_parked(&self, panel: &str) -> bool {
         self.broker.parked.shared().contains(panel)
     }

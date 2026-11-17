@@ -1064,6 +1064,57 @@ fn a_full_account_queues_a_new_isolate_until_heap_is_given_back() {
     assert_eq!(f.admission.waiting(), 0);
     close(&next);
 }
+/// PM-513: an account with room for two windows' realms, three tabs. The
+/// third, shown, gets its realm once the hidden tab shown longest ago gives
+/// its back; shown again, the first wakes (its realm starts again and runs
+/// its panel) when the next hidden one gives its back. Each window here is
+/// one realm; the app's watcher is the loop that closes the chosen one.
+#[test]
+fn a_shown_tab_gets_its_realm_and_the_hidden_tab_shown_longest_ago_gives_its_back() {
+    let account = Admission::new(2 * slice());
+    let windows: Vec<Fixture> = (0..3)
+        .map(|_| fixture_with(|c| c.admission = account.clone()))
+        .collect();
+    let mount = "globalThis.panel = 'mounted'; panel";
+    let t0 = Instant::now();
+    let mut shown: Vec<Option<Instant>> = vec![None; 3];
+    let mut awake: Vec<Option<Realm>> = vec![None, None, None];
+    // Tabs 0 and 1 open and are shown in turn: the account is full.
+    for i in 0..2 {
+        shown[i] = Some(t0 + Duration::from_millis(i as u64));
+        let realm = windows[i].pool.realm(RealmKind::Compat).unwrap();
+        assert_eq!(eval(&realm, mount), "mounted");
+        awake[i] = Some(realm);
+    }
+    // Shows tab `i`: its realm is asked for; while it waits, the hidden tab
+    // shown longest ago hibernates. Returns which one did.
+    let show = |i: usize, shown: &mut Vec<Option<Instant>>, awake: &mut Vec<Option<Realm>>| {
+        shown[i] = Some(Instant::now());
+        let realm = windows[i].pool.realm(RealmKind::Compat).unwrap();
+        let ticket = realm.eval(mount).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while account.waiting() == 0 {
+            assert!(Instant::now() < deadline, "the shown tab waits for room");
+            thread::sleep(Duration::from_millis(2));
+        }
+        let hidden = (0..3)
+            .filter(|&k| k != i && awake[k].is_some())
+            .map(|k| (k, shown[k]));
+        let chosen = crate::least_recently_shown(hidden).expect("a hidden tab to hibernate");
+        close(&awake[chosen].take().unwrap());
+        assert_eq!(wait(ticket).unwrap().value, "mounted", "the shown tab got its realm");
+        awake[i] = Some(realm);
+        assert_eq!(account.waiting(), 0);
+        chosen
+    };
+    assert_eq!(show(2, &mut shown, &mut awake), 0, "the tab shown longest ago");
+    assert_eq!(show(0, &mut shown, &mut awake), 1, "shown again, the first wakes");
+    assert!(awake[0].is_some() && awake[2].is_some() && awake[1].is_none());
+    assert!(account.used() <= account.budget());
+    for realm in awake.into_iter().flatten() {
+        close(&realm);
+    }
+}
 #[test]
 fn a_stuck_account_refuses_after_its_patience_and_closing_stops_a_wait() {
     let f = fixture_with(|c| {

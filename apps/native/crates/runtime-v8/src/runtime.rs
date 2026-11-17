@@ -593,6 +593,17 @@ impl Admission {
         }
     }
 }
+/// Which owner gives its realms back when the account is full (PM-513): the
+/// one shown longest ago, one never shown first. Windows hidden behind
+/// another tab hibernate in this order until the waiting realm is admitted.
+pub fn least_recently_shown<K>(
+    candidates: impl IntoIterator<Item = (K, Option<Instant>)>,
+) -> Option<K> {
+    candidates
+        .into_iter()
+        .min_by_key(|(_, shown)| *shown)
+        .map(|(k, _)| k)
+}
 /// One isolate's share of its account. Only its owner thread changes it.
 pub(crate) struct Reservation {
     account: Admission,

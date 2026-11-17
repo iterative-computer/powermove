@@ -179,6 +179,17 @@ fn media_stamp(published: &pm_kernel::Published) -> pm_panel_media::Stamp {
         revision: published.revision(),
     }
 }
+impl Host {
+    /// The Agent's runs carried across a restart of this window's panels.
+    pub(crate) fn keep_agent(&mut self, carry: Option<pm_builtins::AgentCarry>) {
+        if carry.is_some() {
+            self.agent_carry = carry;
+        }
+    }
+    pub(crate) fn take_agent(&mut self) -> Option<pm_builtins::AgentCarry> {
+        self.agent_carry.take()
+    }
+}
 impl Controller {
     pub fn start_builtins(&mut self, cx: &mut Context<Self>) {
         let application = self.session.is_none();
@@ -346,6 +357,9 @@ impl Controller {
                             }
                             v.builtins.ready.insert(id);
                         }
+                        // No room in the heap account now: it is loading, and
+                        // starts again once room is given back (PM-513).
+                        Err(error) if no_room(&error) => v.retry_builtin(id, check.clone(), cx),
                         Err(error) => {
                             check.close_panel(&id);
                             v.message = format!("Panel {id} could not start: {error}");
@@ -871,6 +885,10 @@ impl Controller {
         if self.restore_waiting() {
             return;
         }
+        // Hibernated behind another tab: nothing starts until it is shown.
+        if self.hibernated {
+            return;
+        }
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
         self.want_thumbnails(cx);
@@ -992,8 +1010,67 @@ impl Controller {
                     v.drain_builtins(cx);
                     cx.notify();
                 }
+                Err(error) if no_room(&error) => {
+                    if let Some(runtime) = v.builtins.runtime.clone() {
+                        v.retry_builtin(id, runtime, cx);
+                    }
+                }
                 Err(error) => v.message = format!("Panel {id} could not start: {error}"),
             });
+        })
+        .detach();
+    }
+    /// A built-in the heap account had no room for: it stays loading (never
+    /// an empty panel) and starts again every `ADMISSION_RETRY` while this
+    /// window keeps the same panels, until it is admitted (PM-513).
+    fn retry_builtin(&mut self, id: String, runtime: Arc<Builtins>, cx: &mut Context<Self>) {
+        eprintln!("Panel {id} waits for room in the heap account");
+        self.builtins.ready.remove(&id);
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(ADMISSION_RETRY).await;
+                let current = this
+                    .update(cx, |v, _| {
+                        v.builtins.runtime.as_ref().is_some_and(|r| Arc::ptr_eq(r, &runtime))
+                            && !v.builtins.ready.contains(&id)
+                    })
+                    .unwrap_or(false);
+                if !current {
+                    return;
+                }
+                let (again, panel) = (runtime.clone(), id.clone());
+                let ticket = cx
+                    .background_executor()
+                    .spawn(async move { again.restart_builtin(&panel) })
+                    .await;
+                let result = match ticket {
+                    Ok(ticket) => ticket.await.map(|evaluation| evaluation.generation.number),
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Err(error) if no_room(&error) => continue,
+                    result => {
+                        let _ = this.update(cx, |v, cx| {
+                            if !v.builtins.runtime.as_ref().is_some_and(|r| Arc::ptr_eq(r, &runtime)) {
+                                return;
+                            }
+                            match result {
+                                Ok(generation) => {
+                                    v.builtins.generations.insert(id.clone(), generation);
+                                    v.builtins.ready.insert(id.clone());
+                                    v.drain_builtins(cx);
+                                    cx.notify();
+                                }
+                                Err(error) => {
+                                    runtime.close_panel(&id);
+                                    v.message = format!("Panel {id} could not start: {error}");
+                                }
+                            }
+                        });
+                        return;
+                    }
+                }
+            }
         })
         .detach();
     }
@@ -3340,6 +3417,14 @@ pub(crate) fn returns_to_popover(was_docked: bool, docked: bool, parked: bool) -
 /// shown there, else the window that asked, else the editor.
 fn consent_window<W>(popover: Option<W>, asking: Option<W>, editor: W) -> W {
     popover.or(asking).unwrap_or(editor)
+}
+/// How long a built-in the heap account had no room for waits before it is
+/// started again.
+const ADMISSION_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+/// Whether a realm could not start only because the shared heap account had
+/// no room for it then (not a failure: it is started again).
+pub(crate) fn no_room(error: &pm_runtime_v8::Error) -> bool {
+    matches!(error, pm_runtime_v8::Error::Quota("isolate admission"))
 }
 fn agent_dismisses(open: bool, editor_took_key: bool) -> bool {
     open && editor_took_key

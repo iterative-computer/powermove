@@ -32,7 +32,7 @@ use std::{
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 mod export;
@@ -51,6 +51,14 @@ const MAX_RESTARTS: usize = 2;
 const PAGE_QUEUE: usize = 256;
 /// How often an idle owner looks for extensions changed on disk.
 const DISK_POLL: Duration = Duration::from_secs(3);
+/// How long a realm the heap account had no room for waits before it asks
+/// again (PM-513): its window shows that extensions are loading meanwhile.
+const ADMISSION_RETRY: Duration = Duration::from_secs(2);
+/// Whether a realm could not start only because the shared heap account had
+/// no room for it then: it is not a failure, and it is asked for again.
+fn no_room(error: &Error) -> bool {
+    matches!(error, Error::Quota("isolate admission"))
+}
 /// How long a synchronous layout read waits for the page, and for a page
 /// that has not started reading yet.
 const SYNC_LAYOUT_WAIT: Duration = Duration::from_millis(250);
@@ -894,6 +902,7 @@ impl ExtensionHost {
         let owner = Owner {
             writer,
             retired: false,
+            start_again: None,
             stores: vec![],
             confined: BTreeMap::new(),
             open: BTreeMap::new(),
@@ -1328,6 +1337,9 @@ struct Owner {
     writer: Writer,
     /// This generation is sealed; the next realm starts a new one.
     retired: bool,
+    /// The realm the account had no room for starts again then: the first
+    /// boot (`None`) or a restart at its clock.
+    start_again: Option<(Instant, Option<(f64, bool)>)>,
     stores: Vec<StoreLive>,
     /// What each Store extension would run, so a toggle can start it.
     confined: BTreeMap<String, (Discovered, ModuleGraph)>,
@@ -1379,6 +1391,15 @@ impl Owner {
         self.disk = self.stamp();
         self.boot();
         loop {
+            if let Some((when, clock)) = self.start_again
+                && Instant::now() >= when
+            {
+                self.start_again = None;
+                match clock {
+                    None => self.boot(),
+                    Some(clock) => self.boot_realm(clock),
+                }
+            }
             self.retry_deferred();
             self.send_moved();
             self.send_presented();
@@ -1386,7 +1407,9 @@ impl Owner {
             let held = self.moved.load(Ordering::Acquire) != 0
                 || self.presented.lock().unwrap().is_some();
             let wait = if self.deferred.is_empty() && !held {
-                DISK_POLL
+                self.start_again
+                    .map_or(DISK_POLL, |(when, _)| when.saturating_duration_since(Instant::now()))
+                    .min(DISK_POLL)
             } else {
                 Duration::from_millis(2)
             };
@@ -2550,6 +2573,14 @@ impl Owner {
         if tests::FAIL_START.lock().unwrap().as_deref() == Some(self.config.cache.as_path()) {
             return Err(Error::Host("no realm for this test".into()));
         }
+        #[cfg(test)]
+        if let Some((cache, times)) = &mut *tests::NO_ROOM.lock().unwrap()
+            && cache.as_path() == self.config.cache.as_path()
+            && *times > 0
+        {
+            *times -= 1;
+            return Err(Error::Quota("isolate admission"));
+        }
         if std::mem::take(&mut self.retired) {
             self.writer.generation += 1;
             forward_mailbox(&self.config.kernel, self.writer, self.inbox.clone());
@@ -2636,8 +2667,17 @@ impl Owner {
             self.shared.update(|p| p.ready = true);
             return;
         }
-        // A realm that cannot start has definitively failed: nothing is loading.
+        // The account has no room for it now: its extensions are loading, and
+        // it asks again, never settling with nothing (that read as "effect not
+        // installed" and drew the frame without them, PM-513).
         if let Err(error) = self.start_realm(None) {
+            if no_room(&error) {
+                trace(json!({"extensions": "waiting for room"}));
+                self.publish_without_realm(None);
+                self.start_again = Some((Instant::now() + ADMISSION_RETRY, None));
+                return;
+            }
+            // Any other reason: it has definitively failed, nothing is loading.
             self.shared.update(|p| {
                 p.ready = true;
                 p.toasts
@@ -2874,6 +2914,12 @@ impl Owner {
                 self.replay_window();
                 self.load(&records, "boot", "");
             }
+            // No room in the account now: still loading, and asked again.
+            Err(error) if no_room(&error) => {
+                trace(json!({"extensions": "waiting for room"}));
+                self.publish_without_realm(None);
+                self.start_again = Some((Instant::now() + ADMISSION_RETRY, Some(clock)));
+            }
             // No realm will finish this load: it has failed, by name, and
             // nothing waits for it (held frames, exports, stills).
             Err(error) => {
@@ -2910,6 +2956,52 @@ mod tests {
     use std::{fs, path::Path, time::Instant};
     /// The host whose compiled-extension cache is here cannot start a realm.
     pub(super) static FAIL_START: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+    /// The host whose cache is here finds no room in the heap account for its
+    /// realm this many times.
+    pub(super) static NO_ROOM: Mutex<Option<(std::path::PathBuf, usize)>> = Mutex::new(None);
+    /// PM-513: a window whose realm found no room in the shared heap account
+    /// said "effect not installed" and drew its frames without the effect,
+    /// for good. Now its extensions are loading meanwhile (nothing settles,
+    /// nothing is named unavailable), it asks again, and its effect arrives.
+    #[test]
+    fn a_realm_with_no_room_is_loading_until_it_starts_and_never_settles_without_it() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "deep",
+            &[(
+                "index.ts",
+                "export default function(api){api.effects.register({id:'deep.glow',label:'Glow',group:'Stylize',params:[],frag:'o = src(v_uv);'})}",
+            )],
+        );
+        *NO_ROOM.lock().unwrap() = Some((root.path().join("cache"), 2));
+        let fixture = Fixture::start(root);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let now = fixture.host.publication();
+            let has = now.contributions.as_ref().is_some_and(|c| {
+                c["effects"]
+                    .as_array()
+                    .is_some_and(|all| all.iter().any(|e| e["id"] == "deep.glow"))
+            });
+            if has && now.settled {
+                break;
+            }
+            assert!(
+                !now.settled,
+                "settled without its effect while the realm had no room: {now:?}"
+            );
+            assert!(
+                now.unavailable.is_empty(),
+                "named unavailable while it only waited: {:?}",
+                now.unavailable
+            );
+            assert!(Instant::now() < deadline, "it never started");
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(fixture.host.take_toasts().iter().all(|t| !t.contains("could not start")));
+        *NO_ROOM.lock().unwrap() = None;
+    }
     fn extension(root: &Path, id: &str, files: &[(&str, &str)]) {
         let directory = root.join(id);
         fs::create_dir_all(&directory).unwrap();

@@ -594,6 +594,9 @@ fn main() -> Result<()> {
                 panel_bridge::register(&bridge_windows, &entity, window.window_handle());
                 lifecycle::install(&entity, window, cx);
                 viewer2::install(&entity, cx);
+                // Hidden tabs give their realms back when the heap account
+                // is full (PM-513): one watcher for the app.
+                session::hibernation::watch(cx);
                 entity.update(cx, |c, cx| {
                     c.apply_skimming(cx);
                     c.load_skimming(cx);

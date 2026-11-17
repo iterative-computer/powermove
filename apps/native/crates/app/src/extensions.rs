@@ -1334,7 +1334,7 @@ impl Controller {
     /// Tells the shell whether the extension panels it lists are all in:
     /// until then a tab whose panel has not registered yet keeps a quiet body
     /// instead of saying it is unavailable.
-    fn tell_panels_ready(&mut self, ready: bool) {
+    pub(crate) fn tell_panels_ready(&mut self, ready: bool) {
         if self.extensions.panels_ready != ready {
             self.extensions.panels_ready = ready;
             self.host.borrow().send_command(
