@@ -3860,12 +3860,14 @@ fn g6_pointer_split_in_both_modes_is_one_undo_and_stays_selected(cx: &mut TestAp
         if all { assert!(s.recorder.reports.borrow().iter().any(|r| r.contains("Locked"))); }
         if mode == "tracks" {
             s.surface.read_with(&s.vcx, |t, _| {
+                let model = t.model();
+                let frame = t.frame().unwrap();
                 for (id, name, lane, row) in &before {
-                    let original = t.model().index.layer(id).unwrap();
+                    let original = model.index.layer(id).unwrap();
                     assert_eq!(original.preferred_track, *lane, "original {id} keeps its track");
-                    for layer in t.model().index.layers.iter().filter(|l| l.id == *id || l.name.to_string_lossy() == format!("{name} 2")) {
+                    for layer in model.index.layers.iter().filter(|l| l.id == *id || l.name.to_string_lossy() == format!("{name} 2")) {
                         assert_eq!(layer.preferred_track, *lane, "{} stays on the source track", layer.id);
-                        let op = t.frame().unwrap().ops.iter().find(|o| o.id == format!("clip:{}", layer.id)).unwrap();
+                        let op = frame.ops.iter().find(|o| o.id == format!("clip:{}", layer.id)).unwrap();
                         assert_eq!(op.bounds.y, *row, "{} stays in its displayed row", layer.id);
                     }
                 }
