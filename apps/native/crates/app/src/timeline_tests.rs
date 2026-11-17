@@ -3683,3 +3683,117 @@ fn g3_speed_keeps_automatically_packed_track_and_ripples_only_its_suffix(cx: &mu
         before
     );
 }
+
+#[::core::prelude::v1::test]
+#[ignore = "writes headless G6 review crops"]
+fn g6_capture_split_review() {
+    use gpui::{HeadlessAppContext, size};
+    use std::sync::Arc;
+    let Ok(dir) = std::env::var("PM_G6_CAPTURE") else { return };
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, scheme) in [("light", pm_design::Scheme::Light), ("dark", pm_design::Scheme::Dark)] {
+        let mut project: serde_json::Value = serde_json::from_str(&crate::v4_view_tests::strips_json()).unwrap();
+        project["layers"][1]["from"] = serde_json::json!(0.);
+        project["layers"][1]["track"] = serde_json::json!(1);
+        let fixture = project.to_string();
+        let rig = crate::v4_view_tests::rig_project("timeline", &fixture);
+        let first = publication(&rig);
+        let tokens = pm_design::Tokens::new(scheme, Default::default());
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load).with_automatic_optical_sizing()),
+            Arc::new(()),
+            || Some(Box::new(gpui_apple::metal_renderer::MetalHeadlessRenderer::new())),
+        );
+        cx.allow_parking();
+        let natives = Natives::default();
+        let recorder = Rc::new(Recorder::default());
+        let surface = cx.update(|cx| cx.new(|cx| TimelineSurface::new(
+            rig.kernel.clone(), PROJECT.into(), tokens.clone(), Rc::new(Recording(recorder)), natives.outline.clone(), Default::default(), cx,
+        )));
+        natives.views.borrow_mut().insert("timeline".into(), surface.clone().into());
+        let outline = natives.outline.clone();
+        let runtime = rig.runtime.clone();
+        let window = cx.open_window(size(px(1000.), px(320.)), |window, cx| {
+            cx.new(|cx| SurfaceView::new(runtime, first, tokens, natives, window, cx))
+        }).unwrap();
+        cx.update(|cx| outline.bind(window.root(cx).unwrap().downgrade()));
+        let pump = |cx: &mut HeadlessAppContext| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                cx.run_until_parked();
+                let idle = cx.update(|cx| surface.read(cx).idle());
+                if idle {
+                    for (_, ticket) in rig.runtime.publish() {
+                        let ticket = ticket.unwrap();
+                        while ticket.try_take().is_none() {
+                            assert!(std::time::Instant::now() < deadline, "outline capture timed out");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    let publications = rig.runtime.take_publications();
+                    cx.update(|cx| {
+                        let view = window.root(cx).unwrap();
+                        for p in publications { view.update(cx, |v, cx| v.publish(p, cx)); }
+                    });
+                    cx.run_until_parked();
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "timeline capture timed out");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            cx.run_until_parked();
+        };
+        pump(&mut cx);
+        cx.update(|cx| surface.update(cx, |s, cx| s.command("timeline.mode:tracks", 0., None, false, cx)));
+        pump(&mut cx);
+        cx.update(|cx| surface.update(cx, |s, cx| s.command("timeline.tool:split", 0., None, false, cx)));
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/tool-{name}.png")).unwrap();
+        let origin = cx.debug_bounds(window.into(), "timeline:surface").unwrap().unwrap().origin;
+        let position = cx.update(|cx| {
+            let s = surface.read(cx);
+            let f = s.frame().unwrap();
+            let v = f.viewport;
+            let clip = f.ops.iter().find(|o| o.id == "clip:a").unwrap();
+            origin + point(px((v.layer_column + (1. - v.scroll_time) * v.pps) as f32), px((clip.bounds.y + clip.bounds.height / 2.) as f32))
+        });
+        for (label, shift) in [("hover", false), ("all-layers", true)] {
+            cx.update_window(window.into(), |_, w, cx| {
+                w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, modifiers: Modifiers { shift, ..Default::default() }, ..Default::default() }), cx);
+            }).unwrap();
+            pump(&mut cx);
+            cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/{label}-{name}.png")).unwrap();
+        }
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(gpui::PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position, ..Default::default() }), cx);
+            w.dispatch_event(gpui::PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position, ..Default::default() }), cx);
+        }).unwrap();
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/result-{name}.png")).unwrap();
+    }
+}
+
+#[gpui::test]
+fn g6_pointer_split_in_both_modes_is_one_undo_and_stays_selected(cx: &mut TestAppContext) {
+    for mode in ["layers", "tracks"] {
+        let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.command(&format!("timeline.mode:{mode}"), 0., None, false, cx);
+            t.command("timeline.tool:split", 0., None, false, cx);
+        });
+        s.idle(cx);
+        let origin = s.origin();
+        let at = s.surface.read_with(&s.vcx, |t, _| {
+            let f = t.frame().unwrap();
+            let op = f.ops.iter().find(|o| o.id == "clip:a").unwrap();
+            origin + point(px((f.viewport.layer_column + (1. - f.viewport.scroll_time) * f.viewport.pps) as f32), px((op.bounds.y + op.bounds.height / 2.) as f32))
+        });
+        s.vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        s.vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        assert_eq!(s.out_of("a"), 1., "{mode}");
+        assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Split);
+        s.undo(cx);
+        assert_eq!(s.out_of("a"), 2., "one Undo restores {mode}");
+    }
+}

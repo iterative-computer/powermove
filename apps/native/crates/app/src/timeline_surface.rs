@@ -1720,6 +1720,22 @@ impl TimelineSurface {
         self.pointer = Some(event.position);
         self.sideways = false;
         let (x, y) = self.local(event.position);
+        if self.model.edit_tool == pm_panel_timeline::EditTool::Split
+            && x >= self.view.layer_column && y >= self.tokens.metrics.ruler as f64 {
+            if let Some((id, _)) = self.clip_at(x, y) {
+                let at = self.model.split_time(self.time_at(x), self.delegate.time(cx), self.snap_radius());
+                let all = event.modifiers.shift;
+                let locked = self.model.index.layers.iter().any(|l| (all || l.id == id)
+                    && l.effectively_locked && at > l.from && at < l.from + l.duration);
+                if locked { self.delegate.report("Locked layers were skipped.".into(), cx); }
+                match self.model.split_at(&id, at, all) {
+                    Ok(plan) if !plan.calls.is_empty() => { self.queue.push_back(Job::Apply(plan)); self.pump(cx); }
+                    Err(e) => self.delegate.report(e.to_string(), cx),
+                    _ => (),
+                }
+            }
+            return;
+        }
         // A new press starts with no graph drag state.
         self.transform = None;
         self.graph_axis = false;
@@ -3234,7 +3250,10 @@ impl TimelineSurface {
         let moved = self.pointer.is_some_and(|seen| seen != position);
         self.pointer = Some(position);
         let (x, y) = self.local(position);
-        if moved {
+        if self.model.edit_tool == pm_panel_timeline::EditTool::Split {
+            self.set_skimmer(None, cx);
+            cx.notify();
+        } else if moved {
             self.skim_to(x, cx);
             self.skim_playhead = Some(self.delegate.time(cx));
         } else if self.skim_live(cx) {
@@ -3259,7 +3278,9 @@ impl TimelineSurface {
         }
         self.hover_clip = hovered;
         let m = self.tokens.metrics;
-        let cursor = if let Some(cursor) = self.graph_cursor(x, y) {
+        let cursor = if self.model.edit_tool == pm_panel_timeline::EditTool::Split && self.clip_at(x, y).is_some() {
+            CursorStyle::Split
+        } else if let Some(cursor) = self.graph_cursor(x, y) {
             cursor
         } else if (x - self.view.layer_column).abs() <= m.hit as f64 / 4.
             && y >= m.ruler as f64
@@ -4206,7 +4227,28 @@ impl Render for TimelineSurface {
             _ => None,
         };
         let weak = this.clone();
+        if let Some(pointer) = self.pointer {
+            let (x, y) = self.local(pointer);
+            if self.model.edit_tool == EditTool::Split && self.clip_at(x, y).is_some() {
+                self.cursor = CursorStyle::Split;
+            } else if self.cursor == CursorStyle::Split { self.cursor = CursorStyle::Arrow; }
+        } else if self.cursor == CursorStyle::Split { self.cursor = CursorStyle::Arrow; }
         let t = &self.tokens;
+        let tools = div().absolute().left(px(t.metrics.inset)).top(px(0.)).h(px(t.metrics.ruler))
+            .flex().items_center().children([
+                (EditTool::Selection, "cursorarrow", "Selection (V)"),
+                (EditTool::Roll, "arrow.left.and.right.righttriangle.left.righttriangle.right", "Roll (R)"),
+                (EditTool::Split, "scissors", "Split (C) — click a clip to cut it. ⇧-click cuts every layer."),
+            ].into_iter().map(|(tool, symbol, label)| {
+                let image = pm_shell::symbol::rasterize(symbol, t.metrics.symbol_panel, pm_shell::symbol::Weight::Regular, t.colors.text, window.scale_factor());
+                div().id(SharedString::from(tool.command())).size(px(t.metrics.control)).flex().items_center().justify_center()
+                    .rounded(px(t.metrics.control_radius)).when(self.model.edit_tool == tool, |d| d.bg(rgb(t.colors.floating)))
+                    .role(Role::Button).aria_label(label).aria_selected(self.model.edit_tool == tool)
+                    .tooltip(pm_shell::kit::tooltip(t, label))
+                    .children(image.map(|im| img(ImageSource::Render(im)).size(px(t.metrics.symbol_panel))))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |s, _, _, cx| { s.command(&tool.command(), 0., None, false, cx); }))
+            }));
         // Media dragged over the timeline: where it would land, an
         // insertion line between layers and the frame under the pointer.
         if !cx.has_active_drag() {
@@ -4376,6 +4418,9 @@ impl Render for TimelineSurface {
             .relative()
             .size_full()
             .cursor(self.cursor)
+            .on_modifiers_changed(cx.listener(|s, _, _, cx| {
+                if s.model.edit_tool == EditTool::Split { cx.notify(); }
+            }))
             .role(Role::ListBox)
             .aria_label(if region.is_some() && graph.is_none() {
                 format!("Timeline tracks. {}", graph_render::EMPTY)
@@ -4788,6 +4833,27 @@ impl Render for TimelineSurface {
                         }
                         if let Some(surface) = this.upgrade() {
                             let surface = surface.read(cx);
+                            if surface.model.edit_tool == pm_panel_timeline::EditTool::Split {
+                                if let Some(pointer) = surface.pointer {
+                                    let (x, y) = surface.local(pointer);
+                                    if let Some((id, _)) = surface.clip_at(x, y) {
+                                        let at = surface.model.split_time(surface.time_at(x), surface.delegate.time(cx), surface.snap_radius());
+                                        let cut_x = surface.view.layer_column + (at - surface.view.scroll_time) * surface.view.pps;
+                                        for op in surface.frame.iter().flat_map(|f| &f.ops).filter(|o| o.id.starts_with("clip:")) {
+                                            let layer = &op.id[5..];
+                                            if (window.modifiers().shift || layer == id) && surface.model.index.layer(layer).is_some_and(|l| at > l.from && at < l.from + l.duration) {
+                                                window.paint_quad(PaintQuad::new(Bounds::new(bounds.origin + point(px(cut_x as f32), px(op.bounds.y as f32)), size(px(1.), px(op.bounds.height as f32)))).background(rgb(tokens.colors.accent)));
+                                            }
+                                        }
+                                        let label = crate::captions_panel::timecode(at, surface.model.index.fps);
+                                        let runs = [TextRun { len: label.len(), font: window.text_style().font(), color: rgb_to_hsla(rgb(tokens.colors.text)), background_color: None, underline: None, strikethrough: None, letter_spacing: None }];
+                                        let text = window.text_system().shape_line(label.into(), px(tokens.typography.minimum), &runs);
+                                        let pos = bounds.origin + point(px((cut_x as f32 + 12.).min(f32::from(bounds.size.width) - 100.)), px((y as f32 - 24.).max(tokens.metrics.ruler)));
+                                        window.paint_quad(PaintQuad::new(Bounds::new(pos - point(px(4.), px(2.)), size(px(94.), px(20.)))).background(rgb(tokens.colors.floating)).corner_radii(px(tokens.metrics.control_radius)));
+                                        let _ = text.paint(pos, px(16.), TextAlign::Left, None, window, cx);
+                                    }
+                                }
+                            }
                             if let Gesture::ParentPick { origin, at, target, moved: true, .. } = &surface.gesture {
                                 // v1 installParentPickwhip: the same cubic and target label.
                                 let mut line = PathBuilder::stroke(px(2.));
@@ -4821,6 +4887,7 @@ impl Render for TimelineSurface {
                                     if s.bounds.contains(&e.position) && !over {
                                         s.hover(e.position, cx);
                                     } else {
+                                        if s.model.edit_tool == EditTool::Split { s.pointer = None; cx.notify(); }
                                         s.set_skimmer(None, cx);
                                     }
                                 });
@@ -4831,6 +4898,7 @@ impl Render for TimelineSurface {
                             if phase == DispatchPhase::Capture {
                                 let _ = exited.update(cx, |s, cx| {
                                     s.pointer = None;
+                                    if s.model.edit_tool == EditTool::Split { cx.notify(); }
                                     s.set_skimmer(None, cx);
                                 });
                             }
@@ -4863,6 +4931,7 @@ impl Render for TimelineSurface {
             .children(reorder.into_iter().flatten().flatten())
             .children(effect_row)
             .children(tip)
+            .child(tools)
             .children(self.graph_readout_element())
     }
 }

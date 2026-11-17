@@ -1947,6 +1947,7 @@ const SELECTION: &[&str] = &[
 const DOCUMENT: &[&str] = &[
     "timeline.toggleRoll",
     "timeline.tool:selection",
+    "timeline.tool:split",
     "timeline.tool:ripple",
     "timeline.tool:roll",
     "timeline.tool:slip",
