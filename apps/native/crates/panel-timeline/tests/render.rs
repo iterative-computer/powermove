@@ -604,6 +604,7 @@ fn audio_clips_draw_one_bar_per_point_from_their_trimmed_peaks() {
         peaks: peaks.into(),
         rate: 10.,
         trim: 2.,
+        speed: 1., pyramid: Default::default(),
     }));
     let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
     let body = f.ops.iter().find(|o| o.id == "clip:a").unwrap();

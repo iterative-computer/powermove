@@ -31,17 +31,19 @@ pub const RATE: f64 = 100.;
 enum State {
     Reading(Vec<async_channel::Sender<()>>),
     /// The envelope and its buckets per second.
-    Ready(Arc<[f32]>, f64),
+    Ready(Arc<[f32]>, f64, Arc<[Arc<[f32]>]>),
     Failed,
 }
 static CACHE: Mutex<Option<HashMap<Key, State>>> = Mutex::new(None);
 
 /// What a timeline can draw for `key` now: the envelope, `Some(None)` while
 /// it is read (or wanted), `None` when the clip has no readable audio.
-pub fn lookup(key: &Key) -> Option<Option<(Arc<[f32]>, f64)>> {
+pub fn lookup(key: &Key) -> Option<Option<(Arc<[f32]>, f64, Arc<[Arc<[f32]>]>)>> {
     let cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     match cache.as_ref().and_then(|c| c.get(key)) {
-        Some(State::Ready(peaks, rate)) => Some(Some((peaks.clone(), *rate))),
+        Some(State::Ready(peaks, rate, pyramid)) => {
+            Some(Some((peaks.clone(), *rate, pyramid.clone())))
+        }
         Some(State::Failed) => None,
         Some(State::Reading(_)) | None => Some(None),
     }
@@ -67,7 +69,10 @@ pub fn read(key: &Key) -> async_channel::Receiver<()> {
         }
     }
     let state = match envelope(key) {
-        Some((peaks, rate)) => State::Ready(peaks, rate),
+        Some((peaks, rate)) => {
+            let pyramid = pyramid(&peaks);
+            State::Ready(peaks, rate, pyramid)
+        }
         None => State::Failed,
     };
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
@@ -136,7 +141,7 @@ mod tests {
             let doc = record(&text);
             let key = Key::of(path.clone(), doc.root());
             let _ = read(&key).recv_blocking();
-            let (peaks, rate) = lookup(&key).unwrap().unwrap();
+            let (peaks, rate, _) = lookup(&key).unwrap().unwrap();
             assert!((rate - RATE).abs() < 1e-9);
             let loudest = peaks
                 .iter()
@@ -146,5 +151,58 @@ mod tests {
                 .0;
             assert_eq!(loudest, at, "{text}");
         }
+    }
+}
+
+/// Successive min/max-magnitude summaries; performed only by the decode worker.
+fn pyramid(peaks: &[f32]) -> Arc<[Arc<[f32]>]> {
+    let mut levels: Vec<Arc<[f32]>> = Vec::new();
+    let mut previous = peaks;
+    while previous.len() > 1 {
+        let next: Arc<[f32]> = previous
+            .chunks(2)
+            .map(|pair| pair.iter().copied().fold(0., f32::max))
+            .collect();
+        levels.push(next);
+        previous = levels.last().unwrap();
+    }
+    levels.into()
+}
+
+#[cfg(test)]
+mod pcm_tests {
+    use super::*;
+    #[test]
+    fn peak_summary_matches_known_pcm_and_pyramid_preserves_extrema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known.wav");
+        let samples: Vec<i16> = (0..960)
+            .map(|i| if i < 480 { 8192 } else { -24576 })
+            .collect();
+        let bytes = (samples.len() * 2) as u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&48000u32.to_le_bytes());
+        wav.extend_from_slice(&96000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&bytes.to_le_bytes());
+        for sample in samples {
+            wav.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(&path, wav).unwrap();
+        let (peaks, rate) = envelope(&Key::of(path, None)).unwrap();
+        assert_eq!(rate, 100.);
+        assert_eq!(peaks.len(), 2);
+        assert!((peaks[0] - 0.25).abs() < 0.0001);
+        assert!((peaks[1] - 0.75).abs() < 0.0001);
+        let pyramid = pyramid(&peaks);
+        assert_eq!(&*pyramid[0], &[0.75]);
     }
 }

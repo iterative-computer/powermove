@@ -64,6 +64,7 @@ pub fn scene(t: &Tokens) -> Scene {
         peaks: vec![0., 0.8, 0.4, 1., 1., 0.2].into(),
         rate: 1.,
         trim: 0.,
+        speed: 1., pyramid: Default::default(),
     }));
     let mut keys = vec![key("linear", 1.1), key("ease", 2.25), key("hold", 3.5)];
     keys[1].interpolation = Interpolation::Ease;

@@ -467,6 +467,7 @@ impl paint::ModelPresenter for Presentation {
             peaks: vec![0., 0.25, 0.5].into(),
             rate: 100.,
             trim: 0.,
+        speed: 1., pyramid: Default::default(),
         }))
     }
     fn interpolation(&self, _: &Key) -> paint::Interpolation {

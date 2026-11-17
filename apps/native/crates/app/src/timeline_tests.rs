@@ -13,6 +13,7 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 
 #[derive(Default)]
 pub(crate) struct Recorder {
+    pub audio: RefCell<Option<([f64; 2], i64, bool)>>,
     pub time: RefCell<f64>,
     pub seeks: RefCell<Vec<f64>>,
     pub effects: RefCell<Vec<HostEffect>>,
@@ -37,6 +38,7 @@ pub(crate) struct Recorder {
 }
 pub(crate) struct Recording(pub Rc<Recorder>);
 impl Delegate for Recording {
+    fn audio_peaks(&self, _: &App) -> Option<([f64; 2], i64, bool)> { *self.0.audio.borrow() }
     fn time(&self, _: &App) -> f64 {
         *self.0.time.borrow()
     }

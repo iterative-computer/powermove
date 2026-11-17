@@ -2509,6 +2509,14 @@ impl Controller {
 }
 struct ControllerDelegate(WeakEntity<Controller>);
 impl crate::timeline_surface::Delegate for ControllerDelegate {
+    fn audio_peaks(&self, cx: &App) -> Option<([f64; 2], i64, bool)> {
+        let controller = self.0.upgrade()?;
+        let v = controller.read(cx);
+        let status = v.viewer.as_ref()?.status();
+        let levels = status.levels.as_ref()?;
+        let playing = status.clock.is_some_and(|c| c.state == pm_protocol::clock::TransportState::Playing);
+        Some((std::array::from_fn(|i| levels.master.peak.get(i).or(levels.master.peak.first()).copied().unwrap_or(0.) as f64), levels.media_time.get(), playing))
+    }
     fn time(&self, cx: &App) -> f64 {
         self.0.upgrade().map_or(0., |c| c.read(cx).time())
     }

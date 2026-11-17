@@ -1,6 +1,8 @@
 //! Native timeline host element. Pointer input runs Rust gesture sessions against
 //! the kernel on a worker; JS keeps the outline and hears about it by publication.
 //! No sample waits on V8, and the main thread never waits on the kernel.
+#[path = "timeline_audio.rs"]
+mod audio;
 use crate::v4_view::Outline;
 use gpui::{prelude::*, *};
 use pm_design::Tokens;
@@ -64,6 +66,8 @@ pub struct EffectDrop {
     pub layer: Option<String>,
 }
 pub trait Delegate: 'static {
+    /// Latest actual output-mix peaks, including scrub grains; None at idle.
+    fn audio_peaks(&self, _cx: &App) -> Option<([f64; 2], i64, bool)> { None }
     fn time(&self, cx: &App) -> f64;
     /// Media dropped on the timeline (Finder files, Project items).
     fn drop_media(&self, _drop: MediaDrop, _cx: &mut App) {}
@@ -388,6 +392,7 @@ pub struct TimelineSurface {
     sources: Sources,
     /// Waveform files being read for this timeline.
     reading: BTreeSet<crate::waveforms::Key>,
+    audio: audio::AudioState,
     model: Arc<TimelineModel>,
     scene: Option<Arc<Scene>>,
     /// The timeline panel holds the keyboard (the shell says, as it lays
@@ -531,6 +536,7 @@ impl TimelineSurface {
             offline: Arc::new(offline),
             sources: Default::default(),
             reading: Default::default(),
+            audio: Default::default(),
             model: Default::default(),
             scene: None,
             graph: None,
@@ -758,6 +764,7 @@ impl TimelineSurface {
     }
     /// Escape: cancel the active gesture. Foreign edits survive in the kernel.
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.audio_cancel(cx) { return true; }
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
             Gesture::Idle => return false,
             Gesture::Dragging { .. } => self.queue.push_back(Job::Finish(false)),
@@ -1310,6 +1317,14 @@ impl TimelineSurface {
             let delegate = self.delegate.clone();
             cx.defer(move |cx| delegate.view_moved(cx));
         }
+        let base = self.frame.clone()?;
+        let mut decorated = (*base).clone();
+        if self.audio.base.as_ref().is_some_and(|previous| Arc::ptr_eq(previous, &base)) {
+            decorated.ops.extend(self.audio.ops.iter().filter(|o| o.id.starts_with("audio-level:") || o.id.starts_with("audio-fade:")).cloned());
+        }
+        self.audio_frame(&mut decorated, cx);
+        self.audio.ops = decorated.ops.into_iter().filter(|o| o.id.starts_with("audio-")).collect();
+        self.audio.base = Some(base);
         self.frame.clone()
     }
     /// v1–3's `timeline` service: `pps`, `scrollT`, `scrollY`, `graph`,
@@ -1711,6 +1726,7 @@ impl TimelineSurface {
         }
     }
     fn on_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        if self.audio_down(event, cx) { return; }
         self.pointer = Some(event.position);
         self.sideways = false;
         let (x, y) = self.local(event.position);
@@ -2362,6 +2378,7 @@ impl TimelineSurface {
         self.tokens.metrics.keyframe as f64 / self.view.pps
     }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) -> bool {
+        if self.audio_move(event, cx) { return true; }
         if let Gesture::ParentPick { ids, origin, .. } = &self.gesture {
             let target = self.parent_target(ids, event.position);
             let delta = event.position - *origin;
@@ -2726,6 +2743,7 @@ impl TimelineSurface {
         self.pump(cx);
     }
     fn on_up(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.audio_up(cx) { return true; }
         self.transform = None;
         self.readout = None;
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
@@ -3949,10 +3967,12 @@ impl ModelPresenter for Presenter {
             .and_then(|root| root.get("assets")?.get(asset));
         let key = crate::waveforms::Key::of(path.clone(), record);
         Some(match crate::waveforms::lookup(&key)? {
-            Some((peaks, rate)) => Some(pm_panel_timeline::render::Waveform {
+            Some((peaks, rate, pyramid)) => Some(pm_panel_timeline::render::Waveform {
                 peaks,
                 rate,
                 trim: layer.trim,
+                speed: layer.speed,
+                pyramid,
             }),
             None => {
                 self.wanted.borrow_mut().push(key);
@@ -4858,6 +4878,7 @@ impl Render for TimelineSurface {
             .children(effect_row)
             .children(tip)
             .children(self.graph_readout_element())
+            .child(self.audio_overlay(cx))
     }
 }
 impl TimelineSurface {
@@ -5549,8 +5570,7 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     let floor = top + h - inset;
                     let mut path = PathBuilder::fill();
                     path.move_to(point(px(x0), px(floor)));
-                    // Silence draws nothing: a bar shorter than `minBar`
-                    // would run along the foot as an underline.
+                    // Silence has no floor underline.
                     for (i, peak) in bars.iter().enumerate() {
                         let bar = peak.as_f64().unwrap_or(0.) as f32 * room;
                         let bar = if bar < min_bar { 0. } else { bar };

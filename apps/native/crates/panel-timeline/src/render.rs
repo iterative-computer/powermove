@@ -216,6 +216,40 @@ pub struct Waveform {
     pub rate: f64,
     /// Media seconds skipped before the clip starts.
     pub trim: f64,
+    /// Source seconds per composition second.
+    pub speed: f64,
+    /// Coarser summaries, computed on the decode worker, shared at every zoom.
+    pub pyramid: std::sync::Arc<[std::sync::Arc<[f32]>]>,
+}
+impl Waveform {
+    pub fn peak(&self, local: f64, width: f64) -> f32 {
+        let a = self.trim + local * self.speed;
+        let b = a + width * self.speed;
+        if !a.is_finite() || !b.is_finite() {
+            return 0.;
+        }
+        let from = (a.min(b) * self.rate).floor().max(0.) as usize;
+        let to = ((a.max(b) * self.rate).ceil().max(0.) as usize).max(from.saturating_add(1));
+        let mut cursor = from.min(self.peaks.len());
+        let end = to.min(self.peaks.len());
+        let mut peak = 0f32;
+        while cursor < end {
+            let alignment = if cursor == 0 {
+                usize::BITS - 1
+            } else {
+                cursor.trailing_zeros()
+            };
+            let level = ((end - cursor).ilog2().min(alignment) as usize).min(self.pyramid.len());
+            let values = if level == 0 {
+                &self.peaks
+            } else {
+                &self.pyramid[level - 1]
+            };
+            peak = peak.max(values[cursor >> level]);
+            cursor += 1usize << level;
+        }
+        peak
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edge {
@@ -1480,16 +1514,19 @@ fn minor_step(label_step: f64, pps: f64, fps: f64, frames: bool) -> Option<f64> 
         .find(|step| step * pps >= MINOR_ROOM)
 }
 /// A waveform is a soft shape in the strip's own hue, not a solid one.
-const WAVEFORM_OPACITY: f64 = 0.72;
+const WAVEFORM_OPACITY: f64 = 0.45;
 fn valid_clip(c: &Clip) -> bool {
     c.from.is_finite()
         && c.duration.is_finite()
         && c.duration >= 0.
         && (c.from + c.duration).is_finite()
-        && c.audio
-            .iter()
-            .flatten()
-            .all(|w| w.rate.is_finite() && w.rate > 0. && w.trim.is_finite() && w.trim >= 0.)
+        && c.audio.iter().flatten().all(|w| {
+            w.rate.is_finite()
+                && w.rate > 0.
+                && w.trim.is_finite()
+                && w.trim >= 0.
+                && w.speed.is_finite()
+        })
 }
 /// The tracks a reader sees, in a frame's x: the whole view's, or for a
 /// frame prepared wider ([`Scene::prepare_wide`]) the part the view shows.
@@ -1739,14 +1776,7 @@ fn paint_clip(
             .map(|w| {
                 let count = r.width.floor().max(0.) as usize;
                 (0..count)
-                    .map(|i| {
-                        let at = w.trim + (r.x + i as f64 - left) / v.pps;
-                        let from = (at * w.rate).floor().max(0.) as usize;
-                        let to = (((at + 1. / v.pps) * w.rate).floor() as usize).max(from + 1);
-                        w.peaks
-                            .get(from.min(w.peaks.len())..to.min(w.peaks.len()))
-                            .map_or(0., |s| s.iter().copied().fold(0., f32::max))
-                    })
+                    .map(|i| w.peak((r.x + i as f64 - left) / v.pps, 1. / v.pps))
                     .collect()
             })
             .unwrap_or_default();
@@ -2695,5 +2725,23 @@ pub fn display_kind<'a>(kind: &'a str, definition: Option<&str>) -> &'a str {
         ("extension", Some("powermove.3d.light")) => "light3d",
         ("extension", Some("powermove.3d.camera")) => "camera3d",
         _ => kind,
+    }
+}
+
+#[cfg(test)]
+mod audio_source_range_tests {
+    use super::*;
+    #[test]
+    fn waveform_source_range_respects_trim_and_speed() {
+        let w = Waveform {
+            peaks: vec![0.1, 0.2, 0.3, 0.4].into(),
+            rate: 1.,
+            trim: 1.,
+            speed: 2.,
+            pyramid: Default::default(),
+        };
+        assert_eq!(w.peak(0., 0.5), 0.2);
+        assert_eq!(w.peak(0.5, 0.5), 0.3);
+        assert_eq!(w.peak(2., 0.5), 0.);
     }
 }
