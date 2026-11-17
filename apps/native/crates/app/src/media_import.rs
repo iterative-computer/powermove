@@ -362,7 +362,14 @@ impl Controller {
         };
         let edge = drop.edge.unwrap_or(Edge::In);
         let placed = self.place_transition(&layer, edge, drop.across.as_deref(), id);
-        self.run_placed(placed, &drop.label, vec![layer], cx);
+        // Named by the registry (a search row's label also names its group).
+        let label = self
+            .kernel
+            .state()
+            .provider("transitions", id)
+            .and_then(|r| r.definition.get("label")?.as_str().map(str::to_owned))
+            .unwrap_or_else(|| drop.label.clone());
+        self.run_placed(placed, &label, vec![layer], cx);
     }
     /// Shift-D (Premiere's Apply Default Transitions to Selection): a
     /// Crossfade on each selected clip's In; in Tracks, across the cut when
