@@ -5594,6 +5594,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
  "pm-design",
+ "pm-wave",
  "raw-window-handle",
  "resvg",
  "serde",

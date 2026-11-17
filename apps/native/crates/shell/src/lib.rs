@@ -81,3 +81,6 @@ pub use native::{
 
 #[cfg(all(test, target_os = "macos"))]
 mod utility_capture_tests;
+
+#[cfg(target_os = "macos")]
+pub mod wave;
