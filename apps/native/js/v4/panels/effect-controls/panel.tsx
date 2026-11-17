@@ -136,7 +136,9 @@ export function EffectControls(props: PanelProps) {
       label={PANEL_TITLE}
       metadata={{ panel: PANEL_ID }}
       style={{
-        background: t("colors.panel"),
+        background: t(
+          p.count === 0 && drag ? "colors.selected_fill" : "colors.panel",
+        ),
         borderRadius: t("metrics.panel_radius"),
         ...(props.increaseContrast
           ? {
@@ -245,14 +247,24 @@ export function EffectControls(props: PanelProps) {
           action={null}
         />
       ) : p.count === 0 ? (
-        <UI.EmptyState
-          label="No Effects"
-          explanation="Drag an effect here from Effects, or add one."
-          attr={{ symbol: "wand.and.rays" }}
-          action={trailingAdd}
+        <div
+          id={`${PANEL_ID}:empty`}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            minHeight: t("metrics.row"),
+            paddingLeft: t("metrics.inset"),
+            paddingRight: t("metrics.inset"),
+            color: t("colors.secondary"),
+            fontSize: t("typography.body"),
+            ...(drag ? { background: t("colors.selected_fill") } : {}),
+          }}
           onDragOver={(e) => dragOver(e, 0)}
+          onDragLeave={() => setDrag(null)}
           onDrop={drop}
-        />
+        >
+          <text>{drag ? "Drop to add effect" : "No effects"}</text>
+        </div>
       ) : (
         <>
           <UI.List

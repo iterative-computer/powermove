@@ -99,6 +99,20 @@ fn capture_builtin_panels() {
                 }
                 let image = cx.capture_screenshot(window.into()).unwrap();
                 image.save(format!("{dir}/{panel}-{name}.png")).unwrap();
+                if panel == "inspector" {
+                    window
+                        .update(&mut cx, |frame, _, cx| {
+                            frame
+                                .view
+                                .update(cx, |view, cx| view.review_scroll_to(f32::MAX, cx));
+                        })
+                        .unwrap();
+                    cx.run_until_parked();
+                    cx.capture_screenshot(window.into())
+                        .unwrap()
+                        .save(format!("{dir}/{panel}-{name}-bottom.png"))
+                        .unwrap();
+                }
                 drop(r);
             });
         }
@@ -138,7 +152,8 @@ fn capture_agent_states() {
     };
     let dir = std::env::var("PM_PANEL_CAPTURE").unwrap_or_else(|_| "/tmp/pm-shots/panels".into());
     std::fs::create_dir_all(&dir).unwrap();
-    let r = rig("agent", 1);
+    let panel = std::env::var("PM_CAPTURE_STATE_PANEL").unwrap_or_else(|_| "agent".into());
+    let r = rig(&panel, 1);
     let mut files: Vec<_> = std::fs::read_dir(&states)
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -157,9 +172,13 @@ fn capture_agent_states() {
         for (scheme_name, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
             objc2::rc::autoreleasepool(|_| {
                 let tokens = Tokens::new(scheme, Accessibility::default());
-                let (w, h) = (tokens.metrics.agent_width, tokens.metrics.agent_height);
+                let (w, h) = if panel == "layer-effects" {
+                    (320., 200.)
+                } else {
+                    (tokens.metrics.agent_width, tokens.metrics.agent_height)
+                };
                 let first = pm_builtins::Publication {
-                    panel: "agent".into(),
+                    panel: panel.clone(),
                     generation: 1,
                     surface: surface.clone(),
                 };
@@ -191,7 +210,7 @@ fn capture_agent_states() {
                 }
                 let image = cx.capture_screenshot(window.into()).unwrap();
                 image
-                    .save(format!("{dir}/agent-{name}-{scheme_name}.png"))
+                    .save(format!("{dir}/{panel}-{name}-{scheme_name}.png"))
                     .unwrap();
             });
         }

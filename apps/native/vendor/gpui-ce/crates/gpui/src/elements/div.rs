@@ -4210,7 +4210,7 @@ impl Interactivity {
                 if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
                     let mut scroll_offset = scroll_offset.borrow_mut();
                     let old_scroll_offset = *scroll_offset;
-                    let mut delta = event.delta.pixel_delta(line_height);
+                    let mut delta = window.scroll_delta_remaining(event.delta.pixel_delta(line_height));
 
                     if restrict_scroll_to_axis
                         && event.delta.precise()
@@ -4249,7 +4249,22 @@ impl Interactivity {
                     scroll_offset.y = (scroll_offset.y + delta_y).clamp(-scroll_max.y, px(0.));
                     scroll_offset.x = (scroll_offset.x + delta_x).clamp(-scroll_max.x, px(0.));
                     if *scroll_offset != old_scroll_offset {
-                        cx.stop_propagation();
+                        let mut consumed = *scroll_offset - old_scroll_offset;
+                        // A single-axis scroller may map the other wheel axis
+                        // into its own; report consumption in the input's axes.
+                        if !restrict_scroll_to_axis {
+                            if overflow.x == Overflow::Scroll && overflow.y != Overflow::Scroll && delta.x.is_zero() {
+                                consumed = point(px(0.), consumed.x);
+                            } else if overflow.y == Overflow::Scroll && overflow.x != Overflow::Scroll && delta.y.is_zero() {
+                                consumed = point(consumed.y, px(0.));
+                            }
+                        }
+                        window.consume_scroll_delta(delta, consumed);
+                        let remaining = window.scroll_delta_remaining(delta);
+                        // Let ancestors consume the unused distance in this same event.
+                        if remaining.x.is_zero() && remaining.y.is_zero() {
+                            cx.stop_propagation();
+                        }
                         drop(scroll_offset);
                         let moved = layer.is_some_and(|key| {
                             window.scroll_layer_step(key, current_view, cx)

@@ -15,6 +15,16 @@ use pm_shell::workspace;
 
 const TITLE: &str = "Panel Library";
 
+fn panel_action(open: bool, elapsed: Option<std::time::Duration>) -> &'static str {
+    if open && elapsed.is_some_and(|t| t < std::time::Duration::from_millis(1500)) {
+        "Added ✓"
+    } else if open {
+        "Show"
+    } else {
+        "Add"
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
     BuiltIn,
@@ -223,6 +233,9 @@ pub struct PanelLibrary {
     motion: pm_shell::motion::Motion<u64>,
     focus: std::collections::HashMap<String, FocusHandle>,
     focused: Option<String>,
+    added: std::collections::HashMap<String, std::time::Instant>,
+    errors: std::collections::HashMap<String, String>,
+    announcement: String,
     #[cfg(test)]
     fixture: Option<(Vec<PanelCard>, Vec<WorkspaceCard>)>,
 }
@@ -242,7 +255,38 @@ impl PanelLibrary {
         }
         cx.notify();
     }
-    fn send(&self, command: String, cx: &mut Context<Self>) {
+    fn send(&mut self, command: String, cx: &mut Context<Self>) {
+        if let Some(id) = command.strip_prefix("panel:activate:") {
+            if let Some(shell) = self.shell.as_ref().and_then(WeakEntity::upgrade) {
+                let was_open = shell.read(cx).layout.find(id).is_some();
+                let result = shell.update(cx, |v, cx| v.show_library_panel(id, cx));
+                match result {
+                    Ok(dock) => {
+                        self.errors.remove(id);
+                        if !was_open {
+                            self.added.insert(id.into(), std::time::Instant::now());
+                            self.announcement = format!(
+                                "{} added to the {} dock",
+                                shell.read(cx).panels(cx).title(id),
+                                dock
+                            );
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(1500))
+                                    .await;
+                                let _ = this.update(cx, |_, cx| cx.notify());
+                            })
+                            .detach();
+                        }
+                    }
+                    Err(error) => {
+                        self.errors.insert(id.into(), error);
+                    }
+                }
+                cx.notify();
+                return;
+            }
+        }
         if let Some(editor) = self.editor.as_ref().and_then(WeakEntity::upgrade) {
             if let Some(id) = command.strip_prefix("library-delete:") {
                 editor.update(cx, |v, cx| {
@@ -273,11 +317,12 @@ impl PanelLibrary {
         let command = format!("panel:activate:{}", card.id);
         let click = command.clone();
         let keyboard = command.clone();
-        let label = format!(
-            "{} {} in Workspace",
-            if card.open { "Show" } else { "Add" },
-            card.title
+        let action_command = command.clone();
+        let action = panel_action(
+            card.open,
+            self.added.get(&card.id).map(std::time::Instant::elapsed),
         );
+        let label = format!("{action} {} in Workspace", card.title);
         let owner = self
             .editor
             .as_ref()
@@ -446,20 +491,7 @@ impl PanelLibrary {
                             cx.stop_propagation();
                             v.send(command.clone(), cx)
                         }))
-                    }))
-                    .child(
-                        kit.icon_button(
-                            format!("library-add-{}", card.id),
-                            if card.open { "eye" } else { "plus" },
-                            label,
-                            false,
-                        )
-                        .bg(rgb(c.floating))
-                        .on_click(cx.listener(move |v, _, _, cx| {
-                            cx.stop_propagation();
-                            v.send(command.clone(), cx)
-                        })),
-                    ),
+                    })),
             )
             .on_click(cx.listener(move |v, _, _, cx| v.send(click.clone(), cx)));
         div()
@@ -469,6 +501,21 @@ impl PanelLibrary {
             .flex_col()
             .child(kit.track_hover(cover, key))
             .child(self.ledge(kit, card.title.clone(), subline, w))
+            .child(
+                kit.button(
+                    format!("library-action-{}", card.id),
+                    action,
+                    kit::Button::Quiet,
+                    None,
+                    None,
+                )
+                .on_click(cx.listener(move |v, _, _, cx| v.send(action_command.clone(), cx))),
+            )
+            .children(
+                self.errors
+                    .get(&card.id)
+                    .map(|error| div().text_color(rgb(c.danger)).child(error.clone())),
+            )
             .into_any_element()
     }
     fn ledge(&self, kit: &Kit, title: String, detail: Option<String>, width: f32) -> Div {
@@ -1034,6 +1081,16 @@ impl Render for PanelLibrary {
             .font_family(pm_design::TEXT_FONT)
             .child(sidebar)
             .child(content)
+            .child(
+                div()
+                    .id("library-announcement")
+                    .absolute()
+                    .size_0()
+                    .overflow_hidden()
+                    .role(Role::Status)
+                    .aria_live(gpui::accesskit::Live::Polite)
+                    .aria_label(self.announcement.clone()),
+            )
             .child(kit.settle())
     }
 }
@@ -1193,6 +1250,9 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
                     motion: Default::default(),
                     focus: Default::default(),
                     focused: None,
+                    added: Default::default(),
+                    errors: Default::default(),
+                    announcement: String::new(),
                     #[cfg(test)]
                     fixture: None,
                 }
@@ -1204,6 +1264,22 @@ fn open_library(editor: Entity<Controller>, cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{Origin, WorkspaceCard, panel_cards, shown_panels, shown_workspaces};
+    #[test]
+    fn panel_feedback_goes_from_add_to_added_to_show() {
+        use std::time::Duration;
+        assert_eq!(super::panel_action(false, None), "Add");
+        assert_eq!(super::panel_action(true, Some(Duration::ZERO)), "Added ✓");
+        assert_eq!(
+            super::panel_action(true, Some(Duration::from_millis(1499))),
+            "Added ✓"
+        );
+        assert_eq!(
+            super::panel_action(true, Some(Duration::from_millis(1500))),
+            "Show"
+        );
+        assert_eq!(super::panel_action(true, None), "Show");
+        assert_eq!(super::panel_action(false, Some(Duration::ZERO)), "Add");
+    }
 
     #[test]
     fn panels_sort_into_shelves_by_where_they_came_from_and_search_by_title() {
@@ -1318,7 +1394,13 @@ mod capture_tests {
             ("dark", pm_design::Scheme::Dark, false),
             ("contrast", pm_design::Scheme::Dark, true),
         ] {
+            if std::env::var_os("PM_LIBRARY_CAPTURE_REVIEW").is_some() && name == "contrast" {
+                continue;
+            }
             for (w, h) in [(900., 600.), (1400., 860.)] {
+                if std::env::var_os("PM_LIBRARY_CAPTURE_REVIEW").is_some() && w != 900. {
+                    continue;
+                }
                 objc2::rc::autoreleasepool(|_| {
                     let mut cx = HeadlessAppContext::with_platform(
                         std::sync::Arc::new(
@@ -1366,12 +1448,16 @@ mod capture_tests {
                                 editor: None,
                                 shell: None,
                                 page: super::Page::Panels(None),
-                                query: String::new(),
+                                query: std::env::var("PM_LIBRARY_CAPTURE_QUERY")
+                                    .unwrap_or_default(),
                                 search: None,
                                 tokens,
                                 motion: Default::default(),
                                 focus: Default::default(),
                                 focused: None,
+                                added: Default::default(),
+                                errors: Default::default(),
+                                announcement: String::new(),
                                 fixture: Some((cards, workspaces)),
                             })
                         })
@@ -1384,6 +1470,30 @@ mod capture_tests {
                         .unwrap()
                         .save(format!("{dir}/after-{name}-{}x{}.png", w as u32, h as u32))
                         .unwrap();
+                    for (state, elapsed) in [("added", 0), ("show", 2)] {
+                        window
+                            .update(&mut cx, |view, _, cx| {
+                                if let Some((cards, _)) = &mut view.fixture {
+                                    cards.iter_mut().find(|c| c.id == "inspector").unwrap().open =
+                                        true;
+                                }
+                                view.added.insert(
+                                    "inspector".into(),
+                                    std::time::Instant::now()
+                                        - std::time::Duration::from_secs(elapsed),
+                                );
+                                cx.notify();
+                            })
+                            .unwrap();
+                        cx.run_until_parked();
+                        cx.capture_screenshot(window.into())
+                            .unwrap()
+                            .save(format!(
+                                "{dir}/{state}-{name}-{}x{}.png",
+                                w as u32, h as u32
+                            ))
+                            .unwrap();
+                    }
                     window
                         .update(&mut cx, |view, _, cx| {
                             view.set_page(super::Page::Workspaces(None), cx)
