@@ -129,9 +129,11 @@ globalThis.__compat = {
         )
       );
     };
+    // An export's realm has no window: none of its frames waits for a panel.
     const shows = (owner) =>
       !owner ||
       !this.panels ||
+      globalThis.__compatWindowless === true ||
       this.realm.kernel.panels.ownerEntries(owner).length === 0 ||
       this.panels.showingOwners().has(owner) ||
       legacy(owner) ||

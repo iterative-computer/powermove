@@ -5438,6 +5438,25 @@ mod tests {
         assert_eq!(answer_of(&answered, 1, Duration::from_secs(40)), json!(5));
         cancel.store(true, Ordering::Release);
     }
+    /// An export's realm withholds no animation frame: an extension that owns
+    /// a panel (never shown there) and waits for a frame still draws.
+    #[test]
+    fn an_export_realm_gives_a_panel_owner_its_animation_frames() {
+        let source = "export default async function activate(api: any){
+            api.panels.register({id:'waits.panel', title:'Waits', build: (root: any) => { root.textContent = 'panel'; } });
+            await new Promise((done: any) => requestAnimationFrame(done));
+            api.services.register('raster',()=>{
+              const c=document.createElement('canvas'); c.width=4; c.height=1;
+              return {cv:c,w:4,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("waits", source)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frozen = fixture.kernel.published("window").unwrap();
+        inbox.export("job-8", frozen, cancel.clone()).unwrap();
+        inbox.ask(1, needs(&fixture), json!({"job":"job-8"}));
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(40)), json!(4));
+        cancel.store(true, Ordering::Release);
+    }
     /// An export's realm builds no panel: nothing shows it, and what it
     /// would start (a search over the network, timers) would only hold the
     /// export's start. The window's realm builds it as before.
