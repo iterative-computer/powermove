@@ -1616,6 +1616,10 @@ impl Drag {
                 } else {
                     frame(first.from + sample.time_delta, self.start.fps) - first.from
                 };
+                let step = if self.track_snap.is_some() {
+                    let earliest = self.start.expanded_ids(ids).iter().filter_map(|id| self.start.layer(id)).map(|l| l.from).reduce(f64::min).unwrap_or(0.);
+                    step.max(-earliest)
+                } else { step };
                 out.push(
                     LayerCommand::Duplicate {
                         layer_ids: ids.clone(),

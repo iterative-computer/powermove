@@ -3139,3 +3139,14 @@ fn g3_tracks_drag_stops_at_zero_but_layers_keep_negative_starts() {
         block_on(c.finish_drag(true)).unwrap();
     }
 }
+
+#[test]
+fn g3_tracks_duplicate_drag_also_stops_at_zero() {
+    let (_a, mut c) = client();
+    c.model.mode = TimelineMode::Tracks;
+    block_on(c.begin_drag(DragKind::DuplicateLayers { ids: strings(&["a"]), new_ids: strings(&["copy-a"]) })).unwrap();
+    block_on(c.drag(sample(-9.))).unwrap();
+    assert_eq!(c.model.index.layer("copy-a").unwrap().from, 0.);
+    assert_eq!(c.model.index.layer("a").unwrap().from, 1.);
+    block_on(c.finish_drag(true)).unwrap();
+}
