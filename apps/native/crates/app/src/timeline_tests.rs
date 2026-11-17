@@ -3760,7 +3760,11 @@ fn g6_capture_split_review() {
         });
         for (label, shift) in [("hover", false), ("all-layers", true)] {
             cx.update_window(window.into(), |_, w, cx| {
-                w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, modifiers: Modifiers { shift, ..Default::default() }, ..Default::default() }), cx);
+                if shift {
+                    w.dispatch_event(gpui::PlatformInput::ModifiersChanged(gpui::ModifiersChangedEvent { modifiers: Modifiers::shift(), ..Default::default() }), cx);
+                } else {
+                    w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, ..Default::default() }), cx);
+                }
             }).unwrap();
             pump(&mut cx);
             cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/{label}-{name}.png")).unwrap();

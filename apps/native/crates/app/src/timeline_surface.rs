@@ -480,6 +480,7 @@ pub struct TimelineSurface {
     /// Clears the skimmer when the window stops being active (Cmd-Tab, key
     /// loss, hide): the pointer may never move out of the timeline.
     activation: Option<Subscription>,
+    split_modifiers: Option<Subscription>,
     /// Where media being dragged over the timeline would land (window
     /// position), for the insertion line.
     media_over: Option<Point<Pixels>>,
@@ -575,6 +576,7 @@ impl TimelineSurface {
             // both hear it.
             focused: true,
             activation: None,
+            split_modifiers: None,
             media_over: None,
             effect_over: None,
             late: None,
@@ -4212,6 +4214,11 @@ impl Render for TimelineSurface {
                 }
             }));
         }
+        if self.split_modifiers.is_none() {
+            self.split_modifiers = Some(cx.observe_window_modifiers(window, |s, _, cx| {
+                if s.model.edit_tool == EditTool::Split && s.pointer.is_some() { cx.notify(); }
+            }));
+        }
         let this = cx.entity().downgrade();
         let tokens = self.tokens.clone();
         let graph = self.graph_ops(Some(self.delegate.time(cx))).map(|mut ops| {
@@ -4426,9 +4433,6 @@ impl Render for TimelineSurface {
             .relative()
             .size_full()
             .cursor(self.cursor)
-            .on_modifiers_changed(cx.listener(|s, _, _, cx| {
-                if s.model.edit_tool == EditTool::Split { cx.notify(); }
-            }))
             .role(Role::ListBox)
             .aria_label(if region.is_some() && graph.is_none() {
                 format!("Timeline tracks. {}", graph_render::EMPTY)
