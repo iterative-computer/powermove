@@ -56,7 +56,7 @@ fn kind(layer: &Value) -> Option<&str> {
 /// A ripple, roll or slide made while the timeline shows tracks keeps every
 /// clip on the track it shows on (`TimingCommand::InTracks`); in the Layers
 /// timeline it is After Effects' layer edit, as it is.
-fn in_tracks(published: &Published, command: TimingCommand) -> TimingCommand {
+pub(crate) fn in_tracks(published: &Published, command: TimingCommand) -> TimingCommand {
     let mut view = pm_panel_timeline::TimelineModel::default();
     view.restore_ui(&published.ui_state);
     if view.mode != pm_panel_timeline::TimelineMode::Tracks {
@@ -1852,7 +1852,7 @@ pub fn disabled(
     for name in ["rippleTrimIn", "rippleTrimOut"] {
         set(name, free(&[]));
     }
-    for name in ["extendEdit", "slideLayer"] {
+    for name in ["extendEdit", "slideLayer", "addDefaultTransition"] {
         set(
             name,
             selected
@@ -1901,6 +1901,7 @@ pub fn disabled(
 }
 /// Rows that act on the selected layers.
 const SELECTION: &[&str] = &[
+    "addDefaultTransition",
     "rippleDelete",
     "rippleTrimIn",
     "rippleTrimOut",

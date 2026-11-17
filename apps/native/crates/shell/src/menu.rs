@@ -450,6 +450,8 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 r("Time-Reverse Layer", "reverseLayers"),
                 r("Freeze Frame", "freezeFrame"),
                 sep(),
+                r("Add Default Transition", "addDefaultTransition"),
+                sep(),
                 r("Center Anchor Point", "centerAnchor"),
                 r("Edit Text", "text.editSelected"),
                 r("Delete", "delete"),

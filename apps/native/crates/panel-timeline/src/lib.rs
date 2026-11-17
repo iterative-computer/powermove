@@ -23,7 +23,7 @@ pub use client::{ClientError, TimelineClient};
 pub use interaction::*;
 pub use marquee::*;
 pub use reveal::{Disclosure, PropertyFacts, RevealState};
-pub use snapshot::{Channel, Key, Layer, Marker, Row, RowId, TimelineIndex, Window};
+pub use snapshot::{Channel, Key, Layer, Marker, Row, RowId, TimelineIndex, Transition, Window};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -110,6 +110,9 @@ pub struct TimelineModel {
     /// the neutral selection fill, not the accent (PM-367).
     pub panel_blurred: bool,
     pub search: String,
+    /// The transition selected on a clip's edge (its layer is selected
+    /// too): Delete removes it. A view choice, not saved.
+    pub transition: Option<(String, crate::render::Edge)>,
     pub property_labels: HashMap<(String, String), String>,
     pub(crate) anchor: Option<String>,
     rows: Vec<Row>,
@@ -141,6 +144,17 @@ impl TimelineModel {
             }
             self.index = TimelineIndex::shared(&published.snapshot, &self.index);
             self.rebuild_rows();
+        }
+        // A transition stays selected until a selection leaves out its layer,
+        // or the layer no longer has it.
+        if let Some((layer, edge)) = &self.transition
+            && (selection_changed && !self.selection.contains(layer)
+                || self
+                    .index
+                    .layer(layer)
+                    .is_none_or(|l| l.transitions[*edge as usize].is_none()))
+        {
+            self.transition = None;
         }
         if self.ui_seen.as_ref() != Some(&published.ui_state.timeline) {
             self.ui_seen = Some(published.ui_state.timeline.clone());

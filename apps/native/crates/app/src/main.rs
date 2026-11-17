@@ -61,6 +61,7 @@ mod mcp_extensions;
 mod mcp_services;
 mod media;
 mod media_import;
+mod transitions;
 mod media_refresh;
 mod linked_sync;
 mod media_thumbs;

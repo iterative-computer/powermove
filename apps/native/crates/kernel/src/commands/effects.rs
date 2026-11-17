@@ -681,6 +681,40 @@ pub fn add_transition(
     })
 }
 
+/// The transition of type `kind` already on `edge` of `layer_id`, at a new
+/// `duration`: its stored parameters `params` keep their channels and keys
+/// (the same type keeps what it has). A duration drag and Properties write it.
+pub fn retime_transition(
+    layer_id: &str,
+    edge: Edge,
+    kind: &str,
+    params: &[String],
+    duration: f64,
+) -> EffectCommand {
+    EffectCommand::SetTransition {
+        layer_id: layer_id.to_owned(),
+        edge,
+        transition: Some(Box::new(TransitionSpec {
+            definition: TransitionDefinition {
+                transition_type: kind.to_owned(),
+                params: params
+                    .iter()
+                    .map(|key| ParamDefinition {
+                        key: key.clone(),
+                        kind: "number".into(),
+                        default: Value::Null,
+                        min: None,
+                        max: None,
+                        reference: false,
+                    })
+                    .collect(),
+            },
+            duration: Some(duration),
+            params: Map::new(),
+        })),
+    }
+}
+
 fn set_transition(
     cx: &mut Cx<'_>,
     layer_id: &str,

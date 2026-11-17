@@ -36,7 +36,34 @@ pub struct Properties {
     /// the request number it came with (each request opens its section once).
     part_focus: Option<(String, u64)>,
     part_request: u64,
+    /// The registered transitions (v1's transitions-basic and any an
+    /// extension adds), for a transition's Type menu and parameter labels.
+    pub transitions: Vec<RegisteredTransition>,
 }
+/// A transition the registry offers: its id, name, definition and each
+/// parameter's label by key.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegisteredTransition {
+    pub id: String,
+    pub label: String,
+    pub definition: pm_kernel::commands::effects::TransitionDefinition,
+    pub labels: BTreeMap<String, String>,
+}
+/// The two transition fields, their slot names and section titles.
+const TRANSITION_EDGES: [(&str, &str, &str, pm_kernel::commands::effects::Edge); 2] = [
+    (
+        "transitionIn",
+        "in",
+        "Transition In",
+        pm_kernel::commands::effects::Edge::In,
+    ),
+    (
+        "transitionOut",
+        "out",
+        "Transition Out",
+        pm_kernel::commands::effects::Edge::Out,
+    ),
+];
 /// What Add Expression… starts from, as the shipped editor did.
 pub const STARTING_EXPRESSION: &str = "value + wiggle(2, 20)";
 impl Properties {
@@ -547,6 +574,9 @@ impl Properties {
                 if !rows.is_empty() {
                     sections.push(json!({"id":"transform","title":"Transform","collapsed":self.collapsed.get("transform").copied().unwrap_or(false),"rows":rows}));
                 }
+            }
+            if model.selected_layers().len() == 1 && !audio {
+                sections.extend(self.transition_sections(model, &layer, time)?);
             }
             if target["first"]["type"] == "text" {
                 let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
@@ -2156,6 +2186,169 @@ impl Properties {
             })
             .collect())
     }
+    /// A transition on the layer's In or Out (v1's "Transition in" and
+    /// "Transition out" groups): its type, duration and parameters, with
+    /// Remove on the heading.
+    fn transition_sections(
+        &mut self,
+        model: &mut Inspector,
+        layer: &str,
+        time: f64,
+    ) -> Result<Vec<Value>, String> {
+        let record = super::data::wire(&model.layer(layer).map_err(|e| e.to_string())?);
+        let locked = !model.editable(layer);
+        let span = record["dur"].as_f64().unwrap_or(600.).clamp(0.02, 600.);
+        let mut sections = vec![];
+        for (field, slot, title, _) in TRANSITION_EDGES {
+            let t = &record[field];
+            let Some(kind) = t["type"].as_str() else {
+                continue;
+            };
+            let missing = t["missing"] == true;
+            let registered = self.transitions.iter().find(|r| r.id == kind).cloned();
+            let mut options: Vec<Value> = self
+                .transitions
+                .iter()
+                .map(|r| json!({"v":r.id,"label":r.label}))
+                .collect();
+            if registered.is_none() {
+                options.push(json!({"v":kind,"label":format!("{kind} (missing)")}));
+            }
+            let mut rows = vec![];
+            let lease = self.control_lease(&format!("transition.{slot}.type"));
+            rows.push(json!({"id":format!("transition.{slot}.type"),"label":"Type","locked":locked,"animation":null,
+                "control":{"kind":"choice","binding":lease,"value":kind,"options":options,"mixed":false}}));
+            let lease = self.control_lease(&format!("transition.{slot}.duration"));
+            rows.push(json!({"id":format!("transition.{slot}.duration"),"label":"Duration","locked":locked || missing,"animation":null,
+                "control":{"kind":"number","axes":[{"binding":lease,"value":t["dur"].as_f64().unwrap_or(0.5),
+                    "unit":"s","step":0.01,"precision":2,"min":0.02,"max":span,"mixed":false}]}}));
+            for param in registered.iter().flat_map(|r| r.definition.params.iter()) {
+                if missing || param.reference {
+                    continue;
+                }
+                let path = format!("{field}.p.{}", param.key);
+                let binding = Binding::Property(PropertyId::new(layer, &path));
+                let state = match model.binding_state(&binding, time) {
+                    Ok(state) => state,
+                    Err(pm_panel_inspector::InspectorError::MissingProperty(_)) => continue,
+                    Err(error) => return Err(error.to_string()),
+                };
+                let value = super::data::wire(&state.value);
+                let id = format!("transition.{slot}.p.{}", param.key);
+                let lease = self.lease(model, &id, binding)?;
+                let control = match (param.kind.as_str(), &value) {
+                    ("color", Value::String(_)) => {
+                        let hex = self.lease(
+                            model,
+                            &format!("{id}#hex"),
+                            Binding::Property(PropertyId::new(layer, &path)),
+                        )?;
+                        json!({"kind":"colour","binding":lease,"value":value,"mixed":false,"hexBinding":hex,"hex":value})
+                    }
+                    ("toggle", Value::Bool(_)) => {
+                        json!({"kind":"toggle","binding":lease,"value":value,"mixed":false})
+                    }
+                    (_, Value::Number(_)) => {
+                        let mut axis = json!({"binding":lease,"value":value,"step":1,"precision":2,"mixed":false});
+                        if let Some(min) = param.min {
+                            axis["min"] = json!(min);
+                        }
+                        if let Some(max) = param.max {
+                            axis["max"] = json!(max);
+                        }
+                        json!({"kind":"number","axes":[axis]})
+                    }
+                    _ => continue,
+                };
+                let label = registered
+                    .as_ref()
+                    .and_then(|r| r.labels.get(&param.key))
+                    .cloned()
+                    .unwrap_or_else(|| param.key.clone());
+                let animation = if state.key_at_playhead {
+                    "key-at-playhead"
+                } else if state.animated {
+                    "animated"
+                } else {
+                    "static"
+                };
+                rows.push(json!({"id":id,"label":label,"locked":locked,"animation":animation,"control":control}));
+            }
+            let id = format!("transition.{slot}");
+            sections.push(json!({"id":id,"title":title,
+                "collapsed":self.collapsed.get(&id).copied().unwrap_or(false),
+                "rows":rows,"action":"remove-transition"}));
+        }
+        Ok(sections)
+    }
+    /// A transition's Type or Duration was set: the command for it.
+    fn transition_write(
+        &self,
+        model: &Inspector,
+        caller: Caller,
+        control: &str,
+        value: &pm_model::Value,
+    ) -> Result<Request, String> {
+        use pm_kernel::commands::effects::{EffectCommand, TransitionSpec, retime_transition};
+        let (slot, what) = control.split_once('.').ok_or("Invalid transition field")?;
+        let (field, _, _, edge) = TRANSITION_EDGES
+            .into_iter()
+            .find(|(_, s, _, _)| *s == slot)
+            .ok_or("Invalid transition field")?;
+        let layer = model.primary().ok_or("No selected layer")?.to_owned();
+        if model.selected_layers().len() != 1 || !model.editable(&layer) {
+            return Err("Select one unlocked layer".into());
+        }
+        let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
+        let t = &record[field];
+        let kind = t["type"].as_str().ok_or("The transition was removed")?;
+        let duration = t["dur"].as_f64().unwrap_or(0.5);
+        let (label, command) = match what {
+            "duration" => {
+                if t["missing"] == true {
+                    return Err("Its extension is not installed".into());
+                }
+                let seconds = value.as_f64().ok_or("Expected a number")?;
+                let params: Vec<String> = t["p"]
+                    .as_object()
+                    .map(|p| p.keys().cloned().collect())
+                    .unwrap_or_default();
+                (
+                    "Transition Duration".to_owned(),
+                    retime_transition(&layer, edge, kind, &params, seconds),
+                )
+            }
+            "type" => {
+                let id = value.as_str().ok_or("Expected a transition")?;
+                let registered = self
+                    .transitions
+                    .iter()
+                    .find(|r| r.id == id)
+                    .ok_or("That transition is not installed")?;
+                (
+                    format!("Set {}", registered.label),
+                    EffectCommand::SetTransition {
+                        layer_id: layer.clone(),
+                        edge,
+                        transition: Some(Box::new(TransitionSpec {
+                            definition: registered.definition.clone(),
+                            duration: Some(duration),
+                            params: pm_model::Map::new(),
+                        })),
+                    },
+                )
+            }
+            _ => return Err("Invalid transition field".into()),
+        };
+        Ok(Request::new(
+            caller,
+            pm_kernel::Call::Transact {
+                label: Some(label),
+                expected_revision: Some(model.revision()),
+                body: pm_kernel::WriteBody::Commands(vec![command.into()]),
+            },
+        ))
+    }
     fn type_settings(
         &mut self,
         model: &mut Inspector,
@@ -2228,6 +2421,15 @@ impl Properties {
         value: pm_model::Value,
         time: f64,
     ) -> Result<Request, String> {
+        if let Some(control) = self
+            .handles
+            .iter()
+            .find(|(_, h)| *h == handle)
+            .and_then(|(path, _)| path.strip_prefix("transition."))
+            .filter(|c| !c.contains(".p."))
+        {
+            return self.transition_write(model, caller, control, &value);
+        }
         if let Some(control) = self
             .handles
             .iter()
@@ -2519,6 +2721,35 @@ impl Properties {
                             layer_ids,
                             mode,
                             time,
+                        }
+                        .into(),
+                    ]),
+                },
+            )));
+        }
+        if intent["type"] == "section-action" && intent["action"] == "remove-transition" {
+            let slot = intent["section"]
+                .as_str()
+                .and_then(|s| s.strip_prefix("transition."))
+                .ok_or("Transition section")?;
+            let (_, _, _, edge) = TRANSITION_EDGES
+                .into_iter()
+                .find(|(_, s, _, _)| *s == slot)
+                .ok_or("Transition section")?;
+            let layer_id = model.primary().ok_or("No selected layer")?.to_owned();
+            if !model.editable(&layer_id) {
+                return Err("The layer is locked".into());
+            }
+            return Ok(Some(Request::new(
+                caller,
+                pm_kernel::Call::Transact {
+                    label: Some("Remove Transition".into()),
+                    expected_revision: Some(model.revision()),
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::commands::effects::EffectCommand::SetTransition {
+                            layer_id,
+                            edge,
+                            transition: None,
                         }
                         .into(),
                     ]),

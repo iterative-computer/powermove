@@ -327,7 +327,10 @@ export function EffectsPanel({
                     metadata={{
                       // A transition's drag names it as one: the timeline
                       // drops it on the clip edge under the pointer.
-                      item: item.kind === "transition" ? `transition:${item.id}` : item.id,
+                      item:
+                        item.kind === "transition"
+                          ? `transition:${item.id}`
+                          : item.id,
                       kind: item.kind,
                       parent: row.parent,
                       focused,

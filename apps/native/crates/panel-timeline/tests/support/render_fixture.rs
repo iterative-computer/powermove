@@ -25,6 +25,8 @@ pub fn clip(id: &str) -> Clip {
         trim: None,
         missing_effect: None,
         cues: vec![],
+        transitions: [None, None],
+        transition_selected: None,
     }
 }
 pub fn key(id: &str, time: f64) -> Key {

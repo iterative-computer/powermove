@@ -2984,6 +2984,7 @@ impl Render for GizmoSurface {
                             label: drag.label.to_string(),
                             layer: None,
                             edge: None,
+                            across: None,
                         },
                         cx,
                     );

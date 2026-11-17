@@ -37,6 +37,7 @@ impl Controller {
         }
         match name {
             "newProject" => self.new_project(cx),
+            "addDefaultTransition" => self.add_default_transition(cx),
             "openRecent" => self.show_home(cx),
             // The toolbar's Home and ⌘P (v1's `ProjectsScreen.toggle`): Home,
             // or the project behind it.

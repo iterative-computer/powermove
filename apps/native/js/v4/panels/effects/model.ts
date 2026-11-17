@@ -448,7 +448,10 @@ export class EffectsModel {
     return item && !item.failed
       ? {
           // A transition drops on a clip's edge (v1's timeline drop).
-          kind: item.kind === "transition" ? ("transition" as const) : ("effect" as const),
+          kind:
+            item.kind === "transition"
+              ? ("transition" as const)
+              : ("effect" as const),
           id: item.id,
           label: item.label,
         }

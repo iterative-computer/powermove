@@ -3111,6 +3111,16 @@
     "loose": false
   },
   {
+    "id": "native.addDefaultTransition",
+    "chord": "shift+d",
+    "command": "addDefaultTransition",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
     "id": "native.addLayerFromAsset",
     "chord": "",
     "command": "native.addLayerFromAsset",

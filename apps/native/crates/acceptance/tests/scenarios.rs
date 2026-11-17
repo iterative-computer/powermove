@@ -55,6 +55,13 @@ const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
     ("native.newNull.ctrl", "ctrl+alt+shift+y", "newNull", "[]"),
     ("native.newCamera", "cmd+alt+shift+c", "newCamera", "[]"),
     ("native.renameLayer", "enter", "renameLayer", "[]"),
+    // Premiere's Apply Default Transitions to Selection (⌘D is Duplicate).
+    (
+        "native.addDefaultTransition",
+        "shift+d",
+        "addDefaultTransition",
+        "[]",
+    ),
     // Menu-only commands: shipped without a key, so the person can assign one.
     ("native.saveTake", "", "native.saveTake", "[]"),
     (

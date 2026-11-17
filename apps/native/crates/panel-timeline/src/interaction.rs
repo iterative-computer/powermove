@@ -422,6 +422,33 @@ impl TimelineModel {
                 }
                 .into(),
             ),
+            // A selected transition goes, not its clip.
+            "delete"
+                if let Some((command, audio)) =
+                    self.transition.as_ref().and_then(|(l, edge)| {
+                        let layer = self.index.layer(l)?;
+                        Some((
+                            transition_command(layer, *edge, None, time)?,
+                            layer.kind == "audio",
+                        ))
+                    }) =>
+            {
+                Plan {
+                    calls: vec![Call::Transact {
+                        label: Some(
+                            if audio {
+                                "Remove Fade"
+                            } else {
+                                "Remove Transition"
+                            }
+                            .into(),
+                        ),
+                        body: WriteBody::Commands(vec![command]),
+                        expected_revision: Some(self.index.revision),
+                    }],
+                    ..Plan::default()
+                }
+            }
             "delete" if self.key_selection_active => {
                 edit(KeyframeCommand::Delete { key_ids: keys }.into())
             }
@@ -1046,6 +1073,12 @@ pub enum DragKind {
     WorkIn,
     WorkOut,
     WorkMove,
+    /// A transition's wedge (an audio clip's fade): its duration follows
+    /// the drag, from the clip's end to the pointer.
+    Transition {
+        layer: String,
+        edge: crate::render::Edge,
+    },
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DragSample {
@@ -1187,6 +1220,20 @@ impl Drag {
                     }
                 }
             }
+            DragKind::Transition { layer, edge } => {
+                let l = index
+                    .layer(layer)
+                    .ok_or_else(|| ModelError::UnknownId(layer.clone()))?;
+                if l.effectively_locked {
+                    return Err(ModelError::Locked(layer.clone()));
+                }
+                if l.transitions[*edge as usize]
+                    .as_ref()
+                    .is_none_or(|t| t.missing)
+                {
+                    return Err(ModelError::InvalidGesture);
+                }
+            }
             DragKind::DuplicateLayers { ids, new_ids } => {
                 if ids.is_empty() || ids.len() != new_ids.len() {
                     return Err(ModelError::InvalidGesture);
@@ -1282,6 +1329,17 @@ impl Drag {
                         });
                     }
                 }
+            }
+            DragKind::Transition { layer, edge } => {
+                let l = index.layer(layer).unwrap();
+                let seconds = l.transitions[*edge as usize].as_ref().unwrap().duration;
+                anchors.push(Anchor {
+                    time: match edge {
+                        crate::render::Edge::In => l.from + seconds,
+                        crate::render::Edge::Out => l.from + l.duration - seconds,
+                    },
+                    edge: None,
+                });
             }
             DragKind::Keys { ids } | DragKind::GraphKeys { ids } => {
                 for id in ids {
@@ -1431,6 +1489,7 @@ impl Drag {
                 _ => "Edit Properties".into(),
             },
             DragKind::WorkMove => "Move Work Area".into(),
+            DragKind::Transition { .. } => "Transition Duration".into(),
             _ => "Work Area".into(),
         }
     }
@@ -1878,6 +1937,20 @@ impl Drag {
                     );
                 }
             }
+            DragKind::Transition { layer, edge } => {
+                let l = self
+                    .start
+                    .layer(layer)
+                    .ok_or(ModelError::UnknownId(layer.clone()))?;
+                let seconds = l.transitions[*edge as usize]
+                    .as_ref()
+                    .map_or(0., |t| t.duration);
+                let seconds = match edge {
+                    crate::render::Edge::In => seconds + delta,
+                    crate::render::Edge::Out => seconds - delta,
+                };
+                out.extend(transition_command(l, *edge, Some(seconds), sample.playhead));
+            }
             DragKind::WorkIn | DragKind::WorkOut | DragKind::WorkMove => {
                 let [a, b] = self.start.work;
                 let frame = 1. / self.start.fps;
@@ -2029,6 +2102,52 @@ fn snap_targets(
         }
     }
     out
+}
+/// The command setting `layer`'s transition at `edge` to `seconds` (kept
+/// within 0.02 s and the clip, as the kernel allows), or removing it with
+/// `None`. An audio clip's fade stands in for its transition. `None` when
+/// there is no transition there to edit.
+pub fn transition_command(
+    layer: &crate::Layer,
+    edge: crate::render::Edge,
+    seconds: Option<f64>,
+    time: f64,
+) -> Option<Command> {
+    let t = layer.transitions[edge as usize].as_ref()?;
+    let seconds = seconds.map(|s| s.clamp(0.02, layer.duration.clamp(0.02, 600.)));
+    let pm_edge = match edge {
+        crate::render::Edge::In => pm_kernel::commands::effects::Edge::In,
+        crate::render::Edge::Out => pm_kernel::commands::effects::Edge::Out,
+    };
+    Some(if layer.kind == "audio" {
+        let mut patch = pm_model::Map::new();
+        patch.insert(
+            if edge == crate::render::Edge::In {
+                "fadeIn"
+            } else {
+                "fadeOut"
+            },
+            Value::Number(seconds.unwrap_or(0.)),
+        );
+        pm_kernel::ContentCommand::Set {
+            layer_id: layer.id.clone(),
+            patch,
+            time,
+        }
+        .into()
+    } else {
+        match seconds {
+            Some(seconds) => pm_kernel::commands::effects::retime_transition(
+                &layer.id, pm_edge, &t.kind, &t.params, seconds,
+            ),
+            None => pm_kernel::commands::effects::EffectCommand::SetTransition {
+                layer_id: layer.id.clone(),
+                edge: pm_edge,
+                transition: None,
+            },
+        }
+        .into()
+    })
 }
 pub fn frame(time: f64, fps: f64) -> f64 {
     let result = (time * fps + 0.5).floor() / fps;
