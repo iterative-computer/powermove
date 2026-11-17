@@ -330,6 +330,9 @@ struct Quota {
     isolate: IsolatePtr,
     guard: Arc<HeapGuard>,
     plan: HeapPlan,
+    /// The running task's blocked time: waiting in line for heap is not the
+    /// task being stuck, so the watchdog does not ask about it (PM-513).
+    blocked: Arc<Blocked>,
 }
 /// An isolate's admission state, shared by the near-limit callback and the
 /// isolate's slot (interrupt and post-task checks).
@@ -470,10 +473,13 @@ unsafe extern "C" fn near_limit(data: *mut c_void, current: usize, _initial: usi
         }
         // No room now: this isolate's work pauses in line for the smallest
         // step (a shown window's first) rather than failing (PM-513).
-        if let Some(next) = refused
-            && guard.reservation.grow_waiting(next - current)
-        {
-            return next;
+        if let Some(next) = refused {
+            quota.blocked.enter();
+            let grown = guard.reservation.grow_waiting(next - current);
+            quota.blocked.exit();
+            if grown {
+                return next;
+            }
         }
         guard.account_full.store(refused.is_some(), Ordering::Release);
     }
@@ -1080,6 +1086,7 @@ impl Vm {
                 .set_max_old_generation_size_in_bytes(plan.initial_old),
         );
         isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+        let blocked: Arc<Blocked> = Arc::default();
         let quota = Box::new(Quota {
             handle: isolate.thread_safe_handle(),
             // SAFETY: kept only while the isolate lives (see `IsolatePtr`).
@@ -1091,6 +1098,7 @@ impl Vm {
                 major_collections: AtomicU64::new(0),
             }),
             plan,
+            blocked: blocked.clone(),
         });
         isolate.set_slot(Guarded(quota.guard.clone()));
         isolate.add_near_heap_limit_callback(near_limit, &*quota as *const Quota as *mut c_void);
@@ -1116,7 +1124,7 @@ impl Vm {
             cancellation: Cancellation::default(),
             sync_calls: 0,
             bodies: HashMap::new(),
-            blocked: Arc::default(),
+            blocked,
             task: Vec::new(),
         }));
         isolate.set_slot(Native(native_state.clone()));

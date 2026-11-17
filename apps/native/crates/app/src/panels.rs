@@ -27,7 +27,9 @@ pub fn ghost_shows(v: &Controller, id: &str) -> bool {
 /// shape of what it will show; a panel's real content replaces it when that
 /// panel is ready.
 pub fn opening(v: &Controller, id: &str, bounds: Rect) -> Option<AnyElement> {
-    if !ghost_shows(v, id) {
+    // Waiting for room in the heap account: it says so (`builtin_panel`)
+    // instead of a ghost that never resolves (PM-513).
+    if !ghost_shows(v, id) || v.waits_for_room(id) {
         return None;
     }
     let t = v.host.borrow().tokens.clone();

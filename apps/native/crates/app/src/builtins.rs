@@ -1008,6 +1008,17 @@ impl Controller {
         })
         .detach();
     }
+    /// Whether panel `id` waits for room in the heap account: refused and
+    /// being retried, or still in line for it.
+    pub(crate) fn waits_for_room(&self, id: &str) -> bool {
+        !self.builtins.ready.contains(id)
+            && (self.builtins.waiting_room.contains(id)
+                || self
+                    .builtins
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|r| r.waiting_for_room(id)))
+    }
     /// A built-in the heap account had no room for: it stays loading (never
     /// an empty panel) and starts again every `ADMISSION_RETRY` while this
     /// window keeps the same panels, until it is admitted (PM-513).
@@ -1146,13 +1157,7 @@ impl Controller {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if !self.builtins.ready.contains(id) {
-            // Refused and being retried, or still in line for room.
-            let in_line = self
-                .builtins
-                .runtime
-                .as_ref()
-                .is_some_and(|r| r.waiting_for_room(id));
-            if in_line || self.builtins.waiting_room.contains(id) {
+            if self.waits_for_room(id) {
                 let t = self.host.borrow().tokens.clone();
                 return Some(waiting_for_memory(&t, bounds, window));
             }
