@@ -185,6 +185,8 @@ pub struct Clip {
     /// An audio clip draws its waveform instead of a name; `None` while the
     /// peaks are still being read (a hairline then marks the clip's middle).
     pub audio: Option<Option<Waveform>>,
+    /// Its audio is muted: the waveform dims.
+    pub muted: bool,
     pub trim: Option<Edge>,
     /// The first missing extension effect: the clip carries a quiet badge.
     pub missing_effect: Option<String>,
@@ -210,12 +212,25 @@ pub fn parse_cue_op(id: &str) -> Option<(&str, &str)> {
 /// An audio file's peak envelope, read once per file off the main thread.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Waveform {
-    /// Largest absolute sample of any channel per bucket, 0–1.
-    pub peaks: std::sync::Arc<[f32]>,
-    /// Buckets per second of media.
-    pub rate: f64,
+    /// What the clip's media sounds like, at every zoom.
+    pub levels: std::sync::Arc<crate::waveform::Levels>,
     /// Media seconds skipped before the clip starts.
     pub trim: f64,
+    /// A retimed or reversed clip's media time, sampled evenly over the
+    /// clip (`crate::waveform::mapped`); `None`: the trim, at speed 1.
+    pub map: Option<std::sync::Arc<[f64]>>,
+}
+impl Waveform {
+    /// A mono clip from its peaks per bucket (`rate` a second), its loudness
+    /// the same as its peaks: for fixtures and tests.
+    pub fn from_peaks(peaks: &[f32], rate: f64, trim: f64) -> Self {
+        let pairs: Vec<[f32; 2]> = peaks.iter().map(|p| [*p, *p]).collect();
+        Waveform {
+            levels: std::sync::Arc::new(crate::waveform::Levels::new(rate, 1, &pairs, &pairs)),
+            trim,
+            map: None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edge {
@@ -473,6 +488,7 @@ impl Scene {
                                     hidden: !layer.visible,
                                     media: p.media(layer),
                                     audio: p.waveform(layer),
+                                    muted: layer.audio_muted,
                                     trim: None,
                                     missing_effect: layer.missing_effects.first().cloned(),
                                     cues: p.cues(layer),
@@ -525,6 +541,7 @@ impl Scene {
                     hidden: !layer.visible,
                     media: p.media(layer),
                     audio: p.waveform(layer),
+                    muted: layer.audio_muted,
                     trim: None,
                     missing_effect: layer.missing_effects.first().cloned(),
                     cues: p.cues(layer),
@@ -1479,8 +1496,10 @@ fn minor_step(label_step: f64, pps: f64, fps: f64, frames: bool) -> Option<f64> 
         .map(|n| label_step / n)
         .find(|step| step * pps >= MINOR_ROOM)
 }
-/// A waveform is a soft shape in the strip's own hue, not a solid one.
-const WAVEFORM_OPACITY: f64 = 0.72;
+/// A muted clip's waveform: dimmed, still there.
+const WAVEFORM_MUTED: f64 = 0.4;
+/// A row this tall (points) shows a stereo clip's two sides apart.
+const STEREO_ROW: f64 = 56.;
 fn valid_clip(c: &Clip) -> bool {
     c.from.is_finite()
         && c.duration.is_finite()
@@ -1489,7 +1508,9 @@ fn valid_clip(c: &Clip) -> bool {
         && c.audio
             .iter()
             .flatten()
-            .all(|w| w.rate.is_finite() && w.rate > 0. && w.trim.is_finite() && w.trim >= 0.)
+            .all(|w| {
+                w.levels.rate.is_finite() && w.levels.rate > 0. && w.trim.is_finite() && w.trim >= 0.
+            })
 }
 /// The tracks a reader sees, in a frame's x: the whole view's, or for a
 /// frame prepared wider ([`Scene::prepare_wide`]) the part the view shows.
@@ -1722,9 +1743,13 @@ fn paint_clip(
             ops.push(o);
         }
     } else if let (Some(audio), false) = (&c.audio, offline) {
-        // Bars keep clear of the seam and the rounded corners on every side.
+        // The waveform sits inside the glass: clear of the rim and the
+        // rounded corners. Two columns per point (device pixels on Retina),
+        // read from the pyramid at this zoom, on a perceptual scale; the
+        // painter fills one smooth shape from them (`waveform::Style`).
         let inset = 2. * m.border as f64;
-        let r = Rect::new(r.x + inset, r.y, (r.width - 2. * inset).max(0.), r.height);
+        let side = (radius * 0.5).max(inset);
+        let r = Rect::new(r.x + side, r.y, (r.width - 2. * side).max(0.), r.height);
         let mut o = Op::new(
             format!("clip-content:{}", c.id),
             "waveform",
@@ -1732,25 +1757,49 @@ fn paint_clip(
             material.primary,
         );
         o.text = Some(c.name.clone());
-        o.opacity = strength * WAVEFORM_OPACITY;
-        let left = v.x(c.from);
-        let bars: Vec<f32> = audio
-            .as_ref()
-            .map(|w| {
-                let count = r.width.floor().max(0.) as usize;
-                (0..count)
-                    .map(|i| {
-                        let at = w.trim + (r.x + i as f64 - left) / v.pps;
-                        let from = (at * w.rate).floor().max(0.) as usize;
-                        let to = (((at + 1. / v.pps) * w.rate).floor() as usize).max(from + 1);
-                        w.peaks
-                            .get(from.min(w.peaks.len())..to.min(w.peaks.len()))
-                            .map_or(0., |s| s.iter().copied().fold(0., f32::max))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        o.detail = json!({"bars": bars, "inset": m.border * 2., "minBar": m.border});
+        o.opacity = strength * if c.muted { WAVEFORM_MUTED } else { 1. };
+        let style = crate::waveform::Style::chosen();
+        let mut detail = json!({
+            "style": style.name(),
+            "inset": m.border * 2.,
+            "columns": crate::waveform::COLUMNS_PER_POINT,
+            "light": material.foreground,
+            "body": fill,
+            "selected": c.selected,
+        });
+        if let Some(w) = audio {
+            let per = crate::waveform::COLUMNS_PER_POINT;
+            let count = (r.width * per).ceil().max(0.) as usize;
+            let step = 1. / (v.pps * per);
+            let left_time = (r.x - v.x(c.from)) / v.pps;
+            let trim = w.trim;
+            let linear = move |t: f64| t + trim;
+            let source: Box<dyn Fn(f64) -> f64> = match &w.map {
+                Some(map) => Box::new(crate::waveform::mapped(map, c.duration)),
+                None => Box::new(linear),
+            };
+            // A tall row shows a stereo clip's two sides, one above the other.
+            let sides = w.levels.sides.as_ref().filter(|_| r.height >= STEREO_ROW);
+            let read = |p: &crate::waveform::Pyramid| {
+                crate::waveform::columns(p, w.levels.rate, &*source, left_time, step, count)
+            };
+            match sides {
+                Some([left, right]) => {
+                    let (lp, lr) = read(left);
+                    let (rp, rr) = read(right);
+                    detail["peak"] = json!(crate::waveform::encode(&lp));
+                    detail["rms"] = json!(crate::waveform::encode(&lr));
+                    detail["peak2"] = json!(crate::waveform::encode(&rp));
+                    detail["rms2"] = json!(crate::waveform::encode(&rr));
+                }
+                None => {
+                    let (peak, rms) = read(&w.levels.combined);
+                    detail["peak"] = json!(crate::waveform::encode(&peak));
+                    detail["rms"] = json!(crate::waveform::encode(&rms));
+                }
+            }
+        }
+        o.detail = detail;
         ops.push(o);
     } else {
         let mut o = Op::new(

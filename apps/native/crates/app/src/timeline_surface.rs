@@ -3949,10 +3949,10 @@ impl ModelPresenter for Presenter {
             .and_then(|root| root.get("assets")?.get(asset));
         let key = crate::waveforms::Key::of(path.clone(), record);
         Some(match crate::waveforms::lookup(&key)? {
-            Some((peaks, rate)) => Some(pm_panel_timeline::render::Waveform {
-                peaks,
-                rate,
+            Some(levels) => Some(pm_panel_timeline::render::Waveform {
+                levels,
                 trim: layer.trim,
+                map: time_map(&self.published, &layer.id, layer.from, layer.duration),
             }),
             None => {
                 self.wanted.borrow_mut().push(key);
@@ -5511,40 +5511,113 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 window.paint_path(path, color);
             }
         }
-        // Bars stand on the clip's floor, one point per column; while the
-        // peaks are read a hairline marks the middle (v1).
+        // One smooth shape in the strip's own pale tint, lighter at the
+        // peaks and fading into the slab (`waveform::Style`); while the
+        // levels are read a hairline marks the middle (v1).
         "waveform" => {
-            let bars = op.detail["bars"].as_array();
-            let inset = op.detail["inset"].as_f64().unwrap_or(2.) as f32;
-            let min_bar = op.detail["minBar"].as_f64().unwrap_or(1.) as f32;
+            let d = &op.detail;
+            let inset = d["inset"].as_f64().unwrap_or(2.) as f32;
+            let per = d["columns"].as_f64().unwrap_or(2.).max(1.) as f32;
             let (x0, top) = (f32::from(area.origin.x), f32::from(area.origin.y));
             let (w, h) = (f32::from(area.size.width), f32::from(area.size.height));
-            let room = (h - 2. * inset).max(0.);
-            match bars.filter(|b| !b.is_empty()) {
-                None => window.paint_quad(
+            let Some(peak) = d["peak"].as_str() else {
+                window.paint_quad(
                     PaintQuad::new(Bounds::new(
                         point(px(x0), px(top + (h / 2.).floor())),
                         size(px(w), px(1.)),
                     ))
                     .background(color),
-                ),
-                Some(bars) => {
-                    let floor = top + h - inset;
-                    let mut path = PathBuilder::fill();
-                    path.move_to(point(px(x0), px(floor)));
-                    // Silence draws nothing: a bar shorter than `minBar`
-                    // would run along the foot as an underline.
-                    for (i, peak) in bars.iter().enumerate() {
-                        let bar = peak.as_f64().unwrap_or(0.) as f32 * room;
-                        let bar = if bar < min_bar { 0. } else { bar };
-                        let x = x0 + i as f32;
-                        path.line_to(point(px(x), px(floor - bar)));
-                        path.line_to(point(px(x + 1.), px(floor - bar)));
+                );
+                return;
+            };
+            let style = pm_panel_timeline::waveform::Style::parse(d["style"].as_str().unwrap_or(""))
+                .unwrap_or_default();
+            let light = d["light"].as_u64().unwrap_or(0xffffff) as u32;
+            let lift = if d["selected"].as_bool() == Some(true) { 1.2 } else { 1. };
+            let a = |share: f64| shade(light, share * lift * op.opacity);
+            let room = (h - 2. * inset).max(0.);
+            let decode = |key: &str| {
+                d[key]
+                    .as_str()
+                    .map(|t| pm_panel_timeline::waveform::smooth(&pm_panel_timeline::waveform::decode(t)))
+            };
+            let lanes: Vec<(Vec<f32>, Option<Vec<f32>>, f32, f32)> = match decode("peak2") {
+                // A tall stereo row: the left above, the right below.
+                Some(peak2) => {
+                    let half = room / 2.;
+                    vec![
+                        (pm_panel_timeline::waveform::smooth(&pm_panel_timeline::waveform::decode(peak)), decode("rms"), top + inset, half),
+                        (peak2, decode("rms2"), top + inset + half, half),
+                    ]
+                }
+                None => vec![(
+                    pm_panel_timeline::waveform::smooth(&pm_panel_timeline::waveform::decode(peak)),
+                    decode("rms"),
+                    top + inset,
+                    room,
+                )],
+            };
+            // Only the columns the window shows (a frame is prepared wider
+            // than the view): the path's work stays the screen's width.
+            let shown = f32::from(window.viewport_size().width);
+            let first = (((0. - x0) * per).floor().max(0.) as usize).saturating_sub(1);
+            let last = (((shown - x0) * per).ceil().max(0.) as usize) + 2;
+            for (peaks, rms, lane_top, lane_h) in lanes {
+                let window_of = |v: Vec<f32>| -> Vec<f32> {
+                    let end = last.min(v.len());
+                    if first >= end { vec![] } else { v[first..end].to_vec() }
+                };
+                let (peaks, rms) = (window_of(peaks), rms.map(window_of));
+                let x = |i: usize| x0 + (first + i) as f32 / per;
+                match style {
+                    pm_panel_timeline::waveform::Style::Mirror => {
+                        let mid = lane_top + lane_h / 2.;
+                        let half = lane_h / 2.;
+                        // Two halves, each lighter at its peaks.
+                        // (direction, gradient angle: its first stop at the peaks)
+                        for (sign, angle) in [(-1f32, 180f32), (1f32, 0f32)] {
+                            if let Some(path) = smooth_fill(&peaks, &x, mid, |v| mid + sign * v * half) {
+                                window.paint_path(
+                                    path,
+                                    linear_gradient(
+                                        angle,
+                                        linear_color_stop(a(0.55), 0.),
+                                        linear_color_stop(a(0.14), 1.),
+                                    ),
+                                );
+                            }
+                        }
                     }
-                    path.line_to(point(px(x0 + bars.len() as f32), px(floor)));
-                    path.close();
-                    if let Ok(path) = path.build() {
-                        window.paint_path(path, color);
+                    pm_panel_timeline::waveform::Style::Floor => {
+                        let floor = lane_top + lane_h;
+                        if let Some(path) = smooth_fill(&peaks, &x, floor, |v| floor - v * lane_h) {
+                            window.paint_path(
+                                path,
+                                linear_gradient(
+                                    180.,
+                                    linear_color_stop(a(0.6), 0.),
+                                    linear_color_stop(a(0.12), 1.),
+                                ),
+                            );
+                        }
+                    }
+                    pm_panel_timeline::waveform::Style::Body => {
+                        let floor = lane_top + lane_h;
+                        let body = rms.as_ref().unwrap_or(&peaks);
+                        if let Some(path) = smooth_fill(body, &x, floor, |v| floor - v * lane_h) {
+                            window.paint_path(
+                                path,
+                                linear_gradient(
+                                    180.,
+                                    linear_color_stop(a(0.62), 0.),
+                                    linear_color_stop(a(0.16), 1.),
+                                ),
+                            );
+                        }
+                        // The peaks as a faint line over the body.
+                        if let Some(path) = smooth_line(&peaks, &x, |v| floor - v * lane_h) {
+                            window.paint_path(path, a(0.32));
+                        }
                     }
                 }
             }
@@ -5878,3 +5951,104 @@ mod transform_box_tests {
     }
 }
 
+/// Samples of a retimed or reversed audio clip's media time over its length
+/// (a time remap, or a speed other than a static 1), as its sound plays them
+/// (`pm_eval`'s `sourceTime`, which the mix follows): its waveform is read
+/// through them (`waveform::mapped`). `None` for a clip at speed 1.
+fn time_map(
+    published: &pm_kernel::Published,
+    layer_id: &str,
+    from: f64,
+    duration: f64,
+) -> Option<std::sync::Arc<[f64]>> {
+    const SAMPLES: usize = 256;
+    let root = published.snapshot.root()?;
+    let loc = pm_kernel::model::find_layer(root, layer_id)?;
+    let layer = pm_kernel::model::layer_at(root, &loc)?;
+    let d = layer.get("d")?;
+    let remapped = d
+        .get("timeRemap")
+        .map(|n| n.to_value())
+        .is_some_and(|v| v.as_bool() == Some(true) || v.get("v").and_then(pm_model::Value::as_bool) == Some(true));
+    let speed = d.get("speed").map(|n| n.to_value());
+    let unit = match &speed {
+        None => true,
+        Some(v) => match v.as_f64() {
+            Some(s) => s == 1.,
+            None => v.get("v").and_then(pm_model::Value::as_f64) == Some(1.)
+                && v.get("kf").and_then(pm_model::Value::as_array).is_none_or(|k| k.is_empty())
+                && v.get("expr").and_then(pm_model::Value::as_str).is_none_or(str::is_empty),
+        },
+    };
+    if !remapped && unit || duration <= 0. {
+        return None;
+    }
+    let comp_id = loc
+        .comp_id
+        .clone()
+        .or_else(|| root.get("id").and_then(|n| n.to_value().as_str().map(str::to_owned)))?;
+    let comp = pm_eval::Comp::in_root(root, &comp_id, published.revision()).ok()?;
+    let mut ev = pm_eval::Evaluator::new();
+    let mut cache = pm_eval::retime::RetimeCache::new();
+    let mut map = Vec::with_capacity(SAMPLES + 1);
+    for i in 0..=SAMPLES {
+        let t = from + duration * i as f64 / SAMPLES as f64;
+        let at = pm_eval::Scope::new(&mut ev, &comp, &comp)
+            .source_time(layer, t, Some(&mut cache))
+            .ok()?;
+        map.push(at);
+    }
+    Some(map.into())
+}
+
+/// `rgb` at `alpha` (0–1).
+fn shade(rgb: u32, alpha: f64) -> Rgba {
+    gpui::rgba((rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32)
+}
+
+/// The waveform's outline through `values` (0–1 per column at `x(i)`),
+/// `y(v)` high: quadratic curves through the midpoints, so it joins
+/// smoothly; silent ends run along `base`.
+fn waveform_outline(
+    path: &mut PathBuilder,
+    values: &[f32],
+    x: &dyn Fn(usize) -> f32,
+    y: &dyn Fn(f32) -> f32,
+) {
+    let at = |i: usize| point(px(x(i)), px(y(values[i])));
+    path.line_to(at(0));
+    for i in 1..values.len() {
+        let (a, b) = (at(i - 1), at(i));
+        path.curve_to(point((a.x + b.x) / 2., (a.y + b.y) / 2.), a);
+    }
+    path.line_to(at(values.len() - 1));
+}
+
+/// One filled waveform shape on `base` (anti-aliased, device resolution).
+fn smooth_fill(
+    values: &[f32],
+    x: &dyn Fn(usize) -> f32,
+    base: f32,
+    y: impl Fn(f32) -> f32,
+) -> Option<Path<Pixels>> {
+    if values.len() < 2 || values.iter().all(|v| *v <= 0.) {
+        return None;
+    }
+    let mut path = PathBuilder::fill();
+    path.move_to(point(px(x(0)), px(base)));
+    waveform_outline(&mut path, values, x, &y);
+    path.line_to(point(px(x(values.len() - 1)), px(base)));
+    path.close();
+    path.build().ok()
+}
+
+/// The waveform's peaks as a hairline over the body.
+fn smooth_line(values: &[f32], x: &dyn Fn(usize) -> f32, y: impl Fn(f32) -> f32) -> Option<Path<Pixels>> {
+    if values.len() < 2 || values.iter().all(|v| *v <= 0.) {
+        return None;
+    }
+    let mut path = PathBuilder::stroke(px(0.5));
+    path.move_to(point(px(x(0)), px(y(values[0]))));
+    waveform_outline(&mut path, values, x, &y);
+    path.build().ok()
+}

@@ -88,6 +88,34 @@ pub fn clip_envelope(
     timing: pm_media::clip::ClipTiming,
     buckets_per_second: f64,
 ) -> Result<(Vec<f32>, f64)> {
+    let levels = clip_levels(path, streams, timing, buckets_per_second)?;
+    let envelope = levels.peak.iter().map(|[a, b]| a.max(*b)).collect();
+    Ok((envelope, levels.rate))
+}
+
+/// What an asset's clip plays, per bucket of clip time, for drawing: the
+/// peak and the RMS of two channel slots, the first channel and every other
+/// channel together (a mono clip has the same sound in both), over every
+/// stream heard. [`clip_envelope`] is the larger peak of the two.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClipLevels {
+    /// Exact buckets per second.
+    pub rate: f64,
+    /// Channels the clip has (at most 2 are kept apart).
+    pub channels: usize,
+    pub peak: Vec<[f32; 2]>,
+    pub rms: Vec<[f32; 2]>,
+}
+
+/// [`ClipLevels`] of `streams` of `path` as the asset's `timing` places them,
+/// at about `buckets_per_second` (rounded to whole samples of the first
+/// stream).
+pub fn clip_levels(
+    path: &Path,
+    streams: &[Option<usize>],
+    timing: pm_media::clip::ClipTiming,
+    buckets_per_second: f64,
+) -> Result<ClipLevels> {
     const CHUNK: usize = 1 << 15;
     let cache = crate::source::SourceCache::new(8 << 20, 0);
     let result = (|| {
@@ -102,9 +130,13 @@ pub fn clip_envelope(
             .round()
             .max(1.0);
         let exact = f64::from(first.sample_rate()) / per;
-        let mut envelope: Vec<f32> = vec![];
+        let mut peak: Vec<[f32; 2]> = vec![];
+        let mut squares: Vec<[f64; 2]> = vec![];
+        let mut counts: Vec<[u32; 2]> = vec![];
+        let mut channels = 0;
         for (&stream, source) in streams.iter().zip(&sources) {
             let rate = f64::from(source.sample_rate());
+            channels = channels.max(source.channels());
             let end = match source.length() {
                 Some(n) => n as i64,
                 None => {
@@ -113,10 +145,13 @@ pub fn clip_envelope(
                 }
             };
             let buckets = (end as f64 * exact / rate).ceil() as usize;
-            if envelope.len() < buckets {
-                envelope.resize(buckets, 0.0);
+            if peak.len() < buckets {
+                peak.resize(buckets, [0.0; 2]);
+                squares.resize(buckets, [0.0; 2]);
+                counts.resize(buckets, [0; 2]);
             }
             let mut scratch = vec![vec![0f32; CHUNK]; source.channels()];
+            let mono = source.channels() == 1;
             let mut at = 0i64;
             while at < end {
                 let len = CHUNK.min((end - at) as usize);
@@ -124,14 +159,37 @@ pub fn clip_envelope(
                 cache.read(source, at, len, &mut out, true)?;
                 for i in 0..len {
                     let bucket =
-                        (((at + i as i64) as f64 * exact / rate) as usize).min(envelope.len() - 1);
-                    let level = scratch.iter().map(|c| c[i].abs()).fold(0f32, f32::max);
-                    envelope[bucket] = envelope[bucket].max(level.min(1.0));
+                        (((at + i as i64) as f64 * exact / rate) as usize).min(peak.len() - 1);
+                    for (c, samples) in scratch.iter().enumerate() {
+                        let v = samples[i];
+                        let slots: &[usize] = if mono { &[0, 1] } else if c == 0 { &[0] } else { &[1] };
+                        for &slot in slots {
+                            let p = &mut peak[bucket][slot];
+                            *p = p.max(v.abs().min(1.0));
+                            squares[bucket][slot] += f64::from(v) * f64::from(v);
+                            counts[bucket][slot] += 1;
+                        }
+                    }
                 }
                 at += len as i64;
             }
         }
-        Ok((envelope, exact))
+        let rms = squares
+            .iter()
+            .zip(&counts)
+            .map(|(s, n)| {
+                let r = |k: usize| {
+                    if n[k] == 0 { 0.0 } else { ((s[k] / f64::from(n[k])).sqrt() as f32).min(1.0) }
+                };
+                [r(0), r(1)]
+            })
+            .collect();
+        Ok(ClipLevels {
+            rate: exact,
+            channels,
+            peak,
+            rms,
+        })
     })();
     cache.shutdown();
     result

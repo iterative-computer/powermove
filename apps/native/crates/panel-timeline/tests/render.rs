@@ -593,49 +593,53 @@ fn a_missing_effect_badge_keeps_its_room_and_explains_itself() {
     assert_eq!(f.tooltip_at(name.bounds.x + 1., y), None);
 }
 #[test]
-fn audio_clips_draw_one_bar_per_point_from_their_trimmed_peaks() {
+fn audio_clips_draw_perceptual_columns_from_their_trimmed_media() {
     let t = tokens();
     let v = viewport(&t);
     let mut audio = clip("a");
     audio.label = Label::Green;
     // 10 buckets per second; a two-second trim skips the first 20.
     let peaks: Vec<f32> = (0..100).map(|i| if i < 20 { 1. } else { 0.25 }).collect();
-    audio.audio = Some(Some(Waveform {
-        peaks: peaks.into(),
-        rate: 10.,
-        trim: 2.,
-    }));
+    audio.audio = Some(Some(Waveform::from_peaks(&peaks, 10., 2.)));
     let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
     let body = f.ops.iter().find(|o| o.id == "clip:a").unwrap();
     let wave = f.ops.iter().find(|o| o.id == "clip-content:a").unwrap();
     assert_eq!(wave.shape, "waveform");
-    assert_eq!(
-        wave.color,
-        t.strip(t.colors.labels.green, pm_design::StripState::Rest)
-            .primary
-    );
-    let bars = wave.detail["bars"].as_array().unwrap();
-    let inset = 2. * t.metrics.border as f64;
-    // The waveform fills the strip's part in view.
+    let material = t.strip(t.colors.labels.green, pm_design::StripState::Rest);
+    assert_eq!(wave.color, material.primary);
+    assert_eq!(wave.detail["light"], material.foreground, "the clip's own pale tint");
+    let columns = pm_panel_timeline::waveform::decode(wave.detail["peak"].as_str().unwrap());
+    // Inside the glass: clear of the rim and the rounded corners.
+    let side = (body.radius * 0.5).max(2. * t.metrics.border as f64);
     let clip = body.clip.unwrap();
     let (x0, x1) = (
         body.bounds.x.max(clip.x),
         (body.bounds.x + body.bounds.width).min(clip.x + clip.width),
     );
-    assert_eq!(bars.len(), (x1 - x0 - 2. * inset).floor() as usize);
-    assert_eq!(wave.bounds.x, x0 + inset);
+    assert_eq!(wave.bounds.x, x0 + side);
+    // Two columns per point: device pixels on Retina.
+    assert_eq!(columns.len(), ((x1 - x0 - 2. * side) * 2.).ceil() as usize);
+    // The trimmed media only, on the perceptual scale (−12 dB is most of
+    // the height, not a quarter).
+    let expected = pm_panel_timeline::waveform::perceptual(0.25);
     assert!(
-        bars.iter().all(|b| b.as_f64() == Some(0.25)),
-        "trimmed peaks only"
+        columns.iter().all(|c| (c - expected).abs() < 1. / 255. + 1e-6),
+        "trimmed media only: {:?}",
+        &columns[..4]
     );
-    // Still reading: no bars (the painter draws the middle hairline).
+    assert!(expected > 0.7);
+    // Still reading: no columns (the painter draws the middle hairline).
     audio.audio = Some(None);
     let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
     let wave = f.ops.iter().find(|o| o.id == "clip-content:a").unwrap();
-    assert_eq!(
-        (wave.shape, wave.detail["bars"].as_array().map(Vec::len)),
-        ("waveform", Some(0))
-    );
+    assert_eq!((wave.shape, wave.detail["peak"].as_str()), ("waveform", None));
+    // Muted: dimmed, still there.
+    audio.audio = Some(Some(Waveform::from_peaks(&peaks, 10., 2.)));
+    audio.muted = true;
+    let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
+    let wave = f.ops.iter().find(|o| o.id == "clip-content:a").unwrap();
+    assert!(wave.opacity < 0.5 && wave.detail["peak"].as_str().is_some());
+    audio.muted = false;
     // Offline audio names itself with the Offline lead instead.
     audio.media = Media::Offline;
     let f = scene_with(&t, audio).prepare(v, &t).unwrap();
