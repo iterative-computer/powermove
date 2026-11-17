@@ -1713,13 +1713,27 @@ impl StoreWindow {
     }
     /// Turns an installed extension off or on without uninstalling it: its
     /// panels, effects and commands stop or come back at once (PM-435).
-    fn turn(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
+    /// Turns an extension off or on. The kernel write waits on the kernel,
+    /// so it runs on a worker: on the main thread (the card menu's Turn Off,
+    /// handled inside a mouse-up) it aborted the app (PM-503).
+    pub(crate) fn turn(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
         let kernel = self.services.kernel.clone();
-        if let Some(tx) = pm_kernel::state::switch_extension(&kernel.state(), id, on)
-            && let Err(error) = kernel.transact(tx)
-        {
-            self.message = Some(error);
-        }
+        let Some(tx) = pm_kernel::state::switch_extension(&kernel.state(), id, on) else {
+            return;
+        };
+        let written = cx
+            .background_executor()
+            .spawn(async move { kernel.transact(tx) });
+        cx.spawn(async move |this, cx| {
+            let result = written.await;
+            let _ = this.update(cx, |v, cx| {
+                if let Err(error) = result {
+                    v.message = Some(error);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
     /// Each Library card that just runs gets its real NSSwitch (made here,

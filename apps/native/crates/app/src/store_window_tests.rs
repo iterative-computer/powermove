@@ -944,15 +944,75 @@ fn a_library_card_turns_its_extension_off_and_on_and_has_a_menu() {
         matches!(&v.library, crate::store_window::Load::Ready(items) if items.len() == 1)
     });
     click(cx, "store-switch-soft-glow");
-    assert!(!running(&f), "off without uninstalling");
-    assert!(profile.join("extensions/soft-glow").exists());
+    settle(&view, cx, "off", |_| !running(&f));
+    assert!(profile.join("extensions/soft-glow").exists(), "off without uninstalling");
     click(cx, "store-switch-soft-glow");
-    assert!(running(&f), "on again");
+    settle(&view, cx, "on again", |_| running(&f));
     click(cx, "store-more-soft-glow");
     let rows = view.read_with(cx, |v, _| v.card_menu_rows());
     assert_eq!(rows[0], "Check for Updates", "{rows:?}");
     assert_eq!(rows.last().map(String::as_str), Some("Uninstall…"), "{rows:?}");
     assert!(!rows.iter().any(|r| r.starts_with("Turn")), "the switch is the corner: {rows:?}");
+}
+
+/// PM-503: Turn Off / Turn On (the card menu's rows, the switch) never waits
+/// on the kernel where it is asked: the write runs on a worker. Waiting on
+/// the main thread, inside the menu's mouse-up, aborted the app.
+#[::core::prelude::v1::test]
+fn turning_an_extension_off_never_waits_on_the_kernel_where_it_is_asked() {
+    struct Counting {
+        inner: Arc<Mutex<Kernel>>,
+        writes: std::sync::atomic::AtomicUsize,
+    }
+    impl pm_compat_runner::StoreAuthority for Counting {
+        fn state(&self) -> Arc<pm_kernel::state::StateSnapshot> {
+            pm_compat_runner::StoreAuthority::state(self.inner.as_ref())
+        }
+        fn transact(&self, tx: pm_kernel::state::StateTransaction) -> Result<(), String> {
+            self.writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            pm_compat_runner::StoreAuthority::transact(self.inner.as_ref(), tx)
+        }
+        fn project(&self, project: &str) -> Option<(u64, pm_model::Value)> {
+            pm_compat_runner::StoreAuthority::project(self.inner.as_ref(), project)
+        }
+    }
+    let f = fixture();
+    let profile = f.profile.path().canonicalize().unwrap();
+    let source = services(&f, true).source.unwrap();
+    store_install::install_from(
+        &source,
+        f.kernel.as_ref(),
+        &profile,
+        "native",
+        &store_install::Request {
+            release: GLOW_NEW,
+            repo: GLOW_REPO,
+            extension: "soft-glow",
+            version: "1.1.0",
+        },
+    )
+    .unwrap();
+    let counting = Arc::new(Counting {
+        inner: f.kernel.clone(),
+        writes: Default::default(),
+    });
+    let mut s = services(&f, true);
+    s.kernel = counting.clone();
+    let mut cx = TestAppContext::single();
+    let (view, cx) = open(&mut cx, s);
+    let during = view.update(cx, |v, cx| {
+        v.turn("soft-glow", false, cx);
+        counting.writes.load(std::sync::atomic::Ordering::SeqCst)
+    });
+    assert_eq!(during, 0, "the kernel was waited on where Turn Off was asked");
+    settle(&view, cx, "written", |_| {
+        counting.writes.load(std::sync::atomic::Ordering::SeqCst) == 1
+    });
+    let off = pm_compat_runner::StoreAuthority::state(f.kernel.as_ref())
+        .extensions
+        .get("soft-glow")
+        .is_some_and(|e| !e.enabled || e.stopped_this_run());
+    assert!(off, "and it is off");
 }
 
 #[::core::prelude::v1::test]
