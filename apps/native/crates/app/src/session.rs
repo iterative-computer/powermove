@@ -1396,6 +1396,15 @@ impl Controller {
         let picture = front || pm_shell::front_restoring().is_none();
         if keep {
             self.stage_open_with(&project, picture);
+            // The project's name, as the window showed it last: the tab,
+            // the bar and the ghost (with the front tab's picture) say it
+            // from the first frame, never an untitled window, while the
+            // library is read (PM-384: ~6 s under load).
+            let name = self.host.borrow().restored_name.clone();
+            if let Some(name) = name {
+                self.message.clear();
+                self.begin_ghost(&name, None, cx);
+            }
         }
         self.front_restore = front;
         let profile = self.profile.clone();
@@ -1427,6 +1436,11 @@ impl Controller {
                 {
                     v.stage_open_with(id, front || pm_shell::front_restoring().is_none());
                     v.begin_ghost(name, None, cx);
+                } else if found.is_none() && v.opening_name.is_some() && !v.opening {
+                    // Named from the session, but the library has no such
+                    // project now: Home, as for any open that ends without one.
+                    v.end_ghost(cx);
+                    v.viewer_poster = None;
                 } else if found.is_none() && v.opening_name.is_none() {
                     v.ghost_retire();
                     v.viewer_poster = None;
@@ -1748,6 +1762,11 @@ impl Controller {
                         let (list, keyframes) = list;
                         if v.rows.finish(key, list, latest) {
                             v.keyframes = keyframes;
+                            // Menus and keys follow the rows they were built
+                            // from: a layer added to a large project is
+                            // selectable before its rows land, and its Layer
+                            // menu stayed off until something else changed.
+                            v.update_disabled();
                             cx.notify();
                         }
                         if let Some(p) = v.published.clone() {
@@ -2421,16 +2440,51 @@ impl Controller {
             return;
         }
         let Some(operation) = self.mcp.try_operation() else {
-            self.message =
-                "A project operation is in progress. Try opening again when it finishes.".into();
+            // Another tab's open holds the fence (its recovery question,
+            // say): this project, already open in the kernel, waits its
+            // turn in its window. Dropped, the new tab stayed Home and the
+            // project had to be found on its Home card (PM-454).
+            self.message = format!("“{name}” opens when the other project has opened.");
+            self.begin_ghost(&name, None, cx);
             cx.notify();
-            // Nothing will adopt this session, so it can't stay open in the kernel.
-            if let ShellReply::Opened { session, .. } = reply {
-                let closing = self.kernel.shell(ShellCall::Close(session));
-                cx.spawn(async move |_, _| drop(closing.await)).detach();
-            }
+            let (mcp, kernel) = (self.mcp.clone(), self.kernel.clone());
+            let reply = std::rc::Rc::new(std::cell::RefCell::new(Some((reply, name, file))));
+            cx.spawn(async move |this, cx| {
+                let operation = crate::mcp::take_fence(&mcp, cx.background_executor()).await;
+                let held = reply.clone();
+                let adopted = this.update(cx, move |v, cx| {
+                    let Some((reply, name, file)) = held.borrow_mut().take() else {
+                        return;
+                    };
+                    // It took another project meanwhile: this one opens
+                    // beside it as v1's tabs do.
+                    if v.session.is_some() || v.opening {
+                        drop(operation);
+                        v.adopt_reply(reply, name, file, cx);
+                    } else {
+                        v.adopt_with(operation, reply, name, file, cx);
+                    }
+                });
+                // The window went: nothing will adopt the session.
+                if adopted.is_err()
+                    && let Some((ShellReply::Opened { session, .. }, _, _)) = reply.borrow_mut().take()
+                {
+                    drop(kernel.shell(ShellCall::Close(session)).await);
+                }
+            })
+            .detach();
             return;
         };
+        self.adopt_with(operation, reply, name, file, cx);
+    }
+    fn adopt_with(
+        &mut self,
+        operation: crate::mcp::Operation,
+        reply: ShellReply,
+        name: String,
+        file: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         if let ShellReply::Opened { session, .. } = &reply {
             self.stage_open(&session.project);
         }

@@ -172,6 +172,9 @@ pub struct Yours {
     pub version: String,
     /// The version this Mac last published.
     pub published: Option<String>,
+    /// Why its manifest can't be loaded (PM-505): the card says so instead of
+    /// looking like a healthy extension.
+    pub broken: Option<String>,
 }
 enum Reply {
     Shelves(u64, Result<Vec<Shelf>, String>),
@@ -1099,6 +1102,10 @@ fn load_error(error: pm_services::ServiceError) -> String {
     }
     .into()
 }
+/// A broken card's line: what is wrong with its manifest, in a sentence.
+pub(crate) fn broken_status(why: &str) -> String {
+    format!("Its manifest has a problem: {why}.")
+}
 fn uuid_like(s: &str) -> bool {
     s.len() == 36 && s.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-')
 }
@@ -1118,6 +1125,7 @@ pub fn yours(profile: &std::path::Path) -> Vec<Yours> {
                 name: text(manifest.and_then(|m| m.get("name"))).unwrap_or(found.id.clone()),
                 version: text(manifest.and_then(|m| m.get("version"))).unwrap_or_default(),
                 published: text(provenance[&found.id]["published"].get("version")),
+                broken: found.manifest.as_ref().err().cloned(),
                 id: found.id,
             }
         })
@@ -1713,13 +1721,27 @@ impl StoreWindow {
     }
     /// Turns an installed extension off or on without uninstalling it: its
     /// panels, effects and commands stop or come back at once (PM-435).
-    fn turn(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
+    /// Turns an extension off or on. The kernel write waits on the kernel,
+    /// so it runs on a worker: on the main thread (the card menu's Turn Off,
+    /// handled inside a mouse-up) it aborted the app (PM-503).
+    pub(crate) fn turn(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
         let kernel = self.services.kernel.clone();
-        if let Some(tx) = pm_kernel::state::switch_extension(&kernel.state(), id, on)
-            && let Err(error) = kernel.transact(tx)
-        {
-            self.message = Some(error);
-        }
+        let Some(tx) = pm_kernel::state::switch_extension(&kernel.state(), id, on) else {
+            return;
+        };
+        let written = cx
+            .background_executor()
+            .spawn(async move { kernel.transact(tx) });
+        cx.spawn(async move |this, cx| {
+            let result = written.await;
+            let _ = this.update(cx, |v, cx| {
+                if let Err(error) = result {
+                    v.message = Some(error);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
     /// Each Library card that just runs gets its real NSSwitch (made here,
@@ -2109,6 +2131,9 @@ impl StoreWindow {
                 .clone()
                 .into_iter()
                 .map(|item| {
+                    if let Some(why) = &item.broken {
+                        return self.broken_card(&item, why, width, cx);
+                    }
                     let (status, label) = match &item.published {
                         Some(published) if *published == item.version => {
                             (format!("Published {published}"), "Publish Update…")
@@ -2167,6 +2192,49 @@ impl StoreWindow {
         };
         out.push(self.section(self.heading("Made by You", None), made));
         out
+    }
+    /// A made-here extension whose manifest can't be loaded: the card says
+    /// why, and offers no Publish and no switch until it is fixed (its "…"
+    /// still shows it in Finder).
+    fn broken_card(
+        &self,
+        item: &Yours,
+        why: &str,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let c = &self.tokens.colors;
+        let id = item.id.clone();
+        let corner = self.card_corner(
+            CardMenu {
+                id: id.clone(),
+                name: item.name.clone(),
+                repo: None,
+                yours: true,
+                switch_in_menu: false,
+            },
+            Some(
+                div()
+                    .text_color(rgb(c.muted))
+                    .child("Needs a fix")
+                    .into_any_element(),
+            ),
+            cx,
+        );
+        self.frame(
+            &format!("store-yours-{id}"),
+            width,
+            Face {
+                seed: &format!("local:{id}"),
+                name: &item.name,
+                line: Some(("Can’t load".to_owned(), c.warning)),
+            },
+            div()
+                .text_color(rgb(c.warning))
+                .child(div().truncate().child(broken_status(why))),
+            corner,
+        )
+        .into_any_element()
     }
     /// An extension's page (S076): its head (art, name, what it does, who
     /// made it, and the action at the trailing edge), then About and a card
@@ -2326,7 +2394,7 @@ impl StoreWindow {
         }
         head = head.child(actions);
         let mut out = vec![back.into_any_element(), head.into_any_element()];
-        out.extend(self.message_line().map(IntoElement::into_any_element));
+        out.extend(self.message_line(cx).map(IntoElement::into_any_element));
         if primary && self.services.source.is_none() {
             out.push(
                 self.status(SIGNING)
@@ -2533,12 +2601,33 @@ impl StoreWindow {
         out.push(block("Details", details.into_any_element()));
         out
     }
-    fn message_line(&self) -> Option<Div> {
+    fn message_line(&self, cx: &mut Context<Self>) -> Option<Div> {
         let message = self.message.clone()?;
-        Some(
-            self.status(&message)
-                .debug_selector(|| "store-message".into()),
-        )
+        let line = self
+            .status(&message)
+            .debug_selector(|| "store-message".into());
+        // Publishing needs an account: the way to one is right there
+        // (PM-505), not only a line of text.
+        if message == crate::publish::SIGN_IN {
+            let owner = self.owner.clone();
+            let sign_in = self
+                .button("store-sign-in", "Sign In…", true, true)
+                .debug_selector(|| "store-sign-in".into())
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    if let Some(owner) = owner.clone() {
+                        crate::cloud::open_sign_in(owner, cx)
+                    }
+                }));
+            return Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(self.tokens.space.xs))
+                    .child(line)
+                    .child(sign_in),
+            );
+        }
+        Some(line)
     }
     fn title_for_back(&self) -> &'static str {
         if self.query.trim().is_empty() {
@@ -2577,7 +2666,7 @@ impl Render for StoreWindow {
         if self.detail.is_none() {
             column = column
                 .child(self.header(window, cx))
-                .children(self.message_line());
+                .children(self.message_line(cx));
         }
         let body = div()
             .id("store-body")

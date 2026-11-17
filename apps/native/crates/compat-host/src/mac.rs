@@ -167,6 +167,9 @@ impl Shared {
             return Ok(Value::Null);
         }
         if kind == "failure" {
+            // Why, in the log: what the page was applying and its error.
+            let why: String = m["payload"].to_string().chars().take(600).collect();
+            eprintln!("extension page stopped: {why}");
             self.handler
                 .event(HostEvent::Failure("compat_applier_stopped"));
             return Ok(Value::Null);
@@ -301,8 +304,16 @@ impl Shared {
                 Ok(Value::Null)
             }
             "remote_dom" => {
-                // Hidden pages still acknowledge DOM/layout; only input needs a slot.
-                if payload["kind"] == "event" && self.panels.borrow().items[&id].slot.is_none() {
+                // Hidden pages still acknowledge DOM/layout; only input needs a
+                // slot. Focus, selection and scroll are the browser's own as a
+                // page leaves the screen (a tab switch fires blur): they pass,
+                // as a refusal stopped the page and blanked every extension
+                // panel in the window (PM-509).
+                if payload["kind"] == "event"
+                    && !payload["event"].as_str().is_some_and(passes_detached)
+                    && self.panels.borrow().items[&id].slot.is_none()
+                {
+                    eprintln!("extension page: input refused while hidden: {}", payload["event"]);
                     return Err(Error::Forbidden);
                 }
                 self.handler.remote_dom(payload)?;
@@ -311,6 +322,13 @@ impl Shared {
             _ => Err(Error::InvalidRequest),
         }
     }
+}
+/// Events a page fires by itself while it is off screen, not input.
+fn passes_detached(event: &str) -> bool {
+    matches!(
+        event,
+        "focus" | "blur" | "focusin" | "focusout" | "selectionchange" | "scroll"
+    )
 }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -2059,6 +2077,24 @@ mod admission_tests {
         s.panels.borrow_mut().get(1).unwrap().slot = None;
         assert_eq!(s.handle(INPUT), Err(Error::Forbidden));
         assert_eq!(h.feedback.get(), 1);
+        let click = INPUT.replace(r#"{"kind":"event"}"#, r#"{"kind":"event","event":"click"}"#);
+        assert_eq!(s.handle(&click), Err(Error::Forbidden));
+        assert_eq!(h.feedback.get(), 1);
+    }
+    /// PM-509: a tab switch detaches the window's page and the browser fires
+    /// blur and focus in it. Refused, they stopped the page's applier and
+    /// every extension panel in the window stayed blank. They reach the
+    /// realm; input stays refused.
+    #[test]
+    fn a_detached_page_still_hears_its_own_focus_and_blur() {
+        let (s, h) = shared(Trust::Trusted);
+        s.panels.borrow_mut().get(1).unwrap().slot = None;
+        for event in ["blur", "focusout", "focus", "focusin", "selectionchange", "scroll"] {
+            let message =
+                INPUT.replace(r#"{"kind":"event"}"#, &format!(r#"{{"kind":"event","event":"{event}"}}"#));
+            assert_eq!(s.handle(&message), Ok(Value::Null), "{event}");
+        }
+        assert_eq!(h.feedback.get(), 6);
     }
     #[test]
     fn stopped_hosts_reject_requests() {

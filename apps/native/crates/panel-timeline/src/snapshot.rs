@@ -49,6 +49,17 @@ pub struct Channel {
     pub expression: Option<JsString>,
     pub keys: Vec<Key>,
 }
+/// A layer's transition at one edge, as the timeline draws and edits it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Transition {
+    /// The registry id (`type`); `fade` for an audio clip's fade.
+    pub kind: String,
+    pub duration: f64,
+    /// Its extension is not installed: it shows, but is not edited.
+    pub missing: bool,
+    /// The parameter keys it stores (`p`), kept by a duration edit.
+    pub params: Vec<String>,
+}
 #[derive(Clone, Debug)]
 pub struct Layer {
     pub id: String,
@@ -86,6 +97,9 @@ pub struct Layer {
     /// Effects whose extension is missing (`fx[].missing`): the layer draws
     /// with them bypassed. Their display names, else types.
     pub missing_effects: Vec<String>,
+    /// The In and Out transitions (`transitionIn`, `transitionOut`); an
+    /// audio clip's fades (`d.fadeIn`, `d.fadeOut`) stand in for them.
+    pub transitions: [Option<Transition>; 2],
     pub masks: Vec<String>,
     pub definition: Option<String>,
     pub channels: Vec<Channel>,
@@ -439,6 +453,34 @@ impl TimelineIndex {
             .filter_map(|fx| string(fx.get("name")).or_else(|| string(fx.get("type"))))
             .collect();
         let asset = layer.get("d").and_then(|d| string(d.get("asset")));
+        let audio = string(layer.get("type")).as_deref() == Some("audio");
+        let transitions =
+            [("transitionIn", "fadeIn"), ("transitionOut", "fadeOut")].map(|(field, fade)| {
+                if audio {
+                    return number(layer.get("d").and_then(|d| d.get(fade)))
+                        .filter(|d| d.is_finite() && *d > 0.)
+                        .map(|duration| Transition {
+                            kind: "fade".into(),
+                            duration,
+                            missing: false,
+                            params: vec![],
+                        });
+                }
+                let t = layer.get(field)?;
+                let kind = string(t.get("type"))?;
+                let params = match t.get("p").map(Node::kind) {
+                    Some(NodeKind::Object(fields)) => {
+                        fields.iter().map(|(k, _)| k.to_string_lossy()).collect()
+                    }
+                    _ => vec![],
+                };
+                Some(Transition {
+                    kind,
+                    duration: number(t.get("dur")).filter(|d| d.is_finite())?.max(0.),
+                    missing: boolean(t.get("missing")),
+                    params,
+                })
+            });
         let masks = array(layer.get("masks"))
             .iter()
             .filter_map(|m| string(m.get("id")))
@@ -464,6 +506,7 @@ impl TimelineIndex {
                 .max(0.),
             asset,
             missing_effects,
+            transitions,
             id,
             name: js_string(layer.get("name")).unwrap_or_default(),
             kind: string(layer.get("type")).unwrap_or_default(),

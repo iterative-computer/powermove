@@ -9,6 +9,19 @@ use std::{
     sync::{Arc, Mutex, atomic::Ordering},
 };
 
+/// The session fence, taken as soon as no other transition holds it. An
+/// open the Library already made for this window (a new tab's project)
+/// waits its turn behind another tab's open, a recovery question, say,
+/// rather than being dropped (PM-454).
+pub(crate) async fn take_fence(host: &Host, executor: &gpui::BackgroundExecutor) -> Operation {
+    loop {
+        if let Some(operation) = host.try_operation() {
+            return operation;
+        }
+        executor.timer(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// The app's own way to the agent's render path, for a still the person
 /// selects (the composer's Select part of the screen).
 static STILLS: std::sync::OnceLock<Arc<Mutex<Automation>>> = std::sync::OnceLock::new();
@@ -49,12 +62,16 @@ impl Tools {
         Connection {
             host: self.host.clone(),
             session: McpSession::new(self.automation.clone()),
+            run: None,
         }
     }
 }
 pub struct Connection {
     host: Arc<Host>,
     session: McpSession,
+    /// The agent run this session acts for, found while the run lives (its
+    /// grant stops resolving once it ends, which is when the session closes).
+    run: Option<String>,
 }
 impl Connection {
     /// UI open/close and MCP requests fence session identity without blocking
@@ -96,6 +113,7 @@ impl Connection {
 impl ToolConnection for Connection {
     fn bind_agent_run(&mut self, run: &str) {
         self.session.set_agent_run(run);
+        self.run = pm_agents::launch::grants::resolve(run).map(|(run, _)| run);
     }
     fn list(&mut self) -> Result<Value> {
         Ok(self.session.tools())
@@ -107,7 +125,15 @@ impl ToolConnection for Connection {
         })
     }
     fn disconnect(&mut self) -> Result<()> {
-        self.session.close()
+        let closed = self.session.close();
+        // The run ended without keeping its edits and they were rolled back:
+        // its thread says so (PM-507).
+        if self.session.take_rolled_back()
+            && let Some(run) = &self.run
+        {
+            pm_builtins::agent_run_rolled_back(run);
+        }
+        closed
     }
 }
 

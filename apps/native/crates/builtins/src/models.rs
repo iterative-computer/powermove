@@ -255,6 +255,10 @@ impl Backend {
         self.native
             .properties
             .focus_part(&self.native.facts["focusPart"]);
+        let transitions = registered_transitions(&self.kernel.state());
+        if self.native.properties.transitions != transitions {
+            self.native.properties.transitions = transitions;
+        }
         if self.native.properties.originals != self.native.originals {
             self.native.properties.originals = self.native.originals.clone();
         }
@@ -1997,7 +2001,15 @@ impl Backend {
                     if crate::agent_host::sends(action) {
                         crate::agent_host::admit_send(&state, &thread)?;
                     }
-                    let run = new_id("run");
+                    // A fresh run, or, while the thread runs, the current
+                    // one: a message sent then steers it (PM-506: a fresh id
+                    // there was refused as stale, and the steer was lost).
+                    let run = state
+                        .panel
+                        .session(&thread)
+                        .ok()
+                        .and_then(|s| s.run.as_ref().map(|r| r.id.clone()))
+                        .unwrap_or_else(|| new_id("run"));
                     let request = new_id("request");
                     let new_thread = new_id("thread");
                     let catalogs = |provider| link.catalog(provider);
@@ -2495,4 +2507,38 @@ pub struct Probe {
     /// That check is not on the sheet yet: the host publishes the sheet
     /// again (`Builtins::publish_finished_checks`).
     pub unpublished: bool,
+}
+
+/// The transitions the registry offers, in its order, for Properties.
+pub(crate) fn registered_transitions(
+    state: &pm_kernel::state::StateSnapshot,
+) -> Vec<crate::properties::RegisteredTransition> {
+    state
+        .registries
+        .get("transitions")
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let definition = pm_kernel::commands::effects::registered_transition(state, &entry.id)?;
+            let text = |v: &pm_model::Value, key: &str| {
+                v.get(key)
+                    .and_then(pm_model::Value::as_str)
+                    .map(str::to_owned)
+            };
+            let labels = entry
+                .definition
+                .get("params")
+                .and_then(pm_model::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|p| Some((text(p, "k")?, text(p, "label")?)))
+                .collect();
+            Some(crate::properties::RegisteredTransition {
+                id: entry.id.clone(),
+                label: text(&entry.definition, "label").unwrap_or_else(|| entry.id.clone()),
+                definition,
+                labels,
+            })
+        })
+        .collect()
 }

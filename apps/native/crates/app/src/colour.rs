@@ -73,6 +73,16 @@ pub(crate) fn edit_interpretation(
     edit: impl FnOnce(&mut Map),
 ) -> Result<Command, String> {
     let asset_id = layer_asset(p, layer).ok_or("Select a video clip to interpret")?;
+    edit_asset_interpretation(p, &asset_id, edit)
+}
+
+/// [`edit_interpretation`] of media `asset_id` itself (a Project panel item).
+pub(crate) fn edit_asset_interpretation(
+    p: &Published,
+    asset_id: &str,
+    edit: impl FnOnce(&mut Map),
+) -> Result<Command, String> {
+    let asset_id = asset_id.to_owned();
     let root = p.snapshot.root().ok_or("Project closed")?;
     let saved = root
         .get("assets")

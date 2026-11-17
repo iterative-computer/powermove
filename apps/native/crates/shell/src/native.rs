@@ -1001,9 +1001,34 @@ define_class!(
                 let command = toolbar_click_command(command, double_click);
                 let _ = tx.try_send(Command { name: command.to_string(), args: vec![], token: None });
             }
+            // A click on the Shape segment's menu indicator lists the
+            // variants at once; holding still does (PM-502).
+            if sender.selectedSegment() == SHAPE_SEGMENT
+                && let Some(event) = NSApplication::sharedApplication(self.mtm()).currentEvent()
+            {
+                let at = sender.convertPoint_fromView(event.locationInWindow(), None);
+                let widths: Vec<f64> = (0..sender.segmentCount())
+                    .map(|i| sender.widthForSegment(i))
+                    .collect();
+                if let Some(start) = on_menu_indicator(at.x, &widths, SHAPE_SEGMENT as usize) {
+                    let menu: Option<Retained<NSMenu>> =
+                        unsafe { msg_send![sender, menuForSegment: SHAPE_SEGMENT] };
+                    if let Some(menu) = menu {
+                        let below = objc2_foundation::NSPoint::new(start, sender.bounds().size.height + 2.);
+                        menu.popUpMenuPositioningItem_atLocation_inView(None, below, Some(sender));
+                    }
+                }
+            }
         }
     }
 );
+/// Where the Shape segment starts when `x` (in the control) falls on its
+/// menu indicator, the right `TOOL_MENU_INDICATOR` points of the segment.
+fn on_menu_indicator(x: f64, widths: &[f64], segment: usize) -> Option<f64> {
+    let start: f64 = widths.iter().take(segment).sum();
+    let end = start + *widths.get(segment)?;
+    (x >= end - TOOL_MENU_INDICATOR - 2. && x <= end + 2.).then_some(start)
+}
 impl Target {
     fn new(
         mtm: MainThreadMarker,
@@ -1433,7 +1458,7 @@ fn workspace_menu(state: &MenuState) -> Vec<Retained<NSMenuItem>> {
 }
 const TOOLS: [(&str, &str, &str); 8] = [
     ("toolSelect", "cursorarrow", "Select (V)"),
-    ("toolHand", "hand.raised", "Hand (H)"),
+    ("toolHand", "hand.raised.fill", "Hand (H)"),
     ("toolZoom", "magnifyingglass", "Zoom (Z)"),
     ("toolRotate", "crop.rotate", "Rotate (W)"),
     ("toolAnchor", "scope", "Anchor (Y)"),
@@ -1477,6 +1502,18 @@ mod strip_page_tests {
         // The front tab without it: the other tab's cell, unlit.
         let cells = super::strip_pages(1, &[], None, &[(2, vec![store()]), (3, vec![store()])]);
         assert_eq!(cells, vec![(2, 0, "Store".into(), false)]);
+    }
+}
+#[cfg(test)]
+mod shape_indicator_tests {
+    /// A click on the Shape segment's indicator opens its variants; one on
+    /// its glyph only picks the tool (PM-502).
+    #[test]
+    fn the_shape_menu_opens_on_a_click_on_its_indicator() {
+        let widths = [30., 30., 30., 30., 30., 42., 30.];
+        assert_eq!(super::on_menu_indicator(185., &widths, 5), Some(150.));
+        assert_eq!(super::on_menu_indicator(165., &widths, 5), None, "the glyph");
+        assert_eq!(super::on_menu_indicator(200., &widths, 5), None, "the next tool");
     }
 }
 #[cfg(test)]
@@ -2688,14 +2725,80 @@ fn symbol(s: &str, label: &str) -> Retained<NSImage> {
     )
     .expect("SF Symbol")
 }
+/// A vendored glyph (`crate::icons`) as a template image `points` square, so
+/// AppKit tints it as it tints a symbol (drawn at 3x: crisp on any display).
+pub(crate) fn glyph_image(glyph: crate::icons::Glyph, points: f64, label: &str) -> Option<Retained<NSImage>> {
+    use objc2::AnyThread;
+    let side = (points * 3.).ceil().max(1.) as u32;
+    let coverage = crate::icons::coverage(glyph, side)?;
+    let rep = unsafe {
+        objc2_app_kit::NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            objc2_app_kit::NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            side as isize,
+            side as isize,
+            8,
+            4,
+            true,
+            false,
+            objc2_app_kit::NSDeviceRGBColorSpace,
+            side as isize * 4,
+            32,
+        )?
+    };
+    let data = rep.bitmapData();
+    if data.is_null() {
+        return None;
+    }
+    let pixels = unsafe { std::slice::from_raw_parts_mut(data, (side * side * 4) as usize) };
+    // Black at the glyph's coverage, premultiplied: a template takes its shape.
+    for (p, a) in pixels.chunks_exact_mut(4).zip(coverage) {
+        p.copy_from_slice(&[0, 0, 0, a]);
+    }
+    let size = NSSize::new(points, points);
+    rep.setSize(size);
+    let image = NSImage::initWithSize(NSImage::alloc(), size);
+    image.addRepresentation(&rep);
+    image.setTemplate(true);
+    image.setAccessibilityDescription(Some(&NSString::from_str(label)));
+    Some(image)
+}
 /// A toolbar glyph: every item draws its symbol at `metrics.symbol_toolbar`
 /// in one weight, whichever control hosts it.
+/// A menu row's glyph: the vendored one where it stands for `s`, at the size
+/// AppKit gives a symbol in a menu, else the symbol.
+fn menu_symbol(s: &str, label: &str) -> Retained<NSImage> {
+    crate::icons::glyph(s)
+        .and_then(|g| glyph_image(g, 16., label))
+        .unwrap_or_else(|| symbol(s, label))
+}
+/// A toolbar item draws an SF Symbol of the toolbar's point size with about
+/// 18 pt of ink (measured at 14 pt: hand, zoom, gear, sparkles); a filled
+/// vendored glyph reads as large at about 16 pt, so its square is this much
+/// larger. A glyph matched to its SF Symbol on its own (Home) keeps its size.
+const TOOLBAR_GLYPH: f64 = 1.4;
+/// Apple's own drawings stand in the toolbar where the vendored family has no
+/// good one: the filled hand for the Hand tool, and Export's box and arrow at
+/// semibold (its filled twin closes into a block on the accent button at 1x).
+/// At the toolbar's 14 pt an SF Symbol draws about 18 pt of ink; among the
+/// vendored glyphs (about 16 pt) these are drawn at this size instead.
+const SF_AMONG_GLYPHS: f64 = 12.5;
 fn toolbar_symbol(s: &str, label: &str, t: &Tokens) -> Retained<NSImage> {
+    if let Some(glyph) = crate::icons::glyph(s) {
+        let points = t.metrics.symbol_toolbar as f64;
+        let points = if glyph.size == 1. { points * TOOLBAR_GLYPH } else { points };
+        if let Some(image) = glyph_image(glyph, points, label) {
+            return image;
+        }
+    }
     let image = symbol(s, label);
-    let config = objc2_app_kit::NSImageSymbolConfiguration::configurationWithPointSize_weight(
-        t.metrics.symbol_toolbar as f64,
-        unsafe { objc2_app_kit::NSFontWeightRegular },
-    );
+    let (points, weight) = match s {
+        "hand.raised.fill" => (SF_AMONG_GLYPHS, unsafe { objc2_app_kit::NSFontWeightRegular }),
+        "square.and.arrow.up" => (SF_AMONG_GLYPHS, unsafe { objc2_app_kit::NSFontWeightSemibold }),
+        _ => (t.metrics.symbol_toolbar as f64, unsafe { objc2_app_kit::NSFontWeightRegular }),
+    };
+    let config =
+        objc2_app_kit::NSImageSymbolConfiguration::configurationWithPointSize_weight(points, weight);
     image.imageWithSymbolConfiguration(&config).unwrap_or(image)
 }
 impl ToolbarDelegate {
@@ -2803,7 +2906,7 @@ impl ToolbarDelegate {
                     item.setRepresentedObject(Some(&NSString::from_str(variant)));
                     item.setTarget(Some(target));
                 }
-                item.setImage(Some(&symbol(glyph, label)));
+                item.setImage(Some(&menu_symbol(glyph, label)));
                 item.setState(if variant == "rect" {
                     NSControlStateValueOn
                 } else {
@@ -3368,6 +3471,8 @@ pub struct Host {
     /// The pages (Settings, the Store) open in this window's strip at the
     /// last quit, which open again behind the project.
     pub restored_pages: Vec<String>,
+    /// The restored project's name as the window last showed it.
+    pub restored_name: Option<String>,
     menu_state: RefCell<Option<MenuState>>,
     /// The open Save Workspace sheet (kept alive while attached).
     sheet: RefCell<Option<Sheet>>,
@@ -3563,6 +3668,7 @@ impl Host {
             restored_project: None,
             restored_front: false,
             restored_pages: Vec::new(),
+            restored_name: None,
             menu_state: RefCell::new(None),
             sheet: RefCell::new(None),
             definition: RefCell::new(None),
@@ -4249,6 +4355,12 @@ impl Host {
         HOME_WINDOWS.with(|h| h.borrow_mut().insert(self.window.windowNumber()));
         self.sync_tabs();
     }
+    /// The project name the window shows, if it shows one (not Home, nor
+    /// the untitled window before a project).
+    pub fn shown_project_name(&self) -> Option<String> {
+        let title = self.document.borrow().0.clone();
+        (!title.is_empty() && title != "Untitled" && title != "Home").then_some(title)
+    }
     pub fn set_document_metadata(
         &self,
         title: &str,
@@ -4384,6 +4496,11 @@ impl Host {
             view.removeFromSuperview();
         }
         let glyph = |name: &str, label: &str, points: f64| {
+            if let Some(image) =
+                crate::icons::glyph(name).and_then(|g| glyph_image(g, points, label))
+            {
+                return image;
+            }
             let config =
                 NSImageSymbolConfiguration::configurationWithPointSize_weight(points, unsafe {
                     NSFontWeightMedium
@@ -4816,6 +4933,11 @@ impl Host {
             view.removeFromSuperview();
         }
         let glyph = |name: &str, label: &str, points: f64| {
+            if let Some(image) =
+                crate::icons::glyph(name).and_then(|g| glyph_image(g, points, label))
+            {
+                return image;
+            }
             let config =
                 NSImageSymbolConfiguration::configurationWithPointSize_weight(points, unsafe {
                     NSFontWeightMedium
@@ -5823,7 +5945,7 @@ impl Host {
                         NSControlStateValueOff
                     });
                 }
-                let image = symbol(glyph, &format!("Shape: {label} (Q)"));
+                let image = toolbar_symbol(glyph, &format!("Shape: {label} (Q)"), &self.tokens);
                 let _: () = msg_send![&*view, setImage: &*image, forSegment: SHAPE_SEGMENT];
                 let tip = NSString::from_str(&format!("{label} (Q)"));
                 let _: () = msg_send![&*view, setToolTip: &*tip, forSegment: SHAPE_SEGMENT];
@@ -7913,9 +8035,11 @@ pub fn bring_forward(window: &NSWindow) {
     if let Some(group) = top.tabGroup() {
         group.setSelectedWindow(Some(&top));
     }
-    top.makeKeyAndOrderFront(None);
+    // Through the window policy, as every show is: at once while the app is
+    // active, else as soon as the activation asked for above lands.
+    gpui_macos::child_window::show(&top, true);
     if !std::ptr::eq(&*top, window) {
-        window.makeKeyAndOrderFront(None);
+        gpui_macos::child_window::show(window, true);
     }
     NSBeep();
 }

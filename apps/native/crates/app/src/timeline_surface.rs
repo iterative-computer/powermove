@@ -62,6 +62,12 @@ pub struct EffectDrop {
     pub definition: String,
     pub label: String,
     pub layer: Option<String>,
+    /// A transition (`definition` reads `transition:<id>`): the clip edge it
+    /// landed on, the nearer half (v1: left half In, right half Out).
+    pub edge: Option<pm_kernel::commands::effects::Edge>,
+    /// Tracks mode: the clip on the other side of that edge's cut, on the
+    /// same track. The transition goes across the cut.
+    pub across: Option<String>,
 }
 pub trait Delegate: 'static {
     fn time(&self, cx: &App) -> f64;
@@ -182,6 +188,11 @@ enum Spec {
         start: f64,
         room: f64,
     },
+    /// A transition's wedge: its duration.
+    Transition {
+        layer: String,
+        edge: pm_panel_timeline::render::Edge,
+    },
 }
 /// A transform box drag (v1's `dragGraphTransform`): the selected keys'
 /// span when the grip was pressed, which grip, and whether ⌘ scales about
@@ -252,6 +263,8 @@ impl TransformBox {
 enum Job {
     Sync,
     SelectLayer(String, Mods),
+    /// The transition selected on a clip's edge, or none.
+    SelectTransition(Option<(String, pm_panel_timeline::render::Edge)>),
     SelectKey {
         layer: String,
         channel: String,
@@ -1636,6 +1649,38 @@ impl TimelineSurface {
         let top = scene.scroll_for(&v4::row_id(&RowId::Layer(layer.clone())))?;
         Some((layer, ruler + top - self.view.scroll_y))
     }
+    /// Where a transition dropped at `position` goes: the clip under it (a
+    /// layer bar, or a clip on a track) and its nearer edge; the layer row's
+    /// clip when the pointer is beside the bar.
+    fn transition_target(
+        &self,
+        position: Point<Pixels>,
+    ) -> (
+        Option<String>,
+        Option<pm_kernel::commands::effects::Edge>,
+        Option<String>,
+    ) {
+        use pm_kernel::commands::effects::Edge as Side;
+        let (x, y) = self.local(position);
+        let layer = self
+            .clip_at(x, y)
+            .map(|(id, _)| id)
+            .or_else(|| self.layer_under(position).map(|(id, _)| id));
+        let edge = layer.as_deref().and_then(|id| self.model.index.layer(id)).map(|l| {
+            if self.time_at(x) < l.from + l.duration / 2. {
+                Side::In
+            } else {
+                Side::Out
+            }
+        });
+        let across = match (&layer, edge) {
+            (Some(layer), Some(edge)) if self.model.mode == TimelineMode::Tracks => {
+                crate::transitions::neighbour(&self.model.index, &self.model.reveal, layer, edge)
+            }
+            _ => None,
+        };
+        (layer, edge, across)
+    }
     fn effect_moved(&mut self, bounds: Bounds<Pixels>, at: Point<Pixels>, cx: &mut Context<Self>) {
         let over = bounds.contains(&at).then_some(at);
         if over != self.effect_over {
@@ -1916,6 +1961,30 @@ impl TimelineSurface {
                 self.pump(cx);
                 return;
             }
+        }
+        // A transition's wedge: the press selects it (and its clip); a drag
+        // sets its duration. Any other press leaves it.
+        let transition = frame.hit_transition(x, y);
+        if self.model.transition.is_some() && transition.is_none() {
+            self.queue.push_back(Job::SelectTransition(None));
+        }
+        if let Some((layer, edge)) = transition {
+            let locked = self
+                .model
+                .index
+                .layer(&layer)
+                .is_some_and(|l| l.effectively_locked);
+            self.queue
+                .push_back(Job::SelectTransition(Some((layer.clone(), edge))));
+            self.queue
+                .push_back(Job::SelectLayer(layer.clone(), Mods::default()));
+            self.gesture = Gesture::Pressed(Press {
+                origin: event.position,
+                spec: (!locked).then_some(Spec::Transition { layer, edge }),
+                release: None,
+            });
+            self.pump(cx);
+            return;
         }
         // The level line of an audio clip: a press on it drags the gain.
         if let Some((layer, start, room)) = level_line_at(&frame, x, y)
@@ -3321,6 +3390,18 @@ impl TimelineSurface {
         } else if self.frame.as_ref().is_some_and(|f| f.hit_layer_key_across(x, y, KEY_REACH, m.row as f64).is_some()) {
             // The owner's rule: no pointing hand; a key keeps the arrow.
             CursorStyle::Arrow
+        } else if let Some((id, _)) = self.frame.as_ref().and_then(|f| f.hit_transition(x, y)) {
+            // A transition's wedge: its duration follows a drag.
+            if self
+                .model
+                .index
+                .layer(&id)
+                .is_some_and(|l| l.effectively_locked)
+            {
+                CursorStyle::Arrow
+            } else {
+                CursorStyle::ResizeLeftRight
+            }
         } else if let Some((id, Some(_))) = self.clip_at(x, y)
                 // A locked layer's ends offer no trim.
                 && !self.frame.as_ref().is_some_and(|f| {
@@ -3680,6 +3761,10 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             client.publish_view().await.map_err(text)?;
             Ok(effects)
         }
+        Job::SelectTransition(transition) => {
+            client.model.transition = transition;
+            Ok(vec![])
+        }
         Job::FocusGraph { layer, channel } => {
             client.model.graph_focus = Some((layer, channel));
             Ok(vec![])
@@ -3809,6 +3894,7 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
                 ids: tops,
             }
         }
+        Spec::Transition { layer, edge } => DragKind::Transition { layer, edge },
         Spec::Trim(Edge::In) => DragKind::TrimIn { ids },
         Spec::Trim(Edge::Out) => DragKind::TrimOut { ids },
         Spec::Offset => DragKind::QuickOffsetLayers { ids },
@@ -4271,7 +4357,23 @@ impl Render for TimelineSurface {
                     .border(px(self.tokens.metrics.border * 2.))
                     .border_color(rgb(self.tokens.colors.accent))
             });
-        let landing = self.media_over.map(|position| {
+        // An empty composition has no row to put a line between: the whole
+        // layer area takes the drop, washed and outlined as a group a layer
+        // moves into is (PM-471).
+        let empty = self.scene.as_ref().is_none_or(|s| s.total() == 0);
+        let empty_landing = self.media_over.filter(|_| empty).map(|_| {
+            let accent = self.tokens.colors.accent;
+            div()
+                .absolute()
+                .left(px(0.))
+                .top(px(self.tokens.metrics.ruler))
+                .w(self.bounds.size.width)
+                .h(self.bounds.size.height - px(self.tokens.metrics.ruler))
+                .bg(rgba((accent << 8) | 0x29))
+                .border(px(self.tokens.metrics.drop_stroke))
+                .border_color(rgb(accent))
+        });
+        let landing = self.media_over.filter(|_| !empty).map(|position| {
             let (at, _, y) = self.media_slot(position);
             let x = self.view.layer_column + (at - self.view.scroll_time) * self.view.pps;
             let (width, height) = (self.bounds.size.width, self.bounds.size.height);
@@ -4476,13 +4578,19 @@ impl Render for TimelineSurface {
                 {
                     cx.stop_propagation();
                     s.effect_over = None;
-                    let layer = s.layer_under(window.mouse_position()).map(|(id, _)| id);
+                    let (layer, edge, across) = if definition.starts_with("transition:") {
+                        s.transition_target(window.mouse_position())
+                    } else {
+                        (s.layer_under(window.mouse_position()).map(|(id, _)| id), None, None)
+                    };
                     s.delegate.drop_effect(
                         EffectDrop {
                             panel: drag.panel.clone(),
                             definition: definition.to_string(),
                             label: drag.label.to_string(),
                             layer,
+                            edge,
+                            across,
                         },
                         cx,
                     );
@@ -4893,6 +5001,7 @@ impl Render for TimelineSurface {
             )
             // Over the canvas.
             .children(landing.into_iter().flatten())
+            .children(empty_landing)
             .children(reorder.into_iter().flatten().flatten())
             .children(effect_row)
             .children(tip)
@@ -5282,6 +5391,26 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     path.line_to(point);
                 }
             }
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        }
+        // A transition's wedge inside a clip's end (v1): full height at the
+        // edge, tapering to its tip. Its corner follows the strip's rounding.
+        "wedge" => {
+            let (x0, y0, w, h) = (b.x, b.y, b.width, b.height);
+            let r = op.radius.min(w).min(h / 2.).max(0.);
+            let k = 0.45 * r;
+            // Mirrored for an Out edge: x measured in from the right.
+            let out = op.detail["edge"] == "out";
+            let p = |dx: f64, dy: f64| at(if out { x0 + w - dx } else { x0 + dx }, y0 + dy);
+            let mut path = PathBuilder::fill();
+            path.move_to(p(0., r));
+            path.cubic_bezier_to(p(r, 0.), p(0., r - k), p(r - k, 0.));
+            path.line_to(p(w, 0.));
+            path.line_to(p(w * r / h, h - r));
+            path.line_to(p(0., h - r));
             path.close();
             if let Ok(path) = path.build() {
                 window.paint_path(path, color);

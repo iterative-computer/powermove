@@ -1706,29 +1706,11 @@ fn native_content_quad<'d>(
     let d = scope.ev.resolve_drawn_content(scope.comp, layer, time)?;
     match ty.as_str() {
         "shape" => {
-            let world = vector_world(scope, b, layer, time, scale)?;
             let on_plane = scope.is_3d_layer(layer)?;
-            // An explicit 3D vector gets projected area coverage. Legacy 2D
-            // artwork inside a 3D group keeps its authored canvas sampling;
-            // changing those children also changes group glows and filters.
-            let grouped_canvas = on_plane && !node::truthy(node::member(Some(layer), "threeD"));
-            if !crate::vector::level2(layer)
-                && (grouped_canvas || (!on_plane && crate::raster_roi::at_rest(&world)))
-            {
-                let density = crate::text::continuous_raster_scale(&world);
-                return Ok(
-                    crate::vector::legacy_raster(scope, layer, &d, time, density)?.map(|q| {
-                        Quad::Texture {
-                            source: Source::Vector(Box::new(q.source)),
-                            w: q.w,
-                            h: q.h,
-                            ax: q.ax,
-                            ay: q.ay,
-                            uv: [0.0, 0.0, 1.0, 1.0],
-                        }
-                    }),
-                );
-            }
+            // Shapes and editable paths are analytic coverage at every
+            // compatibility level, in 2D, in a 3D group and as explicit 3D:
+            // a local Canvas raster resampled through the layer transform
+            // lost up to 18% of their area against the references (PM-510).
             if on_plane {
                 let mut plan = |scope: &mut Scope<'_, 'd>, world: &Mat2d, target| {
                     crate::vector::plan_shape(scope, layer, &d, time, world, target)

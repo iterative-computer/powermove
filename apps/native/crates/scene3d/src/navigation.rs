@@ -132,15 +132,14 @@ pub fn orbit(start: Pose, dx: f64, dy: f64) -> Pose {
     }
 }
 pub fn view_lens(pose: Pose, lens: Lens) -> Lens {
-    if pose.ortho {
-        if let Lens::Perspective { fov, aspect, .. } = lens {
-            let height =
-                2. * length(sub(pose.position, pose.target)) * (fov.to_radians() / 2.).tan();
-            return Lens::Orthographic {
-                width: height * aspect,
-                height,
-            };
-        }
+    if pose.ortho
+        && let Lens::Perspective { fov, aspect, .. } = lens
+    {
+        let height = 2. * length(sub(pose.position, pose.target)) * (fov.to_radians() / 2.).tan();
+        return Lens::Orthographic {
+            width: height * aspect,
+            height,
+        };
     }
     lens
 }

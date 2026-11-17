@@ -83,7 +83,8 @@ export type SectionAction =
   | "set-up-studio"
   | "time-remap"
   | "freeze-frame"
-  | "reverse";
+  | "reverse"
+  | "remove-transition";
 export interface AnimatorPreset {
   id: string | null;
   label: string;

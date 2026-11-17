@@ -746,12 +746,14 @@ fn svgs_draw_where_libxml2_paints_them() {
     }
 }
 
+/// A legacy shape at rest is device-space analytic coverage, as a native one
+/// is: a local Canvas raster resampled through the layer transform lost up
+/// to 18% of its area against the references (PM-510).
 #[test]
-fn fractional_translation_reuses_the_legacy_shape_source_pixel_grid() {
+fn a_legacy_shape_at_rest_is_device_coverage() {
     use pm_render::plan::{Content, Source};
     let mut renderer = Renderer::headless().unwrap();
     let mut keys = vec![];
-    let mut matrices = vec![];
     for x in [128.0, 128.125] {
         let shape = layer(
             "shape",
@@ -779,16 +781,13 @@ fn fractional_translation_reuses_the_legacy_shape_source_pixel_grid() {
             ..
         } = &draw.content
         else {
-            panic!("legacy shape must be sampled from its local texture")
+            panic!("a shape draws vector coverage")
         };
         keys.push(source.key());
-        matrices.push(draw.matrix);
     }
-    assert_eq!(
-        keys[0], keys[1],
-        "a fractional output move must not rerasterize the local shape"
-    );
-    assert!((matrices[1][4] - matrices[0][4] - 0.125).abs() < 1e-9);
+    // Covered where it lands on the output grid: an eighth of a pixel's
+    // move is a new coverage, never the old texture slid along.
+    assert_ne!(keys[0], keys[1], "the shape was sampled from a local texture");
 }
 
 /// Legacy 3D shapes use the same projected geometry as native shapes,

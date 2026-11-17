@@ -1916,6 +1916,9 @@ impl Controller {
                                 pm_panel_media::Effect::NewCompFromAsset(id) => {
                                     self.new_comp_from_asset(&id, cx)
                                 }
+                                pm_panel_media::Effect::InterpretFootage(id) => {
+                                    self.interpret_asset_sheet(id, cx)
+                                }
                                 pm_panel_media::Effect::ConfirmDelete {
                                     token,
                                     assets,
@@ -2293,10 +2296,18 @@ impl Controller {
                         ],
                     )
                     .critical()
-                    .sheet(&self.host.borrow().window);
+                    // On the popover itself, as its file picker is: on the
+                    // editor it took key from the popover, which closed, and
+                    // the person had to open it again to send (PM-507).
+                    .sheet(
+                        &crate::platform::ns_window(window)
+                            .unwrap_or_else(|| self.host.borrow().window.clone()),
+                    );
+                    self.builtins.agent_picking = true;
                     let runtime = runtime.clone();
-                    cx.spawn(async move |_, cx| {
+                    cx.spawn(async move |this, cx| {
                         let accepted = rx.recv().await == Ok(Some(true));
+                        let _ = this.update(cx, |v, _| v.builtins.agent_picking = false);
                         let _ = cx
                             .background_executor()
                             .spawn(async move { runtime.agent_consent(effect, accepted) })
@@ -3112,7 +3123,7 @@ impl Render for SurfaceWindow {
             // A focused control that went away leaves nothing focused.
             self.keys.claim(window, cx);
         }
-        let (mut fill, mut band) = (0, 0.);
+        let (mut fill, mut band, mut head_h) = (0, 0., 0.);
         let (head, body) = self.owner.update(cx, |v, cx| {
             let (header, colour, titlebar) = {
                 let t = &v.host.borrow().tokens;
@@ -3128,6 +3139,7 @@ impl Render for SurfaceWindow {
                 (t.metrics.header, colour, t.metrics.titlebar)
             };
             fill = colour;
+            head_h = header;
             // Windows with a transparent title bar keep their content below it.
             band = if popover || sheet || settings {
                 0.
@@ -3216,8 +3228,15 @@ impl Render for SurfaceWindow {
             .bg(rgb(fill))
             // The popover's header is its handle (popover_drag).
             .children(head.map(|head| {
+                // Its own row, as tall as a header: the cached header has no
+                // height of its own, so the conversation started under it
+                // and covered Thread, New Thread and Pin (PM-507).
                 div()
                     .id("agent-popover-handle")
+                    .w_full()
+                    .h(px(head_h))
+                    .flex_shrink_0()
+                    .bg(rgb(fill))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, window, cx| {

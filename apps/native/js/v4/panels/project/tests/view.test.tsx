@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { beforeAll, expect, test } from "bun:test";
 import { ProjectView, type ProjectViewProps } from "../index";
 import { asset, comp, folder, projection } from "./fixtures";
 import {
@@ -13,6 +13,12 @@ import {
 } from "./helpers";
 import { accessibleName, meta, status } from "../presentation";
 import type { Input, Projection } from "../contract";
+
+// The wire inspector is a cargo build; do it before the first case, not inside its 5 s budget.
+beforeAll(async () => {
+  const { binaries } = await import("./build-model");
+  binaries();
+}, 120_000);
 
 const selected = asset();
 selected.selected = true;
@@ -149,7 +155,10 @@ for (const [state, view, extra] of cases)
       expect(
         Object.values(report.nodes).some(
           // The quiet line says it (no glyph: lists are quiet text).
-          (node: any) => node.text === "Syncing…" || node.props?.text === "Syncing…" || node.props?.label === "Syncing…",
+          (node: any) =>
+            node.text === "Syncing…" ||
+            node.props?.text === "Syncing…" ||
+            node.props?.label === "Syncing…",
         ),
       ).toBe(true);
     }
@@ -745,7 +754,7 @@ test("scrolling inside the rows loaded asks for no new page", async () => {
     [101, 107],
     [94, 100],
     [106, 112],
-  ])
+  ] as [number, number][])
     await event(root, list().id, "rangechange", { range });
   expect(pages).toEqual([[188, 36]]);
   await event(root, list().id, "rangechange", { range: [110, 116] });

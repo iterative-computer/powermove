@@ -553,6 +553,25 @@ impl Panel {
         }
         Ok(())
     }
+    /// The run `run`'s edits were rolled back after it ended (it did not
+    /// keep them): its thread says so after whatever the run said, so a
+    /// "Done" never stands beside a project that lost the change (PM-507).
+    /// `false`: no thread here had that run.
+    pub fn note_rolled_back(&mut self, run: &str, text: &str) -> Result<bool> {
+        let Some(id) = self
+            .sessions
+            .iter()
+            .find(|(_, s)| {
+                s.last_run.as_deref() == Some(run) || s.run.as_ref().is_some_and(|r| r.id == run)
+            })
+            .map(|(id, _)| id.clone())
+        else {
+            return Ok(false);
+        };
+        self.session_mut(&id)?
+            .append(json!({"role":"assistant","text":text,"rolledBack":true}))?;
+        Ok(true)
+    }
     pub fn save(&mut self, store: &mut impl Store, now: u64) -> Result<()> {
         let ids: Vec<_> = self.sessions.keys().cloned().collect();
         for id in ids {

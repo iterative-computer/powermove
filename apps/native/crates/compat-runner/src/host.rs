@@ -184,6 +184,8 @@ enum Input {
     Panel(String, bool),
     Place(String, Option<[f32; 4]>),
     Page(u64, Value),
+    /// A fresh page for generation `u64`: everything again (PM-509).
+    ReplayPage(u64),
     Answer(u64, Value),
     /// A batch of layers the viewer or an export needs override answers for:
     /// `{needs, ask}`.
@@ -1188,6 +1190,11 @@ impl ExtensionHost {
     pub fn set_panel(&self, id: &str, open: bool) {
         let _ = self.inbox.send(Input::Panel(id.to_owned(), open));
     }
+    /// The window made its page of generation `view` again: the realm sends
+    /// its whole document and every canvas to it (PM-509).
+    pub fn replay_page(&self, view: u64) {
+        let _ = self.inbox.send(Input::ReplayPage(view));
+    }
     /// Feedback from the page of generation `view`. Called on a forwarding
     /// thread; a later generation ignores it.
     pub fn page_sink(&self, view: u64) -> impl Fn(Value) + Send + 'static + use<> {
@@ -1672,6 +1679,9 @@ impl Owner {
             Input::Page(view, message) if view == u64::from(self.writer.generation) => {
                 self.page(message)
             }
+            Input::ReplayPage(view) if view == u64::from(self.writer.generation) => {
+                self.replay_page()
+            }
             Input::Dom => self.drain_dom(),
             Input::Canvases => self.collect_canvases(),
             Input::Health(id, health) => self.set_health(&id, health),
@@ -1710,6 +1720,7 @@ impl Owner {
             }
             Input::Realm(..)
             | Input::Page(..)
+            | Input::ReplayPage(_)
             | Input::Booted(_)
             | Input::Failed(_)
             | Input::Unresponsive(..)
@@ -1920,6 +1931,14 @@ impl Owner {
             return;
         }
         for message in &delivered.0 {
+            // The page could not apply a batch: its extension panels stop
+            // drawing. Say which batch and why.
+            if message["kind"] == "fault" {
+                eprintln!(
+                    "extension page fault at batch {}: {}",
+                    message["seq"], message["message"]
+                );
+            }
             // A synchronous layout read is waiting for this answer: it goes to
             // the blocked realm directly (and through its queue as usual).
             if message["kind"] == "layout"
@@ -1941,6 +1960,39 @@ impl Owner {
             self.eval("__compat.receivePage()");
         }
         self.drain_dom();
+    }
+    /// The window's page was made again (the last one stopped applying, or its
+    /// process went): a new router, nothing queued for the old page, and the
+    /// realm's whole document and every canvas from the first batch, so no
+    /// panel stays blank (PM-509).
+    fn replay_page(&mut self) {
+        if self.realm.is_none() {
+            return;
+        }
+        let Ok(router) = RemoteDomPanel::new(
+            PANEL,
+            Session {
+                panel: "compat".into(),
+                generation: PAGE_SESSION,
+            },
+        ) else {
+            return;
+        };
+        trace(json!({"page": "replay"}));
+        self.router = Some(router);
+        self.dom_waiting.clear();
+        self.canvases.clear();
+        self.shared.update(|p| {
+            p.batches.clear();
+            p.canvases.clear();
+        });
+        // Whatever the realm's queue holds was for the old page.
+        if let Some(live) = &self.realm {
+            drop(live.host.take_dom_batches());
+        }
+        self.eval("__compat.replayDom()");
+        self.drain_dom();
+        self.collect_canvases();
     }
     /// Batches the page queue cannot take stay here and in the realm, whose
     /// document coalesces later changes: nothing is dropped and nothing grows.
@@ -6141,6 +6193,95 @@ mod tests {
     /// The PM-435 fixture: `toggled` contributes a panel, a command and an
     /// effect and keeps a timer running; `switcher`'s commands turn it on and
     /// off through the extension API (`api.extensions.setEnabled`).
+    /// What a page would apply: each admitted batch's payload, in order.
+    #[derive(Default)]
+    struct Applied(u64, Vec<Value>);
+    impl pm_compat_host::DomPanelHost for Applied {
+        fn generation(&self) -> pm_compat_host::Generation {
+            self.0
+        }
+        fn create(&mut self, _: pm_compat_host::PanelSpec) -> pm_compat_host::Result<()> {
+            Ok(())
+        }
+        fn attach(&mut self, _: u64, _: pm_compat_host::PanelSlot) -> pm_compat_host::Result<()> {
+            Ok(())
+        }
+        fn detach(&mut self, _: u64) -> pm_compat_host::Result<()> {
+            Ok(())
+        }
+        fn destroy(&mut self, _: u64) -> pm_compat_host::Result<()> {
+            Ok(())
+        }
+        fn apply(&mut self, _: u64, _: u64, batch: Value) -> pm_compat_host::Result<()> {
+            self.1.push(batch);
+            Ok(())
+        }
+        fn focus(&mut self, _: u64, _: Option<u64>) -> pm_compat_host::Result<()> {
+            Ok(())
+        }
+    }
+    /// PM-509: the window's page stopped applying, and every extension panel
+    /// in it stayed blank until extensions restarted (the router refused a
+    /// faulted page for good). The window makes its page again and asks for
+    /// a replay: the realm's whole document comes from batch 1, with the
+    /// panel's content, and later changes follow it.
+    #[test]
+    fn a_page_made_again_gets_the_realms_whole_document() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "anchor",
+            &[(
+                "index.ts",
+                "export default function(api){
+                   api.panels.register({id:'anchor.panel',title:'Anchor Point',
+                     build(root){const h=document.createElement('h2');h.textContent='Anchor body';
+                       root.append(h);globalThis.anchorTitle=h;}});
+                   api.commands.register({id:'anchor.change',label:'Change',
+                     run(){globalThis.anchorTitle.textContent='Changed body'}});
+                 }",
+            )],
+        );
+        let fixture = Fixture::start(root);
+        fixture.until("the extension's panel is registered", |host| {
+            host.records().iter().any(|r| r["id"] == "anchor" && r["health"]["state"] == "ok")
+        });
+        fixture.host.set_panel("anchor.panel", true);
+        let view = fixture.host.view();
+        let page = |want: &str| {
+            let mut seen: Vec<Value> = vec![];
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let mut applied = Applied(view, vec![]);
+                for batch in fixture.host.take_batches(view) {
+                    batch.present(&mut applied).unwrap();
+                }
+                seen.extend(applied.1);
+                if serde_json::to_string(&seen).unwrap().contains(want) {
+                    return seen;
+                }
+                assert!(Instant::now() < deadline, "{want} never reached the page");
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let first = page("Anchor body");
+        let last = first.last().unwrap()["seq"].as_u64().unwrap();
+        let session = json!({"panel":"compat","generation":1});
+        // The page faults at its last batch: the router and the realm stop it.
+        let sink = fixture.host.page_sink(view);
+        sink(json!({"kind":"fault","session":session,"seq":last,"message":"page fault"}));
+        thread::sleep(Duration::from_millis(100));
+        // The window's new page, and everything again from batch 1.
+        fixture.host.replay_page(view);
+        let replay = page("Anchor body");
+        assert_eq!(replay[0]["seq"], 1, "the replay starts a new page");
+        let end = replay.last().unwrap()["seq"].as_u64().unwrap();
+        sink(json!({"kind":"applied","session":session,"seq":end}));
+        // And what changes next follows on the new page.
+        fixture.host.run_command("anchor.change", json!([]));
+        let next = page("Changed body");
+        assert_eq!(next[0]["seq"].as_u64(), Some(end + 1));
+    }
     fn toggled_extensions(extensions: &Path) {
         extension(
             extensions,

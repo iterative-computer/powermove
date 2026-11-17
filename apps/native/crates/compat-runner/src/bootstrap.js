@@ -130,14 +130,23 @@ globalThis.__compat = {
       );
     };
     // An export's realm has no window: none of its frames waits for a panel.
-    const shows = (owner) =>
-      !owner ||
-      !this.panels ||
-      globalThis.__compatWindowless === true ||
-      this.realm.kernel.panels.ownerEntries(owner).length === 0 ||
-      this.panels.showingOwners().has(owner) ||
-      legacy(owner) ||
-      otherSurface(owner);
+    // When in doubt a panel gets its frames: a rule that cannot be decided
+    // (a registry that is not there yet) gives them.
+    const shows = (owner) => {
+      try {
+        return (
+          !owner ||
+          !this.panels ||
+          globalThis.__compatWindowless === true ||
+          this.realm.kernel.panels.ownerEntries(owner).length === 0 ||
+          this.panels.showingOwners().has(owner) ||
+          legacy(owner) ||
+          otherSurface(owner)
+        );
+      } catch {
+        return true;
+      }
+    };
     const start = (id, frame) => {
       const delay = frame.owner && this.realm?.PM?.playing ? PLAYING_FRAME_MS : 16;
       frame.timer = setTimeout(() => {
@@ -1573,6 +1582,12 @@ globalThis.__compat = {
    * its panels count as not showing while it cannot. */
   windowShown(shown) {
     this.panels?.setWindowShown(!!shown);
+  },
+  /** A fresh page: the whole document again, every canvas bound again. */
+  replayDom() {
+    if (!this.dom?.replay()) return;
+    this.flushCanvases?.();
+    this.dom.flush();
   },
   /** The page's messages since the last look, as data, in one flush. */
   receivePage() {

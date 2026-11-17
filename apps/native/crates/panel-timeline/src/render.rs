@@ -194,6 +194,11 @@ pub struct Clip {
     pub missing_effect: Option<String>,
     /// A captions clip's cues (S089), drawn in place of its name.
     pub cues: Vec<CueMark>,
+    /// Seconds of its In and Out transitions (an audio clip's fades), drawn
+    /// as v1's wedges inside its ends.
+    pub transitions: [Option<f64>; 2],
+    /// The transition selected on it.
+    pub transition_selected: Option<Edge>,
 }
 /// One caption cue on its clip, in composition seconds.
 #[derive(Clone, Debug, PartialEq)]
@@ -505,6 +510,15 @@ impl Scene {
                                     trim: None,
                                     missing_effect: layer.missing_effects.first().cloned(),
                                     cues: p.cues(layer),
+                                    transitions: layer
+                                        .transitions
+                                        .each_ref()
+                                        .map(|t| t.as_ref().map(|t| t.duration)),
+                                    transition_selected: model
+                                        .transition
+                                        .as_ref()
+                                        .filter(|(l, _)| *l == id.as_str())
+                                        .map(|(_, e)| *e),
                                 }),
                                 summary,
                             },
@@ -559,6 +573,15 @@ impl Scene {
                     trim: None,
                     missing_effect: layer.missing_effects.first().cloned(),
                     cues: p.cues(layer),
+                    transitions: layer
+                        .transitions
+                        .each_ref()
+                        .map(|t| t.as_ref().map(|t| t.duration)),
+                    transition_selected: model
+                        .transition
+                        .as_ref()
+                        .filter(|(l, _)| *l == item.id.as_str())
+                        .map(|(_, e)| *e),
                 });
             }
             let mut properties: HashMap<(Area, usize), Vec<PaintRow>> = HashMap::new();
@@ -1592,12 +1615,20 @@ fn strip_state(c: &Clip) -> pm_design::StripState {
         StripState::Rest
     }
 }
+/// The op naming clip `layer`'s transition at `edge`.
+pub fn transition_op(layer: &str, edge: Edge) -> String {
+    let edge = if edge == Edge::In { "in" } else { "out" };
+    format!("transition:{edge}:{layer}")
+}
 /// How far past a layer's in or out point a press trims it.
 const TRIM_REACH: f64 = 5.;
 /// How far in from a strip's drawn end a press trims it: v1's five points,
 /// with room for an end drawn on a half point, so five points in trims at
 /// both ends (the out end was drawn on a half point and lost its fifth).
 const TRIM_INSIDE: f64 = 6.;
+/// The least reach of a transition's wedge under the pointer, so a short
+/// one near the clip's floor can still be taken.
+const TRANSITION_GRAB: f64 = 4.;
 /// The least width a strip is drawn at, in points (v1's 4 px).
 const MIN_STRIP: f64 = 4.;
 /// Paints clip `c` and gives back its strip's box on screen (none when the
@@ -1689,6 +1720,61 @@ fn paint_clip(
         o.radius = radius;
         o.detail = json!({"period": (h * 0.45).max(6.), "stripe": (h * 0.18).max(2.)});
         ops.push(o);
+    }
+    // Transitions read as v1's wedges inside the clip's ends: full height at
+    // the edge, tapering to a point where the transition ends. A selected
+    // one is stronger and carries a grip at its tip, where it is dragged.
+    for (slot, edge) in [Edge::In, Edge::Out].into_iter().enumerate() {
+        let Some(seconds) = c.transitions[slot] else {
+            continue;
+        };
+        let w = (seconds * v.pps).clamp(0., end - start);
+        if w < 1. {
+            continue;
+        }
+        let x = match edge {
+            Edge::In => start,
+            Edge::Out => end - w,
+        };
+        let selected = c.transition_selected == Some(edge);
+        let mut o = Op::new(
+            transition_op(&c.id, edge),
+            "wedge",
+            Rect::new(x, r.y, w, r.height),
+            material.primary,
+        );
+        o.opacity = strength * if selected { 0.9 } else { 0.55 };
+        o.radius = radius;
+        o.clip = Some(Rect::new(
+            v.layer_column,
+            r.y,
+            (v.width - v.layer_column).max(0.),
+            r.height,
+        ));
+        o.detail = json!({
+            "edge": if edge == Edge::In { "in" } else { "out" },
+            "seconds": seconds,
+            "selected": selected,
+            "cursor": if c.locked { "notAllowed" } else { "resizeLeftRight" },
+        });
+        ops.push(o);
+        if selected && !c.locked {
+            let grip = t.trim_grip();
+            let gw = grip.width as f64;
+            let gh = (r.height * grip.height as f64).round();
+            let tip = match edge {
+                Edge::In => x + w - gw,
+                Edge::Out => x,
+            };
+            let mut o = Op::new(
+                format!("transition-grip:{}", c.id),
+                "rect",
+                Rect::new(tip, r.y + (r.height - gh) / 2., gw, gh),
+                grip.color,
+            );
+            o.radius = gw / 2.;
+            ops.push(o);
+        }
     }
     // "Offline" leads in `danger`; the name follows in the clip's foreground.
     // The name starts clear of the trim grip that stands inside a hovered
@@ -2302,6 +2388,32 @@ impl Frame {
                 })
             })
             .collect()
+    }
+    /// The transition under a point as `(layer, edge)`: inside its wedge,
+    /// clear of the trim zone at the clip's very end (a trim still takes
+    /// the edge), or on a selected one's grip.
+    pub fn hit_transition(&self, x: f64, y: f64) -> Option<(String, Edge)> {
+        if y < 0. || y >= self.viewport.height || x < self.viewport.layer_column {
+            return None;
+        }
+        self.ops.iter().rev().find_map(|o| {
+            let rest = o.id.strip_prefix("transition:")?;
+            let (edge, layer) = rest.split_once(':')?;
+            let edge = if edge == "in" { Edge::In } else { Edge::Out };
+            let b = o.bounds;
+            if y < b.y || y >= b.y + b.height {
+                return None;
+            }
+            // How far in from the clip's end, and the wedge's width at this
+            // height (it tapers to its tip at the floor).
+            let inward = match edge {
+                Edge::In => x - b.x,
+                Edge::Out => b.x + b.width - x,
+            };
+            let reach = (b.width * (1. - (y - b.y) / b.height)).max(TRANSITION_GRAB);
+            let grip = o.detail["selected"] == true && (inward - b.width).abs() <= TRANSITION_GRAB;
+            (grip || inward > TRIM_INSIDE && inward <= reach).then(|| (layer.to_owned(), edge))
+        })
     }
     pub fn hit_clip<'a>(&'a self, x: f64, y: f64) -> Option<(&'a str, Option<Edge>)> {
         if y < 0.

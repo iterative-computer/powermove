@@ -944,15 +944,75 @@ fn a_library_card_turns_its_extension_off_and_on_and_has_a_menu() {
         matches!(&v.library, crate::store_window::Load::Ready(items) if items.len() == 1)
     });
     click(cx, "store-switch-soft-glow");
-    assert!(!running(&f), "off without uninstalling");
-    assert!(profile.join("extensions/soft-glow").exists());
+    settle(&view, cx, "off", |_| !running(&f));
+    assert!(profile.join("extensions/soft-glow").exists(), "off without uninstalling");
     click(cx, "store-switch-soft-glow");
-    assert!(running(&f), "on again");
+    settle(&view, cx, "on again", |_| running(&f));
     click(cx, "store-more-soft-glow");
     let rows = view.read_with(cx, |v, _| v.card_menu_rows());
     assert_eq!(rows[0], "Check for Updates", "{rows:?}");
     assert_eq!(rows.last().map(String::as_str), Some("Uninstall…"), "{rows:?}");
     assert!(!rows.iter().any(|r| r.starts_with("Turn")), "the switch is the corner: {rows:?}");
+}
+
+/// PM-503: Turn Off / Turn On (the card menu's rows, the switch) never waits
+/// on the kernel where it is asked: the write runs on a worker. Waiting on
+/// the main thread, inside the menu's mouse-up, aborted the app.
+#[::core::prelude::v1::test]
+fn turning_an_extension_off_never_waits_on_the_kernel_where_it_is_asked() {
+    struct Counting {
+        inner: Arc<Mutex<Kernel>>,
+        writes: std::sync::atomic::AtomicUsize,
+    }
+    impl pm_compat_runner::StoreAuthority for Counting {
+        fn state(&self) -> Arc<pm_kernel::state::StateSnapshot> {
+            pm_compat_runner::StoreAuthority::state(self.inner.as_ref())
+        }
+        fn transact(&self, tx: pm_kernel::state::StateTransaction) -> Result<(), String> {
+            self.writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            pm_compat_runner::StoreAuthority::transact(self.inner.as_ref(), tx)
+        }
+        fn project(&self, project: &str) -> Option<(u64, pm_model::Value)> {
+            pm_compat_runner::StoreAuthority::project(self.inner.as_ref(), project)
+        }
+    }
+    let f = fixture();
+    let profile = f.profile.path().canonicalize().unwrap();
+    let source = services(&f, true).source.unwrap();
+    store_install::install_from(
+        &source,
+        f.kernel.as_ref(),
+        &profile,
+        "native",
+        &store_install::Request {
+            release: GLOW_NEW,
+            repo: GLOW_REPO,
+            extension: "soft-glow",
+            version: "1.1.0",
+        },
+    )
+    .unwrap();
+    let counting = Arc::new(Counting {
+        inner: f.kernel.clone(),
+        writes: Default::default(),
+    });
+    let mut s = services(&f, true);
+    s.kernel = counting.clone();
+    let mut cx = TestAppContext::single();
+    let (view, cx) = open(&mut cx, s);
+    let during = view.update(cx, |v, cx| {
+        v.turn("soft-glow", false, cx);
+        counting.writes.load(std::sync::atomic::Ordering::SeqCst)
+    });
+    assert_eq!(during, 0, "the kernel was waited on where Turn Off was asked");
+    settle(&view, cx, "written", |_| {
+        counting.writes.load(std::sync::atomic::Ordering::SeqCst) == 1
+    });
+    let off = pm_compat_runner::StoreAuthority::state(f.kernel.as_ref())
+        .extensions
+        .get("soft-glow")
+        .is_some_and(|e| !e.enabled || e.stopped_this_run());
+    assert!(off, "and it is off");
 }
 
 #[::core::prelude::v1::test]
@@ -1280,4 +1340,50 @@ fn a_page_opened_while_the_storefront_loads_keeps_it() {
     });
     view.update(cx, |v, cx| v.back(cx));
     settle(&view, cx, "storefront after Back", |v| ready(&v.shelves));
+}
+
+/// PM-505: an extension made here whose manifest can't be loaded is listed
+/// as broken, with why, never as a healthy card.
+#[::core::prelude::v1::test]
+fn a_made_extension_with_a_broken_manifest_says_why() {
+    let profile = tempfile::tempdir().unwrap();
+    let folder = profile.path().join("extensions/acc-tint");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("manifest.json"),
+        r#"{"id":"acc-tint","name":"Acceptance Tint","version":"1.0.0","apiVersion":3,"author":"acceptance"}"#,
+    )
+    .unwrap();
+    let made = crate::store_window::yours(profile.path());
+    assert_eq!(made.len(), 1);
+    let why = made[0].broken.clone().expect("listed as broken");
+    assert!(why.contains("author") && why.contains("\"user\""), "{why}");
+    assert!(crate::store_window::broken_status(&why).starts_with("Its manifest has a problem"));
+}
+
+/// PM-505: Publish while signed out says so and offers the way to an account:
+/// a Sign In button, not only a line of text.
+#[::core::prelude::v1::test]
+fn publishing_signed_out_offers_sign_in() {
+    let f = fixture();
+    let profile = f.profile.path().canonicalize().unwrap();
+    let folder = profile.join("extensions/made-here");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("manifest.json"),
+        r#"{"id":"made-here","name":"Made Here","version":"1.0.0","apiVersion":3,"author":"user"}"#,
+    )
+    .unwrap();
+    let mut cx = TestAppContext::single();
+    let (view, cx) = open(&mut cx, services(&f, true));
+    view.update(cx, |v, cx| v.set_page(Page::Library, cx));
+    settle(&view, cx, "library", |v| v.yours.iter().any(|y| y.id == "made-here"));
+    click(cx, "store-publish-made-here");
+    settle(&view, cx, "signed-out answer", |v| v.message.is_some() && v.busy.is_none());
+    assert_eq!(
+        view.read_with(cx, |v, _| v.message.clone()).as_deref(),
+        Some(crate::publish::SIGN_IN)
+    );
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("store-sign-in").is_some(), "a Sign In button is shown");
 }

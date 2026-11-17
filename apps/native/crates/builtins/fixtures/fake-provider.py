@@ -136,6 +136,18 @@ def codex():
                 emit({'method': 'item/agentMessage/delta', 'params': {**turn, 'itemId': 'answer', 'delta': text}})
                 emit({'method': 'item/completed', 'params': {**turn, 'item': {'id': 'answer', 'type': 'agentMessage', 'text': text}}})
                 emit({'method': 'turn/completed', 'params': {'threadId': 'thread', 'turn': {'id': 'turn', 'status': 'completed', 'error': None}}})
+        elif method == 'turn/steer':
+            # More input during the turn: acknowledged, written down for the
+            # test, and answered so the conversation shows it arrived.
+            text = request['params']['input'][0]['text']
+            log = os.environ.get('PM_FAKE_LOG')
+            if log:
+                with open(log, 'a') as file:
+                    file.write('steer ' + text + '\n')
+            emit({'id': request['id'], 'result': {'turnId': request['params'].get('expectedTurnId')}})
+            reply = 'Steered: ' + text.split('\n')[-1]
+            emit({'method': 'item/agentMessage/delta', 'params': {**turn, 'itemId': 'steered', 'delta': reply}})
+            emit({'method': 'item/completed', 'params': {**turn, 'item': {'id': 'steered', 'type': 'agentMessage', 'text': reply}}})
         elif method == 'turn/interrupt':
             STREAMING.clear()
             emit({'id': request['id'], 'result': {}})

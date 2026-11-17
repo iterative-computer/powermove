@@ -65,7 +65,8 @@ function rendition(state: unknown, label: string): string | null {
   if (state === "Queued") return `${label} Waiting`;
   if (typeof state !== "object" || state === null) return null;
   if ("Generating" in state) {
-    const { percent } = (state as { Generating: { percent: number } }).Generating;
+    const { percent } = (state as { Generating: { percent: number } })
+      .Generating;
     return `Creating ${label} ${percent}%`;
   }
   if ("Ready" in state) return label;
@@ -180,6 +181,7 @@ export function commandLabel(command: Command, row?: Row, count = 0): string {
       ? "Locate File…"
       : "Replace File…";
   if ("Reveal" in command) return "Show in Finder";
+  if ("InterpretFootage" in command) return "Interpret Footage…";
   if ("Download" in command) return "Download from Cloud";
   if ("ImportFolder" in command)
     return row && "Folder" in row.data

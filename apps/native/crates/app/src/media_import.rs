@@ -287,6 +287,9 @@ impl Controller {
         if let Some(view) = self.builtins.views.get(&drop.panel).cloned() {
             view.update(cx, |v, cx| v.end_drag(cx));
         }
+        if let Some(id) = drop.definition.strip_prefix("transition:") {
+            return self.drop_transition(id, &drop, cx);
+        }
         let layer = drop.layer.clone().or_else(|| {
             self.published
                 .as_ref()
@@ -334,6 +337,174 @@ impl Controller {
                 cx.notify();
             }
         }
+    }
+    /// A transition from the Effects panel on a clip's edge (v1's timeline
+    /// drop: the nearer half); without a clip under it, the selected layer's
+    /// In. An audio clip fades over the transition's length instead (its
+    /// crossfade). One undo step, "Set <transition>".
+    fn drop_transition(
+        &mut self,
+        id: &str,
+        drop: &crate::timeline_surface::EffectDrop,
+        cx: &mut Context<Self>,
+    ) {
+        use pm_kernel::commands::effects::Edge;
+        let Some(published) = self.published.clone() else {
+            return;
+        };
+        let Some(layer) = drop
+            .layer
+            .clone()
+            .or_else(|| published.selection.primary().map(str::to_owned))
+        else {
+            self.message = format!("Drop {} on a clip's edge, or select one first", drop.label);
+            return cx.notify();
+        };
+        let edge = drop.edge.unwrap_or(Edge::In);
+        let placed = self.place_transition(&layer, edge, drop.across.as_deref(), id);
+        self.run_placed(placed, &drop.label, vec![layer], cx);
+    }
+    /// Shift-D (Premiere's Apply Default Transitions to Selection): a
+    /// Crossfade on each selected clip's In; in Tracks, across the cut when
+    /// a clip on its track ends where it starts. An audio clip fades in, or
+    /// crossfades across its cut.
+    pub(crate) fn add_default_transition(&mut self, cx: &mut Context<Self>) {
+        use pm_kernel::commands::effects::Edge;
+        const DEFAULT: &str = "crossfade";
+        let Some(published) = self.published.clone() else {
+            return;
+        };
+        let mut view = pm_panel_timeline::TimelineModel::default();
+        view.restore_ui(&published.ui_state);
+        let tracks = view.mode == pm_panel_timeline::TimelineMode::Tracks;
+        let index = pm_panel_timeline::TimelineIndex::from_snapshot(&published.snapshot);
+        let clips: Vec<String> = published
+            .selection
+            .layers()
+            .iter()
+            .filter(|id| {
+                index
+                    .layer(id)
+                    .is_some_and(|l| l.kind != "group" && !l.effectively_locked)
+            })
+            .cloned()
+            .collect();
+        if clips.is_empty() {
+            self.message = "Select a clip to add a transition to".into();
+            return cx.notify();
+        }
+        let label = self
+            .kernel
+            .state()
+            .provider("transitions", DEFAULT)
+            .and_then(|r| r.definition.get("label")?.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "Crossfade".into());
+        let (mut commands, mut notice, mut refused) = (vec![], None, None);
+        for clip in &clips {
+            let across = tracks
+                .then(|| crate::transitions::neighbour(&index, &view.reveal, clip, Edge::In))
+                .flatten();
+            match self.place_transition(clip, Edge::In, across.as_deref(), DEFAULT) {
+                Ok(placed) => {
+                    commands.extend(placed.commands);
+                    notice = notice.or(placed.notice);
+                }
+                Err(message) => refused = Some(message),
+            }
+        }
+        let placed = if commands.is_empty() {
+            Err(refused.unwrap_or_default())
+        } else {
+            Ok(crate::transitions::Placed {
+                commands,
+                notice: notice.or(refused),
+            })
+        };
+        self.run_placed(placed, &label, clips, cx);
+    }
+    /// Runs a placed transition as one undo step (`Set <label>`), or says
+    /// why it could not go there; a shortfall of media is said too.
+    pub(crate) fn run_placed(
+        &mut self,
+        placed: Result<crate::transitions::Placed, String>,
+        label: &str,
+        select: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        match placed {
+            Ok(placed) => {
+                if let Some(notice) = placed.notice {
+                    self.message = notice;
+                }
+                self.run_layer_plan(
+                    crate::layer_commands::Plan {
+                        label: format!("Set {label}"),
+                        commands: placed.commands,
+                        select: Some(select),
+                        count_keys: None,
+                    },
+                    cx,
+                );
+            }
+            Err(message) => {
+                self.message = message;
+                cx.notify();
+            }
+        }
+    }
+    /// The commands for transition `id` on `layer`'s `edge`, or across the
+    /// cut to `across` (the clip on the other side, on the same track). An
+    /// audio clip fades at its edge and crossfades across a cut.
+    pub(crate) fn place_transition(
+        &self,
+        layer: &str,
+        edge: pm_kernel::commands::effects::Edge,
+        across: Option<&str>,
+        id: &str,
+    ) -> Result<crate::transitions::Placed, String> {
+        use pm_kernel::commands::effects::Edge;
+        let published = self.published.clone().ok_or("No open project")?;
+        let state = self.kernel.state();
+        if let Some(other) = across {
+            let (outgoing, incoming) = match edge {
+                Edge::In => (other, layer),
+                Edge::Out => (layer, other),
+            };
+            let wrap = |c| crate::layer_commands::in_tracks(&published, c);
+            return crate::transitions::across_cut(
+                &state,
+                &published,
+                outgoing,
+                incoming,
+                id,
+                0.5,
+                self.time(),
+                wrap,
+            );
+        }
+        let kind = published.snapshot.root().and_then(|root| {
+            let at = pm_kernel::model::find_layer(root, layer)?;
+            Some(pm_kernel::model::layer_at(root, &at)?.get("type")?.to_value().as_str()?.to_owned())
+        });
+        let command: pm_kernel::Command = if kind.as_deref() == Some("audio") {
+            let mut patch = pm_model::Map::new();
+            let field = if edge == Edge::In { "fadeIn" } else { "fadeOut" };
+            patch.insert(field, pm_model::Value::Number(0.5));
+            pm_kernel::ContentCommand::Set {
+                layer_id: layer.to_owned(),
+                patch,
+                time: self.time(),
+            }
+            .into()
+        } else {
+            pm_kernel::commands::effects::add_transition(&state, layer, edge, id, None)
+                .map_err(|e| e.to_string())?
+                .into()
+        };
+        Ok(crate::transitions::Placed {
+            commands: vec![command],
+            notice: None,
+        })
     }
     pub(crate) fn place_project_items(
         &mut self,

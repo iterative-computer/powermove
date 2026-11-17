@@ -1084,3 +1084,79 @@ fn the_playhead_marks_each_curve_with_its_value_as_v1() {
     assert!(g.playhead_marks(v, area, at(v.layer_column + 20.), &t).is_empty());
     assert!(g.playhead_marks(v, area, at(v.width - 20.), &t).is_empty());
 }
+
+/// v1's transition wedges: inside the clip's ends, as long as each
+/// transition at this zoom; a selected one is stronger and carries a grip at
+/// its tip. A press inside a wedge takes the transition, its very edge still
+/// trims, and below the wedge's slope the clip moves as before.
+#[test]
+fn transitions_draw_as_wedges_inside_the_clip_and_are_taken_by_a_press() {
+    let t = tokens();
+    let mut c = clip("a");
+    c.from = 1.;
+    c.duration = 6.;
+    c.transitions = [Some(1.), Some(0.5)];
+    c.transition_selected = Some(Edge::In);
+    let scene = Scene::new(
+        vec![row(
+            "a",
+            RowContent::Layer {
+                clip: Some(c),
+                summary: vec![].into(),
+            },
+        )],
+        12.,
+        30.,
+        &t,
+    )
+    .unwrap();
+    let v = viewport(&t);
+    let f = scene.prepare(v, &t).unwrap();
+    let op = |id: &str| f.ops.iter().find(|o| o.id == id).unwrap_or_else(|| panic!("{id}"));
+    let (wedge_in, wedge_out) = (op("transition:in:a"), op("transition:out:a"));
+    assert_eq!((wedge_in.shape, wedge_out.shape), ("wedge", "wedge"));
+    assert!((wedge_in.bounds.width - 100.).abs() < 1e-6, "{:?}", wedge_in.bounds);
+    assert!((wedge_out.bounds.width - 50.).abs() < 1e-6, "{:?}", wedge_out.bounds);
+    assert!(wedge_in.opacity > wedge_out.opacity, "the selected one is stronger");
+    assert_eq!(wedge_in.detail["edge"], "in");
+    assert_eq!(wedge_out.detail["edge"], "out");
+    let grip = op("transition-grip:a");
+    let strip = op("clip:a").bounds;
+    let b = wedge_in.bounds;
+    assert!(grip.bounds.x + grip.bounds.width <= b.x + b.width + 1e-6);
+    let top = b.y + 2.;
+    // Inside the In wedge near the top, past the trim zone: the transition.
+    assert_eq!(f.hit_transition(b.x + 20., top), Some(("a".into(), Edge::In)));
+    // Its grip at the tip.
+    assert_eq!(
+        f.hit_transition(b.x + b.width - 1., strip.y + strip.height / 2.),
+        Some(("a".into(), Edge::In))
+    );
+    // The clip's very edge still trims.
+    assert_eq!(f.hit_transition(b.x + 2., top), None);
+    // Under the slope near the floor: the clip itself.
+    assert_eq!(f.hit_transition(b.x + 60., b.y + b.height - 2.), None);
+    // The Out wedge, from its end.
+    let o = wedge_out.bounds;
+    assert_eq!(
+        f.hit_transition(o.x + o.width - 10., top),
+        Some(("a".into(), Edge::Out))
+    );
+    // A clip without transitions draws none.
+    let plain = Scene::new(
+        vec![row(
+            "p",
+            RowContent::Layer {
+                clip: Some(clip("p")),
+                summary: vec![].into(),
+            },
+        )],
+        12.,
+        30.,
+        &t,
+    )
+    .unwrap()
+    .prepare(v, &t)
+    .unwrap();
+    assert!(!plain.ops.iter().any(|o| o.id.starts_with("transition")));
+}

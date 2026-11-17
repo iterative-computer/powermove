@@ -418,6 +418,20 @@ impl Backend {
             }
             items.insert(entry.id.clone(), json!({"id":entry.id,"label":text("label").unwrap_or(&entry.id), "group":group, "kind":"effect","installed":true}));
         }
+        // v1's Effects panel lists transitions too (transitions-basic): drop one
+        // on a clip's edge, or Add for the selection's In.
+        for entry in state.registries.get("transitions").into_iter().flatten() {
+            let text = |key: &str| entry.definition.get(key).and_then(pm_model::Value::as_str);
+            let group = "Transitions".to_owned();
+            if !groups.contains(&group) {
+                groups.push(group.clone());
+            }
+            let key = format!("transition:{}", entry.id);
+            if !items.contains_key(&key) {
+                order.push(key.clone());
+            }
+            items.insert(key, json!({"id":entry.id,"label":text("label").unwrap_or(&entry.id), "group":group, "kind":"transition","installed":true}));
+        }
         let items = order
             .iter()
             .filter_map(|id| items.remove(id))
@@ -781,6 +795,29 @@ impl KernelData for Data {
                 HostOperation::Edit { label, commands } => {
                     let mut all = vec![];
                     for command in commands {
+                        // A transition from the browser: the selection's In
+                        // (v1's Add), or the edge it names.
+                        if command.command == "transition.set" {
+                            let target =
+                                command.args["target"].as_str().ok_or("transition target")?;
+                            if b.model.as_ref().ok_or("No open project")?.primary() != Some(target) {
+                                return Err("Transition target selection changed".into());
+                            }
+                            let id = command.args["definition"]
+                                .as_str()
+                                .ok_or("transition definition")?;
+                            let edge = match command.args["edge"].as_str() {
+                                Some("out") => pm_kernel::commands::effects::Edge::Out,
+                                _ => pm_kernel::commands::effects::Edge::In,
+                            };
+                            let state = b.kernel.state();
+                            let set = pm_kernel::commands::effects::add_transition(
+                                &state, target, edge, id, None,
+                            )
+                            .map_err(|e| e.to_string())?;
+                            all.push(set.into());
+                            continue;
+                        }
                         if command.command != "effect.add" {
                             return Err("Unregistered built-in edit".into());
                         }

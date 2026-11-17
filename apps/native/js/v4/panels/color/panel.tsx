@@ -210,7 +210,7 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
         >
           <Heading title={p.name} detail={p.typeLabel} locked={p.locked} />
           {tools.length === 0 ? (
-            <Ungraded editable={editable} onAdd={add} />
+            <AddRow empty editable={editable} onAdd={add} />
           ) : null}
           {tools.map((g, i) => {
             const id = g.header.id;
@@ -292,6 +292,11 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
               </UI.DisclosureGroup>
             );
           })}
+          {/* The grade is a stack: after the last block, each kind adds
+              another of its own, which applies after the rest. */}
+          {tools.length > 0 ? (
+            <AddRow empty={false} editable={editable} onAdd={add} />
+          ) : null}
         </scroll>
       )}
     </div>
@@ -367,18 +372,22 @@ function Header({
   );
 }
 
-/** A layer with no grade yet: what can be added, as quiet actions. */
-function Ungraded({
+/** What can be added, as quiet actions: on a layer with no grade yet, and
+ * after the last block of one that has some (each adds another block). */
+function AddRow({
+  empty,
   editable,
   onAdd,
 }: {
+  empty: boolean;
   editable: boolean;
   onAdd: (choice: string) => void;
 }) {
   return (
     <div
+      id={`${PANEL_ID}:add-row`}
       role="group"
-      label="Add a Grade"
+      label={empty ? "Add a Grade" : "Add Another Grade"}
       style={{
         display: "flex",
         flexDirection: "column",
@@ -386,13 +395,19 @@ function Ungraded({
         paddingLeft: t("metrics.inset"),
         paddingRight: t("metrics.inset"),
         paddingTop: t("metrics.gap"),
+        paddingBottom: t("metrics.gap"),
       }}
     >
-      <text
-        style={{ color: t("colors.muted"), fontSize: t("typography.minimum") }}
-      >
-        No grade on this layer.
-      </text>
+      {empty ? (
+        <text
+          style={{
+            color: t("colors.muted"),
+            fontSize: t("typography.minimum"),
+          }}
+        >
+          No grade on this layer.
+        </text>
+      ) : null}
       <div
         style={{
           display: "flex",

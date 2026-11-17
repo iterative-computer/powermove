@@ -53,6 +53,11 @@ impl Layout {
 struct Unit {
     from: f64,
     end: f64,
+    /// Seconds at its start and end that another clip on its track may
+    /// overlap: its In and Out transitions (an audio clip's fades), where
+    /// the clip before or after it runs on into it across a cut.
+    lead: f64,
+    tail: f64,
     height: usize,
     base: usize,
     inner: usize,
@@ -84,9 +89,15 @@ pub fn layout(index: &TimelineIndex, reveal: &RevealState) -> Layout {
     for i in order.into_iter().rev() {
         let l = &index.layers[i];
         if l.kind != "group" {
+            let [lead, tail] = l
+                .transitions
+                .each_ref()
+                .map(|t| t.as_ref().map_or(0., |t| t.duration.max(0.)));
             units[i] = Unit {
                 from: l.from,
                 end: l.from + l.duration.max(0.),
+                lead,
+                tail,
                 height: 1,
                 ..Default::default()
             };
@@ -125,6 +136,8 @@ pub fn layout(index: &TimelineIndex, reveal: &RevealState) -> Layout {
                 inner,
                 children: if open { kids } else { Vec::new() },
                 base: 0,
+                lead: 0.,
+                tail: 0.,
             };
         }
         built.insert(i);
@@ -190,6 +203,19 @@ pub fn layout(index: &TimelineIndex, reveal: &RevealState) -> Layout {
     }
     out
 }
+impl Unit {
+    /// The time it holds its lane alone: less what its transitions let a
+    /// neighbour on its track overlap.
+    fn held(&self) -> (f64, f64) {
+        let (from, end) = (self.from + self.lead, self.end - self.tail);
+        if from <= end {
+            (from, end)
+        } else {
+            let mid = (self.from + self.end) / 2.;
+            (mid, mid)
+        }
+    }
+}
 fn pack(
     ids: &[usize],
     units: &mut [Unit],
@@ -211,7 +237,7 @@ fn pack(
     // Held clips first, each on its lane when free there (an edited clip
     // keeps its lane only if its time is unchanged); then every other one
     // above whatever it overlaps (a new clip, or one an edit moved).
-    let overlap = |a: &Unit, b: (f64, f64)| a.from < b.1 - 1e-5 && b.0 < a.end - 1e-5;
+    let overlap = |a: &Unit, b: (f64, f64)| a.held().0 < b.1 - 1e-5 && b.0 < a.held().1 - 1e-5;
     let mut placed: Vec<(f64, f64, usize, usize)> = Vec::new();
     let mut rest = Vec::new();
     for &i in ids.iter().rev() {
@@ -222,7 +248,7 @@ fn pack(
                     overlap(u, (f, e)) && lane < hi && lo < lane + u.height
                 }) =>
             {
-                placed.push((u.from, u.end, lane, lane + u.height));
+                placed.push((u.held().0, u.held().1, lane, lane + u.height));
                 units[i].base = lane;
             }
             _ => rest.push(i),
@@ -244,48 +270,49 @@ fn pack(
                 None => break,
             }
         }
-        placed.push((u.from, u.end, base, base + u.height));
+        placed.push((u.held().0, u.held().1, base, base + u.height));
         units[i].base = base;
     }
     placed.iter().map(|&(_, _, _, hi)| hi).max().unwrap_or(0)
 }
 fn pack_fresh(ids: &[usize], units: &mut [Unit], index: &TimelineIndex) -> usize {
-    let mut starts: Vec<_> = ids.iter().map(|i| Total(units[*i].from)).collect();
+    let mut starts: Vec<_> = ids.iter().map(|i| Total(units[*i].held().0)).collect();
     starts.sort();
     starts.dedup();
     let size = starts.len().max(1).next_power_of_two();
     let mut tree: Vec<BTreeMap<Total, usize>> = vec![BTreeMap::new(); 2 * size];
     let mut height = 0;
     for i in ids.iter().rev() {
+        let (from, end) = units[*i].held();
         let u = &units[*i];
-        let mut end = starts.partition_point(|v| v.0 < u.end - 1e-5) + size;
+        let mut end_at = starts.partition_point(|v| v.0 < end - 1e-5) + size;
         let mut first = size;
         let mut base = index.layers[*i].preferred_track;
-        while first < end {
+        while first < end_at {
             if first % 2 == 1 {
                 if let Some((_, h)) = tree[first]
-                    .range((Excluded(Total(u.from + 1e-5)), Unbounded))
+                    .range((Excluded(Total(from + 1e-5)), Unbounded))
                     .next()
                 {
                     base = base.max(*h);
                 }
                 first += 1;
             }
-            if end % 2 == 1 {
-                end -= 1;
-                if let Some((_, h)) = tree[end]
-                    .range((Excluded(Total(u.from + 1e-5)), Unbounded))
+            if end_at % 2 == 1 {
+                end_at -= 1;
+                if let Some((_, h)) = tree[end_at]
+                    .range((Excluded(Total(from + 1e-5)), Unbounded))
                     .next()
                 {
                     base = base.max(*h);
                 }
             }
             first /= 2;
-            end /= 2;
+            end_at /= 2;
         }
         let top = base.saturating_add(u.height);
-        let stop = Total(u.end);
-        let mut at = starts.binary_search(&Total(u.from)).unwrap() + size;
+        let stop = Total(end);
+        let mut at = starts.binary_search(&Total(from)).unwrap() + size;
         while at > 0 {
             let map = &mut tree[at];
             if map.range(stop..).next().is_none_or(|(_, h)| *h < top) {
