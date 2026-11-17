@@ -4862,7 +4862,7 @@ impl Render for TimelineSurface {
                                                 }
                                             }
                                         }
-                                        let label = crate::captions_panel::timecode(at, surface.model.index.fps);
+                                        let label = format!("{}{}", if at < 0. { "−" } else { "" }, crate::captions_panel::timecode(at.abs(), surface.model.index.fps));
                                         let runs = [TextRun { len: label.len(), font: window.text_style().font(), color: rgb_to_hsla(rgb(tokens.colors.text)), background_color: None, underline: None, strikethrough: None, letter_spacing: None }];
                                         let text = window.text_system().shape_line(label.into(), px(tokens.typography.minimum), &runs);
                                         let pos = bounds.origin + point(px((cut_x as f32 + 12.).min(f32::from(bounds.size.width) - 100.)), px((y as f32 - 24.).max(tokens.metrics.ruler)));
