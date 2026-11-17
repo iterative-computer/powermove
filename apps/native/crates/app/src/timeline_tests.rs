@@ -2689,6 +2689,13 @@ fn hovering_the_tracks_skims_and_a_click_moves_the_playhead_there(cx: &mut TestA
         None,
         "leaving clears it"
     );
+    // A click moves the playhead to the skimmer in Tracks mode (Final Cut);
+    // in the Layers timeline a click only selects (see
+    // a_press_moves_the_playhead_to_the_skimmer_only_in_tracks_mode).
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.mode:tracks", 0., None, false, cx)
+    });
+    s.idle(cx);
     let at = s.at(1, 2.5);
     hover(&mut s, cx, at);
     s.vcx.simulate_click(at, Modifiers::none());
@@ -3351,4 +3358,36 @@ fn the_ruler_menus_mode_switch_reaches_the_published_view(cx: &mut TestAppContex
         s.idle(cx);
         assert_eq!(mode(&s).as_deref(), Some(want), "{action}");
     }
+}
+/// Run 27: in the Layers timeline a press on a layer selects it and never
+/// moves the playhead, skimming on or off (v1 and After Effects: only the
+/// ruler does). In Tracks mode with skimming on, a press moves the playhead
+/// to the skimmer, as Final Cut does.
+#[gpui::test]
+fn a_press_moves_the_playhead_to_the_skimmer_only_in_tracks_mode(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    s.recorder.skimming.set(true);
+    let press = |s: &mut Stage, cx: &mut TestAppContext| {
+        let at = s.at(0, 1.0);
+        s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        s.idle(cx);
+        s.vcx
+            .simulate_mouse_move(at + point(px(4.), px(0.)), None, Modifiers::none());
+        s.idle(cx);
+        assert!(
+            s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some(),
+            "the pointer skims"
+        );
+        s.vcx
+            .simulate_click(at + point(px(4.), px(0.)), Modifiers::none());
+        s.idle(cx);
+    };
+    press(&mut s, cx);
+    assert!(s.recorder.seeks.borrow().is_empty(), "Layers: no seek");
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.mode:tracks", 0., None, false, cx)
+    });
+    s.idle(cx);
+    press(&mut s, cx);
+    assert_eq!(s.recorder.seeks.borrow().len(), 1, "Tracks: the press seeks");
 }
