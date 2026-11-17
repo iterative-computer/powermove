@@ -781,3 +781,18 @@ test("list video uses its resolved poster resource", async () => {
   ).toBe(true);
   await root.dispose();
 });
+
+test("virtual project viewport has a single scroll owner across thumbnail refreshes", async () => {
+  const { root } = recorder();
+  let previous: number | undefined;
+  for (const status of ["Loading", "Ready"] as const) {
+    await root.render(<ProjectView view={projection([asset("a", status), asset("b")])} input={() => {}} menu={() => {}} page={() => {}} native={native} layout={layout} />);
+    const list = root.inspect().nodes.find((n) => n.type === "virtual-list")!;
+    const outer = find(root, "Project media");
+    expect(outer.props.metadata?.scrollOwner).toBe("child");
+    expect(list.props.metadata?.fixedItems).toBe(true);
+    if (previous !== undefined) expect(list.id).toBe(previous);
+    previous = list.id;
+  }
+  await root.dispose();
+});

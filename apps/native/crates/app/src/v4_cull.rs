@@ -140,7 +140,9 @@ impl SurfaceView {
                 .prepared
                 .nodes
                 .values()
-                .filter(|n| n.scroll_y && !n.hidden)
+                // Virtual lists own their row window and leading/trailing spacers.
+                // Walking their children again loses that spacer origin on publication.
+                .filter(|n| n.scroll_y && !n.hidden && n.virtual_window.is_none())
                 .filter_map(|n| self.scrolls.get(&n.id).map(|h| (n.id, h.clone())))
                 .collect();
             let window_height = f32::from(window.viewport_size().height);

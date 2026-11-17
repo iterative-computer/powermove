@@ -958,6 +958,7 @@ fn compile(
         hidden,
         // The native timeline scrolls its outline; a nested scroller would double it.
         scroll_y: meta.and_then(|m| m.get("nativeFirstRow")).is_none()
+            && meta.and_then(|m| m.get("scrollOwner")).and_then(Value::as_str) != Some("child")
             && (compiled.scroll_y
                 || matches!(component, Some(Component::List | Component::Tree))
                 || matches!(node.r#type.as_str(), "scroll" | "virtual-list")),

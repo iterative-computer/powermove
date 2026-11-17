@@ -1046,6 +1046,7 @@ export function ProjectView(props: ProjectViewProps) {
       )}
       <List
         label="Project media"
+        metadata={{ scrollOwner: view && view.page.total > 0 ? "child" : "self" }}
         tabIndex={0}
         attr={{ rowCount: view?.page.total ?? 0, multiselectable: true }}
         style={{

@@ -2023,3 +2023,81 @@ fn a_header_alone_in_its_row_takes_the_rows_width(cx: &mut TestAppContext) {
     let pop = bounds(&mut vcx, "pop");
     assert!(pop.right() > px(590.), "the trailing pop-up stands at the row's end: {pop:?}");
 }
+
+/// A second culler must not measure a virtual page from zero: its leading
+/// spacer is not a surface node. Republishing must keep the offset and rows.
+#[gpui::test]
+fn project_virtual_page_keeps_rows_and_offset_after_refresh(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let page = || {
+        let mut ops = node_ops(1, 0, "virtual-list", json!({"id":"virtual-viewport","count":30,"range":[10,20],"itemSize":160,"metadata":{"fixedItems":true},"style":{"width":240,"height":400,"lineHeight":20}}), &[]);
+        for i in 10..20 {
+            ops.extend(node_ops(i + 2, 1, "div", json!({"id":format!("card-row-{i}"),"style":{"height":160,"flexShrink":0}}), &[]));
+        }
+        let mut p = synthetic(&rig, ops);
+        p.panel = pm_builtins::PROJECT_PANEL.into();
+        p
+    };
+    let surface = page();
+    let runtime = rig.runtime.clone();
+    cx.executor().allow_parking();
+    let (root, vcx) = cx.add_window_view(|window, cx| Slot {
+        child: cx.new(|cx| SurfaceView::new(runtime, surface, tokens(), Default::default(), window, cx)),
+    });
+    let mut vcx = vcx.clone();
+    vcx.run_until_parked();
+    let view = root.read_with(&vcx, |r, _| r.child.clone());
+    view.update(&mut vcx, |v, cx| {
+        v.review_scroll_to(1600., cx);
+    });
+    vcx.run_until_parked();
+    view.update(&mut vcx, |v, cx| v.publish(page(), cx));
+    settle(cx, |cx| !view.read_with(cx, |v, _| v.compiling()));
+    vcx.run_until_parked();
+    let viewport = bounds(&mut vcx, "virtual-viewport");
+    let visible = (f32::from(viewport.size.height) / 160.).ceil() as usize;
+    for index in 0..visible {
+        let row = bounds(&mut vcx, &format!("card-row-{}", 10 + index));
+        assert_eq!(row.origin.y, viewport.origin.y + px(index as f32 * 160.));
+        assert_eq!(row.size.height, px(160.));
+    }
+    assert!(bounds(&mut vcx, &format!("card-row-{}", 9 + visible)).bottom() >= viewport.bottom());
+    // Fractional wheel steps and a decaying trackpad/momentum burst use the
+    // same offset, without rounding, multiplying or restarting the page.
+    vcx.simulate_mouse_move(point(px(50.), px(50.)), None, Modifiers::none());
+    vcx.run_until_parked();
+    let mut expected = 0_f32;
+    for (delta, phase) in [(-1.25, gpui::TouchPhase::Started), (-32., gpui::TouchPhase::Moved),
+        (-18.5, gpui::TouchPhase::Moved), (-7.25, gpui::TouchPhase::Moved), (-0.5, gpui::TouchPhase::Moved), (0., gpui::TouchPhase::Ended)] {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(50.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(delta))),
+            touch_phase: phase,
+            ..Default::default()
+        });
+        // Scroll layers replay without laying out; refresh before reading
+        // layout debug bounds, keeping the offset set by GPUI's wheel handler.
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        expected += delta;
+        let actual = f32::from(bounds(&mut vcx, "card-row-10").origin.y - viewport.origin.y);
+        let offset = view.read_with(&vcx, |v, _| f32::from(v.test_scroll_offset(1).unwrap().y));
+        assert!((offset + 1600. - expected).abs() < 0.01, "delta={delta}, phase={phase:?}: offset={offset}, expected {}", expected - 1600.);
+        // Layout aligns painted rows to pixels, while the handle retains
+        // every fractional delta for the next event.
+        assert!((actual - expected).abs() <= 1., "painted row={actual}, expected {expected} within one pixel");
+    }
+    let line = 20.; // The scroller's authored line height.
+    vcx.simulate_event(ScrollWheelEvent {
+        position: point(px(50.), px(50.)),
+        delta: ScrollDelta::Lines(point(0., -1.)),
+        ..Default::default()
+    });
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    let actual = f32::from(bounds(&mut vcx, "card-row-10").origin.y - viewport.origin.y);
+    let offset = view.read_with(&vcx, |v, _| f32::from(v.test_scroll_offset(1).unwrap().y));
+    assert!((offset + 1600. - (expected - line)).abs() < 0.01, "line delta: offset={offset}, expected {}", expected - line - 1600.);
+    assert!((actual - (expected - line)).abs() <= 1., "painted row={actual}, expected {} within one pixel", expected - line);
+}

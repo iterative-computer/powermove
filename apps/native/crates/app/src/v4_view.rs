@@ -641,7 +641,7 @@ impl SurfaceView {
         }
         self.cull.retain(|id| live(id));
         self.row_sources.retain(|id, _| live(id));
-        self.scrolls.retain(|id, _| live(id));
+        self.scrolls.retain(|id, _| prepared.node(*id).is_some_and(|n| n.scroll_y || n.scroll_x));
         self.subscriptions.retain(|id, _| live(id));
         self.fields.retain(|id, _| live(id));
         self.focus.retain(|id, _| live(id));
@@ -1461,6 +1461,10 @@ impl SurfaceView {
             scroll.set_offset(point(px(0.), px(-y)));
             cx.notify();
         }
+    }
+    #[cfg(test)]
+    pub fn test_scroll_offset(&self, id: Id) -> Option<Point<Pixels>> {
+        self.scrolls.get(&id).map(|scroll| scroll.offset())
     }
     #[cfg(test)]
     pub fn click_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
