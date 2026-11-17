@@ -3687,6 +3687,7 @@ fn g3_speed_keeps_automatically_packed_track_and_ripples_only_its_suffix(cx: &mu
 #[::core::prelude::v1::test]
 #[ignore = "writes headless G6 review crops"]
 fn g6_capture_split_review() {
+    objc2::rc::autoreleasepool(|_| assert!(gpui_macos::split_cursor_is_custom(), "AppKit must construct the scissors cursor"));
     use gpui::{HeadlessAppContext, size};
     use std::sync::Arc;
     let Ok(dir) = std::env::var("PM_G6_CAPTURE") else { return };
@@ -3775,8 +3776,14 @@ fn g6_capture_split_review() {
 
 #[gpui::test]
 fn g6_pointer_split_in_both_modes_is_one_undo_and_stays_selected(cx: &mut TestAppContext) {
-    for mode in ["layers", "tracks"] {
-        let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
+    for (mode, all) in [("layers", false), ("tracks", false), ("layers", true), ("tracks", true)] {
+        let mut project: serde_json::Value = serde_json::from_str(&crate::v4_view_tests::strips_json()).unwrap();
+        project["layers"][1]["from"] = serde_json::json!(0.);
+        project["layers"][1]["track"] = serde_json::json!(1);
+        project["layers"][2]["from"] = serde_json::json!(0.);
+        project["layers"][2]["track"] = serde_json::json!(2);
+        project["layers"][2]["lock"] = serde_json::json!(true);
+        let mut s = stage_project(cx, project.to_string());
         s.surface.update(&mut s.vcx, |t, cx| {
             t.command(&format!("timeline.mode:{mode}"), 0., None, false, cx);
             t.command("timeline.tool:split", 0., None, false, cx);
@@ -3788,11 +3795,16 @@ fn g6_pointer_split_in_both_modes_is_one_undo_and_stays_selected(cx: &mut TestAp
             let op = f.ops.iter().find(|o| o.id == "clip:a").unwrap();
             origin + point(px((f.viewport.layer_column + (1. - f.viewport.scroll_time) * f.viewport.pps) as f32), px((op.bounds.y + op.bounds.height / 2.) as f32))
         });
-        s.vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
-        s.vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        let modifiers = Modifiers { shift: all, ..Default::default() };
+        s.vcx.simulate_mouse_down(at, MouseButton::Left, modifiers);
+        s.vcx.simulate_mouse_up(at, MouseButton::Left, modifiers);
         s.idle(cx);
         assert_eq!(s.out_of("a"), 1., "{mode}");
         assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Split);
+        assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.model().index.layers.len()), if all { 5 } else { 4 });
+        assert_eq!(s.out_of("b"), if all { 1. } else { 2. });
+        assert_eq!(s.out_of("c"), 2., "locked layer stays intact");
+        if all { assert!(s.recorder.reports.borrow().iter().any(|r| r.contains("Locked"))); }
         s.undo(cx);
         assert_eq!(s.out_of("a"), 2., "one Undo restores {mode}");
     }
@@ -3805,6 +3817,12 @@ fn g6_visible_tool_buttons_select_split_and_selection(cx: &mut TestAppContext) {
     s.vcx.simulate_click(at, Modifiers::none());
     s.idle(cx);
     assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Split);
+    let cancelled = s.surface.update(&mut s.vcx, |t, cx| t.cancel(cx));
+    assert!(cancelled, "Escape exits Split with no clip selected");
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Selection);
+    s.vcx.simulate_click(at, Modifiers::none());
+    s.idle(cx);
     let at = bounds(&mut s.vcx, "timeline.tool:selection").center();
     s.vcx.simulate_click(at, Modifiers::none());
     s.idle(cx);

@@ -3191,6 +3191,14 @@ fn split_cursor() -> ObjcId {
     })
 }
 
+/// Headless capture smoke check: constructs the real AppKit cursor without
+/// installing it or creating a native window.
+#[cfg(feature = "frame-capture")]
+pub fn split_cursor_is_custom() -> bool {
+    let fallback: ObjcId = unsafe { msg_send![class!(NSCursor), crosshairCursor] };
+    split_cursor() != fallback
+}
+
 unsafe extern "C" fn reset_cursor_rects(this: &Objc2Object, _: Sel) {
     // SAFETY: AppKit invokes cursor-rect updates on the main thread for GPUIView instances,
     // whose WINDOW_STATE_IVAR is initialized when the view is created. The cursor registered

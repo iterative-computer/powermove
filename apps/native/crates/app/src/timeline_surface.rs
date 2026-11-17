@@ -761,14 +761,19 @@ impl TimelineSurface {
     }
     /// Escape: cancel the active gesture. Foreign edits survive in the kernel.
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
+        let split = self.model.edit_tool == EditTool::Split;
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
-            Gesture::Idle => return false,
+            Gesture::Idle if !split => return false,
+            Gesture::Idle => (),
             Gesture::Dragging { .. } => self.queue.push_back(Job::Finish(false)),
             Gesture::Marquee { session, .. } => {
                 self.queue.push_back(Job::Apply(session.cancel()));
             }
             Gesture::Scrub(..) => self.delegate.scrubbing(false, cx),
             _ => {}
+        }
+        if split {
+            self.queue.push_back(Job::Command { id: "timeline.tool:selection".into(), time: 0., frames: None, shift: false });
         }
         cx.notify();
         self.pump(cx);
@@ -1720,22 +1725,6 @@ impl TimelineSurface {
         self.pointer = Some(event.position);
         self.sideways = false;
         let (x, y) = self.local(event.position);
-        if self.model.edit_tool == pm_panel_timeline::EditTool::Split
-            && x >= self.view.layer_column && y >= self.tokens.metrics.ruler as f64 {
-            if let Some((id, _)) = self.clip_at(x, y) {
-                let at = self.model.split_time(self.time_at(x), self.delegate.time(cx), self.snap_radius());
-                let all = event.modifiers.shift;
-                let locked = self.model.index.layers.iter().any(|l| (all || l.id == id)
-                    && l.effectively_locked && at > l.from && at < l.from + l.duration);
-                if locked { self.delegate.report("Locked layers were skipped.".into(), cx); }
-                match self.model.split_at(&id, at, all) {
-                    Ok(plan) if !plan.calls.is_empty() => { self.queue.push_back(Job::Apply(plan)); self.pump(cx); }
-                    Err(e) => self.delegate.report(e.to_string(), cx),
-                    _ => (),
-                }
-            }
-            return;
-        }
         // A new press starts with no graph drag state.
         self.transform = None;
         self.graph_axis = false;
@@ -1806,6 +1795,22 @@ impl TimelineSurface {
             return;
         }
         if x < column {
+            return;
+        }
+        if self.model.edit_tool == pm_panel_timeline::EditTool::Split
+            && y >= self.tokens.metrics.ruler as f64 {
+            if let Some((id, _)) = self.clip_at(x, y) {
+                let at = self.model.split_time(self.time_at(x), self.delegate.time(cx), self.snap_radius());
+                let all = event.modifiers.shift;
+                let locked = self.model.index.layers.iter().any(|l| (all || l.id == id)
+                    && l.effectively_locked && at > l.from && at < l.from + l.duration);
+                if locked { self.delegate.report("Locked layers were skipped.".into(), cx); }
+                match self.model.split_at(&id, at, all) {
+                    Ok(plan) if !plan.calls.is_empty() => { self.queue.push_back(Job::Apply(plan)); self.pump(cx); }
+                    Err(e) => self.delegate.report(e.to_string(), cx),
+                    _ => (),
+                }
+            }
             return;
         }
         let mods = Self::mods(event.modifiers);
@@ -3278,7 +3283,8 @@ impl TimelineSurface {
         }
         self.hover_clip = hovered;
         let m = self.tokens.metrics;
-        let cursor = if self.model.edit_tool == pm_panel_timeline::EditTool::Split && self.clip_at(x, y).is_some() {
+        let cursor = if self.model.edit_tool == pm_panel_timeline::EditTool::Split && self.clip_at(x, y).is_some()
+            && (x - self.view.layer_column).abs() > m.hit as f64 / 4. {
             CursorStyle::Split
         } else if let Some(cursor) = self.graph_cursor(x, y) {
             cursor
@@ -4229,7 +4235,9 @@ impl Render for TimelineSurface {
         let weak = this.clone();
         if let Some(pointer) = self.pointer {
             let (x, y) = self.local(pointer);
-            if self.model.edit_tool == EditTool::Split && self.clip_at(x, y).is_some() {
+            if self.model.edit_tool == EditTool::Split
+                && (x - self.view.layer_column).abs() > self.tokens.metrics.hit as f64 / 4.
+                && (self.clip_at(x, y).is_some() || self.frame.is_none() && self.hover_clip.is_some()) {
                 self.cursor = CursorStyle::Split;
             } else if self.cursor == CursorStyle::Split { self.cursor = CursorStyle::Arrow; }
         } else if self.cursor == CursorStyle::Split { self.cursor = CursorStyle::Arrow; }
@@ -4836,7 +4844,8 @@ impl Render for TimelineSurface {
                             if surface.model.edit_tool == pm_panel_timeline::EditTool::Split {
                                 if let Some(pointer) = surface.pointer {
                                     let (x, y) = surface.local(pointer);
-                                    if let Some((id, _)) = surface.clip_at(x, y) {
+                                    if let Some((id, _)) = surface.clip_at(x, y)
+                                        && (x - surface.view.layer_column).abs() > tokens.metrics.hit as f64 / 4. {
                                         let at = surface.model.split_time(surface.time_at(x), surface.delegate.time(cx), surface.snap_radius());
                                         let cut_x = surface.view.layer_column + (at - surface.view.scroll_time) * surface.view.pps;
                                         for op in surface.frame.iter().flat_map(|f| &f.ops).filter(|o| o.id.starts_with("clip:")) {

@@ -33,6 +33,8 @@ pub mod native_text;
 pub mod native_control;
 mod platform;
 mod window;
+#[cfg(feature = "frame-capture")]
+pub use window::split_cursor_is_custom;
 mod window_appearance;
 
 pub(crate) use dispatcher::*;
