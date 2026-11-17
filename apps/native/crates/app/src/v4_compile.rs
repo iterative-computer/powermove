@@ -241,6 +241,9 @@ pub struct NodeView {
     pub local_change: bool,
     /// Escape reports an empty change, so a transient editor can close.
     pub cancel_change: bool,
+    /// A click (1) or a double-click (2) here opens a text field
+    /// (`opensField`): what is typed after it waits for that field.
+    pub opens_field: Option<usize>,
     pub timeline_scrub: Option<(SharedString, SharedString)>,
     /// The timeline's layer name: a press there can lift into a reorder.
     pub timeline_layer_drag: Option<SharedString>,
@@ -925,6 +928,11 @@ fn compile(
             .and_then(|m| m.get("cancelChange"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        opens_field: match meta.and_then(|m| m.get("opensField")).and_then(Value::as_str) {
+            Some("click") => Some(1),
+            Some("doubleClick") => Some(2),
+            _ => None,
+        },
         timeline_scrub: meta.and_then(|m| m.get("timelineScrub")).and_then(|t| {
             Some((
                 SharedString::from(t.get("layer")?.as_str()?.to_owned()),

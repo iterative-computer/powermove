@@ -329,7 +329,15 @@ impl TextField {
     }
     pub fn begin_editing(&mut self, cx: &mut Context<Self>) {
         self.slot.begin_editing();
+        self.await_keyboard();
         cx.notify();
+    }
+    /// Typing was held for a field on its way (a press that opens it): when
+    /// this one takes the keyboard, what waited goes to it.
+    fn await_keyboard(&mut self) {
+        if crate::typing::expecting() && !self.slot.has_keyboard() {
+            self.awaiting_keyboard = true;
+        }
     }
     /// Ends editing and gives the keyboard back to the editor (Escape in a
     /// docked composer).
@@ -341,6 +349,7 @@ impl TextField {
     pub fn begin_editing_selecting_all(&mut self, cx: &mut Context<Self>) {
         self.slot.begin_editing();
         self.slot.set_selection(0, usize::MAX);
+        self.await_keyboard();
         cx.notify();
     }
     pub fn set_tokens(&mut self, tokens: pm_design::Tokens) {
