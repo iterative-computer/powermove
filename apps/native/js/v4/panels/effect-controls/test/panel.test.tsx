@@ -260,3 +260,37 @@ test("a colour wheel sums up on one row and opens in the Color panel", async () 
   await f.root.dispose();
   await f.controller.dispose();
 });
+
+test("empty effects is one quiet row and shows a wash only for accepted drops", async () => {
+  const f = await fixture(states()["no-effects"]!);
+  await f.root.render(
+    <EffectControls controller={f.controller} rowHeight={24} />,
+  );
+  const empty = () => find(f.root, (p) => p.id === "layer-effects:empty");
+  expect(nodes(f.root).some((n) => n.textContent === "No effects")).toBe(true);
+  expect(
+    nodes(f.root).some((n) => n.props.id === "layer-effects:add-bottom"),
+  ).toBe(false);
+  expect(empty().props.style).toMatchObject({
+    minHeight: { token: "metrics.row" },
+    color: { token: "colors.secondary" },
+    fontSize: { token: "typography.body" },
+  });
+  await event(f.root, empty().id, "dragover", {
+    drag: {
+      types: ["application/x-powermove-effect-definition"],
+      data: { "application/x-powermove-effect-definition": "blur" },
+      effect: "copy",
+    },
+  });
+  expect(
+    nodes(f.root).some((n) => n.textContent === "Drop to add effect"),
+  ).toBe(true);
+  expect(empty().props.style).toMatchObject({
+    background: { token: "colors.selected_fill" },
+  });
+  await event(f.root, empty().id, "dragleave");
+  expect(nodes(f.root).some((n) => n.textContent === "No effects")).toBe(true);
+  await f.root.dispose();
+  await f.controller.dispose();
+});

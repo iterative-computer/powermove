@@ -263,6 +263,62 @@ fn nested_wheel_hands_off_at_both_edges() {
 }
 
 #[test]
+fn nested_wheel_crossing_an_edge_hands_off_only_the_remainder() {
+    objc2::rc::autoreleasepool(|_| {
+        let mut cx = context();
+        let window = cx
+            .open_window(size(px(200.), px(200.)), |_, cx| {
+                cx.new(|_| Nested {
+                    observed: 0,
+                    inner: ScrollHandle::new(),
+                    outer: ScrollHandle::new(),
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |v, _, cx| {
+                v.inner.set_offset(point(px(0.), px(-280.)));
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(
+                ScrollWheelEvent {
+                    position: point(px(25.), px(25.)),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(-50.))),
+                    modifiers: Default::default(),
+                    touch_phase: Default::default(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |v, _, _| {
+                assert_eq!(v.inner.offset().y, px(-300.));
+                assert_eq!(
+                    v.outer.offset().y,
+                    px(-30.),
+                    "20 inner + 30 outer = one 50px wheel event"
+                );
+            })
+            .unwrap();
+        // A redraw with no new input must retain both offsets.
+        cx.capture_screenshot(window.into()).unwrap();
+        window
+            .update(&mut cx, |v, _, _| {
+                assert_eq!(v.inner.offset().y, px(-300.));
+                assert_eq!(v.outer.offset().y, px(-30.));
+            })
+            .unwrap();
+    });
+}
+
+#[test]
 fn native_keyboard_panel_navigation_reveals_last_panel() {
     objc2::rc::autoreleasepool(|_| {
         let mut cx = context();
@@ -483,6 +539,8 @@ fn wheel_over_dock_edge_and_panel_gap_scrolls_the_column() {
             for (x, y) in [
                 (edge, panel.y + 80.),
                 (panel.x + 30., panel.y + panel.h + gap / 2.),
+                (panel.x + 4., panel.y + 80.), // panel padding
+                (panel.x + 80., panel.y + 8.), // panel header
             ] {
                 window
                     .update(&mut cx, |editor, _, cx| {
@@ -517,6 +575,35 @@ fn wheel_over_dock_edge_and_panel_gap_scrolls_the_column() {
                     after < before,
                     "wheel over edge or gap moves the whole column at {x},{y}"
                 );
+                assert!(
+                    (after - (before - 30.)).abs() < 0.01,
+                    "one-for-one wheel distance"
+                );
+                for _ in 0..8 {
+                    cx.update_window(window.into(), |_, w, cx| {
+                        w.dispatch_event(
+                            ScrollWheelEvent {
+                                position: point(px(x), px(y)),
+                                delta: ScrollDelta::Pixels(point(px(0.), px(-0.25))),
+                                modifiers: Default::default(),
+                                touch_phase: Default::default(),
+                            }
+                            .to_platform_input(),
+                            cx,
+                        );
+                    })
+                    .unwrap();
+                    cx.run_until_parked();
+                }
+                cx.capture_screenshot(window.into()).unwrap();
+                window
+                    .update(&mut cx, |v, _, _| {
+                        assert!(
+                            (v.panel_rect("inspector").unwrap().y - (before - 32.)).abs() < 0.01,
+                            "fractional momentum survives redraw without jump-back"
+                        );
+                    })
+                    .unwrap();
             }
             window
                 .update(&mut cx, |editor, _, cx| {
@@ -732,4 +819,106 @@ fn sticky_header_light_and_dark_crops() {
             }
         });
     }
+}
+
+#[test]
+fn toolbar_stays_opaque_above_scrolling_dock() {
+    for (name, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
+        objc2::rc::autoreleasepool(|_| {
+            let tokens = Tokens::new(scheme, Accessibility::default());
+            let fill = tokens.colors.window;
+            let mut cx = context();
+            let window = cx
+                .open_window(size(px(1000.), px(600.)), |_, cx| {
+                    cx.new(|cx| {
+                        let mut editor = Editor::new(tokens, None, cx);
+                        tall(&mut editor);
+                        editor
+                    })
+                })
+                .unwrap();
+            cx.run_until_parked();
+            for (position, by) in [("top", 0.), ("middle", 350.), ("bottom", 10000.)] {
+                window
+                    .update(&mut cx, |v, _, cx| {
+                        v.scroll_dock("right", by);
+                        cx.notify();
+                    })
+                    .unwrap();
+                cx.run_until_parked();
+                let image = cx.capture_screenshot(window.into()).unwrap();
+                let scale = image.width() / 1000;
+                if let Ok(dir) = std::env::var("PM_DOCK_CAPTURE_DIR") {
+                    std::fs::create_dir_all(&dir).unwrap();
+                    image
+                        .save(
+                            std::path::Path::new(&dir)
+                                .join(format!("{name}-toolbar-{position}.png")),
+                        )
+                        .unwrap();
+                }
+                let pixel = image.get_pixel(950 * scale, 8 * scale).0;
+                assert_eq!(
+                    pixel,
+                    [(fill >> 16) as u8, (fill >> 8) as u8, fill as u8, 255],
+                    "{name}:{position} toolbar must paint opaque window colour"
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn library_show_expands_selects_and_reveals_existing_tab() {
+    objc2::rc::autoreleasepool(|_| {
+        let mut cx = context();
+        let window = cx
+            .open_window(size(px(1000.), px(600.)), |_, cx| {
+                cx.new(|cx| {
+                    let mut editor = Editor::new(
+                        Tokens::new(
+                            Scheme::Dark,
+                            Accessibility {
+                                reduce_motion: true,
+                                ..Default::default()
+                            },
+                        ),
+                        None,
+                        cx,
+                    );
+                    tall(&mut editor);
+                    let (di, gi, _) = editor.layout.find("notes").unwrap();
+                    editor.layout.docks[di].collapsed = true;
+                    editor.layout.docks[di].groups[gi].collapsed = true;
+                    editor
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |v, _, cx| {
+                assert_eq!(v.show_library_panel("notes", cx).unwrap(), "right");
+                let (di, gi, ti) = v.layout.find("notes").unwrap();
+                assert!(!v.layout.docks[di].collapsed);
+                assert!(!v.layout.docks[di].groups[gi].collapsed);
+                assert_eq!(v.layout.docks[di].groups[gi].active, ti);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |v, _, cx| {
+                v.show_library_panel("fxbrowser", cx).unwrap();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |v, _, _| {
+                let last = v.panel_rect("fxbrowser").unwrap();
+                assert!(
+                    last.y >= 0. && last.y + last.h <= 600.,
+                    "the last panel is visible after Show: {last:?}"
+                );
+            })
+            .unwrap();
+    });
 }

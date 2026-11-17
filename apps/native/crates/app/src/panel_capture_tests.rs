@@ -99,6 +99,20 @@ fn capture_builtin_panels() {
                 }
                 let image = cx.capture_screenshot(window.into()).unwrap();
                 image.save(format!("{dir}/{panel}-{name}.png")).unwrap();
+                if panel == "inspector" {
+                    window
+                        .update(&mut cx, |frame, _, cx| {
+                            frame
+                                .view
+                                .update(cx, |view, cx| view.review_scroll_to(f32::MAX, cx));
+                        })
+                        .unwrap();
+                    cx.run_until_parked();
+                    cx.capture_screenshot(window.into())
+                        .unwrap()
+                        .save(format!("{dir}/{panel}-{name}-bottom.png"))
+                        .unwrap();
+                }
                 drop(r);
             });
         }
