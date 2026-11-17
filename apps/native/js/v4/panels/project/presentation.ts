@@ -65,7 +65,8 @@ function rendition(state: unknown, label: string): string | null {
   if (state === "Queued") return `${label} Waiting`;
   if (typeof state !== "object" || state === null) return null;
   if ("Generating" in state) {
-    const { percent } = (state as { Generating: { percent: number } }).Generating;
+    const { percent } = (state as { Generating: { percent: number } })
+      .Generating;
     return `Creating ${label} ${percent}%`;
   }
   if ("Ready" in state) return label;

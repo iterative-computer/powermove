@@ -251,11 +251,11 @@ fn change_bytes(ops: &[Op]) -> usize {
             _ => 0,
         }
     }
-    ops.len() * size_of::<Op>()
+    std::mem::size_of_val(ops)
         + ops
             .iter()
             .map(|op| {
-                let path = op.path().len() * size_of::<pm_model::patch::PathPart>()
+                let path = std::mem::size_of_val(op.path())
                     + op.path()
                         .iter()
                         .map(|p| match p {

@@ -81,9 +81,8 @@ pub fn validate(v: Value) -> Result<Value> {
         }
     }
     for (key,lo,hi) in [("edgeSamplesMultiplier",1.,8.),("diffuseBounces",0.,32.),("glossyBounces",0.,32.),("transmissionBounces",0.,32.)] {
-        if let Some(value)=v.get(key) {
-            if !value.as_f64().is_some_and(|n|n.is_finite()&&n>=lo&&n<=hi&&n.fract()==0.) {return fail(format!("Invalid Studio quality {key}"));}
-        }
+        if let Some(value)=v.get(key)
+            && !value.as_f64().is_some_and(|n|n.is_finite()&&n>=lo&&n<=hi&&n.fract()==0.) {return fail(format!("Invalid Studio quality {key}"));}
     }
     if v["minSamples"].as_f64() > v["maxSamples"].as_f64() {
         return fail("Minimum samples must not exceed maximum samples");

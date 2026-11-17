@@ -786,6 +786,9 @@ fn split(
 
 /// Edits closer than this meet (abutting layers, a playhead on an edge).
 const EDGE_EPS: f64 = 1e-6;
+/// The track a ripple keeps to (its track id and index), or `None` when it
+/// ripples across tracks.
+type RippleTrack = Option<(Option<String>, f64)>;
 
 fn ends(layer: &Value) -> (f64, f64) {
     let from = values::num(layer, "from").unwrap_or(0.0);
@@ -918,10 +921,10 @@ fn ripple_trim(
     let time = values::finite(time, "time")?;
     let (comp, targets) = leaves(cx, ids)?;
     let frame = 1.0 / cx.fps(comp.as_deref());
-    let mut removed: Vec<(f64, f64, Option<(Option<String>, f64)>)> = vec![];
+    let mut removed: Vec<(f64, f64, RippleTrack)> = vec![];
     // An edge dragged outward: (the layer's old end, the time it gained,
     // its track when the ripple keeps to tracks).
-    let mut grown: Vec<(String, f64, f64, Option<(Option<String>, f64)>)> = vec![];
+    let mut grown: Vec<(String, f64, f64, RippleTrack)> = vec![];
     for layer in targets {
         let (from, end) = ends(&layer);
         let track = by_track.then(|| track_of(&layer));
@@ -996,10 +999,10 @@ fn ripple_trim(
 fn close_up(
     cx: &mut Cx<'_>,
     comp: Option<&str>,
-    mut removed: Vec<(f64, f64, Option<(Option<String>, f64)>)>,
+    mut removed: Vec<(f64, f64, RippleTrack)>,
 ) -> Result<(), CommandError> {
     removed.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut spans: Vec<(f64, f64, Option<(Option<String>, f64)>)> = vec![];
+    let mut spans: Vec<(f64, f64, RippleTrack)> = vec![];
     for (start, end, track) in removed {
         match spans.iter_mut().rev().find(|s| s.2 == track) {
             Some(last) if start <= last.1 + EDGE_EPS => last.1 = last.1.max(end),
