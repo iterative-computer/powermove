@@ -3107,3 +3107,35 @@ fn a_tracks_move_reorders_only_the_moved_clip_and_never_past_a_lock() {
         Some(s(&["t", "l", "m", "u"]))
     );
 }
+
+#[test]
+fn g3_roll_key_toggles_existing_tool() {
+    let key = resolve_key(&KeyInput {
+        key: "r",
+        modifiers: mods(),
+        repeat: false,
+        in_field: false,
+    })
+    .unwrap();
+    assert_eq!(key.command, "timeline.toggleRoll");
+    let (_a, mut c) = client();
+    command(&mut c, &key.command, 0.);
+    assert_eq!(c.model.edit_tool, EditTool::Roll);
+    command(&mut c, &key.command, 0.);
+    assert_eq!(c.model.edit_tool, EditTool::Selection);
+}
+#[test]
+fn g3_tracks_drag_stops_at_zero_but_layers_keep_negative_starts() {
+    for (mode, expected) in [(TimelineMode::Tracks, 0.), (TimelineMode::Layers, -8.)] {
+        let (_a, mut c) = client();
+        c.model.mode = mode;
+        block_on(c.begin_drag(DragKind::Layers {
+            ids: strings(&["a", "b"]),
+        }))
+        .unwrap();
+        block_on(c.drag(sample(-9.))).unwrap();
+        assert_eq!(c.model.index.layer("a").unwrap().from, expected);
+        assert_eq!(c.model.index.layer("b").unwrap().from, expected + 4.);
+        block_on(c.finish_drag(true)).unwrap();
+    }
+}

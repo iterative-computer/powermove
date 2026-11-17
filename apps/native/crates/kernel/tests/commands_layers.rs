@@ -650,17 +650,18 @@ fn trim_in_keeps_media_frames_and_clamps_to_the_source() {
     );
     let c = layer(&s, "clip");
     assert_eq!((num(&c, &["from"]), num(&c, &["d", "trim"])), (1.0, 0.0));
-    run(
+    refused(
         &mut s,
         TimingCommand::TrimOut {
             layer_ids: vec!["clip".into(), "locked".into()],
             time: 0.0,
         },
+        Origin::Interface,
     );
     assert_eq!(
         num(&layer(&s, "clip"), &["dur"]),
-        1.0 / 30.0,
-        "one frame remains"
+        5.0,
+        "refusal preserves the clip"
     );
     assert_eq!(
         num(&layer(&s, "locked"), &["dur"]),
@@ -935,4 +936,105 @@ fn align_moves_the_common_box_to_the_frame_edge_once() {
     let before = s.revision();
     run(&mut s, align());
     assert_eq!(s.revision(), before, "already aligned");
+}
+
+#[test]
+fn g3_trim_out_clamps_to_available_media() {
+    let mut s = store();
+    run(
+        &mut s,
+        TimingCommand::TrimOut {
+            layer_ids: vec!["clip".into()],
+            time: 20.0,
+        },
+    );
+    assert_eq!(num(&layer(&s, "clip"), &["dur"]), 7.0);
+}
+
+#[test]
+fn g3_trim_to_playhead_refuses_inversion_atomically() {
+    let mut s = store();
+    refused(
+        &mut s,
+        TimingCommand::TrimIn {
+            layer_ids: vec!["clip".into()],
+            time: 8.0,
+        },
+        Origin::Interface,
+    );
+    refused(
+        &mut s,
+        TimingCommand::TrimOut {
+            layer_ids: vec!["clip".into()],
+            time: 1.0,
+        },
+        Origin::Interface,
+    );
+    assert_eq!(num(&layer(&s, "clip"), &["dur"]), 4.0);
+}
+#[test]
+fn g3_speed_two_trim_has_half_the_source_handle_length() {
+    let mut s = store();
+    run(
+        &mut s,
+        pm_kernel::ContentCommand::Set {
+            layer_id: "clip".into(),
+            patch: [("speed".into(), Value::from(2.0))].into_iter().collect(),
+            time: 0.0,
+        },
+    );
+    run(
+        &mut s,
+        TimingCommand::TrimOut {
+            layer_ids: vec!["clip".into()],
+            time: 20.0,
+        },
+    );
+    assert_eq!(num(&layer(&s, "clip"), &["dur"]), 3.5);
+}
+
+#[test]
+fn g3_speed_ripples_only_its_track_and_undo_restores_everything() {
+    for tracks in [false, true] {
+        let mut s = store();
+        run(
+            &mut s,
+            LayerCommand::Set {
+                layer_id: "top".into(),
+                patch: LayerPatch {
+                    from: Some(6.),
+                    ..Default::default()
+                },
+            },
+        );
+        run(&mut s, LayerCommand::Set { layer_id: "bottom".into(), patch: LayerPatch { from: Some(6.), track: Some(1), ..Default::default() } });
+        let mut state = pm_kernel::state::StateSnapshot::default();
+        let mut ui = pm_kernel::state::UiState::default();
+        ui.timeline = parse(if tracks {
+            r#"{"mode":"tracks"}"#
+        } else {
+            r#"{"mode":"layers"}"#
+        })
+        .unwrap();
+        std::sync::Arc::make_mut(&mut state.ui).insert("P".into(), ui);
+        s.set_runtime_state("P", state, None);
+        let before = s.root().unwrap().to_value();
+        run(
+            &mut s,
+            pm_kernel::ContentCommand::Set {
+                layer_id: "clip".into(),
+                patch: [("speed".into(), Value::from(2.0))].into_iter().collect(),
+                time: 0.0,
+            },
+        );
+        assert_eq!(num(&layer(&s, "clip"), &["from"]), 2.);
+        assert_eq!(num(&layer(&s, "clip"), &["dur"]), 2.);
+        assert_eq!(
+            num(&layer(&s, "top"), &["from"]),
+            if tracks { 4. } else { 6. }
+        );
+        assert_eq!(num(&layer(&s, "bottom"), &["from"]), 6., "another track stays put");
+        s.undo().unwrap();
+        assert_eq!(s.root().unwrap().to_value(), before);
+    }
 }

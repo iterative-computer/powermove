@@ -1197,6 +1197,21 @@ impl GizmoSurface {
         }
     }
 }
+fn text_tool_duration(p: &pm_kernel::Published, time: f64) -> Option<f64> {
+    if p.ui_state.timeline.get("mode").and_then(Value::as_str) != Some("tracks") {
+        return None;
+    }
+    let root = p.snapshot.root()?;
+    let comp = pm_kernel::model::comp_node(root, None)?;
+    let duration = comp.get("dur").and_then(pm_kernel::model::number_of)?;
+    let fps = comp
+        .get("fps")
+        .and_then(pm_kernel::model::number_of)
+        .unwrap_or(30.)
+        .max(1.);
+    Some((duration - time).min(5.).max(1. / fps))
+}
+
 /// The new layer and, for a paragraph, its box (viewer.ts `startText`).
 fn add_text(
     published: &pm_kernel::Published,
@@ -1237,7 +1252,7 @@ fn add_text(
         comp: None,
         name: Some("Text".into()),
         from: None,
-        duration: None,
+        duration: text_tool_duration(published, time),
         content,
         properties,
         color: None,
@@ -1606,6 +1621,17 @@ pub fn native_input(initial: &str, window: &Window) -> Option<Rc<dyn TextInput>>
 mod tests {
     // Not a glob: gpui's own `test` attribute would shadow the standard one.
     use super::{Align, Layout, Line, first_line, paragraph_range, word_range};
+    #[test]
+    fn g3_text_default_is_per_mode_and_clamped_to_comp_end() {
+        let rig = crate::v4_view_tests::rig("timeline", 0);
+        let mut p = (*rig.kernel.published(crate::v4_view_tests::PROJECT).unwrap()).clone();
+        for (mode, time, expected) in [("layers", 2., None), ("tracks", 2., Some(5.)), ("tracks", 8., Some(2.))] {
+            p.ui_state.timeline = pm_model::json::parse(&format!(r#"{{"mode":"{mode}"}}"#)).unwrap();
+            let commands = super::add_text(&p, "title", [0., 0.], None, time);
+            let pm_kernel::Command::Layer(pm_kernel::LayerCommand::Add(add)) = &commands[0] else { panic!("text add"); };
+            assert_eq!(add.duration, expected);
+        }
+    }
     fn layout() -> Layout {
         // Two lines: "ab" at y 0 and "cd" at y 20; 10 px per character.
         let line = |start: usize, y: f64| Line {

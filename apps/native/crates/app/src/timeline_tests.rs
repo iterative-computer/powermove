@@ -1410,10 +1410,10 @@ fn tracks_mode_ripple_roll_and_slide_edit_through_the_kernel(cx: &mut TestAppCon
         control: true,
         ..Default::default()
     };
-    // Ripple: Option-drag A's out edge shifts B and C with it.
+    // Ripple: Control-drag A's out edge shifts B and C with it.
     let (a_out, b_in) = (s.out_of("a"), s.start_of("b"));
     let from = s.at(0, a_out) - point(px(2.), px(0.));
-    s.drag(cx, from, from - point(px(30.), px(0.)), alt);
+    s.drag(cx, from, from - point(px(30.), px(0.)), control);
     assert!(
         s.recorder.reports.borrow().is_empty(),
         "{:?}",
@@ -1424,10 +1424,10 @@ fn tracks_mode_ripple_roll_and_slide_edit_through_the_kernel(cx: &mut TestAppCon
     assert!((a_out - s.out_of("a") - shifted).abs() < 1e-9);
     s.undo(cx);
     assert_eq!(s.start_of("b"), b_in);
-    // Roll: Control-drag the A/B cut moves both edges and neither outer bound.
+    // Roll: Option-drag the A/B cut moves both edges and neither outer bound.
     let (b_in, b_out) = (s.start_of("b"), s.out_of("b"));
     let from = s.at(0, s.out_of("a")) - point(px(2.), px(0.));
-    s.drag(cx, from, from - point(px(30.), px(0.)), control);
+    s.drag(cx, from, from - point(px(30.), px(0.)), alt);
     assert!(
         s.recorder.reports.borrow().is_empty(),
         "{:?}",
@@ -3390,4 +3390,96 @@ fn a_press_moves_the_playhead_to_the_skimmer_only_in_tracks_mode(cx: &mut TestAp
     s.idle(cx);
     press(&mut s, cx);
     assert_eq!(s.recorder.seeks.borrow().len(), 1, "Tracks: the press seeks");
+}
+
+#[gpui::test]
+fn g3_ruler_click_seeks_without_horizontal_scroll(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let before = s.surface.read_with(&s.vcx, |t, _| t.scroll_time());
+    let at = s.at(0, 3.);
+    let origin = s.origin();
+    let at = point(at.x, origin.y + px(20.));
+    s.vcx.simulate_event(MouseDownEvent { button: MouseButton::Left, position: at, ..Default::default() });
+    s.vcx.simulate_event(MouseUpEvent { button: MouseButton::Left, position: at, ..Default::default() });
+    s.idle(cx);
+    assert!(!s.recorder.seeks.borrow().is_empty());
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_time()), before);
+}
+
+/// Synthetic review crops use GPUI's TestPlatform, with show(false) and
+/// focus(false) supplied by HeadlessAppContext. No native profile or window.
+#[::core::prelude::v1::test]
+#[ignore = "writes headless G3 review crops"]
+fn g3_capture_trim_review() {
+    use gpui::{HeadlessAppContext, size};
+    use std::sync::Arc;
+    let Ok(dir) = std::env::var("PM_G3_CAPTURE") else { return };
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, scheme) in [("light", pm_design::Scheme::Light), ("dark", pm_design::Scheme::Dark)] {
+        let fixture = crate::v4_view_tests::strips_json().replace("\"dur\":100", "\"dur\":12");
+        let rig = crate::v4_view_tests::rig_project("timeline", &fixture);
+        let first = publication(&rig);
+        let tokens = pm_design::Tokens::new(scheme, Default::default());
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load).with_automatic_optical_sizing()),
+            Arc::new(()),
+            || Some(Box::new(gpui_apple::metal_renderer::MetalHeadlessRenderer::new())),
+        );
+        cx.allow_parking();
+        let natives = Natives::default();
+        let recorder = Rc::new(Recorder::default());
+        let surface = cx.update(|cx| cx.new(|cx| TimelineSurface::new(
+            rig.kernel.clone(), PROJECT.into(), tokens.clone(), Rc::new(Recording(recorder)), natives.outline.clone(), Default::default(), cx,
+        )));
+        natives.views.borrow_mut().insert("timeline".into(), surface.clone().into());
+        let outline = natives.outline.clone();
+        let runtime = rig.runtime.clone();
+        let window = cx.open_window(size(px(1000.), px(320.)), |window, cx| {
+            cx.new(|cx| SurfaceView::new(runtime, first, tokens, natives, window, cx))
+        }).unwrap();
+        cx.update(|cx| outline.bind(window.root(cx).unwrap().downgrade()));
+        let pump = |cx: &mut HeadlessAppContext| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                cx.run_until_parked();
+                let idle = cx.update(|cx| surface.read(cx).idle());
+                if idle { break; }
+                assert!(std::time::Instant::now() < deadline, "timeline capture timed out");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            cx.run_until_parked();
+        };
+        pump(&mut cx);
+        cx.update(|cx| surface.update(cx, |s, cx| s.command("timeline.mode:tracks", 0., None, false, cx)));
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/roll-before-{name}.png")).unwrap();
+        cx.update(|cx| surface.update(cx, |s, cx| s.command("timeline.tool:roll", 0., None, false, cx)));
+        pump(&mut cx);
+        let origin = cx.debug_bounds(window.into(), "timeline:surface").unwrap().unwrap().origin;
+        let position = cx.update(|cx| {
+            let s = surface.read(cx);
+            let f = s.frame().unwrap();
+            let v = f.viewport;
+            let clip = f.ops.iter().find(|o| o.id == "clip:a").unwrap();
+            origin + point(px((v.layer_column + (2. - v.scroll_time) * v.pps - 2.) as f32), px((clip.bounds.y + clip.bounds.height / 2.) as f32))
+        });
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(MouseDownEvent { button: MouseButton::Left, position, ..Default::default() }.into(), cx);
+            w.dispatch_event(gpui::MouseMoveEvent { position: position + point(px(35.), px(0.)), pressed_button: Some(MouseButton::Left), ..Default::default() }.into(), cx);
+        }).unwrap();
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/roll-progress-{name}.png")).unwrap();
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(MouseUpEvent { button: MouseButton::Left, position: position + point(px(35.), px(0.)), ..Default::default() }.into(), cx);
+        }).unwrap();
+        pump(&mut cx);
+        // A media-clamped out edge: 12 s source, trim 2 s, rate 2.
+        rig.kernel.call(PROJECT, Request::new(Caller::native(), Call::Transact {
+            body: pm_kernel::WriteBody::Commands(vec![pm_kernel::ContentCommand::Set { layer_id: "a".into(), patch: [("speed".into(), pm_model::Value::from(2.))].into_iter().collect(), time: 0. }.into(), pm_kernel::TimingCommand::TrimOut { layer_ids: vec!["a".into()], time: 200. }.into()]),
+            label: None, expected_revision: None,
+        })).wait().unwrap().unwrap();
+        cx.update(|cx| surface.update(cx, |s, cx| { s.published(cx); s.fit_time(cx); }));
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/trim-clamped-{name}.png")).unwrap();
+    }
 }

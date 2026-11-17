@@ -53,6 +53,7 @@ pub fn new_id(prefix: &str) -> String {
 /// The scratch state of one command.
 pub struct Cx<'a> {
     base: &'a Node,
+    pub(super) project: Option<&'a str>,
     pub(super) state: Option<&'a crate::state::StateSnapshot>,
     pub(super) text: Option<&'a crate::text_host::SharedTextHost>,
     origin: Origin,
@@ -65,6 +66,7 @@ impl<'a> Cx<'a> {
     pub(crate) fn new(root: &'a Node, origin: Origin) -> Cx<'a> {
         Cx {
             base: root,
+            project: None,
             state: None,
             text: None,
             origin,

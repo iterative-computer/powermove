@@ -289,6 +289,7 @@ type ArchiveJudgment = (crate::history::CompactJson, Option<String>, bool);
 /// threading model.
 pub struct DocumentStore {
     runtime_state: Option<crate::state::StateSnapshot>,
+    runtime_project: Option<String>,
     text_host: Option<crate::text_host::SharedTextHost>,
     doc_id: u64,
     current: Arc<Document>,
@@ -441,6 +442,7 @@ impl DocumentStore {
         DocumentStore {
             open_trail,
             runtime_state: None,
+            runtime_project: None,
             text_host: None,
             doc_id: new_doc_id(),
             current,
@@ -482,10 +484,12 @@ impl DocumentStore {
     /// Contribution facts for worker-side planning. Never authored or persisted.
     pub fn set_runtime_state(
         &mut self,
+        project: &str,
         state: crate::state::StateSnapshot,
         text: Option<crate::text_host::SharedTextHost>,
     ) {
         self.runtime_state = Some(state);
+        self.runtime_project = Some(project.to_owned());
         self.text_host = text;
     }
 
@@ -1165,6 +1169,7 @@ impl DocumentStore {
                     tree,
                     origin,
                     self.runtime_state.as_ref(),
+                    self.runtime_project.as_deref(),
                     self.text_host.as_ref(),
                 )?,
                 (None, None) => Vec::new(),

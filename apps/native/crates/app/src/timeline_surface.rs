@@ -1942,10 +1942,10 @@ impl TimelineSurface {
                         pm_panel_timeline::render::Edge::In => Edge::In,
                         pm_panel_timeline::render::Edge::Out => Edge::Out,
                     };
-                    if tool == EditTool::Ripple || tracks && mods.alt {
-                        Spec::Ripple(edge)
-                    } else if tool == EditTool::Roll || tracks && mods.control {
+                    if tool == EditTool::Roll || mods.alt {
                         Spec::Roll(edge)
+                    } else if tool == EditTool::Ripple || tracks && mods.control {
+                        Spec::Ripple(edge)
                     } else {
                         Spec::Trim(edge)
                     }

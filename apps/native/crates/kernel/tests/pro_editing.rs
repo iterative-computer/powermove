@@ -729,3 +729,14 @@ fn a_remapped_clip_extends_its_in_point() {
     assert_eq!(n(&b, &["from"]), 3.);
     assert_eq!(n(&b, &["d", "sourceTime", "kf", "0", "t"]), 1.);
 }
+
+#[test]
+fn g3_roll_clamps_both_media_handles_in_one_undo() {
+    let mut a = clip("a", 0., 4., 0);
+    a["d"]["trim"]["v"] = json!(94.);
+    let mut s = store(vec![a, clip("b", 4., 4., 0)]);
+    roundtrip(&mut s, roll(20.));
+    assert_eq!(n(&layer(&s, "a"), &["dur"]), 6.);
+    assert_eq!(n(&layer(&s, "b"), &["from"]), 6.);
+    assert_eq!(n(&layer(&s, "b"), &["dur"]), 2.);
+}

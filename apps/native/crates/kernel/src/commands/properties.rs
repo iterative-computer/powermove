@@ -455,7 +455,9 @@ fn set_property_inner(
         let prop = channels::get_mut(&mut layer, &path).expect("resolved");
         values::obj(prop).insert("v", value);
         if channel == "c.speed" {
+            let old_duration = values::num(&layer, "dur").unwrap_or(0.);
             resize_video_for_speed(&mut layer, speed_before, fps);
+            super::timing::speed_ripple(cx, &layer, old_duration)?;
         }
     }
     if c.mark_intent {

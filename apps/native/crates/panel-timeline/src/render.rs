@@ -1634,6 +1634,13 @@ fn paint_clip(
         "shadowY":material.shadow.2,"shadowBlur":material.shadow.3,
     });
     ops.push(o);
+    if c.from < 0. && n.width > 18. {
+        let mut marker = Op::new(format!("clip-negative:{}", c.id), "text", Rect::new(n.x + n.width - 14., n.y, 12., n.height), material.foreground);
+        marker.text = Some("‹".into());
+        marker.font_size = t.typography.minimum as f64;
+        marker.opacity = 0.55;
+        ops.push(marker);
+    }
     if offline {
         let mut o = Op::new(
             format!("clip-hatch:{}", c.id),

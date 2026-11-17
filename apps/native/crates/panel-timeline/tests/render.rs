@@ -1045,3 +1045,15 @@ fn the_playhead_marks_each_curve_with_its_value_as_v1() {
     assert!(g.playhead_marks(v, area, at(v.layer_column + 20.), &t).is_empty());
     assert!(g.playhead_marks(v, area, at(v.width - 20.), &t).is_empty());
 }
+
+#[test]
+fn g3_negative_layer_start_has_a_subtle_marker() {
+    let t = tokens();
+    let mut c = clip("early");
+    c.from = -2.;
+    let scene = Scene::new(vec![row("early", RowContent::Layer { clip: Some(c), summary: vec![].into() })], 10., 30., &t).unwrap();
+    let frame = scene.prepare(viewport(&t), &t).unwrap();
+    let marker = frame.ops.iter().find(|o| o.id == "clip-negative:early").expect("negative-start marker");
+    assert_eq!(marker.text.as_deref(), Some("‹"));
+    assert!(marker.opacity < 1.);
+}

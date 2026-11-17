@@ -1800,7 +1800,7 @@
   {
     "id": "K176",
     "chord": "r",
-    "command": "timeline.revealProperty:r",
+    "command": "timeline.toggleRoll",
     "args": [],
     "priority": 100,
     "in_fields": false,

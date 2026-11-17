@@ -99,6 +99,18 @@ impl Clip {
         }
         Ok(clip)
     }
+    pub fn out_handle(&self, cx: &Cx<'_>) -> f64 {
+        if self.remap {
+            return f64::INFINITY;
+        }
+        self.value
+            .get("d")
+            .and_then(|d| values::text(d, "asset"))
+            .and_then(|id| cx.root().get("assets")?.get(id)?.get("dur"))
+            .and_then(crate::model::number_of)
+            .filter(|d| d.is_finite())
+            .map_or(0., |d| ((d - self.trim) / self.rate - self.dur).max(0.))
+    }
     pub fn end(&self) -> f64 {
         self.from + self.dur
     }

@@ -342,6 +342,23 @@ fn rate(layer: &Value) -> f64 {
     }
 }
 
+/// Last available source frame expressed in composition time. Generated
+/// layers and stills have no source-end restriction.
+fn source_end(cx: &Cx<'_>, layer: &Value) -> f64 {
+    if !is_timed(layer) {
+        return f64::INFINITY;
+    }
+    let duration = layer
+        .get("d")
+        .and_then(|d| values::text(d, "asset"))
+        .and_then(|id| cx.root().get("assets")?.get(id)?.get("dur"))
+        .and_then(crate::model::number_of)
+        .filter(|d| d.is_finite() && *d >= 0.);
+    duration.map_or(f64::INFINITY, |d| {
+        values::num(layer, "from").unwrap_or(0.) + (d - trim_of(layer)).max(0.) / rate(layer)
+    })
+}
+
 fn trim_of(layer: &Value) -> f64 {
     content_number(layer, "trim")
         .filter(|t| !t.is_nan())
@@ -432,6 +449,11 @@ fn trim(cx: &mut Cx<'_>, layer_ids: &[String], time: f64, start: bool) -> Result
         let fps = cx.fps(loc.comp_id.as_deref());
         let from = values::num(&layer, "from").unwrap_or(0.0);
         let dur = values::num(&layer, "dur").unwrap_or(0.0);
+        if (start && time >= from + dur) || (!start && time <= from) {
+            return Err(CommandError::Invalid(
+                "Trim refused: the playhead must leave at least one frame in the clip.".into(),
+            ));
+        }
         let mut next = layer.clone();
         if start {
             let mut nf = time.min(from + dur - 1.0 / fps);
@@ -443,7 +465,10 @@ fn trim(cx: &mut Cx<'_>, layer_ids: &[String], time: f64, start: bool) -> Result
             m.insert("dur", Value::Number(dur + (from - nf)));
             start_patch(&mut next, &layer, nf);
         } else {
-            values::obj(&mut next).insert("dur", Value::Number((1.0 / fps).max(time - from)));
+            values::obj(&mut next).insert(
+                "dur",
+                Value::Number((1.0 / fps).max(time.min(source_end(cx, &layer)) - from)),
+            );
         }
         cx.put_layer(&loc, next)?;
     }
@@ -938,8 +963,9 @@ fn ripple_trim(
                 }
             }
             TimeEdge::Out if time > end + EDGE_EPS => {
-                put(cx, with_dur(layer, time - from))?;
-                grown.push((id, end, time - end, track));
+                let t = time.min(source_end(cx, &layer));
+                put(cx, with_dur(layer, t - from))?;
+                grown.push((id, end, t - end, track));
             }
             _ if time <= from + EDGE_EPS || time >= end - EDGE_EPS => {}
             TimeEdge::In => {
@@ -1049,9 +1075,9 @@ fn roll(cx: &mut Cx<'_>, id: &str, edge: TimeEdge, time: f64) -> Result<(), Comm
     match edge {
         TimeEdge::Out => {
             let next = abutting(&layers, &layer, end, false);
-            let (mut lo, mut hi) = (from + frame, f64::INFINITY);
+            let (mut lo, mut hi) = (from + frame, source_end(cx, &layer));
             if let Some(next) = &next {
-                hi = ends(next).1 - frame;
+                hi = hi.min(ends(next).1 - frame);
                 lo = lo.max(first_start(next));
             }
             let t = time.clamp(lo, hi.max(lo));
@@ -1062,9 +1088,10 @@ fn roll(cx: &mut Cx<'_>, id: &str, edge: TimeEdge, time: f64) -> Result<(), Comm
         }
         TimeEdge::In => {
             let previous = abutting(&layers, &layer, from, true);
-            let (mut lo, hi) = (first_start(&layer), end - frame);
+            let (mut lo, mut hi) = (first_start(&layer), end - frame);
             if let Some(previous) = &previous {
                 lo = lo.max(ends(previous).0 + frame);
+                hi = hi.min(source_end(cx, previous));
             }
             let t = time.clamp(lo.min(hi), hi);
             put(cx, cut_head(&layer, layer.clone(), t))?;
@@ -1356,4 +1383,48 @@ fn source_times(
         })
     })?;
     Ok(times)
+}
+
+/// Static speed changes keep the in-point and ripple only the current track.
+/// The caller writes the resized target in the same transaction/undo step.
+pub(super) fn speed_ripple(
+    cx: &mut Cx<'_>,
+    layer: &Value,
+    old_duration: f64,
+) -> Result<(), CommandError> {
+    let project = cx.project.unwrap_or_default();
+    let tracks = cx
+        .state
+        .and_then(|s| s.ui.get(project))
+        .is_some_and(|ui| ui.timeline.get("mode").and_then(Value::as_str) == Some("tracks"));
+    if !tracks {
+        return Ok(());
+    }
+    let id = values::text(layer, "id").unwrap_or_default();
+    let loc = cx.find(id)?;
+    let from = values::num(layer, "from").unwrap_or(0.);
+    let delta = values::num(layer, "dur").unwrap_or(old_duration) - old_duration;
+    if delta.abs() < EDGE_EPS {
+        return Ok(());
+    }
+    let track = track_of(layer);
+    for other in cx.layers(loc.comp_id.as_deref()) {
+        if values::text(&other, "id") == Some(id)
+            || track_of(&other) != track
+            || values::text(&other, "type") == Some("group")
+        {
+            continue;
+        }
+        let start = values::num(&other, "from").unwrap_or(0.);
+        if start < from + old_duration - EDGE_EPS {
+            continue;
+        }
+        let other_id = values::text(&other, "id").unwrap_or_default();
+        let other_loc = cx.find(other_id)?;
+        cx.check_lock(&other_loc, other_id)?;
+        let mut moved = other;
+        values::obj(&mut moved).insert("from", Value::Number(start + delta));
+        cx.put_layer(&other_loc, moved)?;
+    }
+    Ok(())
 }
