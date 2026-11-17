@@ -67,6 +67,11 @@ pub struct Preferences {
     /// Settings › Media › Still Duration, in seconds: how long a placed
     /// still lasts. 0: until the composition ends (v1, After Effects).
     pub still_duration_s: u32,
+    /// Settings › Media › Add Imported Media to the Timeline: an import
+    /// (⌘I, a drop on the window, a paste) places its files at the playhead,
+    /// as v1 did; off, they land in the Project panel only, as After Effects
+    /// and Premiere import.
+    pub import_to_timeline: bool,
 }
 
 impl Default for Preferences {
@@ -80,6 +85,7 @@ impl Default for Preferences {
             background_render: true,
             background_delay_s: 5,
             still_duration_s: 0,
+            import_to_timeline: true,
         }
     }
 }
@@ -153,6 +159,16 @@ impl Preferences {
                     (serde_json::json!("proResProxy"), "ProRes 422 Proxy"),
                     (serde_json::json!("proResLt"), "ProRes 422 LT"),
                     (serde_json::json!("hevc10"), "HEVC (Smaller Files)"),
+                ],
+            ),
+            (
+                "media.importToTimeline",
+                "Add Imported Media to the Timeline",
+                "Imported files are placed at the playhead. Off, they go to the Project panel only.",
+                serde_json::json!(self.import_to_timeline),
+                vec![
+                    (serde_json::json!(true), "On"),
+                    (serde_json::json!(false), "Off"),
                 ],
             ),
             (
@@ -245,6 +261,9 @@ impl Preferences {
             }
             "media.backgroundRender" => {
                 self.background_render = value.as_bool().ok_or("Invalid setting value")?;
+            }
+            "media.importToTimeline" => {
+                self.import_to_timeline = value.as_bool().ok_or("Invalid setting value")?;
             }
             "media.stillDuration" => {
                 let seconds: u32 = serde_json::from_value(value.clone()).map_err(bad)?;
@@ -2560,6 +2579,18 @@ mod tests {
     /// The review's blocker: byte-identical originals share one stored
     /// proxy; clearing with only the second one's project open keeps it,
     /// and a record still naming a file (attached elsewhere) keeps it too.
+    /// Settings › Media › Add Imported Media to the Timeline: on by default
+    /// (v1 placed what it imported), off for the Project panel only.
+    #[test]
+    fn importing_to_the_timeline_is_a_setting_on_by_default() {
+        let mut prefs = Preferences::default();
+        assert!(prefs.import_to_timeline);
+        prefs.set("media.importToTimeline", &serde_json::json!(false)).unwrap();
+        assert!(!prefs.import_to_timeline);
+        assert!(prefs.set("media.importToTimeline", &serde_json::json!("no")).is_err());
+        let kept: Preferences = serde_json::from_str(r#"{"create":"allVideo"}"#).unwrap();
+        assert!(kept.import_to_timeline, "a profile without it keeps v1's behaviour");
+    }
     /// Settings › Media › Still Duration: until the composition ends by
     /// default (v1, After Effects), or one of its lengths; nothing else.
     #[test]

@@ -794,6 +794,7 @@ fn new_layer(published: &Published, kind: &str, name: &str, centred: bool, time:
         visible: None,
         shy: None,
         collapsed: None,
+        track: None,
         time,
     };
     Plan {
@@ -1637,6 +1638,7 @@ fn layer_menu_plan(
                 visible: muted.then_some(false),
                 shy: None,
                 collapsed: None,
+                track: None,
                 time,
             };
             Some(Plan {
