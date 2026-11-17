@@ -643,6 +643,7 @@ mod captures {
                         ))
                     },
                 );
+                let mut captured_surface = None;
                 let window = cx
                     .open_window(size(px(1100.), px(320.)), |window, cx| {
                         let surface = cx.new(|cx| {
@@ -656,6 +657,7 @@ mod captures {
                                 cx,
                             )
                         });
+                        captured_surface = Some(surface.clone());
                         surface.update(cx, |s, cx| {
                             s.set_audio_sources(
                                 BTreeMap::from([("music".into(), source.clone())]),
@@ -666,6 +668,7 @@ mod captures {
                             .views
                             .borrow_mut()
                             .insert("timeline".into(), surface.into());
+                        let outline = natives.outline.clone();
                         let view = cx.new(|cx| {
                             SurfaceView::new(
                                 rig.runtime.clone(),
@@ -676,6 +679,7 @@ mod captures {
                                 cx,
                             )
                         });
+                        outline.bind(view.downgrade());
                         cx.new(|_| CaptureFrame {
                             view,
                             fill: tokens.colors.panel,
@@ -686,6 +690,36 @@ mod captures {
                     cx.run_until_parked();
                     std::thread::sleep(Duration::from_millis(20));
                 }
+                let surface = captured_surface.unwrap();
+                cx.update(|cx| {
+                    let s = surface.read(cx);
+                    assert!(
+                        s.frame
+                            .as_ref()
+                            .unwrap()
+                            .ops
+                            .iter()
+                            .any(|o| o.shape == "waveform"
+                                && o.detail["bars"].as_array().is_some_and(|bars| bars
+                                    .iter()
+                                    .any(|v| v.as_f64().unwrap_or(0.) > 0.)))
+                    );
+                    assert!(s.audio.ops.iter().any(|o| o.id == "audio-level:audio"));
+                    assert_eq!(
+                        s.audio
+                            .ops
+                            .iter()
+                            .filter(|o| o.id.starts_with("audio-fade:"))
+                            .count(),
+                        2
+                    );
+                    assert!(
+                        s.audio
+                            .ops
+                            .iter()
+                            .any(|o| o.id == "audio-meter" && o.bounds.width > 0.)
+                    );
+                });
                 cx.capture_screenshot(window.into())
                     .unwrap()
                     .save(format!("{dir}/audio-{name}.png"))

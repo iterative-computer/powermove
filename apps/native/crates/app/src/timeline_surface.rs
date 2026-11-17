@@ -3958,13 +3958,16 @@ impl ModelPresenter for Presenter {
             .snapshot
             .root()
             .and_then(|root| root.get("assets")?.get(asset));
+        let (trim, speed) = self.published.snapshot.root()
+            .and_then(|root| crate::waveforms::layer_timing(root, &layer.id))
+            .unwrap_or((layer.trim, 1.));
         let key = crate::waveforms::Key::of(path.clone(), record);
         Some(match crate::waveforms::lookup(&key)? {
             Some((peaks, rate, pyramid)) => Some(pm_panel_timeline::render::Waveform {
                 peaks,
                 rate,
-                trim: layer.trim,
-                speed: layer.speed,
+                trim,
+                speed,
                 pyramid,
             }),
             None => {
@@ -5563,7 +5566,8 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     let floor = top + h - inset;
                     let mut path = PathBuilder::fill();
                     path.move_to(point(px(x0), px(floor)));
-                    // Silence has no floor underline.
+                    // Silence draws nothing: a bar shorter than `minBar`
+                    // would run along the foot as an underline.
                     for (i, peak) in bars.iter().enumerate() {
                         let bar = peak.as_f64().unwrap_or(0.) as f32 * room;
                         let bar = if bar < min_bar { 0. } else { bar };

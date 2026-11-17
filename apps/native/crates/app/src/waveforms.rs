@@ -206,3 +206,41 @@ mod pcm_tests {
         assert_eq!(&*pyramid[0], &[0.75]);
     }
 }
+
+/// Static source timing for waveform drawing, without changing the shared timeline index.
+pub fn layer_timing(root: &pm_model::Node, id: &str) -> Option<(f64, f64)> {
+    let at = pm_kernel::model::find_layer(root, id)?;
+    let comp = pm_kernel::model::comp_node(root, at.comp_id.as_deref())?;
+    let layer = pm_kernel::model::layers_of(comp).nth(at.index)?;
+    let number = |key: &str, default: f64| {
+        layer
+            .get("d")
+            .and_then(|d| d.get(key))
+            .and_then(|n| n.get("v").unwrap_or(n).to_value().as_f64())
+            .filter(|v| v.is_finite())
+            .unwrap_or(default)
+    };
+    Some((number("trim", 0.).max(0.), number("speed", 1.)))
+}
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+    #[test]
+    fn waveform_timing_reads_numeric_and_channel_values() {
+        for content in [
+            r#"{"trim":2,"speed":2}"#,
+            r#"{"trim":{"v":2,"kf":[]},"speed":{"v":2,"kf":[]}}"#,
+        ] {
+            let doc = pm_model::Document::new(
+                Some(
+                    pm_model::json::parse(&format!(
+                        r#"{{"compId":"c","layers":[{{"id":"a","type":"audio","d":{content}}}]}}"#
+                    ))
+                    .unwrap(),
+                ),
+                1,
+            );
+            assert_eq!(layer_timing(doc.root().unwrap(), "a"), Some((2., 2.)));
+        }
+    }
+}
