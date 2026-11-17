@@ -772,9 +772,11 @@ impl Controller {
             self.drop_imports("Open a project before importing media");
             return;
         };
-        let Some((request, extension)) = self.imports.pop_front() else {
+        let Some((mut request, extension)) = self.imports.pop_front() else {
             return;
         };
+        // What plays now: an imported file that is a missing item relinks it.
+        request.originals = self.media_base.originals.clone();
         // Close and quit wait for this fence, so an import never lands half way.
         let Some(operation) = self.mcp.try_operation() else {
             self.imports.push_front((request, extension));

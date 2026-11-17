@@ -2178,6 +2178,22 @@ impl Editor {
             )
     }
 }
+/// Whether a control (a button, field or list) has the keyboard, so Return
+/// and the arrows are its own. The viewer's canvas is not a control: after a
+/// click on a layer there, Return edits a text layer and the arrows nudge
+/// (PM-480).
+fn control_has_keyboard(focused_elsewhere: bool, in_viewer: bool) -> bool {
+    focused_elsewhere && !in_viewer
+}
+#[cfg(test)]
+mod control_focus_tests {
+    #[test]
+    fn the_viewer_canvas_is_not_a_control() {
+        assert!(super::control_has_keyboard(true, false), "a panel's field or list");
+        assert!(!super::control_has_keyboard(true, true), "a layer clicked in the viewer");
+        assert!(!super::control_has_keyboard(false, false), "the editor itself");
+    }
+}
 impl Render for Editor {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Development builds: a frame as slow as asked, to check that input
@@ -2387,18 +2403,24 @@ impl Render for Editor {
         if let Some(h) = &self.host {
             let h = h.borrow();
             h.viewer_rect.set(viewer);
+            // The canvas inside the viewer (its gizmos) has a focus handle of
+            // its own: a click on a layer there leaves the keyboard with the
+            // canvas, not with a control (PM-480).
+            let in_viewer = self
+                .panel_focus
+                .get("viewer")
+                .is_some_and(|p| p.contains_focused(w, cx));
             h.canvas_focus.set(
                 viewer.is_some()
-                    && w.focused(cx).is_none_or(|f| {
-                        f == self.focus || self.panel_focus.get("viewer").is_some_and(|p| *p == f)
-                    }),
+                    && (in_viewer || w.focused(cx).is_none_or(|f| f == self.focus)),
             );
             h.publish_menu_state(&self.menu_state(cx));
-            h.keyboard_control_focus.set(
+            h.keyboard_control_focus.set(control_has_keyboard(
                 w.focused(cx).is_some_and(|f| {
                     f != self.focus && !self.panel_focus.values().any(|p| *p == f)
                 }),
-            );
+                in_viewer,
+            ));
         }
         let native = self.host.is_some();
         let canvas_viewer = viewer;

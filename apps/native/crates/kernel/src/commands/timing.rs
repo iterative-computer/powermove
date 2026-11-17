@@ -888,26 +888,10 @@ fn track_of(layer: &Value) -> (Option<String>, f64) {
     )
 }
 
-/// Writes each unlocked layer's lane as its stored `track` where they differ,
-/// and the stack in the lanes' order (`lanes` lists every layer of the
-/// composition as the Tracks timeline stacks them: a clip on a higher track
-/// composites on top), as v1's track view writes both. With only the tracks
-/// written, an edit that made a clip overlap one lower in the stack but on a
-/// higher lane lifted that clip over it.
+/// Writes each unlocked layer's lane as its stored `track` where they differ.
+/// The stack is never touched here: a trim, roll, slide or slip changes no
+/// layer's place in it (the timeline's view state holds the lanes it shows).
 fn pin_tracks(cx: &mut Cx<'_>, lanes: &[(String, u32)]) -> Result<(), CommandError> {
-    if let Some((first, _)) = lanes.first()
-        && let Ok(loc) = cx.find(first)
-    {
-        let comp = loc.comp_id.clone();
-        let ids: Vec<String> = lanes.iter().map(|(id, _)| id.clone()).collect();
-        let mut have = cx.layer_ids(comp.as_deref());
-        let mut want = ids.clone();
-        have.sort();
-        want.sort();
-        if have == want {
-            cx.order_layers(comp.as_deref(), &ids)?;
-        }
-    }
     for (id, lane) in lanes {
         let Ok(loc) = cx.find(id) else { continue };
         let Ok((_, layer)) = cx.layer(id) else {
