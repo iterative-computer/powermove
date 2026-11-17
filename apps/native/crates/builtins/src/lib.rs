@@ -1546,6 +1546,12 @@ impl Builtins {
             json!(args)
         ))
     }
+    /// Whether `panel`'s realm is still in line for room in the heap
+    /// account: it shows that it is waiting for memory, not its empty state.
+    pub fn waiting_for_room(&self, panel: &str) -> bool {
+        self.realm_of(panel)
+            .is_ok_and(|realm| realm.admitted(std::time::Duration::ZERO).is_none())
+    }
     fn realm_of(&self, panel: &str) -> Result<Realm> {
         if let Some(realm) = self.realms.shared().get(panel) {
             return Ok(realm.clone());

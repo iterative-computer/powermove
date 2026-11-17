@@ -1146,7 +1146,13 @@ impl Controller {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if !self.builtins.ready.contains(id) {
-            if self.builtins.waiting_room.contains(id) {
+            // Refused and being retried, or still in line for room.
+            let in_line = self
+                .builtins
+                .runtime
+                .as_ref()
+                .is_some_and(|r| r.waiting_for_room(id));
+            if in_line || self.builtins.waiting_room.contains(id) {
                 let t = self.host.borrow().tokens.clone();
                 return Some(waiting_for_memory(&t, bounds, window));
             }
