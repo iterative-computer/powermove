@@ -178,7 +178,6 @@ pub fn resolve_key(input: &KeyInput<'_>) -> Option<Shortcut> {
         ("o", false, false, false) => "gotoLayerOut",
         ("c", false, false, false) => "timeline.tool:split",
         ("v", false, false, false) => "timeline.tool:selection",
-        ("r", false, false, false) => "timeline.toggleRoll",
         ("[", false, false, false) => "moveLayerIn",
         ("]", false, false, false) => "moveLayerOut",
         ("[", false, true, false) => "trimIn",
@@ -466,14 +465,6 @@ impl TimelineModel {
                 ],
                 ..Plan::default()
             },
-            "timeline.toggleRoll" => {
-                self.edit_tool = if self.edit_tool == crate::EditTool::Roll {
-                    crate::EditTool::Selection
-                } else {
-                    crate::EditTool::Roll
-                };
-                Plan::default()
-            }
             "timeline.addMarker" => self.add_marker(time)?,
             // Toggle Hold Keyframe (After Effects): hold every selected key,
             // or release them when all of them hold.

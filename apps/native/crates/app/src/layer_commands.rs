@@ -247,7 +247,6 @@ fn timeline_owned(name: &str) -> bool {
             | "timeline.addMarker"
             | "timeline.toggleHold"
             | "timeline.toggleSnapping"
-            | "timeline.toggleRoll"
             | "timeline.toggleMode"
             | "timeline.toggleShy"
             | "toggleShy"
@@ -1945,7 +1944,6 @@ const SELECTION: &[&str] = &[
 ];
 /// Rows that need a document, on top of the selection-based ones.
 const DOCUMENT: &[&str] = &[
-    "timeline.toggleRoll",
     "timeline.tool:selection",
     "timeline.tool:split",
     "timeline.tool:ripple",

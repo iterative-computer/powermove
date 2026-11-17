@@ -543,7 +543,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 k("Timeline in Tracks", "timeline.toggleMode", ""),
                 k("Timeline Selection Tool", "timeline.tool:selection", ""),
                 k("Ripple Edit Tool", "timeline.tool:ripple", ""),
-                k("Rolling Edit Tool", "timeline.tool:roll", ""),
+                k("Roll", "timeline.tool:roll", ""),
                 k("Slip Tool", "timeline.tool:slip", ""),
                 k("Slide Tool", "timeline.tool:slide", ""),
                 k("Snapping", "timeline.toggleSnapping", ""),
