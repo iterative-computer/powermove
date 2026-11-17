@@ -398,11 +398,11 @@ impl TextContext {
         }
     }
 
-    /// Drops every glyph drawn from the previous fonts: outlines and color
-    /// bitmaps. Glyph caches key on
+    /// Drops glyph outlines, color bitmaps and native font providers after
+    /// font changes, on idle, or under pressure. Glyph caches key on
     /// `FontBytes::id`, which is never reused, so a replaced font can never
     /// hit an old entry; this releases the old entries.
-    fn forget_glyphs(&mut self) {
+    pub(crate) fn forget_glyphs(&mut self) {
         self.outlines.clear();
         self.bitmaps.clear();
     }
