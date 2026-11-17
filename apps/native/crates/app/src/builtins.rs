@@ -3112,7 +3112,7 @@ impl Render for SurfaceWindow {
             // A focused control that went away leaves nothing focused.
             self.keys.claim(window, cx);
         }
-        let (mut fill, mut band) = (0, 0.);
+        let (mut fill, mut band, mut head_h) = (0, 0., 0.);
         let (head, body) = self.owner.update(cx, |v, cx| {
             let (header, colour, titlebar) = {
                 let t = &v.host.borrow().tokens;
@@ -3128,6 +3128,7 @@ impl Render for SurfaceWindow {
                 (t.metrics.header, colour, t.metrics.titlebar)
             };
             fill = colour;
+            head_h = header;
             // Windows with a transparent title bar keep their content below it.
             band = if popover || sheet || settings {
                 0.
@@ -3216,8 +3217,15 @@ impl Render for SurfaceWindow {
             .bg(rgb(fill))
             // The popover's header is its handle (popover_drag).
             .children(head.map(|head| {
+                // Its own row, as tall as a header: the cached header has no
+                // height of its own, so the conversation started under it
+                // and covered Thread, New Thread and Pin (PM-507).
                 div()
                     .id("agent-popover-handle")
+                    .w_full()
+                    .h(px(head_h))
+                    .flex_shrink_0()
+                    .bg(rgb(fill))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, window, cx| {
