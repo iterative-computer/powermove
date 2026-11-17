@@ -1295,6 +1295,32 @@ fn named_item(mtm: MainThreadMarker, label: &str, command: &str) -> Retained<NSM
     });
     item
 }
+/// The strip's page cells (window, place, title, lit): this window's pages,
+/// then the other tabs' pages it does not have. A page is one cell for the
+/// group, the front tab's when it has it open: two tabs with the Store open
+/// show one Store cell, not two.
+fn strip_pages(
+    own: isize,
+    own_pages: &[(String, String)],
+    shown: Option<usize>,
+    others: &[(isize, Vec<(String, String)>)],
+) -> Vec<(isize, usize, String, bool)> {
+    let mut seen: Vec<&str> = vec![];
+    let mut cells = vec![];
+    for (i, (id, title)) in own_pages.iter().enumerate() {
+        seen.push(id);
+        cells.push((own, i, title.clone(), shown == Some(i)));
+    }
+    for (number, pages) in others {
+        for (i, (id, title)) in pages.iter().enumerate() {
+            if !seen.contains(&id.as_str()) {
+                seen.push(id);
+                cells.push((*number, i, title.clone(), false));
+            }
+        }
+    }
+    cells
+}
 fn rebuild_menu(menu: &NSMenu, kind: MenuKind) {
     let mtm = MainThreadMarker::new().unwrap();
     let state = active_state();
@@ -1390,6 +1416,24 @@ const TOOLBAR_BUTTONS: [(&str, &str, &str); 4] = [
     ("panelLibrary", "square.grid.2x2", "Panels"),
     ("settings", "gearshape", "Settings"),
 ];
+#[cfg(test)]
+mod strip_page_tests {
+    /// Two tabs with the Store open: one Store cell, the front tab's (lit
+    /// when it shows); a page only another tab has is still listed.
+    #[test]
+    fn a_page_open_in_two_tabs_is_one_cell_the_front_tabs() {
+        let store = || ("store".to_owned(), "Store".to_owned());
+        let other = || ("other".to_owned(), "Other".to_owned());
+        let cells = super::strip_pages(1, &[store()], Some(0), &[(2, vec![store(), other()])]);
+        assert_eq!(
+            cells,
+            vec![(1, 0, "Store".into(), true), (2, 1, "Other".into(), false)]
+        );
+        // The front tab without it: the other tab's cell, unlit.
+        let cells = super::strip_pages(1, &[], None, &[(2, vec![store()]), (3, vec![store()])]);
+        assert_eq!(cells, vec![(2, 0, "Store".into(), false)]);
+    }
+}
 #[cfg(test)]
 mod toolbar_tag_tests {
     /// Each button the toolbar builds has a tag (its `TOOLBAR` slot);
@@ -4201,24 +4245,16 @@ impl Host {
         let group = tab_windows(&self.window);
         // Every tab's open pages, this window's first: Settings or the Store
         // opened in one tab stays in the strip whichever tab shows.
-        let mut page_cells: Vec<(isize, usize, String, bool)> = vec![];
-        {
+        let others: Vec<(isize, Vec<(String, String)>)> = group
+            .iter()
+            .map(|w| w.windowNumber())
+            .filter(|n| *n != own)
+            .map(|n| (n, PAGES.with(|p| p.borrow().get(&n).cloned().unwrap_or_default())))
+            .collect();
+        let page_cells = {
             let own_pages = self.pages.borrow();
-            for (i, (_, title)) in own_pages.0.iter().enumerate() {
-                page_cells.push((own, i, title.clone(), own_pages.1 == Some(i)));
-            }
-        }
-        for w in &group {
-            let number = w.windowNumber();
-            if number == own {
-                continue;
-            }
-            PAGES.with(|p| {
-                for (i, (_, title)) in p.borrow().get(&number).into_iter().flatten().enumerate() {
-                    page_cells.push((number, i, title.clone(), false));
-                }
-            });
-        }
+            strip_pages(own, &own_pages.0, own_pages.1, &others)
+        };
         // The group, by its first window, whatever shows in its windows.
         let strip_group = group.iter().map(|w| w.windowNumber()).min().unwrap_or(0);
         // A window with no project is Home, not a project: it is never a tab
