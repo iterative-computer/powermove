@@ -84,6 +84,7 @@ mod panels;
 mod parity_tests;
 mod perf_gate;
 mod perf_panel;
+mod document_paths;
 mod platform;
 mod popover_drag;
 mod play_range;

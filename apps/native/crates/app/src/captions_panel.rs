@@ -811,18 +811,48 @@ impl Controller {
             doc.project.clone()
         }
         .replace(['/', '\\', ':'], "-");
-        let rx = crate::platform::export_destination(
-            &self.host.borrow().window,
-            false,
-            &format!("{base}.{extension}"),
-        );
+        let profile = self.profile.clone();
+        let project_path = self.path.clone();
+        let Some(id) = self.published.as_ref().map(|p| p.project.clone()) else {
+            return;
+        };
         cx.spawn(async move |this, cx| {
+            let folder_profile = profile.clone();
+            let folder_id = id.clone();
+            let (folder, id) = cx
+                .background_executor()
+                .spawn(async move {
+                    let key =
+                        crate::document_paths::export_key(&folder_id, project_path.as_deref());
+                    let folder = crate::document_paths::export_folder(
+                        &folder_profile,
+                        &key,
+                        project_path.as_deref(),
+                    );
+                    (folder, key)
+                })
+                .await;
+            let rx = this.update(cx, |v, _| {
+                crate::platform::export_destination_in(
+                    &v.host.borrow().window,
+                    false,
+                    &format!("{base}.{extension}"),
+                    Some(&folder),
+                )
+            });
+            let Ok(rx) = rx else { return };
             let Ok(Some(path)) = rx.recv().await else {
                 return;
             };
             let written = cx
                 .background_executor()
-                .spawn(async move { write_file(&path, text.as_bytes()) })
+                .spawn(async move {
+                    let result = write_file(&path, text.as_bytes());
+                    if result.is_ok() {
+                        crate::document_paths::remember(&profile, Some(&id), &path);
+                    }
+                    result
+                })
                 .await;
             let _ = this.update(cx, |v, cx| match written {
                 Ok(()) => v.note(

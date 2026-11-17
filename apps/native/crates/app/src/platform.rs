@@ -171,11 +171,22 @@ pub fn paths_named(
     save: bool,
     name: &str,
 ) -> async_channel::Receiver<Option<PathBuf>> {
+    paths_named_in(window, save, name, None)
+}
+pub fn paths_named_in(
+    window: &NSWindow,
+    save: bool,
+    name: &str,
+    directory: Option<&std::path::Path>,
+) -> async_channel::Receiver<Option<PathBuf>> {
     let (tx, rx) = async_channel::bounded(1);
     let mtm = MainThreadMarker::new().unwrap();
     if save {
         let panel = NSSavePanel::savePanel(mtm);
         panel.setNameFieldStringValue(&NSString::from_str(name));
+        if let Some(url) = directory.and_then(objc2_foundation::NSURL::from_file_path) {
+            panel.setDirectoryURL(Some(&url));
+        }
         let retained = panel.clone();
         let done = block2::RcBlock::new(move |result: NSModalResponse| {
             let path = (result == NSModalResponseOK)
@@ -760,10 +771,11 @@ fn review_destination(name: &str) -> Option<PathBuf> {
 pub fn reviewing_saves() -> bool {
     review_destination("x").is_some()
 }
-pub fn export_destination(
+pub fn export_destination_in(
     window: &NSWindow,
     folder: bool,
     name: &str,
+    directory: Option<&std::path::Path>,
 ) -> async_channel::Receiver<Option<PathBuf>> {
     if let Some(path) = review_destination(name) {
         let (tx, rx) = async_channel::bounded(1);
@@ -771,7 +783,7 @@ pub fn export_destination(
         return rx;
     }
     if !folder {
-        return paths_named(window, true, name);
+        return paths_named_in(window, true, name, directory);
     }
     let (tx, rx) = async_channel::bounded(1);
     let mtm = MainThreadMarker::new().unwrap();
@@ -780,6 +792,9 @@ pub fn export_destination(
     panel.setCanChooseFiles(false);
     panel.setAllowsMultipleSelection(false);
     panel.setCanCreateDirectories(true);
+    if let Some(url) = directory.and_then(objc2_foundation::NSURL::from_file_path) {
+        panel.setDirectoryURL(Some(&url));
+    }
     let retained = panel.clone();
     // The suggestion is authored by the Export model, never a pathname.
     let name = PathBuf::from(name).file_name().map(|s| s.to_owned());
