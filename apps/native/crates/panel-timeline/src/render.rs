@@ -1766,13 +1766,13 @@ fn paint_clip(
             ops.push(o);
         }
     } else if let (Some(audio), false) = (&c.audio, offline) {
-        // The waveform sits inside the glass: clear of the rim and the
-        // rounded corners. Two columns per point (device pixels on Retina),
-        // read from the pyramid at this zoom, on a perceptual scale; the
-        // painter fills one smooth shape from them (`waveform::Style`).
+        // The waveform is light caught inside the glass: it stands on the
+        // strip's floor, just inside the rim, over the strip's whole length,
+        // and the strip's rounded corners cut it (the painter follows them
+        // from the strip's own ends). Two columns per point (device pixels
+        // on Retina), read from the pyramid at this zoom, on a perceptual
+        // scale; the painter softens them and fills one smooth shape.
         let inset = 2. * m.border as f64;
-        let side = (radius * 0.5).max(inset);
-        let r = Rect::new(r.x + side, r.y, (r.width - 2. * side).max(0.), r.height);
         let mut o = Op::new(
             format!("clip-content:{}", c.id),
             "waveform",
@@ -1781,14 +1781,13 @@ fn paint_clip(
         );
         o.text = Some(c.name.clone());
         o.opacity = strength * if c.muted { WAVEFORM_MUTED } else { 1. };
-        let style = crate::waveform::Style::chosen();
         let mut detail = json!({
-            "style": style.name(),
-            "inset": m.border * 2.,
+            "rim": material.ring_width,
+            "radius": radius,
+            "ends": [start, end],
             "columns": crate::waveform::COLUMNS_PER_POINT,
-            "light": material.foreground,
-            "body": fill,
-            "selected": c.selected,
+            "wave": material.wave.0,
+            "waveAlpha": material.wave.1,
         });
         if let Some(w) = audio {
             let per = crate::waveform::COLUMNS_PER_POINT;
@@ -1825,7 +1824,7 @@ fn paint_clip(
         o.detail = detail;
         ops.push(o);
         if let Some(level) = c.level {
-            ops.push(level_line(c, level, r, v, inset, material.foreground, strength));
+            ops.push(level_line(c, level, r, v, inset, material.level, strength));
         }
     } else {
         let mut o = Op::new(
@@ -2777,7 +2776,11 @@ pub fn display_kind<'a>(kind: &'a str, definition: Option<&str>) -> &'a str {
 /// gain on the Mixer's fader law, rising from the floor over its fade in and
 /// falling over its fade out; `r` is the part of the strip inside the glass.
 /// A press near its flat part drags the gain.
-fn level_line(c: &Clip, level: Level, r: Rect, v: Viewport, inset: f64, light: u32, strength: f64) -> Op {
+/// An audio clip's level line. It is always there to be grabbed, but drawn
+/// only on a selected clip (`shown`) or under the pointer (the surface's
+/// hover paints it there, with its handle): at rest a clip shows its
+/// waveform alone.
+fn level_line(c: &Clip, level: Level, r: Rect, v: Viewport, inset: f64, light: (u32, f32), strength: f64) -> Op {
     let top = r.y + inset;
     let room = (r.height - 2. * inset).max(0.);
     let floor = top + room;
@@ -2795,8 +2798,8 @@ fn level_line(c: &Clip, level: Level, r: Rect, v: Viewport, inset: f64, light: u
     if fade_out > 0. {
         points.push([end, floor]);
     }
-    let mut o = Op::new(format!("level:{}", c.id), "levelline", r, light);
-    o.opacity = strength * if c.muted { 0.4 } else { 0.85 };
+    let mut o = Op::new(format!("level:{}", c.id), "levelline", r, light.0);
+    o.opacity = strength * light.1 as f64 * if c.muted { 0.5 } else { 1. };
     o.clip = Some(r);
     o.detail = json!({
         "points": points,
@@ -2808,6 +2811,7 @@ fn level_line(c: &Clip, level: Level, r: Rect, v: Viewport, inset: f64, light: u
         "db": crate::level::format_db(crate::level::gain_db(level.gain)),
         "animated": level.animated,
         "cursor": "resizeUpDown",
+        "shown": c.selected,
     });
     o
 }

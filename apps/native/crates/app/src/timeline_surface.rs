@@ -3285,7 +3285,16 @@ impl TimelineSurface {
                 (id.clone(), mid.is_some_and(|mid| *x < mid))
             })
         };
-        if side(&hovered) != side(&self.hover_clip) {
+        // Over an audio clip the level line's handle follows the pointer.
+        let level_moves = hovered.as_ref().is_some_and(|(id, x)| {
+            let level = format!("level:{id}");
+            self.hover_clip.as_ref().is_none_or(|(_, seen)| (seen - x).abs() >= 0.5)
+                && self
+                    .frame
+                    .as_ref()
+                    .is_some_and(|f| f.ops.iter().any(|o| o.id == level))
+        });
+        if side(&hovered) != side(&self.hover_clip) || level_moves {
             cx.notify();
         }
         self.hover_clip = hovered;
@@ -4684,7 +4693,13 @@ impl Render for TimelineSurface {
                                             bounds,
                                             ..Default::default()
                                         }),
-                                        |w| strip_hover(op, *x + reach, origin, &tracks_tokens, w),
+                                        |w| {
+                                            strip_hover(op, *x + reach, origin, &tracks_tokens, w);
+                                            let level = format!("level:{id}");
+                                            if let Some(line) = frame.ops.iter().find(|o| o.id == level) {
+                                                level_hover(line, *x + reach, origin, w);
+                                            }
+                                        },
                                     );
                                 }
                                 for op in
@@ -5196,6 +5211,52 @@ fn strip_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, t: &Tokens, windo
         .corner_radii(px(grip.width / 2.)),
     );
 }
+/// The level line of the audio clip under the pointer: a 1 pt hairline in
+/// the clip's light tone and, under the pointer, a short rounded pill on
+/// it (the trim grip's language) to show it can be dragged.
+fn level_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, window: &mut Window) {
+    let Some(points) = op.detail["points"].as_array() else {
+        return;
+    };
+    let points: Vec<(f64, f64)> = points
+        .iter()
+        .filter_map(|p| Some((p[0].as_f64()?, p[1].as_f64()?)))
+        .collect();
+    if points.len() < 2 {
+        return;
+    }
+    let at = |x: f64, y: f64| origin + point(px(x as f32), px(y as f32));
+    let color = shade(op.color, op.opacity);
+    let mut path = PathBuilder::stroke(px(1.));
+    path.move_to(at(points[0].0, points[0].1));
+    for (x, y) in &points[1..] {
+        path.line_to(at(*x, *y));
+    }
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
+    // The handle sits on the flat part, under the pointer.
+    let (from, to) = (
+        op.detail["from"].as_f64().unwrap_or(f64::MIN),
+        op.detail["to"].as_f64().unwrap_or(f64::MAX),
+    );
+    let Some(y) = op.detail["y"].as_f64() else {
+        return;
+    };
+    const PILL: (f64, f64) = (14., 4.);
+    if to - from < PILL.0 {
+        return;
+    }
+    let x = pointer_x.clamp(from + PILL.0 / 2., to - PILL.0 / 2.);
+    window.paint_quad(
+        PaintQuad::new(Bounds::new(
+            at(x - PILL.0 / 2., y - PILL.1 / 2.),
+            size(px(PILL.0 as f32), px(PILL.1 as f32)),
+        ))
+        .background(shade(op.color, 1.))
+        .corner_radii(px((PILL.1 / 2.) as f32)),
+    );
+}
 fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &mut App) {
     let at = |x: f64, y: f64| origin + point(px(x as f32), px(y as f32));
     let b = op.bounds;
@@ -5552,13 +5613,17 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 window.paint_path(path, color);
             }
         }
-        // One smooth shape in the strip's own pale tint, lighter at the
-        // peaks and fading into the slab (`waveform::Style`); while the
-        // levels are read a hairline marks the middle (v1).
+        // Light caught inside the glass (pm-design `Strip::wave`): one soft
+        // shape standing on the strip's floor just inside its rim, cut by
+        // its rounded corners, with a thin haze along the whole floor so a
+        // silent stretch never reads as empty. While the levels are read a
+        // hairline marks the middle (v1).
         "waveform" => {
+            use pm_panel_timeline::waveform::{LOUDEST, decode, soften};
             let d = &op.detail;
-            let inset = d["inset"].as_f64().unwrap_or(2.) as f32;
             let per = d["columns"].as_f64().unwrap_or(2.).max(1.) as f32;
+            let tone = d["wave"].as_u64().unwrap_or(0xffffff) as u32;
+            let strength = d["waveAlpha"].as_f64().unwrap_or(0.5) * op.opacity;
             let (x0, top) = (f32::from(area.origin.x), f32::from(area.origin.y));
             let (w, h) = (f32::from(area.size.width), f32::from(area.size.height));
             let Some(peak) = d["peak"].as_str() else {
@@ -5567,104 +5632,79 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                         point(px(x0), px(top + (h / 2.).floor())),
                         size(px(w), px(1.)),
                     ))
-                    .background(color),
+                    .background(shade(tone, strength)),
                 );
                 return;
             };
-            let style = pm_panel_timeline::waveform::Style::parse(d["style"].as_str().unwrap_or(""))
-                .unwrap_or_default();
-            let light = d["light"].as_u64().unwrap_or(0xffffff) as u32;
-            let lift = if d["selected"].as_bool() == Some(true) { 1.2 } else { 1. };
-            let a = |share: f64| shade(light, share * lift * op.opacity);
-            let room = (h - 2. * inset).max(0.);
-            let decode = |key: &str| {
-                d[key]
-                    .as_str()
-                    .map(|t| pm_panel_timeline::waveform::smooth(&pm_panel_timeline::waveform::decode(t)))
+            let rim = d["rim"].as_f64().unwrap_or(1.) as f32;
+            let radius = (d["radius"].as_f64().unwrap_or(0.) as f32 - rim).max(0.);
+            let ends = |i: usize| d["ends"][i].as_f64().map(|e| f32::from(origin.x) + e as f32);
+            let (start, end) = (ends(0).unwrap_or(x0), ends(1).unwrap_or(x0 + w));
+            let (inner_top, floor) = (top + rim, top + h - rim);
+            // The strip's inside at `x`: its ceiling and floor, lifted
+            // round the rounded corners.
+            let inside = |x: f32| -> (f32, f32) {
+                if x < start || x > end {
+                    return (floor, floor);
+                }
+                let from_end = (x - start).min(end - x);
+                let lift = if from_end < radius {
+                    let d = radius - from_end;
+                    radius - (radius * radius - d * d).max(0.).sqrt()
+                } else {
+                    0.
+                };
+                (inner_top + lift, floor - lift)
             };
-            let lanes: Vec<(Vec<f32>, Option<Vec<f32>>, f32, f32)> = match decode("peak2") {
+            let lanes: Vec<(Vec<f32>, f32, f32)> = match d["peak2"].as_str() {
                 // A tall stereo row: the left above, the right below.
                 Some(peak2) => {
-                    let half = room / 2.;
+                    let half = (floor - inner_top) / 2.;
                     vec![
-                        (pm_panel_timeline::waveform::smooth(&pm_panel_timeline::waveform::decode(peak)), decode("rms"), top + inset, half),
-                        (peak2, decode("rms2"), top + inset + half, half),
+                        (soften(&decode(peak)), inner_top + half, half),
+                        (soften(&decode(peak2)), floor, half),
                     ]
                 }
-                None => vec![(
-                    pm_panel_timeline::waveform::smooth(&pm_panel_timeline::waveform::decode(peak)),
-                    decode("rms"),
-                    top + inset,
-                    room,
-                )],
+                None => vec![(soften(&decode(peak)), floor, floor - inner_top)],
             };
             // Only the columns the window shows (a frame is prepared wider
             // than the view): the path's work stays the screen's width.
             let shown = f32::from(window.viewport_size().width);
             let first = (((0. - x0) * per).floor().max(0.) as usize).saturating_sub(1);
             let last = (((shown - x0) * per).ceil().max(0.) as usize) + 2;
-            for (peaks, rms, lane_top, lane_h) in lanes {
-                let window_of = |v: Vec<f32>| -> Vec<f32> {
-                    let end = last.min(v.len());
-                    if first >= end { vec![] } else { v[first..end].to_vec() }
-                };
-                let (peaks, rms) = (window_of(peaks), rms.map(window_of));
-                let x = |i: usize| x0 + (first + i) as f32 / per;
-                match style {
-                    pm_panel_timeline::waveform::Style::Mirror => {
-                        let mid = lane_top + lane_h / 2.;
-                        let half = lane_h / 2.;
-                        // Two halves, each lighter at its peaks.
-                        // (direction, gradient angle: its first stop at the peaks)
-                        for (sign, angle) in [(-1f32, 180f32), (1f32, 0f32)] {
-                            if let Some(path) = smooth_fill(&peaks, &x, mid, |v| mid + sign * v * half) {
-                                window.paint_path(
-                                    path,
-                                    linear_gradient(
-                                        angle,
-                                        linear_color_stop(a(0.55), 0.),
-                                        linear_color_stop(a(0.14), 1.),
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                    pm_panel_timeline::waveform::Style::Floor => {
-                        let floor = lane_top + lane_h;
-                        if let Some(path) = smooth_fill(&peaks, &x, floor, |v| floor - v * lane_h) {
-                            window.paint_path(
-                                path,
-                                linear_gradient(
-                                    180.,
-                                    linear_color_stop(a(0.6), 0.),
-                                    linear_color_stop(a(0.12), 1.),
-                                ),
-                            );
-                        }
-                    }
-                    pm_panel_timeline::waveform::Style::Body => {
-                        let floor = lane_top + lane_h;
-                        let body = rms.as_ref().unwrap_or(&peaks);
-                        if let Some(path) = smooth_fill(body, &x, floor, |v| floor - v * lane_h) {
-                            window.paint_path(
-                                path,
-                                linear_gradient(
-                                    180.,
-                                    linear_color_stop(a(0.62), 0.),
-                                    linear_color_stop(a(0.16), 1.),
-                                ),
-                            );
-                        }
-                        // The peaks as a faint line over the body.
-                        if let Some(path) = smooth_line(&peaks, &x, |v| floor - v * lane_h) {
-                            window.paint_path(path, a(0.32));
-                        }
-                    }
+            let x = |i: usize| x0 + (first + i) as f32 / per;
+            for (values, lane_floor, lane_h) in lanes {
+                let end_at = last.min(values.len());
+                if first >= end_at {
+                    continue;
+                }
+                let values = &values[first..end_at];
+                // The haze along the floor, then the shape over it: more
+                // opaque at its base than at its tips.
+                let haze = vec![WAVE_HAZE; values.len()];
+                if let Some(path) = glass_fill(&haze, &x, lane_floor, &inside) {
+                    window.paint_path(path, shade(tone, strength * 0.55));
+                }
+                let heights: Vec<f32> = values.iter().map(|v| v * LOUDEST * lane_h).collect();
+                if let Some(path) = glass_fill(&heights, &x, lane_floor, &inside) {
+                    window.paint_path(
+                        path,
+                        linear_gradient(
+                            180.,
+                            linear_color_stop(shade(tone, strength * 0.78), 0.),
+                            linear_color_stop(shade(tone, strength), 1.),
+                        ),
+                    );
                 }
             }
         }
         // An audio clip's level line: a hairline in its pale tint.
+        // Drawn here only on a selected clip; under the pointer the hover
+        // paints it with its handle (`level_hover`). At rest: nothing.
         "levelline" => {
+            if op.detail["shown"] != true {
+                return;
+            }
             let Some(points) = op.detail["points"].as_array() else {
                 return;
             };
@@ -6068,51 +6108,88 @@ fn shade(rgb: u32, alpha: f64) -> Rgba {
     gpui::rgba((rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32)
 }
 
-/// The waveform's outline through `values` (0–1 per column at `x(i)`),
-/// `y(v)` high: quadratic curves through the midpoints, so it joins
-/// smoothly; silent ends run along `base`.
-fn waveform_outline(
-    path: &mut PathBuilder,
-    values: &[f32],
-    x: &dyn Fn(usize) -> f32,
-    y: &dyn Fn(f32) -> f32,
-) {
-    let at = |i: usize| point(px(x(i)), px(y(values[i])));
-    path.line_to(at(0));
-    for i in 1..values.len() {
-        let (a, b) = (at(i - 1), at(i));
-        path.curve_to(point((a.x + b.x) / 2., (a.y + b.y) / 2.), a);
-    }
-    path.line_to(at(values.len() - 1));
-}
+/// The waveform's haze along the floor, in points: about two device pixels.
+const WAVE_HAZE: f32 = 0.9;
 
-/// One filled waveform shape on `base` (anti-aliased, device resolution).
-fn smooth_fill(
-    values: &[f32],
+/// A waveform shape: `heights` (points above `base`, one per column at
+/// `x(i)`) inside the strip as `inside(x)` gives its ceiling and floor, so
+/// the strip's rounded corners cut it. Its top is a monotone cubic through
+/// the columns (no overshoot, no corner); `None` when nothing shows.
+fn glass_fill(
+    heights: &[f32],
     x: &dyn Fn(usize) -> f32,
     base: f32,
-    y: impl Fn(f32) -> f32,
+    inside: &dyn Fn(f32) -> (f32, f32),
 ) -> Option<Path<Pixels>> {
-    if values.len() < 2 || values.iter().all(|v| *v <= 0.) {
+    let n = heights.len();
+    if n < 2 {
         return None;
     }
+    let mut tops = Vec::with_capacity(n);
+    let mut floors = Vec::with_capacity(n);
+    for (i, height) in heights.iter().enumerate() {
+        let (ceiling, floor) = inside(x(i));
+        let floor = floor.min(base);
+        floors.push(floor);
+        tops.push((base - height).max(ceiling).min(floor));
+    }
+    if tops.iter().zip(&floors).all(|(t, f)| f - t < 0.05) {
+        return None;
+    }
+    let xs: Vec<f32> = (0..n).map(x).collect();
+    let tangents = monotone_tangents(&xs, &tops);
     let mut path = PathBuilder::fill();
-    path.move_to(point(px(x(0)), px(base)));
-    waveform_outline(&mut path, values, x, &y);
-    path.line_to(point(px(x(values.len() - 1)), px(base)));
+    path.move_to(point(px(xs[0]), px(floors[0])));
+    path.line_to(point(px(xs[0]), px(tops[0])));
+    for k in 0..n - 1 {
+        let third = (xs[k + 1] - xs[k]) / 3.;
+        path.cubic_bezier_to(
+            point(px(xs[k + 1]), px(tops[k + 1])),
+            point(px(xs[k] + third), px(tops[k] + tangents[k] * third)),
+            point(px(xs[k + 1] - third), px(tops[k + 1] - tangents[k + 1] * third)),
+        );
+    }
+    // Back along the floor: only where it bends round a corner.
+    for k in (0..n).rev() {
+        let bent = |j: usize| floors[j] < base - 0.01;
+        if k == n - 1 || k == 0 || bent(k) || bent(k + 1) || bent(k - 1) {
+            path.line_to(point(px(xs[k]), px(floors[k])));
+        }
+    }
     path.close();
     path.build().ok()
 }
 
-/// The waveform's peaks as a hairline over the body.
-fn smooth_line(values: &[f32], x: &dyn Fn(usize) -> f32, y: impl Fn(f32) -> f32) -> Option<Path<Pixels>> {
-    if values.len() < 2 || values.iter().all(|v| *v <= 0.) {
-        return None;
+/// Fritsch–Carlson tangents: a cubic through `(xs, ys)` with them never
+/// overshoots or turns a corner between columns.
+fn monotone_tangents(xs: &[f32], ys: &[f32]) -> Vec<f32> {
+    let n = xs.len();
+    let slope: Vec<f32> = (0..n - 1)
+        .map(|k| (ys[k + 1] - ys[k]) / (xs[k + 1] - xs[k]).max(1e-6))
+        .collect();
+    let mut m: Vec<f32> = (0..n)
+        .map(|k| match k {
+            0 => slope[0],
+            k if k == n - 1 => slope[n - 2],
+            k if slope[k - 1] * slope[k] <= 0. => 0.,
+            k => (slope[k - 1] + slope[k]) / 2.,
+        })
+        .collect();
+    for k in 0..n - 1 {
+        if slope[k] == 0. {
+            m[k] = 0.;
+            m[k + 1] = 0.;
+            continue;
+        }
+        let (a, b) = (m[k] / slope[k], m[k + 1] / slope[k]);
+        let r = a * a + b * b;
+        if r > 9. {
+            let t = 3. / r.sqrt();
+            m[k] = t * a * slope[k];
+            m[k + 1] = t * b * slope[k];
+        }
     }
-    let mut path = PathBuilder::stroke(px(0.5));
-    path.move_to(point(px(x(0)), px(y(values[0]))));
-    waveform_outline(&mut path, values, x, &y);
-    path.build().ok()
+    m
 }
 
 /// The audio clip whose level line (its flat part) is under `x, y`: its

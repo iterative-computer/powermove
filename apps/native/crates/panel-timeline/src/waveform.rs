@@ -1,60 +1,18 @@
 //! A clip's waveform as the timeline draws it: the loudness of what the clip
-//! plays, read at any zoom from a pyramid of levels, on a perceptual scale,
+//! plays, read at any zoom from a pyramid of levels, on a square-root scale,
 //! one value per drawn column (two columns per point: the device pixels of a
 //! Retina display), carried to the painter as a compact string.
 //!
-//! The painter fills one smooth shape from these columns in the strip's own
-//! hue, lighter at the peaks and fading into the slab ([`Style`]).
+//! The painter softens the columns ([`soften`]) and fills one smooth shape
+//! standing on the strip's floor, in a pale tint of the strip's own hue:
+//! light caught inside the glass (pm-design `Strip::wave`).
 use std::sync::Arc;
 
 /// Drawn columns per point.
 pub const COLUMNS_PER_POINT: f64 = 2.;
 /// The quietest level drawn, in dB below full scale: anything quieter is
-/// silence, and the scale between it and full scale is even in dB, so quiet
-/// speech still has a shape instead of a flat floor with a few spikes.
+/// silence.
 pub const FLOOR_DB: f32 = 54.;
-
-/// How the waveform is drawn: the owner picks one (`PM_WAVEFORM` names it
-/// meanwhile: `mirror`, `floor` or `body`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Style {
-    /// Symmetric about the strip's middle, as Logic and Final Cut draw it.
-    Mirror,
-    /// Standing on the strip's floor, a soft filled shape (the glass
-    /// timeline concept).
-    #[default]
-    Floor,
-    /// Standing on the floor: the RMS as the filled body, the peaks as a
-    /// fainter line over it.
-    Body,
-}
-impl Style {
-    pub fn name(self) -> &'static str {
-        match self {
-            Style::Mirror => "mirror",
-            Style::Floor => "floor",
-            Style::Body => "body",
-        }
-    }
-    pub fn parse(name: &str) -> Option<Style> {
-        match name {
-            "mirror" => Some(Style::Mirror),
-            "floor" => Some(Style::Floor),
-            "body" => Some(Style::Body),
-            _ => None,
-        }
-    }
-    /// The style chosen for this process (`PM_WAVEFORM`), else the default.
-    pub fn chosen() -> Style {
-        static CHOSEN: std::sync::OnceLock<Style> = std::sync::OnceLock::new();
-        *CHOSEN.get_or_init(|| {
-            std::env::var("PM_WAVEFORM")
-                .ok()
-                .and_then(|v| Style::parse(&v))
-                .unwrap_or_default()
-        })
-    }
-}
 
 /// One channel slot's levels at every resolution: level 0 is the finest
 /// (`rate` buckets per second), each next level halves it, the larger peak
@@ -187,13 +145,16 @@ pub fn column(p: &Pyramid, rate: f64, t0: f64, t1: f64) -> (f32, f32) {
     (top, (squares / count.max(1.)).sqrt() as f32)
 }
 
-/// A linear level as drawn: even in dB from [`FLOOR_DB`] below full scale
-/// (0) to full scale (1).
+/// A linear level as drawn: its square root, so quiet speech keeps a shape
+/// (−20 dB draws at a third of the height, not a tenth) while a sound that
+/// dies away draws as a curve with a soft shoulder. A scale even in dB
+/// would draw every exponential decay as a straight ramp, a sawtooth. Below
+/// [`FLOOR_DB`] is silence.
 pub fn perceptual(level: f32) -> f32 {
-    if level <= 0. {
+    if level <= 10f32.powf(-FLOOR_DB / 20.) {
         return 0.;
     }
-    (1. + 20. * level.log10() / FLOOR_DB).clamp(0., 1.)
+    level.min(1.).sqrt()
 }
 
 /// A clip's columns: `count` columns from the strip's left at `left_time`
@@ -248,27 +209,38 @@ pub fn decode(text: &str) -> Vec<f32> {
         .collect()
 }
 
-/// Columns softened for drawing: a [1, 2, 1] filter twice, so the outline
-/// joins smoothly, never below two thirds of a column's own height, so a
-/// transient keeps most of its height while its neighbours rise toward it.
-pub fn smooth(values: &[f32]) -> Vec<f32> {
-    let pass = |v: &[f32]| -> Vec<f32> {
-        (0..v.len())
-            .map(|i| {
-                let a = v[i.saturating_sub(1)];
-                let c = v[(i + 1).min(v.len() - 1)];
-                (a + 2. * v[i] + c) / 4.
-            })
-            .collect()
-    };
-    if values.is_empty() {
-        return vec![];
-    }
-    pass(&pass(values))
-        .into_iter()
-        .zip(values)
-        .map(|(soft, v)| soft.max(v * 0.66))
-        .collect()
+/// How far either side a column's loudness spreads when drawn, in columns
+/// (device pixels): one width at every zoom, so a hit is a rounded bell
+/// with soft shoulders, never a spike or a ramp.
+pub const SOFTEN: f32 = 3.5;
+/// The loudest moment of a clip reaches this share of its inner height.
+pub const LOUDEST: f32 = 0.7;
+/// The quietest clip still drawn at full height: quieter ones keep their
+/// quietness instead of having their noise drawn as loud.
+const LOUD_ENOUGH: f32 = 0.25;
+
+/// A clip's columns as drawn: softened by a symmetric Gaussian window
+/// [`SOFTEN`] columns wide (an attack and its decay round alike), then
+/// scaled so the clip's loudest moment is 1 (drawn at [`LOUDEST`] of the
+/// height).
+pub fn soften(values: &[f32]) -> Vec<f32> {
+    let reach = (3. * SOFTEN).ceil() as isize;
+    let weights: Vec<f32> = (-reach..=reach)
+        .map(|d| (-(d * d) as f32 / (2. * SOFTEN * SOFTEN)).exp())
+        .collect();
+    let total: f32 = weights.iter().sum();
+    let n = values.len() as isize;
+    let soft: Vec<f32> = (0..n)
+        .map(|i| {
+            (-reach..=reach)
+                .zip(&weights)
+                .map(|(d, w)| values[(i + d).clamp(0, n - 1) as usize] * w)
+                .sum::<f32>()
+                / total
+        })
+        .collect();
+    let loudest = soft.iter().copied().fold(0., f32::max).max(LOUD_ENOUGH);
+    soft.into_iter().map(|v| (v / loudest).min(1.)).collect()
 }
 
 /// A clip's media read through `map`, a time map sampled evenly over the
@@ -302,12 +274,15 @@ mod tests {
     /// Quiet sound has a shape: a level 40 dB down still draws a quarter of
     /// the height; silence draws nothing; full scale draws the whole.
     #[test]
-    fn the_scale_is_even_in_decibels() {
+    fn a_decay_draws_as_a_curve_not_a_ramp() {
         assert_eq!(perceptual(0.), 0.);
         assert_eq!(perceptual(1.), 1.);
-        assert!((perceptual(0.01) - (1. - 40. / FLOOR_DB)).abs() < 1e-5);
-        assert!(perceptual(0.01) > 0.25, "linear would draw 1 %");
-        assert_eq!(perceptual(1e-4), 0., "below the floor is silence");
+        assert!((perceptual(0.1) - 0.1f32.sqrt()).abs() < 1e-6, "−20 dB at a third");
+        assert_eq!(perceptual(1e-3), 0., "below the floor is silence");
+        // An exponential decay: each step falls less than the one before.
+        let drawn: Vec<f32> = (0..6).map(|t| perceptual((-(t as f32)).exp())).collect();
+        let falls: Vec<f32> = drawn.windows(2).map(|w| w[0] - w[1]).collect();
+        assert!(falls.windows(2).all(|f| f[1] < f[0]), "{falls:?}");
     }
 
     /// Every zoom reads real data: a span many buckets wide reads a coarser
@@ -365,13 +340,26 @@ mod tests {
         assert_eq!(back.iter().map(|v| (v * 255.).round() as u8).collect::<Vec<_>>(), bytes);
     }
 
-    /// Smoothing joins neighbours without flattening a transient.
+    /// A hit is drawn as a symmetric bell, tallest where it was, and the
+    /// clip's loudest moment reaches the full drawn height.
     #[test]
-    fn smoothing_keeps_a_transient() {
-        let mut v = vec![0.; 9];
-        v[4] = 1.;
-        let s = smooth(&v);
-        assert!(s[4] >= 0.66 && s[3] > 0. && s[5] > 0. && s[0] == 0.);
+    fn a_hit_is_a_rounded_bell() {
+        let mut v = vec![0.; 41];
+        v[18..=22].fill(1.);
+        let s = soften(&v);
+        assert_eq!(s[20], 1.);
+        for d in 1..15 {
+            assert!((s[20 - d] - s[20 + d]).abs() < 1e-6, "symmetric");
+            assert!(s[20 - d] < s[20 - d + 1], "falls away on both sides");
+        }
+        assert!(s[0] < 1e-3);
+    }
+
+    /// A quiet clip stays quiet: its noise is not drawn as loud.
+    #[test]
+    fn a_quiet_clip_keeps_its_quietness() {
+        let s = soften(&vec![0.05; 30]);
+        assert!(s.iter().all(|v| (*v - 0.2).abs() < 1e-3));
     }
 
     /// A stereo clip keeps each side; the combined shape is the louder peak.

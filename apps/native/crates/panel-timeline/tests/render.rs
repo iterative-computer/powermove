@@ -607,27 +607,31 @@ fn audio_clips_draw_perceptual_columns_from_their_trimmed_media() {
     assert_eq!(wave.shape, "waveform");
     let material = t.strip(t.colors.labels.green, pm_design::StripState::Rest);
     assert_eq!(wave.color, material.primary);
-    assert_eq!(wave.detail["light"], material.foreground, "the clip's own pale tint");
+    assert_eq!(
+        (wave.detail["wave"].as_u64(), wave.detail["waveAlpha"].as_f64()),
+        (Some(u64::from(material.wave.0)), Some(f64::from(material.wave.1))),
+        "light caught in the clip's own glass"
+    );
     let columns = pm_panel_timeline::waveform::decode(wave.detail["peak"].as_str().unwrap());
-    // Inside the glass: clear of the rim and the rounded corners.
-    let side = (body.radius * 0.5).max(2. * t.metrics.border as f64);
+    // Over the strip's whole length: its rounded corners cut it (the
+    // painter follows them from the strip's own ends and corner).
     let clip = body.clip.unwrap();
     let (x0, x1) = (
         body.bounds.x.max(clip.x),
         (body.bounds.x + body.bounds.width).min(clip.x + clip.width),
     );
-    assert_eq!(wave.bounds.x, x0 + side);
+    assert_eq!(wave.bounds.x, x0);
+    assert_eq!(wave.detail["radius"].as_f64(), Some(body.radius));
     // Two columns per point: device pixels on Retina.
-    assert_eq!(columns.len(), ((x1 - x0 - 2. * side) * 2.).ceil() as usize);
-    // The trimmed media only, on the perceptual scale (−12 dB is most of
-    // the height, not a quarter).
+    assert_eq!(columns.len(), ((x1 - x0) * 2.).ceil() as usize);
+    // The trimmed media only, on the square-root scale (−12 dB at half).
     let expected = pm_panel_timeline::waveform::perceptual(0.25);
     assert!(
         columns.iter().all(|c| (c - expected).abs() < 1. / 255. + 1e-6),
         "trimmed media only: {:?}",
         &columns[..4]
     );
-    assert!(expected > 0.7);
+    assert_eq!(expected, 0.5);
     // Still reading: no columns (the painter draws the middle hairline).
     audio.audio = Some(None);
     let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
@@ -658,6 +662,13 @@ fn audio_clips_draw_perceptual_columns_from_their_trimmed_media() {
     assert!((floor - y - 0.72 * room).abs() < 1e-6, "0 dB at 72 % of {room}");
     assert_eq!(points[1][1].as_f64().unwrap(), y, "the fade in rises to the level");
     assert_eq!(line.detail["db"], "0.0");
+    // At rest it is not drawn (only grabbed); a selected clip shows it.
+    assert_eq!(line.detail["shown"], false);
+    audio.selected = true;
+    let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
+    let shown = f.ops.iter().find(|o| o.id == "level:a").unwrap();
+    assert_eq!(shown.detail["shown"], true);
+    audio.selected = false;
     audio.muted = true;
     let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
     let dim = f.ops.iter().find(|o| o.id == "level:a").unwrap();
