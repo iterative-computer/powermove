@@ -4241,7 +4241,7 @@ impl Render for TimelineSurface {
                 (EditTool::Split, "scissors", "Split (C) — click a clip to cut it. ⇧-click cuts every layer."),
             ].into_iter().map(|(tool, symbol, label)| {
                 let image = pm_shell::symbol::rasterize(symbol, t.metrics.symbol_panel, pm_shell::symbol::Weight::Regular, t.colors.text, window.scale_factor());
-                div().id(SharedString::from(tool.command())).size(px(t.metrics.control)).flex().items_center().justify_center()
+                div().id(SharedString::from(tool.command())).debug_selector(move || tool.command()).size(px(t.metrics.control)).flex().items_center().justify_center()
                     .rounded(px(t.metrics.control_radius)).when(self.model.edit_tool == tool, |d| d.bg(rgb(t.colors.floating)))
                     .role(Role::Button).aria_label(label).aria_selected(self.model.edit_tool == tool)
                     .tooltip(pm_shell::kit::tooltip(t, label))

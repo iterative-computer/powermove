@@ -3797,3 +3797,16 @@ fn g6_pointer_split_in_both_modes_is_one_undo_and_stays_selected(cx: &mut TestAp
         assert_eq!(s.out_of("a"), 2., "one Undo restores {mode}");
     }
 }
+
+#[gpui::test]
+fn g6_visible_tool_buttons_select_split_and_selection(cx: &mut TestAppContext) {
+    let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
+    let at = bounds(&mut s.vcx, "timeline.tool:split").center();
+    s.vcx.simulate_click(at, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Split);
+    let at = bounds(&mut s.vcx, "timeline.tool:selection").center();
+    s.vcx.simulate_click(at, Modifiers::none());
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Selection);
+}

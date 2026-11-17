@@ -3200,7 +3200,15 @@ fn g6_split_keys_and_snapping() {
             expected
         );
     }
-    let (_actor, c) = client();
+    let (_actor, mut c) = client();
+    command(&mut c, "timeline.tool:split", 0.);
+    assert_eq!(c.model.edit_tool, EditTool::Split);
+    command(&mut c, "timeline.tool:selection", 0.);
+    assert_eq!(c.model.edit_tool, EditTool::Selection);
+    command(&mut c, "timeline.tool:split", 0.);
+    command(&mut c, "deselect", 0.);
+    assert_eq!(c.model.edit_tool, EditTool::Selection);
+    assert!(resolve_key(&KeyInput { key: "c", modifiers: mods(), repeat: false, in_field: true }).is_none());
     assert_eq!(c.model.split_time(3.97, 8., 0.05), 4.);
     let mut m = c.model.clone();
     m.track_snap_disabled = true;
