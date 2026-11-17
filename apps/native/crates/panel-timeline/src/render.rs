@@ -225,7 +225,7 @@ impl Waveform {
     pub fn peak(&self, local: f64, width: f64) -> f32 {
         let a = self.trim + local * self.speed;
         let b = a + width * self.speed;
-        if !a.is_finite() || !b.is_finite() {
+        if !a.is_finite() || !b.is_finite() || (self.speed != 0. && a.max(b) <= 0.) {
             return 0.;
         }
         let from = (a.min(b) * self.rate).floor().max(0.) as usize;
@@ -2743,5 +2743,20 @@ mod audio_source_range_tests {
         assert_eq!(w.peak(0., 0.5), 0.2);
         assert_eq!(w.peak(0.5, 0.5), 0.3);
         assert_eq!(w.peak(2., 0.5), 0.);
+    }
+    #[test]
+    fn zoomed_out_summary_excludes_trimmed_away_loud_peaks() {
+        let w = Waveform {
+            peaks: vec![1., 0.2, 0.3, 0.4, 0.5, 1.].into(), rate: 1., trim: 1., speed: 1.,
+            pyramid: vec![vec![1., 0.4, 1.].into(), vec![1., 1.].into(), vec![1.].into()].into(),
+        };
+        assert_eq!(w.peak(0., 4.), 0.5);
+        assert_eq!(w.peak(0., 1.), 0.2);
+        assert_eq!(w.peak(1., 2.), 0.4);
+    }
+    #[test]
+    fn reverse_sampling_is_silent_before_source_start() {
+        let w = Waveform { peaks: vec![0.75, 0.5].into(), rate: 1., trim: 0., speed: -1., pyramid: Default::default() };
+        assert_eq!(w.peak(1., 0.5), 0.);
     }
 }

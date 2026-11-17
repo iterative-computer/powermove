@@ -1346,12 +1346,13 @@ impl TimelineSurface {
         } else {
             0.
         };
-        let rows = self
+        let mut rows = self
             .scene
             .as_ref()?
             .prepare_wide(v, &self.tokens, reach, reach_x)
-            .ok()
-            .map(Arc::new)?;
+            .ok()?;
+        self.audio_rows(&mut rows);
+        let rows = Arc::new(rows);
         self.ask_painters(&rows, cx);
         // What the layers record shows this time at their left edge.
         self.drawn.1 = v.scroll_time;

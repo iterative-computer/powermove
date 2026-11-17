@@ -19,6 +19,22 @@ struct AudioFrame {
     viewport: Viewport,
     ops: Vec<Op>,
 }
+fn audio_geometry(base: &Frame) -> AudioFrame {
+    AudioFrame {
+        viewport: base.viewport,
+        ops: base
+            .ops
+            .iter()
+            .filter(|o| o.id.starts_with("clip:") || o.shape == "waveform")
+            .map(|o| {
+                let mut geometry = op(o.id.clone(), o.bounds, o.color);
+                geometry.shape = o.shape;
+                geometry.clip = o.clip;
+                geometry
+            })
+            .collect(),
+    }
+}
 struct Drag {
     layer: String,
     path: String,
@@ -79,6 +95,7 @@ impl TimelineSurface {
             return false;
         }
         self.audio.base = None;
+        self.rows = None;
         cx.notify();
         true
     }
@@ -88,8 +105,17 @@ impl TimelineSurface {
         let region = self.graph_region();
         canvas(
             move |_, _, cx| {
-                weak.read_with(cx, |s, _| s.audio.ops.clone())
-                    .unwrap_or_default()
+                weak.read_with(cx, |s, _| {
+                    s.audio
+                        .ops
+                        .iter()
+                        .filter(|o| {
+                            !o.id.starts_with("audio-level:") && !o.id.starts_with("audio-fade:")
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
             },
             move |bounds, ops, window, cx| {
                 let cull = Cull::new(bounds.size);
@@ -120,20 +146,7 @@ impl TimelineSurface {
     }
     pub(super) fn update_audio(&mut self, base: Arc<Frame>, cx: &mut Context<Self>) {
         // Copy geometry only: never clone waveform JSON or key arrays for meter ticks.
-        let mut frame = AudioFrame {
-            viewport: base.viewport,
-            ops: base
-                .ops
-                .iter()
-                .filter(|o| o.id.starts_with("clip:") || o.shape == "waveform")
-                .map(|o| {
-                    let mut geometry = op(o.id.clone(), o.bounds, o.color);
-                    geometry.shape = o.shape;
-                    geometry.clip = o.clip;
-                    geometry
-                })
-                .collect(),
-        };
+        let mut frame = audio_geometry(&base);
         if self
             .audio
             .base
@@ -155,6 +168,151 @@ impl TimelineSurface {
             .filter(|o| o.id.starts_with("audio-"))
             .collect();
         self.audio.base = Some(base);
+    }
+    fn audio_controls(&self, frame: &mut AudioFrame) {
+        if !frame.ops.iter().any(|o| o.id.starts_with("audio-level:"))
+            && frame.ops.iter().any(|o| o.shape == "waveform")
+            && let Some(published) = self.kernel.published(&self.project)
+        {
+            let mut mirror = QueryMirror::new(&published);
+            let mut q = mirror.queries();
+            let clips: Vec<_> = frame
+                .ops
+                .iter()
+                .filter(|o| o.id.starts_with("clip:"))
+                .cloned()
+                .collect();
+            for clip in clips {
+                let id = clip.id.trim_start_matches("clip:");
+                let Some(layer) = self.model.index.layers.iter().find(|l| l.id == id) else {
+                    continue;
+                };
+                if !matches!(layer.kind.as_str(), "audio" | "video") {
+                    continue;
+                }
+                if !frame
+                    .ops
+                    .iter()
+                    .any(|o| o.id == format!("clip-content:{id}") && o.shape == "waveform")
+                {
+                    continue;
+                }
+                let r = clip.bounds;
+                let gain_path = if layer.kind == "audio" {
+                    "c.gain"
+                } else {
+                    "c.audioGain"
+                };
+                let value =
+                    |q: &mut pm_kernel::QueryContext, path: &str, at: f64, fallback: f64| {
+                        q.evaluate(self.model.index.comp_id.as_deref(), id, path, at)
+                            .ok()
+                            .and_then(|v| v.as_f64())
+                            .filter(|v| v.is_finite())
+                            .unwrap_or(fallback)
+                    };
+                let animated_gain = layer.channels.iter().any(|channel| {
+                    channel.path == gain_path
+                        && (!channel.keys.is_empty() || channel.expression.is_some())
+                });
+                let base_gain = value(&mut q, gain_path, layer.from, 1.);
+                let dragged = self
+                    .audio
+                    .drag
+                    .as_ref()
+                    .filter(|d| d.layer == id && d.path == gain_path)
+                    .map(|d| d.value);
+                let fade_in = value(&mut q, "c.fadeIn", layer.from, 0.).clamp(0., layer.duration);
+                let fade_out = value(&mut q, "c.fadeOut", layer.from, 0.).clamp(0., layer.duration);
+                let fade_in = self
+                    .audio
+                    .drag
+                    .as_ref()
+                    .filter(|d| d.layer == id && d.path == "c.fadeIn")
+                    .map_or(fade_in, |d| d.value);
+                let fade_out = self
+                    .audio
+                    .drag
+                    .as_ref()
+                    .filter(|d| d.layer == id && d.path == "c.fadeOut")
+                    .map_or(fade_out, |d| d.value);
+                let x0 = r.x.max(frame.viewport.layer_column);
+                let x1 = (r.x + r.width).min(frame.viewport.width);
+                for x in (x0.ceil() as i64)..(x1.ceil() as i64) {
+                    let local = ((x as f64 - frame.viewport.layer_column) / frame.viewport.pps
+                        + frame.viewport.scroll_time
+                        - layer.from)
+                        .clamp(0., layer.duration);
+                    let gain = dragged.unwrap_or_else(|| {
+                        if animated_gain {
+                            value(&mut q, gain_path, layer.from + local, base_gain)
+                        } else {
+                            base_gain
+                        }
+                    });
+                    let fade = if fade_in > 0. {
+                        (local / fade_in).min(1.)
+                    } else {
+                        1.
+                    };
+                    let fade = fade.min(if fade_out > 0. {
+                        ((layer.duration - local) / fade_out).min(1.)
+                    } else {
+                        1.
+                    });
+                    let y = gain_y(gain * fade.max(0.), r);
+                    let mut line = op(
+                        format!("audio-level:{id}"),
+                        Rect::new(x as f64, y, 1., 1.),
+                        self.tokens.colors.text,
+                    );
+                    line.detail = serde_json::json!({"layer":id,"path":gain_path,"gain":gain});
+                    line.clip = clip.clip;
+                    frame.ops.push(line);
+                }
+                if layer.kind == "audio" {
+                    for (path, x) in [
+                        (
+                            "c.fadeIn",
+                            frame.viewport.layer_column
+                                + (layer.from - frame.viewport.scroll_time + fade_in)
+                                    * frame.viewport.pps
+                                + 4.,
+                        ),
+                        (
+                            "c.fadeOut",
+                            frame.viewport.layer_column
+                                + (layer.from - frame.viewport.scroll_time + layer.duration
+                                    - fade_out)
+                                    * frame.viewport.pps
+                                - 4.,
+                        ),
+                    ] {
+                        if x < x0 || x > x1 {
+                            continue;
+                        }
+                        let mut handle = op(
+                            format!("audio-fade:{id}:{path}"),
+                            Rect::new(x - 3., r.y + 2., 6., 5.),
+                            self.tokens.colors.text,
+                        );
+                        handle.detail = serde_json::json!({"layer":id,"path":path,"gain":if path == "c.fadeIn" {fade_in} else {fade_out}});
+                        handle.clip = clip.clip;
+                        frame.ops.push(handle);
+                    }
+                }
+            }
+        }
+    }
+    pub(super) fn audio_rows(&self, frame: &mut Frame) {
+        let mut audio = audio_geometry(frame);
+        self.audio_controls(&mut audio);
+        frame.ops.extend(
+            audio
+                .ops
+                .into_iter()
+                .filter(|o| o.id.starts_with("audio-level:") || o.id.starts_with("audio-fade:")),
+        );
     }
     fn audio_frame(&mut self, frame: &mut AudioFrame, cx: &mut Context<Self>) {
         self.audio.painted = Some(Instant::now());
@@ -212,128 +370,7 @@ impl TimelineSurface {
                 let _ = meter.step(0., 0., dt);
             }
         }
-        if !frame.ops.iter().any(|o| o.id.starts_with("audio-level:"))
-            && let Some(published) = self.kernel.published(&self.project)
-        {
-            let mut mirror = QueryMirror::new(&published);
-            let mut q = mirror.queries();
-            let clips: Vec<_> = frame
-                .ops
-                .iter()
-                .filter(|o| o.id.starts_with("clip:"))
-                .cloned()
-                .collect();
-            for clip in clips {
-                let id = clip.id.trim_start_matches("clip:");
-                let Some(layer) = self.model.index.layers.iter().find(|l| l.id == id) else {
-                    continue;
-                };
-                if !matches!(layer.kind.as_str(), "audio" | "video") {
-                    continue;
-                }
-                if !frame
-                    .ops
-                    .iter()
-                    .any(|o| o.id == format!("clip-content:{id}") && o.shape == "waveform")
-                {
-                    continue;
-                }
-                let r = clip.bounds;
-                let gain_path = if layer.kind == "audio" {
-                    "c.gain"
-                } else {
-                    "c.audioGain"
-                };
-                let value =
-                    |q: &mut pm_kernel::QueryContext, path: &str, at: f64, fallback: f64| {
-                        q.evaluate(self.model.index.comp_id.as_deref(), id, path, at)
-                            .ok()
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(fallback)
-                    };
-                let fade_in = value(&mut q, "c.fadeIn", layer.from, 0.).clamp(0., layer.duration);
-                let fade_out = value(&mut q, "c.fadeOut", layer.from, 0.).clamp(0., layer.duration);
-                let fade_in = self
-                    .audio
-                    .drag
-                    .as_ref()
-                    .filter(|d| d.layer == id && d.path == "c.fadeIn")
-                    .map_or(fade_in, |d| d.value);
-                let fade_out = self
-                    .audio
-                    .drag
-                    .as_ref()
-                    .filter(|d| d.layer == id && d.path == "c.fadeOut")
-                    .map_or(fade_out, |d| d.value);
-                let x0 = r.x.max(frame.viewport.layer_column);
-                let x1 = (r.x + r.width).min(frame.viewport.width);
-                for x in (x0.ceil() as i64)..(x1.ceil() as i64) {
-                    let local = ((x as f64 - frame.viewport.layer_column) / frame.viewport.pps
-                        + frame.viewport.scroll_time
-                        - layer.from)
-                        .clamp(0., layer.duration);
-                    let mut gain = value(&mut q, gain_path, layer.from + local, 1.);
-                    if let Some(d) = self
-                        .audio
-                        .drag
-                        .as_ref()
-                        .filter(|d| d.layer == id && d.path == gain_path)
-                    {
-                        gain = d.value;
-                    }
-                    let fade = if fade_in > 0. {
-                        (local / fade_in).min(1.)
-                    } else {
-                        1.
-                    };
-                    let fade = fade.min(if fade_out > 0. {
-                        ((layer.duration - local) / fade_out).min(1.)
-                    } else {
-                        1.
-                    });
-                    let y = gain_y(gain * fade.max(0.), r);
-                    let mut line = op(
-                        format!("audio-level:{id}"),
-                        Rect::new(x as f64, y, 1., 1.),
-                        self.tokens.colors.text,
-                    );
-                    line.detail = serde_json::json!({"layer":id,"path":gain_path,"gain":gain});
-                    line.clip = clip.clip;
-                    frame.ops.push(line);
-                }
-                if layer.kind == "audio" {
-                    for (path, x) in [
-                        (
-                            "c.fadeIn",
-                            frame.viewport.layer_column
-                                + (layer.from - frame.viewport.scroll_time + fade_in)
-                                    * frame.viewport.pps
-                                + 4.,
-                        ),
-                        (
-                            "c.fadeOut",
-                            frame.viewport.layer_column
-                                + (layer.from - frame.viewport.scroll_time + layer.duration
-                                    - fade_out)
-                                    * frame.viewport.pps
-                                - 4.,
-                        ),
-                    ] {
-                        if x < x0 || x > x1 {
-                            continue;
-                        }
-                        let mut handle = op(
-                            format!("audio-fade:{id}:{path}"),
-                            Rect::new(x - 3., r.y + 2., 6., 5.),
-                            self.tokens.colors.text,
-                        );
-                        handle.detail = serde_json::json!({"layer":id,"path":path,"gain":if path == "c.fadeIn" {fade_in} else {fade_out}});
-                        handle.clip = clip.clip;
-                        frame.ops.push(handle);
-                    }
-                }
-            }
-        }
+        self.audio_controls(frame);
         // Fixed-width, deliberately omitted in narrow timelines.
         if frame.viewport.width - frame.viewport.layer_column > 420. {
             let x = frame.viewport.width - 88.;
@@ -375,6 +412,13 @@ impl TimelineSurface {
         }
         if let Some(d) = &self.audio.drag {
             let db = 20. * d.value.max(0.000001).log10();
+            let mut background = op(
+                "audio-readout-bg".into(),
+                Rect::new(d.x + 6., d.y - 24., 94., 20.),
+                self.tokens.colors.floating,
+            );
+            background.radius = 3.;
+            frame.ops.push(background);
             let mut tip = op(
                 "audio-readout".into(),
                 Rect::new(d.x + 10., d.y - 24., 86., 20.),
@@ -391,6 +435,9 @@ impl TimelineSurface {
     }
     pub(super) fn audio_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) -> bool {
         let (x, y) = self.local(event.position);
+        if self.graph_region().is_some_and(|r| y >= r.y) {
+            return false;
+        }
         let Some(frame) = &self.frame else {
             return false;
         };
@@ -403,6 +450,9 @@ impl TimelineSurface {
                 (o.id.starts_with("audio-level:")
                     || o.id.starts_with("audio-fade:")
                     || o.id == "audio-clip-latch")
+                    && o.clip.is_none_or(|c| {
+                        x >= c.x && x <= c.x + c.width && y >= c.y && y <= c.y + c.height
+                    })
                     && x >= o.bounds.x - 3.
                     && x <= o.bounds.x + o.bounds.width + 3.
                     && y >= o.bounds.y - 3.
@@ -434,9 +484,19 @@ impl TimelineSurface {
                 - layer.from)
                 .clamp(0., layer.duration);
         let gain = hit.detail["gain"].as_f64().unwrap_or(1.);
-        if event.modifiers.platform && path.contains("Gain")
-            || event.modifiers.platform && path == "c.gain"
-        {
+        if event.modifiers.platform && matches!(path, "c.gain" | "c.audioGain") {
+            let at = layer.from + frame_time(&self.model, at - layer.from);
+            let gain = self
+                .kernel
+                .published(&self.project)
+                .and_then(|published| {
+                    QueryMirror::new(&published)
+                        .queries()
+                        .evaluate(self.model.index.comp_id.as_deref(), id, path, at)
+                        .ok()
+                        .and_then(|v| v.as_f64())
+                })
+                .unwrap_or(gain);
             self.queue.push_back(Job::Apply(edit(
                 id,
                 path,
@@ -481,6 +541,7 @@ impl TimelineSurface {
             dragged_gain(d.initial, y - d.y, event.modifiers.shift)
         };
         self.audio.base = None;
+        self.rows = None;
         cx.notify();
         true
     }
@@ -500,6 +561,7 @@ impl TimelineSurface {
             self.pump(cx);
         }
         self.audio.base = None;
+        self.rows = None;
         cx.notify();
         true
     }
@@ -611,14 +673,14 @@ mod captures {
     use crate::v4_view::{Natives, SurfaceView};
     use crate::v4_view_tests::{PROJECT, publication, rig_project};
     /// Uses HeadlessAppContext's TestPlatform, with focus(false), show(false).
-    /// Meter input is a synthetic output-tap sample for visual review only.
+    /// A real Playback on a simulated device supplies output-mix meter taps.
     #[test]
-    #[ignore = "writes synthetic audio review crops; set PM_AUDIO_CAPTURE and PM_AUDIO_CAPTURE_SOURCE"]
+    #[ignore = "writes headless audio playback review crops; set PM_AUDIO_CAPTURE and PM_AUDIO_CAPTURE_SOURCE"]
     fn capture_timeline_audio_light_dark() {
         let dir = std::env::var("PM_AUDIO_CAPTURE").unwrap();
         let source = PathBuf::from(std::env::var("PM_AUDIO_CAPTURE_SOURCE").unwrap());
         std::fs::create_dir_all(&dir).unwrap();
-        let project = r##"{"id":"integration","name":"Audio review","compId":"c","w":640,"h":360,"fps":30,"dur":8,"bg":"#000000","assets":{"music":{"kind":"audio","dur":8}},"comps":{},"layers":[{"id":"audio","name":"Music bed","type":"audio","from":0,"dur":8,"on":true,"d":{"asset":"music","gain":0.5,"fadeIn":1,"fadeOut":1.5},"p":{},"fx":[]}]}"##;
+        let project = r##"{"id":"integration","name":"Audio review","compId":"c","w":640,"h":360,"fps":30,"dur":8,"bg":"#000000","assets":{"music":{"kind":"audio","dur":8}},"comps":{},"layers":[{"id":"audio","name":"Music bed","type":"audio","from":0,"dur":8,"on":true,"d":{"asset":"music","gain":{"v":0.5,"kf":[{"i":"gain-0","t":0,"v":0.5},{"i":"gain-4","t":4,"v":0.8},{"i":"gain-8","t":8,"v":0.5}],"expr":null},"fadeIn":1,"fadeOut":1.5},"p":{},"fx":[]}]}"##;
         for (name, scheme) in [
             ("light", pm_design::Scheme::Light),
             ("dark", pm_design::Scheme::Dark),
@@ -628,8 +690,25 @@ mod captures {
                 let first = publication(&rig);
                 let natives = Natives::default();
                 let recorder = Rc::new(crate::timeline_tests::Recorder::default());
-                *recorder.audio.borrow_mut() = Some(([0.5, 0.9], 48000, true));
-                let delegate = Rc::new(crate::timeline_tests::Recording(recorder));
+                let delegate = Rc::new(crate::timeline_tests::Recording(recorder.clone()));
+                let cache = pm_audio::SourceCache::new(8 << 20, 2);
+                let (playback, mut device) = pm_audio::playback::Playback::start_headless(
+                    pm_audio::MixFormat::stereo(48000),
+                    cache.clone(),
+                    pm_audio::playback::PlaybackConfig::default(),
+                    48000,
+                    2,
+                    0,
+                )
+                .unwrap();
+                let doc = pm_model::Document::new(Some(pm_model::json::parse(project).unwrap()), 1);
+                let resolver = |_: &str| Some(source.clone());
+                assert!(
+                    playback
+                        .set_project(Arc::new(doc), "c", &resolver)
+                        .unwrap()
+                        .is_empty()
+                );
                 let tokens = Tokens::new(scheme, pm_design::Accessibility::default());
                 let mut cx = HeadlessAppContext::with_platform(
                     Arc::new(
@@ -686,11 +765,29 @@ mod captures {
                         })
                     })
                     .unwrap();
+                playback
+                    .command(pm_protocol::clock::TransportCommand::Play {
+                        rate: pm_protocol::common::PlaybackRate::NORMAL,
+                    })
+                    .unwrap();
+                let surface = captured_surface.unwrap();
+                let mut output = vec![0f32; 960 * 2];
                 for _ in 0..100 {
+                    device.callback(&mut output, 2, pm_audio::clock::host_now_us() + 20_000);
+                    if let Some(tap) = playback.meters() {
+                        let levels = tap.to_levels(48000);
+                        *recorder.audio.borrow_mut() = Some((
+                            std::array::from_fn(|i| {
+                                levels.master.peak.get(i).copied().unwrap_or(0.) as f64
+                            }),
+                            levels.media_time.get(),
+                            true,
+                        ));
+                    }
+                    cx.update(|cx| surface.update(cx, |_, cx| cx.notify()));
                     cx.run_until_parked();
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                let surface = captured_surface.unwrap();
                 cx.update(|cx| {
                     let s = surface.read(cx);
                     assert!(
@@ -705,6 +802,17 @@ mod captures {
                                     .any(|v| v.as_f64().unwrap_or(0.) > 0.)))
                     );
                     assert!(s.audio.ops.iter().any(|o| o.id == "audio-level:audio"));
+                    let gains: Vec<f64> = s
+                        .audio
+                        .ops
+                        .iter()
+                        .filter(|o| o.id == "audio-level:audio")
+                        .filter_map(|o| o.detail["gain"].as_f64())
+                        .collect();
+                    assert!(
+                        gains.iter().any(|g| *g > 0.75) && gains.iter().any(|g| *g < 0.55),
+                        "gain curve did not follow its keys"
+                    );
                     assert_eq!(
                         s.audio
                             .ops
@@ -724,6 +832,9 @@ mod captures {
                     .unwrap()
                     .save(format!("{dir}/audio-{name}.png"))
                     .unwrap();
+                drop(device);
+                drop(playback);
+                cache.shutdown();
             });
         }
     }
@@ -825,6 +936,120 @@ mod gesture_tests {
                 .as_f64(),
             Some(1.)
         );
+    }
+    fn stage_audio(cx: &mut TestAppContext) -> crate::timeline_tests::Stage {
+        let mut project: serde_json::Value =
+            serde_json::from_str(&crate::v4_view_tests::project_json(1)).unwrap();
+        project["layers"][0]["id"] = serde_json::json!("audio");
+        project["layers"][0]["type"] = serde_json::json!("audio");
+        project["layers"][0]["dur"] = serde_json::json!(8);
+        project["layers"][0]["d"] = serde_json::json!({"gain":1,"fadeIn":0,"fadeOut":0});
+        crate::timeline_tests::stage_project(cx, project.to_string())
+    }
+    fn gain_value(s: &crate::timeline_tests::Stage, path: &str) -> f64 {
+        let p = s
+            .rig
+            .kernel
+            .published(crate::v4_view_tests::PROJECT)
+            .unwrap();
+        QueryMirror::new(&p)
+            .queries()
+            .evaluate(None, "audio", path, 0.)
+            .unwrap()
+            .as_f64()
+            .unwrap()
+    }
+    fn gain_key_count(s: &crate::timeline_tests::Stage) -> usize {
+        let p = s
+            .rig
+            .kernel
+            .published(crate::v4_view_tests::PROJECT)
+            .unwrap();
+        let root: serde_json::Value = serde_json::from_str(&pm_model::json::to_canonical_string(
+            &p.snapshot.root().unwrap().to_value(),
+        ))
+        .unwrap();
+        root["layers"][0]["d"]["gain"]["kf"]
+            .as_array()
+            .map_or(0, Vec::len)
+    }
+    #[gpui::test]
+    fn command_click_on_level_line_adds_one_gain_key(cx: &mut TestAppContext) {
+        let mut s = stage_audio(cx);
+        let from = s.origin() + point(px(600.), px(50.));
+        s.surface.update(&mut s.vcx, |surface, cx| {
+            let mut line = op(
+                "audio-level:audio".into(),
+                Rect::new(599., 49., 3., 1.),
+                0xffffff,
+            );
+            line.detail = serde_json::json!({"layer":"audio","path":"c.gain","gain":1.});
+            surface.audio.ops.push(line);
+            assert!(surface.audio_down(
+                &MouseDownEvent {
+                    position: from,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers {
+                        platform: true,
+                        ..Modifiers::none()
+                    },
+                    click_count: 1,
+                    first_mouse: false
+                },
+                cx
+            ));
+        });
+        s.idle(cx);
+        assert_eq!(gain_key_count(&s), 1);
+        assert_eq!(gain_value(&s, "c.gain"), 1.);
+        s.undo(cx);
+        assert_eq!(gain_value(&s, "c.gain"), 1.);
+        assert_eq!(gain_key_count(&s), 0);
+    }
+    #[gpui::test]
+    fn fade_handle_drag_sets_duration_on_release_and_undoes_once(cx: &mut TestAppContext) {
+        for (path, dx) in [("c.fadeIn", 100.), ("c.fadeOut", -100.)] {
+            let mut s = stage_audio(cx);
+            let from = s.origin() + point(px(600.), px(50.));
+            let expected = s
+                .surface
+                .read_with(&s.vcx, |surface, _| 100. / surface.view.pps);
+            s.surface.update(&mut s.vcx, |surface, cx| {
+                let mut handle = op(
+                    "audio-fade:audio".into(),
+                    Rect::new(599., 49., 3., 3.),
+                    0xffffff,
+                );
+                handle.detail = serde_json::json!({"layer":"audio","path":path,"gain":0.});
+                surface.audio.ops.push(handle);
+                assert!(surface.audio_down(
+                    &MouseDownEvent {
+                        position: from,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                        click_count: 1,
+                        first_mouse: false
+                    },
+                    cx
+                ));
+                assert!(surface.audio_move(
+                    &MouseMoveEvent {
+                        position: from + point(px(dx), px(0.)),
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: Modifiers::none()
+                    },
+                    cx
+                ));
+            });
+            assert_eq!(gain_value(&s, path), 0.);
+            s.surface.update(&mut s.vcx, |surface, cx| {
+                assert!(surface.audio_up(cx));
+            });
+            s.idle(cx);
+            assert!((gain_value(&s, path) - expected).abs() < 1e-9);
+            s.undo(cx);
+            assert_eq!(gain_value(&s, path), 0.);
+        }
     }
 }
 
