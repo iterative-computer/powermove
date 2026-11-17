@@ -1997,7 +1997,15 @@ impl Backend {
                     if crate::agent_host::sends(action) {
                         crate::agent_host::admit_send(&state, &thread)?;
                     }
-                    let run = new_id("run");
+                    // A fresh run, or, while the thread runs, the current
+                    // one: a message sent then steers it (PM-506: a fresh id
+                    // there was refused as stale, and the steer was lost).
+                    let run = state
+                        .panel
+                        .session(&thread)
+                        .ok()
+                        .and_then(|s| s.run.as_ref().map(|r| r.id.clone()))
+                        .unwrap_or_else(|| new_id("run"));
                     let request = new_id("request");
                     let new_thread = new_id("thread");
                     let catalogs = |provider| link.catalog(provider);

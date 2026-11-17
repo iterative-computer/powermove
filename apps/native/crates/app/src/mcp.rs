@@ -62,12 +62,16 @@ impl Tools {
         Connection {
             host: self.host.clone(),
             session: McpSession::new(self.automation.clone()),
+            run: None,
         }
     }
 }
 pub struct Connection {
     host: Arc<Host>,
     session: McpSession,
+    /// The agent run this session acts for, found while the run lives (its
+    /// grant stops resolving once it ends, which is when the session closes).
+    run: Option<String>,
 }
 impl Connection {
     /// UI open/close and MCP requests fence session identity without blocking
@@ -109,6 +113,7 @@ impl Connection {
 impl ToolConnection for Connection {
     fn bind_agent_run(&mut self, run: &str) {
         self.session.set_agent_run(run);
+        self.run = pm_agents::launch::grants::resolve(run).map(|(run, _)| run);
     }
     fn list(&mut self) -> Result<Value> {
         Ok(self.session.tools())
@@ -120,7 +125,15 @@ impl ToolConnection for Connection {
         })
     }
     fn disconnect(&mut self) -> Result<()> {
-        self.session.close()
+        let closed = self.session.close();
+        // The run ended without keeping its edits and they were rolled back:
+        // its thread says so (PM-507).
+        if self.session.take_rolled_back()
+            && let Some(run) = &self.run
+        {
+            pm_builtins::agent_run_rolled_back(run);
+        }
+        closed
     }
 }
 

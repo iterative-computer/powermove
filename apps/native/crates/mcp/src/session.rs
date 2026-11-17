@@ -100,6 +100,8 @@ pub struct McpSession {
     agent_token: Option<String>,
     writer: u32,
     closed: bool,
+    /// Its close rolled the run's edits back ([`Self::take_rolled_back`]).
+    rolled_back: bool,
     panel_lease: Option<crate::panel_lease::Lease>,
 }
 impl McpSession {
@@ -112,7 +114,13 @@ impl McpSession {
             writer: NEXT.fetch_add(1, Ordering::Relaxed),
             closed: false,
             panel_lease: None,
+            rolled_back: false,
         }
+    }
+    /// Whether this session's close rolled its edits back (the run ended
+    /// without keeping them): asked once, after `close`.
+    pub fn take_rolled_back(&mut self) -> bool {
+        std::mem::take(&mut self.rolled_back)
     }
     pub fn tools(&self) -> Value {
         json!(catalog::served_tools())
@@ -1126,6 +1134,7 @@ impl McpSession {
             let mut history_id = None;
             if !commit && changed {
                 rollback(&mut session, &mut host, &id, self.writer)?;
+                self.rolled_back = true;
             } else if changed
                 && !session.external_actions
                 && !tx.interleaved

@@ -2,6 +2,8 @@
 //! the only document writer. GPUI consumes immutable accepted surfaces.
 #![cfg_attr(test, recursion_limit = "512")]
 mod agent_host;
+/// A run's tool session rolled its edits back after it ended (PM-507).
+pub use agent_host::rolled_back as agent_run_rolled_back;
 pub use agent_host::NoticeSink;
 mod agent_tasks;
 mod chrome;
@@ -2112,6 +2114,9 @@ impl EngineProxy for Broker {
                 && let Some(state) = self.carried.shared().take()
             {
                 backend.shared().native.agent = Some(state);
+            }
+            if let Some(state) = backend.shared().native.agent.clone() {
+                agent_host::register(&state, &self.agent, &self.kernel, self.application);
             }
             let facts = self.facts.shared().clone();
             if !facts.is_null() && facts.as_object().is_some_and(|m| !m.is_empty()) {
