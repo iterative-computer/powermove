@@ -308,6 +308,10 @@ pub struct ImportRequest {
     pub keep_folders: bool,
     /// How far the import has come, for the toolbar's task pill.
     pub progress: ImportProgress,
+    /// The files the project's items play from now (the app's resolved
+    /// originals): an item not here is missing. A file that is one of them
+    /// is that item again ([`known`]).
+    pub originals: std::collections::BTreeMap<String, PathBuf>,
 }
 /// How far an import has come: files read of the total, and the file
 /// being read. Shared with whoever shows it; the import only writes.
@@ -372,6 +376,143 @@ pub struct ChosenSequence {
     pub asset: serde_json::Value,
     /// Numbers in the range with no file, as the status line says them.
     pub missing: Option<String>,
+}
+
+/// A file about to be imported: what identifies it.
+#[derive(Debug)]
+pub(crate) struct Facts {
+    pub name: String,
+    pub kind: &'static str,
+    pub size: u64,
+    pub fingerprint: String,
+}
+/// `None` for what is not a plain media file (a folder, an unknown kind).
+fn file_facts(path: &Path, models: bool) -> Option<Facts> {
+    let meta = std::fs::metadata(path).ok().filter(std::fs::Metadata::is_file)?;
+    let kind = kind(path).or((models && model_mime(path).is_some()).then_some("model"))?;
+    Some(Facts {
+        name: path.file_name()?.to_string_lossy().into_owned(),
+        kind,
+        size: meta.len(),
+        fingerprint: pm_kernel::media_archive::sampled_fingerprint(path, meta.len()).ok()?,
+    })
+}
+/// What an imported file already is in the project (v1 `findExistingAsset`).
+#[derive(Debug, PartialEq)]
+pub(crate) enum Known {
+    /// An item that plays from the same content: used again, so a file is
+    /// one Project item however often it is imported.
+    Present(String),
+    /// A missing item this file is: relinked to it.
+    Missing(String),
+}
+/// The item `file` already is, by content (`fingerprint`), which survives a
+/// rename. An item kept without one is the same when it plays from a file
+/// with the same fingerprint, or, when missing, by v1's rule for such items:
+/// the same name, kind and size. A missing match comes first.
+pub(crate) fn known(
+    assets: &Value,
+    originals: &std::collections::BTreeMap<String, PathBuf>,
+    file: &Facts,
+) -> Option<Known> {
+    let mut present = None;
+    for (id, record) in assets.as_object()?.iter() {
+        let id = id.to_string();
+        if record.get("kind").and_then(Value::as_str) != Some(file.kind)
+            || record.get("imageSequence").is_some()
+        {
+            continue;
+        }
+        let size = record.get("size").and_then(Value::as_f64).map(|s| s as u64);
+        let same = match record.get("fingerprint").and_then(Value::as_str) {
+            Some(fingerprint) => fingerprint == file.fingerprint,
+            None => match originals.get(&id) {
+                Some(path) => {
+                    size.is_none_or(|s| s == file.size)
+                        && std::fs::metadata(path).is_ok_and(|m| m.len() == file.size)
+                        && pm_kernel::media_archive::sampled_fingerprint(path, file.size)
+                            .is_ok_and(|f| f == file.fingerprint)
+                }
+                None => {
+                    size == Some(file.size)
+                        && record
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|n| n.eq_ignore_ascii_case(&file.name))
+                }
+            },
+        };
+        if !same {
+            continue;
+        }
+        if !originals.contains_key(&id) {
+            return Some(Known::Missing(id));
+        }
+        present.get_or_insert(id);
+    }
+    present.map(Known::Present)
+}
+/// The project's other missing items whose files are in `folder` (a Locate
+/// just found one there), each with its file: by name first, checked by
+/// content (or v1's size rule for an item kept without a fingerprint), then
+/// any file of its content under another name. Never one file for two items.
+fn siblings(
+    assets: &Value,
+    originals: &std::collections::BTreeMap<String, PathBuf>,
+    located: &str,
+    folder: &Path,
+) -> Vec<(String, PathBuf)> {
+    let Some(records) = assets.as_object() else {
+        return vec![];
+    };
+    let files: Vec<(PathBuf, u64)> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let meta = e.metadata().ok().filter(std::fs::Metadata::is_file)?;
+            Some((e.path(), meta.len()))
+        })
+        .collect();
+    let mut taken = std::collections::HashSet::new();
+    let mut found = vec![];
+    for (id, record) in records.iter() {
+        let id = id.to_string();
+        let kind = record.get("kind").and_then(Value::as_str);
+        if id == located
+            || originals.contains_key(&id)
+            || record.get("imageSequence").is_some()
+            || !matches!(kind, Some("image" | "video" | "audio"))
+        {
+            continue;
+        }
+        let name = record.get("name").and_then(Value::as_str).unwrap_or("");
+        let fingerprint = record.get("fingerprint").and_then(Value::as_str);
+        let size = record.get("size").and_then(Value::as_f64).map(|s| s as u64);
+        let is = |path: &Path, len: u64| match fingerprint {
+            Some(f) => pm_kernel::media_archive::sampled_fingerprint(path, len).is_ok_and(|g| g == f),
+            None => size == Some(len),
+        };
+        let named = files.iter().find(|(path, len)| {
+            !taken.contains(path)
+                && path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name))
+                && self::kind(path) == kind
+                && is(path, *len)
+        });
+        let renamed = || {
+            let wanted: u64 = fingerprint?.split(':').nth(1)?.parse().ok()?;
+            files
+                .iter()
+                .find(|(path, len)| *len == wanted && !taken.contains(path) && is(path, *len))
+        };
+        if let Some((path, _)) = named.or_else(renamed) {
+            taken.insert(path.clone());
+            found.push((id, path.clone()));
+        }
+    }
+    found
 }
 
 /// An image sequence chosen as File ▸ Import Image Sequence chooses it, for
@@ -597,6 +738,10 @@ pub struct Outcome {
     /// What else a person should know (frames missing from a sequence).
     pub notes: Vec<String>,
     pub cancelled: bool,
+    /// Missing items these files were, relinked to them.
+    pub relinked: Vec<String>,
+    /// Files already in the project as an item that plays: used again.
+    pub reused: Vec<String>,
 }
 impl Outcome {
     pub fn summary(&self) -> String {
@@ -605,6 +750,16 @@ impl Outcome {
             0 => {}
             1 => parts.push(format!("Imported {}", self.imported[0])),
             n => parts.push(format!("Imported {n} files")),
+        }
+        match self.relinked.len() {
+            0 => {}
+            1 => parts.push(format!("Relinked {}", self.relinked[0])),
+            n => parts.push(format!("Relinked {n} missing files")),
+        }
+        match self.reused.len() {
+            0 => {}
+            1 => parts.push(format!("{} is already in the project", self.reused[0])),
+            n => parts.push(format!("{n} files are already in the project")),
         }
         parts.extend(self.notes.iter().cloned());
         parts.extend(
@@ -631,7 +786,173 @@ const EDIT_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 impl Builtins {
     /// Blocks the caller for probing, copying and the actor's reply. Run it on
     /// a worker only. Nothing is admitted unless `document` is still open.
+    ///
+    /// As v1 did, a file that is already an item is never a second one: a
+    /// missing item it is gets relinked to it, and one that plays is used
+    /// again (placed, if the import places). A Locate or Replace that
+    /// relinks a missing file then looks in that file's folder for the
+    /// project's other missing files and relinks those too.
     pub fn import_media(
+        &self,
+        document: u64,
+        profile: &Path,
+        mut request: ImportRequest,
+        cancel: &AtomicBool,
+    ) -> Result<Outcome, String> {
+        let assets = || -> Result<Value, String> {
+            let published = self.broker.kernel.published(&self.broker.project).ok_or(SWITCHED)?;
+            Ok(published
+                .snapshot
+                .root()
+                .and_then(|r| r.get("assets"))
+                .map(|a| a.to_value())
+                .unwrap_or(Value::Null))
+        };
+        let originals = request.originals.clone();
+        if let Some(replaced) = request.replace.clone() {
+            let chosen = request.paths.first().cloned();
+            // A Locate that chose other content than the item had: allowed
+            // (it is a Replace then), and said.
+            let differs = request.sequence.is_none()
+                && !originals.contains_key(&replaced)
+                && chosen.as_deref().and_then(|p| file_facts(p, true)).is_some_and(|facts| {
+                    assets().ok().is_some_and(|a| {
+                        a.get(&replaced)
+                            .and_then(|r| r.get("fingerprint"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|f| f != facts.fingerprint)
+                    })
+                });
+            let mut outcome = self.import_once(document, profile, request, cancel)?;
+            if outcome.cancelled || outcome.assets.is_empty() {
+                return Ok(outcome);
+            }
+            if differs {
+                outcome
+                    .notes
+                    .push("The file chosen is not the one that went missing".into());
+            }
+            let Some(folder) = chosen.as_deref().and_then(Path::parent) else {
+                return Ok(outcome);
+            };
+            let mut more = 0;
+            for (id, path) in siblings(&assets()?, &originals, &replaced, folder) {
+                if cancel.load(Ordering::Acquire) {
+                    break;
+                }
+                let relink = ImportRequest {
+                    paths: vec![path],
+                    replace: Some(id),
+                    ..Default::default()
+                };
+                if self
+                    .import_once(document, profile, relink, cancel)
+                    .is_ok_and(|o| !o.assets.is_empty())
+                {
+                    more += 1;
+                }
+            }
+            if more > 0 {
+                outcome.notes.push(format!(
+                    "Relinked {more} more from the same folder"
+                ));
+            }
+            return Ok(outcome);
+        }
+        if request.sequence.is_some() || request.staged.is_some() {
+            return self.import_once(document, profile, request, cancel);
+        }
+        let known_now = assets()?;
+        let (mut relink, mut reuse) = (vec![], vec![]);
+        let mut fresh = vec![];
+        for path in std::mem::take(&mut request.paths) {
+            match file_facts(&path, request.models)
+                .and_then(|facts| known(&known_now, &originals, &facts).map(|k| (k, facts.name)))
+            {
+                Some((Known::Missing(id), name)) => relink.push((id, path, name)),
+                Some((Known::Present(id), name)) => reuse.push((id, name)),
+                None => fresh.push(path),
+            }
+        }
+        let (place_at, place_index) = (request.place_at, request.place_index);
+        let mut outcome = if fresh.is_empty() {
+            Outcome::default()
+        } else {
+            request.paths = fresh;
+            self.import_once(document, profile, request, cancel)?
+        };
+        let mut placed = vec![];
+        for (id, path, name) in relink {
+            if cancel.load(Ordering::Acquire) {
+                outcome.cancelled = true;
+                break;
+            }
+            let request = ImportRequest {
+                paths: vec![path],
+                replace: Some(id.clone()),
+                ..Default::default()
+            };
+            match self.import_once(document, profile, request, cancel) {
+                Ok(o) if !o.assets.is_empty() => {
+                    outcome.relinked.push(name);
+                    outcome.assets.push(id.clone());
+                    placed.push(id);
+                }
+                Ok(o) => outcome.failed.extend(o.failed),
+                Err(error) => outcome.failed.push((name, error)),
+            }
+        }
+        for (id, name) in reuse {
+            if !outcome.assets.contains(&id) {
+                outcome.assets.push(id.clone());
+                placed.push(id);
+            }
+            if place_at.is_none() {
+                outcome.reused.push(name);
+            }
+        }
+        if let Some(at) = place_at
+            && !placed.is_empty()
+        {
+            self.place_known(&placed, at, place_index)?;
+        }
+        Ok(outcome)
+    }
+    /// Items already in the project, placed as an import places its new ones,
+    /// in one Undo step, and selected.
+    fn place_known(&self, assets: &[String], at: f64, index: Option<usize>) -> Result<(), String> {
+        let project = &self.broker.project;
+        let published = self.broker.kernel.published(project).ok_or(SWITCHED)?;
+        let (layers, commands) = place_items(&published, assets, &[], at, index)?;
+        let call = pm_kernel::Call::Transact {
+            label: Some("Add to Timeline".into()),
+            expected_revision: Some(published.revision()),
+            body: pm_kernel::WriteBody::Commands(commands),
+        };
+        match self
+            .broker
+            .kernel
+            .call(project, Request::new(Caller::native(), call))
+            .wait()
+        {
+            Some(Ok(ack)) => {
+                if let Reply::Throw(error) = ack.reply {
+                    return Err(error.to_string());
+                }
+            }
+            Some(Err(error)) => return Err(format!("{error:?}")),
+            None => return Err("Project closed".into()),
+        }
+        let selection = SelectionCall::Layers { ids: layers, add: false };
+        let _ = self
+            .broker
+            .kernel
+            .call(project, Request::new(Caller::native(), selection))
+            .wait();
+        Ok(())
+    }
+    /// One import as asked: each file a new item, or `replace`'s new file.
+    fn import_once(
         &self,
         document: u64,
         profile: &Path,
@@ -754,6 +1075,13 @@ impl Builtins {
                         }
                     }
                 };
+                // Its identity, as v1 kept it: a later import of the same
+                // file finds this item (`known`).
+                if sequence.is_none()
+                    && let Ok(fingerprint) = pm_kernel::media_archive::sampled_fingerprint(&path, size)
+                {
+                    asset["fingerprint"] = json!(fingerprint);
+                }
                 // A new clip's times address the file's presentation. A
                 // relinked asset keeps the reading its edits were made with:
                 // the merge leaves its `timing` member (or its absence) alone.
@@ -1203,6 +1531,108 @@ mod tests {
             runtime,
         };
         (fixture, session)
+    }
+    /// Imports `paths` as the Project panel does, with `originals` the
+    /// files the project's items play from now.
+    fn import_with(
+        f: &Fixture,
+        paths: Vec<PathBuf>,
+        replace: Option<&str>,
+        originals: &[(&str, &Path)],
+        place_at: Option<f64>,
+    ) -> Outcome {
+        f.runtime
+            .import_media(
+                document(f),
+                &f.root,
+                ImportRequest {
+                    paths,
+                    replace: replace.map(Into::into),
+                    place_at,
+                    originals: originals
+                        .iter()
+                        .map(|(id, path)| (id.to_string(), path.to_path_buf()))
+                        .collect(),
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap()
+    }
+    fn assets_now(f: &Fixture) -> Value {
+        f.actor.handle().published("p").unwrap().snapshot.root().unwrap()
+            .get("assets").unwrap().to_value()
+    }
+    fn source_of(f: &Fixture, id: &str) -> String {
+        assets_now(f).get(id).and_then(|a| a.get("sourcePath")).and_then(Value::as_str)
+            .unwrap_or_default().to_owned()
+    }
+    /// The same file imported again is the item it already is (v1 kept one
+    /// per file, by content): nothing new in the Project panel, said so;
+    /// imported to the timeline, the item is placed again (PM-486).
+    #[test]
+    fn a_file_imported_again_is_the_item_it_already_is() {
+        let f = fixture();
+        let a = write(&f.root, "A.png", PNG);
+        let first = import_with(&f, vec![a.clone()], None, &[], None);
+        let id = first.assets[0].clone();
+        let again = import_with(&f, vec![a.clone()], None, &[(id.as_str(), a.as_path())], None);
+        assert!(again.imported.is_empty(), "{again:?}");
+        assert_eq!(again.reused, ["A.png"]);
+        assert_eq!(again.assets, [id.clone()]);
+        assert_eq!(again.summary(), "A.png is already in the project");
+        // A copy under another name is the same content.
+        let copy = write(&f.root, "A copy.png", PNG);
+        let placed = import_with(&f, vec![copy], None, &[(id.as_str(), a.as_path())], Some(0.));
+        assert_eq!(placed.assets, [id.clone()]);
+        assert_eq!(assets_now(&f).as_object().unwrap().len(), 1, "one item per file");
+        let p = f.actor.handle().published("p").unwrap();
+        let layers = pm_kernel::model::comp_node(p.snapshot.root().unwrap(), p.snapshot.open_comp().as_deref())
+            .unwrap().to_value().get("layers").unwrap().as_array().unwrap().clone();
+        assert_eq!(layers.len(), 1, "placed again");
+        assert_eq!(layers[0].get("d").and_then(|d| d.get("asset")).and_then(Value::as_str), Some(id.as_str()));
+    }
+    /// A missing item's file imported again, renamed or not, relinks the
+    /// item instead of adding one (v1: "relinked N missing assets") (PM-494).
+    #[test]
+    fn importing_a_missing_items_file_relinks_it() {
+        let f = fixture();
+        let a = write(&f.root, "A.png", PNG);
+        let id = import_with(&f, vec![a], None, &[], None).assets[0].clone();
+        let moved = f.root.join("moved");
+        std::fs::create_dir_all(&moved).unwrap();
+        let renamed = write(&moved, "A renamed.png", PNG);
+        // Nothing plays from a file now: the item is missing.
+        let outcome = import_with(&f, vec![renamed.clone()], None, &[], None);
+        assert_eq!(outcome.relinked, ["A renamed.png"], "{outcome:?}");
+        assert!(outcome.imported.is_empty());
+        assert_eq!(outcome.summary(), "Relinked A renamed.png");
+        assert_eq!(assets_now(&f).as_object().unwrap().len(), 1);
+        assert_eq!(source_of(&f, &id), renamed.to_string_lossy());
+    }
+    /// Locating one missing file relinks the project's other missing files
+    /// in the same folder: by name, and by content under another name; a
+    /// file that is not one of them stays out (PM-494).
+    #[test]
+    fn locating_one_missing_file_relinks_the_others_in_its_folder() {
+        let f = fixture();
+        let b_bytes = [PNG, b"other"].concat();
+        let a = write(&f.root, "A.png", PNG);
+        let b = write(&f.root, "B.png", &b_bytes);
+        let ids = import_with(&f, vec![a, b], None, &[], None).assets;
+        let moved = f.root.join("moved");
+        std::fs::create_dir_all(&moved).unwrap();
+        let a2 = write(&moved, "A.png", PNG);
+        let b2 = write(&moved, "B renamed.png", &b_bytes);
+        write(&moved, "C.png", &[PNG, b"unrelated"].concat());
+        let outcome = import_with(&f, vec![a2.clone()], Some(&ids[0]), &[], None);
+        assert!(
+            outcome.notes.contains(&"Relinked 1 more from the same folder".to_owned()),
+            "{outcome:?}"
+        );
+        assert_eq!(source_of(&f, &ids[0]), a2.to_string_lossy());
+        assert_eq!(source_of(&f, &ids[1]), b2.to_string_lossy());
+        assert_eq!(assets_now(&f).as_object().unwrap().len(), 2);
     }
     fn write(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
         let path = root.join(name);
