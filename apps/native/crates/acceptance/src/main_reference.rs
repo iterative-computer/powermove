@@ -69,6 +69,22 @@ pub fn expected_catalog() -> Value {
             .expect("existing main tool");
         *base = overlay.clone();
     }
+    // Live viewer guidance extends the frozen source by an exact pinned delta.
+    let viewer = include_bytes!("../../mcp/fixtures/viewer-handles-native-catalog.json");
+    assert_eq!(
+        pm_model::hash::sha256_hex(viewer),
+        "166afbdea0e2053bca88ddcb8571a5ff966283facb2d8fbf8326cf813b39f470"
+    );
+    let viewer: Value = serde_json::from_slice(viewer).unwrap();
+    for overlay in viewer["tools"].as_array().unwrap() {
+        let base = catalog["tools"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|tool| tool["name"] == overlay["name"])
+            .expect("existing viewer-guidance tool");
+        *base = overlay.clone();
+    }
     // Composition tools take an optional `compositionId` (additive: never
     // required, so a call without it keeps main's meaning).
     let compositions: Value = serde_json::from_str(include_str!(
