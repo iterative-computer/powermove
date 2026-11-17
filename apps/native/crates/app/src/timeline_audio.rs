@@ -6,14 +6,18 @@ use std::time::{Duration, Instant};
 #[derive(Default)]
 pub(super) struct AudioState {
     drag: Option<Drag>,
-    pub(super) base: Option<Arc<Frame>>,
-    pub(super) ops: Vec<Op>,
+    base: Option<Arc<Frame>>,
+    ops: Vec<Op>,
     meters: [Meter; 2],
     sampled: Option<Instant>,
     stamp: Option<i64>,
     heard: Option<Instant>,
     painted: Option<Instant>,
     running: bool,
+}
+struct AudioFrame {
+    viewport: Viewport,
+    ops: Vec<Op>,
 }
 struct Drag {
     layer: String,
@@ -81,6 +85,7 @@ impl TimelineSurface {
     pub(super) fn audio_overlay(&self, cx: &Context<Self>) -> AnyElement {
         let weak = cx.entity().downgrade();
         let tokens = self.tokens.clone();
+        let region = self.graph_region();
         canvas(
             move |_, _, cx| {
                 weak.read_with(cx, |s, _| s.audio.ops.clone())
@@ -88,11 +93,17 @@ impl TimelineSurface {
             },
             move |bounds, ops, window, cx| {
                 let cull = Cull::new(bounds.size);
+                let above = region.map(|r| {
+                    Bounds::from_corners(
+                        bounds.origin,
+                        point(bounds.right(), bounds.origin.y + px(r.y as f32)),
+                    )
+                });
                 paint_ops(
                     &ops,
                     bounds.origin,
                     0.,
-                    None,
+                    above,
                     &cull,
                     None,
                     &tokens,
@@ -107,7 +118,45 @@ impl TimelineSurface {
         .size_full()
         .into_any_element()
     }
-    pub(super) fn audio_frame(&mut self, frame: &mut Frame, cx: &mut Context<Self>) {
+    pub(super) fn update_audio(&mut self, base: Arc<Frame>, cx: &mut Context<Self>) {
+        // Copy geometry only: never clone waveform JSON or key arrays for meter ticks.
+        let mut frame = AudioFrame {
+            viewport: base.viewport,
+            ops: base
+                .ops
+                .iter()
+                .filter(|o| o.id.starts_with("clip:") || o.shape == "waveform")
+                .map(|o| {
+                    let mut geometry = op(o.id.clone(), o.bounds, o.color);
+                    geometry.shape = o.shape;
+                    geometry.clip = o.clip;
+                    geometry
+                })
+                .collect(),
+        };
+        if self
+            .audio
+            .base
+            .as_ref()
+            .is_some_and(|previous| Arc::ptr_eq(previous, &base))
+        {
+            frame.ops.extend(
+                self.audio
+                    .ops
+                    .iter()
+                    .filter(|o| o.id.starts_with("audio-level:") || o.id.starts_with("audio-fade:"))
+                    .cloned(),
+            );
+        }
+        self.audio_frame(&mut frame, cx);
+        self.audio.ops = frame
+            .ops
+            .into_iter()
+            .filter(|o| o.id.starts_with("audio-"))
+            .collect();
+        self.audio.base = Some(base);
+    }
+    fn audio_frame(&mut self, frame: &mut AudioFrame, cx: &mut Context<Self>) {
         self.audio.painted = Some(Instant::now());
         if !self.audio.running {
             self.audio.running = true;
@@ -204,6 +253,18 @@ impl TimelineSurface {
                     };
                 let fade_in = value(&mut q, "c.fadeIn", layer.from, 0.).clamp(0., layer.duration);
                 let fade_out = value(&mut q, "c.fadeOut", layer.from, 0.).clamp(0., layer.duration);
+                let fade_in = self
+                    .audio
+                    .drag
+                    .as_ref()
+                    .filter(|d| d.layer == id && d.path == "c.fadeIn")
+                    .map_or(fade_in, |d| d.value);
+                let fade_out = self
+                    .audio
+                    .drag
+                    .as_ref()
+                    .filter(|d| d.layer == id && d.path == "c.fadeOut")
+                    .map_or(fade_out, |d| d.value);
                 let x0 = r.x.max(frame.viewport.layer_column);
                 let x1 = (r.x + r.width).min(frame.viewport.width);
                 for x in (x0.ceil() as i64)..(x1.ceil() as i64) {
@@ -220,21 +281,13 @@ impl TimelineSurface {
                     {
                         gain = d.value;
                     }
-                    let fi = self
-                        .audio
-                        .drag
-                        .as_ref()
-                        .filter(|d| d.layer == id && d.path == "c.fadeIn")
-                        .map_or(fade_in, |d| d.value);
-                    let fo = self
-                        .audio
-                        .drag
-                        .as_ref()
-                        .filter(|d| d.layer == id && d.path == "c.fadeOut")
-                        .map_or(fade_out, |d| d.value);
-                    let fade = if fi > 0. { (local / fi).min(1.) } else { 1. };
-                    let fade = fade.min(if fo > 0. {
-                        ((layer.duration - local) / fo).min(1.)
+                    let fade = if fade_in > 0. {
+                        (local / fade_in).min(1.)
+                    } else {
+                        1.
+                    };
+                    let fade = fade.min(if fade_out > 0. {
+                        ((layer.duration - local) / fade_out).min(1.)
                     } else {
                         1.
                     });
@@ -416,20 +469,13 @@ impl TimelineSurface {
         };
         d.moved |= (x - d.x).abs() + (y - d.y).abs() > 2.;
         d.value = if d.path.contains("fade") {
-            let layer = self
-                .model
-                .index
-                .layers
-                .iter()
-                .find(|l| l.id == d.layer)
-                .unwrap();
-            let local =
-                (x - self.view.layer_column) / self.view.pps + self.view.scroll_time - layer.from;
-            (if d.path == "c.fadeIn" {
-                local
-            } else {
-                d.duration - local
-            })
+            let seconds = (x - d.x) / self.view.pps;
+            (d.initial
+                + if d.path == "c.fadeIn" {
+                    seconds
+                } else {
+                    -seconds
+                })
             .clamp(0., d.duration)
         } else {
             dragged_gain(d.initial, y - d.y, event.modifiers.shift)
@@ -745,5 +791,68 @@ mod gesture_tests {
                 .as_f64(),
             Some(1.)
         );
+    }
+}
+
+#[cfg(test)]
+mod mix_tap_tests {
+    use super::*;
+    #[test]
+    fn output_mix_tap_reads_full_scale_and_half_scale_test_tone() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("tone.wav");
+        let mut writer = pm_audio::offline::WavWriter::new(
+            std::io::BufWriter::new(std::fs::File::create(&source).unwrap()),
+            pm_audio::offline::PcmFormat::F32,
+            2,
+            48000,
+        )
+        .unwrap();
+        let mut pcm = Vec::new();
+        for n in 0..48000 {
+            let sample = (std::f32::consts::TAU * (n % 48) as f32 / 48.).sin();
+            pcm.extend([sample, sample]);
+        }
+        writer.write(0, &pcm).unwrap();
+        writer.finish().unwrap();
+        for (gain, expected) in [(1., 0.), (0.5, -6.020599913)] {
+            let text = format!(
+                r##"{{"id":"P","compId":"C","w":640,"h":360,"fps":30,"dur":1,"audioGain":{gain},"assets":{{}},"comps":{{}},"layers":[{{"id":"a","type":"audio","from":0,"dur":1,"on":true,"d":{{"asset":"tone","gain":1}},"p":{{}},"fx":[]}}]}}"##
+            );
+            let doc = pm_model::Document::new(Some(pm_model::json::parse(&text).unwrap()), 1);
+            let cache = pm_audio::SourceCache::new(8 << 20, 0);
+            let resolver = |_: &str| Some(source.clone());
+            let mut evaluator = pm_eval::Evaluator::new();
+            let graph =
+                pm_audio::MixGraph::build(&doc, "C", &mut evaluator, &cache, &resolver).unwrap();
+            let mut mixer = pm_audio::Mixer::new(
+                pm_audio::MixFormat::stereo(48000),
+                Arc::new(doc),
+                Arc::new(graph),
+                evaluator,
+                cache.clone(),
+            );
+            let mut out = vec![Vec::new(), Vec::new()];
+            mixer
+                .render(
+                    4800,
+                    4800,
+                    &mut out,
+                    &pm_audio::RenderOptions {
+                        wait: true,
+                        meters: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let levels = mixer.meters(9600).to_levels(48000);
+            for peak in levels.master.peak {
+                let mut meter = Meter::default();
+                meter.step(peak as f64, 0., 0.033).unwrap();
+                assert!((meter.peak_db - expected).abs() < 0.001);
+            }
+            drop(mixer);
+            cache.shutdown();
+        }
     }
 }

@@ -1317,14 +1317,7 @@ impl TimelineSurface {
             let delegate = self.delegate.clone();
             cx.defer(move |cx| delegate.view_moved(cx));
         }
-        let base = self.frame.clone()?;
-        let mut decorated = (*base).clone();
-        if self.audio.base.as_ref().is_some_and(|previous| Arc::ptr_eq(previous, &base)) {
-            decorated.ops.extend(self.audio.ops.iter().filter(|o| o.id.starts_with("audio-level:") || o.id.starts_with("audio-fade:")).cloned());
-        }
-        self.audio_frame(&mut decorated, cx);
-        self.audio.ops = decorated.ops.into_iter().filter(|o| o.id.starts_with("audio-")).collect();
-        self.audio.base = Some(base);
+        self.update_audio(self.frame.clone()?, cx);
         self.frame.clone()
     }
     /// v1–3's `timeline` service: `pps`, `scrollT`, `scrollY`, `graph`,
