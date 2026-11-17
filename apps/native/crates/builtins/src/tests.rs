@@ -2589,6 +2589,7 @@ mod effect_delta;
 mod effect_registry;
 mod expressions;
 mod text_animators;
+mod trim_paths;
 
 mod precomp_delta;
 

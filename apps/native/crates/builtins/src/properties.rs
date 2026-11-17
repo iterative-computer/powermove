@@ -189,6 +189,7 @@ impl Properties {
             let mut content = vec![];
             let mut layer_rows = vec![];
             let mut time_rows = vec![];
+            let mut trim_rows = vec![];
             // The model decides applicability; this adapter only maps authored
             // labels and supported control descriptors to frozen v4 rows.
             let fields = model.fields().map_err(|e| e.to_string())?;
@@ -208,8 +209,20 @@ impl Properties {
                         .cloned(),
                     _ => None,
                 };
-                let row_id = contributed.as_ref().map(|p| format!("content.x.{}", p.key));
+                // A pen path's Trim Paths channel (`g.<path>.trimStart`).
+                let trim = match &field.binding {
+                    Binding::Property(id) => trim_row(&id.path),
+                    _ => None,
+                };
+                let row_id = contributed
+                    .as_ref()
+                    .map(|p| format!("content.x.{}", p.key))
+                    .or_else(|| trim.as_ref().map(|(id, _, _)| id.clone()));
                 let (id, label, unit) = match &field.binding {
+                    Binding::Property(_) if trim.is_some() => {
+                        let (_, label, unit) = trim.as_ref().expect("trim");
+                        (row_id.as_deref().unwrap_or_default(), *label, *unit)
+                    }
                     // A contributed layer type's parameter, labelled by its definition.
                     Binding::Property(_) if contributed.is_some() => (
                         row_id.as_deref().unwrap_or_default(),
@@ -373,8 +386,18 @@ impl Properties {
                                 }
                                 json!(options)
                             }
+                            // After Effects' Track Matte modes, the kernel's values.
+                            "layer.matteMode" => json!(
+                                [
+                                    ("alpha", "Alpha Matte"),
+                                    ("alpha-inverted", "Alpha Inverted Matte"),
+                                    ("luma", "Luma Matte"),
+                                    ("luma-inverted", "Luma Inverted Matte"),
+                                ]
+                                .map(|(v, label)| json!({"v": v, "label": label}))
+                            ),
                             // The registry/spec owns choice labels and order.
-                            // DESIGN-TODO(opus): supply blend/matte menu descriptors.
+                            // DESIGN-TODO(opus): supply blend menu descriptors.
                             _ => continue,
                         };
                         let mut choice = json!({"kind":"choice","binding":lease,"value":value,"options":options,"mixed":state.mixed});
@@ -414,6 +437,8 @@ impl Properties {
                 }
                 if id.starts_with("layer.") {
                     layer_rows.push(row);
+                } else if id.starts_with("trim.") {
+                    trim_rows.push(row);
                 } else if matches!(id, "content.timeRemap" | "content.sourceTime") {
                     time_rows.push(row);
                 } else if studio.is_none() {
@@ -423,6 +448,9 @@ impl Properties {
             }
             if !content.is_empty() {
                 sections.push(json!({"id":"content","title":"Content","collapsed":self.collapsed.get("content").copied().unwrap_or(false),"rows":content}));
+            }
+            if !trim_rows.is_empty() {
+                sections.push(json!({"id":"trim","title":"Trim Paths","collapsed":self.collapsed.get("trim").copied().unwrap_or(false),"rows":trim_rows}));
             }
             // Time (`RetimingSection.svelte`): the three buttons, then the
             // remapping rows once a layer has a source time channel.
@@ -2888,4 +2916,16 @@ fn finish_swatch(p: &Value) -> Value {
         "glintSize": "12%",
         "glint": (coat > 0.5 || (glass > 0.5 && rough < 0.1)).then_some("#FFFFFF"),
     })
+}
+/// A pen path's Trim Paths channel: its row id, label and unit.
+fn trim_row(path: &str) -> Option<(String, &'static str, &'static str)> {
+    let rest = path.strip_prefix("g.")?;
+    let (pid, param) = rest.split_once('.')?;
+    let (label, unit) = match param {
+        "trimStart" => ("Start", "%"),
+        "trimEnd" => ("End", "%"),
+        "trimOffset" => ("Offset", "°"),
+        _ => return None,
+    };
+    Some((format!("trim.{pid}.{param}"), label, unit))
 }

@@ -261,7 +261,7 @@ test("selection identity, axes, order, unit actions and checkbox AX semantics", 
     await p.drive("link:scale", "click");
     await f.session.settled();
     expect(f.model.intents).toEqual([
-      { type: "key", row: "position", removeAnimation: true },
+      { type: "row-action", row: "position", action: "edit-expression" },
       { type: "key", row: "scale", removeAnimation: false },
       { type: "row-action", row: "scale", action: "link" },
     ]);
