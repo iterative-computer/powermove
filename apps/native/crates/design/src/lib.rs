@@ -309,6 +309,10 @@ pub struct Metrics {
     /// a row's value column (it takes what the label column leaves).
     pub field: f32,
     pub value_column: f32,
+    /// The least width of one of Properties' alignment wells: three cells
+    /// at the pointer's least target (`3 × hit`). A dock narrower than the
+    /// strip wraps a well onto a second line instead of overlapping it.
+    pub align_well: f32,
     /// The most a row's value column takes when its panel asks for a cap
     /// (Effect Controls): on a wide panel the label and its control stay
     /// together instead of the control stretching to the far edge.
@@ -864,6 +868,7 @@ impl Tokens {
                 segment_radius: radius.nested(radius.md, space.hair),
                 field: 22.,
                 value_column: 128.,
+                align_well: 72.,
                 value_column_most: 240.,
                 label_column: 120.,
                 keyframe: 9.,
