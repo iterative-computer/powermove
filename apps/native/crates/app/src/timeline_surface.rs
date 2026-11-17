@@ -4245,7 +4245,7 @@ impl Render for TimelineSurface {
         let tools = div().absolute().left(px(t.metrics.inset)).top(px(0.)).h(px(t.metrics.ruler))
             .flex().items_center().children([
                 (EditTool::Selection, "cursorarrow", "Selection (V)"),
-                (EditTool::Roll, "arrow.left.and.right.righttriangle.left.righttriangle.right", "Roll (R)"),
+                (EditTool::Roll, "arrow.left.and.right.righttriangle.left.righttriangle.right", "Roll — or ⌥-drag a cut"),
                 (EditTool::Split, "scissors", "Split (C) — click a clip to cut it. ⇧-click cuts every layer."),
             ].into_iter().map(|(tool, symbol, label)| {
                 let image = pm_shell::symbol::rasterize(symbol, t.metrics.symbol_panel, pm_shell::symbol::Weight::Regular, t.colors.text, window.scale_factor());
@@ -4851,7 +4851,11 @@ impl Render for TimelineSurface {
                                         for op in surface.frame.iter().flat_map(|f| &f.ops).filter(|o| o.id.starts_with("clip:")) {
                                             let layer = &op.id[5..];
                                             if (window.modifiers().shift || layer == id) && surface.model.index.layer(layer).is_some_and(|l| at > l.from && at < l.from + l.duration) {
-                                                window.paint_quad(PaintQuad::new(Bounds::new(bounds.origin + point(px(cut_x as f32), px(op.bounds.y as f32)), size(px(1.), px(op.bounds.height as f32)))).background(rgb(tokens.colors.accent)));
+                                                let top = op.bounds.y.max(tokens.metrics.ruler as f64);
+                                                let bottom = (op.bounds.y + op.bounds.height).min(f32::from(surface.bounds.size.height) as f64);
+                                                if bottom > top && cut_x >= surface.view.layer_column && cut_x < f32::from(surface.bounds.size.width) as f64 {
+                                                    window.paint_quad(PaintQuad::new(Bounds::new(bounds.origin + point(px(cut_x as f32), px(top as f32)), size(px(1.), px((bottom - top) as f32)))).background(rgb(tokens.colors.accent)));
+                                                }
                                             }
                                         }
                                         let label = crate::captions_panel::timecode(at, surface.model.index.fps);

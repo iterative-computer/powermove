@@ -132,7 +132,7 @@ pub fn tools() -> Vec<Item> {
 /// The native timeline's persistent edit tools.
 pub fn timeline_tools() -> Vec<Item> {
     vec![Item::command("Selection", "timeline.tool:selection", "V"),
-         Item::command("Roll", "timeline.tool:roll", "R"),
+         Item::command("Roll — or ⌥-drag a cut", "timeline.tool:roll", ""),
          Item::command("Split (C)", "timeline.tool:split", "C")]
 }
 /// Items of View ▸ 3D (3d-studio.md §2): the viewer's 3D group as menu items,
