@@ -105,6 +105,7 @@ export type Command =
   | { NewCompFromAsset: string }
   | { Replace: string }
   | { Reveal: string }
+  | { InterpretFootage: string }
   | { Download: string }
   | { ImportFolder: string | null }
   | { NewFolder: string | null }
