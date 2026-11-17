@@ -1,3 +1,4 @@
+import { panelFailure } from "./panels";
 import { createExtensionAPI } from "./frozen/host/host";
 import { HostError } from "./channel";
 import { makePMFacades, mergeDescriptors } from "./facades";
@@ -264,7 +265,22 @@ export function extensionAPI(
           ? (body: any, instance: any) => {
               if (nativeStyle !== "full")
                 body.parentNode?.setAttribute("data-pm-style", nativeStyle);
-              return definition.build(body, instance);
+              try {
+                return definition.build(body, instance);
+              } catch (error) {
+                panelFailure(
+                  body,
+                  settings.manifest?.name ?? definition.title ?? id,
+                  error,
+                  () => {
+                    if (backends.extensions?.reload)
+                      return backends.extensions.reload(id);
+                    return backends.panelsBackend?.refresh?.(definition.id);
+                  },
+                );
+                // The frozen guard attributes and logs the original failure.
+                throw error;
+              }
             }
           : definition.build,
       component: definition.component,
