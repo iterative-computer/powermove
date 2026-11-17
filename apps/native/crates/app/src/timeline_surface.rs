@@ -3652,7 +3652,7 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             pending
                 .await
                 .ok_or("Kernel closed")?
-                .map_err(|e| format!("{e:?}"))?;
+                .map_err(|e| e.to_string())?;
             Ok(vec![])
         }
     }

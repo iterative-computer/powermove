@@ -7772,8 +7772,99 @@ fn animate_as(
     }
     duration
 }
+thread_local! {
+    /// Where the Quit item and Cmd-Q go once the app's quit coordinator is
+    /// up ([`set_quit_hook`]); before it, `terminate:` as AppKit does.
+    static QUIT_HOOK: std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+/// From now on the Quit item and Cmd-Q call `hook` (the quit coordinator).
+pub fn set_quit_hook(hook: impl Fn() + 'static) {
+    QUIT_HOOK.with(|h| *h.borrow_mut() = Some(std::rc::Rc::new(hook)));
+}
+/// The Quit item's action (`menu::QUIT_ACTION`), answered by the
+/// application object itself: from the first menu on (Welcome, onboarding,
+/// a library that failed to open) and beside any sheet, where AppKit drops
+/// `terminate:` (PM-464). Until the quit coordinator sets its hook, it
+/// terminates as AppKit's own Quit does.
+fn install_quit_action(app: &NSApplication) {
+    use objc2::runtime::{AnyClass, AnyObject, Sel};
+    extern "C-unwind" fn quit(_: *mut AnyObject, _: Sel, _sender: *mut AnyObject) {
+        match QUIT_HOOK.with(|h| h.borrow().clone()) {
+            Some(hook) => hook(),
+            None => {
+                let mtm = MainThreadMarker::new().unwrap();
+                NSApplication::sharedApplication(mtm).terminate(None);
+            }
+        }
+    }
+    let selector = Sel::register(std::ffi::CString::new(menu::QUIT_ACTION).unwrap().as_c_str());
+    let class: &AnyClass = AnyObject::class(app);
+    if class.instance_method(selector).is_some() {
+        return;
+    }
+    // SAFETY: adds one `v@:@` method to the application's class, once.
+    unsafe {
+        objc2::ffi::class_addMethod(
+            class as *const AnyClass as *mut AnyClass,
+            selector,
+            std::mem::transmute::<
+                extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject),
+                objc2::runtime::Imp,
+            >(quit),
+            c"v@:@".as_ptr(),
+        );
+    }
+}
+/// The first window anywhere in the app that a sheet covers (an editor, a
+/// popover, Settings, the Store, a pop-out viewer), with the deepest sheet of
+/// its chain (a sheet's own sheet): what holds a quit. Sheets themselves are
+/// not looked at as windows of their own.
+pub fn quit_blocker_window() -> Option<(Retained<NSWindow>, Retained<NSWindow>)> {
+    let mtm = MainThreadMarker::new()?;
+    let app = NSApplication::sharedApplication(mtm);
+    let windows = app.windows();
+    // The key window's sheet first: it is the one the person sees.
+    let key = app.keyWindow();
+    let ordered = key.into_iter().chain(windows.iter());
+    for window in ordered {
+        if window.isSheet() {
+            continue;
+        }
+        let Some(mut sheet) = window.attachedSheet() else {
+            continue;
+        };
+        while let Some(next) = sheet.attachedSheet() {
+            sheet = next;
+        }
+        return Some((window, sheet));
+    }
+    None
+}
+/// Brings `window` forward to be answered: the app unhidden and active, the
+/// window's tab chosen, a popover's parent raised first, the window key; a
+/// beep says the request (a quit) stopped there.
+pub fn bring_forward(window: &NSWindow) {
+    let mtm = MainThreadMarker::new().unwrap();
+    let app = NSApplication::sharedApplication(mtm);
+    app.unhide(None);
+    app.activate();
+    let mut top = objc2::Message::retain(window);
+    while let Some(parent) = top.parentWindow() {
+        top = parent;
+    }
+    if let Some(group) = top.tabGroup() {
+        group.setSelectedWindow(Some(&top));
+    }
+    top.makeKeyAndOrderFront(None);
+    if !std::ptr::eq(&*top, window) {
+        window.makeKeyAndOrderFront(None);
+    }
+    NSBeep();
+}
 pub fn install_menus() {
     let mtm = MainThreadMarker::new().unwrap();
+    install_quit_action(&NSApplication::sharedApplication(mtm));
     // Built again when the keymap changes: the old menus' delegates go.
     MENU_DELEGATES.with(|v| v.borrow_mut().clear());
     let app = NSApplication::sharedApplication(mtm);

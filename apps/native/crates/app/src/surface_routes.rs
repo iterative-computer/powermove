@@ -891,7 +891,7 @@ fn apply_composition(
     edit.submit(kernel, 0)
         .wait()
         .ok_or(DialogError::Stale)?
-        .map_err(|e| DialogError::Kernel(format!("{e:?}")))?;
+        .map_err(|e| DialogError::Kernel(e.to_string()))?;
     Ok(new_id.map(|id| (id, document)))
 }
 

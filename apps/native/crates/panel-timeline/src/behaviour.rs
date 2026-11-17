@@ -793,7 +793,7 @@ impl TimelineModel {
                 .map_err(|e| ModelError::KernelPlan(e.to_string()))?;
             scratch
                 .apply_ops(&next)
-                .map_err(|e| ModelError::KernelPlan(format!("{e:?}")))?;
+                .map_err(|e| ModelError::KernelPlan(e.to_string()))?;
             ops.extend(next);
         }
         let mut remaining: Vec<_> = self
@@ -880,7 +880,7 @@ impl TimelineModel {
                     .map_err(|e| ModelError::KernelPlan(e.to_string()))?;
                 scratch
                     .apply_ops(&next)
-                    .map_err(|e| ModelError::KernelPlan(format!("{e:?}")))?;
+                    .map_err(|e| ModelError::KernelPlan(e.to_string()))?;
                 ops.extend(next);
             }
             if l.track != before.preferred_track {
