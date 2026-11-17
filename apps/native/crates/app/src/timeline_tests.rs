@@ -3590,18 +3590,53 @@ fn g3_speed_keeps_automatically_packed_track_and_ripples_only_its_suffix(cx: &mu
         .root()
         .unwrap()
         .to_value();
-    let begin = s
-        .rig
+    s.rig
         .kernel
         .call(
             PROJECT,
             Request::new(
                 Caller::native(),
-                Call::Gesture(pm_kernel::GestureCall::Begin {
-                    label: "Change Speed".into(),
-                }),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["a".into()],
+                    add: false,
+                },
             ),
         )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut inspector = pm_builtins::Builtins::new(s.rig.kernel.clone(), PROJECT, || {}).unwrap();
+    // G3_VIEW_SNAPSHOT_BEGIN
+    inspector.update_timeline_view(s.surface.read_with(&s.vcx, |t, _| t.model()));
+    // G3_VIEW_SNAPSHOT_END
+    let mounted = inspector.mount("inspector").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(result) = mounted.try_take() {
+            result.unwrap();
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Properties mount timed out"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let binding = inspector
+        .take_publications()
+        .into_iter()
+        .rev()
+        .find_map(|p| {
+            p.surface.nodes().values().find_map(|n| {
+                (n.props.get("id").and_then(serde_json::Value::as_str)
+                    == Some("value:content.speed:0"))
+                .then(|| n.props["binding"].as_str().unwrap().to_owned())
+            })
+        })
+        .expect("native Speed field");
+    let begin = inspector
+        .scrub_begin("inspector", Some("Speed"))
+        .unwrap()
         .wait()
         .unwrap()
         .unwrap();
@@ -3611,21 +3646,12 @@ fn g3_speed_keeps_automatically_packed_track_and_ripples_only_its_suffix(cx: &mu
     // A Properties slider replays from the gesture's start. Repeating a value
     // must pin the shown lanes again, even when the current speed already matches.
     for _ in 0..2 {
-        let request = Request::new(
-            Caller::native(),
-            Call::Gesture(pm_kernel::GestureCall::Step {
-                gesture,
-                replace: true,
-                body: pm_kernel::WriteBody::Commands(vec![
-                    pm_kernel::PropertyCommand::Set(
-                        pm_kernel::commands::properties::SetProperty::new("a", "c.speed", 2., 0.),
-                    )
-                    .into(),
-                ]),
-            }),
-        );
-        let request = s.rig.runtime.prepare_timeline_request(request).unwrap();
-        s.rig.kernel.call(PROJECT, request).wait().unwrap().unwrap();
+        inspector
+            .scrub_step("inspector", &binding, gesture, serde_json::json!(2.))
+            .unwrap()
+            .wait()
+            .unwrap()
+            .unwrap();
         s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
         s.idle(cx);
         assert_eq!(lane(&s), 1);
@@ -3638,15 +3664,9 @@ fn g3_speed_keeps_automatically_packed_track_and_ripples_only_its_suffix(cx: &mu
             "another displayed track stays in place"
         );
     }
-    s.rig
-        .kernel
-        .call(
-            PROJECT,
-            Request::new(
-                Caller::native(),
-                Call::Gesture(pm_kernel::GestureCall::Commit { gesture }),
-            ),
-        )
+    inspector
+        .scrub_finish("inspector", gesture, true)
+        .unwrap()
         .wait()
         .unwrap()
         .unwrap();

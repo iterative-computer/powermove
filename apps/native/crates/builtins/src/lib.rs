@@ -1596,7 +1596,7 @@ impl Builtins {
     pub fn update_timeline_view(&self, view: Arc<pm_panel_timeline::TimelineModel>) {
         *self.broker.timeline_view.shared() = Some(view);
     }
-    pub fn prepare_timeline_request(
+    fn prepare_timeline_request(
         &self,
         mut request: pm_kernel::Request,
     ) -> std::result::Result<pm_kernel::Request, String> {
@@ -1605,11 +1605,8 @@ impl Builtins {
             .kernel
             .published(&self.broker.project)
             .ok_or("No open project")?;
-        models::pin_speed_request(
-            self.broker.timeline_view.shared().clone(),
-            &published,
-            &mut request,
-        )?;
+        let view = self.broker.timeline_view.shared().clone();
+        models::pin_speed_request(view, &published, &mut request)?;
         Ok(request)
     }
     pub fn update_facts(&self, facts: Value) {
@@ -1973,17 +1970,17 @@ impl Builtins {
         let pm_kernel::Call::Transact { body, .. } = request.call else {
             return Err(Error::Invalid("binding is not a scrubbable edit"));
         };
-        Ok(self.broker.kernel.call(
-            &self.broker.project,
-            pm_kernel::Request::new(
+        let request = self
+            .prepare_timeline_request(pm_kernel::Request::new(
                 caller,
                 pm_kernel::GestureCall::Step {
                     gesture,
                     body,
                     replace: true,
                 },
-            ),
-        ))
+            ))
+            .map_err(Error::Host)?;
+        Ok(self.broker.kernel.call(&self.broker.project, request))
     }
     pub fn scrub_finish(
         &self,
