@@ -1989,6 +1989,10 @@ impl Controller {
                     Ok(Value::Null)
                 }
                 "export.begin" | "export.retry" | "export.without" => {
+                    // The 3D estimate measures the GPU the export now uses.
+                    if let Some(viewer) = &self.viewer {
+                        viewer.cancel_export_estimate("an export started");
+                    }
                     self.begin_builtin_export(
                         request.input.clone(),
                         request.operation != "export.begin",

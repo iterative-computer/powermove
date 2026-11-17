@@ -1526,7 +1526,13 @@ impl Backend {
             let changed = self.native.export_estimate_key.as_deref() != Some(key.as_str());
             self.native.export_estimate_seen =
                 (status, if changed { 0 } else { asked + superseded as u8 });
-            if changed || superseded {
+            // An export running (or starting) uses the GPU the estimate would
+            // measure; the sheet shows its progress instead: nothing is asked.
+            let exporting = matches!(
+                self.native.export["run"]["phase"].as_str(),
+                Some("choosingDestination" | "preparing" | "rendering" | "checking" | "cancelling")
+            );
+            if (changed || superseded) && !exporting {
                 self.native.export_estimate_key = Some(key);
                 self.native.platform.push((
                     "export.estimate".into(),
@@ -1536,7 +1542,8 @@ impl Backend {
             let preset = policy["preset"].as_str().unwrap_or("production");
             // Asked just now: say so until the viewer's state catches up,
             // rather than flash the static guess before the measured range.
-            let asked = (changed || superseded).then(|| format!("3D {label}, measuring…"));
+            let asked =
+                ((changed || superseded) && !exporting).then(|| format!("3D {label}, measuring…"));
             let from_viewer = asked.is_some()
                 || crate::delivery::measured_estimate_scaled(
                     &self.native.facts["studioExportEstimate"],

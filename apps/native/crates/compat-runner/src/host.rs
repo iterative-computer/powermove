@@ -5535,6 +5535,45 @@ mod tests {
         assert_eq!(answer_of(&answered, 2, Duration::from_secs(40)), json!(1));
         cancel.store(true, Ordering::Release);
     }
+    /// An export whose job keeps ending (its child dies, the person tries
+    /// again) gives its realm's room back to the shared isolate account each
+    /// time: with room for one export realm only, every next export is still
+    /// admitted and answers, so tries never starve the account or the other
+    /// windows' panels.
+    #[test]
+    fn an_ended_export_gives_its_isolate_room_back_for_the_next_try() {
+        let source = "export default function activate(api: any){
+            api.services.register('raster',()=>{
+              const c=document.createElement('canvas'); c.width=2; c.height=1;
+              return {cv:c,w:2,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("tries", source)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        let live = fixture.kernel.published("window").unwrap().revision();
+        inbox.ask(1, needs(&fixture), json!({"revision": live}));
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(20)), json!(2));
+        let cage = pm_runtime_v8::Admission::cage();
+        // Room for one export realm (its slice and some growth), no more.
+        let room = crate::EXPORT_SLICE + 96 * 1024 * 1024;
+        let held = cage
+            .hold(cage.budget().saturating_sub(cage.used() + room))
+            .unwrap();
+        for attempt in 0..3u64 {
+            let job = format!("try-{attempt}");
+            let cancel = Arc::new(AtomicBool::new(false));
+            let frozen = fixture.kernel.published("window").unwrap();
+            inbox.export(&job, frozen, cancel.clone()).unwrap();
+            let ask = 10 + attempt;
+            inbox.ask(ask, needs(&fixture), json!({"job": job}));
+            assert_eq!(
+                answer_of(&answered, ask, Duration::from_secs(60)),
+                json!(2),
+                "try {attempt} was admitted"
+            );
+            // The job ended (as when its child dies): its pin lets go.
+            cancel.store(true, Ordering::Release);
+        }
+        drop(held);
+    }
     #[test]
     fn the_projects_text_faces_and_pm_fonts_reach_the_window() {
         let root = tempfile::tempdir().unwrap();

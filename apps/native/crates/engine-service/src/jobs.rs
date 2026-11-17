@@ -245,13 +245,21 @@ impl Activity {
         self.quiet.1.notify_all();
     }
     /// Waits while the viewer is busy, unless `cancel` is set (whoever sets
-    /// it wakes the wait). Whether it waited.
-    fn wait_quiet(&self, cancel: &AtomicBool) -> bool {
+    /// it wakes the wait), and for at most `most`: an export the person
+    /// started is never held off by a viewer that stays busy (a picture or
+    /// a 3D estimate that never finishes); past it the export goes ahead in
+    /// bands. Whether it waited.
+    fn wait_quiet(&self, cancel: &AtomicBool, most: std::time::Duration) -> bool {
+        let until = std::time::Instant::now() + most;
         let mut quiet = self.quiet.0.lock().unwrap();
         let mut waited = false;
         while self.busy() && !cancel.load(Ordering::Acquire) {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return true;
+            }
             waited = true;
-            quiet = self.quiet.1.wait(quiet).unwrap();
+            quiet = self.quiet.1.wait_timeout(quiet, left).unwrap().0;
         }
         waited
     }
@@ -928,7 +936,7 @@ impl ExportHandle {
                                 }
                             }
                             continue;
-                        } else if interactive.wait_quiet(&cancel) {
+                        } else if interactive.wait_quiet(&cancel, QUIET) {
                             active_at = Some(std::time::Instant::now());
                         }
                         if !cancel.load(Ordering::Acquire) {
@@ -2980,7 +2988,9 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let waiting = |activity: &Activity, cancel: &Arc<AtomicBool>| {
             let (activity, cancel) = (activity.clone(), cancel.clone());
-            std::thread::spawn(move || activity.wait_quiet(&cancel))
+            std::thread::spawn(move || {
+                activity.wait_quiet(&cancel, std::time::Duration::from_secs(60))
+            })
         };
         let quiet = waiting(&activity, &cancel);
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -2993,6 +3003,27 @@ mod tests {
         activity.wake();
         assert!(cancelled.join().unwrap());
         assert!(activity.busy());
+    }
+    /// A viewer that never goes quiet (a 3D estimate stuck waiting for its
+    /// renderer, a picture that never lands) holds an export back for at most
+    /// the quiet period per grant: the export goes ahead, in bands.
+    #[test]
+    fn a_viewer_that_stays_busy_never_holds_an_export_back() {
+        let activity = Activity::default();
+        activity.set(true);
+        let cancel = AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        for _ in 0..3 {
+            assert!(activity.wait_quiet(&cancel, std::time::Duration::from_millis(50)));
+        }
+        assert!(activity.busy(), "the viewer stayed busy");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "three grants in {:?}",
+            started.elapsed()
+        );
+        // Granted right after viewer activity: bands, not whole frames.
+        assert!(!grants_whole_frames(Some(std::time::Instant::now())));
     }
     /// An offline refusal names the first three clips and counts the rest.
     #[test]
