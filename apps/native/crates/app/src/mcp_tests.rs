@@ -1163,3 +1163,39 @@ fn run_command_and_list_commands_reach_the_projects_window() {
     assert_eq!(calls[1].1.as_deref(), Some("test"), "the session's project");
     assert_eq!(calls[1].2["args"], json!([-1]));
 }
+/// Acceptance runs 24 and 27 (PM-454): a new project made from a tab while
+/// another tab's open held the fence (waiting on its recovery question) was
+/// dropped and its tab stayed Home. The adopting window now waits for the
+/// fence and takes it the moment the other open lets go.
+#[gpui::test]
+async fn a_new_tabs_project_waits_for_the_fence_instead_of_being_dropped(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    let actor = KernelActor::spawn(KernelConfig {
+        journal_root: Some(profile.join("journals")),
+        ..Default::default()
+    });
+    attach(&actor.handle(), &profile).unwrap();
+    let host = Host::new(actor.handle(), profile);
+    let recovering = host.try_operation().expect("the other tab's open holds it");
+    let executor = cx.executor();
+    let waiting = {
+        let host = host.clone();
+        let executor = executor.clone();
+        cx.background_executor
+            .spawn(async move { take_fence(&host, &executor).await })
+    };
+    executor.advance_clock(std::time::Duration::from_millis(500));
+    cx.run_until_parked();
+    assert!(host.operation_in_progress());
+    drop(recovering);
+    assert!(!host.operation_in_progress(), "released for a moment");
+    executor.advance_clock(std::time::Duration::from_millis(100));
+    let taken = waiting.await;
+    assert!(host.operation_in_progress(), "now the new tab's open holds it");
+    drop(taken);
+    assert!(!host.operation_in_progress());
+}
