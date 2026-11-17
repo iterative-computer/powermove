@@ -542,3 +542,80 @@ fn two_clips_rippled_out_together_stay_in_order() {
     );
     assert_eq!(field(&s, "b", "from"), Some(5.0));
 }
+
+/// Speed/Duration: at 2× a clip runs half as long from the same source In;
+/// with ripple the next clip on its track moves up to it (no gap), and a
+/// clip on another track stays. Undo restores all.
+#[test]
+fn a_speed_change_scales_the_clip_and_ripples_its_track() {
+    let mut s = store();
+    run(
+        &mut s,
+        TimingCommand::SetSpeed {
+            layer_id: "b".into(),
+            speed: 2.0,
+            ripple: true,
+        },
+    );
+    let b = layer(&s, "b");
+    assert_eq!(b.get("dur").and_then(Value::as_f64), Some(1.5));
+    assert_eq!(
+        b.get("d")
+            .and_then(|d| d.get("speed"))
+            .and_then(Value::as_f64),
+        Some(2.0)
+    );
+    assert_eq!(
+        field(&s, "c", "from"),
+        Some(3.5),
+        "C follows B on its track"
+    );
+    assert_eq!(field(&s, "title", "from"), Some(0.0));
+    s.undo().unwrap();
+    assert_eq!(field(&s, "c", "from"), Some(5.0));
+    assert_eq!(field(&s, "b", "dur"), Some(3.0));
+    // Without ripple, the gap stays (v1's Speed field).
+    run(
+        &mut s,
+        TimingCommand::SetSpeed {
+            layer_id: "b".into(),
+            speed: 2.0,
+            ripple: false,
+        },
+    );
+    assert_eq!(field(&s, "c", "from"), Some(5.0));
+    assert!(
+        refused(
+            &mut s,
+            TimingCommand::SetSpeed {
+                layer_id: "title".into(),
+                speed: 2.0,
+                ripple: false,
+            },
+        )
+        .contains("video or audio")
+    );
+}
+
+/// A trim never runs a clip past its media's end at its speed: B starts 5 s
+/// into a 20 s source; at 2× it can run 7.5 s.
+#[test]
+fn a_trim_stops_at_the_end_of_the_media_at_the_clips_speed() {
+    let mut s = store();
+    run(
+        &mut s,
+        TimingCommand::SetSpeed {
+            layer_id: "b".into(),
+            speed: 2.0,
+            ripple: false,
+        },
+    );
+    run(
+        &mut s,
+        TimingCommand::TrimOut {
+            layer_ids: vec!["b".into()],
+            time: 12.0,
+        },
+    );
+    assert_eq!(field(&s, "b", "dur"), Some(7.5));
+}
