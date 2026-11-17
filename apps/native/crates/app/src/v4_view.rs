@@ -158,7 +158,7 @@ mod cull;
 
 /// A number field's value after an arrow key: the typed text (else the
 /// field's value) one step up or down, ten with Shift, within its limits.
-fn arrow_step(typed: &str, facts: crate::v4_compile::NumberFacts, key: &str) -> f64 {
+pub(crate) fn arrow_step(typed: &str, facts: crate::v4_compile::NumberFacts, key: &str) -> f64 {
     let current = typed
         .trim()
         .parse::<f64>()

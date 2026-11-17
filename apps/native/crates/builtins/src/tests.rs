@@ -4709,6 +4709,8 @@ fn media_and_playback_rows_show_without_a_project_and_follow_their_fact() {
         json!({"mediaSettings":{"rows":[
             {"id":"media.renderLimit","label":"Render Files Limit","detail":"","value":limit,
              "options":[{"v":10,"label":"10 GB"},{"v":25,"label":"25 GB"}]},
+            {"id":"media.importToTimeline","label":"Add Imported Media to the Timeline","detail":"",
+             "value":true,"options":[{"v":true,"label":"On"},{"v":false,"label":"Off"}]},
             {"id":"media.backgroundRender","label":"Background Rendering","detail":"","value":true,
              "options":[{"v":true,"label":"On"},{"v":false,"label":"Off"}],
              "section":"general","group":"Playback","control":"switch"}],
@@ -4720,6 +4722,10 @@ fn media_and_playback_rows_show_without_a_project_and_follow_their_fact() {
     let rows = publication["rows"].as_array().unwrap();
     let row = |id: &str| rows.iter().find(|r| r["id"] == id).cloned().unwrap();
     assert_eq!(row("media.renderLimit")["section"], "media");
+    let import = row("media.importToTimeline");
+    assert_eq!(import["control"], "switch");
+    assert_eq!(import["value"], true);
+    assert!(import["binding"].as_str().is_some_and(|binding| !binding.is_empty()));
     let playback = row("media.backgroundRender");
     assert_eq!(
         (

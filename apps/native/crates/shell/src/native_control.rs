@@ -564,7 +564,6 @@ fn make_control(
             }
             if form {
                 v.setBezelStyle(NSBezelStyle::Push);
-                v.setShowsBorderOnlyWhileMouseInside(true);
             }
             if inline || well {
                 v.setBordered(false);
