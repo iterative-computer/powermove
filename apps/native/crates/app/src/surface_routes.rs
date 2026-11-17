@@ -670,8 +670,10 @@ impl Controller {
                 .ok()
             }),
         });
+        let tokens = self.host.borrow().tokens.clone();
         library.update(cx, |v, cx| {
             v.active = active;
+            v.set_tokens(tokens, cx);
             if let Some(thumbnails) = thumbnails {
                 v.show_posters(thumbnails);
             }

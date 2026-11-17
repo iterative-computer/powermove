@@ -313,6 +313,21 @@ impl StoreWindow {
         window.load_library();
         window
     }
+    /// The window's tokens now (Settings › Appearance switched while the
+    /// Store was open): its page, sidebar and search field follow.
+    pub(crate) fn set_tokens(&mut self, tokens: Tokens, cx: &mut Context<Self>) {
+        if self.tokens == tokens {
+            return;
+        }
+        if let Some(search) = &self.search {
+            search.update(cx, |field, cx| {
+                field.set_tokens(tokens.clone());
+                cx.notify();
+            });
+        }
+        self.tokens = tokens;
+        cx.notify();
+    }
     /// The native search field; only a real AppKit window can host one.
     pub fn attach_search(&mut self, window: &Window, cx: &mut Context<Self>) {
         use pm_shell::text::{TextEvent, TextField, TextKind};
