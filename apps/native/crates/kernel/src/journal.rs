@@ -457,6 +457,52 @@ impl JournalSync {
         }
         Ok(())
     }
+    /// Best effort within `bound`: every segment's sync is attempted at once,
+    /// each on its own thread, so one that fails or stalls never keeps the
+    /// others from being tried. Each project's segment is reported: synced,
+    /// failed, or not confirmed in time.
+    pub fn sync_each(&self, bound: std::time::Duration) -> Vec<(String, Result<(), String>)> {
+        sync_each(self.0.targets.lock().expect("targets").clone(), bound)
+    }
+}
+
+fn sync_each(
+    targets: Vec<Arc<SyncTarget>>,
+    bound: std::time::Duration,
+) -> Vec<(String, Result<(), String>)> {
+    let deadline = std::time::Instant::now() + bound;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let projects: Vec<String> = targets.iter().map(|t| t.project.clone()).collect();
+    for (i, target) in targets.into_iter().enumerate() {
+        let sent = tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("pm-journal-sync".into())
+            .spawn(move || {
+                let _ = sent.send((i, target.sync().map_err(|e| e.to_string())));
+            });
+        if let Err(e) = spawned {
+            let _ = tx.send((i, Err(format!("no thread to sync it: {e}"))));
+        }
+    }
+    drop(tx);
+    let mut results: Vec<Option<Result<(), String>>> = vec![None; projects.len()];
+    while results.iter().any(Option::is_none) {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(left) {
+            Ok((i, result)) => results[i] = Some(result),
+            Err(_) => break,
+        }
+    }
+    projects
+        .into_iter()
+        .zip(results)
+        .map(|(project, result)| {
+            let result = result.unwrap_or_else(|| {
+                Err(format!("not confirmed within {} ms", bound.as_millis()))
+            });
+            (project, result)
+        })
+        .collect()
 }
 
 impl Drop for Durability {
@@ -847,6 +893,19 @@ impl Journal {
             measured: self.checkpoint_bytes.clone(),
         });
         Ok(())
+    }
+
+    /// A checkpoint of `state`, durable before returning: a save whose
+    /// file a reopen reads with other key ids than this session's (keys
+    /// stored without ids, named by place, that the session moved) must not
+    /// leave recovery replaying this session's lines onto that reopen.
+    pub(crate) fn checkpoint_now(
+        &mut self,
+        durability: &Durability,
+        state: CheckpointState,
+    ) -> io::Result<()> {
+        self.rotate(durability, state)?;
+        durability.barrier()
     }
 
     /// Records that a save is about to publish the state as of this line
@@ -2001,6 +2060,52 @@ mod durability_tests {
             .unwrap()
             .unwrap();
         worker.join().unwrap();
+    }
+
+    /// One failing and one stalled journal never keep the others from being
+    /// synced; each is reported, and the whole is bounded.
+    #[test]
+    fn every_journal_is_tried_when_one_fails_or_stalls() {
+        use std::os::{fd::OwnedFd, unix::net::UnixStream};
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let target = |project: &str, file: File| {
+            Arc::new(SyncTarget {
+                project: project.into(),
+                file,
+                dirty: AtomicBool::new(true),
+                syncing: Mutex::new(()),
+            })
+        };
+        let dir = std::env::temp_dir().join(format!("pm-sync-each-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let failing = target("Failing", File::from(OwnedFd::from(socket)));
+        let stalled = target("Stalled", File::create(dir.join("s")).unwrap());
+        let fine = target("Fine", File::create(dir.join("f")).unwrap());
+        // A sync already under way that never ends: the next one waits on it.
+        let held = stalled.clone();
+        let (hold, release) = std::sync::mpsc::channel::<()>();
+        let (locked, is_locked) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _guard = held.syncing.lock().unwrap();
+            locked.send(()).unwrap();
+            let _ = release.recv();
+        });
+        is_locked.recv().unwrap();
+        let started = std::time::Instant::now();
+        let results = sync_each(
+            vec![failing, stalled, fine.clone()],
+            std::time::Duration::from_millis(300),
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0, "Failing");
+        assert!(results[0].1.is_err());
+        assert_eq!(results[1].0, "Stalled");
+        assert!(results[1].1.as_ref().unwrap_err().contains("not confirmed"));
+        assert_eq!(results[2], ("Fine".into(), Ok(())));
+        assert!(!fine.dirty.load(Ordering::Acquire), "the fine journal was synced");
+        drop(hold);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

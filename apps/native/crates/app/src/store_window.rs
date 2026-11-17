@@ -226,6 +226,33 @@ pub struct StoreWindow {
     /// The Library's own loads: a later load's answer wins.
     library_generation: u64,
     tx: async_channel::Sender<Reply>,
+    /// A Library card's open "…" menu (v1.2.0's card menu), each card's
+    /// button where it was drawn, and the row the pointer lights.
+    card_menu: Option<CardMenu>,
+    card_anchors: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Bounds<Pixels>>>>,
+    card_lit: Option<usize>,
+    /// Each installed card's real NSSwitch, by extension id.
+    switches: std::collections::HashMap<String, Entity<NativeControl>>,
+}
+/// The Library card whose "…" menu is open.
+#[derive(Clone, Debug, PartialEq)]
+struct CardMenu {
+    id: String,
+    name: String,
+    repo: Option<String>,
+    /// Made on this Mac (Library › Made by You).
+    yours: bool,
+    /// The card's corner is not its switch (Update, Publish…): On and Off
+    /// are in the menu.
+    switch_in_menu: bool,
+}
+/// What a Library card's menu does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CardAct {
+    Turn(bool),
+    CheckForUpdates,
+    ShowInFinder,
+    Uninstall,
 }
 
 impl StoreWindow {
@@ -274,6 +301,10 @@ impl StoreWindow {
             shelves_generation: 0,
             library_generation: 0,
             tx,
+            card_menu: None,
+            card_anchors: Default::default(),
+            card_lit: None,
+            switches: Default::default(),
         };
         window.load_shelves();
         window.load_library();
@@ -992,6 +1023,11 @@ impl StoreWindow {
             }
             return;
         }
+        if event.keystroke.key == "escape" && self.card_menu.take().is_some() {
+            // An open card menu closes first.
+            cx.notify();
+            return;
+        }
         if event.keystroke.key == "escape" {
             // Esc steps back from a listing or a kind's page; on Discover or
             // Library the Store, a page of the window, closes back to the
@@ -1666,6 +1702,282 @@ impl StoreWindow {
                     .children(self.publish_menu.clone()),
             )
     }
+    /// Whether the extension runs: on, and not stopped for this run.
+    fn running(&self, id: &str) -> bool {
+        self.services
+            .kernel
+            .state()
+            .extensions
+            .get(id)
+            .is_some_and(|e| e.enabled && !e.stopped_this_run())
+    }
+    /// Turns an installed extension off or on without uninstalling it: its
+    /// panels, effects and commands stop or come back at once (PM-435).
+    fn turn(&mut self, id: &str, on: bool, cx: &mut Context<Self>) {
+        let kernel = self.services.kernel.clone();
+        if let Some(tx) = pm_kernel::state::switch_extension(&kernel.state(), id, on)
+            && let Err(error) = kernel.transact(tx)
+        {
+            self.message = Some(error);
+        }
+        cx.notify();
+    }
+    /// Each Library card that just runs gets its real NSSwitch (made here,
+    /// before drawing; a card that goes takes its switch with it).
+    fn ensure_switches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !pm_shell::text::available(window) {
+            return;
+        }
+        let Load::Ready(items) = &self.library else {
+            return;
+        };
+        // Store installs with nothing to update, and what was made here and
+        // published as it is (nothing to publish): their corner is the switch.
+        let wanted: Vec<(String, String)> = items
+            .iter()
+            .filter(|i| i.update.is_none())
+            .map(|i| (i.id.clone(), i.name.clone()))
+            .chain(
+                self.yours
+                    .iter()
+                    .filter(|y| y.published.as_deref() == Some(y.version.as_str()))
+                    .map(|y| (y.id.clone(), y.name.clone())),
+            )
+            .collect();
+        self.switches.retain(|id, _| wanted.iter().any(|(w, _)| w == id));
+        for (id, name) in wanted {
+            if self.switches.contains_key(&id) {
+                continue;
+            }
+            let on = json!(self.running(&id));
+            let identifier = format!("store.switch.{id}");
+            let tokens = self.tokens.clone();
+            let control = cx.new(|cx| {
+                NativeControl::new(
+                    ControlSpec {
+                        kind: Kind::Switch,
+                        label: &name,
+                        identifier: &identifier,
+                        value: &on,
+                        options: vec![],
+                        disabled: false,
+                        default: false,
+                        destructive: false,
+                        inline: false,
+                        quiet: false,
+                        pull: false,
+                        tint: None,
+                        symbol: None,
+                        glass: false,
+                        well: false,
+                    },
+                    &tokens,
+                    window,
+                    cx,
+                )
+            });
+            let flip = id.clone();
+            cx.subscribe(&control, move |v: &mut Self, _, value: &Value, cx| {
+                if let Some(on) = value.as_bool() {
+                    v.turn(&flip, on, cx);
+                }
+            })
+            .detach();
+            self.switches.insert(id, control);
+        }
+    }
+    /// The extension's folder on this Mac.
+    fn folder(&self, id: &str) -> Option<PathBuf> {
+        let state = self.services.kernel.state();
+        let entry = state.extensions.get(id)?;
+        let folder = entry.source.get("hostRecord")?.get("folder")?;
+        folder.as_str().map(PathBuf::from)
+    }
+    #[cfg(test)]
+    pub fn card_menu_rows(&self) -> Vec<String> {
+        self.card_menu
+            .as_ref()
+            .map(|m| self.card_rows(m).into_iter().map(|r| r.0).collect())
+            .unwrap_or_default()
+    }
+    /// The rows of a card's "…" menu, v1.2.0's: On or Off when the corner
+    /// holds another action, Check for Updates for a Store extension, Show in
+    /// Finder, then Uninstall… on its own.
+    fn card_rows(&self, menu: &CardMenu) -> Vec<(String, CardAct)> {
+        let mut rows = Vec::new();
+        if menu.switch_in_menu {
+            let on = self.running(&menu.id);
+            rows.push((
+                if on { "Turn Off" } else { "Turn On" }.to_owned(),
+                CardAct::Turn(!on),
+            ));
+        }
+        if !menu.yours {
+            rows.push(("Check for Updates".to_owned(), CardAct::CheckForUpdates));
+        }
+        if self.folder(&menu.id).is_some() {
+            rows.push(("Show in Finder".to_owned(), CardAct::ShowInFinder));
+        }
+        if !menu.yours {
+            rows.push(("Uninstall…".to_owned(), CardAct::Uninstall));
+        }
+        rows
+    }
+    /// A card's corner: its one action, or its switch when it just runs,
+    /// then the "…" button with the rest (v1.2.0's Library card).
+    fn card_corner(
+        &self,
+        menu: CardMenu,
+        action: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let kit = self.kit();
+        let id = menu.id.clone();
+        let corner = match action {
+            Some(action) => action,
+            // The real NSSwitch, in step with the extension's state.
+            None if self.switches.contains_key(&id) => {
+                let on = json!(self.running(&id));
+                let control = self.switches[&id].clone();
+                control.update(cx, |p, cx| p.update(&on, &[], false, cx));
+                control.into_any_element()
+            }
+            None => {
+                let on = self.running(&id);
+                let flip = id.clone();
+                let selector = format!("store-switch-{id}");
+                kit.switch(format!("store-switch-{id}"), on)
+                    .debug_selector(move || selector.clone())
+                    .aria_label(format!("{}: {}", menu.name, if on { "on" } else { "off" }))
+                    .on_click(cx.listener(move |v, _, _, cx| {
+                        let on = v.running(&flip);
+                        v.turn(&flip, !on, cx);
+                    }))
+                    .into_any_element()
+            }
+        };
+        let open = self.card_menu.as_ref().is_some_and(|m| m.id == id);
+        let anchors = self.card_anchors.clone();
+        let at = id.clone();
+        let selector = format!("store-more-{id}");
+        let more = kit
+            .icon_button(
+                format!("store-more-{id}"),
+                "ellipsis",
+                format!("More actions for {}", menu.name),
+                open,
+            )
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        anchors.borrow_mut().insert(at.clone(), bounds);
+                    },
+                    |_, _, _, _| (),
+                )
+                .absolute()
+                .size_full(),
+            )
+            .debug_selector(move || selector.clone())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |v, _, _, cx| {
+                cx.stop_propagation();
+                v.card_menu = if v.card_menu.as_ref() == Some(&menu) {
+                    None
+                } else {
+                    Some(menu.clone())
+                };
+                v.card_lit = None;
+                cx.notify();
+            }));
+        div()
+            .flex()
+            .items_center()
+            .gap(px(self.tokens.space.xs))
+            .child(corner)
+            .child(more)
+            .into_any_element()
+    }
+    /// Runs a row of the open card menu and closes it.
+    fn card_choose(&mut self, row: usize, window: &Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.card_menu.take() else {
+            return;
+        };
+        match self.card_rows(&menu).get(row).map(|r| r.1) {
+            Some(CardAct::Turn(on)) => self.turn(&menu.id, on, cx),
+            Some(CardAct::CheckForUpdates) => {
+                if self.busy.is_none() {
+                    self.message = None;
+                    self.load_library();
+                }
+            }
+            Some(CardAct::ShowInFinder) => {
+                if let Some(folder) = self.folder(&menu.id) {
+                    crate::platform::reveal(&folder);
+                }
+            }
+            Some(CardAct::Uninstall) => {
+                self.confirm_uninstall(menu.id, menu.name, menu.repo, window, cx)
+            }
+            None => {}
+        }
+        cx.notify();
+    }
+    /// The open card menu: our popover hanging from its "…" button, closed
+    /// by a click elsewhere or Escape.
+    fn card_menu_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.card_menu.clone()?;
+        let anchor = self.card_anchors.borrow().get(&menu.id).copied()?;
+        let kit = self.kit();
+        let t = &self.tokens;
+        let rows = self.card_rows(&menu);
+        let separator = rows.iter().position(|r| r.1 == CardAct::Uninstall).filter(|i| *i > 0);
+        let close = cx.listener(|v, _: &MouseDownEvent, _, cx| {
+            v.card_menu = None;
+            cx.notify();
+        });
+        let mut items: Vec<AnyElement> = Vec::new();
+        for (row, (label, _)) in rows.iter().enumerate() {
+            if Some(row) == separator {
+                items.push(kit.separator().my(px(t.space.xs)).into_any_element());
+            }
+            items.push(
+                kit.menu_row(format!("store-card-menu-{row}"), label.clone(), None, None)
+                    .on_hover(cx.listener(move |v, hovered: &bool, _, cx| {
+                        let lit = hovered.then_some(row);
+                        if v.card_lit != lit && (*hovered || v.card_lit == Some(row)) {
+                            v.card_lit = lit;
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |v, _, window, cx| v.card_choose(row, window, cx)))
+                    .into_any_element(),
+            );
+        }
+        // The light rides the rows; past the separator, its height too.
+        let gap = 1. + 2. * t.space.xs;
+        let lit = self.card_lit.map(|row| {
+            row as f32 * t.metrics.row + if separator.is_some_and(|s| row >= s) { gap } else { 0. }
+        });
+        Some(
+            deferred(
+                anchored()
+                    .anchor(Anchor::TopRight)
+                    .position(point(anchor.right(), anchor.bottom() + px(t.space.xs)))
+                    .child(
+                        kit.menu()
+                            .id("store-card-menu")
+                            .min_w(px(t.metrics.sidebar - 2. * t.space.md))
+                            .font_family(pm_design::TEXT_FONT)
+                            .role(Role::Menu)
+                            .on_mouse_down_out(close)
+                            .child(kit.menu_light("store-card-menu", lit))
+                            .children(items),
+                    ),
+            )
+            .priority(1)
+            .into_any_element(),
+        )
+    }
     /// Library (S077): what needs you, what the Store installed here and
     /// what was made here, each a section of cards.
     fn library_rows(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -1690,7 +2002,7 @@ impl StoreWindow {
                 (format!("Version {}", item.version), c.muted)
             };
             let id = item.id.clone();
-            let action = match (&item.update, &item.repo, item.removed) {
+            let update = match (&item.update, &item.repo, item.removed) {
                 (Some((version, release)), Some(repo), false) => {
                     let pick = Pick {
                         release: release.clone(),
@@ -1700,17 +2012,30 @@ impl StoreWindow {
                         name: item.name.clone(),
                     };
                     let busy = self.busy.as_deref() == Some(repo.as_str());
-                    self.button(
+                    let button = self.button(
                         format!("store-update-{id}"),
                         if busy { "Updating…" } else { "Update" },
                         self.busy.is_none() && self.services.source.is_some(),
                         true,
                     )
                     .on_click(cx.listener(move |v, _, _, cx| v.install(pick.clone(), cx)))
-                    .into_any_element()
+                    .into_any_element();
+                    Some(button)
                 }
-                _ => div().into_any_element(),
+                _ => None,
             };
+            // Its one action (Update), else its switch; the menu has the rest.
+            let action = self.card_corner(
+                CardMenu {
+                    id: id.clone(),
+                    name: item.name.clone(),
+                    repo: item.repo.clone(),
+                    yours: false,
+                    switch_in_menu: update.is_some(),
+                },
+                update,
+                cx,
+            );
             let facts = div().child(div().truncate().child(if item.update.is_some() {
                 format!("Version {} installed", item.version)
             } else {
@@ -1809,6 +2134,21 @@ impl StoreWindow {
                         )
                         .into_any_element()
                     };
+                    // v1.2.0: Publish… holds the corner while there is
+                    // something to publish (On and Off are then in its
+                    // menu); published as it is, the corner is its switch.
+                    let unchanged = item.published.as_deref() == Some(item.version.as_str());
+                    let corner = self.card_corner(
+                        CardMenu {
+                            id: id.clone(),
+                            name: item.name.clone(),
+                            repo: None,
+                            yours: true,
+                            switch_in_menu: !unchanged,
+                        },
+                        (!unchanged).then_some(publish),
+                        cx,
+                    );
                     self.frame(
                         &format!("store-yours-{id}"),
                         width,
@@ -1818,7 +2158,7 @@ impl StoreWindow {
                             line: Some((format!("Version {}", item.version), c.muted)),
                         },
                         div().child(div().truncate().child(status)),
-                        publish,
+                        corner,
                     )
                     .into_any_element()
                 })
@@ -2212,6 +2552,7 @@ impl StoreWindow {
 impl Render for StoreWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.motion.frame(window);
+        self.ensure_switches(window, cx);
         self.frame_kit = Some(Kit::new(
             &self.tokens,
             &self.motion,
@@ -2266,6 +2607,7 @@ impl Render for StoreWindow {
             .text_role(&t, Text::Body)
             .font_family(pm_design::TEXT_FONT)
             .child(body)
+            .children(self.card_menu_overlay(cx))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
     }

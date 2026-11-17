@@ -147,6 +147,10 @@ fn builtin_registries() -> Arc<BTreeMap<String, Vec<Registration>>> {
     })
     .clone()
 }
+/// A state transaction staged on a revision another write has moved past
+/// (`StateTransaction::expected_revision`): nothing was changed. A writer that
+/// patches what it read stages again on the new state.
+pub const STATE_CHANGED: &str = "Something else changed the project’s view at the same moment, so this change was not made.";
 impl StateSnapshot {
     /// The state every kernel starts from, before any profile is attached.
     pub fn seeded() -> Self {
@@ -204,7 +208,7 @@ impl StateSnapshot {
     }
     pub fn stage(&self, tx: StateTransaction) -> Result<(Self, Vec<StateChange>), String> {
         if tx.expected_revision.is_some_and(|r| r != self.revision) {
-            return Err("Kernel state changed".into());
+            return Err(STATE_CHANGED.into());
         }
         let mut next = self.clone();
         for op in tx.ops {

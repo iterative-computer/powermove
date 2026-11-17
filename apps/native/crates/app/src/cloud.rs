@@ -98,7 +98,7 @@ impl Keychain {
             return Ok(Vec::new());
         };
         let locators = pm_kernel::profile::registered_secrets(profile, "cloud/session")
-            .map_err(|e| format!("{e:?}"))?;
+            .map_err(|e| e.to_string())?;
         Ok(locators
             .into_iter()
             .rev()

@@ -2596,3 +2596,169 @@ fn ruler_menu_groups_marker_work_area_and_the_switch() {
     );
     assert_eq!(menu[1].id, MenuItem::SEPARATOR);
 }
+
+/// PM-476: the timeline's view write lands even when another write moved the
+/// project's view state on after it was read (the editor writes it on most
+/// changes): it is made again on the new state, and the other write's change
+/// stays. It never fails with the stale state's error.
+#[test]
+fn a_view_write_on_state_another_write_moved_on_still_lands() {
+    use pm_kernel::state::{StateOp, StateTransaction, UiState};
+    let (_actor, c) = client();
+    let stale = c.kernel.state();
+    let mut other = stale.ui.get("P").cloned().unwrap_or_default();
+    if let Value::Object(viewer) = &mut other.viewer {
+        viewer.insert("zoom", Value::from(3.0));
+    }
+    block_on(c.kernel.state_transaction(StateTransaction {
+        expected_revision: Some(stale.revision),
+        ops: vec![StateOp::Ui {
+            project: "P".into(),
+            next: other,
+        }],
+    }))
+    .unwrap()
+    .unwrap();
+    assert!(c.kernel.state().revision > stale.revision);
+    block_on(c.publish_view_from(stale)).expect("the view write lands on the new state");
+    let ui: UiState = c.kernel.state().ui.get("P").cloned().unwrap();
+    assert_eq!(
+        ui.viewer.get("zoom").and_then(Value::as_f64),
+        Some(3.0),
+        "the other write's change stays"
+    );
+}
+
+/// No timeline error reaches the status line as a variant or an id.
+#[test]
+fn timeline_errors_read_as_sentences() {
+    let stale = ClientError::Kernel(
+        pm_kernel::KernelFailure::Storage(pm_kernel::state::STATE_CHANGED.into()).to_string(),
+    );
+    let all = [
+        stale,
+        ClientError::Closed,
+        ClientError::GestureActive,
+        ClientError::NoGesture,
+        ClientError::DocumentChanged,
+        ClientError::OriginMismatch,
+        ClientError::ConcurrentRelativeGesture,
+        ClientError::Model(ModelError::UnknownId("Cl86qj39".into())),
+        ClientError::Model(ModelError::UnknownCommand("x.y".into())),
+        ClientError::Model(ModelError::HiddenRow),
+        ClientError::Model(ModelError::InvalidNumber),
+        ClientError::Model(ModelError::Locked("Cl86qj39".into())),
+        ClientError::Model(ModelError::InvalidGesture),
+        ClientError::Model(ModelError::MissingHost("unknown edit tool")),
+    ];
+    for error in all {
+        let text = error.to_string();
+        assert!(
+            !text.contains('(') && !text.contains("Cl86qj39") && text.ends_with('.'),
+            "{error:?} reads {text:?}"
+        );
+    }
+}
+
+/// PM-462: v1.2.0 stores a shape path's vertex keys without ids. The
+/// kernel names them on read; the timeline shows them, a click selects one,
+/// a nudge moves it, and it keeps its id.
+#[test]
+fn path_vertex_keys_stored_without_ids_are_shown_selected_and_moved() {
+    let key = |t: f64, v: f64| {
+        format!(r#"{{"t":{t},"v":{v},"inInterp":"linear","outInterp":"linear","inEase":{{"speed":0,"influence":16.7}},"outEase":{{"speed":0,"influence":16.7}}}}"#)
+    };
+    let project = parse(&format!(
+        r##"{{"id":"P","compId":"C","name":"Paths","w":200,"h":100,"fps":30,"dur":10,"comps":{{}},"assets":{{}},"layers":[
+        {{"id":"s","name":"Outline","type":"shape","from":0,"dur":5,"on":true,"p":{{}},"d":{{"shape":"path","paths":[{{"id":"outline","p":{{}},
+          "vertices":[{{"id":"v0","p":{{"x":{{"v":0,"kf":[{},{}],"expr":null}},"y":{{"v":0,"kf":[{}],"expr":null}}}}}}]}}]}}}}]}}"##,
+        key(0., 0.),
+        key(1., 10.),
+        key(0., 3.)
+    ))
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    let channel = "g.outline.v.v0.x";
+    let ids: Vec<String> = c.model.track_channels("s", channel)[0]
+        .keys
+        .iter()
+        .map(|k| k.id.clone())
+        .collect();
+    let named = |i| pm_kernel::model::derived_key_id("C", "s", "d.paths.outline.vertices.v0.p.x", i);
+    assert_eq!(ids, [named(0), named(1)]);
+    assert_eq!(c.model.track_channels("s", "g.outline.v.v0.y")[0].keys.len(), 1);
+    let calls = c
+        .model
+        .select_keys("s", channel, &[named(1)], false, false)
+        .unwrap();
+    for call in calls {
+        block_on(c.call(call)).unwrap();
+    }
+    assert_eq!(c.model.selection.keys(), [named(1)]);
+    command(&mut c, "nudgeKeyframes", 0.);
+    c.sync().unwrap();
+    let keys = &c.model.track_channels("s", channel)[0].keys;
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[1].id, named(1));
+    assert!((keys[1].time - (1. + 1. / 30.)).abs() < 1e-9, "{}", keys[1].time);
+    assert_eq!(c.model.selection.keys(), [named(1)]);
+}
+/// Tracks mode: a track row's lock and eye act on every clip on the lane,
+/// as v1's track view does, one undo step named for the track; the row
+/// shows the new state.
+#[test]
+fn a_track_rows_lock_and_eye_act_on_its_clips() {
+    let (_a, mut c) = client();
+    c.model.mode = TimelineMode::Tracks;
+    let layout = pm_panel_timeline::tracks::layout(&c.model.index, &c.model.reveal);
+    let item = layout
+        .items
+        .iter()
+        .find(|i| i.id == "a")
+        .expect("a has a track")
+        .clone();
+    let on_lane: Vec<String> = layout
+        .items
+        .iter()
+        .filter(|i| i.area == item.area && i.lane == item.lane)
+        .map(|i| i.id.clone())
+        .collect();
+    let label = |p: &Plan| match p.calls.first() {
+        Some(Call::Transact { label, .. }) => label.clone(),
+        _ => None,
+    };
+    let p = c
+        .model
+        .track_switch(item.area, item.lane, "lock", 0.)
+        .unwrap();
+    assert_eq!(label(&p).as_deref(), Some("Lock Track"));
+    run(&mut c, p);
+    assert!(
+        on_lane
+            .iter()
+            .all(|id| c.model.index.layer(id).unwrap().locked)
+    );
+    let p = c
+        .model
+        .track_switch(item.area, item.lane, "lock", 0.)
+        .unwrap();
+    assert_eq!(label(&p).as_deref(), Some("Unlock Track"));
+    run(&mut c, p);
+    let p = c
+        .model
+        .track_switch(item.area, item.lane, "visibility", 0.)
+        .unwrap();
+    assert_eq!(label(&p).as_deref(), Some("Hide Track"));
+    run(&mut c, p);
+    assert!(
+        on_lane
+            .iter()
+            .all(|id| !c.model.index.layer(id).unwrap().visible)
+    );
+    undo(&mut c);
+    assert!(
+        on_lane
+            .iter()
+            .all(|id| c.model.index.layer(id).unwrap().visible)
+    );
+}

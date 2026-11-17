@@ -36,9 +36,20 @@ pub enum ModelError {
     MissingHost(&'static str),
     KernelPlan(String),
 }
+/// A sentence for the status line: never a variant name or an internal id.
 impl std::fmt::Display for ModelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::UnknownId(_) => f.write_str("That item is no longer in the timeline."),
+            Self::UnknownCommand(_) | Self::MissingHost(_) => {
+                f.write_str("The timeline can’t do that here.")
+            }
+            Self::HiddenRow => f.write_str("That row is hidden."),
+            Self::InvalidNumber => f.write_str("That isn’t a number the timeline can use."),
+            Self::Locked(_) => f.write_str("That layer is locked."),
+            Self::InvalidGesture => f.write_str("That timeline edit can’t be made."),
+            Self::KernelPlan(message) => f.write_str(message),
+        }
     }
 }
 impl std::error::Error for ModelError {}
@@ -47,6 +58,9 @@ impl std::error::Error for ModelError {}
 /// Returning an effect does not claim that host work has succeeded.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HostEffect {
+    /// One of the app's own commands, by name (the empty composition's
+    /// Text, Shape, Solid, Null and Import… buttons).
+    Run(String),
     Seek(f64),
     TogglePlayback,
     /// Fit Selected Curves: show this span of composition time.

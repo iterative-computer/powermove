@@ -408,6 +408,8 @@ impl Controller {
         if self.settling.as_deref() == Some(project) {
             self.settling = None;
             self.opening_name = None;
+            // No panel shows its ghost any more: its picture goes.
+            self.ghost_retire();
             self.open_timer.mark("settled", serde_json::json!({}));
             self.busy = None;
             // Bound to the open that brought `project`: they run only if this
@@ -691,7 +693,24 @@ impl Controller {
         let gizmos = self.builtins.gizmos.clone();
         let views: Vec<_> = self.builtins.views.values().cloned().collect();
         timeline.is_some_and(|t| t.update(cx, |t, cx| t.cancel(cx)))
-            || gizmos.is_some_and(|g| g.update(cx, |g, cx| g.cancel(cx)))
+            || gizmos.is_some_and(|g| {
+                // A text session ends here (it reads nothing of this
+                // controller, and its keys keep their order, PM-459); a
+                // pointer gesture's end reads the controller through its
+                // host, so it ends after this update (PM-480).
+                if g.update(cx, |g, cx| g.finish_text(false, cx)) {
+                    return true;
+                }
+                if !g.read(cx).gesture_to_cancel() {
+                    return false;
+                }
+                cx.defer(move |cx| {
+                    g.update(cx, |g, cx| {
+                        g.cancel(cx);
+                    })
+                });
+                true
+            })
             || views
                 .into_iter()
                 .any(|view| view.update(cx, |view, cx| view.cancel_gesture(cx)))
@@ -1442,6 +1461,11 @@ impl Controller {
         }
     }
     pub fn show_builtin(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // The Export sheet stands over a project in front: never over Home,
+        // whatever asked for it (PM-472).
+        if id == "export" && (self.session.is_none() || self.home_visible) {
+            return;
+        }
         self.start_builtins(cx);
         if id == "settings" {
             // Settings › Media shows the protected folders as they are now,
@@ -1912,6 +1936,29 @@ impl Controller {
                                     .collect();
                                     crate::quick_look::toggle(files);
                                 }
+                                // Double-click or Return on a ready item, and the
+                                // item menus (v1 `addFromAsset`, `Comps.fromAsset`,
+                                // `Comps.addToTimeline`).
+                                pm_panel_media::Effect::AddAsset(id) => {
+                                    self.add_to_timeline(&[id], &[], cx)
+                                }
+                                pm_panel_media::Effect::NestComposition(id) => {
+                                    self.add_to_timeline(&[], &[id], cx)
+                                }
+                                pm_panel_media::Effect::NewCompFromAsset(id) => {
+                                    self.new_comp_from_asset(&id, cx)
+                                }
+                                pm_panel_media::Effect::ConfirmDelete {
+                                    token,
+                                    assets,
+                                    references,
+                                } => self.confirm_delete_media(
+                                    effect.owner.clone(),
+                                    token,
+                                    &assets,
+                                    references,
+                                    cx,
+                                ),
                                 pm_panel_media::Effect::Focus(_)
                                 | pm_panel_media::Effect::ClearPreview => {}
                                 other => {
@@ -2535,6 +2582,10 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         use pm_panel_timeline::HostEffect as E;
         let _ = self.0.update(cx, |v, cx| match effect {
             E::Seek(time) => v.seek(time),
+            // The empty composition's buttons: the app's own commands.
+            E::Run(name) => v.host.borrow().send_command(&name, vec![]),
+            // Import… from the timeline: File › Import…, at the playhead.
+            E::Import { .. } => v.host.borrow().send_command("import", vec![]),
             E::TogglePlayback => v.host.borrow().send_command("play", vec![]),
             E::FrameComposition => v.host.borrow().send_command("viewer.fit", vec![]),
             E::OpenComposition(id) => v.open_builtin_composition(&id, cx),
@@ -2570,10 +2621,9 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         }
     }
     fn report(&self, message: String, cx: &mut App) {
-        let _ = self.0.update(cx, |v, cx| {
-            v.message = message;
-            cx.notify();
-        });
+        // A passing note: it clears once its moment is over (PM-476 kept a
+        // timeline view write's failure in the status line for good).
+        let _ = self.0.update(cx, |v, cx| v.note(message, cx));
     }
     fn command(&self, name: &str, cx: &mut App) {
         crate::timeline_surface::Delegate::run(self, name, vec![], cx);
@@ -2732,6 +2782,9 @@ impl crate::gizmo::Host for ControllerDelegate {
         cx: &mut App,
     ) {
         let _ = self.0.update(cx, |v, _| v.set_gizmos(lines, at));
+    }
+    fn marks(&self, marks: Vec<crate::gizmo_layer::Mark>, cx: &mut App) {
+        let _ = self.0.update(cx, |v, _| v.gizmo_marks = marks);
     }
     fn pick_surface(
         &self,
@@ -3178,8 +3231,17 @@ impl Render for SurfaceWindow {
                         }
                         let panel = this.panel.clone();
                         let view = this.owner.read(cx).builtins.views.get(&panel).cloned();
-                        if let Some(view) = view {
-                            view.update(cx, |v, cx| v.root_key_down(e, window, cx));
+                        let heard = view
+                            .is_some_and(|view| view.update(cx, |v, cx| v.root_key_down(e, window, cx)));
+                        // Escape closes every sheet: one whose panel has no
+                        // keys of its own (nothing in it yet) is closed here
+                        // (PM-472).
+                        if !heard && PopoverKeys::dismisses(e) {
+                            cx.stop_propagation();
+                            let owner = this.owner.clone();
+                            cx.defer(move |cx| {
+                                let _ = owner.update(cx, |v, cx| v.close_export_sheet(cx));
+                            });
                         }
                     },
                 ))
@@ -3727,7 +3789,7 @@ mod project_view_tests {
 
 impl Controller {
     /// The open project's asset names, by id (what the Project shows).
-    fn asset_names(&self) -> std::collections::HashMap<String, String> {
+    pub(crate) fn asset_names(&self) -> std::collections::HashMap<String, String> {
         let Some(published) = &self.published else {
             return Default::default();
         };

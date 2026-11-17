@@ -442,6 +442,9 @@ pub struct NativeControl {
     width: f32,
     height: f32,
     inline: bool,
+    /// The least width of a pop-up in a row (`value_column`): it is never
+    /// narrower, and wider when its widest row needs it.
+    least: f32,
     /// Fills a slot that may be narrower than `width` (its node has
     /// `flexShrink`); AppKit then truncates the title.
     pub fill: bool,
@@ -928,6 +931,11 @@ impl NativeControl {
             width,
             height,
             inline,
+            least: if matches!(kind, Kind::Popup) && !inline {
+                t.metrics.value_column
+            } else {
+                0.
+            },
             // A search field is as wide as the place it is given.
             fill: matches!(kind, Kind::Search),
             stretch: well && matches!(kind, Kind::Popup),
@@ -1138,6 +1146,13 @@ impl NativeControl {
         if self.inline {
             // The title names the current value, so the width follows it.
             self.width = self.control.view().fittingSize().width as f32;
+        } else if matches!(self.control, Control::Popup(_)) && !self.stretch {
+            // New rows (the Export sheet's Format, built for one kind and
+            // then given another's): as wide as its widest row again, so
+            // no value is cut off (PM-452).
+            self.width = self
+                .least
+                .max(self.control.view().fittingSize().width as f32);
         }
         cx.notify();
     }

@@ -717,6 +717,16 @@ impl TimelineSurface {
         });
         self.pump(cx);
     }
+    /// A row chosen from one of the timeline's own context menus.
+    pub(crate) fn choose_menu(&mut self, context: MenuContext, action: &str, cx: &mut Context<Self>) {
+        let time = self.delegate.time(cx);
+        self.queue.push_back(Job::Menu {
+            context,
+            action: action.to_owned(),
+            time,
+        });
+        self.pump(cx);
+    }
     /// Menu checkmarks: the timeline shows tracks, and clips snap in them.
     pub fn toggles(&self) -> (bool, bool) {
         (
@@ -1736,9 +1746,13 @@ impl TimelineSurface {
                 f.hit_op("work-area", x, y, 0.).is_some()
                     && (event.modifiers.alt || y <= WORK_BAR_STRIP)
             });
+        // Final Cut's skimming: a press in Tracks mode moves the playhead to
+        // the skimmer. In the Layers timeline a press selects and never moves
+        // the playhead (v1 and After Effects: only the ruler does).
         if let Some(at) = self.skimmer
             && !grabs
             && !scrubs
+            && self.model.mode == TimelineMode::Tracks
         {
             self.delegate.seek(at, cx);
         }
@@ -3006,15 +3020,7 @@ impl TimelineSurface {
                 let Some(action) = index.and_then(|i| ids.get(i)) else {
                     return;
                 };
-                let _ = weak.update(cx, |s, cx| {
-                    let time = s.delegate.time(cx);
-                    s.queue.push_back(Job::Menu {
-                        context,
-                        action: (*action).to_owned(),
-                        time,
-                    });
-                    s.pump(cx);
-                });
+                let _ = weak.update(cx, |s, cx| s.choose_menu(context, action, cx));
             }),
         );
     }
@@ -3564,8 +3570,6 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             frames,
             shift,
         } => {
-            let persist =
-                id.starts_with("timeline.") || id.starts_with("graph") || id == "toggleLayerStrips";
             let plan = client
                 .model
                 .command(
@@ -3578,9 +3582,7 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
                 )
                 .map_err(|e| e.to_string())?;
             let effects = client.dispatch(plan).await.map_err(text)?;
-            if persist {
-                client.publish_view().await.map_err(text)?;
-            }
+            client.publish_view_if_changed().await.map_err(text)?;
             Ok(effects)
         }
         Job::Menu {
@@ -3588,15 +3590,14 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             action,
             time,
         } => {
-            let persist = action == "mode.toggle" || action.starts_with("graph.");
             let plan = client
                 .model
                 .menu_action(&context, &action, time)
                 .map_err(|e| e.to_string())?;
             let effects = client.dispatch(plan).await.map_err(text)?;
-            if persist {
-                client.publish_view().await.map_err(text)?;
-            }
+            // The menu and the Layers | Tracks control drive one state: a
+            // mode chosen here reaches the header and the layer column.
+            client.publish_view_if_changed().await.map_err(text)?;
             Ok(effects)
         }
         Job::Reveal { layer, keys } => {
@@ -3651,7 +3652,7 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             pending
                 .await
                 .ok_or("Kernel closed")?
-                .map_err(|e| format!("{e:?}"))?;
+                .map_err(|e| e.to_string())?;
             Ok(vec![])
         }
     }

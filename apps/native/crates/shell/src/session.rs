@@ -270,6 +270,23 @@ impl Session {
         Ok(())
     }
 }
+/// The order a launch opens `plan` in: the window (or tab group) that was in
+/// front last, so it lies over the others from the start (separate windows
+/// each take the front as they open); in its group, the front window right
+/// after the group's first, so its tab shows while the others open (each
+/// takes its own place in the strip, `native::restore_tab_index`).
+pub fn front_first(plan: Vec<WindowState>, front: Option<u64>) -> Vec<WindowState> {
+    let group = |s: &WindowState| s.tab_group.unwrap_or(s.id);
+    let front_group = plan.iter().find(|s| Some(s.id) == front).map(group);
+    let (mut ordered, mut last): (Vec<_>, Vec<_>) =
+        plan.into_iter().partition(|s| Some(group(s)) != front_group);
+    if let Some(at) = last.iter().position(|s| Some(s.id) == front).filter(|at| *at > 1) {
+        let window = last.remove(at);
+        last.insert(1, window);
+    }
+    ordered.extend(last);
+    ordered
+}
 /// One window's change to the shared session file.
 #[derive(Clone, Debug)]
 pub enum Change {
@@ -547,6 +564,29 @@ mod upgrade_tests {
             key: Some(4),
             complete: false,
         }
+    }
+
+    /// A launch opens the group that was in front last, and in it the front
+    /// window right after the group's first, so its tab shows while the
+    /// others open; a front window that is its group's first, or alone,
+    /// keeps its place.
+    #[test]
+    fn the_front_window_opens_early_in_its_group_and_its_group_last() {
+        let ids = |plan: Vec<WindowState>| plan.iter().map(|w| w.id).collect::<Vec<_>>();
+        let plan = || {
+            vec![
+                window(6, "lead", None),
+                window(5, "run13", Some(6)),
+                window(7, "a", Some(6)),
+                window(12, "paper", Some(6)),
+                window(13, "b", Some(6)),
+                window(4, "alone", None),
+            ]
+        };
+        assert_eq!(ids(front_first(plan(), Some(12))), [4, 6, 12, 5, 7, 13]);
+        assert_eq!(ids(front_first(plan(), Some(6))), [4, 6, 5, 7, 12, 13]);
+        assert_eq!(ids(front_first(plan(), Some(4))), [6, 5, 7, 12, 13, 4]);
+        assert_eq!(ids(front_first(plan(), None)), [6, 5, 7, 12, 13, 4]);
     }
 
     #[test]

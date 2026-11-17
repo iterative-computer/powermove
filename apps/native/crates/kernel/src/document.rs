@@ -229,6 +229,55 @@ pub(crate) enum Tap {
 
 /// Most changes kept for [`DocumentStore::changes_since`].
 const CHANGE_LOG: usize = 256;
+// Incremental readers can resync from the current snapshot. A count alone
+// retains arbitrarily large decoded layer stacks after structural edits.
+const CHANGE_LOG_BYTES: usize = 16 * 1024 * 1024;
+
+fn change_bytes(ops: &[Op]) -> usize {
+    use std::mem::size_of;
+    fn value(v: &Value) -> usize {
+        match v {
+            Value::String(s) => s.heap_bytes(),
+            Value::Array(a) => {
+                a.capacity() * size_of::<Value>() + a.iter().map(value).sum::<usize>()
+            }
+            // Charge schema storage conservatively even when shared.
+            Value::Object(m) => {
+                m.len() * (size_of::<Value>() + size_of::<pm_model::JsString>() + 32)
+                    + m.iter()
+                        .map(|(k, v)| k.heap_bytes() + value(v))
+                        .sum::<usize>()
+            }
+            _ => 0,
+        }
+    }
+    ops.len() * size_of::<Op>()
+        + ops
+            .iter()
+            .map(|op| {
+                let path = op.path().len() * size_of::<pm_model::patch::PathPart>()
+                    + op.path()
+                        .iter()
+                        .map(|p| match p {
+                            pm_model::patch::PathPart::Key(s) => s.heap_bytes(),
+                            _ => 0,
+                        })
+                        .sum::<usize>();
+                path + match op {
+                    Op::Leaf(p) => p.value.as_ref().map_or(0, value),
+                    Op::Insert { value: v, .. } => value(v),
+                    Op::Order { ids, .. } => {
+                        ids.capacity() * size_of::<pm_model::JsString>()
+                            + ids
+                                .iter()
+                                .map(pm_model::JsString::heap_bytes)
+                                .sum::<usize>()
+                    }
+                    Op::Delete { id, .. } => id.heap_bytes(),
+                }
+            })
+            .sum::<usize>()
+}
 
 type Listener = Box<dyn FnMut(&StoreEvent) + Send + 'static>;
 
@@ -247,6 +296,10 @@ pub struct DocumentStore {
     history: History,
     /// Whether the history now differs from the file's `history` member.
     history_owned: bool,
+    /// The compositions open in the editor, oldest first ("" the project's
+    /// own): where an Undo or Redo that removes the open one goes back to
+    /// ([`Self::keep_open_composition`]). Not saved.
+    open_trail: Vec<String>,
     /// Whether the file's `history` member needs an archive before a save
     /// replaces it ([`Self::file_history_needs_archive`]), for the member
     /// and open composition it was judged with.
@@ -276,6 +329,7 @@ pub struct DocumentStore {
     /// pending one is `file.envelope.workspace`.
     saved_workspace: Option<Value>,
     log: VecDeque<Arc<Change>>,
+    log_bytes: usize,
     listeners: Vec<(u64, Listener)>,
     next_listener: u64,
     save_ticket: Weak<()>,
@@ -383,7 +437,9 @@ impl DocumentStore {
         let token = history.state_token();
         let saved_steps = history.saved_steps();
         let saved_workspace = file.envelope.workspace.clone();
+        let open_trail = vec![current.root().and_then(model::open_comp_id).unwrap_or_default()];
         DocumentStore {
+            open_trail,
             runtime_state: None,
             text_host: None,
             doc_id: new_doc_id(),
@@ -406,6 +462,7 @@ impl DocumentStore {
             saved_steps,
             saved_workspace,
             log: VecDeque::new(),
+            log_bytes: 0,
             listeners: Vec::new(),
             next_listener: 1,
             save_ticket: Weak::new(),
@@ -541,6 +598,15 @@ impl DocumentStore {
     /// edits, or workspace and metadata changes since the last save.
     pub fn needs_save(&self) -> bool {
         self.is_dirty() || self.metadata_token != self.saved_metadata_token
+    }
+
+    /// Nothing a save would write differs from what was last read or
+    /// written: no unsaved change, the undo history (redo steps too) as
+    /// saved, and nothing upgraded on open.
+    pub fn as_saved(&self) -> bool {
+        !self.needs_save()
+            && self.history.saved_steps() == self.saved_steps
+            && !self.upgraded_on_open()
     }
 
     /// Whether a save of this document is running.
@@ -1189,6 +1255,48 @@ impl DocumentStore {
         })
     }
 
+    /// `ops` as an Undo or Redo applies them, first going back to the
+    /// composition open before the one they remove when they remove the one
+    /// open now (undoing New Composition while it is open, PM-475): the
+    /// latest composition the editor had open that the step leaves, else the
+    /// project's own. The switch is part of the same step.
+    fn keep_open_composition(&self, ops: &Arc<[Op]>) -> Arc<[Op]> {
+        let Some(root) = self.root() else {
+            return ops.clone();
+        };
+        let Some(open) = model::open_comp_id(root) else {
+            return ops.clone();
+        };
+        let revision = self.revision() + 1;
+        let mut after = Some(root.clone());
+        for op in ops.iter() {
+            if let Ok((next, _)) = apply_one(after.clone(), op, revision) {
+                after = next;
+            }
+        }
+        let Some(after) = after else {
+            return ops.clone();
+        };
+        let exists = |id: &str| model::comp_node(&after, Some(id)).is_some();
+        if exists(&open) {
+            return ops.clone();
+        }
+        let previous = self
+            .open_trail
+            .iter()
+            .rev()
+            .find(|id| **id != open && (id.is_empty() || exists(id)))
+            .cloned()
+            .unwrap_or_default();
+        let path = vec![PathPart::Key("compId".into())];
+        let switch = if previous.is_empty() {
+            Op::Leaf(Patch::delete(path))
+        } else {
+            Op::Leaf(Patch::set(path, Value::from(previous.as_str())))
+        };
+        std::iter::once(switch).chain(ops.iter().cloned()).collect()
+    }
+
     /// One Undo or Redo of a document entry: publishes what applied and
     /// returns it with the operations reversing it (`reverse` when all did).
     fn history_step(
@@ -1197,10 +1305,28 @@ impl DocumentStore {
         reverse: &Arc<[Op]>,
         cause: ChangeCause,
     ) -> Result<HistoryStep, TransactionError> {
-        let staged = self.stage_history_ops(ops)?;
+        let ops = &self.keep_open_composition(ops);
+        let mut staged = self.stage_history_ops(ops)?;
         let skipped = staged.forward.len() != ops.len();
+        // A key the step brought back without an id, or under a derived id
+        // its track already has, is named (see `model::naming_ops`).
+        let naming = staged
+            .document
+            .root()
+            .map(|root| model::naming_ops(root, Some(&staged.forward)))
+            .unwrap_or_default();
+        if !naming.is_empty() {
+            let revision = staged.document.revision();
+            let mut root = staged.document.root().cloned();
+            for op in &naming {
+                root = apply_one(root, op, revision)?.0;
+            }
+            staged.document = Document::from_root(root, revision);
+        }
+        let mut published = staged.forward.clone();
+        published.extend(naming);
         let applied: Arc<[Op]> = staged.forward.into();
-        self.publish(staged.document, applied.clone(), cause);
+        self.publish(staged.document, published.into(), cause);
         if !skipped {
             return Ok((applied, reverse.clone()));
         }
@@ -1325,6 +1451,14 @@ impl DocumentStore {
             ops = diff_node_ops(self.root(), document.root()).into();
         }
         let base_revision = self.revision();
+        let open = document.root().and_then(model::open_comp_id).unwrap_or_default();
+        if self.open_trail.last() != Some(&open) {
+            self.open_trail.retain(|id| *id != open);
+            self.open_trail.push(open);
+            if self.open_trail.len() > 32 {
+                self.open_trail.remove(0);
+            }
+        }
         document.set_saving_app_version(self.current.saving_app_version().map(str::to_owned));
         let document = Arc::new(document);
         let revision = document.revision();
@@ -1349,9 +1483,12 @@ impl DocumentStore {
                 ops: change.ops.clone(),
             });
         }
+        self.log_bytes += change_bytes(&change.ops);
         self.log.push_back(change.clone());
-        while self.log.len() > CHANGE_LOG {
-            self.log.pop_front();
+        while self.log.len() > CHANGE_LOG || self.log_bytes > CHANGE_LOG_BYTES {
+            if let Some(old) = self.log.pop_front() {
+                self.log_bytes -= change_bytes(&old.ops);
+            }
         }
         let pruned = self.prune_selection();
         self.emit(StoreEvent::Changed(change));
@@ -1581,7 +1718,12 @@ impl DocumentStore {
             doc_id: self.doc_id,
             state_token: self.state_token,
             outside_writes: self.outside_writes,
-            document: self.current.clone(),
+            // Ids given to keys stored without one stay in memory.
+            document: if unchanged.is_some() {
+                self.current.clone()
+            } else {
+                model::without_derived_key_ids(&self.current)
+            },
             had_comps: self.file.envelope.had_comps,
             history,
             workspace: self.file.envelope.workspace.clone(),
@@ -2519,6 +2661,9 @@ pub(crate) fn scoped_patches(
     (forward, backward)
 }
 
+/// A staged result whose open composition is gone (named by no id).
+pub const OPEN_COMP_MISSING: &str = "the composition open in the editor is missing";
+
 /// Whole-transaction validation on the staged result.
 pub(crate) fn validate(document: &Document, ops: &[Op]) -> Result<(), TransactionError> {
     let invalid = |m: String| Err(TransactionError::Invalid(m));
@@ -2533,7 +2678,7 @@ pub(crate) fn validate(document: &Document, ops: &[Op]) -> Result<(), Transactio
         && model::comp_node(root, Some(open))
             .is_none_or(|c| !matches!(c.kind(), NodeKind::Object(_)))
     {
-        return invalid(format!("the open composition {open} is missing"));
+        return invalid(OPEN_COMP_MISSING.into());
     }
     // Compositions the transaction touched.
     let mut all = false;
@@ -2596,7 +2741,8 @@ pub(crate) fn validate(document: &Document, ops: &[Op]) -> Result<(), Transactio
             match id {
                 Some(id) if !id.is_empty() => {
                     if !ids.insert(id) {
-                        return invalid(format!("two layers have the id {id}"));
+                        let name = layer.get("name").and_then(model::str_of).unwrap_or("A layer");
+                        return invalid(format!("“{name}” would be in the composition twice"));
                     }
                 }
                 _ => return invalid("a layer has no id".into()),
