@@ -64,6 +64,7 @@ const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
     ),
     // Menu-only commands: shipped without a key, so the person can assign one.
     ("native.saveTake", "", "native.saveTake", "[]"),
+    ("native.speedDuration", "", "speedDuration", "[]"),
     (
         "native.addCompositionToTimeline",
         "",

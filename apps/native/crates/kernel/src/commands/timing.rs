@@ -114,6 +114,20 @@ pub enum TimingCommand {
         lanes: Vec<(String, u32)>,
         command: Box<TimingCommand>,
     },
+    /// Speed/Duration: a video or audio clip plays at `speed` (1 = normal,
+    /// above 0.05) from the same source In; its length scales so it shows the
+    /// same media (never past the media's end). With `ripple`, the later
+    /// clips on its track move by the change, so no gap opens and nothing is
+    /// covered (inside `InTracks`, its track is the lane it shows on). An
+    /// animated speed or a remapped clip refuses. `keep_pitch` sets how its
+    /// audio sounds at that speed (`d.pitch`: kept, or following the speed
+    /// as tape would); `None` leaves it. Label "Change Speed".
+    SetSpeed {
+        layer_id: String,
+        speed: f64,
+        ripple: bool,
+        keep_pitch: Option<bool>,
+    },
     /// Writes each unlocked layer's lane in the Tracks timeline as its
     /// stored `track` where they differ (see `InTracks`), first in a
     /// transaction whose edit (a pro edit's drag) decides tracks from them.
@@ -174,6 +188,7 @@ impl TimingCommand {
             TimingCommand::Slide { .. } => "Slide Layer",
             TimingCommand::InTracks { command, .. } => return command.label(),
             TimingCommand::PinTracks { .. } => "Edit Clips",
+            TimingCommand::SetSpeed { .. } => "Change Speed",
             TimingCommand::RemoveRange { close: false, .. } => "Lift Work Area",
             TimingCommand::RemoveRange { close: true, .. } => "Extract Work Area",
             TimingCommand::Retime { mode, .. } => match mode {
@@ -240,6 +255,12 @@ impl TimingCommand {
                 }
             }
             TimingCommand::PinTracks { lanes } => pin_tracks(cx, lanes),
+            TimingCommand::SetSpeed {
+                layer_id,
+                speed,
+                ripple,
+                keep_pitch,
+            } => set_speed(cx, layer_id, *speed, *ripple, *keep_pitch),
             TimingCommand::Roll {
                 layer_id,
                 edge,
@@ -443,7 +464,10 @@ fn trim(cx: &mut Cx<'_>, layer_ids: &[String], time: f64, start: bool) -> Result
             m.insert("dur", Value::Number(dur + (from - nf)));
             start_patch(&mut next, &layer, nf);
         } else {
-            values::obj(&mut next).insert("dur", Value::Number((1.0 / fps).max(time - from)));
+            // Never past the media's end at the clip's speed.
+            let longest = media_limit(cx, &layer).unwrap_or(f64::INFINITY);
+            let dur = (time - from).min(longest).max(1.0 / fps);
+            values::obj(&mut next).insert("dur", Value::Number(dur));
         }
         cx.put_layer(&loc, next)?;
     }
@@ -867,6 +891,119 @@ fn first_start(layer: &Value) -> f64 {
     }
 }
 
+/// The playback rate of a clip's media (`speed`, audio's too), or `None`
+/// when time remapping or an animated speed decides which frame shows.
+fn media_rate(layer: &Value) -> Option<f64> {
+    let d = layer.get("d")?;
+    let remapped = d.get("timeRemap").is_some_and(|r| {
+        if values::is_property(r) {
+            r.get("v").is_some_and(Value::is_truthy) || !track::keys_of(r).is_empty()
+        } else {
+            r.is_truthy()
+        }
+    });
+    let speed = d.get("speed");
+    let animated = speed.filter(|s| values::is_property(s)).is_some_and(|s| {
+        !track::keys_of(s).is_empty() || s.get("expr").is_some_and(Value::is_truthy)
+    });
+    if remapped || animated {
+        return None;
+    }
+    Some(
+        content_number(layer, "speed")
+            .filter(|s| *s > 0.0 && s.is_finite())
+            .unwrap_or(1.0),
+    )
+}
+
+/// The longest a video or audio clip may run before its media ends, at its
+/// speed from its source In; `None` without a known media length (or when
+/// its frames come from remapping).
+fn media_limit(cx: &Cx<'_>, layer: &Value) -> Option<f64> {
+    if !is_timed(layer) {
+        return None;
+    }
+    let rate = media_rate(layer)?;
+    let asset = layer.get("d").and_then(|d| values::text(d, "asset"))?;
+    let length = cx
+        .root()
+        .get("assets")
+        .and_then(|a| a.get(asset))
+        .and_then(|a| a.get("dur"))
+        .and_then(crate::model::number_of)
+        .filter(|n| n.is_finite() && *n > 0.0)?;
+    Some(((length - trim_of(layer)) / rate).max(0.0))
+}
+
+/// Speed/Duration (see `TimingCommand::SetSpeed`).
+fn set_speed(
+    cx: &mut Cx<'_>,
+    id: &str,
+    speed: f64,
+    ripple: bool,
+    keep_pitch: Option<bool>,
+) -> Result<(), CommandError> {
+    let speed = values::finite(speed, "speed")?;
+    if !(0.05..=100.0).contains(&speed) {
+        return Err(CommandError::Invalid(
+            "Choose a speed between 5% and 10000%.".into(),
+        ));
+    }
+    let (comp, layer, _) = editable(cx, id)?;
+    if !is_timed(&layer) {
+        return Err(CommandError::Invalid(
+            "Speed changes a video or audio clip.".into(),
+        ));
+    }
+    let Some(previous) = media_rate(&layer) else {
+        return Err(CommandError::Invalid(
+            "The clip's speed is animated or remapped: change it in Properties.".into(),
+        ));
+    };
+    let mut next = layer.clone();
+    if let Some(keep) = keep_pitch {
+        let pitch = if keep { "preserve" } else { "follow" };
+        values::obj(&mut next)
+            .get_mut("d")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| CommandError::Invalid("The clip has no source content.".into()))?
+            .insert("pitch", Value::from(pitch));
+    }
+    if (previous - speed).abs() < 1e-12 {
+        return put(cx, next);
+    }
+    let frame = 1.0 / cx.fps(comp.as_deref());
+    let (from, end) = ends(&layer);
+    set_content(&mut next, "speed", Value::Number(speed));
+    let mut dur = ((end - from) * previous / speed).max(frame);
+    if let Some(limit) = media_limit(cx, &next) {
+        dur = dur.min(limit.max(frame));
+    }
+    let track = track_of(&layer);
+    put(cx, with_dur(next, dur))?;
+    if ripple {
+        let delta = from + dur - end;
+        let layers = cx.layers(comp.as_deref());
+        for other in &layers {
+            let oid = values::text(other, "id").unwrap_or_default();
+            if oid == id
+                || values::text(other, "type") == Some("group")
+                || locked_here(&layers, other)
+                || track_of(other) != track
+            {
+                continue;
+            }
+            let (ofrom, _) = ends(other);
+            if ofrom >= end - EDGE_EPS {
+                let mut path = cx.find(oid)?.path();
+                path.push("from".into());
+                cx.set(path, Value::Number(ofrom + delta))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The Tracks timeline area a layer's lanes count in: audio, captions or
 /// video (each numbers its lanes from 0).
 fn area(layer: &Value) -> &'static str {
@@ -938,8 +1075,11 @@ fn ripple_trim(
                 }
             }
             TimeEdge::Out if time > end + EDGE_EPS => {
-                put(cx, with_dur(layer, time - from))?;
-                grown.push((id, end, time - end, track));
+                let t = time.min(from + media_limit(cx, &layer).unwrap_or(f64::INFINITY));
+                if t - end > EDGE_EPS {
+                    put(cx, with_dur(layer, t - from))?;
+                    grown.push((id, end, t - end, track));
+                }
             }
             _ if time <= from + EDGE_EPS || time >= end - EDGE_EPS => {}
             TimeEdge::In => {
@@ -1049,7 +1189,10 @@ fn roll(cx: &mut Cx<'_>, id: &str, edge: TimeEdge, time: f64) -> Result<(), Comm
     match edge {
         TimeEdge::Out => {
             let next = abutting(&layers, &layer, end, false);
-            let (mut lo, mut hi) = (from + frame, f64::INFINITY);
+            let (mut lo, mut hi) = (
+                from + frame,
+                from + media_limit(cx, &layer).unwrap_or(f64::INFINITY),
+            );
             if let Some(next) = &next {
                 hi = ends(next).1 - frame;
                 lo = lo.max(first_start(next));
@@ -1062,9 +1205,13 @@ fn roll(cx: &mut Cx<'_>, id: &str, edge: TimeEdge, time: f64) -> Result<(), Comm
         }
         TimeEdge::In => {
             let previous = abutting(&layers, &layer, from, true);
-            let (mut lo, hi) = (first_start(&layer), end - frame);
+            let (mut lo, mut hi) = (first_start(&layer), end - frame);
             if let Some(previous) = &previous {
                 lo = lo.max(ends(previous).0 + frame);
+                // The clip before grows: never past its media's end.
+                if let Some(limit) = media_limit(cx, previous) {
+                    hi = hi.min(ends(previous).0 + limit);
+                }
             }
             let t = time.clamp(lo.min(hi), hi);
             put(cx, cut_head(&layer, layer.clone(), t))?;
@@ -1087,6 +1234,10 @@ fn slide(cx: &mut Cx<'_>, id: &str, delta: f64) -> Result<(), CommandError> {
     let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
     if let Some(p) = &previous {
         lo = lo.max(ends(p).0 + frame - from);
+        // The clip before grows as this one moves on: never past its media.
+        if let Some(limit) = media_limit(cx, p) {
+            hi = hi.min(ends(p).0 + limit - from);
+        }
     }
     if let Some(n) = &next {
         hi = hi.min(ends(n).1 - frame - end);

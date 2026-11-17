@@ -66,6 +66,13 @@ pub(crate) fn in_tracks(published: &Published, command: TimingCommand) -> Timing
     pm_panel_timeline::tracks::in_tracks(&index, &view.reveal, command)
 }
 
+/// Whether the timeline shows tracks (its published view).
+pub(crate) fn shows_tracks(published: &Published) -> bool {
+    let mut view = pm_panel_timeline::TimelineModel::default();
+    view.restore_ui(&published.ui_state);
+    view.mode == pm_panel_timeline::TimelineMode::Tracks
+}
+
 fn plain(label: &str, commands: Vec<Command>) -> Plan {
     Plan {
         label: label.into(),
@@ -1869,6 +1876,7 @@ pub fn disabled(
         "slipLayers",
         selected.iter().any(|l| !l.effectively_locked && l.kind != "group"),
     );
+    set("speedDuration", free(&["video", "audio"]));
     for name in ["timeRemapLayers", "freezeFrame", "reverseLayers"] {
         set(name, free(&["video", "precomp"]));
     }
@@ -1981,6 +1989,7 @@ const DOCUMENT: &[&str] = &[
     "newComposition",
     "compositionSettings",
     "interpretFootage",
+    "speedDuration",
 ];
 
 /// A command that acts on the project: asked for while one is still

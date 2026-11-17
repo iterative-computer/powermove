@@ -102,6 +102,7 @@ mod render_frames;
 mod recent_work;
 mod rows;
 mod session;
+mod speed_sheet;
 mod region_attach;
 mod settings_window;
 mod shader_panel;
