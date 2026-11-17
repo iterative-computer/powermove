@@ -46,9 +46,27 @@ pub struct Client {
     compact: Option<String>,
     compactions: usize,
     done: bool,
+    steered: bool,
+    last_result: Option<RunResult>,
     deadline: u64,
 }
 impl Client {
+    /// A queued user message may get its own CLI turn after the first result.
+    /// Like Electron, close stdin on that result and retain the latest result
+    /// until stdout ends, bounded by the run's existing deadline.
+    pub fn steer(&mut self, prompt: &str, images: &[String]) -> Result<Effects, String> {
+        if self.done || self.last_result.is_some() {
+            return Err("Claude has finished reading input.".into());
+        }
+        self.steered = true;
+        Ok(Effects {
+            outgoing: vec![user_message(prompt, images)],
+            ..Effects::default()
+        })
+    }
+    pub fn awaiting_steered_exit(&self) -> bool {
+        !self.done && self.last_result.is_some()
+    }
     pub fn run_id(&self) -> &str {
         &self.run
     }
@@ -66,6 +84,8 @@ impl Client {
             compact: None,
             compactions: 0,
             done: false,
+            steered: false,
+            last_result: None,
             deadline: now.saturating_add(3_600_000),
         }
     }
@@ -167,7 +187,12 @@ impl Client {
                         RunResult::success(output, self.authority.access)
                     }
                 };
-                self.finish(result, &mut e);
+                if self.steered {
+                    e.close_stdin = self.last_result.is_none();
+                    self.last_result = Some(result);
+                } else {
+                    self.finish(result, &mut e);
+                }
             }
             _ => e.events.push(Event::Notification(v)),
         }
@@ -477,7 +502,14 @@ impl Client {
     }
     pub fn stopped(&mut self, reason: &str) -> Effects {
         let mut e = Effects::default();
-        self.finish(RunResult::failure(reason, false), &mut e);
+        let result = if reason == "Agent runtime stopped." {
+            self.last_result
+                .take()
+                .unwrap_or_else(|| RunResult::failure(reason, false))
+        } else {
+            RunResult::failure(reason, false)
+        };
+        self.finish(result, &mut e);
         e.events.push(Event::Stopped(reason.into()));
         e
     }
@@ -597,5 +629,52 @@ impl Options {
         }
         args.extend(["--system-prompt".into(), self.instructions.clone()]);
         Ok(args)
+    }
+}
+
+#[cfg(test)]
+mod steering_tests {
+    use super::*;
+    fn client() -> Client {
+        Client::new(
+            "run".into(),
+            Authority::new(Access::Editor, crate::ApprovalMode::Auto, false).unwrap(),
+            0,
+        )
+    }
+    #[test]
+    fn steer_during_final_answer_waits_for_last_result() {
+        let mut c = client();
+        c.receive(json!({"type":"assistant","message":{"content":[{"type":"text","text":"First answer"}]}}));
+        c.steer("Make it blue", &[]).unwrap();
+        let first = c.receive(json!({"type":"result","result":"First answer"}));
+        assert!(first.close_stdin);
+        assert!(
+            !first
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::Completed { .. }))
+        );
+        assert!(c.steer("Too late", &[]).is_err());
+        let last = c.receive(json!({"type":"result","result":"Blue answer"}));
+        assert!(!last.close_stdin);
+        assert!(last.events.is_empty());
+        let exit = c.stopped("Agent runtime stopped.");
+        assert!(exit.events.iter().any(|e| matches!(e, Event::Completed { result, .. } if *result == RunResult::success("Blue answer".into(), Access::Editor))));
+    }
+    #[test]
+    fn steer_before_output_and_consumed_by_tool_can_finish_with_one_result() {
+        let mut c = client();
+        c.steer("Make it blue", &[]).unwrap();
+        c.receive(json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool","name":"Read","input":{}}]}}));
+        let result = c.receive(json!({"type":"result","result":"Done"}));
+        assert!(result.close_stdin);
+        assert!(c.awaiting_steered_exit());
+        assert!(
+            c.stopped("Agent runtime stopped.")
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::Completed { .. }))
+        );
     }
 }

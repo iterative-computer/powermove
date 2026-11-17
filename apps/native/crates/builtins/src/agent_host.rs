@@ -380,11 +380,6 @@ pub fn admit_send(state: &AgentState, thread: &str) -> Result<(), String> {
     if !session.draft.sendable() {
         return Ok(());
     }
-    if session.run.is_some() && session.draft.attachments().next().is_some() {
-        return Err(
-            "Attachments can't join a running turn yet. Send them with your next message.".into(),
-        );
-    }
     match &session.run {
         None if state.runs.active() >= 8 => {
             Err("Eight agents are already running. Wait for one to finish.".into())
@@ -462,9 +457,15 @@ pub fn run_effect(
             launch_request(state, environment, effect, text, settings).and_then(
                 |(environment, request)| {
                     let kept = request.clone();
+                    // Built-in workflow labels expand before launch. Retain
+                    // those same instructions when a later direction restarts it.
+                    let mut original = effect.clone();
+                    if let EffectKind::Send { text, .. } = &mut original.kind {
+                        *text = expand_request(text).into_owned();
+                    }
                     state
                         .runs
-                        .start(&mut state.panel, &mut store, effect, now(), || {
+                        .start(&mut state.panel, &mut store, &original, now(), || {
                             launch::launch(&environment, request).map_err(Error::Host)
                         })?;
                     let target = &effect.target;
@@ -472,6 +473,71 @@ pub fn run_effect(
                     Ok(())
                 },
             )
+        }
+        EffectKind::Send {
+            text,
+            settings,
+            steer: true,
+            ..
+        } => {
+            let environment = link.environment.shared().clone();
+            let run = effect.target.run.as_deref().ok_or(Error::Stale);
+            run.and_then(|run| state.runs.continued_request(run, text))
+                .and_then(|continued| {
+                    let continued_effect = state.runs.continuation_effect(effect)?;
+                    let (environment, mut request) = launch_request(
+                        state,
+                        environment,
+                        &continued_effect,
+                        &continued,
+                        settings,
+                    )?;
+                    // Stage the current direction separately: original attachments belong
+                    // to the restart request, not another live user message.
+                    let attached = match &effect.kind {
+                        EffectKind::Send { attachments, .. } => attachments.as_slice(),
+                        _ => &[],
+                    };
+                    let (images, files) = lay_out_direction(
+                        &request
+                            .workspace
+                            .join("attachments")
+                            .join(safe(effect.target.run.as_deref().ok_or(Error::Stale)?))
+                            .join(effect.id.to_string()),
+                        attached,
+                    )
+                    .map_err(|e| {
+                        Error::Host(format!("An attachment could not be prepared: {e}"))
+                    })?;
+                    let document = kernel
+                        .published(&effect.target.project)
+                        .map_or(0, |p| p.snapshot.doc_id);
+                    let live =
+                        steering_prompt(text, &files, attached, &effect.target.project, document);
+                    append_restart_targets(
+                        &mut request.prompt,
+                        match &continued_effect.kind {
+                            EffectKind::Send { attachments, .. } => attachments.as_slice(),
+                            _ => &[],
+                        },
+                        &effect.target.project,
+                        document,
+                    );
+                    let kept = request.clone();
+                    state.runs.steer(
+                        &mut state.panel,
+                        &mut store,
+                        effect,
+                        now(),
+                        live,
+                        images,
+                        Box::new(move || {
+                            launch::launch(&environment, request).map_err(Error::Host)
+                        }),
+                    )?;
+                    state.tasks.directed(&kept);
+                    Ok(())
+                })
         }
         // A subagent's question, answered in its parent's conversation.
         EffectKind::Answer {
@@ -506,6 +572,84 @@ pub fn run_effect(
     ensure_worker(shared, link, kernel, application);
     refused.map_or(Ok(()), Err)
 }
+/// Keep initial targets and a bounded recent window when references accumulate.
+fn append_restart_targets(prompt: &mut String, attached: &[Value], project: &str, document: u64) {
+    prompt.push_str(&pm_agents::context::targets(attached, project, document));
+    let recent_start = attached.len().saturating_sub(6).max(6);
+    if recent_start < attached.len() {
+        let recent = pm_agents::context::targets(&attached[recent_start..], project, document);
+        if !recent.is_empty() {
+            prompt.push_str(&format!("\n\nRECENT TARGETS (attachmentIndex 0 in this block starts at retained reference {recent_start}; use these newer anchors with the newest direction)"));
+            prompt.push_str(&recent);
+        }
+    }
+}
+/// Only the new direction and its references travel over a live transport.
+fn steering_prompt(
+    text: &str,
+    files: &[Value],
+    attached: &[Value],
+    project: &str,
+    document: u64,
+) -> String {
+    let mut prompt = text.to_owned();
+    if !files.is_empty() {
+        prompt.push_str(&format!("\n\nATTACHED FILES\n{}", serde_json::json!(files)));
+    }
+    prompt.push_str(&pm_agents::context::targets(attached, project, document));
+    prompt
+}
+
+#[cfg(test)]
+mod steering_prompt_tests {
+    use super::*;
+    #[test]
+    fn live_steer_includes_screen_pick_targets() {
+        let attached = vec![serde_json::json!({"name":"screen.png","targetContext":{
+            "projectId":"p","documentId":7,"panelId":"viewer","coordinateSpace":"panel",
+            "compositionTime":1.5,"time":1.5,"area":{"x":10,"y":20,"width":30,"height":40}
+        }})];
+        let targets = pm_agents::context::targets(&attached, "p", 7);
+        let prompt = steering_prompt("Move this left", &[], &attached, "p", 7);
+        assert!(!targets.is_empty());
+        assert_eq!(prompt, format!("Move this left{targets}"));
+        assert!(prompt.contains("\"sameDocument\":true"));
+        assert!(prompt.contains("compositionTime"));
+        assert!(!prompt.contains("ORIGINAL REQUEST"));
+    }
+    #[test]
+    fn live_direction_layout_keeps_original_reference_pixels() {
+        let root = tempfile::tempdir().unwrap();
+        let original = vec![
+            serde_json::json!({"name":"original.png","type":"image/png","dataBase64":"b3JpZ2luYWw="}),
+        ];
+        let direction =
+            vec![serde_json::json!({"name":"new.png","type":"image/png","dataBase64":"bmV3"})];
+        let (before, _) = lay_out(root.path(), &original).unwrap();
+        let (live, _) = lay_out_direction(root.path(), &direction).unwrap();
+        assert_ne!(before, live);
+        assert_eq!(std::fs::read(&before[0]).unwrap(), b"original");
+        assert_eq!(std::fs::read(&live[0]).unwrap(), b"new");
+    }
+    #[test]
+    fn restart_keeps_the_latest_pick_beyond_the_original_reference_window() {
+        let mut attached: Vec<Value> = (0..6).map(|index| serde_json::json!({
+            "name":format!("original-{index}.png"),
+            "targetContext":{"projectId":"p","documentId":7,"panelId":"viewer","selection":[format!("original-{index}")]}
+        })).collect();
+        attached.push(serde_json::json!({"name":"latest.png","targetContext":{
+            "projectId":"p","documentId":7,"panelId":"viewer","selection":["new-target"],"compositionTime":1.5
+        }}));
+        let mut prompt = "Make the latest selection blue".to_owned();
+        append_restart_targets(&mut prompt, &attached, "p", 7);
+        assert!(prompt.contains("original-0"));
+        assert!(prompt.contains("original-5"));
+        assert!(prompt.contains("new-target"));
+        assert!(prompt.contains("retained reference 6"));
+        assert!(prompt.contains("compositionTime"));
+    }
+}
+
 fn launch_request(
     state: &AgentState,
     environment: Option<Environment>,
@@ -522,8 +666,14 @@ fn launch_request(
         _ => &[],
     };
     let run = effect.target.run.clone().unwrap_or_default();
-    let (images, files) = lay_out(&directory.join("attachments").join(safe(&run)), attached)
-        .map_err(|e| Error::Host(format!("An attachment could not be prepared: {e}")))?;
+    let (images, files) = lay_out(
+        &directory
+            .join("attachments")
+            .join(safe(&run))
+            .join(effect.id.to_string()),
+        attached,
+    )
+    .map_err(|e| Error::Host(format!("An attachment could not be prepared: {e}")))?;
     let request = Request {
         run: effect.target.run.clone().ok_or(Error::Stale)?,
         prompt: prompt(&state.panel, thread, text)?,
@@ -559,6 +709,13 @@ fn launch_request(
 }
 fn safe(name: &str) -> String {
     pm_agents::workspace::safe_component(name)
+}
+/// Keep new live references separate from the restart's original references.
+fn lay_out_direction(
+    directory: &std::path::Path,
+    attached: &[Value],
+) -> std::io::Result<(Vec<String>, Vec<Value>)> {
+    lay_out(&directory.join("direction"), attached)
 }
 /// Main's attachment layout: images become files in the run's workspace for
 /// the provider to look at; other files travel in the prompt (ATTACHED FILES).

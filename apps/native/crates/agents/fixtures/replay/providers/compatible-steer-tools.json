@@ -1,0 +1,23 @@
+{
+  "synthetic": true,
+  "direction": "Make it blue",
+  "firstDelta": {
+    "tool_calls": [
+      {
+        "index": 0,
+        "id": "call",
+        "function": {
+          "name": "complete_task",
+          "arguments": "{}"
+        }
+      }
+    ]
+  },
+  "expectedRoles": [
+    "system",
+    "user",
+    "assistant",
+    "tool",
+    "user"
+  ]
+}

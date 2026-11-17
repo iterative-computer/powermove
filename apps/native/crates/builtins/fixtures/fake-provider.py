@@ -121,6 +121,9 @@ def codex():
         elif method == 'turn/start':
             emit({'id': request['id'], 'result': {'turn': {'id': 'turn', 'status': 'inProgress'}}})
             emit({'method': 'turn/started', 'params': {'threadId': 'thread', 'turn': {'id': 'turn'}}})
+            if os.environ.get('PM_FAKE_REQUESTS'):
+                with open(os.environ['PM_FAKE_REQUESTS'], 'a') as record:
+                    record.write(json.dumps({'cwd': os.getcwd(), 'request': request}) + '\n')
             last = request['params']['input'][0]['text'].split('\n')[-1]
             if last.startswith('Secret:'):
                 emit({'id': 900, 'method': 'item/tool/requestUserInput', 'params': {**turn, 'itemId': 'q1', 'isBlocking': True,

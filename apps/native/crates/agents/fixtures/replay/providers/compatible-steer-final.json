@@ -1,0 +1,13 @@
+{
+  "synthetic": true,
+  "direction": "Make it blue",
+  "firstDelta": {
+    "content": "Original answer"
+  },
+  "expectedRoles": [
+    "system",
+    "user",
+    "assistant",
+    "user"
+  ]
+}

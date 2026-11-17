@@ -112,7 +112,11 @@ impl Machine {
                     .steer(&run, &prompt, &images, now)
                     .map(|e| (e, true))
                     .unwrap_or_else(warning),
-                _ => warning("Live steering requires App Server".into()),
+                Self::Claude(c) if c.run_id() == run => c
+                    .steer(&prompt, &images)
+                    .map(|e| (e, true))
+                    .unwrap_or_else(warning),
+                _ => warning("This transport needs a continuation restart".into()),
             },
             Action::Answer { run, item, answers } => match self {
                 Self::Codex(c) => optional(c.answer(&run, &item, &answers)),
@@ -162,7 +166,10 @@ impl Handle {
         self
     }
     pub fn supports_steering(&self) -> bool {
-        self.surface == Surface::Codex
+        true
+    }
+    pub fn supports_live_steering(&self) -> bool {
+        self.surface != Surface::CodexExec
     }
     /// On saturation, returns the original action for a later retry.
     pub fn send(&self, a: Action) -> Result<(), TrySendError<Action>> {
@@ -349,6 +356,11 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
                 reason = err.to_string();
                 stop = true;
             }
+            // Claude consumes user messages queued before stdin closed. Those
+            // follow-up turns use the normal run deadline, not the reap grace.
+            if matches!(&machine, Machine::Claude(c) if c.awaiting_steered_exit()) {
+                closing = None;
+            }
             if closing.is_some_and(|end| Instant::now() >= end) {
                 reason = "Agent runtime did not exit after its turn ended.".into();
                 stop = true;
@@ -481,4 +493,54 @@ fn terminate(child: &mut Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(test)]
+mod steering_capability_tests {
+    #[test]
+    fn all_transports_accept_steering() {
+        for surface in [
+            super::Surface::Codex,
+            super::Surface::Claude,
+            super::Surface::Compatible,
+            super::Surface::CodexExec,
+        ] {
+            assert!(super::worker(surface).0.supports_steering());
+        }
+    }
+}
+
+#[cfg(test)]
+mod claude_steering_replay_tests {
+    use super::*;
+    #[test]
+    fn claude_steer_replay() {
+        for fixture in [
+            include_str!("../fixtures/replay/providers/claude-steer.json"),
+            include_str!("../fixtures/replay/providers/claude-steer-attachments.json"),
+        ] {
+            let v: Value = serde_json::from_str(fixture).unwrap();
+            let direction = &v["frames"][0]["value"];
+            let mut machine = Machine::Claude(claude::Client::new(
+                "run".into(),
+                crate::approvals::Authority::new(
+                    crate::Access::Editor,
+                    crate::ApprovalMode::Auto,
+                    false,
+                )
+                .unwrap(),
+                0,
+            ));
+            let (effects, accepted) = machine.action(
+                Action::Steer {
+                    run: "run".into(),
+                    prompt: direction["prompt"].as_str().unwrap().into(),
+                    images: serde_json::from_value(direction["images"].clone()).unwrap(),
+                },
+                0,
+            );
+            assert!(accepted, "Claude rejected live direction");
+            assert_eq!(effects.outgoing, vec![v["frames"][1]["value"].clone()]);
+        }
+    }
 }

@@ -16,11 +16,15 @@ use std::sync::mpsc::{Receiver, TryRecvError, TrySendError};
 
 struct PendingAction {
     effect: Option<u64>,
+    restart: Option<Box<dyn FnOnce() -> Result<Handle> + Send>>,
     pending: Receiver<bool>,
     result: Option<bool>,
 }
 struct Running {
     target: Target,
+    original: String,
+    attachments: Vec<serde_json::Value>,
+    directions: Vec<String>,
     handle: Handle,
     sequence: u64,
     pending: Option<Event>,
@@ -111,6 +115,15 @@ impl ProviderRuns {
         };
         self.runs.push(Running {
             target: effect.target.clone(),
+            original: match &effect.kind {
+                EffectKind::Send { text, .. } => text.clone(),
+                _ => unreachable!(),
+            },
+            attachments: match &effect.kind {
+                EffectKind::Send { attachments, .. } => attachments.clone(),
+                _ => vec![],
+            },
+            directions: vec![],
             handle,
             sequence: 0,
             pending: None,
@@ -220,6 +233,10 @@ impl ProviderRuns {
                 }
                 panel.save(store, now)
             }
+            EffectKind::Send { steer: true, .. } => {
+                self.inject(effect.target.run.as_deref().ok_or(Error::Stale)?, Event::Trace { run: effect.target.run.clone().ok_or(Error::Stale)?, value: serde_json::json!({"kind":"answer","text":format!("Your direction could not be delivered: {error}. Please send it again.")}) });
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -239,13 +256,102 @@ impl ProviderRuns {
             }
         }
     }
-    /// Only App Server takes more input during a turn.
+    /// Every run can take direction, either live or through a continuation.
+    pub fn continuation_effect(&self, effect: &Effect) -> Result<Effect> {
+        let running = self
+            .runs
+            .iter()
+            .find(|r| !r.finished && r.target == effect.target)
+            .ok_or(Error::Stale)?;
+        let mut next = effect.clone();
+        if let EffectKind::Send { attachments, .. } = &mut next.kind {
+            let current = std::mem::take(attachments);
+            *attachments = running.attachments.iter().cloned().chain(current).collect();
+        }
+        Ok(next)
+    }
+    pub fn continued_request(&self, run: &str, direction: &str) -> Result<String> {
+        let running = self
+            .runs
+            .iter()
+            .find(|r| !r.finished && r.target.run.as_deref() == Some(run))
+            .ok_or(Error::Stale)?;
+        Ok(format!(
+            "ORIGINAL REQUEST\n{}\n\nNEW DIRECTION\n{}",
+            running.original,
+            running
+                .directions
+                .iter()
+                .map(String::as_str)
+                .chain(std::iter::once(direction))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        ) + "\n\nPreserve completed work, re-read the live project state, and finish the original request with the newest direction applied.")
+    }
+    /// Dispatch staged input and keep a restart available if the process has
+    /// already closed its input. The host prepares files exactly as for Send.
+    pub fn steer(
+        &mut self,
+        panel: &mut Panel,
+        store: &mut impl Store,
+        effect: &Effect,
+        now: u64,
+        prompt: String,
+        images: Vec<String>,
+        restart: Box<dyn FnOnce() -> Result<Handle> + Send>,
+    ) -> Result<()> {
+        Self::validate(panel, &effect.target)?;
+        let running = self
+            .runs
+            .iter_mut()
+            .find(|r| !r.finished && r.target == effect.target)
+            .ok_or(Error::Stale)?;
+        if running.action.is_some() {
+            return Err(Error::Busy);
+        }
+        panel.save(store, now)?;
+        let direction = match &effect.kind {
+            EffectKind::Send { text, .. } => text.clone(),
+            _ => return Err(Error::Invalid("steering effect")),
+        };
+        if !running.handle.supports_live_steering() || running.held.is_some() {
+            running.handle = restart()?;
+            running.pending = None;
+            running.held = None;
+            running.release = false;
+        } else {
+            match running.handle.send_checked(Action::Steer {
+                run: effect.target.run.clone().ok_or(Error::Stale)?,
+                prompt,
+                images,
+            }) {
+                Ok(pending) => {
+                    running.action = Some(PendingAction {
+                        effect: None,
+                        pending,
+                        result: None,
+                        restart: Some(restart),
+                    })
+                }
+                Err(TrySendError::Full(_)) => return Err(Error::Busy),
+                Err(TrySendError::Disconnected(_)) => {
+                    running.handle = restart()?;
+                    running.pending = None;
+                }
+            }
+        }
+        if let EffectKind::Send { attachments, .. } = &effect.kind {
+            running.attachments.extend(attachments.clone());
+        }
+        running.directions.push(direction);
+        self.ended
+            .retain(|(run, _)| Some(run) != effect.target.run.as_ref());
+        Ok(())
+    }
+    /// Whether this unfinished run can take direction.
     pub fn steerable(&self, run: &str) -> bool {
         self.runs.iter().any(|r| {
-            !r.finished
-                && r.held.is_none()
-                && r.target.run.as_deref() == Some(run)
-                && r.handle.supports_steering()
+            !r.finished && r.target.run.as_deref() == Some(run) && r.handle.supports_steering()
         })
     }
     /// Unfinished runs, which is what the thread lease and the UI care about.
@@ -315,10 +421,17 @@ impl ProviderRuns {
                 steer: true,
                 attachments,
                 ..
-            } if attachments.is_empty() && running.handle.supports_steering() => (
+            } if running.handle.supports_steering() => (
                 Action::Steer {
                     run,
-                    prompt: text.clone(),
+                    prompt: if attachments.is_empty() {
+                        text.clone()
+                    } else {
+                        format!(
+                            "{text}\n\nATTACHED FILES\n{}",
+                            serde_json::json!(attachments)
+                        )
+                    },
                     images: vec![],
                 },
                 false,
@@ -330,6 +443,7 @@ impl ProviderRuns {
             Ok(pending) => {
                 running.action = Some(PendingAction {
                     effect: ack.then_some(effect.id),
+                    restart: None,
                     pending,
                     result: None,
                 });
@@ -372,7 +486,18 @@ impl ProviderRuns {
                         next.save(store, now)?;
                         *panel = next;
                     }
+                    let restart = action.restart.take();
                     running.action = None;
+                    if !accepted && let Some(restart) = restart {
+                        match restart() {
+                            Ok(handle) => { running.handle = handle; running.pending = None; }
+                            Err(error) => running.injected.push_back(Event::Trace {
+                                run: running.target.run.clone().ok_or(Error::Stale)?,
+                                value: serde_json::json!({"kind":"answer","text":format!("Your direction could not be delivered: {error}. Please send it again.")}),
+                            }),
+                        }
+                        continue;
+                    }
                     if !accepted {
                         return Err(Error::Host("provider rejected action".into()));
                     }
