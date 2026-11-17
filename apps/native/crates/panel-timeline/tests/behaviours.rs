@@ -2639,3 +2639,38 @@ fn path_vertex_keys_stored_without_ids_are_shown_selected_and_moved() {
     assert!((keys[1].time - (1. + 1. / 30.)).abs() < 1e-9, "{}", keys[1].time);
     assert_eq!(c.model.selection.keys(), [named(1)]);
 }
+/// PM-477 by hand: M, on top of the stack, rests on the lower lane because
+/// nothing overlaps it; E, on the lane above, slides into M's time. Each
+/// clip keeps the lane it showed on: E now composites over M, as its track
+/// says (the stack follows the lanes, as v1's track view writes it).
+#[test]
+fn a_slide_into_another_tracks_time_moves_no_clip_to_another_lane() {
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"Lanes","w":200,"h":100,"fps":30,"dur":10,"comps":{},"assets":{},"layers":[
+        {"id":"m","name":"M","type":"shape","from":3,"dur":2,"on":true,"p":{}},
+        {"id":"e","name":"E","type":"shape","from":0,"dur":2.9,"on":true,"p":{}},
+        {"id":"k","name":"K","type":"shape","from":0,"dur":2.9,"on":true,"p":{}},
+        {"id":"n","name":"N","type":"shape","from":0,"dur":6,"on":true,"p":{}}
+        ]}"##,
+    )
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    let lanes = |c: &TimelineClient| {
+        let layout = pm_panel_timeline::tracks::layout(&c.model.index, &c.model.reveal);
+        ["m", "e", "k", "n"].map(|id| layout.item(id).unwrap().lane)
+    };
+    let before = lanes(&c);
+    assert!(before[1] > before[0], "E shows above M: {before:?}");
+    let command = pm_panel_timeline::tracks::in_tracks(
+        &c.model.index,
+        &c.model.reveal,
+        pm_kernel::TimingCommand::Slide {
+            layer_id: "e".into(),
+            delta: 0.5,
+        },
+    );
+    edit(&mut c, vec![command.into()]);
+    c.sync().unwrap();
+    assert_eq!(lanes(&c), before);
+}

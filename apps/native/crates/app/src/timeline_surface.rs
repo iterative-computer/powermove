@@ -1226,6 +1226,16 @@ impl TimelineSurface {
         self.outline.set_scene(self.scene.clone());
         self.frame = None;
         self.clamp_scroll();
+        // The names follow the new scene at once: a switch between Layers and
+        // Tracks at the same offset kept the outline's old window and offset,
+        // and the header column drew nothing beside the tracks until a scroll
+        // (PM-477).
+        self.outline.scrolled(
+            self.view.scroll_y as f32,
+            self.view.layer_column as f32,
+            self.visible_rows(),
+            cx,
+        );
         let duration = self.model.index.duration;
         if duration > 0. && self.bounds.size.width > px(0.) {
             let width = (f32::from(self.bounds.size.width) as f64 - self.view.layer_column).max(1.);
