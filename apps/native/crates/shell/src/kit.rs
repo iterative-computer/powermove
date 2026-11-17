@@ -361,6 +361,19 @@ impl Kit {
                     .child(hint.to_string())
             }))
     }
+    /// A header's shared face for the search and pull-down AppKit controls.
+    pub fn header_well(&self, control: Entity<crate::native_control::NativeControl>) -> Div {
+        let t = &self.t;
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .h(px(t.metrics.control))
+            .px(px(t.space.xs))
+            .rounded(px(t.metrics.control_radius))
+            .bg(ink(t.colors.text, t.translucency.hover))
+            .child(control)
+    }
     /// The drawn switch, for places a real view per control cannot work (a
     /// long scrolling list). Everywhere else host the real `NSSwitch`
     /// (`native_control::Kind::Switch`). It keeps the system switch's shape on
@@ -740,6 +753,9 @@ impl Kit {
             .px(px(t.space.xxl))
             .py(px(t.space.lg))
     }
+    /// The default AppKit source-list row at medium sidebar size.
+    pub const SIDEBAR_INSET: f32 = 10.;
+
     /// The same source-list row in Home and utility windows.
     pub fn nav_row(
         &self,
@@ -750,8 +766,26 @@ impl Kit {
         selected: bool,
     ) -> Stateful<Div> {
         let t = &self.t;
-        self.row(id, selected)
-            .text_size(px(t.typography.reading))
+        let id = id.into();
+        let key = key(&id);
+        let radius = 8.;
+        let row = div()
+            .id(id)
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(32.))
+            .px(px(8.))
+            .gap(px(8.))
+            .rounded(px(radius))
+            .text_size(px(13.))
+            .font_weight(FontWeight::NORMAL)
+            .line_height(px(16.))
+            .text_color(rgb(t.colors.text))
+            .aria_selected(selected)
+            .when(selected, |d| {
+                d.bg(ink(t.colors.text, t.translucency.selected))
+            })
             .role(Role::Button)
             .aria_label(match count {
                 Some(n) => format!("{label}, {n}"),
@@ -759,7 +793,7 @@ impl Kit {
             })
             .child(self.symbol(
                 symbol,
-                t.metrics.symbol_panel,
+                16.,
                 Weight::Regular,
                 if selected {
                     t.colors.text
@@ -775,7 +809,12 @@ impl Kit {
                     .font_features(tabular())
                     .text_color(rgb(t.colors.muted))
                     .child(n.to_string())
-            }))
+            }));
+        if selected {
+            row
+        } else {
+            self.wash(row, key, radius)
+        }
     }
     pub fn vertical_separator(&self) -> Div {
         div()

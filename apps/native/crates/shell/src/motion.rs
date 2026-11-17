@@ -8,6 +8,9 @@ use pm_design::{
 };
 use std::{cell::RefCell, collections::HashMap, hash::Hash, rc::Rc, time::Instant};
 
+mod rolling_label;
+pub use rolling_label::RollingLabel;
+
 /// Hover washes keyed by control. The control under the pointer washes in
 /// quickly; the one it left for a neighbour vanishes in ~80 ms; a wash left
 /// for nothing fades out slowly. Interrupting either keeps its velocity.

@@ -302,6 +302,32 @@ impl Control {
 /// A prominent search field's shortcut hint stands at its trailing end while
 /// the field is empty (the clear button takes that place once it is not).
 const SEARCH_HINT: isize = 0x4846;
+fn add_search_hint(
+    v: &NSSearchField,
+    shortcut: &str,
+    font: f32,
+    inset: f64,
+    mtm: MainThreadMarker,
+) {
+    let hint = NSTextField::labelWithString(&NSString::from_str(shortcut), mtm);
+    hint.setFont(Some(&NSFont::systemFontOfSize(f64::from(font))));
+    hint.setTextColor(Some(&NSColor::tertiaryLabelColor()));
+    hint.setTag(SEARCH_HINT);
+    hint.setAccessibilityElement(false);
+    hint.sizeToFit();
+    let (field, own) = (v.frame().size, hint.frame().size);
+    hint.setFrameOrigin(NSPoint::new(
+        field.width - own.width - inset,
+        ((field.height - own.height) / 2.).round(),
+    ));
+    hint.setAutoresizingMask(
+        NSAutoresizingMaskOptions::ViewMinXMargin
+            | NSAutoresizingMaskOptions::ViewMinYMargin
+            | NSAutoresizingMaskOptions::ViewMaxYMargin,
+    );
+    v.addSubview(&hint);
+}
+
 fn search_hint(field: &NSView, empty: bool) {
     if let Some(hint) = field.viewWithTag(SEARCH_HINT) {
         hint.setHidden(!empty);
@@ -684,23 +710,7 @@ impl NativeControl {
                     v.setControlSize(NSControlSize::Large);
                     v.setFont(Some(&NSFont::systemFontOfSize(t.typography.title as f64)));
                     v.sizeToFit();
-                    let hint = NSTextField::labelWithString(&NSString::from_str(shortcut), mtm);
-                    hint.setFont(Some(&NSFont::systemFontOfSize(t.typography.body as f64)));
-                    hint.setTextColor(Some(&NSColor::tertiaryLabelColor()));
-                    hint.setTag(SEARCH_HINT);
-                    hint.setAccessibilityElement(false);
-                    hint.sizeToFit();
-                    let (field, own) = (v.frame().size, hint.frame().size);
-                    hint.setFrameOrigin(NSPoint::new(
-                        field.width - own.width - 12.,
-                        ((field.height - own.height) / 2.).round(),
-                    ));
-                    hint.setAutoresizingMask(
-                        NSAutoresizingMaskOptions::ViewMinXMargin
-                            | NSAutoresizingMaskOptions::ViewMinYMargin
-                            | NSAutoresizingMaskOptions::ViewMaxYMargin,
-                    );
-                    v.addSubview(&hint);
+                    add_search_hint(&v, shortcut, t.typography.body, 12., mtm);
                 }
                 Control::Search(v)
             }
@@ -826,12 +836,75 @@ impl NativeControl {
             None => self.focus.set(true),
         }
     }
+    /// Uses the same native search as panels, in the kit's header well.
+    pub fn header_search(
+        label: &str,
+        id: &str,
+        value: &str,
+        t: &pm_design::Tokens,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut control = Self::new(
+            ControlSpec {
+                kind: Kind::Search,
+                label,
+                identifier: id,
+                value: &Value::String(value.to_owned()),
+                options: vec![],
+                disabled: false,
+                default: false,
+                destructive: false,
+                inline: false,
+                quiet: false,
+                pull: false,
+                tint: None,
+                symbol: None,
+                glass: false,
+                well: false,
+            },
+            t,
+            window,
+            cx,
+        );
+        control.use_header_well();
+        if let Control::Search(field) = &control.control {
+            let mtm = MainThreadMarker::new().expect("main thread");
+            add_search_hint(field, "⌘F", t.typography.body, f64::from(t.space.sm), mtm);
+            search_hint(field, value.is_empty());
+        }
+        control
+    }
+    /// Lets the kit draw the well while AppKit still draws and handles the
+    /// search cell or pull-down. Keep their regular-size native baselines.
+    pub fn use_header_well(&mut self) {
+        match &self.control {
+            Control::Search(v) => {
+                self.height = v.fittingSize().height as f32;
+                v.setBezeled(false);
+                v.setBordered(false);
+                v.setDrawsBackground(false);
+            }
+            Control::Popup(v) => {
+                self.height = v.fittingSize().height as f32;
+                v.setBordered(false);
+            }
+            _ => {}
+        }
+    }
     /// A text the view's host set (a filter applied from outside) replaces
     /// a search field's text even while it is typed in, once per revision.
     pub fn host_text(&mut self, text: &str, revision: u64) {
-        if let Control::Search(v) = &self.control
-            && self.host_revision.replace(revision) != Some(revision)
-        {
+        if self.host_revision.replace(revision) != Some(revision) {
+            self.set_search_text(text);
+        }
+    }
+    /// Clears a search owned by its native editor, even on repeated Escapes.
+    pub fn clear_search(&self) {
+        self.set_search_text("");
+    }
+    fn set_search_text(&self, text: &str) {
+        if let Control::Search(v) = &self.control {
             v.setStringValue(&NSString::from_str(text));
             search_hint(v, text.is_empty());
         }

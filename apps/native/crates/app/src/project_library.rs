@@ -152,7 +152,9 @@ pub struct ProjectLibrary {
     repeated: std::collections::HashSet<String>,
     /// Every shown card's title (`fit_title` tells apart those a cut makes alike).
     titles: Vec<String>,
-    search: Option<Entity<pm_shell::text::TextField>>,
+    search: Option<Entity<NativeControl>>,
+    section_label: pm_shell::motion::RollingLabel,
+    count_label: pm_shell::motion::RollingLabel,
     /// New Project, the system's glass button: the header's one raised
     /// action. The rest of the header is drawn.
     new_project: Option<Entity<NativeControl>>,
@@ -257,6 +259,8 @@ impl ProjectLibrary {
             repeated: Default::default(),
             titles: Vec::new(),
             search: None,
+            section_label: Default::default(),
+            count_label: Default::default(),
             new_project: None,
             active: None,
             announced_open: None,
@@ -594,7 +598,7 @@ impl ProjectLibrary {
         match event.keystroke.key.as_str() {
             "f" if event.keystroke.modifiers.platform => {
                 if let Some(field) = &self.search {
-                    field.update(cx, |f, cx| f.begin_editing_selecting_all(cx));
+                    field.read(cx).focus();
                 }
             }
             "up" => self.controller.move_selection(-columns),
@@ -620,7 +624,7 @@ impl ProjectLibrary {
     }
     pub(crate) fn clear_search(&mut self, cx: &mut Context<Self>) {
         if let Some(field) = &self.search {
-            field.update(cx, |f, cx| f.set_value("", cx));
+            field.read(cx).clear_search();
         }
         self.set_text(String::new(), cx);
     }
@@ -680,8 +684,6 @@ const INSET: f32 = 24.;
 /// The header row, and the height of what stands in it: the search pill and
 /// the icon actions, with their glyph.
 const HEADER: f32 = 48.;
-const ACTION: f32 = 32.;
-const ACTION_SYMBOL: f32 = 18.;
 /// The search pill is at most this wide, and leaves this much of the sheet
 /// to the title and the actions.
 const SEARCH_MAX: f32 = 360.;
@@ -855,23 +857,9 @@ impl ProjectLibrary {
         label: &'static str,
         tip: &'static str,
     ) -> Stateful<Div> {
-        let t = &kit.t;
-        let (text, pressed) = (t.colors.text, t.translucency.pressed);
-        let d = div()
-            .id(id)
+        kit.icon_button(id, symbol, label, false)
             .debug_selector(move || id.into())
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .size(px(ACTION))
-            .rounded(px(t.radius.md))
-            .role(Role::Button)
-            .aria_label(label)
-            .tooltip(kit::tooltip(t, tip))
-            .child(kit.symbol(symbol, ACTION_SYMBOL, Weight::Regular, t.colors.secondary))
-            .active_style(move |s| s.bg(ink(text, pressed)));
-        kit.wash(d, kit::key(id), t.radius.md)
+            .tooltip(kit::tooltip(&kit.t, tip))
     }
     /// The rows of a button menu.
     fn rows_of(&self, menu: Menu) -> Vec<pm_shell::transient::Choice> {
@@ -1763,32 +1751,21 @@ impl Render for ProjectLibrary {
         let (c, m) = (&t.colors, &t.metrics);
         let kit = Kit::new(&t, &self.motion, Self::motion, window, cx);
         if self.search.is_none() && pm_shell::text::available(window) {
-            let tokens = t.clone();
-            // A bare field in the header's own pill: no bezel, no ring.
             let search = cx.new(|cx| {
-                let mut field = pm_shell::text::TextField::new(
-                    pm_shell::text::TextKind::Primary,
+                NativeControl::header_search(
                     "Search projects",
+                    "home-search",
                     &self.controller.query.text,
-                    tokens,
+                    &t,
                     window,
                     cx,
-                );
-                field.set_placeholder("Search projects");
-                field.set_bare(true);
-                // Escape clears the search and leaves the field in one step.
-                field.set_escape_cancels(true);
-                field
+                )
             });
-            cx.subscribe(&search, |v: &mut Self, _, event, cx| {
-                use pm_shell::text::TextEvent;
-                match event {
-                    TextEvent::Changed(text) | TextEvent::Committed(text) => {
-                        v.set_text(text.clone(), cx)
-                    }
-                    // Escape in the field clears the search, as on Home.
-                    TextEvent::Cancelled => v.clear_search(cx),
-                    _ => {}
+            cx.subscribe(&search, |v: &mut Self, _, event: &Value, cx| {
+                if let Some(text) = event.as_str() {
+                    v.set_text(text.to_owned(), cx);
+                } else if event["key"] == "Escape" {
+                    v.clear_search(cx);
                 }
             })
             .detach();
@@ -1822,10 +1799,9 @@ impl Render for ProjectLibrary {
             .flex()
             .flex_col()
             .flex_none()
-            .gap(px(t.space.hair))
             .w(px(m.sidebar))
             .h_full()
-            .px(px(m.dock_gap))
+            .px(px(Kit::SIDEBAR_INSET))
             .pt(px(t.space.sm))
             .pb(px(m.dock_gap))
             .role(Role::Group)
@@ -1834,7 +1810,7 @@ impl Render for ProjectLibrary {
                 self.nav_row(
                     &kit,
                     "home-recents",
-                    ("clock", "Recents".into()),
+                    ("clock.fill", "Recents".into()),
                     None,
                     section != Section::Deleted,
                 )
@@ -1852,8 +1828,14 @@ impl Render for ProjectLibrary {
             )
             .child(div().h(px(t.space.lg)))
             .child(
-                self.nav_row(&kit, "home-store", ("basket", "Store".into()), None, false)
-                    .on_click(cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("store"), cx))),
+                self.nav_row(
+                    &kit,
+                    "home-store",
+                    ("basket.fill", "Store".into()),
+                    None,
+                    false,
+                )
+                .on_click(cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("store"), cx))),
             )
             .child(div().flex_1())
             .child(match identity {
@@ -1861,7 +1843,7 @@ impl Render for ProjectLibrary {
                     .nav_row(
                         &kit,
                         "home-account",
-                        ("person.crop.circle", name),
+                        ("person.crop.circle.fill", name),
                         None,
                         false,
                     )
@@ -1871,7 +1853,7 @@ impl Render for ProjectLibrary {
                     .nav_row(
                         &kit,
                         "home-account",
-                        ("person.crop.circle", "Sign in".into()),
+                        ("person.crop.circle.fill", "Sign in".into()),
                         None,
                         false,
                     )
@@ -1888,6 +1870,14 @@ impl Render for ProjectLibrary {
             "{shown} {}",
             if shown == 1 { "project" } else { "projects" }
         );
+        let section_label = self.section_label.render(
+            section.title(),
+            &t,
+            Text::Headline,
+            c.text,
+            window,
+        );
+        let count_label = self.count_label.render(&count, &t, Text::Body, c.muted, window);
         let sort = self.controller.query.sort;
         let opening = self
             .controller
@@ -1931,45 +1921,14 @@ impl Render for ProjectLibrary {
         }
         let sheet = (f32::from(window.viewport_size().width) - m.sidebar - m.dock_gap).max(0.);
         let search_width = SEARCH_MAX.min(sheet - SEARCH_ROOM).max(CARD_LEAST);
-        let search_key = kit::key("home-search");
-        let search = kit.track_hover(
-            div()
-                .id("home-search")
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(t.space.md))
-                .w(px(search_width))
-                .h(px(ACTION))
-                .px(px(t.space.md + t.space.hair))
-                .rounded(px(t.radius.md))
-                .bg(ink(
-                    c.text,
-                    tr.hover + (tr.selected - tr.hover) * kit.hovered(search_key),
-                ))
-                .child(kit.symbol(
-                    "magnifyingglass",
-                    m.symbol_toolbar + 1.,
-                    Weight::Regular,
-                    c.muted,
-                ))
-                .child(div().flex_1().min_w(px(0.)).children(self.search.clone()))
-                .when(self.controller.query.text.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .flex_none()
-                            .text_role(&t, Text::Caption)
-                            .text_color(rgb(c.faint))
-                            .child("⌘F"),
-                    )
-                })
-                .on_click(cx.listener(|v, _, _, cx| {
-                    if let Some(field) = &v.search {
-                        field.update(cx, |f, cx| f.begin_editing(cx));
-                    }
-                })),
-            search_key,
-        );
+        let search = self
+            .search
+            .clone()
+            .map_or_else(
+                || kit.search(None, Some("⌘F")),
+                |field| kit.header_well(field),
+            )
+            .w(px(search_width));
         let side = || div().flex().flex_1().min_w(px(0.)).items_center();
         let title_row =
             div()
@@ -1986,7 +1945,7 @@ impl Render for ProjectLibrary {
                             .role(Role::Heading)
                             .aria_label(format!("{}, {count}", section.title()))
                             .text_role(&t, Text::Headline)
-                            .child(section.title()),
+                            .child(section_label),
                     ),
                 )
                 .child(search)
@@ -2072,7 +2031,9 @@ impl Render for ProjectLibrary {
                     .text_role(&t, Text::Body)
                     .font_features(kit::tabular())
                     .text_color(rgb(c.muted))
-                    .child(count),
+                    .id("home-count")
+                    .aria_label(count)
+                    .child(count_label),
             )
             // A real project can take seconds to read: say so here until it
             // shows in the window.
