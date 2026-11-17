@@ -775,6 +775,36 @@ impl Controller {
         off
     }
 }
+/// Whether `text` is a program's error value rather than a sentence: a type
+/// or variant name with its fields, as `Storage("Kernel state changed")` or
+/// `Closed { id: 3 }` print.
+fn raw_error(text: &str) -> bool {
+    let text = text.trim();
+    let name: String = text.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    let rest = &text[name.len()..];
+    name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        && !name.contains(' ')
+        && ((rest.starts_with('(') && rest.ends_with(')'))
+            || (rest.starts_with(" {") && rest.ends_with('}')))
+}
+#[cfg(test)]
+mod raw_error_tests {
+    #[test]
+    fn a_program_error_value_never_reads_as_status() {
+        for raw in [r#"Storage("Kernel state changed")"#, "GestureActive()", "Closed { id: 3 }", r#"Kernel("x")"#] {
+            assert!(super::raw_error(raw), "{raw}");
+        }
+        for plain in [
+            "Saved · 868 layers · 26878 keyframes",
+            "Powermove didn’t quit: the Export sheet is open. Answer or close it, then quit again.",
+            "Viewer: the effect (Deep Glow) is missing",
+            "No project",
+            "Couldn’t write the caption file.",
+        ] {
+            assert!(!super::raw_error(plain), "{plain}");
+        }
+    }
+}
 impl Controller {
     /// A passing status note (v1's status toast): shown in the status line,
     /// then the line returns to Saved/Edited unless something replaced it.
@@ -818,6 +848,12 @@ impl Controller {
                     self.keyframes,
                 )
             };
+        let status = if raw_error(&status) {
+            // Never a program's error value in the status line (PM-476).
+            "Something went wrong. Window ▸ Error Log has the details.".to_owned()
+        } else {
+            status
+        };
         match preview_pause {
             Some(pause) => format!("{pause} · {status}"),
             None => status,

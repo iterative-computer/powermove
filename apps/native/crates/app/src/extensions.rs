@@ -1644,7 +1644,7 @@ impl Controller {
                         .spawn(async move {
                             runtime
                                 .run_menu(&panel, &key)
-                                .map_err(|e| format!("{e:?}"))
+                                .map_err(|e| e.to_string())
                                 .and_then(|ticket| {
                                     wait_ticket(
                                         ticket,
@@ -2791,7 +2791,7 @@ fn wait_ticket(
     crate::ticket::answer(ticket, deadline)
         .ok_or_else(|| "The extension didn't answer in time.".to_owned())?
         .map(|e| e.value)
-        .map_err(|e| format!("{e:?}"))
+        .map_err(|e| e.to_string())
 }
 /// Every v4 extension's items for a menu, as native entries (off the main
 /// thread). Realms gather in parallel, each giving its contributions 100 ms;

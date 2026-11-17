@@ -2531,10 +2531,9 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         }
     }
     fn report(&self, message: String, cx: &mut App) {
-        let _ = self.0.update(cx, |v, cx| {
-            v.message = message;
-            cx.notify();
-        });
+        // A passing note: it clears once its moment is over (PM-476 kept a
+        // timeline view write's failure in the status line for good).
+        let _ = self.0.update(cx, |v, cx| v.note(message, cx));
     }
     fn command(&self, name: &str, cx: &mut App) {
         crate::timeline_surface::Delegate::run(self, name, vec![], cx);

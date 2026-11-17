@@ -1917,7 +1917,7 @@ impl GizmoSurface {
                         .call(&project, Request::new(Caller::native(), call))
                         .await
                         .ok_or("Kernel closed")?
-                        .map_err(|e| format!("{e:?}"))?;
+                        .map_err(|e| e.to_string())?;
                     if let Reply::Throw(error) = ack.reply {
                         return Err(error.to_string());
                     }
@@ -1992,7 +1992,7 @@ impl GizmoSurface {
                                 .call(&project, Request::new(Caller::native(), select))
                                 .await
                                 .ok_or("Kernel closed")?
-                                .map_err(|e| format!("{e:?}"));
+                                .map_err(|e| e.to_string());
                         }
                         (Job::Transact(label, commands, select), _) => {
                             let call = Call::Transact {
@@ -2004,7 +2004,7 @@ impl GizmoSurface {
                                 .call(&project, Request::new(Caller::native(), call))
                                 .await
                                 .ok_or("Kernel closed")?
-                                .map_err(|e| format!("{e:?}"))?;
+                                .map_err(|e| e.to_string())?;
                             if let (Some(id), false) =
                                 (select, matches!(ack.reply, Reply::Throw(_)))
                             {
@@ -2040,7 +2040,7 @@ impl GizmoSurface {
                         .call(&project, Request::new(Caller::native(), call))
                         .await
                         .ok_or("Kernel closed")?
-                        .map_err(|e| format!("{e:?}"))
+                        .map_err(|e| e.to_string())
                 })
                 .await;
             crate::diag::line(

@@ -2241,7 +2241,7 @@ impl SurfaceView {
                     pending
                         .await
                         .ok_or("Kernel closed")?
-                        .map_err(|e| format!("{e:?}"))
+                        .map_err(|e| e.to_string())
                 })
                 .await;
             let _ = this.update(cx, |v, cx| {
