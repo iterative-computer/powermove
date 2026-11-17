@@ -5,6 +5,7 @@
 //! extension definition when an extension overrides a built-in (N4/N6). No JS,
 //! shader compiler, renderer, or platform APIs are needed for defaults/Reset.
 
+pub mod audio;
 pub mod catalog;
 pub mod grade;
 pub mod graph;
