@@ -1064,56 +1064,117 @@ fn a_full_account_queues_a_new_isolate_until_heap_is_given_back() {
     assert_eq!(f.admission.waiting(), 0);
     close(&next);
 }
-/// PM-513: an account with room for two windows' realms, three tabs. The
-/// third, shown, gets its realm once the hidden tab shown longest ago gives
-/// its back; shown again, the first wakes (its realm starts again and runs
-/// its panel) when the next hidden one gives its back. Each window here is
-/// one realm; the app's watcher is the loop that closes the chosen one.
-#[test]
-fn a_shown_tab_gets_its_realm_and_the_hidden_tab_shown_longest_ago_gives_its_back() {
-    let account = Admission::new(2 * slice());
-    let windows: Vec<Fixture> = (0..3)
-        .map(|_| fixture_with(|c| c.admission = account.clone()))
-        .collect();
-    let mount = "globalThis.panel = 'mounted'; panel";
-    let t0 = Instant::now();
-    let mut shown: Vec<Option<Instant>> = vec![None; 3];
-    let mut awake: Vec<Option<Realm>> = vec![None, None, None];
-    // Tabs 0 and 1 open and are shown in turn: the account is full.
-    for i in 0..2 {
-        shown[i] = Some(t0 + Duration::from_millis(i as u64));
-        let realm = windows[i].pool.realm(RealmKind::Compat).unwrap();
-        assert_eq!(eval(&realm, mount), "mounted");
-        awake[i] = Some(realm);
+/// A window's realm sized as a window's extension realm is: a 128 MiB slice.
+fn window_limits() -> Limits {
+    Limits {
+        heap_bytes: 512 * 1024 * 1024,
+        initial_heap_bytes: 128 * 1024 * 1024,
+        ..Limits::default()
     }
-    // Shows tab `i`: its realm is asked for; while it waits, the hidden tab
-    // shown longest ago hibernates. Returns which one did.
-    let show = |i: usize, shown: &mut Vec<Option<Instant>>, awake: &mut Vec<Option<Realm>>| {
-        shown[i] = Some(Instant::now());
-        let realm = windows[i].pool.realm(RealmKind::Compat).unwrap();
-        let ticket = realm.eval(mount).unwrap();
+}
+fn window_fixture(account: &Admission) -> Fixture {
+    fixture_with(|c| {
+        c.admission = account.clone();
+        c.limits = window_limits();
+    })
+}
+/// PM-513: an account with room for two full windows, six tabs. Each tab
+/// opened hides the one before; a hidden window's realm stays alive with all
+/// its state and gives back what its heap does not hold, so the shown tab
+/// gets its realm. Shown again, the first tab's in-memory state is intact.
+#[test]
+fn hidden_tabs_shrink_so_the_shown_tab_gets_its_realm_and_keep_their_state() {
+    let full = crate::vm::HeapPlan::new(&window_limits()).initial();
+    let account = Admission::new(2 * full);
+    let windows: Vec<Fixture> = (0..6).map(|_| window_fixture(&account)).collect();
+    let mut realms = vec![];
+    for (i, window) in windows.iter().enumerate() {
+        if i > 0 {
+            windows[i - 1].pool.set_shown(false);
+        }
+        let realm = window.pool.realm(RealmKind::Compat).unwrap();
+        let draft = format!("globalThis.draft = 'draft {i}'; draft");
+        assert_eq!(eval(&realm, &draft), format!("draft {i}"), "tab {i} got its realm");
+        realms.push(realm);
+    }
+    assert!(account.used() <= account.budget());
+    assert_eq!(account.isolates(), 6, "every tab's realm is alive");
+    // The first tab shown again: its state is as it was left.
+    windows[5].pool.set_shown(false);
+    windows[0].pool.set_shown(true);
+    assert_eq!(eval(&realms[0], "draft"), "draft 0");
+    for (i, realm) in realms.iter().enumerate() {
+        assert_eq!(eval(realm, "draft"), format!("draft {i}"), "tab {i} kept its state");
+    }
+    for realm in &realms {
+        close(realm);
+    }
+}
+/// PM-513: the shown window's requests are served first, always: a hidden
+/// window's isolate asked first, the shown one's second, room for one comes
+/// back, and the shown one gets it.
+#[test]
+fn a_shown_windows_request_is_served_before_a_hidden_ones() {
+    let slot = 32 * 1024 * 1024;
+    let account = Admission::new(2 * slot);
+    let first = account.hold(slot).unwrap();
+    let second = account.hold(slot).unwrap();
+    let order: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+    let ask = |label: &'static str, shown: bool| {
+        let (account, order) = (account.clone(), order.clone());
+        thread::spawn(move || {
+            let held = account
+                .reserve_waiting(slot, Arc::new(AtomicBool::new(shown)), || true)
+                .unwrap();
+            order.lock().unwrap().push(label);
+            held
+        })
+    };
+    let until = |n: usize| {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while account.waiting() == 0 {
-            assert!(Instant::now() < deadline, "the shown tab waits for room");
+        while account.waiting() < n {
+            assert!(Instant::now() < deadline);
             thread::sleep(Duration::from_millis(2));
         }
-        let hidden = (0..3)
-            .filter(|&k| k != i && awake[k].is_some())
-            .map(|k| (k, shown[k]));
-        let chosen = crate::least_recently_shown(hidden).expect("a hidden tab to hibernate");
-        close(&awake[chosen].take().unwrap());
-        assert_eq!(wait(ticket).unwrap().value, "mounted", "the shown tab got its realm");
-        awake[i] = Some(realm);
-        assert_eq!(account.waiting(), 0);
-        chosen
     };
-    assert_eq!(show(2, &mut shown, &mut awake), 0, "the tab shown longest ago");
-    assert_eq!(show(0, &mut shown, &mut awake), 1, "shown again, the first wakes");
-    assert!(awake[0].is_some() && awake[2].is_some() && awake[1].is_none());
-    assert!(account.used() <= account.budget());
-    for realm in awake.into_iter().flatten() {
-        close(&realm);
+    let hidden = ask("hidden", false);
+    until(1);
+    let shown = ask("shown", true);
+    until(2);
+    drop(first);
+    let shown = shown.join().unwrap();
+    assert_eq!(*order.lock().unwrap(), ["shown"], "the shown window first");
+    drop(second);
+    let hidden = hidden.join().unwrap();
+    assert_eq!(*order.lock().unwrap(), ["shown", "hidden"]);
+    drop((shown, hidden));
+}
+/// A hidden window's realm that must grow while the account is full waits
+/// (its work pauses) instead of failing, and goes on once room is given back.
+#[test]
+fn a_hidden_realm_that_must_grow_waits_for_room_instead_of_failing() {
+    let full = crate::vm::HeapPlan::new(&window_limits()).initial();
+    let account = Admission::new(full + 256 * 1024 * 1024);
+    let window = window_fixture(&account);
+    window.pool.set_shown(false);
+    let realm = window.pool.realm(RealmKind::Compat).unwrap();
+    assert_eq!(eval(&realm, "1"), "1");
+    // Everything else is taken.
+    let held = account.hold(account.budget() - account.used()).unwrap();
+    let ticket = realm
+        .eval("globalThis.big = Array.from({length: 1.5e6}, (_, i) => 'x'.repeat(100) + i); big.length")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while account.waiting() == 0 {
+        if Instant::now() >= deadline {
+            let outcome = wait(ticket).map(|e| e.value);
+            panic!("its growth never waited: {outcome:?}, used {} of {}", account.used(), account.budget());
+        }
+        thread::sleep(Duration::from_millis(5));
     }
+    drop(held);
+    assert_eq!(wait(ticket).unwrap().value, "1500000", "it went on, not failed");
+    close(&realm);
 }
 #[test]
 fn a_stuck_account_refuses_after_its_patience_and_closing_stops_a_wait() {
@@ -1142,12 +1203,12 @@ fn a_stuck_account_refuses_after_its_patience_and_closing_stops_a_wait() {
 #[test]
 fn a_trim_that_frees_nothing_never_keeps_a_stuck_wait_going() {
     let account = Admission::with_patience(slice(), Duration::from_millis(300));
-    let held = account.reserve(slice()).unwrap();
+    let held = account.reserve(slice(), Arc::new(AtomicBool::new(true))).unwrap();
     let waiter = {
         let account = account.clone();
         thread::spawn(move || {
             let asked = Instant::now();
-            let refused = account.reserve_waiting(slice(), || true).is_err();
+            let refused = account.reserve_waiting(slice(), Arc::new(AtomicBool::new(true)), || true).is_err();
             (asked.elapsed(), refused)
         })
     };
@@ -1315,8 +1376,13 @@ fn full_account_child() {
     if std::env::var_os("PM_RUNTIME_SYNTHETIC_ACCOUNT_CHILD").is_none() {
         return;
     }
-    // Room for two slices and 24 MiB of growth, shared by two isolates.
-    let f = fixture_with(|c| c.admission = Admission::new(2 * slice() + 24 * 1024 * 1024));
+    // Room for two slices and 24 MiB of growth, shared by two isolates. A
+    // growth with no room waits in line (PM-513); nothing gives room back
+    // here, so it fails after the account's (short) patience.
+    let f = fixture_with(|c| {
+        c.admission =
+            Admission::with_patience(2 * slice() + 24 * 1024 * 1024, Duration::from_millis(300))
+    });
     let quiet = f
         .pool
         .realm(RealmKind::V4Extension("quiet".into()))
@@ -1362,7 +1428,8 @@ fn large_allocation_child() {
             c.limits.heap_bytes = 16 * 1024 * 1024;
             c.limits.initial_heap_bytes = 16 * 1024 * 1024;
         }
-        c.admission = Admission::new(budget);
+        // Growth waits for room before it fails (PM-513): briefly here.
+        c.admission = Admission::with_patience(budget, Duration::from_millis(300));
         c.watchdog.prompt = Duration::from_secs(2);
     });
     let at_rest = |f: &Fixture| f.admission.used();

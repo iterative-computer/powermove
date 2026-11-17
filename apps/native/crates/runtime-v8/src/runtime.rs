@@ -203,6 +203,8 @@ struct Control {
     /// waiting its turn), and the signal when it is decided.
     admitted: Mutex<Option<Result<()>>>,
     decided: Condvar,
+    /// Whether its pool's window is shown (shared by the pool's realms).
+    shown: Arc<AtomicBool>,
 }
 struct Inner {
     tx: Arc<SyncSender<Command>>,
@@ -419,6 +421,9 @@ pub struct RuntimePool {
     scope: String,
     realms: Mutex<HashMap<RealmKind, Weak<Inner>>>,
     config: Config,
+    /// Whether this pool's window is shown: a hidden window's realms keep
+    /// only what their heaps hold, and wait behind shown ones for more.
+    shown: Arc<AtomicBool>,
 }
 #[derive(Clone)]
 pub struct Config {
@@ -453,13 +458,23 @@ pub struct Admission {
 }
 #[derive(Default)]
 struct Queue {
-    /// The next ticket handed out and the one served now.
+    /// The next ticket handed out.
     next: u64,
-    serving: u64,
-    /// Tickets whose isolate stopped waiting before its turn.
-    left: std::collections::BTreeSet<u64>,
+    /// Tickets waiting for room, and whether each is a shown window's: those
+    /// are served first, in order, then the hidden ones' (PM-513).
+    waiting: std::collections::BTreeMap<u64, bool>,
     /// Bumped whenever the account changes, so a waiter can tell busy from stuck.
     changes: u64,
+}
+impl Queue {
+    /// Whose turn it is: the first shown window's waiter, else the first.
+    fn turn(&self) -> Option<u64> {
+        self.waiting
+            .iter()
+            .find(|(_, shown)| **shown)
+            .or_else(|| self.waiting.iter().next())
+            .map(|(ticket, _)| *ticket)
+    }
 }
 /// In-process isolates share one 4 GB pointer-compression cage (plan §3.5.1);
 /// a quarter stays for V8's code and read-only spaces, the grace a failing
@@ -487,12 +502,16 @@ impl Admission {
     /// (a test fills the account with it).
     #[doc(hidden)]
     pub fn hold(&self, bytes: usize) -> Result<impl Drop + Send + use<>> {
-        self.reserve(bytes)
+        self.reserve(bytes, Arc::new(AtomicBool::new(true)))
     }
-    /// How many isolates wait for room now.
+    /// How many isolates wait for room now (to start or to grow).
     pub fn waiting(&self) -> usize {
-        let queue = self.queue.0.lock().unwrap();
-        (queue.next - queue.serving) as usize - queue.left.len()
+        self.queue.0.lock().unwrap().waiting.len()
+    }
+    /// Whether a shown window's isolate waits for room now: nothing hidden
+    /// takes room ahead of it.
+    fn shown_waiting(&self) -> bool {
+        self.queue.0.lock().unwrap().waiting.values().any(|shown| *shown)
     }
     /// Room was given back (or the account changed): waiters look again.
     fn changed(&self) {
@@ -504,7 +523,16 @@ impl Admission {
     /// compat realm and compiler reserve from it.
     pub fn cage() -> Self {
         static CAGE: std::sync::OnceLock<Admission> = std::sync::OnceLock::new();
-        CAGE.get_or_init(|| Admission::new(CAGE_ADMISSION)).clone()
+        // A lane can make it smaller to see a full account by hand
+        // (`PM_HEAP_ACCOUNT_MB`); never larger than the cage allows.
+        CAGE.get_or_init(|| {
+            let budget = std::env::var("PM_HEAP_ACCOUNT_MB")
+                .ok()
+                .and_then(|mb| mb.parse::<usize>().ok())
+                .map_or(CAGE_ADMISSION, |mb| (mb << 20).min(CAGE_ADMISSION));
+            Admission::new(budget)
+        })
+        .clone()
     }
     pub fn used(&self) -> usize {
         self.used.load(Ordering::Acquire)
@@ -529,22 +557,36 @@ impl Admission {
         }
         taken.is_ok()
     }
-    /// Room now, never ahead of an isolate already waiting for it.
-    pub(crate) fn reserve(&self, bytes: usize) -> Result<Reservation> {
+    /// Room now, never ahead of an isolate already waiting for it. `shown`
+    /// is its window's (a hidden window's isolates keep less, `Vm::trim`).
+    pub(crate) fn reserve(&self, bytes: usize, shown: Arc<AtomicBool>) -> Result<Reservation> {
         let queue = self.queue.0.lock().unwrap();
-        let waiters = queue.next - queue.serving > queue.left.len() as u64;
-        if waiters || !self.take(bytes) {
+        if !queue.waiting.is_empty() || !self.take(bytes) {
             return Err(Error::Quota("isolate admission"));
         }
         drop(queue);
-        Ok(self.reserved(bytes))
+        Ok(self.reserved(bytes, shown))
     }
     /// Room for an isolate someone asked for: when the account is full it
-    /// waits its turn (first come, first served) for isolates to give heap
-    /// back, while `wanted` (its realm is still open). It gives up only when
-    /// it is no longer wanted, when it could never fit, or when the account
-    /// stayed exactly as it is for the account's patience (stuck, not busy).
-    pub(crate) fn reserve_waiting(&self, bytes: usize, wanted: impl Fn() -> bool) -> Result<Reservation> {
+    /// waits its turn for isolates to give heap back (a shown window's first,
+    /// then in order), while `wanted` (its realm is still open). It gives up
+    /// only when it is no longer wanted, when it could never fit, or when the
+    /// account stayed exactly as it is for the account's patience (stuck, not
+    /// busy).
+    pub(crate) fn reserve_waiting(
+        &self,
+        bytes: usize,
+        shown: Arc<AtomicBool>,
+        wanted: impl Fn() -> bool,
+    ) -> Result<Reservation> {
+        let priority = shown.clone();
+        self.wait_take(bytes, &|| priority.load(Ordering::Acquire), &wanted)?;
+        Ok(self.reserved(bytes, shown))
+    }
+    /// Takes `bytes` once it is this waiter's turn and they fit (see
+    /// `reserve_waiting`). `shown` is read again while it waits: a window
+    /// shown meanwhile moves ahead of the hidden ones.
+    fn wait_take(&self, bytes: usize, shown: &dyn Fn() -> bool, wanted: &dyn Fn() -> bool) -> Result<()> {
         if bytes > self.budget {
             return Err(Error::Quota("isolate admission"));
         }
@@ -552,17 +594,15 @@ impl Admission {
         let mut q = queue.lock().unwrap();
         let ticket = q.next;
         q.next += 1;
+        q.waiting.insert(ticket, shown());
         let mut seen = q.changes;
         let mut since = Instant::now();
         let result = loop {
-            loop {
-                let serving = q.serving;
-                if !q.left.remove(&serving) {
-                    break;
-                }
-                q.serving += 1;
+            let now = shown();
+            if q.waiting.get(&ticket) != Some(&now) {
+                q.waiting.insert(ticket, now);
             }
-            if q.serving == ticket && self.take(bytes) {
+            if q.turn() == Some(ticket) && self.take(bytes) {
                 break Ok(());
             }
             if !wanted() || since.elapsed() >= self.patience {
@@ -574,47 +614,62 @@ impl Admission {
                 since = Instant::now();
             }
         };
-        if q.serving == ticket {
-            q.serving += 1;
-        } else {
-            q.left.insert(ticket);
-        }
+        q.waiting.remove(&ticket);
+        q.changes += 1;
         drop(q);
         // The next in line may fit now.
         room.notify_all();
-        result.map(|()| self.reserved(bytes))
+        result
     }
-    fn reserved(&self, bytes: usize) -> Reservation {
+    fn reserved(&self, bytes: usize, shown: Arc<AtomicBool>) -> Reservation {
         self.isolates.fetch_add(1, Ordering::AcqRel);
         self.changed();
         Reservation {
             account: self.clone(),
             bytes: AtomicUsize::new(bytes),
+            shown,
         }
     }
-}
-/// Which owner gives its realms back when the account is full (PM-513): the
-/// one shown longest ago, one never shown first. Windows hidden behind
-/// another tab hibernate in this order until the waiting realm is admitted.
-pub fn least_recently_shown<K>(
-    candidates: impl IntoIterator<Item = (K, Option<Instant>)>,
-) -> Option<K> {
-    candidates
-        .into_iter()
-        .min_by_key(|(_, shown)| *shown)
-        .map(|(k, _)| k)
 }
 /// One isolate's share of its account. Only its owner thread changes it.
 pub(crate) struct Reservation {
     account: Admission,
     bytes: AtomicUsize,
+    /// Whether its window is shown: a hidden window's isolate keeps only what
+    /// lives (`Vm::trim`) and waits behind shown ones for more.
+    shown: Arc<AtomicBool>,
 }
 impl Reservation {
     pub(crate) fn bytes(&self) -> usize {
         self.bytes.load(Ordering::Acquire)
     }
-    /// More heap, only while the account has room.
+    pub(crate) fn shown(&self) -> bool {
+        self.shown.load(Ordering::Acquire)
+    }
+    /// More heap; when the account has no room now, its isolate's work
+    /// pauses in line for it (a shown window's first) instead of failing, up
+    /// to the account's patience (PM-513).
+    pub(crate) fn grow_waiting(&self, bytes: usize) -> bool {
+        if self.grow(bytes) {
+            return true;
+        }
+        let shown = self.shown.clone();
+        let taken = self
+            .account
+            .wait_take(bytes, &|| shown.load(Ordering::Acquire), &|| true)
+            .is_ok();
+        if taken {
+            self.bytes.fetch_add(bytes, Ordering::AcqRel);
+            self.account.changed();
+        }
+        taken
+    }
+    /// More heap, only while the account has room, and for a hidden
+    /// window's isolate only while no shown window's waits (PM-513).
     pub(crate) fn grow(&self, bytes: usize) -> bool {
+        if !self.shown() && self.account.shown_waiting() {
+            return false;
+        }
         let taken = self.account.take(bytes);
         if taken {
             self.bytes.fetch_add(bytes, Ordering::AcqRel);
@@ -667,7 +722,35 @@ impl RuntimePool {
             scope: scope.into(),
             realms: Default::default(),
             config,
+            shown: Arc::new(AtomicBool::new(true)),
         })
+    }
+    /// Its window is shown or hidden (a tab behind another). Hidden, every
+    /// realm stays alive with all its state and gives back the room its heap
+    /// does not use once idle (`Vm::trim`); shown, it asks for room first
+    /// when it grows (PM-513).
+    pub fn set_shown(&self, shown: bool) {
+        if self.shown.swap(shown, Ordering::AcqRel) == shown {
+            return;
+        }
+        // Waiters re-read their place; idle realms trim from now.
+        self.config.admission.changed();
+        let realms: Vec<Arc<Inner>> = self
+            .realms
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect();
+        // Hidden: each realm collects and gives back what its heap does not
+        // hold now (it is idle or nearly; the caller waits a moment first).
+        for inner in realms {
+            let command = if shown { Command::Wake } else { Command::MemoryPressure };
+            let _ = (Realm { inner }).send(command);
+        }
+    }
+    pub fn shown(&self) -> bool {
+        self.shown.load(Ordering::Acquire)
     }
     /// Starting is asynchronous: the first task observes startup/load failures.
     pub fn realm(&self, kind: RealmKind) -> Result<Realm> {
@@ -697,6 +780,7 @@ impl RuntimePool {
             culprit: crate::vm::Culprit::default(),
             admitted: Mutex::new(None),
             decided: Condvar::new(),
+            shown: self.shown.clone(),
         });
         let inner = Arc::new(Inner {
             tx: Arc::new(tx),
@@ -1188,7 +1272,7 @@ fn worker(
     // work someone asked for; closing the realm stops the wait.
     let admitted = config
         .admission
-        .reserve_waiting(HeapPlan::new(&config.limits).initial(), || {
+        .reserve_waiting(HeapPlan::new(&config.limits).initial(), control.shown.clone(), || {
             !control.closing.load(Ordering::Acquire)
         });
     *control.admitted.lock().unwrap() = Some(admitted.as_ref().map(|_| ()).map_err(Clone::clone));
@@ -1262,7 +1346,7 @@ fn worker(
                     if result.is_err() {
                         fail_generation(live, &config);
                         drop(std::mem::replace(&mut current, Err(Error::Closed)));
-                        current = recover(&name, &kind, &config);
+                        current = recover(&name, &kind, &config, control.shown.clone());
                     }
                 }
                 continue;
@@ -1353,7 +1437,7 @@ fn worker(
                     ) {
                         fail_generation(live, &config);
                         drop(std::mem::replace(&mut current, Err(Error::Closed)));
-                        current = recover(&name, &kind, &config);
+                        current = recover(&name, &kind, &config, control.shown.clone());
                     } else if result.is_err() {
                         let guard = Guard::new(&live.vm, &live.generation, id, &config, &control);
                         let restored = live.restore_storage();
@@ -1361,7 +1445,7 @@ fn worker(
                         if restored.is_err() {
                             fail_generation(live, &config);
                             drop(std::mem::replace(&mut current, Err(Error::Closed)));
-                            current = recover(&name, &kind, &config);
+                            current = recover(&name, &kind, &config, control.shown.clone());
                         }
                     }
                 }
@@ -1381,7 +1465,7 @@ fn worker(
                     let old = current.as_ref().map_err(Clone::clone)?;
                     let reservation = config
                         .admission
-                        .reserve(HeapPlan::new(&config.limits).initial())?;
+                        .reserve(HeapPlan::new(&config.limits).initial(), control.shown.clone())?;
                     let generation = Generation {
                         realm: name.clone(),
                         number: next_generation(),
@@ -1491,7 +1575,7 @@ fn worker(
                             fail_generation(live, &config);
                         }
                         drop(std::mem::replace(&mut current, Err(Error::Closed)));
-                        current = recover(&name, &kind, &config);
+                        current = recover(&name, &kind, &config, control.shown.clone());
                     } else if let Some(mut live) = retained.remove(&pin.generation.number) {
                         fail_generation(&mut live, &config);
                     }
@@ -1528,14 +1612,14 @@ fn next_generation() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
-fn recover(name: &str, kind: &RealmKind, config: &Config) -> Result<Live> {
+fn recover(name: &str, kind: &RealmKind, config: &Config, shown: Arc<AtomicBool>) -> Result<Live> {
     let generation = Generation {
         realm: name.into(),
         number: next_generation(),
     };
     let reservation = config
         .admission
-        .reserve(HeapPlan::new(&config.limits).initial())?;
+        .reserve(HeapPlan::new(&config.limits).initial(), shown)?;
     let storage = config.kernel.load_storage(name)?;
     Live::new(generation, kind, config, storage, json!({}), reservation)
 }

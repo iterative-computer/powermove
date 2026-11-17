@@ -3418,6 +3418,29 @@ fn a_fork_parks_as_itself_and_gets_painters_overlays_and_menus() {
     panels.close();
     actor.shutdown();
 }
+/// PM-513 (Sol 6): a panel the heap account had no room for is started
+/// again as what is installed: an installed fork, never the shipped panel.
+#[test]
+fn a_retried_panel_start_mounts_the_installed_fork() {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let fork = graph_of("export const view = () => jsx('text', { children: 'Fork view' });");
+    finish(panels.mount_builtin("inspector").unwrap());
+    finish(panels.replace("inspector", "inspector-fork", &fork).unwrap());
+    assert!(text_of(&panels, "inspector").contains(&"Fork view".to_owned()));
+    // The retry after a refusal for room: retired, then started again.
+    finish(panels.restart_builtin("inspector").unwrap());
+    assert!(
+        text_of(&panels, "inspector").contains(&"Fork view".to_owned()),
+        "the fork, not the shipped panel"
+    );
+    // Without a fork, the shipped panel.
+    finish(panels.restore("inspector").unwrap());
+    finish(panels.restart_builtin("inspector").unwrap());
+    assert!(!text_of(&panels, "inspector").contains(&"Fork view".to_owned()));
+    panels.close();
+    actor.shutdown();
+}
 #[test]
 fn the_latest_theme_activation_wins_and_a_repeat_counts() {
     let actor = actor();

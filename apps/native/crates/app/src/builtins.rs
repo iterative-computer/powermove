@@ -123,6 +123,9 @@ pub struct Host {
     bodies: BTreeMap<String, Entity<PanelBody>>,
     scrolled_at: BTreeMap<String, std::time::Instant>,
     pub(crate) ready: BTreeSet<String>,
+    /// Panels whose realm waits for room in the heap account: they show that
+    /// they are waiting for memory, never their empty state (PM-513).
+    pub(crate) waiting_room: BTreeSet<String>,
     generations: BTreeMap<String, u64>,
     pub(crate) requests: VecDeque<PlatformRequest>,
     pub windows: BTreeMap<String, AnyWindowHandle>,
@@ -177,17 +180,6 @@ fn media_stamp(published: &pm_kernel::Published) -> pm_panel_media::Stamp {
         project: published.project.clone(),
         document: published.snapshot.doc_id,
         revision: published.revision(),
-    }
-}
-impl Host {
-    /// The Agent's runs carried across a restart of this window's panels.
-    pub(crate) fn keep_agent(&mut self, carry: Option<pm_builtins::AgentCarry>) {
-        if carry.is_some() {
-            self.agent_carry = carry;
-        }
-    }
-    pub(crate) fn take_agent(&mut self) -> Option<pm_builtins::AgentCarry> {
-        self.agent_carry.take()
     }
 }
 impl Controller {
@@ -885,10 +877,6 @@ impl Controller {
         if self.restore_waiting() {
             return;
         }
-        // Hibernated behind another tab: nothing starts until it is shown.
-        if self.hibernated {
-            return;
-        }
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
         self.want_thumbnails(cx);
@@ -1023,9 +1011,14 @@ impl Controller {
     /// A built-in the heap account had no room for: it stays loading (never
     /// an empty panel) and starts again every `ADMISSION_RETRY` while this
     /// window keeps the same panels, until it is admitted (PM-513).
-    fn retry_builtin(&mut self, id: String, runtime: Arc<Builtins>, cx: &mut Context<Self>) {
+    pub(crate) fn retry_builtin(&mut self, id: String, runtime: Arc<Builtins>, cx: &mut Context<Self>) {
         eprintln!("Panel {id} waits for room in the heap account");
         self.builtins.ready.remove(&id);
+        if !self.builtins.waiting_room.insert(id.clone()) {
+            // Already being retried.
+            return;
+        }
+        cx.notify();
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(ADMISSION_RETRY).await;
@@ -1036,6 +1029,7 @@ impl Controller {
                     })
                     .unwrap_or(false);
                 if !current {
+                    let _ = this.update(cx, |v, _| v.builtins.waiting_room.remove(&id));
                     return;
                 }
                 let (again, panel) = (runtime.clone(), id.clone());
@@ -1051,6 +1045,8 @@ impl Controller {
                     Err(error) if no_room(&error) => continue,
                     result => {
                         let _ = this.update(cx, |v, cx| {
+                            v.builtins.waiting_room.remove(&id);
+                            cx.notify();
                             if !v.builtins.runtime.as_ref().is_some_and(|r| Arc::ptr_eq(r, &runtime)) {
                                 return;
                             }
@@ -1150,6 +1146,10 @@ impl Controller {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if !self.builtins.ready.contains(id) {
+            if self.builtins.waiting_room.contains(id) {
+                let t = self.host.borrow().tokens.clone();
+                return Some(waiting_for_memory(&t, bounds, window));
+            }
             return None;
         }
         let runtime = self.builtins.runtime.clone()?;
@@ -3418,9 +3418,33 @@ pub(crate) fn returns_to_popover(was_docked: bool, docked: bool, parked: bool) -
 fn consent_window<W>(popover: Option<W>, asking: Option<W>, editor: W) -> W {
     popover.or(asking).unwrap_or(editor)
 }
+/// A panel whose realm waits for room in the heap account: its loading
+/// state, saying why, in place of an empty panel (PM-513).
+fn waiting_for_memory(
+    t: &pm_design::Tokens,
+    bounds: pm_shell::layout::Rect,
+    window: &mut Window,
+) -> AnyElement {
+    static SINCE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let turns = SINCE.get_or_init(std::time::Instant::now).elapsed().as_secs_f64();
+    window.request_animation_frame();
+    pm_shell::kit::empty_state(
+        t,
+        "memorychip",
+        "Waiting for Memory",
+        "Too many projects are open for the memory panels and extensions run in. Close a project tab to free some: this panel starts on its own as soon as there is room.",
+    )
+    .h(px((bounds.h - t.metrics.header).max(0.)))
+    .overflow_hidden()
+    .child(pm_shell::welcome_view::spinner(
+        if t.accessibility.reduce_motion { 0. } else { turns },
+        t,
+    ))
+    .into_any_element()
+}
 /// How long a built-in the heap account had no room for waits before it is
 /// started again.
-const ADMISSION_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) const ADMISSION_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
 /// Whether a realm could not start only because the shared heap account had
 /// no room for it then (not a failure: it is started again).
 pub(crate) fn no_room(error: &pm_runtime_v8::Error) -> bool {

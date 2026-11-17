@@ -192,6 +192,8 @@ enum Input {
     Panel(String, bool),
     Place(String, Option<[f32; 4]>),
     Page(u64, Value),
+    /// The window's realms' heap follows whether it is shown (PM-513).
+    HeapShown(bool),
     /// A fresh page for generation `u64`: everything again (PM-509).
     ReplayPage(u64),
     Answer(u64, Value),
@@ -903,6 +905,7 @@ impl ExtensionHost {
             writer,
             retired: false,
             start_again: None,
+            heap_hidden: false,
             stores: vec![],
             confined: BTreeMap::new(),
             open: BTreeMap::new(),
@@ -1224,6 +1227,12 @@ impl ExtensionHost {
     /// Whether the person can see the window: a tab behind another cannot, and
     /// its extension panels count as not showing (they get no animation
     /// frames) until it is selected.
+    /// A window hidden a while gives back the heap its extensions' realm
+    /// does not hold (it stays alive with all its state); shown, it asks for
+    /// room first when it grows (PM-513).
+    pub fn set_heap_shown(&self, shown: bool) {
+        let _ = self.inbox.send(Input::HeapShown(shown));
+    }
     pub fn set_window_shown(&self, shown: bool) {
         let _ = self.inbox.send(Input::WindowShown(shown));
     }
@@ -1340,6 +1349,8 @@ struct Owner {
     /// The realm the account had no room for starts again then: the first
     /// boot (`None`) or a restart at its clock.
     start_again: Option<(Instant, Option<(f64, bool)>)>,
+    /// Its window was hidden a while: a new realm's pool starts hidden too.
+    heap_hidden: bool,
     stores: Vec<StoreLive>,
     /// What each Store extension would run, so a toggle can start it.
     confined: BTreeMap<String, (Discovered, ModuleGraph)>,
@@ -1628,6 +1639,12 @@ impl Owner {
             Input::WindowShown(shown) => {
                 self.window_hidden = !shown;
                 self.eval(&format!("__compat.windowShown({shown})"));
+            }
+            Input::HeapShown(shown) => {
+                self.heap_hidden = !shown;
+                if let Some(live) = &self.realm {
+                    live.pool.set_shown(shown);
+                }
             }
             Input::Place(id, rect) => {
                 if let Some(placed) = self.open.get_mut(&id) {
@@ -2639,6 +2656,9 @@ impl Owner {
             )
             .map_err(|e| Error::Host(format!("{e:?}")))?,
         );
+        if self.heap_hidden {
+            pool.set_shown(false);
+        }
         self.realm = Some(Live {
             realm,
             pool,
@@ -5126,6 +5146,29 @@ mod tests {
         let first = launch(RASTER);
         assert_eq!(launch(RASTER), first, "unchanged code: the same identity");
         assert_ne!(launch(&RASTER.replace("c.width=1", "c.width=2")), first);
+    }
+    /// PM-513: a window hidden a while keeps its extensions' realm (nothing
+    /// closes; it gives back the heap it does not hold), so a background fill
+    /// or a job for that project still gets its raster overrides, the same
+    /// answer as while it was shown, and the realm keeps its state.
+    #[test]
+    fn a_hidden_windows_realm_keeps_answering_its_overrides() {
+        let (fixture, answered) = export_window(&[("spy", SPY)], "hidden", None);
+        let needs = needs(&fixture);
+        let inbox = fixture.host.raster_inbox();
+        let live = fixture.kernel.published("window").unwrap().revision();
+        inbox.ask(1, needs.clone(), json!({"revision": live}));
+        let shown = answer_of(&answered, 1, Duration::from_secs(30));
+        fixture.host.set_window_shown(false);
+        fixture.host.set_heap_shown(false);
+        // Long enough for its realm to collect and give room back.
+        thread::sleep(Duration::from_millis(1500));
+        inbox.ask(2, needs, json!({"revision": live}));
+        assert_eq!(
+            answer_of(&answered, 2, Duration::from_secs(30)),
+            shown,
+            "the hidden window's overrides, as before"
+        );
     }
     #[test]
     fn an_export_realm_answers_from_its_frozen_project_code_and_storage_while_the_window_edits() {

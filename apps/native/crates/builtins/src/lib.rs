@@ -1257,6 +1257,12 @@ impl Builtins {
         true
     }
 
+    /// Its window is shown or hidden a while: its panels' and extensions'
+    /// realms stay alive with all their state; hidden, they give back the
+    /// heap they do not hold, and shown, they ask for room first (PM-513).
+    pub fn set_shown(&self, shown: bool) {
+        self.pool.set_shown(shown);
+    }
     pub fn memory_pressure(&self) {
         let extensions = self.extension_realms.shared();
         for realm in self.realms.shared().values().chain(extensions.values()) {
@@ -1281,11 +1287,7 @@ impl Builtins {
         if !self.broker.parked.shared().remove(panel) {
             return None;
         }
-        let fork = self.forks.shared().get(panel).cloned();
-        Some(match fork {
-            Some((fork, graph)) => self.start(panel, fork_source(&fork, &graph, panel)),
-            None => self.mount_builtin(panel),
-        })
+        Some(self.mount_panel(panel))
     }
     /// A built-in whose realm the heap account had no room for, started
     /// again from its first commit (PM-513). Waits (bounded) for the old
@@ -1293,7 +1295,17 @@ impl Builtins {
     pub fn restart_builtin(&self, panel: &str) -> Result<Ticket<Evaluation>> {
         self.retire(panel);
         self.broker.parked.shared().remove(panel);
-        self.mount_builtin(panel)
+        self.mount_panel(panel)
+    }
+    /// The panel `panel` as it is installed now: the fork that replaced it,
+    /// if any, else the shipped built-in (never the shipped one in place of
+    /// an installed fork).
+    fn mount_panel(&self, panel: &str) -> Result<Ticket<Evaluation>> {
+        let fork = self.forks.shared().get(panel).cloned();
+        match fork {
+            Some((fork, graph)) => self.start(panel, fork_source(&fork, &graph, panel)),
+            None => self.mount_builtin(panel),
+        }
     }
     pub fn is_parked(&self, panel: &str) -> bool {
         self.broker.parked.shared().contains(panel)

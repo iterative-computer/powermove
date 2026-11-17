@@ -375,6 +375,11 @@ impl HeapGuard {
     }
 }
 struct Guarded(Arc<HeapGuard>);
+/// A hidden window's isolate's old-generation limit: what lives, a quarter
+/// again and 2 MiB, at least 4 MiB. It grows back on demand (`near_limit`).
+pub(crate) fn hidden_old_limit(used: usize) -> usize {
+    (used + used / 4 + 2 * MIB).next_multiple_of(MIB).max(4 * MIB)
+}
 /// The quota an isolate fails with when the shared account had no room left.
 pub const HEAP_FULL: &str = "extension memory is full";
 /// What a terminating isolate may still allocate while it unwinds, above
@@ -453,17 +458,24 @@ unsafe extern "C" fn near_limit(data: *mut c_void, current: usize, _initial: usi
     let held = isolate.get_heap_statistics().total_heap_size();
     if !guard.exceeded.load(Ordering::Acquire) {
         let floor = held.saturating_add(GRACE);
-        let mut refused = false;
+        let mut refused = None;
         for next in quota.plan.steps(current) {
             let next = next.max(floor);
             if next <= quota.plan.ceiling_old && next > current {
                 if guard.reservation.grow(next - current) {
                     return next;
                 }
-                refused = true;
+                refused = Some(next);
             }
         }
-        guard.account_full.store(refused, Ordering::Release);
+        // No room now: this isolate's work pauses in line for the smallest
+        // step (a shown window's first) rather than failing (PM-513).
+        if let Some(next) = refused
+            && guard.reservation.grow_waiting(next - current)
+        {
+            return next;
+        }
+        guard.account_full.store(refused.is_some(), Ordering::Release);
     }
     // Past its ceiling or the account: the isolate fails. The grace covers
     // the heap as it stands while it unwinds, charged until disposal.
@@ -1193,23 +1205,38 @@ impl Vm {
     }
     /// An idle isolate gives back what it grew past its live size: a full
     /// collection, then the old-generation limit comes down to half again
-    /// above what lives (never under the initial slice). V8 keeps any limit
-    /// it can't honour, so the account follows V8's own limit, not the ask.
+    /// above what lives (never under the initial slice). A hidden window's
+    /// comes down to what lives plus a small margin, under the initial slice
+    /// too: hidden tabs held their whole worst-case slices, and seventeen
+    /// filled the account (PM-513). V8 keeps any limit it can't honour, so the
+    /// account follows V8's own limit, not the ask.
     pub fn trim(&mut self) {
         if self.quota.guard.exceeded.load(Ordering::Acquire) {
             return;
         }
+        let hidden = !self.quota.guard.reservation.shown();
         let quota = &*self.quota as *const Quota as *mut c_void;
         let mut isolate = self.isolate.as_ref().unwrap().lock();
         isolate.low_memory_notification();
-        if !self.grown() {
+        if !hidden && !self.grown() {
             return;
         }
         let before = isolate.get_heap_statistics();
         let used = before.used_heap_size();
-        let target = (used + used / 2 + 4 * MIB)
-            .next_multiple_of(MIB)
-            .max(self.quota.plan.initial_old);
+        let target = if hidden {
+            hidden_old_limit(used)
+        } else {
+            (used + used / 2 + 4 * MIB)
+                .next_multiple_of(MIB)
+                .max(self.quota.plan.initial_old)
+        };
+        // Only ever down: the account holds what V8's limit is now.
+        let old_now = before
+            .heap_size_limit()
+            .saturating_sub(self.quota.plan.young);
+        if target >= old_now {
+            return;
+        }
         isolate.remove_near_heap_limit_callback(near_limit, target);
         isolate.add_near_heap_limit_callback(near_limit, quota);
         let after = isolate.get_heap_statistics().heap_size_limit();
@@ -1448,3 +1475,4 @@ impl Drop for Vm {
         drop(self.isolate.take());
     }
 }
+

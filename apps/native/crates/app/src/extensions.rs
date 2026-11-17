@@ -1320,6 +1320,9 @@ impl Controller {
             let _ = this.update(cx, |v, cx| {
                 match mounted {
                     Ok(generation) => v.surface_ready(panel, generation),
+                    // No room in the heap account now: it waits and is
+                    // mounted again, as what it is (PM-513).
+                    Err(error) if crate::builtins::no_room(&error) => v.retry_surface(panel, source, cx),
                     Err(error) => {
                         v.builtins.forget_surface(&panel);
                         v.message = format!("{source} could not start: {error}");
@@ -1331,10 +1334,46 @@ impl Controller {
         })
         .detach();
     }
+    /// A panel the heap account had no room for when it mounted. A built-in
+    /// or a fork starts again through the panels' retry, which mounts the
+    /// installed fork if there is one; a v4 extension's failed realm goes and
+    /// its surface is mounted again from its current source by the next scan.
+    fn retry_surface(&mut self, panel: String, source: String, cx: &mut Context<Self>) {
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        if pm_builtins::builtin_panel(&panel).is_some() {
+            self.retry_builtin(panel, runtime, cx);
+            return;
+        }
+        eprintln!("Extension panel {source} waits for room in the heap account");
+        self.builtins.waiting_room.insert(panel.clone());
+        cx.spawn(async move |this, cx| {
+            let gone = runtime.clone();
+            let id = panel.clone();
+            cx.background_executor()
+                .spawn(async move { gone.unmount_extension(&id) })
+                .await;
+            cx.background_executor().timer(crate::builtins::ADMISSION_RETRY).await;
+            let _ = this.update(cx, |v, cx| {
+                if !v.builtins.runtime.as_ref().is_some_and(|r| Arc::ptr_eq(r, &runtime)) {
+                    v.builtins.waiting_room.remove(&panel);
+                    return;
+                }
+                // Forgotten, the next scan mounts it again from its source.
+                v.extensions.surfaces.remove(&panel);
+                v.extensions.mounted_once.remove(&panel);
+                v.builtins.waiting_room.remove(&panel);
+                v.mount_surfaces(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     /// Tells the shell whether the extension panels it lists are all in:
     /// until then a tab whose panel has not registered yet keeps a quiet body
     /// instead of saying it is unavailable.
-    pub(crate) fn tell_panels_ready(&mut self, ready: bool) {
+    fn tell_panels_ready(&mut self, ready: bool) {
         if self.extensions.panels_ready != ready {
             self.extensions.panels_ready = ready;
             self.host.borrow().send_command(

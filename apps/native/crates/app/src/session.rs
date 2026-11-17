@@ -48,12 +48,10 @@ pub struct Controller {
     pub viewer: Option<Viewer>,
     /// The viewer last told whether its window can be seen, and what.
     viewer_shown: Option<(u64, bool)>,
-    /// When this window was last seen (a tab in front): the hidden tab shown
-    /// longest ago gives its realms back first (`hibernation`).
-    last_shown: Option<std::time::Instant>,
-    /// Its panels' and extensions' realms were closed while it was hidden;
-    /// shown again, they start (`hibernation`, PM-513).
-    pub(crate) hibernated: bool,
+    /// Since when its window has been hidden, and what its realms' heap was
+    /// last told (panels' runtime, extensions' realm, shown): `follow_heap`.
+    hidden_since: Option<std::time::Instant>,
+    heap_told: Option<(usize, u64, bool)>,
     /// The extension host last told whether the window can be seen, and what.
     extensions_shown: Option<(u64, bool)>,
     pub media: MediaCatalog,
@@ -869,8 +867,6 @@ fn saved_where(path: &std::path::Path) -> String {
         .unwrap_or_else(|| "your Mac".into());
     format!("Saved “{file}” in {folder}. File ▸ Show in Finder shows it.")
 }
-#[path = "hibernation.rs"]
-pub(crate) mod hibernation;
 #[cfg(test)]
 mod first_save_tests {
     #[test]
@@ -1130,8 +1126,8 @@ impl Controller {
             mirror: None,
             viewer: None,
             viewer_shown: None,
-            last_shown: None,
-            hibernated: false,
+            hidden_since: None,
+            heap_told: None,
             extensions_shown: None,
             media: MediaCatalog::default(),
             linked_sync: Default::default(),
@@ -3296,13 +3292,7 @@ impl Controller {
     /// another (or a minimized window) draws nothing until it is shown.
     pub(crate) fn follow_shown(&mut self, cx: &mut Context<Self>) {
         let shown = pm_shell::window_shown(&self.host.borrow().window);
-        if shown {
-            self.last_shown = Some(std::time::Instant::now());
-            // Hibernated while hidden: its panels and extensions start now.
-            if self.hibernated {
-                self.wake(cx);
-            }
-        }
+        self.follow_heap(shown);
         // Its extensions' panels count as not showing while it cannot be
         // seen: they get no animation frames.
         if let Some(host) = &self.extensions.host {
@@ -3329,6 +3319,39 @@ impl Controller {
         };
         if viewer.set_shown(shown).is_ok() {
             self.viewer_shown = Some(now);
+        }
+    }
+    /// A window hidden a while (a tab behind another) keeps every realm with
+    /// all its state, and they give back the heap they do not hold; shown,
+    /// they ask for room ahead of hidden windows' (PM-513). Shown applies at
+    /// once, hidden after `HEAP_HIDE_AFTER`, so a quick look at another tab
+    /// changes nothing.
+    fn follow_heap(&mut self, shown: bool) {
+        const HEAP_HIDE_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+        let since = if shown {
+            self.hidden_since = None;
+            None
+        } else {
+            Some(*self.hidden_since.get_or_insert_with(std::time::Instant::now))
+        };
+        let heap_shown = since.is_none_or(|at| at.elapsed() < HEAP_HIDE_AFTER);
+        let runtime = self.builtins.runtime.as_ref().map_or(0, |r| Arc::as_ptr(r) as usize);
+        let view = self.extensions.host.as_ref().map_or(0, |h| h.view());
+        let told = (runtime, view, heap_shown);
+        if self.heap_told == Some(told) {
+            return;
+        }
+        self.heap_told = Some(told);
+        let account = pm_runtime_v8::Admission::cage();
+        crate::diag::line(serde_json::json!({"heap": if heap_shown { "shown" } else { "hidden" },
+            "window": self.window_key, "used_mb": account.used() >> 20,
+            "budget_mb": account.budget() >> 20, "isolates": account.isolates(),
+            "waiting": account.waiting()}));
+        if let Some(runtime) = &self.builtins.runtime {
+            runtime.set_shown(heap_shown);
+        }
+        if let Some(host) = &self.extensions.host {
+            host.set_heap_shown(heap_shown);
         }
     }
     fn bind_composition(&mut self) {
