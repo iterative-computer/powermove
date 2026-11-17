@@ -787,11 +787,7 @@ impl Controller {
                 h: f32::from(b.size.height),
             })
         });
-        let owner = (!self.builtins.agent_docked)
-            .then(|| self.builtins.windows.get("agent").copied())
-            .flatten()
-            .and_then(|w| w.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
-            .flatten();
+        let owner = self.agent_popover_window(cx);
         let choices = options
             .iter()
             .enumerate()
@@ -830,6 +826,16 @@ impl Controller {
             Some("agentPick:".into()),
             request.input["placeholder"].as_str().unwrap_or("Search"),
         );
+    }
+    /// The Agent popover's own window, while the panel is shown there (not
+    /// docked): what its menus and questions stand on, so answering them
+    /// leaves the popover open (a sheet on the editor took key from it).
+    fn agent_popover_window(&self, cx: &mut App) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+        (!self.builtins.agent_docked)
+            .then(|| self.builtins.windows.get("agent").copied())
+            .flatten()
+            .and_then(|w| w.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
+            .flatten()
     }
     /// The Agent menu's answer: a row's value, or none when it closed unchosen.
     pub fn agent_picked(&mut self, index: &str) {
@@ -2295,6 +2301,13 @@ impl Controller {
                 "agent.consent" => {
                     let effect = request.input["effect"].as_u64().unwrap_or_default();
                     use crate::alert::{Alert, Button};
+                    // The request comes through the editor's window, never
+                    // the popover's: the sheet's window is looked up.
+                    let on: objc2::rc::Retained<objc2_app_kit::NSWindow> = consent_window(
+                        self.agent_popover_window(cx),
+                        crate::platform::ns_window(window),
+                        self.host.borrow().window.clone(),
+                    );
                     let rx = Alert::new(
                         "Give the agent full access?",
                         "It can run commands and edit files anywhere on this Mac without asking. Choose this only for work you trust.",
@@ -2307,10 +2320,7 @@ impl Controller {
                     // On the popover itself, as its file picker is: on the
                     // editor it took key from the popover, which closed, and
                     // the person had to open it again to send (PM-507).
-                    .sheet(
-                        &crate::platform::ns_window(window)
-                            .unwrap_or_else(|| self.host.borrow().window.clone()),
-                    );
+                    .sheet(&on);
                     self.builtins.agent_picking = true;
                     let runtime = runtime.clone();
                     cx.spawn(async move |this, cx| {
@@ -3322,8 +3332,25 @@ pub(crate) fn returns_to_popover(was_docked: bool, docked: bool, parked: bool) -
 }
 /// The popover gave up key: it closes when its own editor took it (a press
 /// outside the popover), never for another window or app.
+/// Where the full-access question stands: the Agent popover when the panel is
+/// shown there, else the window that asked, else the editor.
+fn consent_window<W>(popover: Option<W>, asking: Option<W>, editor: W) -> W {
+    popover.or(asking).unwrap_or(editor)
+}
 fn agent_dismisses(open: bool, editor_took_key: bool) -> bool {
     open && editor_took_key
+}
+#[cfg(test)]
+mod consent_window_tests {
+    /// PM-507 / run 29: the full-access question stood on the editor (the
+    /// request comes through its window) and answering it closed the
+    /// popover. With the popover open it stands on the popover.
+    #[test]
+    fn the_full_access_question_stands_on_the_popover_when_it_is_open() {
+        assert_eq!(super::consent_window(Some("popover"), Some("editor"), "host"), "popover");
+        assert_eq!(super::consent_window(None, Some("editor"), "host"), "editor", "docked");
+        assert_eq!(super::consent_window::<&str>(None, None, "host"), "host");
+    }
 }
 #[cfg(test)]
 mod popover_keys_tests {
