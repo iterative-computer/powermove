@@ -13,12 +13,22 @@ pub enum ClientError {
     OriginMismatch,
     ConcurrentRelativeGesture,
 }
-/// The status line shows the kernel's own sentence, not the variant.
+/// The status line shows a sentence, never a variant or an internal id.
 impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Kernel(message) | Self::Rejected(message) => f.write_str(message),
-            other => write!(f, "{other:?}"),
+            Self::Model(e) => write!(f, "{e}"),
+            Self::Closed => f.write_str("The project is closed."),
+            Self::GestureActive => f.write_str("Another timeline edit is still under way."),
+            Self::NoGesture => f.write_str("That timeline edit has already ended."),
+            Self::DocumentChanged => {
+                f.write_str("The project changed meanwhile, so this timeline edit was not made.")
+            }
+            Self::OriginMismatch => f.write_str("That timeline edit belongs to another window."),
+            Self::ConcurrentRelativeGesture => {
+                f.write_str("Another edit is moving the same items at the same time.")
+            }
         }
     }
 }
@@ -78,10 +88,10 @@ impl TimelineClient {
             )
             .await
             .ok_or(ClientError::Closed)?
-            .map_err(|e| ClientError::Kernel(format!("{e:?}")))?;
+            .map_err(|e| ClientError::Kernel(e.to_string()))?;
         self.sync()?;
         if let Reply::Throw(e) = &ack.reply {
-            return Err(ClientError::Rejected(format!("{e:?}")));
+            return Err(ClientError::Rejected(e.to_string()));
         }
         if let Reply::Edit(e) = &ack.reply
             && !e.ok
@@ -126,10 +136,10 @@ impl TimelineClient {
             .call(&self.project, request)
             .await
             .ok_or(ClientError::Closed)?
-            .map_err(|e| ClientError::Kernel(format!("{e:?}")))?;
+            .map_err(|e| ClientError::Kernel(e.to_string()))?;
         self.sync()?;
         if let Reply::Throw(e) = &ack.reply {
-            return Err(ClientError::Rejected(format!("{e:?}")));
+            return Err(ClientError::Rejected(e.to_string()));
         }
         Ok(ack)
     }
@@ -146,10 +156,24 @@ impl TimelineClient {
                 .source
                 .as_ref()
                 .ok_or(ModelError::InvalidGesture)?;
+            // Checked as it will run: after the lanes it shows are written.
+            let mut scratch =
+                pm_model::Document::from_root(source.root().cloned(), source.revision);
+            if let Some(pin) = drag.pin_command() {
+                let ops = pin
+                    .plan(
+                        scratch.root().ok_or(ModelError::InvalidGesture)?,
+                        self.caller.origin,
+                    )
+                    .map_err(|e| ClientError::Rejected(e.to_string()))?;
+                scratch
+                    .apply_ops(&ops)
+                    .map_err(|e| ClientError::Rejected(format!("{e:?}")))?;
+            }
             let command: pm_kernel::Command = command.clone().into();
             command
                 .plan(
-                    source.root().ok_or(ModelError::InvalidGesture)?,
+                    scratch.root().ok_or(ModelError::InvalidGesture)?,
                     self.caller.origin,
                 )
                 .map_err(|e| ClientError::Rejected(e.to_string()))?;
@@ -177,7 +201,7 @@ impl TimelineClient {
                 let value = mirror
                     .queries()
                     .evaluate(self.model.index.comp_id.as_deref(), layer, channel, *time)
-                    .map_err(|e| ClientError::Kernel(format!("{e:?}")))?;
+                    .map_err(|e| ClientError::Kernel(e.to_string()))?;
                 let number = value
                     .as_f64()
                     .filter(|v| v.is_finite())
@@ -289,21 +313,44 @@ impl TimelineClient {
         self.publish_view().await
     }
     pub async fn publish_view(&self) -> Result<(), ClientError> {
-        use pm_kernel::state::{StateOp, StateTransaction};
-        let state = self.kernel.state();
-        let old = state.ui.get(&self.project).cloned().unwrap_or_default();
-        self.kernel
-            .state_transaction(StateTransaction {
-                expected_revision: Some(state.revision),
-                ops: vec![StateOp::Ui {
-                    project: self.project.clone(),
-                    next: self.model.patch_ui(&old),
-                }],
-            })
-            .await
-            .ok_or(ClientError::Closed)?
-            .map_err(|e| ClientError::Kernel(format!("{e:?}")))?;
-        Ok(())
+        self.publish_view_from(self.kernel.state()).await
+    }
+    /// [`Self::publish_view`], patching `state` first. The view facts are a
+    /// patch on the project's UI entry as read: when another write moved the
+    /// state on meanwhile (the editor writes it on most changes), the patch
+    /// is made again on the state as it is now, so nothing either wrote is
+    /// lost (PM-476: a fast run of text boxes left the stale write's raw
+    /// error in the status line).
+    pub async fn publish_view_from(
+        &self,
+        mut state: std::sync::Arc<pm_kernel::state::StateSnapshot>,
+    ) -> Result<(), ClientError> {
+        use pm_kernel::state::{STATE_CHANGED, StateOp, StateTransaction};
+        const TRIES: usize = 8;
+        for attempt in 1..=TRIES {
+            let old = state.ui.get(&self.project).cloned().unwrap_or_default();
+            let written = self
+                .kernel
+                .state_transaction(StateTransaction {
+                    expected_revision: Some(state.revision),
+                    ops: vec![StateOp::Ui {
+                        project: self.project.clone(),
+                        next: self.model.patch_ui(&old),
+                    }],
+                })
+                .await
+                .ok_or(ClientError::Closed)?;
+            match written {
+                Ok(_) => return Ok(()),
+                Err(pm_kernel::KernelFailure::Storage(m))
+                    if m == STATE_CHANGED && attempt < TRIES =>
+                {
+                    state = self.kernel.state();
+                }
+                Err(e) => return Err(ClientError::Kernel(e.to_string())),
+            }
+        }
+        unreachable!("the last try returns")
     }
     /// The host awaits disposal before retiring/replacing a panel. Drop never
     /// blocks the main thread and cannot silently cancel a kernel lease.

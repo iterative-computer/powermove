@@ -1280,7 +1280,7 @@ async fn call(
         .call(project, Request::new(Caller::native(), call))
         .await
         .ok_or("Kernel closed")?
-        .map_err(|e| format!("{e:?}"))?;
+        .map_err(|e| e.to_string())?;
     match ack.reply {
         Reply::Throw(error) => Err(error.to_string()),
         reply => Ok(reply),

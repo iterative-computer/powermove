@@ -1226,6 +1226,16 @@ impl TimelineSurface {
         self.outline.set_scene(self.scene.clone());
         self.frame = None;
         self.clamp_scroll();
+        // The names follow the new scene at once: a switch between Layers and
+        // Tracks at the same offset kept the outline's old window and offset,
+        // and the header column drew nothing beside the tracks until a scroll
+        // (PM-477).
+        self.outline.scrolled(
+            self.view.scroll_y as f32,
+            self.view.layer_column as f32,
+            self.visible_rows(),
+            cx,
+        );
         let duration = self.model.index.duration;
         if duration > 0. && self.bounds.size.width > px(0.) {
             let width = (f32::from(self.bounds.size.width) as f64 - self.view.layer_column).max(1.);
@@ -3652,7 +3662,7 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             pending
                 .await
                 .ok_or("Kernel closed")?
-                .map_err(|e| format!("{e:?}"))?;
+                .map_err(|e| e.to_string())?;
             Ok(vec![])
         }
     }
@@ -3843,13 +3853,27 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         Spec::Ripple(edge) => {
             let id = primary()?;
             let layer = model.index.layer(&id).ok_or("Unknown clip")?;
+            // The track it shows on (its lane is written as its track ahead
+            // of the edit), in its own area: V1 is not A1.
+            let lane = pm_panel_timeline::tracks::relative_lanes(&model.index, &model.reveal)
+                .into_iter()
+                .find(|(l, _)| *l == id)
+                .map_or(layer.preferred_track as i32, |(_, lane)| lane as i32);
             DragKind::ProEdit(Pro::RippleTrim {
                 layer_id: id.clone(),
                 edge: pro_edge(edge),
                 delta: 0.,
                 tracks: vec![TrackTarget {
-                    track: layer.preferred_track as i32,
+                    track: lane,
                     group_id: layer.group.clone(),
+                    area: Some(
+                        if layer.kind == "audio" {
+                            "audio"
+                        } else {
+                            "video"
+                        }
+                        .into(),
+                    ),
                 }],
                 linked: true,
             })

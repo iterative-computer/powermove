@@ -121,7 +121,7 @@ impl ProEditCommand {
                         Self::Trim {
                             edge: Edge::Out, ..
                         } => clip.dur += delta,
-                        Self::Slip { .. } => clip.trim += delta * clip.rate,
+                        Self::Slip { .. } => clip.slip(delta)?,
                         _ => unreachable!(),
                     }
                     clip.write(cx, !matches!(self, Self::Move { .. }))?;

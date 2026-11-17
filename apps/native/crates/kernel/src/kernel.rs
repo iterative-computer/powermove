@@ -1029,6 +1029,18 @@ impl Kernel {
         }
         Ok(())
     }
+    /// The barrier a project's close needs before its journal is retired:
+    /// that project's journal synced, the library flushed, and the queued
+    /// durability work (checkpoints, journal syncs) done.
+    pub fn close_barrier(&self, id: &str) -> Result<(), KernelFailure> {
+        self.flush_project(id)?;
+        if let Some(writer) = &self.library {
+            writer
+                .flush()
+                .map_err(|e| KernelFailure::Storage(e.to_string()))?;
+        }
+        Ok(())
+    }
     pub fn durability_barrier(&self) -> Result<(), KernelFailure> {
         for id in self.projects() {
             self.flush_project(id)?;

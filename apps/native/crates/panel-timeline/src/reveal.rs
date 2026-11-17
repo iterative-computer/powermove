@@ -30,6 +30,19 @@ struct Last {
 pub struct RevealState {
     pub layers: HashMap<String, Disclosure>,
     last: Option<Last>,
+    /// Tracks mode: the lane each clip showed on (relative to its group, as
+    /// a stored `track` is) and the time it spanned then. A clip whose time
+    /// has not changed stays on it through any edit, from any source; only
+    /// a clip that never had a lane, or an edited one whose lane is taken,
+    /// is packed (PM-477, PM-485).
+    pub held: HashMap<String, Held>,
+}
+/// A clip's lane as the Tracks timeline last showed it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Held {
+    pub lane: usize,
+    pub from: f64,
+    pub end: f64,
 }
 impl RevealState {
     pub fn visible(&self, layer: &str, channel: &Channel) -> bool {

@@ -39,8 +39,9 @@ pub fn route_sigterm() {
                     continue;
                 }
                 if !TERMINATE_HEARD.load(std::sync::atomic::Ordering::Acquire) {
-                    // No window yet, so nothing is open to close.
-                    std::process::exit(0);
+                    // No window yet, so nothing is open to close; ends
+                    // without exit handlers, as the signal's limit does.
+                    crate::quit_limit::stop_jobs_and_exit(0);
                 }
                 // Bounded here, not on the main thread: a quit already under
                 // way and stuck there would otherwise never hear it.
@@ -688,6 +689,17 @@ pub fn quit_guard() -> (Retained<QuitDelegate>, async_channel::Receiver<()>) {
     (guard, rx)
 }
 impl QuitDelegate {
+    /// Quit Powermove or Cmd-Q (`pm_shell::native::set_quit_hook`): to the
+    /// quit coordinator like the Quit Apple Event, with or without a sheet;
+    /// once the quit is allowed, the app terminates.
+    pub fn chosen(&self) {
+        if self.ivars().allowed.get() {
+            let mtm = MainThreadMarker::new().unwrap();
+            NSApplication::sharedApplication(mtm).terminate(None);
+            return;
+        }
+        let _ = self.ivars().sender.try_send(());
+    }
     pub fn allow(&self) {
         self.ivars().allowed.set(true);
     }

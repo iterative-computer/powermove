@@ -132,6 +132,13 @@ impl TimelineModel {
         let selection_changed = self.selection.layers() != published.selection.layers();
         self.selection = published.selection.clone();
         if changed {
+            // Tracks mode: the lanes shown now hold through whatever changed
+            // the document (the timeline, a menu, Properties, an agent).
+            if self.mode == TimelineMode::Tracks && !new_document {
+                self.reveal.held = crate::tracks::shown(&self.index, &self.reveal);
+            } else {
+                self.reveal.held.clear();
+            }
             self.index = TimelineIndex::shared(&published.snapshot, &self.index);
             self.rebuild_rows();
         }
