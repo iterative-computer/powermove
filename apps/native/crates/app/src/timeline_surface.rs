@@ -4871,6 +4871,9 @@ impl Render for TimelineSurface {
                                     }
                                 }
                             }
+                        }
+                        if let Some(surface) = this.upgrade() {
+                            let surface = surface.read(cx);
                             if let Gesture::ParentPick { origin, at, target, moved: true, .. } = &surface.gesture {
                                 // v1 installParentPickwhip: the same cubic and target label.
                                 let mut line = PathBuilder::stroke(px(2.));
