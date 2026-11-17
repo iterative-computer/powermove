@@ -39,6 +39,9 @@ pub struct TextField {
     width: Rc<std::cell::Cell<f32>>,
     /// Shown as a picture of itself while its surface's body scrolls.
     picture: crate::picture::Picture,
+    /// A press opened it and the keyboard is on its way (it moves at the next
+    /// present): keys typed meanwhile wait for it (`typing`, PM-487).
+    awaiting_keyboard: bool,
 }
 impl Drop for TextField {
     fn drop(&mut self) {
@@ -118,6 +121,7 @@ impl TextField {
             ink: None,
             width: Rc::default(),
             picture: Default::default(),
+            awaiting_keyboard: false,
         }
     }
     /// The lines a multi-line field shows: its text as it wraps in the
@@ -396,6 +400,17 @@ const MONO_ADVANCE: f32 = 0.602;
 const MULTILINE_MOST: usize = 6;
 impl Render for TextField {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The keyboard a press asked for has come: what waited for it goes in.
+        if self.awaiting_keyboard {
+            if self.slot.has_keyboard() {
+                self.awaiting_keyboard = false;
+                crate::typing::field_ready();
+            } else if crate::typing::expecting() {
+                window.request_animation_frame();
+            } else {
+                self.awaiting_keyboard = false;
+            }
+        }
         if matches!(self.kind, TextKind::Form | TextKind::FormNumber) {
             return self.render_form(window);
         }
@@ -489,6 +504,13 @@ impl Render for TextField {
                     // A press on its picture goes to the editor once shown.
                     if !this.picture.press(window) {
                         this.slot.begin_editing();
+                        // Under load the keyboard moves a slow frame later:
+                        // what is typed until then is for this field, never
+                        // ⌘A on the layers or digits on the playhead.
+                        if !this.slot.has_keyboard() {
+                            crate::typing::expect();
+                            this.awaiting_keyboard = true;
+                        }
                     }
                     cx.notify();
                 }),

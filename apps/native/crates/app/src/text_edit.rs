@@ -1398,8 +1398,10 @@ impl GizmoSurface {
     ) {
         // The text opens a turn or more from now (a point click first asks
         // what is under it): letters typed meanwhile wait for it, not run as
-        // shortcuts on the canvas (PM-465).
-        pm_shell::typing::expect();
+        // shortcuts on the canvas (PM-465). Under load the first texts open
+        // slowly (the editor and fonts cold): the letters wait long enough
+        // for them, or an empty text was left and nothing made.
+        pm_shell::typing::expect_for(std::time::Duration::from_secs(6));
         let paragraph = sketch.shape.filter(|b| b.w() >= PARAGRAPH_MIN);
         if let Some(b) = paragraph {
             self.new_text([b.x0, b.y0], Some(b.w()), window, cx);
