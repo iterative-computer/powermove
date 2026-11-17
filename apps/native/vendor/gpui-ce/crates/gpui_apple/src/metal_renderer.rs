@@ -152,6 +152,15 @@ pub fn new_window_layer(transparent: bool) -> metal::MetalLayer {
     // Reborrow its Objective-C object as the generated objc2 class to keep
     // selector encodings and the autoresizing mask type checked here.
     let layer_object = unsafe { &*(layer.as_ptr() as *const Objc2CAMetalLayer) };
+    // GPUI's packed surfaces (including snapshot transitions) are encoded sRGB.
+    // Label the layer explicitly so ColorSync converts them on wide-gamut displays.
+    let space = core_graphics::color_space::CGColorSpace::create_with_name(unsafe {
+        core_graphics::color_space::kCGColorSpaceSRGB
+    })
+    .expect("sRGB color space");
+    // The core-graphics and objc2-core-graphics wrappers retain the same CF type;
+    // CAMetalLayer retains the color space before the local wrapper is dropped.
+    unsafe { layer_object.setColorspace(Some(&*space.as_ptr().cast())) };
     // Powermove: the layer is asked for a drawable off the main thread
     // (`DrawableSource`) or inside AppKit's own synchronous paints; with the
     // timeout a full pool gives up after a second instead of waiting for ever.
