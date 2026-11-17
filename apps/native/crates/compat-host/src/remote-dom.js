@@ -397,6 +397,7 @@
       }
     } catch (error) {
       stopped = true;
+      // What stopped it, for the app's log: every panel of this page is blank from here.
       try {
         call({
           kind: "failure",

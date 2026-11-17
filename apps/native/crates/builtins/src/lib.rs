@@ -1912,6 +1912,7 @@ impl Builtins {
     pub fn scrub_begin(
         &self,
         panel: &str,
+        label: Option<&str>,
     ) -> Result<pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>>
     {
         let caller = self.backend(panel)?.shared().caller;
@@ -1919,8 +1920,10 @@ impl Builtins {
             &self.broker.project,
             pm_kernel::Request::new(
                 caller,
+                // Named for the control dragged (Lift, Curve, Temperature),
+                // as v1's grade undo steps were.
                 pm_kernel::GestureCall::Begin {
-                    label: "Change Property".into(),
+                    label: label.unwrap_or("Change Property").into(),
                 },
             ),
         ))
