@@ -1123,6 +1123,16 @@ fn key_eases(index: &TimelineIndex, ids: &[String]) -> Vec<(String, EaseSide, Te
     out
 }
 impl Drag {
+    /// Tracks mode: the command writing the lanes shown when the drag began,
+    /// which goes ahead of each step of a pro edit.
+    pub fn pin_command(&self) -> Option<Command> {
+        self.lanes.as_ref().map(|lanes| {
+            pm_kernel::TimingCommand::PinTracks {
+                lanes: lanes.clone(),
+            }
+            .into()
+        })
+    }
     /// Captures identities and baselines once; never keeps a writer lease itself.
     pub fn begin(model: &TimelineModel, mut kind: DragKind) -> Result<Self, ModelError> {
         let index = &model.index;

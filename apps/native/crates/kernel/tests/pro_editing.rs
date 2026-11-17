@@ -508,6 +508,7 @@ fn nested_composition_and_track_group_ids_are_resolved_per_command() {
             tracks: vec![TrackTarget {
                 group_id: Some("inner-g".into()),
                 track: 2,
+                area: None,
             }],
             linked: true,
         },
@@ -704,4 +705,27 @@ fn retimed_clips_trim_and_slip_like_any_other() {
     assert_eq!(n(&b, &["d", "sourceTime", "kf", "0", "v"]), 3.5);
     assert_eq!(n(&b, &["d", "sourceTime", "kf", "1", "v"]), 1.5);
     assert_eq!(n(&b, &["from"]), 5.);
+}
+/// A remapped clip whose source starts at its first frame (a freeze at
+/// trim 0) still extends its In point: its keys say which frame shows.
+#[test]
+fn a_remapped_clip_extends_its_in_point() {
+    let mut b = clip("b", 4., 4., 0);
+    b["d"]["trim"] = json!({"v": 0, "kf": [], "expr": null});
+    b["d"]["timeRemap"] = json!({"v": true, "kf": [], "expr": null});
+    b["d"]["sourceTime"] = json!({"v": 0, "kf": [
+        {"i": "s0", "t": 0, "v": 2, "eo": [0, 0], "ei": [1, 1], "hold": true}], "expr": null});
+    let mut s = store(vec![b]);
+    roundtrip(
+        &mut s,
+        Edit::Trim {
+            layer_ids: ids(&["b"]),
+            edge: Edge::In,
+            delta: -1.,
+            linked: false,
+        },
+    );
+    let b = layer(&s, "b");
+    assert_eq!(n(&b, &["from"]), 3.);
+    assert_eq!(n(&b, &["d", "sourceTime", "kf", "0", "t"]), 1.);
 }

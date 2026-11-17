@@ -3839,13 +3839,27 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         Spec::Ripple(edge) => {
             let id = primary()?;
             let layer = model.index.layer(&id).ok_or("Unknown clip")?;
+            // The track it shows on (its lane is written as its track ahead
+            // of the edit), in its own area: V1 is not A1.
+            let lane = pm_panel_timeline::tracks::relative_lanes(&model.index, &model.reveal)
+                .into_iter()
+                .find(|(l, _)| *l == id)
+                .map_or(layer.preferred_track as i32, |(_, lane)| lane as i32);
             DragKind::ProEdit(Pro::RippleTrim {
                 layer_id: id.clone(),
                 edge: pro_edge(edge),
                 delta: 0.,
                 tracks: vec![TrackTarget {
-                    track: layer.preferred_track as i32,
+                    track: lane,
                     group_id: layer.group.clone(),
+                    area: Some(
+                        if layer.kind == "audio" {
+                            "audio"
+                        } else {
+                            "video"
+                        }
+                        .into(),
+                    ),
                 }],
                 linked: true,
             })

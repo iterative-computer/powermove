@@ -17,17 +17,27 @@ pub(super) fn number(n: f64) -> Result<f64, CommandError> {
 pub struct TrackTarget {
     pub group_id: Option<String>,
     pub track: i32,
+    /// The Tracks timeline area the lane counts in (`video` or `audio`,
+    /// whose lanes both start at 0); `None` for any.
+    pub area: Option<String>,
 }
 impl TrackTarget {
     pub fn new(track: i32) -> Self {
         Self {
             group_id: None,
             track,
+            area: None,
         }
     }
     pub(super) fn matches(&self, layer: &Value) -> bool {
+        let area = match values::text(layer, "type") {
+            Some("audio") => "audio",
+            Some("captions") => "captions",
+            _ => "video",
+        };
         values::text(layer, "group") == self.group_id.as_deref()
             && values::num(layer, "track").unwrap_or(0.0) == f64::from(self.track)
+            && self.area.as_deref().is_none_or(|a| a == area)
     }
 }
 
@@ -111,7 +121,7 @@ impl Clip {
         if self.from < -EPS
             || self.dur + EPS < 1.0 / cx.fps(self.comp.as_deref())
             || self.end() > cx.duration(self.comp.as_deref()) + EPS
-            || self.trim < -EPS
+            || (!self.remap && self.trim < -EPS)
         {
             return Err(invalid(
                 "The edit must retain one frame inside the composition and source.",
@@ -141,7 +151,10 @@ impl Clip {
     pub fn trim_in(&mut self, delta: f64) -> Result<(), CommandError> {
         self.from += delta;
         self.dur -= delta;
-        self.trim += delta * self.rate;
+        // A remapped clip's source frames come from its keys, rebased below.
+        if !self.remap {
+            self.trim += delta * self.rate;
+        }
         rebase(&mut self.value, delta)
     }
     /// Slip by `delta` seconds of source: the source moves under the clip

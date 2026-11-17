@@ -495,3 +495,50 @@ fn a_slide_in_tracks_takes_its_neighbours_on_its_own_track() {
     assert_eq!(field(&s, "c", "from"), Some(3.0));
     assert_eq!(field(&s, "c", "dur"), Some(2.0));
 }
+
+/// V1 and A1 are different tracks though both are lane 0 of their area: a
+/// ripple on a video clip leaves a later audio clip where it is.
+#[test]
+fn a_ripple_in_tracks_keeps_to_its_area() {
+    let project = LANES.replace(
+        r#"{"id": "c", "type": "shape", "name": "C", "from": 3, "dur": 2, "p": {}}"#,
+        r#"{"id": "c", "type": "audio", "name": "C", "from": 3, "dur": 2, "d": {"trim": 0, "speed": 1}, "p": {}}"#,
+    );
+    let mut s = DocumentStore::new_untitled(parse(&project).unwrap());
+    run(
+        &mut s,
+        TimingCommand::InTracks {
+            lanes: vec![("a".into(), 0), ("b".into(), 0), ("c".into(), 0)],
+            command: Box::new(TimingCommand::RippleTrim {
+                layer_ids: vec!["a".into()],
+                edge: TimeEdge::Out,
+                time: 1.0,
+            }),
+        },
+    );
+    assert_eq!(field(&s, "b", "from"), Some(1.0));
+    assert_eq!(field(&s, "c", "from"), Some(3.0), "A1 is not V1");
+}
+
+/// Two clips on one track rippled out together: the later one moves on by
+/// the earlier one's growth, so they never overlap.
+#[test]
+fn two_clips_rippled_out_together_stay_in_order() {
+    let mut s = DocumentStore::new_untitled(parse(LANES).unwrap());
+    run(
+        &mut s,
+        TimingCommand::InTracks {
+            lanes: lanes(),
+            command: Box::new(TimingCommand::RippleTrim {
+                layer_ids: vec!["a".into(), "b".into()],
+                edge: TimeEdge::Out,
+                time: 5.0,
+            }),
+        },
+    );
+    assert_eq!(
+        (field(&s, "a", "from"), field(&s, "a", "dur")),
+        (Some(0.0), Some(5.0))
+    );
+    assert_eq!(field(&s, "b", "from"), Some(5.0));
+}

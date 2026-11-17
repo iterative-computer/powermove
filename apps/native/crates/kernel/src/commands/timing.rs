@@ -839,6 +839,7 @@ fn abutting(layers: &[Value], layer: &Value, at: f64, before: bool) -> Option<Va
             values::text(l, "id") != values::text(layer, "id")
                 && values::text(l, "type") != Some("group")
                 && values::text(l, "group") == values::text(layer, "group")
+                && area(l) == area(layer)
                 && track(l) == track(layer)
                 && !locked_here(layers, l)
                 && ((if before { end } else { from }) - at).abs() < EDGE_EPS
@@ -866,10 +867,23 @@ fn first_start(layer: &Value) -> f64 {
     }
 }
 
-/// A layer's track key: its group and stored `track` (Tracks timeline).
+/// The Tracks timeline area a layer's lanes count in: audio, captions or
+/// video (each numbers its lanes from 0).
+fn area(layer: &Value) -> &'static str {
+    match values::text(layer, "type") {
+        Some("audio") => "audio",
+        Some("captions") => "captions",
+        _ => "video",
+    }
+}
+
+/// A layer's track key: its group, area and stored `track` (Tracks
+/// timeline): V1, A1 and the first caption lane are different tracks.
 fn track_of(layer: &Value) -> (Option<String>, f64) {
     (
-        values::text(layer, "group").map(str::to_owned),
+        values::text(layer, "group")
+            .map(|g| format!("{g}\u{1f}{}", area(layer)))
+            .or_else(|| Some(area(layer).to_owned())),
         values::num(layer, "track").unwrap_or(0.0),
     )
 }
@@ -948,17 +962,18 @@ fn ripple_trim(
         let layers = cx.layers(comp.as_deref());
         for layer in &layers {
             let id = values::text(layer, "id").unwrap_or_default();
-            if values::text(layer, "type") == Some("group")
-                || locked_here(&layers, layer)
-                || grown.iter().any(|(g, ..)| g == id)
-            {
+            if values::text(layer, "type") == Some("group") || locked_here(&layers, layer) {
                 continue;
             }
             let (from, _) = ends(layer);
+            // A grown target moves on by the others' growth before it, never
+            // by its own.
             let shift: f64 = grown
                 .iter()
-                .filter(|(_, pivot, _, track)| {
-                    from >= pivot - EDGE_EPS && track.as_ref().is_none_or(|t| *t == track_of(layer))
+                .filter(|(g, pivot, _, track)| {
+                    g != id
+                        && from >= pivot - EDGE_EPS
+                        && track.as_ref().is_none_or(|t| *t == track_of(layer))
                 })
                 .map(|(_, _, gained, _)| gained)
                 .sum();
