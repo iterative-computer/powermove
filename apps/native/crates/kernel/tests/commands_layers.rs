@@ -1036,3 +1036,11 @@ fn g3_speed_ripples_only_its_track_and_undo_restores_everything() {
         assert_eq!(s.root().unwrap().to_value(), before);
     }
 }
+
+#[test]
+fn g3_intentional_time_remaps_keep_their_authored_length() {
+    let mut s = store();
+    run(&mut s, pm_kernel::ContentCommand::Set { layer_id: "clip".into(), patch: [("timeRemap".into(), Value::from(true))].into_iter().collect(), time: 0.0 });
+    run(&mut s, TimingCommand::TrimOut { layer_ids: vec!["clip".into()], time: 20.0 });
+    assert_eq!(num(&layer(&s, "clip"), &["dur"]), 18.0);
+}

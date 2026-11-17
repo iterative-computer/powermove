@@ -373,8 +373,12 @@ pub(crate) fn plan_set(
     origin: super::Origin,
     c: &SetProperty,
     presets: &mut Presets,
+    state: Option<&crate::state::StateSnapshot>,
+    project: Option<&str>,
 ) -> Result<Vec<pm_model::Op>, CommandError> {
     let mut cx = Cx::new(root, origin);
+    cx.state = state;
+    cx.project = project;
     set_property_inner(&mut cx, c, Some(presets), true)?;
     Ok(cx.finish())
 }

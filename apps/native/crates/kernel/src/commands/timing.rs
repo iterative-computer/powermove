@@ -345,7 +345,10 @@ fn rate(layer: &Value) -> f64 {
 /// Last available source frame expressed in composition time. Generated
 /// layers and stills have no source-end restriction.
 fn source_end(cx: &Cx<'_>, layer: &Value) -> f64 {
-    if !is_timed(layer) {
+    if !is_timed(layer)
+        || (values::text(layer, "type") == Some("video") && super::properties::previous_speed(layer).is_none())
+    {
+        // An authored remap/freeze supplies its own source frame mapping.
         return f64::INFINITY;
     }
     let duration = layer

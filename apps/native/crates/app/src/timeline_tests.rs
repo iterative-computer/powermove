@@ -3399,10 +3399,11 @@ fn g3_ruler_click_seeks_without_horizontal_scroll(cx: &mut TestAppContext) {
     let at = s.at(0, 3.);
     let origin = s.origin();
     let at = point(at.x, origin.y + px(20.));
+    s.recorder.seeks.borrow_mut().clear();
     s.vcx.simulate_event(MouseDownEvent { button: MouseButton::Left, position: at, ..Default::default() });
     s.vcx.simulate_event(MouseUpEvent { button: MouseButton::Left, position: at, ..Default::default() });
     s.idle(cx);
-    assert!(!s.recorder.seeks.borrow().is_empty());
+    assert!((s.recorder.seeks.borrow().last().copied().expect("ruler seek") - 3.).abs() <= 1. / 30.);
     assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_time()), before);
 }
 
@@ -3443,7 +3444,22 @@ fn g3_capture_trim_review() {
             loop {
                 cx.run_until_parked();
                 let idle = cx.update(|cx| surface.read(cx).idle());
-                if idle { break; }
+                if idle {
+                    for (_, ticket) in rig.runtime.publish() {
+                        let ticket = ticket.unwrap();
+                        while ticket.try_take().is_none() {
+                            assert!(std::time::Instant::now() < deadline, "outline capture timed out");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    let publications = rig.runtime.take_publications();
+                    cx.update(|cx| {
+                        let view = window.root(cx).unwrap();
+                        for p in publications { view.update(cx, |v, cx| v.publish(p, cx)); }
+                    });
+                    cx.run_until_parked();
+                    break;
+                }
                 assert!(std::time::Instant::now() < deadline, "timeline capture timed out");
                 std::thread::sleep(Duration::from_millis(5));
             }
@@ -3489,5 +3505,14 @@ fn g3_capture_trim_review() {
         cx.update(|cx| surface.update(cx, |s, cx| { s.published(cx); s.fit_time(cx); }));
         pump(&mut cx);
         cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/trim-clamped-{name}.png")).unwrap();
+        cx.update(|cx| surface.update(cx, |s, cx| s.command("timeline.mode:layers", 0., None, false, cx)));
+        pump(&mut cx);
+        rig.kernel.call(PROJECT, Request::new(Caller::native(), Call::Transact {
+            label: None, expected_revision: None,
+            body: pm_kernel::WriteBody::Commands(vec![pm_kernel::LayerCommand::Set { layer_id: "a".into(), patch: pm_kernel::commands::layers::LayerPatch { from: Some(-1.), ..Default::default() } }.into()]),
+        })).wait().unwrap().unwrap();
+        cx.update(|cx| surface.update(cx, |s, cx| s.published(cx)));
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/negative-start-{name}.png")).unwrap();
     }
 }

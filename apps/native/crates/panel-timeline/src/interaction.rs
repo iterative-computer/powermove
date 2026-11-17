@@ -1578,6 +1578,7 @@ impl Drag {
                 let earliest = ids
                     .iter()
                     .filter_map(|id| self.start.layer(id))
+                    .filter(|l| l.kind != "group")
                     .map(|l| l.from)
                     .reduce(f64::min)
                     .unwrap_or(0.);
@@ -1593,7 +1594,8 @@ impl Drag {
                     let from = if self.snap.lock.is_some() {
                         l.from + clamp(delta)
                     } else {
-                        l.from + clamp(frame(sample.time_delta, self.start.fps))
+                        let rounded = frame(l.from + sample.time_delta, self.start.fps);
+                        if self.track_snap.is_some() { l.from + clamp(rounded - l.from) } else { rounded }
                     };
                     out.push(
                         LayerCommand::Set {
@@ -1617,7 +1619,7 @@ impl Drag {
                     frame(first.from + sample.time_delta, self.start.fps) - first.from
                 };
                 let step = if self.track_snap.is_some() {
-                    let earliest = self.start.expanded_ids(ids).iter().filter_map(|id| self.start.layer(id)).map(|l| l.from).reduce(f64::min).unwrap_or(0.);
+                    let earliest = self.start.expanded_ids(ids).iter().filter_map(|id| self.start.layer(id)).filter(|l| l.kind != "group").map(|l| l.from).reduce(f64::min).unwrap_or(0.);
                     step.max(-earliest)
                 } else { step };
                 out.push(

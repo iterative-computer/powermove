@@ -1141,9 +1141,7 @@ impl DocumentStore {
         {
             let tree = root.as_ref().ok_or(TransactionError::NoDocument)?;
             let property = match command {
-                // Speed needs the project mode to ripple its track. Plan it with
-                // runtime state rather than the state-free keyframe batch.
-                Some(Command::Property(crate::PropertyCommand::Set(c))) if c.channel != "c.speed" => Some(c),
+                Some(Command::Property(crate::PropertyCommand::Set(c))) => Some(c),
                 _ => None,
             };
             let mut ops = if property.is_none() {
@@ -1165,7 +1163,10 @@ impl DocumentStore {
             let tree = root.as_ref().ok_or(TransactionError::NoDocument)?;
             let ops = match (command, property) {
                 (_, Some(c)) => {
-                    crate::commands::properties::plan_set(tree, origin, c, &mut presets)?
+                    crate::commands::properties::plan_set(
+                        tree, origin, c, &mut presets,
+                        self.runtime_state.as_ref(), self.runtime_project.as_deref(),
+                    )?
                 }
                 (Some(c), None) => c.plan_with_state(
                     tree,

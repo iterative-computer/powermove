@@ -3150,3 +3150,33 @@ fn g3_tracks_duplicate_drag_also_stops_at_zero() {
     assert_eq!(c.model.index.layer("a").unwrap().from, 1.);
     block_on(c.finish_drag(true)).unwrap();
 }
+
+#[test]
+fn g3_layer_moves_keep_existing_absolute_frame_rounding() {
+    for mode in [TimelineMode::Layers, TimelineMode::Tracks] {
+        let mut value = fixture();
+        layer_mut(&mut value, 0).insert("from", Value::from(0.125));
+        let (_a, mut c) = client_with(value);
+        c.model.mode = mode;
+        c.model.track_snap_disabled = true;
+        block_on(c.begin_drag(DragKind::Layers { ids: strings(&["a"]) })).unwrap();
+        block_on(c.drag(sample(0.01))).unwrap();
+        assert!((c.model.index.layer("a").unwrap().from - 4. / 30.).abs() < 1e-9);
+        block_on(c.finish_drag(true)).unwrap();
+    }
+}
+
+#[test]
+fn g3_tracks_group_clamp_uses_member_span_not_container_metadata() {
+    let mut value = fixture();
+    layer_mut(&mut value, 0).insert("type", Value::from("group"));
+    layer_mut(&mut value, 0).insert("from", Value::from(0.));
+    layer_mut(&mut value, 1).insert("group", Value::from("a"));
+    let (_a, mut c) = client_with(value);
+    c.model.mode = TimelineMode::Tracks;
+    c.model.track_snap_disabled = true;
+    block_on(c.begin_drag(DragKind::Layers { ids: strings(&["a"]) })).unwrap();
+    block_on(c.drag(sample(-9.))).unwrap();
+    assert_eq!(c.model.index.layer("b").unwrap().from, 0.);
+    block_on(c.finish_drag(true)).unwrap();
+}
