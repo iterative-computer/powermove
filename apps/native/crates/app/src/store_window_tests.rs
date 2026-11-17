@@ -1341,3 +1341,49 @@ fn a_page_opened_while_the_storefront_loads_keeps_it() {
     view.update(cx, |v, cx| v.back(cx));
     settle(&view, cx, "storefront after Back", |v| ready(&v.shelves));
 }
+
+/// PM-505: an extension made here whose manifest can't be loaded is listed
+/// as broken, with why, never as a healthy card.
+#[::core::prelude::v1::test]
+fn a_made_extension_with_a_broken_manifest_says_why() {
+    let profile = tempfile::tempdir().unwrap();
+    let folder = profile.path().join("extensions/acc-tint");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("manifest.json"),
+        r#"{"id":"acc-tint","name":"Acceptance Tint","version":"1.0.0","apiVersion":3,"author":"acceptance"}"#,
+    )
+    .unwrap();
+    let made = crate::store_window::yours(profile.path());
+    assert_eq!(made.len(), 1);
+    let why = made[0].broken.clone().expect("listed as broken");
+    assert!(why.contains("author") && why.contains("\"user\""), "{why}");
+    assert!(crate::store_window::broken_status(&why).starts_with("Its manifest has a problem"));
+}
+
+/// PM-505: Publish while signed out says so and offers the way to an account:
+/// a Sign In button, not only a line of text.
+#[::core::prelude::v1::test]
+fn publishing_signed_out_offers_sign_in() {
+    let f = fixture();
+    let profile = f.profile.path().canonicalize().unwrap();
+    let folder = profile.join("extensions/made-here");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("manifest.json"),
+        r#"{"id":"made-here","name":"Made Here","version":"1.0.0","apiVersion":3,"author":"user"}"#,
+    )
+    .unwrap();
+    let mut cx = TestAppContext::single();
+    let (view, cx) = open(&mut cx, services(&f, true));
+    view.update(cx, |v, cx| v.set_page(Page::Library, cx));
+    settle(&view, cx, "library", |v| v.yours.iter().any(|y| y.id == "made-here"));
+    click(cx, "store-publish-made-here");
+    settle(&view, cx, "signed-out answer", |v| v.message.is_some() && v.busy.is_none());
+    assert_eq!(
+        view.read_with(cx, |v, _| v.message.clone()).as_deref(),
+        Some(crate::publish::SIGN_IN)
+    );
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("store-sign-in").is_some(), "a Sign In button is shown");
+}
