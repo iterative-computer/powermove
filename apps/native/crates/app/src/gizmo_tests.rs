@@ -857,6 +857,11 @@ struct Owner {
     surface: Option<Entity<GizmoSurface>>,
     overlays: usize,
 }
+impl gpui::Render for Owner {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        gpui::div()
+    }
+}
 struct OwnerHost(gpui::WeakEntity<Owner>);
 impl Host for OwnerHost {
     fn time(&self, cx: &App) -> f64 {
@@ -884,6 +889,67 @@ impl Host for OwnerHost {
     fn navigate(&self, _: Navigate, _: &mut App) {}
     fn layer_menu(&self, _: Option<String>, _: &mut gpui::Window, _: &mut App) {}
     fn report(&self, _: String, _: &mut App) {}
+    fn pause(&self, cx: &mut App) {
+        // As the app's: it reads the owner to reach the viewer.
+        if let Some(o) = self.0.upgrade() {
+            o.read(cx);
+        }
+    }
+}
+/// Acceptance run 26 (PM-480, 2 of 2): Return with a text layer selected,
+/// from the controller's own command. The edit reads the controller (the
+/// time, pausing playback) through the host: run inside the owner's update
+/// it aborted the app; it starts once that update is over.
+#[gpui::test]
+fn return_on_a_selected_text_during_the_owners_update_never_reads_it_while_leased(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig_project(
+        "viewer",
+        &project_of("text").replace(r#""d":{"w":100,"h":100}"#, r#""d":{"text":"Hi"}"#),
+    );
+    let select = SelectionCall::Layers {
+        ids: vec!["l0".into()],
+        add: false,
+    };
+    rig.kernel
+        .call(PROJECT, Request::new(Caller::native(), select))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let kernel = rig.kernel.clone();
+    cx.executor().allow_parking();
+    let (owner, vcx) = cx.add_window_view(|_, _| Owner {
+        surface: None,
+        overlays: 0,
+    });
+    let weak = owner.downgrade();
+    let surface = vcx.new(|_| {
+        GizmoSurface::new(kernel, PROJECT.into(), tokens(), Rc::new(OwnerHost(weak)))
+    });
+    owner.update(vcx, |o, _| o.surface = Some(surface.clone()));
+    // Controller::command("text.editSelected"), under the owner's lease.
+    let edits = owner.update_in(vcx, |o, window, cx| {
+        let surface = o.surface.clone().unwrap();
+        crate::gizmo::text::edit_selected_text_after(surface, window, cx)
+    });
+    assert!(edits, "one unlocked text layer is selected");
+    vcx.run_until_parked();
+    let open = surface.clone();
+    settle(cx, move |cx| open.read_with(cx, |g, _| g.text_open().is_some()));
+}
+/// Acceptance run 26 (PM-480): digits typed for a number field that did not
+/// take the click turned the view 3D (0) and orbited it. View ▸ 3D's keys
+/// act only while the 3D view has the keyboard, in Free View; elsewhere
+/// digits do what v1's did. Fly Navigation's key is not a digit.
+#[test]
+fn digits_reach_the_3d_view_only_while_it_has_the_keyboard_in_free_view() {
+    assert!(!crate::gizmo::studio_key("nav", true, true, false));
+    assert!(!crate::gizmo::studio_key("look", true, true, false), "0 never turns 3D on by key");
+    assert!(!crate::gizmo::studio_key("nav", false, true, true), "the 3D view has no keyboard");
+    assert!(crate::gizmo::studio_key("nav", true, true, true));
+    assert!(crate::gizmo::studio_key("look", true, true, true), "0 leaves Free View");
+    assert!(crate::gizmo::studio_key("fly", true, true, false));
 }
 #[gpui::test]
 fn refreshing_during_the_owners_update_never_reads_it_while_leased(cx: &mut TestAppContext) {
