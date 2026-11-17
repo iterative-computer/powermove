@@ -230,7 +230,7 @@ pub struct Extensions {
     v4_themes: Vec<Value>,
     v4_themes_seen: u64,
     /// Mounted v4 surface extensions by title, with the source they run.
-    surfaces: BTreeMap<String, (String, String)>,
+    pub(crate) surfaces: BTreeMap<String, (String, String)>,
     /// Forks drawing a built-in panel in its place: id to (panel, source).
     forks: BTreeMap<String, (String, String)>,
     /// Surface ids this window has mounted, and whether the first scan is done:
@@ -1129,7 +1129,10 @@ impl Controller {
                     }
                     .checked(row["checked"] == true);
                     entry.enabled &= row["disabled"] != true;
-                    entry.shortcut = row["id"].as_str().filter(|c| !c.is_empty()).and_then(pm_shell::menu::chord_for);
+                    entry.shortcut = row["id"]
+                        .as_str()
+                        .filter(|c| !c.is_empty())
+                        .and_then(pm_shell::menu::chord_for);
                     entry
                 })
                 .collect()
@@ -1312,6 +1315,7 @@ impl Controller {
         ticket: Task<pm_runtime_v8::Result<pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>>>,
         cx: &mut Context<Self>,
     ) {
+        self.panel_builds.entry(panel.clone()).or_default();
         cx.spawn(async move |this, cx| {
             let mounted = match ticket.await {
                 Ok(ticket) => ticket.await.map(|e| e.generation.number),
@@ -1319,7 +1323,12 @@ impl Controller {
             };
             let _ = this.update(cx, |v, cx| {
                 match mounted {
-                    Ok(generation) => v.surface_ready(panel, generation),
+                    Ok(generation) => {
+                        if let Some(build) = v.panel_builds.get_mut(&panel) {
+                            build.published([0], true);
+                        }
+                        v.surface_ready(panel, generation)
+                    }
                     Err(error) => {
                         v.builtins.forget_surface(&panel);
                         v.message = format!("{source} could not start: {error}");
@@ -2228,7 +2237,11 @@ impl Controller {
                 .then(|| {
                     mine.iter()
                         .map(|(id, r)| {
-                            let mask = if host.panel_layout_applied(id, *r) { *r } else { sent.mask(id, *r) };
+                            let mask = if host.panel_layout_applied(id, *r) {
+                                *r
+                            } else {
+                                sent.mask(id, *r)
+                            };
                             let clip = clipped(id, *r);
                             Rect::new(
                                 mask.x.max(clip.x),
@@ -2953,7 +2966,10 @@ fn titles_file(profile: &std::path::Path) -> std::path::PathBuf {
 thread_local! {
     static TITLES: RefCell<Option<BTreeMap<String, String>>> = const { RefCell::new(None) };
 }
-fn with_titles<R>(profile: &std::path::Path, f: impl FnOnce(&mut BTreeMap<String, String>) -> R) -> R {
+fn with_titles<R>(
+    profile: &std::path::Path,
+    f: impl FnOnce(&mut BTreeMap<String, String>) -> R,
+) -> R {
     TITLES.with(|t| {
         let mut t = t.borrow_mut();
         let titles = t.get_or_insert_with(|| {
@@ -2966,7 +2982,9 @@ fn with_titles<R>(profile: &std::path::Path, f: impl FnOnce(&mut BTreeMap<String
     })
 }
 pub(crate) fn remembered_titles(profile: &std::path::Path) -> Vec<(String, String)> {
-    with_titles(profile, |t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    with_titles(profile, |t| {
+        t.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    })
 }
 fn remember_titles(profile: &std::path::Path, panels: &[(String, String)]) {
     let changed = with_titles(profile, |t| {
@@ -2985,4 +3003,3 @@ fn remember_titles(profile: &std::path::Path, panels: &[(String, String)]) {
         let _ = std::fs::write(file, bytes);
     }
 }
-

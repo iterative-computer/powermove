@@ -229,6 +229,8 @@ fn empty_uniforms(downsample_mode: DownsampleMode) -> BlurUniforms {
         padding0: 0,
         padding1: 0,
         padding2: 0,
+        dots: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
+        dot_accent: wgsl_rs::std::vec4f(0.0, 0.0, 0.0, 0.0),
     }
 }
 

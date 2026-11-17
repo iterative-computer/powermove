@@ -379,7 +379,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                 state.explicit = true;
                 state.planned.extend(0..planned.len());
                 v.panel_builds.insert(id.clone(), state);
-                v.agent_panel_builds.insert(id.clone(), crate::generated_panel::AgentBuild { title: title.into(), planned, target: None, finishing: false, owner: Some(lease.to_owned()), agent_run: args["_panel_owner"].as_str().map(str::to_owned) });
+                v.agent_panel_builds.insert(id.clone(), crate::generated_panel::AgentBuild { title: title.into(), planned, target: None, finishing: false, owner: Some(lease.to_owned()), agent_run: args["_panel_owner"].as_str().map(str::to_owned), snapshot:None, snapshot_key:None });
                 if !v.agent_panel_sweep {
                     v.agent_panel_sweep = true;
                     cx.spawn(async move |this, cx| {
@@ -439,7 +439,7 @@ async fn handle(call: &Call, windows: &Shared, cx: &mut AsyncApp) -> Result<Valu
                     }).await?;
                     if !rendered { return Err(Error::invalid("Panel has not committed its first render. Build slot remains; inspect the extension or cancel.")); }
                 }
-                cx.background_executor().timer(Duration::from_millis(360)).await;
+                cx.background_executor().timer(Duration::from_millis(if event == "ready" {700} else {360})).await;
                 call.live()?;
                 target.with(cx, |c, editor, _, cx| {
                     authorize_build(c.read(cx).agent_panel_builds.get(&id), &args)?;
@@ -1661,6 +1661,8 @@ mod lease_tests {
             finishing: false,
             owner: Some(lease.id().into()),
             agent_run: None,
+            snapshot: None,
+            snapshot_key: None,
         };
         assert!(authorize_build(Some(&b), &args).is_ok());
         assert!(authorize_build(Some(&b), &json!({"_panel_session":"foreign"})).is_err());

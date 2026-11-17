@@ -620,7 +620,10 @@ impl Editor {
         // else the last used (PM-449).
         let prefer: Vec<&str> = [
             workspace::record_id(&self.record),
-            self.workspaces.project.as_ref().and_then(workspace::record_id),
+            self.workspaces
+                .project
+                .as_ref()
+                .and_then(workspace::record_id),
             self.workspaces.current.as_deref(),
         ]
         .into_iter()
@@ -1861,6 +1864,7 @@ impl Editor {
         placement: &serde_json::Value,
         height: f32,
     ) -> serde_json::Value {
+        self.slides.armed = true;
         self.maximized_panel = None;
         let used = layout::reserve_build(&mut self.layout, id, placement, height);
         self.agent_build_slots

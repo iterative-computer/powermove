@@ -529,6 +529,7 @@ impl pm_shell::integration::Integration for Bridge {
                 .or_else(|| crate::workspaces::panel(v, id, bounds, cx))
                 .or_else(|| crate::generated_panel::panel(v, id, bounds, w, cx))
                 .or_else(|| v.builtin_panel(id, bounds, w, cx))?;
+            let content = crate::generated_panel::extension_build(v, id, content, bounds, w, cx);
             let Some(at) = v.revealed.get(id).copied() else {
                 return Some(content);
             };
@@ -730,10 +731,13 @@ impl pm_shell::integration::Integration for Bridge {
             return String::new();
         }
         let presented = c.viewer.as_ref().map_or(0, |v| v.status().presented);
-        let playback = c
-            .frame_facts
-            .playback_state(c.playing(), presented, std::time::Instant::now());
-        format!("{playback} · {}", panels::format_facts(c.dimensions, c.rate.to_f64()))
+        let playback =
+            c.frame_facts
+                .playback_state(c.playing(), presented, std::time::Instant::now());
+        format!(
+            "{playback} · {}",
+            panels::format_facts(c.dimensions, c.rate.to_f64())
+        )
     }
     fn status_alert(&self, cx: &App) -> String {
         let c = self.0.read(cx);

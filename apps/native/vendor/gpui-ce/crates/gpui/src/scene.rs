@@ -983,6 +983,7 @@ impl FilterBoundary {
 fn max_blur_radius(filters: &[ScaledFilter]) -> f32 {
     filters.iter().fold(0.0, |radius, filter| match filter {
         ScaledFilter::Blur(filter_radius) => radius.max(filter_radius.0),
+        ScaledFilter::DotMatrix { .. } => radius,
     })
 }
 
