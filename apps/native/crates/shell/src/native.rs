@@ -2678,6 +2678,13 @@ fn glyph_image(glyph: crate::icons::Glyph, points: f64, label: &str) -> Option<R
 }
 /// A toolbar glyph: every item draws its symbol at `metrics.symbol_toolbar`
 /// in one weight, whichever control hosts it.
+/// A menu row's glyph: the vendored one where it stands for `s`, at the size
+/// AppKit gives a symbol in a menu, else the symbol.
+fn menu_symbol(s: &str, label: &str) -> Retained<NSImage> {
+    crate::icons::glyph(s)
+        .and_then(|g| glyph_image(g, 16., label))
+        .unwrap_or_else(|| symbol(s, label))
+}
 fn toolbar_symbol(s: &str, label: &str, t: &Tokens) -> Retained<NSImage> {
     if let Some(glyph) = crate::icons::glyph(s)
         && let Some(image) = glyph_image(glyph, t.metrics.symbol_toolbar as f64, label)
@@ -2796,7 +2803,7 @@ impl ToolbarDelegate {
                     item.setRepresentedObject(Some(&NSString::from_str(variant)));
                     item.setTarget(Some(target));
                 }
-                item.setImage(Some(&symbol(glyph, label)));
+                item.setImage(Some(&menu_symbol(glyph, label)));
                 item.setState(if variant == "rect" {
                     NSControlStateValueOn
                 } else {
@@ -4376,6 +4383,11 @@ impl Host {
             view.removeFromSuperview();
         }
         let glyph = |name: &str, label: &str, points: f64| {
+            if let Some(image) =
+                crate::icons::glyph(name).and_then(|g| glyph_image(g, points, label))
+            {
+                return image;
+            }
             let config =
                 NSImageSymbolConfiguration::configurationWithPointSize_weight(points, unsafe {
                     NSFontWeightMedium
@@ -4802,6 +4814,11 @@ impl Host {
             view.removeFromSuperview();
         }
         let glyph = |name: &str, label: &str, points: f64| {
+            if let Some(image) =
+                crate::icons::glyph(name).and_then(|g| glyph_image(g, points, label))
+            {
+                return image;
+            }
             let config =
                 NSImageSymbolConfiguration::configurationWithPointSize_weight(points, unsafe {
                     NSFontWeightMedium
@@ -5809,7 +5826,7 @@ impl Host {
                         NSControlStateValueOff
                     });
                 }
-                let image = symbol(glyph, &format!("Shape: {label} (Q)"));
+                let image = toolbar_symbol(glyph, &format!("Shape: {label} (Q)"), &self.tokens);
                 let _: () = msg_send![&*view, setImage: &*image, forSegment: SHAPE_SEGMENT];
                 let tip = NSString::from_str(&format!("{label} (Q)"));
                 let _: () = msg_send![&*view, setToolTip: &*tip, forSegment: SHAPE_SEGMENT];

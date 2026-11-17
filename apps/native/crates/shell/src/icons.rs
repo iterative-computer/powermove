@@ -1,37 +1,152 @@
 //! Vendored glyphs (`icons/`, see its README): where one stands for an SF
 //! Symbol of the same meaning, the app draws it instead, in the same place,
-//! size and tint. Pierre's set (Apache-2.0) covers the general chrome; glyphs
-//! it has no counterpart for are drawn on the same grid (`icons/powermove`).
+//! size and tint. Pierre's set (Apache-2.0) covers the general chrome, its
+//! filled variant wherever it has one; glyphs it has no counterpart for are
+//! drawn on the same grid in the same grammar (`icons/powermove`). SF Symbols
+//! stay where AppKit itself draws the glyph inside a control (pop-up chevrons,
+//! switches, menu marks, the window buttons) and for names not mapped here.
 use resvg::{tiny_skia, usvg};
 
-/// A vendored glyph: its SVG (16 px grid) and how many quarter turns
-/// (clockwise) it is drawn at.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A vendored glyph: its SVG (a 16 px grid; a wider one is fitted by its
+/// longer side), how many quarter turns (clockwise) it is drawn at, whether
+/// it is mirrored left to right first, and its size against the shared
+/// `FILL` (1 for all but a glyph matched by eye to the SF Symbol it replaced).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Glyph {
     pub svg: &'static str,
     pub turns: u8,
+    pub mirror: bool,
+    pub size: f32,
 }
 
-const HOME: &str = include_str!("../icons/pierre/IconHome.svg");
-const ALIGN_LEFT: &str = include_str!("../icons/pierre/IconAlignLeft.svg");
-const ALIGN_CENTER: &str = include_str!("../icons/pierre/IconAlignCenter.svg");
-const ALIGN_RIGHT: &str = include_str!("../icons/pierre/IconAlignRight.svg");
-const DISTRIBUTE: &str = include_str!("../icons/powermove/distribute-horizontal.svg");
+macro_rules! pierre {
+    ($name:literal) => {
+        include_str!(concat!("../icons/pierre/Icon", $name, ".svg"))
+    };
+}
+macro_rules! drawn {
+    ($name:literal) => {
+        include_str!(concat!("../icons/powermove/", $name, ".svg"))
+    };
+}
 
 /// The vendored glyph that stands for SF Symbol `name`, if one does.
 pub fn glyph(name: &str) -> Option<Glyph> {
-    let g = |svg, turns| Some(Glyph { svg, turns });
+    let g = |svg| {
+        Some(Glyph {
+            svg,
+            turns: 0,
+            mirror: false,
+            size: 1.,
+        })
+    };
+    let turned = |svg, turns| {
+        Some(Glyph {
+            svg,
+            turns,
+            mirror: false,
+            size: 1.,
+        })
+    };
     match name {
-        "house" => g(HOME, 0),
-        "align.horizontal.left" => g(ALIGN_LEFT, 0),
-        "align.horizontal.center" => g(ALIGN_CENTER, 0),
-        "align.horizontal.right" => g(ALIGN_RIGHT, 0),
+        // Home stands among SF Symbols in the toolbar: the filled house at
+        // the optical size of the SF `house` it replaced (14 pt ink in a
+        // 14 pt square, where the shared fill would make it 12.25 pt).
+        "house" => Some(Glyph {
+            svg: pierre!("HomeFill"),
+            turns: 0,
+            mirror: false,
+            size: 16. / 14.,
+        }),
+        "align.horizontal.left" => g(pierre!("AlignLeft")),
+        "align.horizontal.center" => g(pierre!("AlignCenter")),
+        "align.horizontal.right" => g(pierre!("AlignRight")),
         // The same three drawings turned a quarter: one family.
-        "align.vertical.top" => g(ALIGN_LEFT, 1),
-        "align.vertical.center" => g(ALIGN_CENTER, 1),
-        "align.vertical.bottom" => g(ALIGN_RIGHT, 1),
-        "distribute.horizontal.center" => g(DISTRIBUTE, 0),
-        "distribute.vertical.center" => g(DISTRIBUTE, 1),
+        "align.vertical.top" => turned(pierre!("AlignLeft"), 1),
+        "align.vertical.center" => turned(pierre!("AlignCenter"), 1),
+        "align.vertical.bottom" => turned(pierre!("AlignRight"), 1),
+        "distribute.horizontal.center" => g(drawn!("distribute-horizontal")),
+        "distribute.vertical.center" => turned(drawn!("distribute-horizontal"), 1),
+        // Chrome.
+        "plus" => g(pierre!("Plus")),
+        "minus" => g(pierre!("Minus")),
+        "xmark" => g(pierre!("X")),
+        "ellipsis" => g(pierre!("Ellipsis")),
+        "magnifyingglass" => g(pierre!("Search")),
+        "gearshape" => g(pierre!("GearFill")),
+        "sparkles" => g(pierre!("Sparkles")),
+        "square.and.arrow.up" => g(pierre!("Share")),
+        "square.grid.2x2" => g(drawn!("grid")),
+        "trash" => g(pierre!("BinFill")),
+        "folder" => g(pierre!("Folder")),
+        "list.bullet" => g(pierre!("ListUnordered")),
+        "link" => g(pierre!("Link")),
+        "icloud.and.arrow.down" => g(pierre!("Download")),
+        "exclamationmark.triangle.fill" => g(pierre!("CiWarningFill")),
+        "arrow.clockwise" => g(pierre!("Reload")),
+        "arrow.counterclockwise" => Some(Glyph {
+            svg: pierre!("Reload"),
+            turns: 0,
+            mirror: true,
+            size: 1.,
+        }),
+        // Pierre's chevron points down; the others are it turned.
+        "chevron.down" => g(pierre!("Chevron")),
+        "chevron.left" => turned(pierre!("Chevron"), 1),
+        "chevron.up" => turned(pierre!("Chevron"), 2),
+        "chevron.right" => turned(pierre!("Chevron"), 3),
+        // Tools (the toolbar's segments and the Shape tool's kinds).
+        "cursorarrow" => g(pierre!("Cursor")),
+        "hand.raised" => g(drawn!("hand")),
+        "crop.rotate" => g(pierre!("Reload")),
+        "scope" => g(drawn!("anchor")),
+        "square.on.circle" => g(drawn!("shape")),
+        "pencil.tip" => g(pierre!("Pencil")),
+        "textformat" => g(pierre!("Type")),
+        "square" | "square.fill" => g(drawn!("rectangle")),
+        "app" => g(pierre!("Squircle")),
+        "circle" => g(pierre!("CircleFill")),
+        "hexagon" => g(drawn!("hexagon")),
+        "star" => g(pierre!("StarFill")),
+        // Timeline rows: switches and transport.
+        "eye" => g(pierre!("Eye")),
+        "eye.slash" => g(pierre!("EyeSlash")),
+        "lock" => g(pierre!("Lock")),
+        "lock.open" => g(pierre!("LockOpen")),
+        "speaker.wave.2" => g(drawn!("speaker")),
+        "speaker.slash" => g(drawn!("speaker-off")),
+        // Solo, as After Effects shows it: a dot.
+        "s.circle.fill" => g(drawn!("solo")),
+        "s.circle" => g(drawn!("solo-off")),
+        "face.dashed" => g(pierre!("EmojiSmileDashed")),
+        "face.dashed.fill" => g(pierre!("EmojiSmileFill")),
+        "play.fill" => g(drawn!("play")),
+        "pause.fill" => g(drawn!("pause")),
+        "backward.end.fill" => g(drawn!("backward-end")),
+        "backward.frame.fill" => g(drawn!("backward-frame")),
+        "forward.frame.fill" => g(drawn!("forward-frame")),
+        "forward.end.fill" => g(drawn!("forward-end")),
+        "diamond.fill" => g(drawn!("diamond")),
+        "diamond.lefthalf.filled" => g(drawn!("diamond-half")),
+        "wand.and.rays" | "wand.and.stars" => g(drawn!("wand")),
+        "point.topleft.down.to.point.bottomright.curvepath" => g(drawn!("path")),
+        "arrow.right.and.line.vertical.and.arrow.left" => g(drawn!("squeeze")),
+        "captions.bubble" => g(pierre!("CommentFill")),
+        // Layer kinds (rows, the Project panel).
+        "film" => g(drawn!("film")),
+        "film.stack" => g(drawn!("film-stack")),
+        "photo" | "photo.on.rectangle" | "photo.on.rectangle.angled.fill" => g(pierre!("Image")),
+        "photo.stack" => g(drawn!("photo-stack")),
+        "waveform" => g(drawn!("waveform")),
+        "music.note" => g(drawn!("note")),
+        "slider.horizontal.3" => g(drawn!("sliders")),
+        "circle.dashed" => g(drawn!("null")),
+        "camera" => g(drawn!("camera")),
+        "square.stack" => g(drawn!("stack")),
+        "rectangle.stack" => g(drawn!("rect-stack")),
+        "square.dashed" => g(drawn!("dashed")),
+        "lightbulb" => g(pierre!("BulbFill")),
+        "square.stack.3d.up" | "square.stack.3d.down.right" => g(pierre!("Layers")),
         _ => None,
     }
 }
@@ -42,15 +157,21 @@ pub fn glyph(name: &str) -> Option<Glyph> {
 pub const FILL: f32 = 14. / 16.;
 
 /// `glyph`'s coverage (0–255 per pixel) on a `side` × `side` canvas, centred,
-/// filling `FILL` of it.
+/// its longer side filling `FILL` × `glyph.size` of it.
 pub fn coverage(glyph: Glyph, side: u32) -> Option<Vec<u8>> {
     let tree = usvg::Tree::from_str(glyph.svg, &usvg::Options::default()).ok()?;
     let mut pixmap = tiny_skia::Pixmap::new(side, side)?;
-    let scale = side as f32 * FILL / 16.;
-    let offset = (side as f32 - 16. * scale) / 2.;
-    let transform = tiny_skia::Transform::from_translate(offset, offset)
+    let (w, h) = (tree.size().width(), tree.size().height());
+    let scale = side as f32 * FILL * glyph.size / w.max(h);
+    let (cx, cy) = (w / 2., h / 2.);
+    let half = side as f32 / 2.;
+    let mut transform = tiny_skia::Transform::from_translate(half, half)
         .pre_scale(scale, scale)
-        .pre_rotate_at(90. * glyph.turns as f32, 8., 8.);
+        .pre_rotate(90. * glyph.turns as f32);
+    if glyph.mirror {
+        transform = transform.pre_scale(-1., 1.);
+    }
+    let transform = transform.pre_translate(-cx, -cy);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
     Some(pixmap.pixels().iter().map(|p| p.alpha()).collect())
 }
@@ -70,31 +191,159 @@ pub fn tinted_bgra(glyph: Glyph, side: u32, color: u32) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    /// Every mapped glyph parses and draws something, and a quarter turn
-    /// moves an align-left glyph's edge line to the top.
+    /// Every mapped symbol the main surfaces draw.
+    const MAPPED: &[&str] = &[
+        "house",
+        "align.horizontal.left",
+        "align.horizontal.center",
+        "align.horizontal.right",
+        "align.vertical.top",
+        "align.vertical.center",
+        "align.vertical.bottom",
+        "distribute.horizontal.center",
+        "distribute.vertical.center",
+        "plus",
+        "minus",
+        "xmark",
+        "ellipsis",
+        "magnifyingglass",
+        "gearshape",
+        "sparkles",
+        "square.and.arrow.up",
+        "square.grid.2x2",
+        "trash",
+        "folder",
+        "list.bullet",
+        "link",
+        "icloud.and.arrow.down",
+        "exclamationmark.triangle.fill",
+        "arrow.clockwise",
+        "arrow.counterclockwise",
+        "chevron.down",
+        "chevron.left",
+        "chevron.up",
+        "chevron.right",
+        "cursorarrow",
+        "hand.raised",
+        "crop.rotate",
+        "scope",
+        "square.on.circle",
+        "pencil.tip",
+        "textformat",
+        "square",
+        "square.fill",
+        "app",
+        "circle",
+        "hexagon",
+        "star",
+        "eye",
+        "eye.slash",
+        "lock",
+        "lock.open",
+        "speaker.wave.2",
+        "speaker.slash",
+        "s.circle.fill",
+        "s.circle",
+        "face.dashed",
+        "face.dashed.fill",
+        "play.fill",
+        "pause.fill",
+        "backward.end.fill",
+        "backward.frame.fill",
+        "forward.frame.fill",
+        "forward.end.fill",
+        "diamond.fill",
+        "diamond.lefthalf.filled",
+        "wand.and.rays",
+        "wand.and.stars",
+        "point.topleft.down.to.point.bottomright.curvepath",
+        "arrow.right.and.line.vertical.and.arrow.left",
+        "captions.bubble",
+        "film",
+        "film.stack",
+        "photo",
+        "photo.on.rectangle",
+        "photo.on.rectangle.angled.fill",
+        "photo.stack",
+        "waveform",
+        "music.note",
+        "slider.horizontal.3",
+        "circle.dashed",
+        "camera",
+        "square.stack",
+        "rectangle.stack",
+        "square.dashed",
+        "lightbulb",
+        "square.stack.3d.up",
+        "square.stack.3d.down.right",
+    ];
+
+    /// Every mapped glyph parses, draws inside its square (nothing clipped
+    /// at the canvas edge) and covers a fair part of it.
     #[test]
-    fn every_glyph_draws_and_turns() {
-        for name in [
-            "house",
-            "align.horizontal.left",
-            "align.horizontal.center",
-            "align.horizontal.right",
-            "align.vertical.top",
-            "align.vertical.center",
-            "align.vertical.bottom",
-            "distribute.horizontal.center",
-            "distribute.vertical.center",
-        ] {
-            let c = coverage(glyph(name).unwrap(), 32).unwrap();
-            assert!(c.iter().any(|a| *a > 200), "{name} draws nothing");
+    fn every_glyph_draws_inside_its_square() {
+        let side = 64usize;
+        for name in MAPPED {
+            let c = coverage(
+                glyph(name).unwrap_or_else(|| panic!("{name} unmapped")),
+                side as u32,
+            )
+            .unwrap();
+            let inked = c.iter().filter(|a| **a > 128).count();
+            assert!(inked > side * side / 40, "{name} draws too little: {inked}");
+            let edge =
+                (0..side).flat_map(|i| [i, (side - 1) * side + i, i * side, i * side + side - 1]);
+            // Home alone fills its square (matched to the SF house's size).
+            if *name != "house" {
+                assert!(
+                    edge.map(|i| c[i]).all(|a| a < 128),
+                    "{name} touches its square's edge"
+                );
+            }
         }
+    }
+
+    /// A quarter turn moves an align-left glyph's edge line to the top; a
+    /// mirror moves Reload's arrowhead to the other side; a 16 × 18 grid is
+    /// fitted by its longer side.
+    #[test]
+    fn turns_mirrors_and_wide_grids() {
         let side = 32usize;
         let at = |c: &[u8], x: usize, y: usize| c[y * side + x];
         let left = coverage(glyph("align.horizontal.left").unwrap(), 32).unwrap();
         let top = coverage(glyph("align.vertical.top").unwrap(), 32).unwrap();
-        // The edge line: a column at the left of `left`, a row at the top of `top`.
         let edge = (32. - 32. * FILL) as usize / 2 + 1;
         assert!(at(&left, edge, 16) > 200 && at(&left, 16, edge) < 50);
         assert!(at(&top, 16, edge) > 200 && at(&top, edge, 16) < 50);
+        let cw = coverage(glyph("arrow.clockwise").unwrap(), 32).unwrap();
+        let ccw = coverage(glyph("arrow.counterclockwise").unwrap(), 32).unwrap();
+        // The ink of each half moves to the other one.
+        let half = |c: &[u8], left: bool| -> u32 {
+            (0..side)
+                .flat_map(|y| (0..side / 2).map(move |x| (x, y)))
+                .map(|(x, y)| at(c, if left { x } else { side - 1 - x }, y) as u32)
+                .sum()
+        };
+        let (l, r) = (half(&cw, true), half(&ccw, false));
+        assert!(l.abs_diff(r) * 50 < l, "{l} vs {r}");
+        assert!(
+            half(&cw, true).abs_diff(half(&cw, false)) * 10 > half(&cw, true),
+            "Reload is not symmetric"
+        );
+        let folder = coverage(glyph("folder").unwrap(), 32).unwrap();
+        let columns = (0..side)
+            .filter(|x| (0..side).any(|y| at(&folder, *x, y) > 128))
+            .count();
+        assert!(columns as f32 <= 32. * FILL + 1., "{columns} columns");
+    }
+
+    /// Home stands at the optical size of the SF `house` it replaced.
+    #[test]
+    fn home_is_drawn_at_the_sf_house_size() {
+        let c = coverage(glyph("house").unwrap(), 140).unwrap();
+        let rows = (0..140)
+            .filter(|y| (0..140).any(|x| c[y * 140 + x] > 128))
+            .count();
+        assert!((138..=140).contains(&rows), "{rows} of 140 rows");
     }
 }
