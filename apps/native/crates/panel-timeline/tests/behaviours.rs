@@ -634,6 +634,37 @@ fn work_out_drag_extends_live_keeps_peak_and_undo_restores_duration() {
     assert_eq!(c.model.index.duration, 10.);
     assert_eq!(c.model.index.work, [1., 9.]);
 }
+/// An audio clip's level line drags its gain along the Mixer's fader law,
+/// live, in one Undo step labelled as the Mixer labels it (PM-492).
+#[test]
+fn the_level_line_drags_an_audio_clips_gain() {
+    let project = parse(r##"{"id":"P","name":"p","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{"x":{"id":"x","name":"a.wav","kind":"audio","dur":5}},"comps":{},"layers":[{"id":"m","type":"audio","name":"a.wav","from":0,"dur":5,"d":{"asset":"x","trim":0,"gain":1,"fadeIn":0.5,"fadeOut":0}}]}"##).unwrap();
+    let (_a, mut c) = client_with(project);
+    let layer = c.model.index.layer("m").unwrap();
+    assert_eq!((layer.gain, layer.fade_in, layer.gain_animated), (1., 0.5, false));
+    let start = pm_panel_timeline::level::fader_position(0.);
+    block_on(c.begin_drag(DragKind::Gain {
+        layer: "m".into(),
+        start,
+    }))
+    .unwrap();
+    for up in [0.05, 0.1, 0.14] {
+        block_on(c.drag(DragSample {
+            value_delta: up,
+            ..sample(0.)
+        }))
+        .unwrap();
+    }
+    // 0.72 + 0.14 on the law is +6 dB.
+    let gain = c.model.index.layer("m").unwrap().gain;
+    assert!((pm_panel_timeline::level::gain_db(gain) - 6.).abs() < 1e-6, "{gain}");
+    block_on(c.finish_drag(true)).unwrap();
+    let published = c.kernel.published("P").unwrap();
+    assert_eq!(published.history.entries, 1);
+    assert_eq!(published.history.undo_label.as_deref(), Some("Gain"));
+    undo(&mut c);
+    assert_eq!(c.model.index.layer("m").unwrap().gain, 1.);
+}
 #[test]
 fn work_move_clamps_as_rigid_range() {
     let m = model(fixture());
@@ -2554,7 +2585,9 @@ fn u_and_double_u_toggle_then_twirl_can_hide_revealed_rows() {
 #[test]
 fn keyframe_menu_names_what_it_acts_on_and_checks_the_keys_ease() {
     let (_actor, mut c) = client();
-    let one = Context::Keys { ids: strings(&["a0"]) };
+    let one = Context::Keys {
+        ids: strings(&["a0"]),
+    };
     let labels = |c: &TimelineClient, ctx: &Context| -> Vec<String> {
         c.model.menu(ctx).iter().map(|i| i.label.clone()).collect()
     };
@@ -2563,16 +2596,39 @@ fn keyframe_menu_names_what_it_acts_on_and_checks_the_keys_ease() {
     assert_eq!(
         labels(&c, &one),
         [
-            "Keyframe", "Edit Value…", "Keyframe Velocity…", "Scale Keyframes…", "Linear", "Ease In",
-            "Ease Out", "Easy Ease", "Swish", "Power", "Exponential Out", "Overshoot", "Snap",
-            "Glide", "Toggle Hold", "", "Copy Keyframe", "Delete Keyframe",
+            "Keyframe",
+            "Edit Value…",
+            "Keyframe Velocity…",
+            "Scale Keyframes…",
+            "Linear",
+            "Ease In",
+            "Ease Out",
+            "Easy Ease",
+            "Swish",
+            "Power",
+            "Exponential Out",
+            "Overshoot",
+            "Snap",
+            "Glide",
+            "Toggle Hold",
+            "",
+            "Copy Keyframe",
+            "Delete Keyframe",
         ]
     );
     let plan = c.model.menu_action(&one, "ease.glide", 0.).unwrap();
     run(&mut c, plan);
-    let checked: Vec<&str> = c.model.menu(&one).iter().filter(|i| i.checked).map(|i| i.id).collect();
+    let checked: Vec<&str> = c
+        .model
+        .menu(&one)
+        .iter()
+        .filter(|i| i.checked)
+        .map(|i| i.id)
+        .collect();
     assert_eq!(checked, ["ease.glide"]);
-    let two = Context::Keys { ids: strings(&["a0", "a2"]) };
+    let two = Context::Keys {
+        ids: strings(&["a0", "a2"]),
+    };
     let two_labels = labels(&c, &two);
     assert_eq!(two_labels[0], "2 Keyframes");
     assert!(two_labels.ends_with(&["Copy 2 Keyframes".into(), "Delete 2 Keyframes".into()]));
@@ -2590,7 +2646,12 @@ fn ruler_menu_groups_marker_work_area_and_the_switch() {
     assert_eq!(
         labels,
         [
-            "Add Marker Here", "", "Set Work Area Start", "Set Work Area End", "Reset Work Area", "",
+            "Add Marker Here",
+            "",
+            "Set Work Area Start",
+            "Set Work Area End",
+            "Reset Work Area",
+            "",
             "Switch to Track Timeline",
         ]
     );
@@ -2666,7 +2727,9 @@ fn timeline_errors_read_as_sentences() {
 #[test]
 fn path_vertex_keys_stored_without_ids_are_shown_selected_and_moved() {
     let key = |t: f64, v: f64| {
-        format!(r#"{{"t":{t},"v":{v},"inInterp":"linear","outInterp":"linear","inEase":{{"speed":0,"influence":16.7}},"outEase":{{"speed":0,"influence":16.7}}}}"#)
+        format!(
+            r#"{{"t":{t},"v":{v},"inInterp":"linear","outInterp":"linear","inEase":{{"speed":0,"influence":16.7}},"outEase":{{"speed":0,"influence":16.7}}}}"#
+        )
     };
     let project = parse(&format!(
         r##"{{"id":"P","compId":"C","name":"Paths","w":200,"h":100,"fps":30,"dur":10,"comps":{{}},"assets":{{}},"layers":[
@@ -2684,9 +2747,15 @@ fn path_vertex_keys_stored_without_ids_are_shown_selected_and_moved() {
         .iter()
         .map(|k| k.id.clone())
         .collect();
-    let named = |i| pm_kernel::model::derived_key_id("C", "s", "d.paths.outline.vertices.v0.p.x", i);
+    let named =
+        |i| pm_kernel::model::derived_key_id("C", "s", "d.paths.outline.vertices.v0.p.x", i);
     assert_eq!(ids, [named(0), named(1)]);
-    assert_eq!(c.model.track_channels("s", "g.outline.v.v0.y")[0].keys.len(), 1);
+    assert_eq!(
+        c.model.track_channels("s", "g.outline.v.v0.y")[0]
+            .keys
+            .len(),
+        1
+    );
     let calls = c
         .model
         .select_keys("s", channel, &[named(1)], false, false)
@@ -2700,8 +2769,221 @@ fn path_vertex_keys_stored_without_ids_are_shown_selected_and_moved() {
     let keys = &c.model.track_channels("s", channel)[0].keys;
     assert_eq!(keys.len(), 2);
     assert_eq!(keys[1].id, named(1));
-    assert!((keys[1].time - (1. + 1. / 30.)).abs() < 1e-9, "{}", keys[1].time);
+    assert!(
+        (keys[1].time - (1. + 1. / 30.)).abs() < 1e-9,
+        "{}",
+        keys[1].time
+    );
     assert_eq!(c.model.selection.keys(), [named(1)]);
+}
+/// PM-477 by hand: M, on top of the stack, rests on the lower lane because
+/// nothing overlaps it; E, on the lane above, slides into M's time. Each
+/// clip keeps the lane it showed on: E now composites over M, as its track
+/// says (the stack follows the lanes, as v1's track view writes it).
+#[test]
+fn a_slide_into_another_tracks_time_moves_no_clip_to_another_lane() {
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"Lanes","w":200,"h":100,"fps":30,"dur":10,"comps":{},"assets":{},"layers":[
+        {"id":"m","name":"M","type":"shape","from":3,"dur":2,"on":true,"p":{}},
+        {"id":"e","name":"E","type":"shape","from":0,"dur":2.9,"on":true,"p":{}},
+        {"id":"k","name":"K","type":"shape","from":0,"dur":2.9,"on":true,"p":{}},
+        {"id":"n","name":"N","type":"shape","from":0,"dur":6,"on":true,"p":{}}
+        ]}"##,
+    )
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    let lanes = |c: &TimelineClient| {
+        let layout = pm_panel_timeline::tracks::layout(&c.model.index, &c.model.reveal);
+        ["m", "e", "k", "n"].map(|id| layout.item(id).unwrap().lane)
+    };
+    let before = lanes(&c);
+    assert!(before[1] > before[0], "E shows above M: {before:?}");
+    let command = pm_panel_timeline::tracks::in_tracks(
+        &c.model.index,
+        &c.model.reveal,
+        pm_kernel::TimingCommand::Slide {
+            layer_id: "e".into(),
+            delta: 0.5,
+        },
+    );
+    edit(&mut c, vec![command.into()]);
+    c.sync().unwrap();
+    assert_eq!(lanes(&c), before);
+}
+/// PM-477 by hand: in Tracks mode an edge trim that frees room on a lower
+/// lane leaves an untouched clip on its own: K rests on lane 2 because E
+/// overlapped it; trimming E's Out edge away from K keeps K where it is.
+#[test]
+fn an_edge_trim_in_tracks_moves_no_untouched_clip_to_another_lane() {
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"Lanes","w":200,"h":100,"fps":30,"dur":10,"comps":{},"assets":{},"layers":[
+        {"id":"k","name":"K","type":"shape","from":2.5,"dur":1.5,"on":true,"p":{}},
+        {"id":"e","name":"E","type":"shape","from":0,"dur":3,"on":true,"p":{}},
+        {"id":"n","name":"N","type":"shape","from":0,"dur":6,"on":true,"p":{}}
+        ]}"##,
+    )
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    let lanes = |c: &TimelineClient| {
+        let layout = pm_panel_timeline::tracks::layout(&c.model.index, &c.model.reveal);
+        ["k", "e", "n"].map(|id| layout.item(id).unwrap().lane)
+    };
+    let before = lanes(&c);
+    assert_eq!(before, [2, 1, 0]);
+    block_on(c.begin_drag(DragKind::TrimOut {
+        ids: vec!["e".into()],
+    }))
+    .unwrap();
+    block_on(c.drag(sample(-1.))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    assert_eq!(c.model.index.layer("e").unwrap().duration, 2.);
+    assert_eq!(lanes(&c), before);
+}
+/// PM-477/PM-485: while the timeline shows tracks, the lanes it shows are the
+/// truth for every edit, whatever makes it (a timeline key or drag, a menu,
+/// Properties, an agent through the kernel): after each, no clip the edit
+/// did not touch is on another lane; a new clip takes a free lane.
+#[test]
+fn in_tracks_no_edit_from_any_source_moves_an_untouched_clip() {
+    use pm_kernel::commands::layers::{AddLayer, LayerPatch};
+    use pm_kernel::{LayerCommand, TimingCommand};
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"Lanes","w":200,"h":100,"fps":30,"dur":20,"comps":{},"assets":{},"layers":[
+        {"id":"m","name":"M","type":"shape","from":3.5,"dur":2,"on":true,"p":{}},
+        {"id":"k","name":"K","type":"shape","from":2.5,"dur":1.5,"on":true,"p":{}},
+        {"id":"e","name":"E","type":"shape","from":0,"dur":3,"on":true,"p":{}},
+        {"id":"x","name":"X","type":"shape","from":8,"dur":2,"on":true,"p":{}},
+        {"id":"n","name":"N","type":"shape","from":0,"dur":6,"on":true,"p":{}}
+        ]}"##,
+    )
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    let lanes = |c: &TimelineClient| -> std::collections::BTreeMap<String, usize> {
+        let layout = pm_panel_timeline::tracks::layout(&c.model.index, &c.model.reveal);
+        layout
+            .items
+            .iter()
+            .map(|i| (i.id.clone(), i.lane))
+            .collect()
+    };
+    // Every edit arrives as the kernel's publication, as any source's does.
+    let kernel = |c: &mut TimelineClient, command: Command| {
+        edit(c, vec![command]);
+        c.sync().unwrap();
+    };
+    let check = |c: &TimelineClient,
+                 before: &std::collections::BTreeMap<String, usize>,
+                 touched: &[&str],
+                 what: &str| {
+        let after = lanes(c);
+        for (id, lane) in before {
+            if !touched.contains(&id.as_str()) && after.contains_key(id) {
+                assert_eq!(after[id], *lane, "{what}: {id} moved");
+            }
+        }
+    };
+    c.sync().unwrap();
+    // A first change in Tracks mode records the lanes it shows.
+    let start = lanes(&c);
+    // A keyboard trim (Trim Out to playhead): E stops overlapping K.
+    let before = lanes(&c);
+    kernel(
+        &mut c,
+        TimingCommand::TrimOut {
+            layer_ids: vec!["e".into()],
+            time: 2.0,
+        }
+        .into(),
+    );
+    check(&c, &before, &["e"], "trim");
+    // Properties: K's duration.
+    let before = lanes(&c);
+    kernel(
+        &mut c,
+        LayerCommand::Set {
+            layer_id: "k".into(),
+            patch: LayerPatch {
+                duration: Some(0.5),
+                ..Default::default()
+            },
+        }
+        .into(),
+    );
+    check(&c, &before, &["k"], "duration");
+    // An agent moves X into everyone's time.
+    let before = lanes(&c);
+    kernel(
+        &mut c,
+        LayerCommand::Set {
+            layer_id: "x".into(),
+            patch: LayerPatch {
+                from: Some(1.0),
+                ..Default::default()
+            },
+        }
+        .into(),
+    );
+    check(&c, &before, &["x"], "move");
+    // A drag's edge trim.
+    let before = lanes(&c);
+    block_on(c.begin_drag(DragKind::TrimOut {
+        ids: vec!["m".into()],
+    }))
+    .unwrap();
+    block_on(c.drag(sample(-0.5))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    check(&c, &before, &["m"], "drag trim");
+    // A slide by key, through the timeline's Tracks wrapper.
+    let before = lanes(&c);
+    let slide = pm_panel_timeline::tracks::in_tracks(
+        &c.model.index,
+        &c.model.reveal,
+        TimingCommand::Slide {
+            layer_id: "e".into(),
+            delta: 0.5,
+        },
+    );
+    kernel(&mut c, slide.into());
+    check(&c, &before, &["e"], "slide");
+    // A new clip takes a free lane; a deleted one leaves the rest.
+    let before = lanes(&c);
+    let new = AddLayer {
+        id: "y".into(),
+        layer_type: "shape".into(),
+        comp: None,
+        name: None,
+        from: Some(4.0),
+        duration: Some(1.0),
+        content: Default::default(),
+        properties: Default::default(),
+        color: None,
+        index: None,
+        parent: None,
+        blend: None,
+        motion_blur: None,
+        visible: None,
+        shy: None,
+        collapsed: None,
+        track: None,
+        time: 0.,
+    };
+    kernel(&mut c, LayerCommand::Add(Box::new(new)).into());
+    check(&c, &before, &["y"], "add");
+    let before = lanes(&c);
+    kernel(
+        &mut c,
+        LayerCommand::Delete {
+            layer_ids: vec!["k".into()],
+        }
+        .into(),
+    );
+    check(&c, &before, &["k"], "delete");
+    let _ = start;
 }
 /// Tracks mode: a track row's lock and eye act on every clip on the lane,
 /// as v1's track view does, one undo step named for the track; the row
@@ -2760,5 +3042,350 @@ fn a_track_rows_lock_and_eye_act_on_its_clips() {
         on_lane
             .iter()
             .all(|id| c.model.index.layer(id).unwrap().visible)
+    );
+}
+/// Sol's review of the stack write (w58): a Tracks edge trim on E, which
+/// nobody else touches, leaves the stack exactly as it was in each
+/// arrangement: a collapsed locked group's children, lanes held after an
+/// outside edit, a caption between video layers, a 2D layer between two 3D
+/// runs (so the runs stay split).
+#[test]
+fn a_tracks_trim_never_changes_the_stack() {
+    use pm_kernel::commands::layers::LayerPatch;
+    let order = |c: &TimelineClient| -> Vec<String> {
+        c.model.index.layers.iter().map(|l| l.id.clone()).collect()
+    };
+    let solid = |id: &str, from: f64, dur: f64, extra: &str| {
+        format!(r##"{{"id":"{id}","name":"{id}","type":"solid","from":{from},"dur":{dur},"on":true,"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}}{extra}}}"##)
+    };
+    let arrangements: Vec<(&str, Vec<String>, bool)> = vec![
+        ("locked group", vec![
+            r#"{"id":"g","name":"G","type":"group","from":0,"dur":20,"on":true,"lock":true,"collapsed":true,"groupCollapsed":true,"p":{}}"#.into(),
+            solid("a", 0., 10., r#","group":"g","track":0"#),
+            solid("b", 0., 10., r#","group":"g","track":1"#),
+            solid("e", 12., 3., ""),
+        ], false),
+        ("held after an outside edit", vec![
+            solid("a", 0., 4., ""),
+            solid("b", 5., 4., ""),
+            solid("e", 12., 3., ""),
+        ], true),
+        ("caption between video", vec![
+            solid("r", 3., 2., ""),
+            r#"{"id":"c","name":"C","type":"captions","from":0,"dur":10,"on":true,"d":{"cues":[{"id":"q","start":4,"end":5,"text":"Hi"}]},"p":{}}"#.into(),
+            solid("b", 0., 2., ""),
+            solid("x", 0., 2., ""),
+            solid("e", 12., 3., ""),
+        ], false),
+        ("3D runs", vec![
+            solid("a", 0., 10., r#","threeD":true"#),
+            solid("d", 20., 1., r#","track":2"#),
+            solid("b", 0., 10., r#","threeD":true"#),
+            solid("e", 30., 5., ""),
+        ], false),
+    ];
+    for (what, layers, outside) in arrangements {
+        let project = parse(&format!(
+            r##"{{"id":"P","compId":"C","name":"Stack","w":200,"h":100,"fps":30,"dur":40,"comps":{{}},"assets":{{}},"layers":[{}]}}"##,
+            layers.join(",")
+        ))
+        .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        let (_a, mut c) = client_with(project);
+        c.model.mode = TimelineMode::Tracks;
+        c.sync().unwrap();
+        if outside {
+            // Properties or an agent moves B over A: the stack stays.
+            edit(
+                &mut c,
+                vec![pm_kernel::LayerCommand::Set {
+                    layer_id: "b".into(),
+                    patch: LayerPatch { from: Some(2.), ..Default::default() },
+                }
+                .into()],
+            );
+            c.sync().unwrap();
+        }
+        let before = order(&c);
+        block_on(c.begin_drag(DragKind::TrimOut { ids: vec!["e".into()] })).unwrap();
+        block_on(c.drag(sample(-1.))).unwrap();
+        block_on(c.finish_drag(true)).unwrap();
+        c.sync().unwrap();
+        assert_eq!(order(&c), before, "{what}");
+    }
+}
+
+/// A Tracks move to another lane changes only the moved clip's place in the
+/// stack, and never across a locked layer: then only its lane changes.
+#[test]
+fn a_tracks_move_reorders_only_the_moved_clip_and_never_past_a_lock() {
+    use pm_panel_timeline::tracks::move_order;
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"Move","w":200,"h":100,"fps":30,"dur":20,"comps":{},"assets":{},"layers":[
+        {"id":"t","name":"T","type":"shape","from":0,"dur":5,"on":true,"p":{}},
+        {"id":"l","name":"L","type":"shape","from":0,"dur":5,"on":true,"lock":true,"p":{}},
+        {"id":"u","name":"U","type":"shape","from":0,"dur":5,"on":true,"p":{}},
+        {"id":"m","name":"M","type":"shape","from":0,"dur":5,"on":true,"p":{}}
+        ]}"##,
+    )
+    .unwrap();
+    let (_a, c) = client_with(project);
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    // M to just under T, past U and locked L: refused, the stack stays.
+    assert_eq!(move_order(&c.model.index, &s(&["m"]), &s(&["t", "m", "l", "u"])), None);
+    // M just above U (past nothing locked): only M moves.
+    assert_eq!(
+        move_order(&c.model.index, &s(&["m"]), &s(&["t", "l", "m", "u"])),
+        Some(s(&["t", "l", "m", "u"]))
+    );
+}
+
+/// A transition's wedge drags its duration (keeping its type, values and
+/// keys) as one step named for it; selected, Delete removes it and leaves
+/// the clip; an audio clip's fade drags and deletes the same way.
+#[test]
+fn a_transition_drags_its_duration_and_delete_removes_only_it() {
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":20,"comps":{},"assets":{},"layers":[
+        {"id":"a","name":"A","type":"solid","from":0,"dur":6,"on":true,"d":{"color":"#ff0000","w":100,"h":100},"p":{},
+         "transitionIn":{"type":"wipe","dur":0.5,"p":{"angle":{"v":45,"kf":[{"t":0,"v":10},{"t":0.4,"v":80}],"expr":null}}},
+         "transitionOut":null},
+        {"id":"s","name":"S","type":"audio","from":0,"dur":6,"on":true,"d":{"fadeIn":0,"fadeOut":1},"p":{}}]}"##,
+    )
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.sync().unwrap();
+    let transition = |c: &TimelineClient, id: &str, slot: usize| {
+        c.model.index.layer(id).unwrap().transitions[slot].clone()
+    };
+    assert_eq!(transition(&c, "a", 0).unwrap().duration, 0.5);
+    assert!(transition(&c, "a", 1).is_none());
+    assert_eq!(transition(&c, "s", 1).unwrap().duration, 1.);
+    assert!(transition(&c, "s", 0).is_none(), "no fade, no wedge");
+    let kind = DragKind::Transition {
+        layer: "a".into(),
+        edge: render::Edge::In,
+    };
+    assert_eq!(
+        Drag::begin(&c.model, kind.clone()).unwrap().label(),
+        "Transition Duration"
+    );
+    block_on(c.begin_drag(kind)).unwrap();
+    block_on(c.drag(sample(0.5))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    let t = transition(&c, "a", 0).unwrap();
+    assert!((t.duration - 1.).abs() < 1e-9, "{t:?}");
+    assert_eq!(t.kind, "wipe");
+    assert_eq!(t.params, vec!["angle".to_owned()]);
+    let channel = c
+        .model
+        .index
+        .layer("a")
+        .unwrap()
+        .channels
+        .iter()
+        .find(|ch| ch.path == "transitionIn.p.angle")
+        .cloned()
+        .expect("its keys survive");
+    assert_eq!(channel.keys.len(), 2);
+    // Never past the clip, never under the kernel's least.
+    block_on(c.begin_drag(DragKind::Transition {
+        layer: "a".into(),
+        edge: render::Edge::In,
+    }))
+    .unwrap();
+    block_on(c.drag(sample(30.))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    assert!((transition(&c, "a", 0).unwrap().duration - 6.).abs() < 1e-9);
+    undo(&mut c);
+    c.sync().unwrap();
+    assert!((transition(&c, "a", 0).unwrap().duration - 1.).abs() < 1e-9);
+    // An Out fade drags from the clip's end: left makes it longer.
+    block_on(c.begin_drag(DragKind::Transition {
+        layer: "s".into(),
+        edge: render::Edge::Out,
+    }))
+    .unwrap();
+    block_on(c.drag(sample(-1.))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    assert!((transition(&c, "s", 1).unwrap().duration - 2.).abs() < 1e-9);
+    // Selected, Delete takes the transition and leaves the clip.
+    select(&mut c, &["a"]);
+    c.sync().unwrap();
+    c.model.transition = Some(("a".into(), render::Edge::In));
+    let plan = c
+        .model
+        .command("delete", 0., None, false, 0, &PropertyFacts::default())
+        .unwrap();
+    assert!(matches!(
+        &plan.calls[0],
+        Call::Transact { label: Some(l), .. } if l == "Remove Transition"
+    ));
+    run(&mut c, plan);
+    c.sync().unwrap();
+    assert!(c.model.index.layer("a").is_some(), "the clip stays");
+    assert!(transition(&c, "a", 0).is_none());
+    assert_eq!(c.model.transition, None, "nothing left selected");
+    // A selected fade goes the same way.
+    select(&mut c, &["s"]);
+    c.sync().unwrap();
+    c.model.transition = Some(("s".into(), render::Edge::Out));
+    let plan = c
+        .model
+        .command("delete", 0., None, false, 0, &PropertyFacts::default())
+        .unwrap();
+    assert!(matches!(
+        &plan.calls[0],
+        Call::Transact { label: Some(l), .. } if l == "Remove Fade"
+    ));
+    run(&mut c, plan);
+    c.sync().unwrap();
+    assert!(c.model.index.layer("s").is_some());
+    assert!(transition(&c, "s", 1).is_none());
+    // With no transition selected, Delete is the clip's again.
+    command(&mut c, "delete", 0.);
+    c.sync().unwrap();
+    assert!(c.model.index.layer("s").is_none());
+}
+
+/// Two clips that run into each other across a cut under a transition share
+/// their track in Tracks mode: the overlap is the transition's, not a clash.
+/// The same overlap without a transition stacks them, as before.
+#[test]
+fn clips_crossing_a_cut_under_a_transition_stay_on_one_track() {
+    let lanes = |transition: &str| {
+        let project = parse(&format!(
+            r##"{{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":20,"comps":{{}},"assets":{{}},"layers":[
+            {{"id":"b","name":"B","type":"solid","from":4.5,"dur":4,"on":true,"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}},"transitionIn":{transition}}},
+            {{"id":"a","name":"A","type":"solid","from":0,"dur":5,"on":true,"d":{{"color":"#00ff00","w":100,"h":100}},"p":{{}}}}]}}"##
+        ))
+        .unwrap();
+        let (_a, mut c) = client_with(project);
+        c.model.mode = TimelineMode::Tracks;
+        c.sync().unwrap();
+        let layout = tracks::layout(&c.model.index, &c.model.reveal);
+        (
+            layout.item("a").unwrap().lane,
+            layout.item("b").unwrap().lane,
+        )
+    };
+    let (a, b) = lanes(r#"{"type":"crossfade","dur":1,"p":{}}"#);
+    assert_eq!(a, b, "one track across the cut");
+    let (a, b) = lanes("null");
+    assert_ne!(a, b, "an overlap with no transition stacks");
+}
+
+/// PM-512: in Tracks, a new layer (the top of the stack) goes on a track
+/// above every clip it overlaps, at once: never into a free lower track
+/// under a still the picture draws it over. Clips already shown keep theirs.
+#[test]
+fn a_new_layer_in_tracks_goes_above_what_it_overlaps() {
+    use pm_kernel::commands::layers::AddLayer;
+    let solid = |id: &str, from: f64, dur: f64, track: u32| {
+        format!(
+            r##"{{"id":"{id}","name":"{id}","type":"solid","from":{from},"dur":{dur},"on":true,"track":{track},"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}}}}"##
+        )
+    };
+    // V3 holds a still from 11 s; V2 is empty; V1 two clips.
+    let project = parse(&format!(
+        r##"{{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":30,"comps":{{}},"assets":{{}},"layers":[{},{},{}]}}"##,
+        solid("still", 11., 9., 2),
+        solid("a", 0., 7., 0),
+        solid("b", 7., 6., 0),
+    ))
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    c.sync().unwrap();
+    let lane = |c: &TimelineClient, id: &str| {
+        tracks::layout(&c.model.index, &c.model.reveal)
+            .item(id)
+            .unwrap()
+            .lane
+    };
+    let shown = [lane(&c, "still"), lane(&c, "a"), lane(&c, "b")];
+    assert!(
+        shown[0] > shown[2] + 1,
+        "a free track under the still: {shown:?}"
+    );
+    let title = AddLayer {
+        id: "title".into(),
+        layer_type: "text".into(),
+        comp: None,
+        name: None,
+        from: Some(11.),
+        duration: Some(3.),
+        content: Default::default(),
+        properties: Default::default(),
+        color: None,
+        index: None,
+        parent: None,
+        blend: None,
+        motion_blur: None,
+        visible: None,
+        shy: None,
+        collapsed: None,
+        track: None,
+        time: 0.,
+    };
+    edit(
+        &mut c,
+        vec![pm_kernel::LayerCommand::Add(Box::new(title)).into()],
+    );
+    c.sync().unwrap();
+    assert_eq!(c.model.index.layers[0].id, "title", "the top of the stack");
+    assert!(
+        lane(&c, "title") > lane(&c, "still"),
+        "above the still it is drawn over: title {} still {}",
+        lane(&c, "title"),
+        lane(&c, "still")
+    );
+    // Nothing that was shown moves.
+    assert_eq!([lane(&c, "still"), lane(&c, "a"), lane(&c, "b")], shown);
+}
+
+/// The common Tracks gesture: a slide drag on a clip with a neighbour on one
+/// side only, and on a still, works (the media-only edit refused both); the
+/// clip keeps its track and so do its neighbours.
+#[test]
+fn a_tracks_slide_drag_works_on_a_still_and_with_one_neighbour() {
+    let solid = |id: &str, from: f64, dur: f64| {
+        format!(
+            r##"{{"id":"{id}","name":"{id}","type":"solid","from":{from},"dur":{dur},"on":true,"track":0,"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}}}}"##
+        )
+    };
+    let project = parse(&format!(
+        r##"{{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":30,"comps":{{}},"assets":{{}},"layers":[{},{}]}}"##,
+        solid("a", 0., 5.),
+        solid("b", 5., 5.),
+    ))
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    c.sync().unwrap();
+    select(&mut c, &["b"]);
+    c.sync().unwrap();
+    block_on(
+        c.begin_drag(DragKind::Timing(pm_kernel::TimingCommand::Slide {
+            layer_id: "b".into(),
+            delta: 0.,
+        })),
+    )
+    .unwrap();
+    block_on(c.drag(sample(1.))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    let span = |c: &TimelineClient, id: &str| {
+        let l = c.model.index.layer(id).unwrap();
+        (l.from, l.from + l.duration)
+    };
+    assert_eq!(span(&c, "b").0, 6., "slid a second later");
+    assert_eq!(span(&c, "a"), (0., 6.), "the clip before follows");
+    let layout = tracks::layout(&c.model.index, &c.model.reveal);
+    assert_eq!(
+        layout.item("a").unwrap().lane,
+        layout.item("b").unwrap().lane
     );
 }

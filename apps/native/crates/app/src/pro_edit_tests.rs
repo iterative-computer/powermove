@@ -148,7 +148,8 @@ fn slip_and_slide_keys_move_by_frames() {
         close(number(&content(&b, "trim")), 5. - 9. * FRAME),
         "saved and reopened"
     );
-    // The held keys repeat; a shape has no source to slip.
+    // The held keys repeat. A shape has no source to slip: Slip stays
+    // enabled so its key is never silent, does nothing, and says why.
     assert!(
         pm_shell::keyboard::shipped()
             .iter()
@@ -158,7 +159,11 @@ fn slip_and_slide_keys_move_by_frames() {
     desk.select(&["c"]);
     let published = desk.published();
     assert!(command_plan("slipLayers", &[json!(-1)], &published, 0.).is_none());
-    assert!(disabled(Some(&published), &desk.layers(), &Default::default()).contains("slipLayers"));
+    assert!(!disabled(Some(&published), &desk.layers(), &Default::default()).contains("slipLayers"));
+    assert_eq!(
+        crate::layer_commands::nothing_reason("slipLayers", &published),
+        Some("Slip moves a clip's video or audio; the selected layers have none")
+    );
 }
 
 #[test]

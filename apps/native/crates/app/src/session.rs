@@ -842,6 +842,68 @@ impl Controller {
         off
     }
 }
+/// The file name a project's first save or Save As proposes: its own name
+/// (v1), without characters a file name cannot hold.
+fn save_name(project: &str) -> String {
+    let name: String = project
+        .trim()
+        .chars()
+        .map(|c| if matches!(c, '/' | ':') { '-' } else { c })
+        .collect();
+    let name = name.trim_start_matches('.');
+    format!("{}.pmv", if name.is_empty() { "Untitled" } else { name })
+}
+/// The note after a save to a place chosen in the save panel: the file and
+/// the folder it is in, as Finder names them.
+fn saved_where(path: &std::path::Path) -> String {
+    let file = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let folder = path
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "your Mac".into());
+    format!("Saved “{file}” in {folder}. File ▸ Show in Finder shows it.")
+}
+#[cfg(test)]
+mod first_save_tests {
+    #[test]
+    fn a_tab_behind_waiting_for_an_answer_is_named_in_front() {
+        assert_eq!(
+            super::waiting_note("Paper"),
+            "“Paper” is waiting for an answer in its tab."
+        );
+    }
+    #[test]
+    fn a_first_save_proposes_the_projects_own_name() {
+        assert_eq!(super::save_name("Paper"), "Paper.pmv");
+        assert_eq!(super::save_name("Cut 2/3: final"), "Cut 2-3- final.pmv");
+        assert_eq!(super::save_name("  "), "Untitled.pmv");
+        assert_eq!(super::save_name(".hidden"), "hidden.pmv");
+    }
+    #[test]
+    fn a_save_to_a_chosen_place_says_where() {
+        let note = super::saved_where(std::path::Path::new("/Users/someone/Movies/Paper.pmv"));
+        assert_eq!(note, "Saved “Paper.pmv” in Movies. File ▸ Show in Finder shows it.");
+    }
+}
+/// A project in a tab behind asks something (its Recover question): the
+/// editor whose tab is shown says so in its status line, once.
+pub(crate) fn tell_front_waiting(asking: gpui::EntityId, name: &str, cx: &mut App) {
+    let shown = crate::entry::editors(cx)
+        .into_iter()
+        .find(|c| c.entity_id() != asking && c.read(cx).host.borrow().tab_shown());
+    if let Some(front) = shown {
+        let text = waiting_note(name);
+        front.update(cx, |v, cx| v.note(text, cx));
+    }
+}
+/// The front window's line when a tab behind waits for an answer.
+fn waiting_note(name: &str) -> String {
+    format!("“{name}” is waiting for an answer in its tab.")
+}
 /// Whether `text` is a program's error value rather than a sentence: a type
 /// or variant name with its fields, as `Storage("Kernel state changed")` or
 /// `Closed { id: 3 }` print.
@@ -1360,6 +1422,15 @@ impl Controller {
         let picture = front || pm_shell::front_restoring().is_none();
         if keep {
             self.stage_open_with(&project, picture);
+            // The project's name, as the window showed it last: the tab,
+            // the bar and the ghost (with the front tab's picture) say it
+            // from the first frame, never an untitled window, while the
+            // library is read (PM-384: ~6 s under load).
+            let name = self.host.borrow().restored_name.clone();
+            if let Some(name) = name {
+                self.message.clear();
+                self.begin_ghost(&name, None, cx);
+            }
         }
         self.front_restore = front;
         let profile = self.profile.clone();
@@ -1391,6 +1462,11 @@ impl Controller {
                 {
                     v.stage_open_with(id, front || pm_shell::front_restoring().is_none());
                     v.begin_ghost(name, None, cx);
+                } else if found.is_none() && v.opening_name.is_some() && !v.opening {
+                    // Named from the session, but the library has no such
+                    // project now: Home, as for any open that ends without one.
+                    v.end_ghost(cx);
+                    v.viewer_poster = None;
                 } else if found.is_none() && v.opening_name.is_none() {
                     v.ghost_retire();
                     v.viewer_poster = None;
@@ -1618,8 +1694,12 @@ impl Controller {
             .and_then(|r| r.get("name"))
             .and_then(crate::node_string)
             .unwrap_or("Untitled");
+        // Named as its Home card names it: a project still "Untitled" saved
+        // as "RC Edit.pmv" reads "RC Edit" in its tab, the window title and
+        // the menus from the moment the save lands.
+        let title = crate::library_surface::model::shown_name(title, self.path.as_deref());
         self.host.borrow().set_document_metadata(
-            title,
+            &title,
             &copy_subtitle(
                 p.session.as_ref().map(|s| &s.metadata),
                 if self.unprotected && !saving {
@@ -1712,6 +1792,11 @@ impl Controller {
                         let (list, keyframes) = list;
                         if v.rows.finish(key, list, latest) {
                             v.keyframes = keyframes;
+                            // Menus and keys follow the rows they were built
+                            // from: a layer added to a large project is
+                            // selectable before its rows land, and its Layer
+                            // menu stayed off until something else changed.
+                            v.update_disabled();
                             cx.notify();
                         }
                         if let Some(p) = v.published.clone() {
@@ -1783,16 +1868,21 @@ impl Controller {
         }
         let (name, args, time) = (name.to_owned(), args.to_vec(), self.time());
         cx.spawn(async move |this, cx| {
-            let plan = cx
+            let (plan, reason) = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::layer_commands::command_plan(&name, &args, &published, time)
+                    let plan = crate::layer_commands::command_plan(&name, &args, &published, time);
+                    let reason = plan
+                        .is_none()
+                        .then(|| crate::layer_commands::nothing_reason(&name, &published))
+                        .flatten();
+                    (plan, reason)
                 })
                 .await;
             let _ = this.update(cx, |v, cx| match plan {
                 Some(plan) => v.run_layer_plan(plan, cx),
                 None => {
-                    v.message = "Nothing to change".into();
+                    v.message = reason.unwrap_or("Nothing to change").into();
                     cx.notify();
                 }
             });
@@ -1942,7 +2032,8 @@ impl Controller {
         let Some(published) = &self.published else {
             return;
         };
-        match pm_builtins::media_import::place_items(published, assets, comps, self.time(), None) {
+        let still = self.pro_media.preferences().still();
+        match pm_builtins::media_import::place_items(published, assets, comps, self.time(), None, still) {
             Ok((layers, commands)) if !commands.is_empty() => self.run_layer_plan(
                 crate::layer_commands::Plan {
                     label: "Add to Timeline".into(),
@@ -2379,16 +2470,51 @@ impl Controller {
             return;
         }
         let Some(operation) = self.mcp.try_operation() else {
-            self.message =
-                "A project operation is in progress. Try opening again when it finishes.".into();
+            // Another tab's open holds the fence (its recovery question,
+            // say): this project, already open in the kernel, waits its
+            // turn in its window. Dropped, the new tab stayed Home and the
+            // project had to be found on its Home card (PM-454).
+            self.message = format!("“{name}” opens when the other project has opened.");
+            self.begin_ghost(&name, None, cx);
             cx.notify();
-            // Nothing will adopt this session, so it can't stay open in the kernel.
-            if let ShellReply::Opened { session, .. } = reply {
-                let closing = self.kernel.shell(ShellCall::Close(session));
-                cx.spawn(async move |_, _| drop(closing.await)).detach();
-            }
+            let (mcp, kernel) = (self.mcp.clone(), self.kernel.clone());
+            let reply = std::rc::Rc::new(std::cell::RefCell::new(Some((reply, name, file))));
+            cx.spawn(async move |this, cx| {
+                let operation = crate::mcp::take_fence(&mcp, cx.background_executor()).await;
+                let held = reply.clone();
+                let adopted = this.update(cx, move |v, cx| {
+                    let Some((reply, name, file)) = held.borrow_mut().take() else {
+                        return;
+                    };
+                    // It took another project meanwhile: this one opens
+                    // beside it as v1's tabs do.
+                    if v.session.is_some() || v.opening {
+                        drop(operation);
+                        v.adopt_reply(reply, name, file, cx);
+                    } else {
+                        v.adopt_with(operation, reply, name, file, cx);
+                    }
+                });
+                // The window went: nothing will adopt the session.
+                if adopted.is_err()
+                    && let Some((ShellReply::Opened { session, .. }, _, _)) = reply.borrow_mut().take()
+                {
+                    drop(kernel.shell(ShellCall::Close(session)).await);
+                }
+            })
+            .detach();
             return;
         };
+        self.adopt_with(operation, reply, name, file, cx);
+    }
+    fn adopt_with(
+        &mut self,
+        operation: crate::mcp::Operation,
+        reply: ShellReply,
+        name: String,
+        file: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         if let ShellReply::Opened { session, .. } = &reply {
             self.stage_open(&session.project);
         }
@@ -2461,13 +2587,27 @@ impl Controller {
                         }
                         v.recovery_pending = true;
                         v.mcp.awaiting_recovery(Some(name.clone()));
-                        recovery.alert.sheet(&v.host.borrow().window)
+                        // A tab behind asks unseen: its tab is marked until
+                        // the question is answered.
+                        let hidden = !v.host.borrow().tab_shown();
+                        if hidden {
+                            v.host.borrow().set_attention(true);
+                        }
+                        (recovery.alert.sheet(&v.host.borrow().window), hidden)
                     });
+                    // ... and the window in front says so, once.
+                    if let Ok((_, true)) = &answer {
+                        let asking = this.entity_id();
+                        let _ = cx.update(|cx| tell_front_waiting(asking, &name, cx));
+                    }
                     let response = match answer {
-                        Ok(rx) => rx.recv().await.ok().flatten(),
+                        Ok((rx, _)) => rx.recv().await.ok().flatten(),
                         Err(_) => None,
                     };
-                    let _ = this.update(cx, |v, _| v.mcp.awaiting_recovery(None));
+                    let _ = this.update(cx, |v, _| {
+                        v.mcp.awaiting_recovery(None);
+                        v.host.borrow().set_attention(false);
+                    });
                     match response.and_then(|action| recovery.decision(action)) {
                         Some(call) => result = kernel.shell(call).await,
                         // Cancelled (Escape) or never answered: nothing is
@@ -3387,13 +3527,22 @@ impl Controller {
                         displaced,
                     })) => {
                         v.session = Some(session);
-                        if as_path.is_some() {
+                        let chosen = as_path.is_some();
+                        if chosen {
                             v.path = as_path;
                         }
                         v.unprotected = false;
                         v.message = recovery_copy.map_or(String::new(), |_| {
                             "Its file couldn’t be written, so your changes were saved as a recovered copy in your projects.".into()
                         });
+                        // Saved to a place chosen now: where it went is said.
+                        if v.message.is_empty()
+                            && let Some(path) = &v.path
+                            && chosen
+                        {
+                            let note = saved_where(path);
+                            v.note(note, cx);
+                        }
                         v.load_recent(cx);
                         if let Some(kept) = displaced {
                             v.other_version_kept(kept, cx);
@@ -3615,8 +3764,21 @@ impl Controller {
             }
         }
     }
+    /// Whether the project saves to a file of its own (not only kept in
+    /// the library).
+    fn has_file(&self) -> bool {
+        self.published.as_ref().is_some_and(|p| {
+            p.session
+                .as_ref()
+                .is_some_and(|s| matches!(s.destination, SessionDestination::File(_)))
+        })
+    }
     pub fn save_dialog(&mut self, cx: &mut Context<Self>) {
-        let rx = platform::paths(&self.host.borrow().window, true);
+        let rx = platform::paths_named(
+            &self.host.borrow().window,
+            true,
+            &save_name(&self.project_name()),
+        );
         cx.spawn(async move |this, cx| {
             if let Ok(Some(path)) = rx.recv().await {
                 let _ = this.update(cx, |v, cx| v.save(Some(path), cx));
@@ -4126,6 +4288,9 @@ impl Controller {
                 })
                 .detach();
             }
+            // v1: the first save of a project with no file of its own asks
+            // where it goes, named for the project; later saves go there.
+            "save" if self.session.is_some() && !self.has_file() => self.save_dialog(cx),
             "save" => self.save(None, cx),
             "native.saveTake" => {
                 crate::takes_panel::dispatch(&cmd.name, || self.save_take(cx));

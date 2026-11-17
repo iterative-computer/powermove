@@ -74,8 +74,17 @@ pub struct Strip {
     /// Names and glyphs on the strip, in its own hue: a pale tint on the
     /// dark canvas, a dark shade on the light one.
     pub foreground: u32,
-    /// Waveforms and marks: the hue again, between body and foreground.
+    /// Marks (caption chips): the hue again, between body and foreground.
     pub primary: u32,
+    /// An audio clip's waveform, as (colour, alpha at its base): light
+    /// caught inside the glass. On the dark canvas a pale tint of the
+    /// slab's own hue, lighter than the slab (the reference's pale peach on
+    /// amber); on the light canvas, where the slab is already pale, a soft
+    /// mid-tone of the hue a small lightness step under the slab.
+    pub wave: (u32, f32),
+    /// The level line on a hovered or selected audio clip, as (colour,
+    /// alpha): a hairline in the hue's light tone, never dark.
+    pub level: (u32, f32),
 }
 
 /// The playhead, as v1 (Electron) draws it: a 1 px accent line under an
@@ -128,6 +137,9 @@ struct LightStrip {
     ring: f32,
     label: f32,
     mark: f32,
+    /// The waveform's tone and the level line's.
+    wave: f32,
+    level: f32,
     /// How much deeper a selected body is.
     selected_step: f32,
 }
@@ -140,6 +152,8 @@ const LIGHT: LightStrip = LightStrip {
     ring: 0.42,
     label: 0.38,
     mark: 0.54,
+    wave: 0.74,
+    level: 0.64,
     selected_step: 0.045,
 };
 
@@ -191,6 +205,8 @@ impl Tokens {
                 shadow: (0, 0., 0., 0.),
                 foreground: ink,
                 primary: ink,
+                wave: (ink, 0.55),
+                level: (ink, 1.),
             };
         }
         if !dark {
@@ -288,7 +304,15 @@ impl Tokens {
                 (0, 0., 0., 0.)
             },
             foreground,
-            // Marks (waveforms) stand on the foot, the body's lightest part:
+            // The waveform is the slab's foot pushed toward white (the deep
+            // hues further, so they still read lighter), at half strength:
+            // the reference's pale peach on amber.
+            wave: (
+                mix(body, 0xffffff, if light_hue { 0.74 } else { 0.78 }),
+                if disabled { 0.24 } else { 0.5 },
+            ),
+            level: (mix(body, 0xffffff, 0.8), if disabled { 0.4 } else { 0.85 }),
+            // Marks stand on the foot, the body's lightest part:
             // the palest step of the hue that still reads there.
             // On the light hues' bright slab the marks are a deep shade.
             primary: if light_hue {
@@ -375,6 +399,13 @@ impl Tokens {
             },
             foreground,
             primary: oklch(l.mark, (chroma * 1.4).min(0.15), hue),
+            // A soft mid-tone of the hue: about a 0.13 lightness step under
+            // the slab's foot once laid on it, never a dark shade.
+            wave: (
+                oklch(l.wave, (chroma * 1.25).min(0.15), hue),
+                if disabled { 0.35 } else { 0.8 },
+            ),
+            level: (oklch(l.level, (chroma * 1.5).min(0.15), hue), if disabled { 0.4 } else { 0.9 }),
         }
     }
     /// A graph curve's ink for channel `path`, the `index`th curve shown:

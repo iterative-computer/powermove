@@ -795,11 +795,7 @@ impl Controller {
                 h: f32::from(b.size.height),
             })
         });
-        let owner = (!self.builtins.agent_docked)
-            .then(|| self.builtins.windows.get("agent").copied())
-            .flatten()
-            .and_then(|w| w.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
-            .flatten();
+        let owner = self.agent_popover_window(cx);
         let choices = options
             .iter()
             .enumerate()
@@ -838,6 +834,16 @@ impl Controller {
             Some("agentPick:".into()),
             request.input["placeholder"].as_str().unwrap_or("Search"),
         );
+    }
+    /// The Agent popover's own window, while the panel is shown there (not
+    /// docked): what its menus and questions stand on, so answering them
+    /// leaves the popover open (a sheet on the editor took key from it).
+    fn agent_popover_window(&self, cx: &mut App) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+        (!self.builtins.agent_docked)
+            .then(|| self.builtins.windows.get("agent").copied())
+            .flatten()
+            .and_then(|w| w.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
+            .flatten()
     }
     /// The Agent menu's answer: a row's value, or none when it closed unchosen.
     pub fn agent_picked(&mut self, index: &str) {
@@ -1339,8 +1345,16 @@ impl Controller {
             .or_insert_with(|| cx.new(|cx| crate::v4_view::HeaderView::new(view, cx)))
             .clone();
         header.update(cx, |h, cx| h.set_tabbed(tabbed, cx));
-        // Cached: drawn again only when its panel changes (it observes the
-        // panel), not with every frame the window draws.
+        // Beside a group's tabs the header's actions take their own width
+        // (the dock gives them a box as wide as its content): a cached view
+        // is laid out only by the style it is given, so one there, asked for
+        // the full width of a box sized by it, came out with none and the
+        // panel's + and menu did not show. Drawn in place instead.
+        if tabbed {
+            return Some(div().flex().h_full().child(header).into_any_element());
+        }
+        // Alone in its row: cached, drawn again only when its panel changes
+        // (it observes the panel), not with every frame the window draws.
         Some(
             div()
                 .w_full()
@@ -1948,6 +1962,9 @@ impl Controller {
                                 pm_panel_media::Effect::NewCompFromAsset(id) => {
                                     self.new_comp_from_asset(&id, cx)
                                 }
+                                pm_panel_media::Effect::InterpretFootage(id) => {
+                                    self.interpret_asset_sheet(id, cx)
+                                }
                                 pm_panel_media::Effect::ConfirmDelete {
                                     token,
                                     assets,
@@ -2007,6 +2024,10 @@ impl Controller {
                     Ok(Value::Null)
                 }
                 "export.begin" | "export.retry" | "export.without" => {
+                    // The 3D estimate measures the GPU the export now uses.
+                    if let Some(viewer) = &self.viewer {
+                        viewer.cancel_export_estimate("an export started");
+                    }
                     self.begin_builtin_export(
                         request.input.clone(),
                         request.operation != "export.begin",
@@ -2318,6 +2339,13 @@ impl Controller {
                 "agent.consent" => {
                     let effect = request.input["effect"].as_u64().unwrap_or_default();
                     use crate::alert::{Alert, Button};
+                    // The request comes through the editor's window, never
+                    // the popover's: the sheet's window is looked up.
+                    let on: objc2::rc::Retained<objc2_app_kit::NSWindow> = consent_window(
+                        self.agent_popover_window(cx),
+                        crate::platform::ns_window(window),
+                        self.host.borrow().window.clone(),
+                    );
                     let rx = Alert::new(
                         "Give the agent full access?",
                         "It can run commands and edit files anywhere on this Mac without asking. Choose this only for work you trust.",
@@ -2327,10 +2355,15 @@ impl Controller {
                         ],
                     )
                     .critical()
-                    .sheet(&self.host.borrow().window);
+                    // On the popover itself, as its file picker is: on the
+                    // editor it took key from the popover, which closed, and
+                    // the person had to open it again to send (PM-507).
+                    .sheet(&on);
+                    self.builtins.agent_picking = true;
                     let runtime = runtime.clone();
-                    cx.spawn(async move |_, cx| {
+                    cx.spawn(async move |this, cx| {
                         let accepted = rx.recv().await == Ok(Some(true));
+                        let _ = this.update(cx, |v, _| v.builtins.agent_picking = false);
                         let _ = cx
                             .background_executor()
                             .spawn(async move { runtime.agent_consent(effect, accepted) })
@@ -3148,7 +3181,7 @@ impl Render for SurfaceWindow {
             // A focused control that went away leaves nothing focused.
             self.keys.claim(window, cx);
         }
-        let (mut fill, mut band) = (0, 0.);
+        let (mut fill, mut band, mut head_h) = (0, 0., 0.);
         let (head, body) = self.owner.update(cx, |v, cx| {
             let (header, colour, titlebar) = {
                 let t = &v.host.borrow().tokens;
@@ -3164,6 +3197,7 @@ impl Render for SurfaceWindow {
                 (t.metrics.header, colour, t.metrics.titlebar)
             };
             fill = colour;
+            head_h = header;
             // Windows with a transparent title bar keep their content below it.
             band = if popover || sheet || settings {
                 0.
@@ -3252,8 +3286,15 @@ impl Render for SurfaceWindow {
             .bg(rgb(fill))
             // The popover's header is its handle (popover_drag).
             .children(head.map(|head| {
+                // Its own row, as tall as a header: the cached header has no
+                // height of its own, so the conversation started under it
+                // and covered Thread, New Thread and Pin (PM-507).
                 div()
                     .id("agent-popover-handle")
+                    .w_full()
+                    .h(px(head_h))
+                    .flex_shrink_0()
+                    .bg(rgb(fill))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -3331,8 +3372,25 @@ pub(crate) fn returns_to_popover(was_docked: bool, docked: bool, parked: bool) -
 }
 /// The popover gave up key: it closes when its own editor took it (a press
 /// outside the popover), never for another window or app.
+/// Where the full-access question stands: the Agent popover when the panel is
+/// shown there, else the window that asked, else the editor.
+fn consent_window<W>(popover: Option<W>, asking: Option<W>, editor: W) -> W {
+    popover.or(asking).unwrap_or(editor)
+}
 fn agent_dismisses(open: bool, editor_took_key: bool) -> bool {
     open && editor_took_key
+}
+#[cfg(test)]
+mod consent_window_tests {
+    /// PM-507 / run 29: the full-access question stood on the editor (the
+    /// request comes through its window) and answering it closed the
+    /// popover. With the popover open it stands on the popover.
+    #[test]
+    fn the_full_access_question_stands_on_the_popover_when_it_is_open() {
+        assert_eq!(super::consent_window(Some("popover"), Some("editor"), "host"), "popover");
+        assert_eq!(super::consent_window(None, Some("editor"), "host"), "editor", "docked");
+        assert_eq!(super::consent_window::<&str>(None, None, "host"), "host");
+    }
 }
 #[cfg(test)]
 mod popover_keys_tests {

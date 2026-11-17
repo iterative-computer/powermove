@@ -54,6 +54,8 @@ mod panel_id_tests {
         assert!(pm_builtins::builtin_panel(pm_builtins::PROJECT_PANEL).is_some());
     }
 }
+/// How far either side of a cut a dropped transition still goes across it.
+const CUT_REACH: f64 = 8.;
 /// An effect dragged from the Effects panel `panel` dropped on `layer`'s row
 /// (`None`: no row there, and the selected layer takes it, as v1.2.0).
 #[derive(Clone, Debug, PartialEq)]
@@ -62,6 +64,12 @@ pub struct EffectDrop {
     pub definition: String,
     pub label: String,
     pub layer: Option<String>,
+    /// A transition (`definition` reads `transition:<id>`): the clip edge it
+    /// landed on, the nearer half (v1: left half In, right half Out).
+    pub edge: Option<pm_kernel::commands::effects::Edge>,
+    /// Tracks mode: the clip on the other side of that edge's cut, on the
+    /// same track. The transition goes across the cut.
+    pub across: Option<String>,
 }
 pub trait Delegate: 'static {
     fn time(&self, cx: &App) -> f64;
@@ -175,6 +183,18 @@ enum Spec {
         band: pm_panel_timeline::stagger::Band,
         end: bool,
     },
+    /// An audio clip's level line: its gain's place on the fader law when
+    /// pressed, and the height (points) the law spans.
+    Gain {
+        layer: String,
+        start: f64,
+        room: f64,
+    },
+    /// A transition's wedge: its duration.
+    Transition {
+        layer: String,
+        edge: pm_panel_timeline::render::Edge,
+    },
 }
 /// A transform box drag (v1's `dragGraphTransform`): the selected keys'
 /// span when the grip was pressed, which grip, and whether ⌘ scales about
@@ -245,6 +265,8 @@ impl TransformBox {
 enum Job {
     Sync,
     SelectLayer(String, Mods),
+    /// The transition selected on a clip's edge, or none.
+    SelectTransition(Option<(String, pm_panel_timeline::render::Edge)>),
     SelectKey {
         layer: String,
         channel: String,
@@ -326,6 +348,8 @@ enum Gesture {
         quick_limits: Vec<(f64, f64)>,
         /// A handle drag: its key's layer start, for layer-local handle times.
         handle: Option<f64>,
+        /// A level-line drag: the height the fader law spans.
+        gain_room: Option<f64>,
     },
     /// A ruler scrub and the frame time it last sought.
     Scrub(Scrub, f64),
@@ -1226,6 +1250,16 @@ impl TimelineSurface {
         self.outline.set_scene(self.scene.clone());
         self.frame = None;
         self.clamp_scroll();
+        // The names follow the new scene at once: a switch between Layers and
+        // Tracks at the same offset kept the outline's old window and offset,
+        // and the header column drew nothing beside the tracks until a scroll
+        // (PM-477).
+        self.outline.scrolled(
+            self.view.scroll_y as f32,
+            self.view.layer_column as f32,
+            self.visible_rows(),
+            cx,
+        );
         let duration = self.model.index.duration;
         if duration > 0. && self.bounds.size.width > px(0.) {
             let width = (f32::from(self.bounds.size.width) as f64 - self.view.layer_column).max(1.);
@@ -1617,6 +1651,92 @@ impl TimelineSurface {
         let top = scene.scroll_for(&v4::row_id(&RowId::Layer(layer.clone())))?;
         Some((layer, ruler + top - self.view.scroll_y))
     }
+    /// Where a transition dropped at `position` goes: the clip under it (a
+    /// layer bar, or a clip on a track) and its nearer edge; the layer row's
+    /// clip when the pointer is beside the bar.
+    fn transition_target(
+        &self,
+        position: Point<Pixels>,
+    ) -> (
+        Option<String>,
+        Option<pm_kernel::commands::effects::Edge>,
+        Option<String>,
+    ) {
+        use pm_kernel::commands::effects::Edge as Side;
+        let (x, y) = self.local(position);
+        // Tracks: a drop within a few points either side of a cut on the
+        // track under the pointer goes across it (the gap between the two
+        // strips is no clip's, and a point just inside one is still the cut).
+        if self.model.mode == TimelineMode::Tracks
+            && let Some((left, right)) = self.cut_near(x, y, CUT_REACH)
+        {
+            return (Some(right), Some(Side::In), Some(left));
+        }
+        let layer = self
+            .clip_at(x, y)
+            .map(|(id, _)| id)
+            .or_else(|| self.layer_under(position).map(|(id, _)| id));
+        let edge = layer.as_deref().and_then(|id| self.model.index.layer(id)).map(|l| {
+            if self.time_at(x) < l.from + l.duration / 2. {
+                Side::In
+            } else {
+                Side::Out
+            }
+        });
+        let across = match (&layer, edge) {
+            (Some(layer), Some(edge)) if self.model.mode == TimelineMode::Tracks => {
+                crate::transitions::neighbour(&self.model.index, &self.model.reveal, layer, edge)
+            }
+            _ => None,
+        };
+        (layer, edge, across)
+    }
+    /// The cut nearest `x` within `reach` points on the track at `y`: the
+    /// clip ending there and the clip starting there, by their drawn layer
+    /// edges (a transition across the cut lets them overlap by its length).
+    fn cut_near(&self, x: f64, y: f64, reach: f64) -> Option<(String, String)> {
+        let frame = self.frame.as_ref()?;
+        let row: Vec<(&str, f64, f64)> = frame
+            .ops
+            .iter()
+            .filter(|o| o.shape == "clip" && o.bounds.y <= y && y < o.bounds.y + o.bounds.height)
+            .filter_map(|o| {
+                let id = o.id.strip_prefix("clip:")?;
+                let edges = o.detail["sourceEdges"].as_array()?;
+                Some((id, edges[0].as_f64()?, edges[1].as_f64()?))
+            })
+            .collect();
+        let mut best: Option<(f64, String, String)> = None;
+        for &(left, _, end) in &row {
+            for &(right, start, stop) in &row {
+                if left == right || start >= end + 1. || stop <= end {
+                    continue;
+                }
+                let index = &self.model.index;
+                let fade = index
+                    .layer(right)
+                    .and_then(|l| l.transitions[0].as_ref().map(|t| t.duration))
+                    .unwrap_or(0.)
+                    .max(
+                        index
+                            .layer(left)
+                            .and_then(|l| l.transitions[1].as_ref().map(|t| t.duration))
+                            .unwrap_or(0.),
+                    )
+                    * self.view.pps;
+                // Butted, or overlapping by no more than a transition.
+                if end - start > fade + 1. {
+                    continue;
+                }
+                let cut = (start + end) / 2.;
+                let distance = (x - cut).abs();
+                if distance <= reach && best.as_ref().is_none_or(|(d, ..)| distance < *d) {
+                    best = Some((distance, left.to_owned(), right.to_owned()));
+                }
+            }
+        }
+        best.map(|(_, left, right)| (left, right))
+    }
     fn effect_moved(&mut self, bounds: Bounds<Pixels>, at: Point<Pixels>, cx: &mut Context<Self>) {
         let over = bounds.contains(&at).then_some(at);
         if over != self.effect_over {
@@ -1897,6 +2017,48 @@ impl TimelineSurface {
                 self.pump(cx);
                 return;
             }
+        }
+        // A transition's wedge: the press selects it (and its clip); a drag
+        // sets its duration. Any other press leaves it.
+        let transition = frame.hit_transition(x, y);
+        if self.model.transition.is_some() && transition.is_none() {
+            self.queue.push_back(Job::SelectTransition(None));
+        }
+        if let Some((layer, edge)) = transition {
+            let locked = self
+                .model
+                .index
+                .layer(&layer)
+                .is_some_and(|l| l.effectively_locked);
+            self.queue
+                .push_back(Job::SelectTransition(Some((layer.clone(), edge))));
+            self.queue
+                .push_back(Job::SelectLayer(layer.clone(), Mods::default()));
+            self.gesture = Gesture::Pressed(Press {
+                origin: event.position,
+                spec: (!locked).then_some(Spec::Transition { layer, edge }),
+                release: None,
+            });
+            self.pump(cx);
+            return;
+        }
+        // The level line of an audio clip: a press on it drags the gain.
+        if let Some((layer, start, room)) = level_line_at(&frame, x, y)
+            && !self
+                .model
+                .index
+                .layer(&layer)
+                .is_some_and(|l| l.effectively_locked)
+        {
+            self.queue
+                .push_back(Job::SelectLayer(layer.clone(), Mods::default()));
+            self.gesture = Gesture::Pressed(Press {
+                origin: event.position,
+                spec: Some(Spec::Gain { layer, start, room }),
+                release: None,
+            });
+            self.pump(cx);
+            return;
         }
         if let Some((layer, edge)) = frame.hit_clip(x, y) {
             let layer = layer.to_owned();
@@ -2501,6 +2663,10 @@ impl TimelineSurface {
                         .map(|(l, _, _)| l.from),
                     _ => None,
                 };
+                let gain_room = match &spec {
+                    Spec::Gain { room, .. } => Some(*room),
+                    _ => None,
+                };
                 let time = self.delegate.time(cx);
                 // v1: a clip being moved is held (grabbing).
                 if matches!(spec, Spec::Layers | Spec::Duplicate) {
@@ -2514,6 +2680,7 @@ impl TimelineSurface {
                     quick,
                     quick_limits,
                     handle,
+                    gain_room,
                 };
             }
             _ => {}
@@ -2526,7 +2693,9 @@ impl TimelineSurface {
                 quick,
                 quick_limits,
                 handle,
+                gain_room,
             } => {
+                let gain_room = *gain_room;
                 if let Some((at, total, _)) = quick {
                     *at = event.position;
                     *total = f32::from(event.position.x - origin.x) as f64 / self.view.pps;
@@ -2540,6 +2709,9 @@ impl TimelineSurface {
                 }
                 let (origin, proedit, readout, handle) = (*origin, *proedit, *readout, *handle);
                 let mut sample = self.sample(origin, event.position, event.modifiers, cx);
+                if let Some(room) = gain_room.filter(|r| *r > 0.) {
+                    sample.value_delta = -(f32::from(event.position.y - origin.y) as f64) / room;
+                }
                 if let (Some(layer_from), Some(area), Some(graph)) =
                     (handle, self.graph_area(), self.graph.as_ref())
                 {
@@ -2756,6 +2928,9 @@ impl TimelineSurface {
             }
             Gesture::Pressed(press) => {
                 if let Some(Spec::Property { layer, path }) = press.spec {
+                    // The value opens as a field: ⌘A, digits and Return typed
+                    // from now on are its, never shortcuts on the layers.
+                    pm_shell::typing::expect();
                     self.delegate.run(
                         "timeline.propertyEdit",
                         vec![serde_json::json!({"type":"propertyEdit","layer":layer,"path":path})],
@@ -3238,7 +3413,16 @@ impl TimelineSurface {
                 (id.clone(), mid.is_some_and(|mid| *x < mid))
             })
         };
-        if side(&hovered) != side(&self.hover_clip) {
+        // Over an audio clip the level line's handle follows the pointer.
+        let level_moves = hovered.as_ref().is_some_and(|(id, x)| {
+            let level = format!("level:{id}");
+            self.hover_clip.as_ref().is_none_or(|(_, seen)| (seen - x).abs() >= 0.5)
+                && self
+                    .frame
+                    .as_ref()
+                    .is_some_and(|f| f.ops.iter().any(|o| o.id == level))
+        });
+        if side(&hovered) != side(&self.hover_clip) || level_moves {
             cx.notify();
         }
         self.hover_clip = hovered;
@@ -3259,9 +3443,24 @@ impl TimelineSurface {
             CursorStyle::OpenHand
         } else if x >= self.view.layer_column && (0. ..m.ruler as f64).contains(&y) {
             CursorStyle::ResizeLeftRight
+        } else if self.frame.as_ref().is_some_and(|f| level_line_at(f, x, y).is_some()) {
+            // The level line moves up and down.
+            CursorStyle::ResizeUpDown
         } else if self.frame.as_ref().is_some_and(|f| f.hit_layer_key_across(x, y, KEY_REACH, m.row as f64).is_some()) {
             // The owner's rule: no pointing hand; a key keeps the arrow.
             CursorStyle::Arrow
+        } else if let Some((id, _)) = self.frame.as_ref().and_then(|f| f.hit_transition(x, y)) {
+            // A transition's wedge: its duration follows a drag.
+            if self
+                .model
+                .index
+                .layer(&id)
+                .is_some_and(|l| l.effectively_locked)
+            {
+                CursorStyle::Arrow
+            } else {
+                CursorStyle::ResizeLeftRight
+            }
         } else if let Some((id, Some(_))) = self.clip_at(x, y)
                 // A locked layer's ends offer no trim.
                 && !self.frame.as_ref().is_some_and(|f| {
@@ -3621,6 +3820,10 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             client.publish_view().await.map_err(text)?;
             Ok(effects)
         }
+        Job::SelectTransition(transition) => {
+            client.model.transition = transition;
+            Ok(vec![])
+        }
         Job::FocusGraph { layer, channel } => {
             client.model.graph_focus = Some((layer, channel));
             Ok(vec![])
@@ -3707,7 +3910,11 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         Edge::Out => pm_kernel::commands::timing::TimeEdge::Out,
     };
     use pm_kernel::TimingCommand as Timing;
-    if layered && matches!(spec, Spec::Ripple(_) | Spec::Roll(_) | Spec::Slide) {
+    // Roll and slide run the layer-level edits in both modes (any clip kind,
+    // neighbours on its own track; in Tracks the shown lanes are pinned
+    // first), as their keys do: the media-only edits refused a still or a
+    // clip with no neighbour on one side, so the drag did nothing.
+    if matches!(spec, Spec::Roll(_) | Spec::Slide) || layered && matches!(spec, Spec::Ripple(_)) {
         let id = primary()?;
         return Ok(DragKind::Timing(match spec {
             Spec::Ripple(edge) => Timing::RippleTrim {
@@ -3750,6 +3957,7 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
                 ids: tops,
             }
         }
+        Spec::Transition { layer, edge } => DragKind::Transition { layer, edge },
         Spec::Trim(Edge::In) => DragKind::TrimIn { ids },
         Spec::Trim(Edge::Out) => DragKind::TrimOut { ids },
         Spec::Offset => DragKind::QuickOffsetLayers { ids },
@@ -3832,6 +4040,7 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
                 time,
             }
         }
+        Spec::Gain { layer, start, .. } => DragKind::Gain { layer, start },
         Spec::WorkIn => DragKind::WorkIn,
         Spec::WorkOut => DragKind::WorkOut,
         Spec::WorkMove => DragKind::WorkMove,
@@ -3843,13 +4052,27 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         Spec::Ripple(edge) => {
             let id = primary()?;
             let layer = model.index.layer(&id).ok_or("Unknown clip")?;
+            // The track it shows on (its lane is written as its track ahead
+            // of the edit), in its own area: V1 is not A1.
+            let lane = pm_panel_timeline::tracks::relative_lanes(&model.index, &model.reveal)
+                .into_iter()
+                .find(|(l, _)| *l == id)
+                .map_or(layer.preferred_track as i32, |(_, lane)| lane as i32);
             DragKind::ProEdit(Pro::RippleTrim {
                 layer_id: id.clone(),
                 edge: pro_edge(edge),
                 delta: 0.,
                 tracks: vec![TrackTarget {
-                    track: layer.preferred_track as i32,
+                    track: lane,
                     group_id: layer.group.clone(),
+                    area: Some(
+                        if layer.kind == "audio" {
+                            "audio"
+                        } else {
+                            "video"
+                        }
+                        .into(),
+                    ),
                 }],
                 linked: true,
             })
@@ -3925,10 +4148,10 @@ impl ModelPresenter for Presenter {
             .and_then(|root| root.get("assets")?.get(asset));
         let key = crate::waveforms::Key::of(path.clone(), record);
         Some(match crate::waveforms::lookup(&key)? {
-            Some((peaks, rate)) => Some(pm_panel_timeline::render::Waveform {
-                peaks,
-                rate,
+            Some(levels) => Some(pm_panel_timeline::render::Waveform {
+                levels,
                 trim: layer.trim,
+                map: time_map(&self.published, &layer.id, layer.from, layer.duration),
             }),
             None => {
                 self.wanted.borrow_mut().push(key);
@@ -4197,7 +4420,23 @@ impl Render for TimelineSurface {
                     .border(px(self.tokens.metrics.border * 2.))
                     .border_color(rgb(self.tokens.colors.accent))
             });
-        let landing = self.media_over.map(|position| {
+        // An empty composition has no row to put a line between: the whole
+        // layer area takes the drop, washed and outlined as a group a layer
+        // moves into is (PM-471).
+        let empty = self.scene.as_ref().is_none_or(|s| s.total() == 0);
+        let empty_landing = self.media_over.filter(|_| empty).map(|_| {
+            let accent = self.tokens.colors.accent;
+            div()
+                .absolute()
+                .left(px(0.))
+                .top(px(self.tokens.metrics.ruler))
+                .w(self.bounds.size.width)
+                .h(self.bounds.size.height - px(self.tokens.metrics.ruler))
+                .bg(rgba((accent << 8) | 0x29))
+                .border(px(self.tokens.metrics.drop_stroke))
+                .border_color(rgb(accent))
+        });
+        let landing = self.media_over.filter(|_| !empty).map(|position| {
             let (at, _, y) = self.media_slot(position);
             let x = self.view.layer_column + (at - self.view.scroll_time) * self.view.pps;
             let (width, height) = (self.bounds.size.width, self.bounds.size.height);
@@ -4402,13 +4641,19 @@ impl Render for TimelineSurface {
                 {
                     cx.stop_propagation();
                     s.effect_over = None;
-                    let layer = s.layer_under(window.mouse_position()).map(|(id, _)| id);
+                    let (layer, edge, across) = if definition.starts_with("transition:") {
+                        s.transition_target(window.mouse_position())
+                    } else {
+                        (s.layer_under(window.mouse_position()).map(|(id, _)| id), None, None)
+                    };
                     s.delegate.drop_effect(
                         EffectDrop {
                             panel: drag.panel.clone(),
                             definition: definition.to_string(),
                             label: drag.label.to_string(),
                             layer,
+                            edge,
+                            across,
                         },
                         cx,
                     );
@@ -4619,7 +4864,13 @@ impl Render for TimelineSurface {
                                             bounds,
                                             ..Default::default()
                                         }),
-                                        |w| strip_hover(op, *x + reach, origin, &tracks_tokens, w),
+                                        |w| {
+                                            strip_hover(op, *x + reach, origin, &tracks_tokens, w);
+                                            let level = format!("level:{id}");
+                                            if let Some(line) = frame.ops.iter().find(|o| o.id == level) {
+                                                level_hover(line, *x + reach, origin, w);
+                                            }
+                                        },
                                     );
                                 }
                                 for op in
@@ -4813,6 +5064,7 @@ impl Render for TimelineSurface {
             )
             // Over the canvas.
             .children(landing.into_iter().flatten())
+            .children(empty_landing)
             .children(reorder.into_iter().flatten().flatten())
             .children(effect_row)
             .children(tip)
@@ -5131,6 +5383,52 @@ fn strip_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, t: &Tokens, windo
         .corner_radii(px(grip.width / 2.)),
     );
 }
+/// The level line of the audio clip under the pointer: a 1 pt hairline in
+/// the clip's light tone and, under the pointer, a short rounded pill on
+/// it (the trim grip's language) to show it can be dragged.
+fn level_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, window: &mut Window) {
+    let Some(points) = op.detail["points"].as_array() else {
+        return;
+    };
+    let points: Vec<(f64, f64)> = points
+        .iter()
+        .filter_map(|p| Some((p[0].as_f64()?, p[1].as_f64()?)))
+        .collect();
+    if points.len() < 2 {
+        return;
+    }
+    let at = |x: f64, y: f64| origin + point(px(x as f32), px(y as f32));
+    let color = shade(op.color, op.opacity);
+    let mut path = PathBuilder::stroke(px(1.));
+    path.move_to(at(points[0].0, points[0].1));
+    for (x, y) in &points[1..] {
+        path.line_to(at(*x, *y));
+    }
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
+    // The handle sits on the flat part, under the pointer.
+    let (from, to) = (
+        op.detail["from"].as_f64().unwrap_or(f64::MIN),
+        op.detail["to"].as_f64().unwrap_or(f64::MAX),
+    );
+    let Some(y) = op.detail["y"].as_f64() else {
+        return;
+    };
+    const PILL: (f64, f64) = (14., 4.);
+    if to - from < PILL.0 {
+        return;
+    }
+    let x = pointer_x.clamp(from + PILL.0 / 2., to - PILL.0 / 2.);
+    window.paint_quad(
+        PaintQuad::new(Bounds::new(
+            at(x - PILL.0 / 2., y - PILL.1 / 2.),
+            size(px(PILL.0 as f32), px(PILL.1 as f32)),
+        ))
+        .background(shade(op.color, 1.))
+        .corner_radii(px((PILL.1 / 2.) as f32)),
+    );
+}
 fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &mut App) {
     let at = |x: f64, y: f64| origin + point(px(x as f32), px(y as f32));
     let b = op.bounds;
@@ -5156,6 +5454,26 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                     path.line_to(point);
                 }
             }
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        }
+        // A transition's wedge inside a clip's end (v1): full height at the
+        // edge, tapering to its tip. Its corner follows the strip's rounding.
+        "wedge" => {
+            let (x0, y0, w, h) = (b.x, b.y, b.width, b.height);
+            let r = op.radius.min(w).min(h / 2.).max(0.);
+            let k = 0.45 * r;
+            // Mirrored for an Out edge: x measured in from the right.
+            let out = op.detail["edge"] == "out";
+            let p = |dx: f64, dy: f64| at(if out { x0 + w - dx } else { x0 + dx }, y0 + dy);
+            let mut path = PathBuilder::fill();
+            path.move_to(p(0., r));
+            path.cubic_bezier_to(p(r, 0.), p(0., r - k), p(r - k, 0.));
+            path.line_to(p(w, 0.));
+            path.line_to(p(w * r / h, h - r));
+            path.line_to(p(0., h - r));
             path.close();
             if let Ok(path) = path.build() {
                 window.paint_path(path, color);
@@ -5487,42 +5805,115 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 window.paint_path(path, color);
             }
         }
-        // Bars stand on the clip's floor, one point per column; while the
-        // peaks are read a hairline marks the middle (v1).
+        // Light caught inside the glass (pm-design `Strip::wave`): one soft
+        // shape standing on the strip's floor just inside its rim, cut by
+        // its rounded corners, with a thin haze along the whole floor so a
+        // silent stretch never reads as empty. While the levels are read a
+        // hairline marks the middle (v1).
         "waveform" => {
-            let bars = op.detail["bars"].as_array();
-            let inset = op.detail["inset"].as_f64().unwrap_or(2.) as f32;
-            let min_bar = op.detail["minBar"].as_f64().unwrap_or(1.) as f32;
+            use pm_panel_timeline::waveform::{LOUDEST, decode, soften};
+            let d = &op.detail;
+            let per = d["columns"].as_f64().unwrap_or(2.).max(1.) as f32;
+            let tone = d["wave"].as_u64().unwrap_or(0xffffff) as u32;
+            let strength = d["waveAlpha"].as_f64().unwrap_or(0.5) * op.opacity;
             let (x0, top) = (f32::from(area.origin.x), f32::from(area.origin.y));
             let (w, h) = (f32::from(area.size.width), f32::from(area.size.height));
-            let room = (h - 2. * inset).max(0.);
-            match bars.filter(|b| !b.is_empty()) {
-                None => window.paint_quad(
+            let Some(peak) = d["peak"].as_str() else {
+                window.paint_quad(
                     PaintQuad::new(Bounds::new(
                         point(px(x0), px(top + (h / 2.).floor())),
                         size(px(w), px(1.)),
                     ))
-                    .background(color),
-                ),
-                Some(bars) => {
-                    let floor = top + h - inset;
-                    let mut path = PathBuilder::fill();
-                    path.move_to(point(px(x0), px(floor)));
-                    // Silence draws nothing: a bar shorter than `minBar`
-                    // would run along the foot as an underline.
-                    for (i, peak) in bars.iter().enumerate() {
-                        let bar = peak.as_f64().unwrap_or(0.) as f32 * room;
-                        let bar = if bar < min_bar { 0. } else { bar };
-                        let x = x0 + i as f32;
-                        path.line_to(point(px(x), px(floor - bar)));
-                        path.line_to(point(px(x + 1.), px(floor - bar)));
-                    }
-                    path.line_to(point(px(x0 + bars.len() as f32), px(floor)));
-                    path.close();
-                    if let Ok(path) = path.build() {
-                        window.paint_path(path, color);
-                    }
+                    .background(shade(tone, strength)),
+                );
+                return;
+            };
+            let rim = d["rim"].as_f64().unwrap_or(1.) as f32;
+            let radius = (d["radius"].as_f64().unwrap_or(0.) as f32 - rim).max(0.);
+            let ends = |i: usize| d["ends"][i].as_f64().map(|e| f32::from(origin.x) + e as f32);
+            let (start, end) = (ends(0).unwrap_or(x0), ends(1).unwrap_or(x0 + w));
+            let (inner_top, floor) = (top + rim, top + h - rim);
+            // The strip's inside at `x`: its ceiling and floor, lifted
+            // round the rounded corners.
+            let inside = |x: f32| -> (f32, f32) {
+                if x < start || x > end {
+                    return (floor, floor);
                 }
+                let from_end = (x - start).min(end - x);
+                let lift = if from_end < radius {
+                    let d = radius - from_end;
+                    radius - (radius * radius - d * d).max(0.).sqrt()
+                } else {
+                    0.
+                };
+                (inner_top + lift, floor - lift)
+            };
+            let lanes: Vec<(Vec<f32>, f32, f32)> = match d["peak2"].as_str() {
+                // A tall stereo row: the left above, the right below.
+                Some(peak2) => {
+                    let half = (floor - inner_top) / 2.;
+                    vec![
+                        (soften(&decode(peak)), inner_top + half, half),
+                        (soften(&decode(peak2)), floor, half),
+                    ]
+                }
+                None => vec![(soften(&decode(peak)), floor, floor - inner_top)],
+            };
+            // Only the columns the window shows (a frame is prepared wider
+            // than the view): the path's work stays the screen's width.
+            let shown = f32::from(window.viewport_size().width);
+            let first = (((0. - x0) * per).floor().max(0.) as usize).saturating_sub(1);
+            let last = (((shown - x0) * per).ceil().max(0.) as usize) + 2;
+            let x = |i: usize| x0 + (first + i) as f32 / per;
+            for (values, lane_floor, lane_h) in lanes {
+                let end_at = last.min(values.len());
+                if first >= end_at {
+                    continue;
+                }
+                let values = &values[first..end_at];
+                // The haze along the floor, then the shape over it: more
+                // opaque at its base than at its tips.
+                let haze = vec![WAVE_HAZE; values.len()];
+                if let Some(path) = glass_fill(&haze, &x, lane_floor, &inside) {
+                    window.paint_path(path, shade(tone, strength * 0.55));
+                }
+                let heights: Vec<f32> = values.iter().map(|v| v * LOUDEST * lane_h).collect();
+                if let Some(path) = glass_fill(&heights, &x, lane_floor, &inside) {
+                    window.paint_path(
+                        path,
+                        linear_gradient(
+                            180.,
+                            linear_color_stop(shade(tone, strength * 0.78), 0.),
+                            linear_color_stop(shade(tone, strength), 1.),
+                        ),
+                    );
+                }
+            }
+        }
+        // An audio clip's level line: a hairline in its pale tint.
+        // Drawn here only on a selected clip; under the pointer the hover
+        // paints it with its handle (`level_hover`). At rest: nothing.
+        "levelline" => {
+            if op.detail["shown"] != true {
+                return;
+            }
+            let Some(points) = op.detail["points"].as_array() else {
+                return;
+            };
+            let mut path = PathBuilder::stroke(px(1.));
+            for (i, p) in points.iter().enumerate() {
+                let (Some(x), Some(y)) = (p[0].as_f64(), p[1].as_f64()) else {
+                    continue;
+                };
+                let at = at(x, y);
+                if i == 0 {
+                    path.move_to(at);
+                } else {
+                    path.line_to(at);
+                }
+            }
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
             }
         }
         "text" => {
@@ -5854,3 +6245,161 @@ mod transform_box_tests {
     }
 }
 
+/// Samples of a retimed or reversed audio clip's media time over its length
+/// (a time remap, or a speed other than a static 1), as its sound plays them
+/// (`pm_eval`'s `sourceTime`, which the mix follows): its waveform is read
+/// through them (`waveform::mapped`). `None` for a clip at speed 1.
+fn time_map(
+    published: &pm_kernel::Published,
+    layer_id: &str,
+    from: f64,
+    duration: f64,
+) -> Option<std::sync::Arc<[f64]>> {
+    const SAMPLES: usize = 256;
+    let root = published.snapshot.root()?;
+    let loc = pm_kernel::model::find_layer(root, layer_id)?;
+    let layer = pm_kernel::model::layer_at(root, &loc)?;
+    let d = layer.get("d")?;
+    let remapped = d
+        .get("timeRemap")
+        .map(|n| n.to_value())
+        .is_some_and(|v| v.as_bool() == Some(true) || v.get("v").and_then(pm_model::Value::as_bool) == Some(true));
+    let speed = d.get("speed").map(|n| n.to_value());
+    let unit = match &speed {
+        None => true,
+        Some(v) => match v.as_f64() {
+            Some(s) => s == 1.,
+            None => v.get("v").and_then(pm_model::Value::as_f64) == Some(1.)
+                && v.get("kf").and_then(pm_model::Value::as_array).is_none_or(|k| k.is_empty())
+                && v.get("expr").and_then(pm_model::Value::as_str).is_none_or(str::is_empty),
+        },
+    };
+    if !remapped && unit || duration <= 0. {
+        return None;
+    }
+    let comp_id = loc
+        .comp_id
+        .clone()
+        .or_else(|| root.get("id").and_then(|n| n.to_value().as_str().map(str::to_owned)))?;
+    let comp = pm_eval::Comp::in_root(root, &comp_id, published.revision()).ok()?;
+    let mut ev = pm_eval::Evaluator::new();
+    let mut cache = pm_eval::retime::RetimeCache::new();
+    let mut map = Vec::with_capacity(SAMPLES + 1);
+    for i in 0..=SAMPLES {
+        let t = from + duration * i as f64 / SAMPLES as f64;
+        let at = pm_eval::Scope::new(&mut ev, &comp, &comp)
+            .source_time(layer, t, Some(&mut cache))
+            .ok()?;
+        map.push(at);
+    }
+    Some(map.into())
+}
+
+/// `rgb` at `alpha` (0–1).
+fn shade(rgb: u32, alpha: f64) -> Rgba {
+    gpui::rgba((rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32)
+}
+
+/// The waveform's haze along the floor, in points: about two device pixels.
+const WAVE_HAZE: f32 = 0.9;
+
+/// A waveform shape: `heights` (points above `base`, one per column at
+/// `x(i)`) inside the strip as `inside(x)` gives its ceiling and floor, so
+/// the strip's rounded corners cut it. Its top is a monotone cubic through
+/// the columns (no overshoot, no corner); `None` when nothing shows.
+fn glass_fill(
+    heights: &[f32],
+    x: &dyn Fn(usize) -> f32,
+    base: f32,
+    inside: &dyn Fn(f32) -> (f32, f32),
+) -> Option<Path<Pixels>> {
+    let n = heights.len();
+    if n < 2 {
+        return None;
+    }
+    let mut tops = Vec::with_capacity(n);
+    let mut floors = Vec::with_capacity(n);
+    for (i, height) in heights.iter().enumerate() {
+        let (ceiling, floor) = inside(x(i));
+        let floor = floor.min(base);
+        floors.push(floor);
+        tops.push((base - height).max(ceiling).min(floor));
+    }
+    if tops.iter().zip(&floors).all(|(t, f)| f - t < 0.05) {
+        return None;
+    }
+    let xs: Vec<f32> = (0..n).map(x).collect();
+    let tangents = monotone_tangents(&xs, &tops);
+    let mut path = PathBuilder::fill();
+    path.move_to(point(px(xs[0]), px(floors[0])));
+    path.line_to(point(px(xs[0]), px(tops[0])));
+    for k in 0..n - 1 {
+        let third = (xs[k + 1] - xs[k]) / 3.;
+        path.cubic_bezier_to(
+            point(px(xs[k + 1]), px(tops[k + 1])),
+            point(px(xs[k] + third), px(tops[k] + tangents[k] * third)),
+            point(px(xs[k + 1] - third), px(tops[k + 1] - tangents[k + 1] * third)),
+        );
+    }
+    // Back along the floor: only where it bends round a corner.
+    for k in (0..n).rev() {
+        let bent = |j: usize| floors[j] < base - 0.01;
+        if k == n - 1 || k == 0 || bent(k) || bent(k + 1) || bent(k - 1) {
+            path.line_to(point(px(xs[k]), px(floors[k])));
+        }
+    }
+    path.close();
+    path.build().ok()
+}
+
+/// Fritsch–Carlson tangents: a cubic through `(xs, ys)` with them never
+/// overshoots or turns a corner between columns.
+fn monotone_tangents(xs: &[f32], ys: &[f32]) -> Vec<f32> {
+    let n = xs.len();
+    let slope: Vec<f32> = (0..n - 1)
+        .map(|k| (ys[k + 1] - ys[k]) / (xs[k + 1] - xs[k]).max(1e-6))
+        .collect();
+    let mut m: Vec<f32> = (0..n)
+        .map(|k| match k {
+            0 => slope[0],
+            k if k == n - 1 => slope[n - 2],
+            k if slope[k - 1] * slope[k] <= 0. => 0.,
+            k => (slope[k - 1] + slope[k]) / 2.,
+        })
+        .collect();
+    for k in 0..n - 1 {
+        if slope[k] == 0. {
+            m[k] = 0.;
+            m[k + 1] = 0.;
+            continue;
+        }
+        let (a, b) = (m[k] / slope[k], m[k + 1] / slope[k]);
+        let r = a * a + b * b;
+        if r > 9. {
+            let t = 3. / r.sqrt();
+            m[k] = t * a * slope[k];
+            m[k + 1] = t * b * slope[k];
+        }
+    }
+    m
+}
+
+/// The audio clip whose level line (its flat part) is under `x, y`: its
+/// layer, its gain's place on the fader law and the law's height.
+fn level_line_at(frame: &pm_panel_timeline::render::Frame, x: f64, y: f64) -> Option<(String, f64, f64)> {
+    const REACH: f64 = 4.;
+    frame.ops.iter().rev().find_map(|op| {
+        if op.shape != "levelline" {
+            return None;
+        }
+        let d = &op.detail;
+        let (line, from, to) = (d["y"].as_f64()?, d["from"].as_f64()?, d["to"].as_f64()?);
+        if (y - line).abs() > REACH || x < from || x > to {
+            return None;
+        }
+        let start = pm_panel_timeline::level::fader_position(pm_panel_timeline::level::gain_db(
+            d["gain"].as_f64()?,
+        ));
+        Some((op.id.strip_prefix("level:")?.to_owned(), start, d["room"].as_f64()?))
+    })
+}

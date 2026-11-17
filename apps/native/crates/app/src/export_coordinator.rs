@@ -208,6 +208,7 @@ impl Controller {
                 &self.host.borrow().window,
                 typed.format == Format::Png,
                 &filename,
+                crate::platform::export_start(self.path.as_deref()),
             ))
         } else {
             None
@@ -226,6 +227,7 @@ impl Controller {
             } else if let Some(picker) = picker
                 && let Some(destination) = picker.recv().await.ok().flatten()
             {
+                crate::platform::exported_to(&destination);
                 // What the export would replace is one decision: the save
                 // panel's Replace answers for the video alone; caption files
                 // (or no panel) take one question listing every file.

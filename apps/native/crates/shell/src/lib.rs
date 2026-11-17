@@ -45,6 +45,7 @@ pub mod session;
 pub mod region_pick;
 pub mod settings_window;
 #[cfg(target_os = "macos")]
+pub mod icons;
 pub mod symbol;
 #[cfg(target_os = "macos")]
 pub mod text;

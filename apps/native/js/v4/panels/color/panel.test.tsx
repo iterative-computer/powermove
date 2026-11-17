@@ -301,3 +301,44 @@ test("a Color Space Transform's rows stand under Input and Output", async () => 
   ).toBe(true);
   await root.dispose();
 });
+
+// PM-504: a clip's grade is a stack. After the last block the panel keeps
+// its add row, so wheels, a curve and a LUT all go on one clip: each adds a
+// block of its own after the others (a LUT and a CDL come from a file).
+test("the add row stays after the last grade, and each kind adds its own block", async () => {
+  const at = (h: ReturnType<typeof tool>, ordinal: number) => ({
+    ...h,
+    ordinal,
+  });
+  const { root, sent, commands } = await mounted(
+    stacked([at(tool("w1", "colorWheels", "Color Wheels"), 0)]),
+  );
+  const row = named(root, `${PANEL_ID}:add-row`);
+  expect(row.props.label).toBe("Add Another Grade");
+  const action = (id: string) => named(root, `${PANEL_ID}:add:${id}`);
+  expect(action("colorCurves").props.label).toBe("Add Curve");
+  expect(action("lut").props.label).toBe("Load LUT…");
+  for (const id of ["colorCurves", "colorWheels", "lut"]) {
+    await event(root, action(id).id, "click");
+  }
+  expect(sent.filter((i) => i.type === "add")).toEqual([
+    {
+      type: "add",
+      definition: "colorCurves",
+      slot: 1,
+      parameters: { channel: 0 },
+    },
+    { type: "add", definition: "colorWheels", slot: 1 },
+  ]);
+  expect(commands).toEqual(["viewer.applyLut"]);
+  // It follows every block, after the grades in the panel's order.
+  const order = [...root.host.nodes.values()]
+    .filter(
+      (n) =>
+        n.props["data-pm-component"] === "disclosure-group" ||
+        n.props.id === `${PANEL_ID}:add-row`,
+    )
+    .map((n) => n.props.id);
+  expect(order.at(-1)).toBe(`${PANEL_ID}:add-row`);
+  await root.dispose();
+});

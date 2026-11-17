@@ -323,7 +323,7 @@ pub(crate) fn effect_steps_raster<'d>(
     measure: Option<&mut dyn pm_eval::text_geom::TextMeasure>,
 ) -> JsResult<Result<Vec<EffectStep>, Feature>> {
     effect_steps_frame(
-        scope, effects, layer, time, scale, prefix, raster, measure, None,
+        scope, effects, layer, time, scale, prefix, raster, measure, None, None,
     )
 }
 #[allow(clippy::too_many_arguments)]
@@ -339,6 +339,7 @@ pub(crate) fn effect_steps_frame<'d>(
     // A layer captured as a 3D material: its effects read the capture's
     // space, not the layer's place in the composition.
     space: Option<crate::composite::effects::OwnerSpace>,
+    bounds3d: Option<Bounds3d>,
 ) -> JsResult<Result<Vec<EffectStep>, Feature>> {
     let mut steps = Vec::new();
     let mut refused = None;
@@ -438,7 +439,7 @@ pub(crate) fn effect_steps_frame<'d>(
             match raster.map_or_else(
                 || match space {
                     Some(space) => owner_in_space(scope, layer, time, space),
-                    None => owner(scope, layer, time, scale, &mut measure),
+                    None => owner(scope, layer, time, scale, &mut measure, bounds3d),
                 },
                 |r| Ok(Ok(r.owner())),
             )? {
@@ -765,18 +766,60 @@ fn padding_with(steps: &[EffectStep], support: u32) -> Padding {
     })
 }
 
+/// Where a 3D object layer's effects find its picture
+/// ([`crate::scene3d::bounds::object_bounds`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Bounds3d {
+    /// The composition's 3D scene through the render camera (`GL.bounds`),
+    /// `None` when the object projects to nothing.
+    Scene(Option<pm_eval::bounds::Bounds>),
+    /// The studio draws the layer as a picture of the whole frame, in
+    /// screen space: the frame is its bounds.
+    Frame,
+}
+
 /// Electron's `effectLayerCoordinates`: GL.bounds, inverse projected plane,
-/// then the composition fallback (valid only for adjustment layers).
+/// then the composition fallback (valid only for adjustment layers). A 3D
+/// object's bounds come from its picture's 3D source (`bounds3d`).
 pub(crate) fn owner<'d>(
     scope: &mut Scope<'_, 'd>,
     layer: &'d Node,
     time: f64,
     scale: (f64, f64),
     measure: &mut Option<&mut dyn pm_eval::text_geom::TextMeasure>,
+    bounds3d: Option<Bounds3d>,
 ) -> JsResult<Result<Owner, Feature>> {
-    let bounds = scope.bounds_with_measure(layer, time, measure, &mut pm_eval::bounds::NoHost)?;
-    let world = scope.world_matrix(layer, time)?;
-    let plane = scope.plane_matrix(layer, time, false)?;
+    let (bounds, world, plane) = match bounds3d {
+        Some(Bounds3d::Frame) => {
+            let (w, h) = scope.comp_size();
+            let frame = pm_eval::bounds::Bounds {
+                x0: 0.,
+                y0: 0.,
+                x1: w,
+                y1: h,
+                w,
+                h,
+                ax: 0.,
+                ay: 0.,
+                z: None,
+            };
+            (
+                Some(frame),
+                [1., 0., 0., 1., 0., 0.],
+                [1., 0., 0., 0., 1., 0., 0., 0., 1.],
+            )
+        }
+        scene => (
+            match scene {
+                Some(Bounds3d::Scene(b)) => b,
+                _ => {
+                    scope.bounds_with_measure(layer, time, measure, &mut pm_eval::bounds::NoHost)?
+                }
+            },
+            scope.world_matrix(layer, time)?,
+            scope.plane_matrix(layer, time, false)?,
+        ),
+    };
     let mut scaled = plane;
     for i in 0..3 {
         scaled[i * 3] *= scale.0;
@@ -918,7 +961,7 @@ mod tests {
         let mut ev = pm_eval::Evaluator::new();
         let mut scope = Scope::new(&mut ev, &comp, &comp);
         for layer in scope.layers() {
-            let owner = owner(&mut scope, layer, 0., (0.5, 0.5), &mut None)
+            let owner = owner(&mut scope, layer, 0., (0.5, 0.5), &mut None, None)
                 .unwrap()
                 .unwrap();
             assert_eq!(owner.size, [160., 90.]);
@@ -1099,7 +1142,7 @@ mod tests {
         let mut ev = pm_eval::Evaluator::new();
         let mut scope = Scope::new(&mut ev, &comp, &comp);
         let layer = &scope.layers()[0];
-        let owner = owner(&mut scope, layer, 0., (0.5, 0.5), &mut None)
+        let owner = owner(&mut scope, layer, 0., (0.5, 0.5), &mut None, None)
             .unwrap()
             .unwrap();
         assert!(owner.valid);

@@ -278,7 +278,7 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             title={`Current time (${f.frameRate})`}
             value={f.spokenTime}
             onClick={action(send, { type: "timeEdit" })}
-            metadata={{ fixedWidthSample: "00:00:00:00" }}
+            metadata={{ fixedWidthSample: "00:00:00:00", opensField: "click" }}
             style={{
               color: t("colors.text"),
               fontSize: t("typography.timecode"),
@@ -552,7 +552,10 @@ function Layer({
             title={row.label}
             // v1: dragging a name reorders the layer (the native surface
             // takes the gesture past its threshold; a click still selects).
-            metadata={{ timelineLayerDrag: { layer: row.layer } }}
+            metadata={{
+              timelineLayerDrag: { layer: row.layer },
+              opensField: "doubleClick",
+            }}
             style={{
               ...text,
               ...(lit ? { color: t("colors.accent_text") } : {}),
@@ -576,7 +579,19 @@ function Layer({
               id={`timeline:${item.name}:${row.id}`}
               label={item.label}
               symbol={item.symbol}
-              tint={lit ? "colors.accent_text" : undefined}
+              tint={
+                lit
+                  ? "colors.accent_text"
+                  : // Solo and shy show their state in ink: solo's dot
+                    // takes the accent while on, both are dim while off.
+                    item.name === "solo" || item.name === "shy"
+                    ? item.on
+                      ? item.name === "solo"
+                        ? "colors.accent"
+                        : undefined
+                      : "colors.muted"
+                    : undefined
+              }
               active={item.active}
               tabIndex={-1}
               send={send}

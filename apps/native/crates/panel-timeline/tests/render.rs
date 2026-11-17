@@ -593,49 +593,88 @@ fn a_missing_effect_badge_keeps_its_room_and_explains_itself() {
     assert_eq!(f.tooltip_at(name.bounds.x + 1., y), None);
 }
 #[test]
-fn audio_clips_draw_one_bar_per_point_from_their_trimmed_peaks() {
+fn audio_clips_draw_perceptual_columns_from_their_trimmed_media() {
     let t = tokens();
     let v = viewport(&t);
     let mut audio = clip("a");
     audio.label = Label::Green;
     // 10 buckets per second; a two-second trim skips the first 20.
     let peaks: Vec<f32> = (0..100).map(|i| if i < 20 { 1. } else { 0.25 }).collect();
-    audio.audio = Some(Some(Waveform {
-        peaks: peaks.into(),
-        rate: 10.,
-        trim: 2.,
-    }));
+    audio.audio = Some(Some(Waveform::from_peaks(&peaks, 10., 2.)));
     let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
     let body = f.ops.iter().find(|o| o.id == "clip:a").unwrap();
     let wave = f.ops.iter().find(|o| o.id == "clip-content:a").unwrap();
     assert_eq!(wave.shape, "waveform");
+    let material = t.strip(t.colors.labels.green, pm_design::StripState::Rest);
+    assert_eq!(wave.color, material.primary);
     assert_eq!(
-        wave.color,
-        t.strip(t.colors.labels.green, pm_design::StripState::Rest)
-            .primary
+        (wave.detail["wave"].as_u64(), wave.detail["waveAlpha"].as_f64()),
+        (Some(u64::from(material.wave.0)), Some(f64::from(material.wave.1))),
+        "light caught in the clip's own glass"
     );
-    let bars = wave.detail["bars"].as_array().unwrap();
-    let inset = 2. * t.metrics.border as f64;
-    // The waveform fills the strip's part in view.
+    let columns = pm_panel_timeline::waveform::decode(wave.detail["peak"].as_str().unwrap());
+    // Over the strip's whole length: its rounded corners cut it (the
+    // painter follows them from the strip's own ends and corner).
     let clip = body.clip.unwrap();
     let (x0, x1) = (
         body.bounds.x.max(clip.x),
         (body.bounds.x + body.bounds.width).min(clip.x + clip.width),
     );
-    assert_eq!(bars.len(), (x1 - x0 - 2. * inset).floor() as usize);
-    assert_eq!(wave.bounds.x, x0 + inset);
+    assert_eq!(wave.bounds.x, x0);
+    assert_eq!(wave.detail["radius"].as_f64(), Some(body.radius));
+    // Two columns per point: device pixels on Retina.
+    assert_eq!(columns.len(), ((x1 - x0) * 2.).ceil() as usize);
+    // The trimmed media only, on the square-root scale (−12 dB at half).
+    let expected = pm_panel_timeline::waveform::perceptual(0.25);
     assert!(
-        bars.iter().all(|b| b.as_f64() == Some(0.25)),
-        "trimmed peaks only"
+        columns.iter().all(|c| (c - expected).abs() < 1. / 255. + 1e-6),
+        "trimmed media only: {:?}",
+        &columns[..4]
     );
-    // Still reading: no bars (the painter draws the middle hairline).
+    assert_eq!(expected, 0.5);
+    // Still reading: no columns (the painter draws the middle hairline).
     audio.audio = Some(None);
     let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
     let wave = f.ops.iter().find(|o| o.id == "clip-content:a").unwrap();
-    assert_eq!(
-        (wave.shape, wave.detail["bars"].as_array().map(Vec::len)),
-        ("waveform", Some(0))
-    );
+    assert_eq!((wave.shape, wave.detail["peak"].as_str()), ("waveform", None));
+    // Muted: dimmed, still there.
+    audio.audio = Some(Some(Waveform::from_peaks(&peaks, 10., 2.)));
+    audio.muted = true;
+    let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
+    let wave = f.ops.iter().find(|o| o.id == "clip-content:a").unwrap();
+    assert!(wave.opacity < 0.5 && wave.detail["peak"].as_str().is_some());
+    audio.muted = false;
+    // The level line: 0 dB sits 72 % up the room (the Mixer's law), a fade
+    // in rises from the floor to it; it dims with the clip's mute.
+    audio.level = Some(Level {
+        gain: 1.,
+        fade_in: 1.,
+        fade_out: 0.,
+        animated: false,
+    });
+    let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
+    let line = f.ops.iter().find(|o| o.id == "level:a").unwrap();
+    assert_eq!(line.shape, "levelline");
+    let room = line.detail["room"].as_f64().unwrap();
+    let points = line.detail["points"].as_array().unwrap();
+    let floor = points[0][1].as_f64().unwrap();
+    let y = line.detail["y"].as_f64().unwrap();
+    assert!((floor - y - 0.72 * room).abs() < 1e-6, "0 dB at 72 % of {room}");
+    assert_eq!(points[1][1].as_f64().unwrap(), y, "the fade in rises to the level");
+    assert_eq!(line.detail["db"], "0.0");
+    // At rest it is not drawn (only grabbed); a selected clip shows it.
+    assert_eq!(line.detail["shown"], false);
+    audio.selected = true;
+    let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
+    let shown = f.ops.iter().find(|o| o.id == "level:a").unwrap();
+    assert_eq!(shown.detail["shown"], true);
+    audio.selected = false;
+    audio.muted = true;
+    let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
+    let dim = f.ops.iter().find(|o| o.id == "level:a").unwrap();
+    assert!(dim.opacity < line.opacity);
+    audio.muted = false;
+    audio.level = None;
     // Offline audio names itself with the Offline lead instead.
     audio.media = Media::Offline;
     let f = scene_with(&t, audio).prepare(v, &t).unwrap();
@@ -1044,4 +1083,80 @@ fn the_playhead_marks_each_curve_with_its_value_as_v1() {
     let at = |x: f64| v.scroll_time + (x - v.layer_column) / v.pps;
     assert!(g.playhead_marks(v, area, at(v.layer_column + 20.), &t).is_empty());
     assert!(g.playhead_marks(v, area, at(v.width - 20.), &t).is_empty());
+}
+
+/// v1's transition wedges: inside the clip's ends, as long as each
+/// transition at this zoom; a selected one is stronger and carries a grip at
+/// its tip. A press inside a wedge takes the transition, its very edge still
+/// trims, and below the wedge's slope the clip moves as before.
+#[test]
+fn transitions_draw_as_wedges_inside_the_clip_and_are_taken_by_a_press() {
+    let t = tokens();
+    let mut c = clip("a");
+    c.from = 1.;
+    c.duration = 6.;
+    c.transitions = [Some(1.), Some(0.5)];
+    c.transition_selected = Some(Edge::In);
+    let scene = Scene::new(
+        vec![row(
+            "a",
+            RowContent::Layer {
+                clip: Some(c),
+                summary: vec![].into(),
+            },
+        )],
+        12.,
+        30.,
+        &t,
+    )
+    .unwrap();
+    let v = viewport(&t);
+    let f = scene.prepare(v, &t).unwrap();
+    let op = |id: &str| f.ops.iter().find(|o| o.id == id).unwrap_or_else(|| panic!("{id}"));
+    let (wedge_in, wedge_out) = (op("transition:in:a"), op("transition:out:a"));
+    assert_eq!((wedge_in.shape, wedge_out.shape), ("wedge", "wedge"));
+    assert!((wedge_in.bounds.width - 100.).abs() < 1e-6, "{:?}", wedge_in.bounds);
+    assert!((wedge_out.bounds.width - 50.).abs() < 1e-6, "{:?}", wedge_out.bounds);
+    assert!(wedge_in.opacity > wedge_out.opacity, "the selected one is stronger");
+    assert_eq!(wedge_in.detail["edge"], "in");
+    assert_eq!(wedge_out.detail["edge"], "out");
+    let grip = op("transition-grip:a");
+    let strip = op("clip:a").bounds;
+    let b = wedge_in.bounds;
+    assert!(grip.bounds.x + grip.bounds.width <= b.x + b.width + 1e-6);
+    let top = b.y + 2.;
+    // Inside the In wedge near the top, past the trim zone: the transition.
+    assert_eq!(f.hit_transition(b.x + 20., top), Some(("a".into(), Edge::In)));
+    // Its grip at the tip.
+    assert_eq!(
+        f.hit_transition(b.x + b.width - 1., strip.y + strip.height / 2.),
+        Some(("a".into(), Edge::In))
+    );
+    // The clip's very edge still trims.
+    assert_eq!(f.hit_transition(b.x + 2., top), None);
+    // Under the slope near the floor: the clip itself.
+    assert_eq!(f.hit_transition(b.x + 60., b.y + b.height - 2.), None);
+    // The Out wedge, from its end.
+    let o = wedge_out.bounds;
+    assert_eq!(
+        f.hit_transition(o.x + o.width - 10., top),
+        Some(("a".into(), Edge::Out))
+    );
+    // A clip without transitions draws none.
+    let plain = Scene::new(
+        vec![row(
+            "p",
+            RowContent::Layer {
+                clip: Some(clip("p")),
+                summary: vec![].into(),
+            },
+        )],
+        12.,
+        30.,
+        &t,
+    )
+    .unwrap()
+    .prepare(v, &t)
+    .unwrap();
+    assert!(!plain.ops.iter().any(|o| o.id.starts_with("transition")));
 }

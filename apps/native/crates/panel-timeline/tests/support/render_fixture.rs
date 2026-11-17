@@ -22,9 +22,13 @@ pub fn clip(id: &str) -> Clip {
         hidden: false,
         media: Media::Ready,
         audio: None,
+        muted: false,
+        level: None,
         trim: None,
         missing_effect: None,
         cues: vec![],
+        transitions: [None, None],
+        transition_selected: None,
     }
 }
 pub fn key(id: &str, time: f64) -> Key {
@@ -60,11 +64,7 @@ pub fn scene(t: &Tokens) -> Scene {
     locked.trim = Some(Edge::In);
     let mut audio = clip("audio");
     audio.label = Label::Green;
-    audio.audio = Some(Some(Waveform {
-        peaks: vec![0., 0.8, 0.4, 1., 1., 0.2].into(),
-        rate: 1.,
-        trim: 0.,
-    }));
+    audio.audio = Some(Some(Waveform::from_peaks(&[0., 0.8, 0.4, 1., 1., 0.2], 1., 0.)));
     let mut keys = vec![key("linear", 1.1), key("ease", 2.25), key("hold", 3.5)];
     keys[1].interpolation = Interpolation::Ease;
     keys[1].selected = true;

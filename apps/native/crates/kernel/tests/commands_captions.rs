@@ -304,6 +304,7 @@ fn generic_caption_layer_uses_visible_base_transform_and_height_scaled_content()
         visible: None,
         shy: None,
         collapsed: None,
+        track: None,
         time: 0.,
     };
     command.content=parse(r#"{"cues":[{"id":"a","start":1,"end":2,"text":"Synthetic"}],"style":{"size":72},"future":{"keep":true}}"#).unwrap().as_object().unwrap().clone();

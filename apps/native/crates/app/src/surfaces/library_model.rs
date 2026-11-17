@@ -116,16 +116,7 @@ impl Row {
         original_name(self.file_title().unwrap_or_else(|| self.name.clone()))
     }
     fn file_title(&self) -> Option<String> {
-        let default = self.name == "Untitled"
-            || self
-                .name
-                .strip_prefix("Untitled ")
-                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
-        if !default {
-            return None;
-        }
-        let stem = self.file.as_ref()?.file_stem()?.to_string_lossy().into_owned();
-        (!stem.is_empty()).then_some(stem)
+        file_title(&self.name, self.file.as_deref())
     }
     /// How long the composition runs (`0:20`, `1:02:03`), when known.
     pub fn length(&self) -> Option<String> {
@@ -416,6 +407,26 @@ pub enum Failure {
     RenameByOpening,
 }
 
+/// The name a project still named "Untitled" ("Untitled 2", …) shows once
+/// it is kept in a file: the file's (`RC Edit.pmv` reads "RC Edit"), as a Mac
+/// document does. `None` for any other name, or with no file.
+pub(crate) fn file_title(name: &str, file: Option<&std::path::Path>) -> Option<String> {
+    let default = name == "Untitled"
+        || name
+            .strip_prefix("Untitled ")
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+    if !default {
+        return None;
+    }
+    let stem = file?.file_stem()?.to_string_lossy().into_owned();
+    (!stem.is_empty()).then_some(stem)
+}
+/// What a project is called wherever it shows (its Home card, its tab, the
+/// window's title and menus): [`file_title`], else its own name, with a
+/// repeated copy suffix shown once.
+pub(crate) fn shown_name(name: &str, file: Option<&std::path::Path>) -> String {
+    original_name(file_title(name, file).unwrap_or_else(|| name.to_owned()))
+}
 /// A copy of a copy was named "X — Native — Native" (each copy added its
 /// suffix again; fixed since), a recovered one "X — Recovered — Recovered":
 /// a part repeated straight after itself shows once. No part that differs is
@@ -434,6 +445,15 @@ pub(crate) fn original_name(name: String) -> String {
 }
 #[cfg(test)]
 mod original_name_tests {
+    #[test]
+    fn a_saved_untitled_project_shows_its_files_name() {
+        let file = std::path::Path::new("/Users/someone/Movies/RC Edit.pmv");
+        assert_eq!(super::shown_name("Untitled", Some(file)), "RC Edit");
+        assert_eq!(super::shown_name("Untitled 3", Some(file)), "RC Edit");
+        assert_eq!(super::shown_name("Untitled", None), "Untitled");
+        assert_eq!(super::shown_name("Launch", Some(file)), "Launch", "a name of its own stays");
+        assert_eq!(super::shown_name("Run6 — Native — Native", None), "Run6 — Native");
+    }
     #[test]
     fn a_part_repeated_after_itself_shows_once() {
         let n = |s: &str| super::original_name(s.to_owned());

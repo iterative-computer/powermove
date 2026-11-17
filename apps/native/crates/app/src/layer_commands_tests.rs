@@ -615,3 +615,26 @@ fn host_rows_list_the_layers_a_layer_can_follow() {
         .is_none()
     );
 }
+/// Acceptance run 27 (PM-502): two layers named "Rect" looked the same in
+/// the Track Matte list. Rows read by stack number and name, as After
+/// Effects lists them.
+#[test]
+fn track_matte_rows_tell_layers_of_one_name_apart() {
+    let rect = |id: &str| {
+        layer(id, "shape", 0., 0., 0., "#ffffff", "")
+            .replace(&format!(r#""name":"{id}""#), r#""name":"Rect""#)
+    };
+    let (_actor, kernel) = open(&[
+        layer("t", "solid", 0., 0., 0., "#ffffff", ""),
+        rect("r1"),
+        rect("r2"),
+    ]);
+    let p = select(&kernel, &[]);
+    let rows = host_rows(
+        &p,
+        &serde_json::json!({"source": "layer-parents", "layer": "t"}),
+    )
+    .unwrap();
+    let labels: Vec<&str> = rows.iter().filter_map(|r| r["label"].as_str()).collect();
+    assert_eq!(labels, ["None", "2. Rect", "3. Rect"]);
+}

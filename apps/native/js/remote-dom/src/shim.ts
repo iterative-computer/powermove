@@ -459,7 +459,7 @@ export class RemoteDOM {
   readonly document: N;
   readonly window: N;
   readonly session: Session;
-  readonly layouts = new WeakMap<object, { entry: LayoutEntry; applied: number }>();
+  layouts = new WeakMap<object, { entry: LayoutEntry; applied: number }>();
   readonly values = new WeakMap<object, Map<string, N>>();
   private ids = new WeakMap<object, number>();
   private nodes = new Map<number, N>();
@@ -482,6 +482,8 @@ export class RemoteDOM {
   private backlog: { ops: Op[]; caused_by: number | null }[] = [];
   private disposed = false;
   private lifecycle: 'created' | 'connected' | 'faulted' | 'retired' = 'created';
+  /** What it was before a page fault, to go back to on `replay`. */
+  private beforeFault: 'created' | 'connected' = 'created';
   private visibility: 'foreground' | 'background' | 'headless' = 'foreground';
   private realmTask: <T>(run: () => T) => T = (run) => run();
   private request = 0;
@@ -776,7 +778,8 @@ export class RemoteDOM {
   }
   /** Immediate queue admission; no frame timer, await, or synchronous page call. */
   flush(): Batch | null {
-    if (this.disposed) return null;
+    // A faulted page takes nothing until a fresh one asks for everything.
+    if (this.disposed || this.lifecycle === 'faulted') return null;
     if (!this.pending && this.backlog.length) {
       const chunk = this.backlog.shift()!;
       this.pending = {
@@ -1044,9 +1047,12 @@ export class RemoteDOM {
   }
   private receiveMessage(message: PageMessage): boolean {
     if (this.disposed || !sameSession(message.session, this.session)) return false;
+    // The page stopped applying: the document stays, and changes collect,
+    // until a fresh page is given all of it (`replay`), or the realm goes.
     if (message.kind === 'fault') {
       this.report(new Error(message.message));
-      this.dispose();
+      if (this.lifecycle === 'created' || this.lifecycle === 'connected')
+        this.beforeFault = this.lifecycle;
       this.lifecycle = 'faulted';
       return true;
     }
@@ -1219,6 +1225,56 @@ export class RemoteDOM {
         else delete target[key];
       }
     };
+  }
+  /**
+   * A fresh page (the last one stopped applying, or its process went): the
+   * whole document again from the first batch. Every node keeps its id, so
+   * the realm's state and listeners carry on; observed sizes and pending
+   * measurements are asked again. False once retired (PM-509).
+   */
+  replay(): boolean {
+    if (this.disposed) return false;
+    this.collect(this.observer.takeRecords());
+    this.seq = 0;
+    this.applied = 0;
+    this.lastEvent = 0;
+    this.causedBy = null;
+    this.pending = null;
+    this.backlog = [];
+    this.layouts = new WeakMap();
+    this.syncSuspended = false;
+    for (const map of [this.snapshots, this.parent, this.next, this.previous, this.last])
+      map.clear();
+    for (const id of [ROOT.document, ROOT.html, ROOT.head, ROOT.body, ROOT.window])
+      this.snapshots.set(id, this.empty());
+    this.parent.set(ROOT.document, ROOT.window);
+    this.parent.set(ROOT.html, ROOT.document);
+    this.parent.set(ROOT.head, ROOT.html);
+    this.parent.set(ROOT.body, ROOT.html);
+    this.snapshots.get(ROOT.document)!.children = [ROOT.html];
+    this.snapshots.get(ROOT.html)!.children = [ROOT.head, ROOT.body];
+    const later = this.commands;
+    this.commands = [];
+    for (const [node, observers] of this.resizeTargets)
+      if (observers.size)
+        this.commands.push({ op: 'observe_resize', id: this.id(node), enabled: true });
+    for (const [request, wait] of this.waits)
+      if (wait.node.isConnected)
+        this.commands.push({ op: 'measure', request, ids: [this.id(wait.node)], styles: [] });
+    if (this.active !== this.document.body && this.active?.isConnected)
+      this.commands.push({ op: 'focus', id: this.id(this.active), prevent_scroll: true });
+    this.commands.push(...later);
+    for (const node of [
+      this.window,
+      this.document,
+      this.document.documentElement,
+      this.document.head,
+      this.document.body
+    ])
+      this.dirty.add(node);
+    if (this.lifecycle === 'faulted') this.lifecycle = this.beforeFault;
+    this.flush();
+    return true;
   }
   inspect() {
     return {

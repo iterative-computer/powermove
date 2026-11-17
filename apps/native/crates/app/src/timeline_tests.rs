@@ -2453,6 +2453,10 @@ fn clicking_a_layer_name_selects_it_and_a_double_click_renames(cx: &mut TestAppC
             click_count,
         });
     }
+    assert!(
+        pm_shell::typing::expecting(),
+        "typed from the double-click on, ⌘A and letters wait for the name field"
+    );
     s.idle(cx);
     s.idle(cx);
     assert!(
@@ -2974,6 +2978,8 @@ fn an_effect_dropped_on_a_layers_bar_goes_to_that_layer(cx: &mut TestAppContext)
             definition: "gaussianBlur".into(),
             label: "Gaussian Blur".into(),
             layer: Some(layer),
+            edge: None,
+            across: None,
         }]
     );
 }
@@ -3097,6 +3103,10 @@ fn clicking_an_axis_value_opens_its_editor_without_an_edit(cx: &mut TestAppConte
     s.idle(cx);
     assert_eq!(&*s.recorder.commands.borrow(), &["timeline.propertyEdit"]);
     assert!(s.recorder.reports.borrow().is_empty());
+    // What is typed from the click on (⌘A, digits, Return) waits for the
+    // field it opens, never selecting every layer on the way.
+    assert!(pm_shell::typing::expecting(), "the click arms the typing hold");
+    assert!(pm_shell::typing::for_field("a", true, "cmd+a"));
 }
 
 #[gpui::test]

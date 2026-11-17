@@ -25,6 +25,16 @@ const MASKABLE: [&str; 7] = [
 /// Grab radius around vertices and tangent ends, display points.
 const REACH: f64 = 8.;
 
+/// Pointer input the Pen holds until a read that includes its own last
+/// press has landed: a press acts on the path as that press left it, never
+/// on an older read (four quick clicks drew one vertex, and a press replayed
+/// after its release left a tangent following the pointer).
+pub enum PenInput {
+    Down(MouseDownEvent, [f64; 2], f64),
+    Move(MouseMoveEvent, [f64; 2]),
+    Up(bool),
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Vertex {
     pub id: String,
@@ -360,6 +370,7 @@ impl GizmoSurface {
         if self.host.tool(cx) != super::Tool::Pen || self.host.playing(cx) {
             self.pen_ready = false;
             self.pen_active = None;
+            self.pen_waiting.clear();
             if self.pen.take().is_some() {
                 cx.notify();
             }
@@ -370,7 +381,9 @@ impl GizmoSurface {
         // A read taken while the Pen's own steps are still queued (a new path
         // layer is selected only after its first vertex lands) may see the
         // old selection; it must not end the open path.
-        let own_work = self.busy || !self.queue.is_empty();
+        // A Pen press still held is the Pen's work too: its release commits
+        // it and selects a new path layer, which a read now cannot show.
+        let own_work = self.busy || !self.queue.is_empty() || self.pen_drag.is_some();
         let (kernel, project, time) = (
             self.kernel.clone(),
             self.project.clone(),
@@ -385,7 +398,8 @@ impl GizmoSurface {
                 if s.pen_reading == ticket {
                     // The open path lives on while its layer is the one
                     // selected (a new path layer's own selection keeps it).
-                    let own_work = own_work || s.busy || !s.queue.is_empty();
+                    let own_work =
+                        own_work || s.busy || !s.queue.is_empty() || s.pen_drag.is_some();
                     if !own_work
                         && s.pen_active.as_ref().map(|(layer, _)| layer)
                             != pose.as_ref().map(|p| &p.layer)
@@ -393,17 +407,40 @@ impl GizmoSurface {
                         s.pen_active = None;
                     }
                     s.pen = pose;
-                    s.pen_ready = true;
+                    // A read taken under the Pen's own queued work may not
+                    // show it yet: presses wait for one that does.
+                    s.pen_ready = !own_work;
                     cx.notify();
-                    if let Some((event, at, scale)) = s.pen_waiting.take() {
-                        s.pen_down(&event, at, scale, cx);
-                    }
+                    s.pen_drain(cx);
                 }
             });
         })
         .detach();
     }
-    /// A Pen press: close, delete, grab, or place a vertex.
+    /// Held input in the order it came: a press runs on a read that includes
+    /// the Pen's earlier work; its moves and release follow it at once.
+    fn pen_drain(&mut self, cx: &mut Context<Self>) {
+        loop {
+            match self.pen_waiting.front() {
+                None => break,
+                Some(PenInput::Down(..)) if !self.pen_ready => break,
+                _ => {}
+            }
+            match self.pen_waiting.pop_front() {
+                Some(PenInput::Down(event, at, scale)) => self.pen_press(&event, at, scale, cx),
+                Some(PenInput::Move(event, at)) => {
+                    self.pen_drag_to(&event, at, cx);
+                }
+                Some(PenInput::Up(commit)) => {
+                    self.pen_release(commit, cx);
+                }
+                None => break,
+            }
+        }
+    }
+    /// A Pen press. Before a read that shows the Pen's last press (the
+    /// first press after choosing the tool, or quick clicks) it waits, in
+    /// order, never querying here.
     pub(super) fn pen_down(
         &mut self,
         event: &MouseDownEvent,
@@ -411,18 +448,32 @@ impl GizmoSurface {
         scale: f64,
         cx: &mut Context<Self>,
     ) {
-        let time = self.host.time(cx);
-        // The first press after choosing the tool may beat its read; it runs
-        // once the read lands, never by querying here.
-        if !self.pen_ready {
-            self.pen_waiting = Some((event.clone(), at, scale));
-            self.pen_reread(cx);
+        if !self.pen_ready || !self.pen_waiting.is_empty() {
+            self.pen_waiting
+                .push_back(PenInput::Down(event.clone(), at, scale));
+            if !self.pen_ready && !self.busy && self.queue.is_empty() {
+                self.pen_reread(cx);
+            }
             return;
         }
+        self.pen_press(event, at, scale, cx);
+    }
+    /// Close, delete, grab, or place a vertex.
+    fn pen_press(
+        &mut self,
+        event: &MouseDownEvent,
+        at: [f64; 2],
+        scale: f64,
+        cx: &mut Context<Self>,
+    ) {
+        let time = self.host.time(cx);
         let pose = self.pen.clone();
         if pose.as_ref().is_some_and(|p| p.locked) {
             return;
         }
+        // What this press does changes the path: the next one waits for a
+        // read that shows it.
+        self.pen_ready = false;
         let cmd = event.modifiers.platform || event.modifiers.control;
         if let Some(pose) = &pose
             && let Some(h) = hit(pose, at, scale)
@@ -517,6 +568,7 @@ impl GizmoSurface {
                     visible: None,
                     shy: None,
                     collapsed: None,
+                    track: None,
                     time,
                 };
                 commands.push(LayerCommand::Add(Box::new(add)).into());
@@ -599,6 +651,28 @@ impl GizmoSurface {
         at: [f64; 2],
         cx: &mut Context<Self>,
     ) -> bool {
+        // A held press's drag: only its latest point waits with it.
+        if self.pen_drag.is_none()
+            && matches!(
+                self.pen_waiting.back(),
+                Some(PenInput::Down(..) | PenInput::Move(..))
+            )
+        {
+            if matches!(self.pen_waiting.back(), Some(PenInput::Move(..))) {
+                self.pen_waiting.pop_back();
+            }
+            self.pen_waiting
+                .push_back(PenInput::Move(event.clone(), at));
+            return true;
+        }
+        self.pen_drag_to(event, at, cx)
+    }
+    fn pen_drag_to(
+        &mut self,
+        event: &MouseMoveEvent,
+        at: [f64; 2],
+        cx: &mut Context<Self>,
+    ) -> bool {
         let threshold = self.tokens.metrics.drag_threshold;
         let Some(d) = self.pen_drag.as_mut() else {
             if self.pen.is_some() {
@@ -620,6 +694,20 @@ impl GizmoSurface {
         true
     }
     pub(super) fn pen_up(&mut self, commit: bool, cx: &mut Context<Self>) -> bool {
+        // A held press's release waits behind it (Escape's too, which then
+        // cancels it).
+        if self.pen_drag.is_none()
+            && matches!(
+                self.pen_waiting.back(),
+                Some(PenInput::Down(..) | PenInput::Move(..))
+            )
+        {
+            self.pen_waiting.push_back(PenInput::Up(commit));
+            return true;
+        }
+        self.pen_release(commit, cx)
+    }
+    fn pen_release(&mut self, commit: bool, cx: &mut Context<Self>) -> bool {
         let Some(drag) = self.pen_drag.take() else {
             return false;
         };

@@ -41,6 +41,9 @@ pub struct TextField {
     width: Rc<std::cell::Cell<f32>>,
     /// Shown as a picture of itself while its surface's body scrolls.
     picture: crate::picture::Picture,
+    /// A press opened it and the keyboard is on its way (it moves at the next
+    /// present): keys typed meanwhile wait for it (`typing`, PM-487).
+    awaiting_keyboard: bool,
 }
 impl Drop for TextField {
     fn drop(&mut self) {
@@ -122,6 +125,7 @@ impl TextField {
             ink: None,
             width: Rc::default(),
             picture: Default::default(),
+            awaiting_keyboard: false,
         }
     }
     /// The lines a multi-line field shows: its text as it wraps in the
@@ -388,8 +392,23 @@ impl TextField {
         self.slot.has_keyboard()
     }
     pub fn begin_editing(&mut self, cx: &mut Context<Self>) {
+        // Already typing in it: asked again (a double-click's second press,
+        // a focus that follows the first), it keeps the keyboard. Taking it
+        // again ends the edit, committing it and closing a field opened on
+        // demand, so the next ⌘A selected every layer.
+        if self.slot.has_keyboard() {
+            return;
+        }
         self.slot.begin_editing();
+        self.await_keyboard();
         cx.notify();
+    }
+    /// Typing was held for a field on its way (a press that opens it): when
+    /// this one takes the keyboard, what waited goes to it.
+    fn await_keyboard(&mut self) {
+        if crate::typing::expecting() && !self.slot.has_keyboard() {
+            self.awaiting_keyboard = true;
+        }
     }
     /// Ends editing and gives the keyboard back to the editor (Escape in a
     /// docked composer).
@@ -399,8 +418,11 @@ impl TextField {
     }
     /// Focused with all its text selected, so typing replaces it.
     pub fn begin_editing_selecting_all(&mut self, cx: &mut Context<Self>) {
-        self.slot.begin_editing();
+        if !self.slot.has_keyboard() {
+            self.slot.begin_editing();
+        }
         self.slot.set_selection(0, usize::MAX);
+        self.await_keyboard();
         cx.notify();
     }
     pub fn set_tokens(&mut self, tokens: pm_design::Tokens) {
@@ -460,6 +482,17 @@ const MONO_ADVANCE: f32 = 0.602;
 const MULTILINE_MOST: usize = 6;
 impl Render for TextField {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The keyboard a press asked for has come: what waited for it goes in.
+        if self.awaiting_keyboard {
+            if self.slot.has_keyboard() {
+                self.awaiting_keyboard = false;
+                crate::typing::field_ready();
+            } else if crate::typing::expecting() {
+                window.request_animation_frame();
+            } else {
+                self.awaiting_keyboard = false;
+            }
+        }
         if matches!(self.kind, TextKind::Form | TextKind::FormNumber) {
             return self.render_form(window, cx);
         }
@@ -559,8 +592,18 @@ impl Render for TextField {
                         return;
                     }
                     // A press on its picture goes to the editor once shown.
-                    if !this.picture.press(window) {
+                    // One while it already has the keyboard (a double-click's
+                    // second press) leaves it: taking it again ended the edit,
+                    // which commits and closes a field opened on demand.
+                    if !this.picture.press(window) && !this.slot.has_keyboard() {
                         this.slot.begin_editing();
+                        // Under load the keyboard moves a slow frame later:
+                        // what is typed until then is for this field, never
+                        // ⌘A on the layers or digits on the playhead.
+                        if !this.slot.has_keyboard() {
+                            crate::typing::expect();
+                            this.awaiting_keyboard = true;
+                        }
                     }
                     cx.notify();
                 }),

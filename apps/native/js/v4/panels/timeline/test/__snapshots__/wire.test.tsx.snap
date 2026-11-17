@@ -534,6 +534,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {
@@ -1381,6 +1382,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {
@@ -1613,6 +1615,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:headline",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "headline",
                                       },
@@ -2290,6 +2293,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {
@@ -2522,6 +2526,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:headline",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "headline",
                                       },
@@ -3234,6 +3239,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {
@@ -3466,6 +3472,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:headline",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "headline",
                                       },
@@ -3552,7 +3559,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -3581,7 +3588,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -4178,6 +4185,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {
@@ -4410,6 +4418,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:headline",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "headline",
                                       },
@@ -4496,7 +4505,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -4525,7 +4534,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -5119,6 +5128,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {
@@ -5351,6 +5361,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:headline",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "headline",
                                       },
@@ -6277,6 +6288,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {
@@ -6509,6 +6521,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:headline",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "headline",
                                       },
@@ -7238,6 +7251,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {
@@ -7470,6 +7484,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:headline",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "headline",
                                       },
@@ -7556,7 +7571,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -7585,7 +7600,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                     },
                                     "style": {
                                       "color": {
-                                        "token": "colors.secondary",
+                                        "token": "colors.muted",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -8188,6 +8203,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {
@@ -8420,6 +8436,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:headline",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "headline",
                                       },
@@ -8762,6 +8779,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:kicker",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "kicker",
                                       },
@@ -9450,6 +9468,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {
@@ -9682,6 +9701,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:headline",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "headline",
                                       },
@@ -10359,6 +10379,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {
@@ -10591,6 +10612,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-29990",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-29990",
                                       },
@@ -10930,6 +10952,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-29991",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-29991",
                                       },
@@ -11269,6 +11292,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-29992",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-29992",
                                       },
@@ -11608,6 +11632,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-29993",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-29993",
                                       },
@@ -11947,6 +11972,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-29994",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-29994",
                                       },
@@ -12286,6 +12312,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-29995",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-29995",
                                       },
@@ -12625,6 +12652,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-29996",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-29996",
                                       },
@@ -12964,6 +12992,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-29997",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-29997",
                                       },
@@ -13303,6 +13332,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-29998",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-29998",
                                       },
@@ -13642,6 +13672,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-29999",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-29999",
                                       },
@@ -13981,6 +14012,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30000",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30000",
                                       },
@@ -14320,6 +14352,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30001",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30001",
                                       },
@@ -14659,6 +14692,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30002",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30002",
                                       },
@@ -14998,6 +15032,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30003",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30003",
                                       },
@@ -15337,6 +15372,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30004",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30004",
                                       },
@@ -15676,6 +15712,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30005",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30005",
                                       },
@@ -16015,6 +16052,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30006",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30006",
                                       },
@@ -16354,6 +16392,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30007",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30007",
                                       },
@@ -16693,6 +16732,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30008",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30008",
                                       },
@@ -17032,6 +17072,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30009",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30009",
                                       },
@@ -17371,6 +17412,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30010",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30010",
                                       },
@@ -17710,6 +17752,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30011",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30011",
                                       },
@@ -18049,6 +18092,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30012",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30012",
                                       },
@@ -18388,6 +18432,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30013",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30013",
                                       },
@@ -18727,6 +18772,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30014",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30014",
                                       },
@@ -19066,6 +19112,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30015",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30015",
                                       },
@@ -19405,6 +19452,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30016",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30016",
                                       },
@@ -19744,6 +19792,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30017",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30017",
                                       },
@@ -20083,6 +20132,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30018",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30018",
                                       },
@@ -20422,6 +20472,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:row-30019",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "row-30019",
                                       },
@@ -21099,6 +21150,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {
@@ -21361,6 +21413,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:headline",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "headline",
                                       },
@@ -22038,6 +22091,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {
@@ -22300,6 +22354,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:headline",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "headline",
                                       },
@@ -22987,6 +23042,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {
@@ -23991,6 +24047,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "id": "timeline:name:layer:headline",
                                     "metadata": {
+                                      "opensField": "doubleClick",
                                       "timelineLayerDrag": {
                                         "layer": "headline",
                                       },
@@ -24780,6 +24837,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {
@@ -25697,6 +25755,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             "label": "Current time",
                             "metadata": {
                               "fixedWidthSample": "00:00:00:00",
+                              "opensField": "click",
                             },
                             "style": {
                               "color": {

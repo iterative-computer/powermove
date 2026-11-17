@@ -140,6 +140,9 @@ pub struct AddLayer {
     pub visible: Option<bool>,
     pub shy: Option<bool>,
     pub collapsed: Option<bool>,
+    /// The Tracks timeline's lane for it (`track`); `None`: none chosen,
+    /// the timeline packs it where it fits.
+    pub track: Option<u32>,
     /// The playhead (for the default `from`).
     pub time: f64,
 }
@@ -1001,6 +1004,9 @@ fn add_layer(cx: &mut Cx<'_>, c: &AddLayer) -> Result<(), CommandError> {
             return Err(CommandError::Invalid("Invalid parent layer".into()));
         }
         values::obj(&mut layer).insert("parent", values::s(pid));
+    }
+    if let Some(track) = c.track {
+        values::obj(&mut layer).insert("track", Value::Number(f64::from(track)));
     }
     let index = c.index.unwrap_or(0).min(layers.len());
     cx.insert_layer(c.comp.as_deref(), index, layer)

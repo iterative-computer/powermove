@@ -4893,6 +4893,7 @@ dependencies = [
  "pm-color",
  "pm-eval",
  "pm-export",
+ "pm-fx-defs",
  "pm-glsl",
  "pm-gpu",
  "pm-kernel",

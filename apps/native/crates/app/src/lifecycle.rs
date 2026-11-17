@@ -1473,8 +1473,16 @@ impl Controller {
         };
         let kernel = self.kernel.clone();
         if intent == Intent::Quit {
-            // Don't Save is answered: archiving the changes is bounded too.
+            // Don't Save is answered: archiving the changes is bounded too,
+            // and the windows go at once while it finishes behind (it took
+            // a second and more on a large project); the quit still waits
+            // for it before the process ends, and a failure shows the app.
             arm(cx, "windows", crate::quit_limit::WINDOWS);
+            if cx.global::<QuitCoordinator>().queue.iter().all(|w| {
+                w.upgrade().is_none_or(|c| !c.read(cx).dirty())
+            }) {
+                hide_for_quit(cx);
+            }
         }
         self.closing_note = Some(closing(intent, "archiving changes"));
         cx.spawn(async move |this, cx| {

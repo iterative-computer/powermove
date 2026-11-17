@@ -71,6 +71,9 @@ pub struct EffectFrame {
     /// the frame's density, so a reduced-resolution frame is the full
     /// picture sampled down.
     pub final_output: bool,
+    /// Where a 3D object layer's effects find its picture; `None` for
+    /// other layers.
+    pub bounds3d: Option<crate::effects::plan::Bounds3d>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

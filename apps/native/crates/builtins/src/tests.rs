@@ -2589,6 +2589,7 @@ mod effect_delta;
 mod effect_registry;
 mod expressions;
 mod text_animators;
+mod trim_paths;
 
 mod precomp_delta;
 
@@ -5129,7 +5130,7 @@ fn a_color_wheel_drag_writes_red_green_and_blue_as_one_undo_step() {
     let ack = |pending: Result<
         pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>,
     >| pending.unwrap().wait().unwrap().unwrap();
-    let gesture = match ack(panels.scrub_begin("color")).reply {
+    let gesture = match ack(panels.scrub_begin("color", Some("Lift"))).reply {
         pm_kernel::Reply::Gesture(id) => id,
         other => panic!("no gesture: {other:?}"),
     };
@@ -5145,6 +5146,8 @@ fn a_color_wheel_drag_writes_red_green_and_blue_as_one_undo_step() {
     ack(panels.scrub_finish("color", gesture, true));
     let p = kernel.published("synthetic").unwrap();
     assert_eq!(p.history.entries, before + 1, "one Undo step");
+    // Named for the wheel, as v1's were, not "Change Property".
+    assert_eq!(p.history.undo_label.as_deref(), Some("Lift"));
     let backend = panels
         .broker
         .entry("color")
@@ -6237,4 +6240,113 @@ fn composition_tab_closing_switches_to_neighbor_and_does_not_reopen_pending_tabs
     assert_eq!(pending["tabs"].as_array().unwrap().len(), 2);
     assert_eq!(pending["tabs"][1]["id"], "spinner");
     assert_eq!(pending["tabs"][0]["id"], "c");
+}
+
+/// A transition on the selected layer has its own Properties section
+/// (v1's "Transition in" group): Type from the registry, Duration in
+/// seconds, its parameters; Duration and Type write it, Remove takes it off.
+#[test]
+fn properties_show_and_edit_a_layer_transition() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    let project = pm_model::json::parse(r##"{"id":"synthetic","name":"T","compId":"root","w":96,"h":54,"fps":30,"dur":10,"assets":{},"comps":{},"layers":[
+      {"id":"a","type":"solid","name":"A","from":0,"dur":6,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"w":10,"h":10,"color":"#112233"},"fx":[],
+       "transitionIn":{"type":"wipe","dur":0.5,"p":{"angle":{"v":45,"kf":[],"expr":null}}},"transitionOut":null}]}"##).unwrap();
+    kernel
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec!["a".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut presenter = properties::Properties::default();
+    presenter.transitions = crate::models::registered_transitions(&kernel.state());
+    assert!(presenter.transitions.iter().any(|t| t.id == "crossfade"));
+    let snapshot = |presenter: &mut properties::Properties| {
+        let mut model = pm_panel_inspector::Inspector::new(
+            kernel.published("synthetic").unwrap(),
+            Default::default(),
+        );
+        let publication = presenter.snapshot(&mut model, 0., false).unwrap();
+        let sections: Vec<Value> = publication["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["id"].as_str().is_some_and(|id| id.starts_with("transition.")))
+            .cloned()
+            .collect();
+        (sections, model)
+    };
+    let send = |request| {
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)), "{:?}", ack.reply);
+    };
+    let (sections, mut model) = snapshot(&mut presenter);
+    assert_eq!(sections.len(), 1, "only the In edge has one");
+    let section = &sections[0];
+    assert_eq!(section["title"], "Transition In");
+    assert_eq!(section["action"], "remove-transition");
+    let rows = section["rows"].as_array().unwrap();
+    let row = |label: &str| rows.iter().find(|r| r["label"] == label).unwrap_or_else(|| panic!("{label}"));
+    assert_eq!(row("Type")["control"]["value"], "wipe");
+    assert!(
+        row("Type")["control"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["v"] == "crossfade")
+    );
+    let duration = &row("Duration")["control"]["axes"][0];
+    assert_eq!(duration["value"], 0.5);
+    assert_eq!(duration["unit"], "s");
+    assert!(rows.iter().any(|r| r["control"]["axes"][0]["value"] == 45.), "the angle row");
+    // Duration: the same wipe, its angle kept.
+    let handle = duration["binding"]["handle"].as_str().unwrap().to_owned();
+    send(
+        presenter
+            .write(&mut model, Caller::native(), &handle, 1.25f64.into(), 0.)
+            .unwrap(),
+    );
+    let (sections, mut model) = snapshot(&mut presenter);
+    let rows = sections[0]["rows"].as_array().unwrap();
+    assert!(rows.iter().any(|r| r["label"] == "Duration" && r["control"]["axes"][0]["value"] == 1.25));
+    assert!(rows.iter().any(|r| r["control"]["axes"][0]["value"] == 45.), "kept");
+    // Type: a Crossfade, the duration kept.
+    let handle = rows.iter().find(|r| r["label"] == "Type").unwrap()["control"]["binding"]["handle"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let request = presenter
+        .write(&mut model, Caller::native(), &handle, "crossfade".into(), 0.)
+        .unwrap();
+    assert!(matches!(&request.call, pm_kernel::Call::Transact { label: Some(l), .. } if l == "Set Crossfade"));
+    send(request);
+    let (sections, mut model) = snapshot(&mut presenter);
+    let rows = sections[0]["rows"].as_array().unwrap();
+    assert!(rows.iter().any(|r| r["label"] == "Type" && r["control"]["value"] == "crossfade"));
+    assert!(rows.iter().any(|r| r["label"] == "Duration" && r["control"]["axes"][0]["value"] == 1.25));
+    // Remove.
+    let request = presenter
+        .intent(
+            &mut model,
+            Caller::native(),
+            &serde_json::json!({"type":"section-action","section":"transition.in","action":"remove-transition"}),
+            0.,
+        )
+        .unwrap()
+        .unwrap();
+    send(request);
+    assert!(snapshot(&mut presenter).0.is_empty());
 }

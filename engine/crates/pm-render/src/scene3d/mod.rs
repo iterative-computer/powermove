@@ -20,6 +20,7 @@
 //! luminance-weighted ([`karis`]). The compositing seam unweights, tone maps and encodes once before 2D masks and effects.
 //! Legacy OBJ mesh layers retain their own encoded output contract.
 
+pub(crate) mod bounds;
 mod color_round;
 pub mod describe;
 pub mod gltf;

@@ -37,6 +37,7 @@ impl Controller {
         }
         match name {
             "newProject" => self.new_project(cx),
+            "addDefaultTransition" => self.add_default_transition(cx),
             "openRecent" => self.show_home(cx),
             // The toolbar's Home and ⌘P (v1's `ProjectsScreen.toggle`): Home,
             // or the project behind it.
@@ -138,6 +139,7 @@ impl Controller {
             "newComposition" => self.composition_sheet(false, None, cx),
             "compositionSettings" => self.composition_sheet(true, None, cx),
             "interpretFootage" => self.interpret_footage_sheet(cx),
+            "speedDuration" => self.speed_sheet(cx),
             command if crate::keyframe_sheets::Kind::of(command).is_some() => {
                 self.keyframe_sheet(crate::keyframe_sheets::Kind::of(command).unwrap(), cx)
             }
@@ -668,8 +670,10 @@ impl Controller {
                 .ok()
             }),
         });
+        let tokens = self.host.borrow().tokens.clone();
         library.update(cx, |v, cx| {
             v.active = active;
+            v.set_tokens(tokens, cx);
             if let Some(thumbnails) = thumbnails {
                 v.show_posters(thumbnails);
             }

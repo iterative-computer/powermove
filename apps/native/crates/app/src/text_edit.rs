@@ -685,8 +685,28 @@ impl GizmoSurface {
             })
             .detach();
             input.focus();
-            // Letters typed before it had the keyboard go to it now, first.
-            pm_shell::typing::field_ready();
+            // Letters typed before it had the keyboard go to it once it has
+            // it. AppKit moves the keyboard at the next present: handed over
+            // before that, they arrived with no field to take them and ran
+            // as shortcuts, so the first texts under load came out empty
+            // (PM-465).
+            if input.focused() {
+                pm_shell::typing::field_ready();
+            } else {
+                let probe = input.clone();
+                cx.spawn(async move |_, cx| {
+                    while pm_shell::typing::expecting() {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(8))
+                            .await;
+                        if probe.focused() {
+                            pm_shell::typing::field_ready();
+                            return;
+                        }
+                    }
+                })
+                .detach();
+            }
         }
         let label = if fresh { None } else { Some("Edit Text") };
         let mut session = TextSession {
@@ -1228,6 +1248,7 @@ fn add_text(
         visible: None,
         shy: None,
         collapsed: None,
+        track: None,
         time,
     };
     let mut commands: Vec<Command> = vec![LayerCommand::Add(Box::new(add)).into()];
@@ -1398,8 +1419,10 @@ impl GizmoSurface {
     ) {
         // The text opens a turn or more from now (a point click first asks
         // what is under it): letters typed meanwhile wait for it, not run as
-        // shortcuts on the canvas (PM-465).
-        pm_shell::typing::expect();
+        // shortcuts on the canvas (PM-465). Under load the first texts open
+        // slowly (the editor and fonts cold): the letters wait long enough
+        // for them, or an empty text was left and nothing made.
+        pm_shell::typing::expect_for(std::time::Duration::from_secs(6));
         let paragraph = sketch.shape.filter(|b| b.w() >= PARAGRAPH_MIN);
         if let Some(b) = paragraph {
             self.new_text([b.x0, b.y0], Some(b.w()), window, cx);

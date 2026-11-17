@@ -82,6 +82,7 @@ const sectionActions: Record<SectionAction, string> = {
   "time-remap": "Time Remap",
   "freeze-frame": "Freeze Frame",
   reverse: "Reverse",
+  "remove-transition": "Remove Transition",
 };
 const sectionSymbols: Partial<Record<SectionAction, string>> = {
   "refresh-fonts": "arrow.clockwise",
@@ -91,12 +92,14 @@ const sectionSymbols: Partial<Record<SectionAction, string>> = {
   "time-remap": "",
   "freeze-frame": "",
   reverse: "",
+  "remove-transition": "",
 };
 /** What a heading action shows when its full name would not fit. */
 const sectionShort: Partial<Record<SectionAction, string>> = {
   "time-remap": "Remap",
   "freeze-frame": "Freeze",
   reverse: "Reverse",
+  "remove-transition": "Remove",
 };
 export const alignmentButtons: {
   id: Alignment;
@@ -538,12 +541,20 @@ function Property({
                   row.animation === "static" ? "colors.muted" : "colors.accent",
                 ),
               }}
+              // Option-click adds (or edits) an expression, as Option-click
+              // on After Effects' stopwatch does (PM-502).
               onActivate={(event) =>
-                session.send({
-                  type: "key",
-                  row: row.id,
-                  removeAnimation: !!event.altKey,
-                })
+                event.altKey
+                  ? session.send({
+                      type: "row-action",
+                      row: row.id,
+                      action: "edit-expression",
+                    })
+                  : session.send({
+                      type: "key",
+                      row: row.id,
+                      removeAnimation: false,
+                    })
               }
             />
           ) : (

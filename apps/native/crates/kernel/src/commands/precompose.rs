@@ -312,10 +312,10 @@ fn move_all(
                     ));
                 }
                 for field in ["parent", "group"] {
-                    if let Some(id) = link(item, field) {
-                        if let Some(parent) = host.iter().find(|l| id_of(l) == id) {
-                            queue.push(parent);
-                        }
+                    if let Some(id) = link(item, field)
+                        && let Some(parent) = host.iter().find(|l| id_of(l) == id)
+                    {
+                        queue.push(parent);
                     }
                 }
             }
@@ -482,11 +482,11 @@ fn move_all(
     cx.set(path, Value::Array(moved))?;
     let mut layer = precomp_layer(r, &name, [w, h, duration], (w, h))?;
     let m = values::obj(&mut layer);
-    if let Some(b) = crop {
-        if let Some(p) = m.get_mut("p").and_then(Value::as_object_mut) {
-            p.insert("position.x", values::property(Value::Number(b[0] + w / 2.)));
-            p.insert("position.y", values::property(Value::Number(b[1] + h / 2.)));
-        }
+    if let Some(b) = crop
+        && let Some(p) = m.get_mut("p").and_then(Value::as_object_mut)
+    {
+        p.insert("position.x", values::property(Value::Number(b[0] + w / 2.)));
+        p.insert("position.y", values::property(Value::Number(b[1] + h / 2.)));
     }
     m.insert("from", Value::Number(start));
     if let Some(group) = shared_group {

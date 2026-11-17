@@ -463,11 +463,7 @@ impl paint::ModelPresenter for Presentation {
         paint::Media::Ready
     }
     fn waveform(&self, _: &Layer) -> Option<Option<paint::Waveform>> {
-        Some(Some(paint::Waveform {
-            peaks: vec![0., 0.25, 0.5].into(),
-            rate: 100.,
-            trim: 0.,
-        }))
+        Some(Some(paint::Waveform::from_peaks(&[0., 0.25, 0.5], 100., 0.)))
     }
     fn interpolation(&self, _: &Key) -> paint::Interpolation {
         paint::Interpolation::Linear
@@ -503,7 +499,7 @@ fn renderer_adopts_actual_model_timing_selection_and_document_rows() {
         clip.audio
             .as_ref()
             .and_then(|w| w.as_ref())
-            .map(|w| w.peaks.len()),
+            .map(|w| w.levels.combined.peak[0].len()),
         Some(3)
     );
     assert_eq!(summary[0].seconds, 0.);
@@ -1093,4 +1089,31 @@ fn revealed_properties_can_be_hidden_by_the_twirl() {
         .unwrap();
         assert_eq!(c.model.reveal.layers["a:[]"].collapsed, !open);
     }
+}
+
+/// Tracks mode with a clip's properties revealed: the outline (the header
+/// column) and the painted rows count the same rows in the same order, so a
+/// deep scroll still shows each row's name beside its keys.
+#[test]
+fn tracks_outline_and_painted_rows_agree_with_properties_revealed() {
+    let (_actor, mut c) = client();
+    c.model.toggle_disclosure("a:[]").unwrap();
+    c.model.mode = TimelineMode::Tracks;
+    let t = Tokens::new(Scheme::Dark, Accessibility::default());
+    let scene = paint::Scene::from_model(&c.model, &Presentation, &t, 0.).unwrap();
+    let outline = v4::project_window(&c.model, 0, 500).unwrap();
+    let ids: Vec<String> = outline["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        outline["window"]["total"].as_u64().unwrap() as usize,
+        scene.total()
+    );
+    let painted: Vec<String> = (0..scene.total())
+        .map(|i| scene.span(i).unwrap().0.id.clone())
+        .collect();
+    assert_eq!(ids, painted);
 }

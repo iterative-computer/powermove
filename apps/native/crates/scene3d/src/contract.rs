@@ -123,10 +123,10 @@ fn ranges(p: &Value) -> Result<()> {
         ("scaleMin", "scaleMax"),
         ("rotationMin", "rotationMax"),
     ] {
-        if let (Some(a), Some(b)) = (p[a]["v"].as_f64(), p[b]["v"].as_f64()) {
-            if a > b {
-                return fail("Studio minimum must not exceed maximum");
-            }
+        if let (Some(a), Some(b)) = (p[a]["v"].as_f64(), p[b]["v"].as_f64())
+            && a > b
+        {
+            return fail("Studio minimum must not exceed maximum");
         }
     }
     Ok(())
@@ -413,26 +413,25 @@ pub fn plan(
             return fail("Layer ID already exists");
         }
         let mut actions = vec![];
-        if kind == "scatter" {
-            if let Some(species) = patch["model"]
+        if kind == "scatter"
+            && let Some(species) = patch["model"]
                 .as_str()
                 .and_then(|s| s.strip_prefix("nature:"))
                 .map(str::to_owned)
-            {
-                let source_id = uid("nature");
-                let mut action = crate::operations::add(
-                    Role::Object,
-                    json!({"source":{"nature":species,"seed":1}}),
-                    source_id.clone(),
-                    Some("Nature"),
-                    None,
-                )?;
-                if let Action::Add { visible, .. } = &mut action {
-                    *visible = false;
-                }
-                actions.push(action);
-                patch["model"] = json!(source_id);
+        {
+            let source_id = uid("nature");
+            let mut action = crate::operations::add(
+                Role::Object,
+                json!({"source":{"nature":species,"seed":1}}),
+                source_id.clone(),
+                Some("Nature"),
+                None,
+            )?;
+            if let Action::Add { visible, .. } = &mut action {
+                *visible = false;
             }
+            actions.push(action);
+            patch["model"] = json!(source_id);
         }
         let value = node(kind, patch)?;
         let title = args["name"].as_str().unwrap_or(match kind {

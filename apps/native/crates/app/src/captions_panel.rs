@@ -815,6 +815,7 @@ impl Controller {
             &self.host.borrow().window,
             false,
             &format!("{base}.{extension}"),
+            crate::platform::export_start(self.path.as_deref()),
         );
         cx.spawn(async move |this, cx| {
             let Ok(Some(path)) = rx.recv().await else {

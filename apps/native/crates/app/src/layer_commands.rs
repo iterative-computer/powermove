@@ -53,6 +53,26 @@ fn layer(published: &Published, id: &str) -> Option<Value> {
 fn kind(layer: &Value) -> Option<&str> {
     layer.get("type").and_then(Value::as_str)
 }
+/// A ripple, roll or slide made while the timeline shows tracks keeps every
+/// clip on the track it shows on (`TimingCommand::InTracks`); in the Layers
+/// timeline it is After Effects' layer edit, as it is.
+pub(crate) fn in_tracks(published: &Published, command: TimingCommand) -> TimingCommand {
+    let mut view = pm_panel_timeline::TimelineModel::default();
+    view.restore_ui(&published.ui_state);
+    if view.mode != pm_panel_timeline::TimelineMode::Tracks {
+        return command;
+    }
+    let index = pm_panel_timeline::TimelineIndex::from_snapshot(&published.snapshot);
+    pm_panel_timeline::tracks::in_tracks(&index, &view.reveal, command)
+}
+
+/// Whether the timeline shows tracks (its published view).
+pub(crate) fn shows_tracks(published: &Published) -> bool {
+    let mut view = pm_panel_timeline::TimelineModel::default();
+    view.restore_ui(&published.ui_state);
+    view.mode == pm_panel_timeline::TimelineMode::Tracks
+}
+
 fn plain(label: &str, commands: Vec<Command>) -> Plan {
     Plan {
         label: label.into(),
@@ -351,12 +371,12 @@ pub fn host_rows(
             .and_then(|v| v.as_bool())
             == Some(true)
     };
+    // By stack number and name, as After Effects lists them: two layers
+    // named alike ("Rect", "Rect") are told apart (PM-502).
+    let number = |l: &LayerInfo| layers.iter().position(|o| o.id == l.id).map_or(0, |i| i + 1);
     let label = |l: &LayerInfo| {
-        if l.name.is_empty() {
-            l.id.clone()
-        } else {
-            l.name.clone()
-        }
+        let name = if l.name.is_empty() { &l.id } else { &l.name };
+        format!("{}. {name}", number(l))
     };
     let mut rows = vec![json!({"v": null, "label": "None"})];
     match source.get("source")?.as_str()? {
@@ -794,6 +814,7 @@ fn new_layer(published: &Published, kind: &str, name: &str, centred: bool, time:
         visible: None,
         shy: None,
         collapsed: None,
+        track: None,
         time,
     };
     Plan {
@@ -1038,6 +1059,25 @@ pub fn paste_plan(layers: Vec<Value>, time: f64) -> Plan {
 }
 /// Every layer command a menu, the palette or a key can run. `None` when there
 /// is nothing to act on; a key then falls through to the focused control.
+/// Why `name` had nothing to change, in plain words, when the person would
+/// otherwise wonder: Slip moves a clip's media inside it, so a selection with
+/// no video or audio clip has nothing to slip.
+pub fn nothing_reason(name: &str, published: &Published) -> Option<&'static str> {
+    match name {
+        "slipLayers" => {
+            let root = published.snapshot.root()?;
+            let layers = list_layers(root, None);
+            let selected = published.selection.layers();
+            let media = layers
+                .iter()
+                .any(|l| selected.contains(&l.id) && matches!(l.kind.as_str(), "video" | "audio"));
+            (!selected.is_empty() && !media)
+                .then_some("Slip moves a clip's video or audio; the selected layers have none")
+        }
+        _ => None,
+    }
+}
+
 pub fn command_plan(
     name: &str,
     args: &[serde_json::Value],
@@ -1289,11 +1329,14 @@ pub fn command_plan(
                 plain(
                     "Ripple Trim",
                     vec![
-                        TimingCommand::RippleTrim {
-                            layer_ids,
-                            edge,
-                            time,
-                        }
+                        in_tracks(
+                            published,
+                            TimingCommand::RippleTrim {
+                                layer_ids,
+                                edge,
+                                time,
+                            },
+                        )
                         .into(),
                     ],
                 )
@@ -1314,11 +1357,14 @@ pub fn command_plan(
             Some(plain(
                 "Extend Edit",
                 vec![
-                    TimingCommand::Roll {
-                        layer_id: id,
-                        edge,
-                        time,
-                    }
+                    in_tracks(
+                        published,
+                        TimingCommand::Roll {
+                            layer_id: id,
+                            edge,
+                            time,
+                        },
+                    )
                     .into(),
                 ],
             ))
@@ -1367,10 +1413,13 @@ pub fn command_plan(
                 plain(
                     "Slide Layer",
                     vec![
-                        TimingCommand::Slide {
-                            layer_id,
-                            delta: frames / fps,
-                        }
+                        in_tracks(
+                            published,
+                            TimingCommand::Slide {
+                                layer_id,
+                                delta: frames / fps,
+                            },
+                        )
                         .into(),
                     ],
                 )
@@ -1637,6 +1686,7 @@ fn layer_menu_plan(
                 visible: muted.then_some(false),
                 shy: None,
                 collapsed: None,
+                track: None,
                 time,
             };
             Some(Plan {
@@ -1811,7 +1861,7 @@ pub fn disabled(
     for name in ["rippleTrimIn", "rippleTrimOut"] {
         set(name, free(&[]));
     }
-    for name in ["extendEdit", "slideLayer"] {
+    for name in ["extendEdit", "slideLayer", "addDefaultTransition"] {
         set(
             name,
             selected
@@ -1819,7 +1869,14 @@ pub fn disabled(
                 .any(|l| !l.effectively_locked && l.kind != "group"),
         );
     }
-    set("slipLayers", free(&["video", "audio"]));
+    // Enabled for any unlocked layer: with no video or audio clip selected,
+    // Slip says why in the status line instead of doing nothing (a disabled
+    // command's key was silent).
+    set(
+        "slipLayers",
+        selected.iter().any(|l| !l.effectively_locked && l.kind != "group"),
+    );
+    set("speedDuration", free(&["video", "audio"]));
     for name in ["timeRemapLayers", "freezeFrame", "reverseLayers"] {
         set(name, free(&["video", "precomp"]));
     }
@@ -1854,6 +1911,7 @@ pub fn disabled(
 }
 /// Rows that act on the selected layers.
 const SELECTION: &[&str] = &[
+    "addDefaultTransition",
     "rippleDelete",
     "rippleTrimIn",
     "rippleTrimOut",
@@ -1931,6 +1989,7 @@ const DOCUMENT: &[&str] = &[
     "newComposition",
     "compositionSettings",
     "interpretFootage",
+    "speedDuration",
 ];
 
 /// A command that acts on the project: asked for while one is still

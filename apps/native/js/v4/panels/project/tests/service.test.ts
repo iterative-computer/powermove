@@ -164,7 +164,7 @@ test("a new document in the window shows only its own media, from the top", asyn
     .filter((r) => r.operation.type === "command")
     .map(
       (r) =>
-        r.operation.args as unknown as {
+        (r.operation as { args?: unknown }).args as {
           owner: Stamp;
           action: { Page?: { offset: number } };
         },

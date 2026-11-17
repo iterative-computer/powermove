@@ -161,9 +161,8 @@ impl Catalog {
                 if folder.link.is_some() {
                     let descendants: Vec<_> = self.folders.keys().filter(|candidate| self.path(Some(candidate)).iter().any(|f| f.id == id)).cloned().collect();
                     for child in descendants {
-                        if let Some(value) = ensure_map(&mut next, "assetFolders").get_mut(&child) {
-                            if let Some(map) = value.as_object_mut() { map.remove("link"); }
-                        }
+                        if let Some(value) = ensure_map(&mut next, "assetFolders").get_mut(&child)
+                            && let Some(map) = value.as_object_mut() { map.remove("link"); }
                     }
                 }
                 for (_, a) in ensure_map(&mut next, "assets").iter_mut() {

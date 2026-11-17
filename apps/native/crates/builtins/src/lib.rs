@@ -2,6 +2,8 @@
 //! the only document writer. GPUI consumes immutable accepted surfaces.
 #![cfg_attr(test, recursion_limit = "512")]
 mod agent_host;
+/// A run's tool session rolled its edits back after it ended (PM-507).
+pub use agent_host::rolled_back as agent_run_rolled_back;
 pub use agent_host::NoticeSink;
 mod agent_tasks;
 mod chrome;
@@ -1910,6 +1912,7 @@ impl Builtins {
     pub fn scrub_begin(
         &self,
         panel: &str,
+        label: Option<&str>,
     ) -> Result<pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>>
     {
         let caller = self.backend(panel)?.shared().caller;
@@ -1917,8 +1920,10 @@ impl Builtins {
             &self.broker.project,
             pm_kernel::Request::new(
                 caller,
+                // Named for the control dragged (Lift, Curve, Temperature),
+                // as v1's grade undo steps were.
                 pm_kernel::GestureCall::Begin {
-                    label: "Change Property".into(),
+                    label: label.unwrap_or("Change Property").into(),
                 },
             ),
         ))
@@ -2112,6 +2117,9 @@ impl EngineProxy for Broker {
                 && let Some(state) = self.carried.shared().take()
             {
                 backend.shared().native.agent = Some(state);
+            }
+            if let Some(state) = backend.shared().native.agent.clone() {
+                agent_host::register(&state, &self.agent, &self.kernel, self.application);
             }
             let facts = self.facts.shared().clone();
             if !facts.is_null() && facts.as_object().is_some_and(|m| !m.is_empty()) {

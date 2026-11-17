@@ -245,13 +245,21 @@ impl Activity {
         self.quiet.1.notify_all();
     }
     /// Waits while the viewer is busy, unless `cancel` is set (whoever sets
-    /// it wakes the wait). Whether it waited.
-    fn wait_quiet(&self, cancel: &AtomicBool) -> bool {
+    /// it wakes the wait), and for at most `most`: an export the person
+    /// started is never held off by a viewer that stays busy (a picture or
+    /// a 3D estimate that never finishes); past it the export goes ahead in
+    /// bands. Whether it waited.
+    fn wait_quiet(&self, cancel: &AtomicBool, most: std::time::Duration) -> bool {
+        let until = std::time::Instant::now() + most;
         let mut quiet = self.quiet.0.lock().unwrap();
         let mut waited = false;
         while self.busy() && !cancel.load(Ordering::Acquire) {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return true;
+            }
             waited = true;
-            quiet = self.quiet.1.wait(quiet).unwrap();
+            quiet = self.quiet.1.wait_timeout(quiet, left).unwrap().0;
         }
         waited
     }
@@ -808,7 +816,12 @@ impl ExportHandle {
             matches!(request.spec, JobSpec::Export { .. }),
             "expected export job"
         );
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        if let Some(ledger) = export_ledger() {
+            // The job records its temporaries there (PM-478).
+            command.env(EXPORT_LEDGER_ENV, ledger);
+        }
+        let mut child = command
             .arg("--engine-job")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -923,7 +936,7 @@ impl ExportHandle {
                                 }
                             }
                             continue;
-                        } else if interactive.wait_quiet(&cancel) {
+                        } else if interactive.wait_quiet(&cancel, QUIET) {
                             active_at = Some(std::time::Instant::now());
                         }
                         if !cancel.load(Ordering::Acquire) {
@@ -1052,8 +1065,27 @@ fn end_with_parent() {
             }
         });
 }
+/// The variable an export job reads its ledger folder from.
+const EXPORT_LEDGER_ENV: &str = "PM_EXPORT_LEDGER";
+static EXPORT_LEDGER: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+fn export_ledger() -> Option<std::path::PathBuf> {
+    EXPORT_LEDGER.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+/// At launch, before any export: removes the export temporaries an earlier
+/// session ended by force left, as its ledger in `dir` names them (and
+/// nothing else), then records every new one there, in this process and in
+/// each export job (PM-478). Returns what it removed.
+pub fn adopt_export_ledger(dir: std::path::PathBuf) -> Vec<std::path::PathBuf> {
+    let removed = pm_export::atomic::clean_ledger(&dir);
+    pm_export::atomic::set_ledger(Some(dir.clone()));
+    *EXPORT_LEDGER.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
+    removed
+}
 pub fn run_child() -> Result<()> {
     end_with_parent();
+    if let Some(ledger) = std::env::var_os(EXPORT_LEDGER_ENV) {
+        pm_export::atomic::set_ledger(Some(ledger.into()));
+    }
     let mut lines = std::io::BufReader::new(std::io::stdin()).lines();
     let first = lines
         .next()
@@ -2956,7 +2988,9 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let waiting = |activity: &Activity, cancel: &Arc<AtomicBool>| {
             let (activity, cancel) = (activity.clone(), cancel.clone());
-            std::thread::spawn(move || activity.wait_quiet(&cancel))
+            std::thread::spawn(move || {
+                activity.wait_quiet(&cancel, std::time::Duration::from_secs(60))
+            })
         };
         let quiet = waiting(&activity, &cancel);
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -2969,6 +3003,27 @@ mod tests {
         activity.wake();
         assert!(cancelled.join().unwrap());
         assert!(activity.busy());
+    }
+    /// A viewer that never goes quiet (a 3D estimate stuck waiting for its
+    /// renderer, a picture that never lands) holds an export back for at most
+    /// the quiet period per grant: the export goes ahead, in bands.
+    #[test]
+    fn a_viewer_that_stays_busy_never_holds_an_export_back() {
+        let activity = Activity::default();
+        activity.set(true);
+        let cancel = AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        for _ in 0..3 {
+            assert!(activity.wait_quiet(&cancel, std::time::Duration::from_millis(50)));
+        }
+        assert!(activity.busy(), "the viewer stayed busy");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "three grants in {:?}",
+            started.elapsed()
+        );
+        // Granted right after viewer activity: bands, not whole frames.
+        assert!(!grants_whole_frames(Some(std::time::Instant::now())));
     }
     /// An offline refusal names the first three clips and counts the rest.
     #[test]

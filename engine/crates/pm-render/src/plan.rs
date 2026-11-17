@@ -944,6 +944,7 @@ fn draw_layer<'d>(
             scale,
             time,
             final_output: b.final_output,
+            bounds3d: None,
         };
         match b.effects {
             None => {
@@ -1008,6 +1009,7 @@ fn draw_layer<'d>(
                 scale,
                 time,
                 final_output: b.final_output,
+                bounds3d: None,
             };
             match host.prepare_transition(scope, layer, frame)? {
                 Ok(t) => t,
@@ -1706,29 +1708,11 @@ fn native_content_quad<'d>(
     let d = scope.ev.resolve_drawn_content(scope.comp, layer, time)?;
     match ty.as_str() {
         "shape" => {
-            let world = vector_world(scope, b, layer, time, scale)?;
             let on_plane = scope.is_3d_layer(layer)?;
-            // An explicit 3D vector gets projected area coverage. Legacy 2D
-            // artwork inside a 3D group keeps its authored canvas sampling;
-            // changing those children also changes group glows and filters.
-            let grouped_canvas = on_plane && !node::truthy(node::member(Some(layer), "threeD"));
-            if !crate::vector::level2(layer)
-                && (grouped_canvas || (!on_plane && crate::raster_roi::at_rest(&world)))
-            {
-                let density = crate::text::continuous_raster_scale(&world);
-                return Ok(
-                    crate::vector::legacy_raster(scope, layer, &d, time, density)?.map(|q| {
-                        Quad::Texture {
-                            source: Source::Vector(Box::new(q.source)),
-                            w: q.w,
-                            h: q.h,
-                            ax: q.ax,
-                            ay: q.ay,
-                            uv: [0.0, 0.0, 1.0, 1.0],
-                        }
-                    }),
-                );
-            }
+            // Shapes and editable paths are analytic coverage at every
+            // compatibility level, in 2D, in a 3D group and as explicit 3D:
+            // a local Canvas raster resampled through the layer transform
+            // lost up to 18% of their area against the references (PM-510).
             if on_plane {
                 let mut plan = |scope: &mut Scope<'_, 'd>, world: &Mat2d, target| {
                     crate::vector::plan_shape(scope, layer, &d, time, world, target)
@@ -3088,6 +3072,7 @@ fn source_plan<'d>(
                 scale,
                 time,
                 final_output: b.final_output,
+                bounds3d: None,
             },
             prefix,
             raster,
@@ -3209,10 +3194,17 @@ fn prepare_effects<'d>(
     scope: &mut Scope<'_, 'd>,
     b: &mut Build<'_>,
     layer: &'d Node,
-    frame: composite::effects::EffectFrame,
+    mut frame: composite::effects::EffectFrame,
     prefix: Option<usize>,
 ) -> JsResult<Result<Option<composite::PreparedEffects>, Feature>> {
     let host = b.effects.expect("effect host checked by caller");
+    frame.bounds3d = crate::scene3d::bounds::object_bounds(
+        scope,
+        layer,
+        frame.time,
+        b.assets,
+        b.options3d.studio.is_some(),
+    )?;
     let result = host.prepare_measured(
         scope,
         layer,
@@ -3370,12 +3362,20 @@ fn effect_inputs_once<'d>(
             producers.push(producer);
             continue;
         }
+        let bounds3d = crate::scene3d::bounds::object_bounds(
+            scope,
+            source,
+            at,
+            b.assets,
+            b.options3d.studio.is_some(),
+        )?;
         let owner_binding = match crate::effects::plan::owner(
             scope,
             source,
             at,
             scale,
             &mut b.text.as_deref_mut().and_then(|t| t.measure()),
+            bounds3d,
         )? {
             Ok(o) => o,
             Err(f) => return Ok(Err(f)),
@@ -3443,6 +3443,7 @@ fn effect_inputs_once<'d>(
                         scale,
                         time: at,
                         final_output: b.final_output,
+                        bounds3d: None,
                     },
                     request.prefix,
                 )? {
