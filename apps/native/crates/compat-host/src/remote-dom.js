@@ -378,15 +378,21 @@
     }
   };
   async function poll() {
+    // What was being done when it stopped: the host logs it (PM-509).
+    let doing = "poll";
     try {
       while (!stopped) {
+        doing = "poll";
         const response = await fetch(base + "events?q=" + after, {
           cache: "no-store",
         });
         const message = await response.json();
         if (message.generation !== generation)
           throw Error("Stale host generation");
-        for (const event of message.events) await apply(event);
+        for (const event of message.events) {
+          doing = event.kind + (event.kind === "batch" ? " " + event.batch?.seq : "");
+          await apply(event);
+        }
         after = message.seq;
       }
     } catch (error) {
@@ -396,7 +402,13 @@
         call({
           kind: "failure",
           panel: 0,
-          payload: "remote_dom_stopped: " + String(error?.message ?? error).slice(0, 300),
+          payload: {
+            code: "remote_dom_stopped",
+            doing,
+            after,
+            applied,
+            reason: String(error?.message ?? error).slice(0, 300),
+          },
         });
       } catch (_) {}
     }

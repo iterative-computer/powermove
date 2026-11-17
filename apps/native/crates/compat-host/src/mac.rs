@@ -167,8 +167,9 @@ impl Shared {
             return Ok(Value::Null);
         }
         if kind == "failure" {
-            // Its panels draw nothing from here: say why in the log.
-            eprintln!("extension page stopped: {}", m["payload"]);
+            // Why, in the log: what the page was applying and its error.
+            let why: String = m["payload"].to_string().chars().take(600).collect();
+            eprintln!("extension page stopped: {why}");
             self.handler
                 .event(HostEvent::Failure("compat_applier_stopped"));
             return Ok(Value::Null);

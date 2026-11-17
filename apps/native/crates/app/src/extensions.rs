@@ -250,6 +250,10 @@ pub struct Extensions {
     faces: Vec<pm_compat_host::PageFace>,
     /// Faces asked for, resolved or not: each is resolved once.
     face_keys: BTreeSet<(String, u16, bool)>,
+    /// Every face given to this window's pages: a page made again gets them.
+    page_faces: Vec<pm_compat_host::PageFace>,
+    /// When the window's page was last made again after it stopped.
+    page_rebuilds: Vec<std::time::Instant>,
     /// Contributed definitions, pinned per generation for viewers and exports.
     pub resources: Arc<ResourceSnapshot>,
     /// Where the realm's viewer stage shows the page over the viewer, once an
@@ -320,6 +324,8 @@ impl Default for Extensions {
             v4_themes_seen: 0,
             faces: vec![],
             face_keys: BTreeSet::new(),
+            page_faces: Vec::new(),
+            page_rebuilds: Vec::new(),
             surfaces: BTreeMap::new(),
             forks: BTreeMap::new(),
             mounted_once: BTreeSet::new(),
@@ -741,7 +747,7 @@ impl Controller {
                 self.pin_definitions(&publication);
             }
         }
-        self.present_page();
+        self.present_page(cx);
     }
     /// The realm's questions for AppKit. Each answer returns through the inbox.
     fn extension_request(&mut self, request: Value, cx: &mut Context<Self>) {
@@ -2011,6 +2017,7 @@ impl Controller {
                 for page in v.extensions.views.borrow().values() {
                     let _ = page.borrow_mut().add_fonts(&faces);
                 }
+                v.extensions.page_faces.extend(faces.iter().cloned());
                 // A face the registry could not give is settled now: no page
                 // will load it, and whoever waits for it stops waiting.
                 let unresolved: Vec<Value> = keys
@@ -2286,7 +2293,7 @@ impl Controller {
         });
         cx.spawn(async move |this, cx| {
             while wake_rx.recv().await.is_ok() {
-                if this.update(cx, |v, _| v.present_page()).is_err() {
+                if this.update(cx, |v, cx| v.present_page(cx)).is_err() {
                     break;
                 }
             }
@@ -2425,10 +2432,12 @@ impl Controller {
             host.set_panel(id, false);
         }
     }
-    fn present_page(&mut self) {
+    fn present_page(&mut self, cx: &mut Context<Self>) {
         let Some(host) = &self.extensions.host else {
             return;
         };
+        // The window's page that stopped applying, or whose process went.
+        let mut stopped = None;
         for (key, page) in &mut self.extensions.pages {
             for event in page.events.events.borrow_mut().drain(..) {
                 match event {
@@ -2446,8 +2455,20 @@ impl Controller {
                         .send_command(&format!("dockReveal:{id}"), vec![json!(top), json!(height)]),
                     HostEvent::GeometryChanged => (),
                     HostEvent::Ready { .. } => page.ready = true,
-                    HostEvent::ProcessTerminated => page.ready = false,
-                    HostEvent::Failure(code) => eprintln!("extension page: {code}"),
+                    HostEvent::ProcessTerminated => {
+                        eprintln!("extension page: its process ended");
+                        page.ready = false;
+                        if key.is_empty() {
+                            stopped = Some(page.view);
+                        }
+                    }
+                    HostEvent::Failure(code) => {
+                        eprintln!("extension page: {code}");
+                        if key.is_empty() && STOPS_PAGE.contains(&code) {
+                            page.ready = false;
+                            stopped = Some(page.view);
+                        }
+                    }
                     HostEvent::FontsLoaded(keys) => host.fonts_loaded(key, keys.into()),
                 }
             }
@@ -2482,8 +2503,44 @@ impl Controller {
                 host.return_store_batches(key, page.view, batches);
             }
         }
+        if let Some(view) = stopped {
+            self.rebuild_page(view, cx);
+        }
+    }
+    /// The window's page stopped applying the realm's document, or its
+    /// process went: every extension panel in the window would stay blank
+    /// until extensions restarted (PM-509). A new page takes its place, gets
+    /// the faces the old one had, and the realm sends it its whole document
+    /// and every canvas. A page that keeps stopping is made again at most
+    /// `PAGE_REBUILDS` times a minute.
+    fn rebuild_page(&mut self, view: u64, cx: &mut Context<Self>) {
+        let now = std::time::Instant::now();
+        let rebuilds = &mut self.extensions.page_rebuilds;
+        rebuilds.retain(|at| now.duration_since(*at) < std::time::Duration::from_secs(60));
+        if rebuilds.len() >= PAGE_REBUILDS {
+            eprintln!("extension page: stopped again; not made again for a minute");
+            return;
+        }
+        rebuilds.push(now);
+        if self.extensions.host.as_ref().map(|h| h.view()) != Some(view) {
+            return;
+        }
+        eprintln!("extension page: made again, its panels replayed");
+        self.open_page(String::new(), view, cx);
+        if let Some(page) = self.extensions.views.borrow().get("") {
+            let _ = page.borrow_mut().add_fonts(&self.extensions.page_faces);
+        }
+        if let Some(host) = &self.extensions.host {
+            host.replay_page(view);
+        }
+        self.sync_viewport();
+        cx.notify();
     }
 }
+/// The page events that mean the window's page applies nothing more.
+const STOPS_PAGE: &[&str] = &["compat_applier_stopped"];
+/// How often a minute a stopped page is made again.
+const PAGE_REBUILDS: usize = 3;
 
 /// How long the realm's page may take to move a panel's content after the
 /// shell placed it (it hears through the realm, on a worker).

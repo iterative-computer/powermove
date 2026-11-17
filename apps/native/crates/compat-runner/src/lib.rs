@@ -583,6 +583,65 @@ mod tests {
     fn dom_runner() -> CompatRunner {
         runner()
     }
+    /// PM-509: the window's page faulted and every extension panel stayed
+    /// blank until extensions restarted. The realm keeps its document through
+    /// the fault, and a fresh page gets all of it from the first batch: the
+    /// panel's content, what changed while no page applied, and its events.
+    #[test]
+    fn after_a_page_fault_a_fresh_page_gets_the_whole_document_again() {
+        let runner = dom_runner();
+        let session = json!({"panel":"compat","generation":1});
+        let id = runner
+            .json(
+                "(()=>{const d=__compat.dom.document;const root=d.createElement('section');
+                 root.setAttribute('data-pm-contribution','anchor-point');
+                 const title=d.createElement('h2');title.textContent='Anchor Point';
+                 const button=d.createElement('button');button.textContent='Reset';
+                 button.addEventListener('click',()=>{globalThis.clicked=(globalThis.clicked||0)+1});
+                 root.append(title,button);d.body.append(root);globalThis.panelTitle=title;
+                 __compat.dom.flush();return __compat.dom.id(button)})()",
+            )
+            .unwrap();
+        let first = runner.take_dom_batches();
+        let seq = first.last().unwrap()["seq"].as_u64().unwrap();
+        runner
+            .receive_dom(&json!({"kind":"applied","session":session,"seq":seq}))
+            .unwrap();
+        // The page faults: nothing more goes to it, and the document stays.
+        runner
+            .receive_dom(&json!({"kind":"fault","session":session,"seq":seq,"message":"page fault"}))
+            .unwrap();
+        runner
+            .eval("panelTitle.textContent='changed meanwhile';__compat.dom.flush()")
+            .unwrap();
+        assert!(runner.take_dom_batches().is_empty(), "a faulted page takes nothing");
+        // A fresh page: everything again, from batch 1.
+        runner.eval("__compat.replayDom()").unwrap();
+        let replay = runner.take_dom_batches();
+        assert_eq!(replay[0]["seq"], 1, "{:?}", replay[0]["seq"]);
+        for (i, batch) in replay.iter().enumerate() {
+            assert_eq!(batch["seq"].as_u64(), Some(i as u64 + 1));
+        }
+        let text = serde_json::to_string(&replay).unwrap();
+        for needed in ["anchor-point", "changed meanwhile", "Reset", "\"click\""] {
+            assert!(text.contains(needed), "{needed} missing from the replay");
+        }
+        let last = replay.last().unwrap()["seq"].as_u64().unwrap();
+        runner
+            .receive_dom(&json!({"kind":"applied","session":session,"seq":last}))
+            .unwrap();
+        // The fresh page's first event reaches the realm's listener.
+        runner.receive_dom(&json!({"kind":"event","session":session,"seq":1,"applied":last,"target":id,"event":"click",
+            "bubbles":true,"cancelable":true,"default_prevented":false,"data":{}})).unwrap();
+        assert_eq!(runner.json("globalThis.clicked").unwrap(), 1);
+        // And changes keep going to it.
+        runner
+            .eval("panelTitle.textContent='after the replay';__compat.dom.flush()")
+            .unwrap();
+        let next = runner.take_dom_batches();
+        assert_eq!(next[0]["seq"].as_u64(), Some(last + 1));
+        assert!(serde_json::to_string(&next).unwrap().contains("after the replay"));
+    }
     fn decode(bytes: &[u8]) -> (png::OutputInfo, Vec<u8>) {
         let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
         let mut reader = decoder.read_info().unwrap();

@@ -1583,6 +1583,12 @@ globalThis.__compat = {
   windowShown(shown) {
     this.panels?.setWindowShown(!!shown);
   },
+  /** A fresh page: the whole document again, every canvas bound again. */
+  replayDom() {
+    if (!this.dom?.replay()) return;
+    this.flushCanvases?.();
+    this.dom.flush();
+  },
   /** The page's messages since the last look, as data, in one flush. */
   receivePage() {
     const messages = runtime.engine("dom.takeMessages", {});
