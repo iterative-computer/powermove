@@ -373,8 +373,18 @@ impl Properties {
                                 }
                                 json!(options)
                             }
+                            // After Effects' Track Matte modes, the kernel's values.
+                            "layer.matteMode" => json!(
+                                [
+                                    ("alpha", "Alpha Matte"),
+                                    ("alpha-inverted", "Alpha Inverted Matte"),
+                                    ("luma", "Luma Matte"),
+                                    ("luma-inverted", "Luma Inverted Matte"),
+                                ]
+                                .map(|(v, label)| json!({"v": v, "label": label}))
+                            ),
                             // The registry/spec owns choice labels and order.
-                            // DESIGN-TODO(opus): supply blend/matte menu descriptors.
+                            // DESIGN-TODO(opus): supply blend menu descriptors.
                             _ => continue,
                         };
                         let mut choice = json!({"kind":"choice","binding":lease,"value":value,"options":options,"mixed":state.mixed});
