@@ -3276,3 +3276,116 @@ fn clips_crossing_a_cut_under_a_transition_stay_on_one_track() {
     let (a, b) = lanes("null");
     assert_ne!(a, b, "an overlap with no transition stacks");
 }
+
+/// PM-512: in Tracks, a new layer (the top of the stack) goes on a track
+/// above every clip it overlaps, at once: never into a free lower track
+/// under a still the picture draws it over. Clips already shown keep theirs.
+#[test]
+fn a_new_layer_in_tracks_goes_above_what_it_overlaps() {
+    use pm_kernel::commands::layers::AddLayer;
+    let solid = |id: &str, from: f64, dur: f64, track: u32| {
+        format!(
+            r##"{{"id":"{id}","name":"{id}","type":"solid","from":{from},"dur":{dur},"on":true,"track":{track},"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}}}}"##
+        )
+    };
+    // V3 holds a still from 11 s; V2 is empty; V1 two clips.
+    let project = parse(&format!(
+        r##"{{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":30,"comps":{{}},"assets":{{}},"layers":[{},{},{}]}}"##,
+        solid("still", 11., 9., 2),
+        solid("a", 0., 7., 0),
+        solid("b", 7., 6., 0),
+    ))
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    c.sync().unwrap();
+    let lane = |c: &TimelineClient, id: &str| {
+        tracks::layout(&c.model.index, &c.model.reveal)
+            .item(id)
+            .unwrap()
+            .lane
+    };
+    let shown = [lane(&c, "still"), lane(&c, "a"), lane(&c, "b")];
+    assert!(
+        shown[0] > shown[2] + 1,
+        "a free track under the still: {shown:?}"
+    );
+    let title = AddLayer {
+        id: "title".into(),
+        layer_type: "text".into(),
+        comp: None,
+        name: None,
+        from: Some(11.),
+        duration: Some(3.),
+        content: Default::default(),
+        properties: Default::default(),
+        color: None,
+        index: None,
+        parent: None,
+        blend: None,
+        motion_blur: None,
+        visible: None,
+        shy: None,
+        collapsed: None,
+        track: None,
+        time: 0.,
+    };
+    edit(
+        &mut c,
+        vec![pm_kernel::LayerCommand::Add(Box::new(title)).into()],
+    );
+    c.sync().unwrap();
+    assert_eq!(c.model.index.layers[0].id, "title", "the top of the stack");
+    assert!(
+        lane(&c, "title") > lane(&c, "still"),
+        "above the still it is drawn over: title {} still {}",
+        lane(&c, "title"),
+        lane(&c, "still")
+    );
+    // Nothing that was shown moves.
+    assert_eq!([lane(&c, "still"), lane(&c, "a"), lane(&c, "b")], shown);
+}
+
+/// The common Tracks gesture: a slide drag on a clip with a neighbour on one
+/// side only, and on a still, works (the media-only edit refused both); the
+/// clip keeps its track and so do its neighbours.
+#[test]
+fn a_tracks_slide_drag_works_on_a_still_and_with_one_neighbour() {
+    let solid = |id: &str, from: f64, dur: f64| {
+        format!(
+            r##"{{"id":"{id}","name":"{id}","type":"solid","from":{from},"dur":{dur},"on":true,"track":0,"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}}}}"##
+        )
+    };
+    let project = parse(&format!(
+        r##"{{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":30,"comps":{{}},"assets":{{}},"layers":[{},{}]}}"##,
+        solid("a", 0., 5.),
+        solid("b", 5., 5.),
+    ))
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    c.sync().unwrap();
+    select(&mut c, &["b"]);
+    c.sync().unwrap();
+    block_on(
+        c.begin_drag(DragKind::Timing(pm_kernel::TimingCommand::Slide {
+            layer_id: "b".into(),
+            delta: 0.,
+        })),
+    )
+    .unwrap();
+    block_on(c.drag(sample(1.))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    let span = |c: &TimelineClient, id: &str| {
+        let l = c.model.index.layer(id).unwrap();
+        (l.from, l.from + l.duration)
+    };
+    assert_eq!(span(&c, "b").0, 6., "slid a second later");
+    assert_eq!(span(&c, "a"), (0., 6.), "the clip before follows");
+    let layout = tracks::layout(&c.model.index, &c.model.reveal);
+    assert_eq!(
+        layout.item("a").unwrap().lane,
+        layout.item("b").unwrap().lane
+    );
+}
