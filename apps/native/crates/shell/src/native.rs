@@ -3892,6 +3892,7 @@ impl Host {
         assert!(!self.window.isVisible(), "Smoke window became visible");
         assert!(!self.palette.borrow().window.isVisible());
         assert!(!self.fields.borrow().window.isVisible());
+        self.sync_tabs();
         let ids: Vec<_> = self
             ._toolbar
             .items()
@@ -3900,6 +3901,26 @@ impl Host {
             .map(|i| i.itemIdentifier().to_string())
             .collect();
         for id in TOOLBAR {
+            if id == "home" {
+                // Home is the project strip's first cell, not a toolbar item.
+                let home = &self._delegate.ivars().home;
+                assert!(
+                    home.isDescendantOf(&self.tabs),
+                    "Home is missing from the project strip"
+                );
+                assert!(!home.isHidden(), "Home is hidden");
+                let button: &NSView = &home.ivars().label;
+                let is_button: bool =
+                    unsafe { msg_send![button, isKindOfClass: NSButton::class()] };
+                assert!(is_button, "Home is not a button");
+                assert!(!button.isHidden(), "Home button is hidden");
+                let tag: isize = unsafe { msg_send![button, tag] };
+                assert_eq!(
+                    tag,
+                    TOOLBAR.iter().position(|name| *name == id).unwrap() as isize
+                );
+                continue;
+            }
             assert!(
                 ids.iter().any(|item| item == id),
                 "Missing toolbar item: {id}"
