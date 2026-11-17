@@ -3173,18 +3173,23 @@ mod lifetime_tests {
         // Draws `spec` and says whether the frame cache served it.
         let draw = |engine: &mut Engine, spec: FrameSpec| {
             let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
-            while engine
-                .frame(
-                    &scene,
-                    spec,
-                    None,
-                    &Default::default(),
-                    false,
-                    trace.clone(),
-                )
-                .unwrap()
-                .is_none()
-            {}
+            loop {
+                if let Some(submission) = engine
+                    .frame(
+                        &scene,
+                        spec,
+                        None,
+                        &Default::default(),
+                        false,
+                        trace.clone(),
+                    )
+                    .unwrap()
+                {
+                    submission.commit();
+                    submission.complete().unwrap();
+                    break;
+                }
+            }
             trace.lock().unwrap().cache_hit
         };
         // The viewer's picture at that scale is a settled one: drawn off
@@ -3277,7 +3282,7 @@ mod lifetime_tests {
             "an edit discarded the picture before its replacement was ready"
         );
         assert!(engine.settle_now(&edited, viewer, || false).unwrap());
-        engine
+        let replacement = engine
             .frame(
                 &edited,
                 viewer,
@@ -3288,6 +3293,8 @@ mod lifetime_tests {
             )
             .unwrap()
             .unwrap();
+        replacement.commit();
+        replacement.complete().unwrap();
         assert_eq!(engine.showing.len(), 1);
         assert!(!Arc::ptr_eq(&surface, &engine.showing[0].1.surface));
         let preview = FrameSpec {
