@@ -2938,6 +2938,7 @@ fn in_tracks_no_edit_from_any_source_moves_an_untouched_clip() {
         visible: None,
         shy: None,
         collapsed: None,
+        track: None,
         time: 0.,
     };
     kernel(&mut c, LayerCommand::Add(Box::new(new)).into());
