@@ -107,8 +107,8 @@ pub struct Refresh {
     pending: Option<(u64, Inputs)>,
 }
 pub struct Plan {
-    /// Retire these ids' pixels and readiness before exposing a new selection.
-    /// `None` retires everything. Other ids keep showing through the refresh.
+    /// Source inputs that changed; `None` means a different document.
+    /// Same-document paths keep showing until the replacement resolves.
     pub retire: Option<BTreeSet<String>>,
     pub job: Option<u64>,
 }
@@ -166,6 +166,19 @@ impl Refresh {
     }
 }
 
+/// Only a document switch clears displayed source paths immediately. A
+/// same-document replacement is published atomically by adopt_media.
+fn retire_catalog(
+    catalog: &mut pm_engine_service::MediaCatalog,
+    ids: Option<BTreeSet<String>>,
+) -> bool {
+    if ids.is_some() {
+        return false;
+    }
+    *catalog = Default::default();
+    true
+}
+
 impl Controller {
     fn publish_media_catalog(&mut self) {
         if let Some(viewer) = &self.viewer
@@ -181,15 +194,8 @@ impl Controller {
         }
     }
     fn retire_media(&mut self, ids: Option<BTreeSet<String>>, cx: &mut Context<Self>) {
-        match ids {
-            None => self.media_base = Default::default(),
-            Some(ids) if ids.is_empty() => return,
-            Some(ids) => {
-                for id in &ids {
-                    self.media_base.originals.remove(id);
-                    self.media_base.proxies.remove(id);
-                }
-            }
+        if !retire_catalog(&mut self.media_base, ids) {
+            return;
         }
         self.decorate_media(cx);
         self.publish_media_catalog();
@@ -209,8 +215,8 @@ impl Controller {
         let Some(job) = plan.job else {
             return;
         };
-        // Until the job lands, a clip whose file isn't known yet (just
-        // imported or relinked) draws nothing rather than Media Offline: the
+        // Until the job lands, a newly imported clip with no known file
+        // draws nothing rather than Media Offline: the
         // card is wrong for it, and drawing it held the viewer seconds after
         // an import.
         let resolving: BTreeSet<String> = published
@@ -352,6 +358,30 @@ mod tests {
             ),
             media: MediaTable::default(),
         }
+    }
+    #[test]
+    fn background_source_refresh_keeps_visible_paths_until_adoption() {
+        let mut catalog = pm_engine_service::MediaCatalog::default();
+        catalog
+            .originals
+            .insert("a".into(), "/synthetic/original.png".into());
+        catalog
+            .proxies
+            .insert("a".into(), "/synthetic/proxy.png".into());
+        let before = catalog.clone();
+        assert!(!retire_catalog(
+            &mut catalog,
+            Some(BTreeSet::from(["a".into()]))
+        ));
+        assert!(
+            catalog == before,
+            "background refresh removed displayed pixels"
+        );
+        assert!(retire_catalog(&mut catalog, None));
+        assert!(
+            catalog == Default::default(),
+            "document switches forget old sources"
+        );
     }
     #[test]
     fn rapid_relink_undo_and_reopen_never_publish_a_stale_catalog() {

@@ -451,7 +451,10 @@ impl Controller {
     fn rendition_runtime(&self) -> pm_panel_media::readiness::ObservedRuntime {
         use crate::pro_media::Status;
         use pm_panel_media::ProxyStatus;
-        let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
+        let (Some(project), Some(published)) = (
+            self.session.as_ref().map(|s| s.project.clone()),
+            self.published.as_ref(),
+        ) else {
             return self.builtins.media_runtime.clone();
         };
         let status = |s: Status, observed: &ProxyStatus| match s {
@@ -466,6 +469,12 @@ impl Controller {
         self.builtins
             .media_runtime
             .clone()
+            .with_posters(
+                media_stamp(published),
+                self.project_assets()
+                    .into_iter()
+                    .filter_map(|id| self.thumbs.key(&id).map(|key| (id, key))),
+            )
             .with_states(|id, state| {
                 let (proxy, optimized) = self.pro_media.status(
                     &project,
@@ -478,9 +487,6 @@ impl Controller {
                 state.proxy = status(proxy, &state.proxy);
                 state.optimized = status(optimized, &state.optimized);
                 state.play_original = self.pro_media.plays_original(&project, id);
-                if let Some(key) = self.thumbs.key(id) {
-                    state.poster = Some(key);
-                }
             })
     }
     /// Readiness depends only on the media inputs, so an edit that left them

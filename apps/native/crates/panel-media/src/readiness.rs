@@ -33,6 +33,22 @@ impl ObservedRuntime {
         self.stamp = Some(stamp);
         self
     }
+    /// Host-owned thumbnails remain valid while a new readiness probe runs.
+    /// A different stamp must not inherit decode readiness, only the supplied
+    /// current document's poster keys.
+    pub fn with_posters(
+        mut self,
+        stamp: Stamp,
+        posters: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        if self.stamp.as_ref() != Some(&stamp) {
+            self = Self::new(stamp, BTreeMap::new());
+        }
+        for (id, poster) in posters {
+            self.states.entry(id).or_default().poster = Some(poster);
+        }
+        self
+    }
     /// These observations with `f` applied to each asset's state (what the
     /// host tracks itself, such as renditions).
     pub fn with_states(mut self, f: impl Fn(&str, &mut RuntimeState)) -> Self {
@@ -57,6 +73,53 @@ impl MediaRuntime for ObservedRuntime {
 mod tests {
     use super::*;
     use crate::Availability;
+    #[test]
+    fn posters_survive_republish_and_import_without_stale_readiness() {
+        let stamp = Stamp {
+            project: "p".into(),
+            document: 1,
+            revision: 2,
+        };
+        let mut ready = RuntimeState::default();
+        ready.poster = Some("thumb/a".into());
+        ready.availability = Availability::Ready;
+        let observed = ObservedRuntime::new(stamp.clone(), BTreeMap::from([("a".into(), ready)]));
+        let observed = observed.with_posters(stamp.clone(), [("a".into(), "thumb/a".into())]);
+        assert_eq!(
+            observed.state(&stamp, "a").availability,
+            Availability::Ready
+        );
+        let next = Stamp {
+            revision: 3,
+            ..stamp.clone()
+        };
+        let observed = observed.with_posters(
+            next.clone(),
+            [
+                ("a".into(), "thumb/a".into()),
+                ("imported".into(), "thumb/new".into()),
+            ],
+        );
+        assert_eq!(
+            observed.state(&next, "a").poster.as_deref(),
+            Some("thumb/a")
+        );
+        assert_eq!(
+            observed.state(&next, "imported").poster.as_deref(),
+            Some("thumb/new")
+        );
+        assert_eq!(
+            observed.state(&next, "a").availability,
+            RuntimeState::default().availability
+        );
+        assert_eq!(observed.state(&stamp, "a"), RuntimeState::default());
+        let other = Stamp {
+            project: "other".into(),
+            ..next
+        };
+        let observed = observed.with_posters(other.clone(), []);
+        assert_eq!(observed.state(&other, "a"), RuntimeState::default());
+    }
     #[test]
     fn missing_counts_files_the_offline_filter_lists() {
         let stamp = Stamp {
