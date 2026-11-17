@@ -66,7 +66,8 @@ pub struct EffectDrop {
     pub layer: Option<String>,
 }
 pub trait Delegate: 'static {
-    /// Latest actual output-mix peaks, including scrub grains; None at idle.
+    /// Latest output-mix peaks, media tick and playback flag. The timeline
+    /// expires paused scrub taps from their media tick.
     fn audio_peaks(&self, _cx: &App) -> Option<([f64; 2], i64, bool)> { None }
     fn time(&self, cx: &App) -> f64;
     /// Media dropped on the timeline (Finder files, Project items).

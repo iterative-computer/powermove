@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub(super) struct AudioState {
+    #[cfg(test)]
+    baseline_capture: bool,
     drag: Option<Drag>,
     base: Option<Arc<Frame>>,
     ops: Vec<Op>,
@@ -106,6 +108,10 @@ impl TimelineSurface {
         canvas(
             move |_, _, cx| {
                 weak.read_with(cx, |s, _| {
+                    #[cfg(test)]
+                    if s.audio.baseline_capture {
+                        return Vec::new();
+                    }
                     s.audio
                         .ops
                         .iter()
@@ -305,6 +311,11 @@ impl TimelineSurface {
         }
     }
     pub(super) fn audio_rows(&self, frame: &mut Frame) {
+        #[cfg(test)]
+        if self.audio.baseline_capture {
+            self.baseline_waveform_ops(frame);
+            return;
+        }
         let mut audio = audio_geometry(frame);
         self.audio_controls(&mut audio);
         frame.ops.extend(
@@ -313,6 +324,52 @@ impl TimelineSurface {
                 .into_iter()
                 .filter(|o| o.id.starts_with("audio-level:") || o.id.starts_with("audio-fade:")),
         );
+    }
+    /// Before-crop replay of cea9fdb46's waveform ops, not a running release screenshot.
+    /// The native panel/fixture stay identical; only the original sampler/opacity
+    /// and absence of the new controls/meters are replayed for visual comparison.
+    #[cfg(test)]
+    fn baseline_waveform_ops(&self, frame: &mut Frame) {
+        let Some(published) = self.kernel.published(&self.project) else {
+            return;
+        };
+        let view = frame.viewport;
+        for op in frame.ops.iter_mut().filter(|o| o.shape == "waveform") {
+            let Some(id) = op.id.strip_prefix("clip-content:") else {
+                continue;
+            };
+            let Some(layer) = self.model.index.layers.iter().find(|l| l.id == id) else {
+                continue;
+            };
+            let Some(asset) = &layer.asset else {
+                continue;
+            };
+            let Some(path) = self.sources.get(asset) else {
+                continue;
+            };
+            let record = published
+                .snapshot
+                .root()
+                .and_then(|root| root.get("assets")?.get(asset));
+            let key = crate::waveforms::Key::of(path.clone(), record);
+            let Some(Some((peaks, rate, _))) = crate::waveforms::lookup(&key) else {
+                continue;
+            };
+            let left = view.layer_column + (layer.from - view.scroll_time) * view.pps;
+            let bars: Vec<f32> = (0..op.bounds.width.floor().max(0.) as usize)
+                .map(|i| {
+                    let at = layer.trim + (op.bounds.x + i as f64 - left) / view.pps;
+                    let from = (at * rate).floor().max(0.) as usize;
+                    let to = (((at + 1. / view.pps) * rate).floor() as usize)
+                        .max(from.saturating_add(1));
+                    peaks
+                        .get(from.min(peaks.len())..to.min(peaks.len()))
+                        .map_or(0., |s| s.iter().copied().fold(0., f32::max))
+                })
+                .collect();
+            op.detail["bars"] = serde_json::json!(bars);
+            op.opacity *= 0.72 / 0.45;
+        }
     }
     fn audio_frame(&mut self, frame: &mut AudioFrame, cx: &mut Context<Self>) {
         self.audio.painted = Some(Instant::now());
@@ -462,6 +519,16 @@ impl TimelineSurface {
         let Some(hit) = hit else {
             return false;
         };
+        // Existing key glyphs keep ordinary key selection/dragging. Cmd-click
+        // on the gain line still inserts (or updates) a gain key as requested.
+        if hit.id.starts_with("audio-level:")
+            && !event.modifiers.platform
+            && frame
+                .hit_key_across(x, y, KEY_REACH, self.tokens.metrics.row as f64)
+                .is_some()
+        {
+            return false;
+        }
         if hit.id == "audio-clip-latch" {
             for m in &mut self.audio.meters {
                 m.clear_clip();
@@ -830,7 +897,22 @@ mod captures {
                 });
                 cx.capture_screenshot(window.into())
                     .unwrap()
-                    .save(format!("{dir}/audio-{name}.png"))
+                    .save(format!("{dir}/audio-after-{name}.png"))
+                    .unwrap();
+                cx.update(|cx| {
+                    surface.update(cx, |s, cx| {
+                        s.audio.baseline_capture = true;
+                        s.rows = None;
+                        cx.notify();
+                    })
+                });
+                for _ in 0..3 {
+                    cx.run_until_parked();
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                cx.capture_screenshot(window.into())
+                    .unwrap()
+                    .save(format!("{dir}/audio-before-baseline-replay-{name}.png"))
                     .unwrap();
                 drop(device);
                 drop(playback);
