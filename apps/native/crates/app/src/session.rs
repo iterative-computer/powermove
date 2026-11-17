@@ -5038,3 +5038,24 @@ fn delete_media_question(name: Option<&str>, count: usize, references: usize) ->
         ),
     }
 }
+
+#[cfg(test)]
+mod delete_media_question_tests {
+    /// v1's question: one item by name with its layer count, several by
+    /// count.
+    #[test]
+    fn delete_media_asks_as_v1_did() {
+        assert_eq!(
+            super::delete_media_question(Some("Sky.png"), 1, 1),
+            (
+                "Delete “Sky.png”?".to_owned(),
+                "This also removes 1 layer that uses this media. You can undo this.".to_owned()
+            )
+        );
+        assert_eq!(
+            super::delete_media_question(Some("Sky.png"), 1, 3).1,
+            "This also removes 3 layers that use this media. You can undo this."
+        );
+        assert_eq!(super::delete_media_question(None, 4, 2).0, "Delete 4 media files?");
+    }
+}
