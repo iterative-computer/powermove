@@ -2639,3 +2639,62 @@ fn path_vertex_keys_stored_without_ids_are_shown_selected_and_moved() {
     assert!((keys[1].time - (1. + 1. / 30.)).abs() < 1e-9, "{}", keys[1].time);
     assert_eq!(c.model.selection.keys(), [named(1)]);
 }
+/// Tracks mode: a track row's lock and eye act on every clip on the lane,
+/// as v1's track view does, one undo step named for the track; the row
+/// shows the new state.
+#[test]
+fn a_track_rows_lock_and_eye_act_on_its_clips() {
+    let (_a, mut c) = client();
+    c.model.mode = TimelineMode::Tracks;
+    let layout = pm_panel_timeline::tracks::layout(&c.model.index, &c.model.reveal);
+    let item = layout
+        .items
+        .iter()
+        .find(|i| i.id == "a")
+        .expect("a has a track")
+        .clone();
+    let on_lane: Vec<String> = layout
+        .items
+        .iter()
+        .filter(|i| i.area == item.area && i.lane == item.lane)
+        .map(|i| i.id.clone())
+        .collect();
+    let label = |p: &Plan| match p.calls.first() {
+        Some(Call::Transact { label, .. }) => label.clone(),
+        _ => None,
+    };
+    let p = c
+        .model
+        .track_switch(item.area, item.lane, "lock", 0.)
+        .unwrap();
+    assert_eq!(label(&p).as_deref(), Some("Lock Track"));
+    run(&mut c, p);
+    assert!(
+        on_lane
+            .iter()
+            .all(|id| c.model.index.layer(id).unwrap().locked)
+    );
+    let p = c
+        .model
+        .track_switch(item.area, item.lane, "lock", 0.)
+        .unwrap();
+    assert_eq!(label(&p).as_deref(), Some("Unlock Track"));
+    run(&mut c, p);
+    let p = c
+        .model
+        .track_switch(item.area, item.lane, "visibility", 0.)
+        .unwrap();
+    assert_eq!(label(&p).as_deref(), Some("Hide Track"));
+    run(&mut c, p);
+    assert!(
+        on_lane
+            .iter()
+            .all(|id| !c.model.index.layer(id).unwrap().visible)
+    );
+    undo(&mut c);
+    assert!(
+        on_lane
+            .iter()
+            .all(|id| c.model.index.layer(id).unwrap().visible)
+    );
+}
