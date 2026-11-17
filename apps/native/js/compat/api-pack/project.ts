@@ -1,8 +1,13 @@
 import type { AudioEffectInstance } from "./audio-effects";
-import type { StoredExportDefaults } from '../export-defaults';
-import type { CaptionsContent } from './captions';
+import type { StoredExportDefaults } from "../export-defaults";
+import type { CaptionsContent } from "./captions";
 
-export type { CaptionCue, CaptionStyle, CaptionWord, CaptionsContent } from './captions';
+export type {
+  CaptionCue,
+  CaptionStyle,
+  CaptionWord,
+  CaptionsContent,
+} from "./captions";
 
 /**
  * Serializable Powermove project source.
@@ -12,55 +17,91 @@ export type { CaptionCue, CaptionStyle, CaptionWord, CaptionsContent } from './c
  */
 
 export const TYPE_META = {
-  solid: { icon: 'grid', color: '#4C8DFF', label: 'Solid' },
-  text: { icon: 'code', color: '#E8E2CF', label: 'Text' },
-  shape: { icon: 'grid', color: '#6C7BE8', label: 'Shape' },
-  image: { icon: 'layers', color: '#A9A9AE', label: 'Image' },
-  video: { icon: 'cam', color: '#3B62E8', label: 'Video' },
+  solid: { icon: "grid", color: "#4C8DFF", label: "Solid" },
+  text: { icon: "code", color: "#E8E2CF", label: "Text" },
+  shape: { icon: "grid", color: "#6C7BE8", label: "Shape" },
+  image: { icon: "layers", color: "#A9A9AE", label: "Image" },
+  video: { icon: "cam", color: "#3B62E8", label: "Video" },
   audio: {
-    icon: 'clock', color: '#4C8DFF', label: 'Audio', visual: false,
-    transform: false, effects: false, masks: false, pickable: false
+    icon: "clock",
+    color: "#4C8DFF",
+    label: "Audio",
+    visual: false,
+    transform: false,
+    effects: false,
+    masks: false,
+    pickable: false,
   },
-  adjustment: { icon: 'wand', color: '#A78BFA', label: 'Adjustment', pickable: false },
-  shader: { icon: 'wand', color: '#FF6B1A', label: 'Shader' },
-  extension: { icon: 'layers', color: '#9B8CFF', label: 'Extension' },
-  null: { icon: 'dot', color: '#6a6a70', label: 'Null', visual: false, pickable: true },
-  group: { icon: 'layers', color: '#3FCF8E', label: 'Group', visual: false, transform: true, pickable: false },
-  precomp: { icon: 'layers', color: '#3FCF8E', label: 'Precomp' },
-  captions: { icon: 'captions', color: '#F2C14E', label: 'Captions' }
+  adjustment: {
+    icon: "wand",
+    color: "#A78BFA",
+    label: "Adjustment",
+    pickable: false,
+  },
+  shader: { icon: "wand", color: "#FF6B1A", label: "Shader" },
+  extension: { icon: "layers", color: "#9B8CFF", label: "Extension" },
+  null: {
+    icon: "dot",
+    color: "#6a6a70",
+    label: "Null",
+    visual: false,
+    pickable: true,
+  },
+  group: {
+    icon: "layers",
+    color: "#3FCF8E",
+    label: "Group",
+    visual: false,
+    transform: true,
+    pickable: false,
+  },
+  precomp: { icon: "layers", color: "#3FCF8E", label: "Precomp" },
+  captions: { icon: "captions", color: "#F2C14E", label: "Captions" },
 } as const;
 
 export type LayerType = keyof typeof TYPE_META;
 export type LayerTypeMeta = (typeof TYPE_META)[LayerType];
-export type LayerTypeIcon = LayerTypeMeta['icon'];
-export type LayerTypeColor = LayerTypeMeta['color'];
-export type LayerTypeLabel = LayerTypeMeta['label'];
+export type LayerTypeIcon = LayerTypeMeta["icon"];
+export type LayerTypeColor = LayerTypeMeta["color"];
+export type LayerTypeLabel = LayerTypeMeta["label"];
 export type NonVisualLayerType = {
-  [T in LayerType]: (typeof TYPE_META)[T] extends { readonly visual: false } ? T : never;
+  [T in LayerType]: (typeof TYPE_META)[T] extends { readonly visual: false }
+    ? T
+    : never;
 }[LayerType];
 export type NonTransformableLayerType = {
-  [T in LayerType]: (typeof TYPE_META)[T] extends { readonly transform: false } ? T : never;
+  [T in LayerType]: (typeof TYPE_META)[T] extends { readonly transform: false }
+    ? T
+    : never;
 }[LayerType];
 
 export const BLEND_MODES = [
-  'normal', 'add', 'screen', 'multiply', 'overlay', 'softlight', 'difference', 'lighten', 'darken'
+  "normal",
+  "add",
+  "screen",
+  "multiply",
+  "overlay",
+  "softlight",
+  "difference",
+  "lighten",
+  "darken",
 ] as const;
 export type BlendMode = (typeof BLEND_MODES)[number];
 
 export type ChannelValue = number | string | boolean;
 export type EaseHandle = [number, number];
 
-export type { InterpolationType, TemporalEase } from '../anim/temporal-ease';
+export type { InterpolationType, TemporalEase } from "../anim/temporal-ease";
 
 export interface Keyframe<T extends ChannelValue = ChannelValue> {
   t: number;
   v: T;
   /** After Effects temporal interpolation, per side of the key. */
-  inInterp: import('../anim/temporal-ease').InterpolationType;
-  outInterp: import('../anim/temporal-ease').InterpolationType;
+  inInterp: import("../anim/temporal-ease").InterpolationType;
+  outInterp: import("../anim/temporal-ease").InterpolationType;
   /** Speed in value units per second, influence as a percent of the segment. */
-  inEase: import('../anim/temporal-ease').TemporalEase;
-  outEase: import('../anim/temporal-ease').TemporalEase;
+  inEase: import("../anim/temporal-ease").TemporalEase;
+  outEase: import("../anim/temporal-ease").TemporalEase;
   /** AE "Auto Bezier": the tangent follows the neighbouring keys. */
   autoBezier: boolean;
   /** AE "Continuous Bezier": one speed carries through the key. */
@@ -75,26 +116,32 @@ export interface Channel<T extends ChannelValue = ChannelValue> {
 }
 
 export type TransformChannelName =
-  | 'position.z' | 'anchor.z' | 'scale.z' | 'rotation.x' | 'rotation.y'
-  | 'perspective'
-  | 'orientation.x' | 'orientation.y' | 'orientation.z'
-  | 'anchor.x'
-  | 'anchor.y'
-  | 'position.x'
-  | 'position.y'
-  | 'scale.x'
-  | 'scale.y'
-  | 'rotation'
-  | 'opacity'
-  | 'skew';
+  | "position.z"
+  | "anchor.z"
+  | "scale.z"
+  | "rotation.x"
+  | "rotation.y"
+  | "perspective"
+  | "orientation.x"
+  | "orientation.y"
+  | "orientation.z"
+  | "anchor.x"
+  | "anchor.y"
+  | "position.x"
+  | "position.y"
+  | "scale.x"
+  | "scale.y"
+  | "rotation"
+  | "opacity"
+  | "skew";
 
 export type TransformChannels = Record<TransformChannelName, Channel<number>>;
 
 export interface Mask {
   path?: VectorPath;
   id: string;
-  shape: 'rect' | 'ellipse';
-  mode: 'add' | 'subtract';
+  shape: "rect" | "ellipse";
+  mode: "add" | "subtract";
   on: boolean;
   p: {
     x: Channel<number>;
@@ -124,25 +171,42 @@ export interface Transition {
 }
 
 /** Editable paths and text controls use the same channels as transforms. */
-export interface PathVertex { id:string; p:Record<'x'|'y'|'inX'|'inY'|'outX'|'outY',Channel<number>> }
-export interface VectorPath { id:string; name:string; parent:string|null; vertices:PathVertex[]; p:Record<string,Channel> }
-export interface TextAnimator {
-  id:string; name:string; p:Record<string,Channel>;
-  enabled?:boolean;
-  /** Absent on animators saved before selector modes: those are range selectors. */
-  mode?:'stagger'|'range'|'wave';
-  /** Older animators store the unit in a `unit` channel instead. */
-  unit?:'characters'|'words'|'lines';
-  order?:'forward'|'reverse'|'center'|'edges'|'random';
-  seed?:number;
-  /** Stagger mode: `in` settles from the animated values, `out` leaves toward them. */
-  direction?:'in'|'out';
-  easing?:string;
-  shape?:'square'|'rampUp'|'rampDown'|'triangle'|'round';
-  /** Set on split pieces so they keep their position in the source's sequence. */
-  unitOffset?:number; unitTotal?:number;
+export interface PathVertex {
+  id: string;
+  p: Record<"x" | "y" | "inX" | "inY" | "outX" | "outY", Channel<number>>;
 }
-export interface TextStyleRange { id:string; start:number; end:number; p:Record<string,Channel> }
+export interface VectorPath {
+  id: string;
+  name: string;
+  parent: string | null;
+  vertices: PathVertex[];
+  p: Record<string, Channel>;
+}
+export interface TextAnimator {
+  id: string;
+  name: string;
+  p: Record<string, Channel>;
+  enabled?: boolean;
+  /** Absent on animators saved before selector modes: those are range selectors. */
+  mode?: "stagger" | "range" | "wave";
+  /** Older animators store the unit in a `unit` channel instead. */
+  unit?: "characters" | "words" | "lines";
+  order?: "forward" | "reverse" | "center" | "edges" | "random";
+  seed?: number;
+  /** Stagger mode: `in` settles from the animated values, `out` leaves toward them. */
+  direction?: "in" | "out";
+  easing?: string;
+  shape?: "square" | "rampUp" | "rampDown" | "triangle" | "round";
+  /** Set on split pieces so they keep their position in the source's sequence. */
+  unitOffset?: number;
+  unitTotal?: number;
+}
+export interface TextStyleRange {
+  id: string;
+  start: number;
+  end: number;
+  p: Record<string, Channel>;
+}
 
 export interface SolidContent {
   [key: string]: unknown;
@@ -167,14 +231,14 @@ export interface TextContent {
   /** Line height as a multiple of size: 1.2 means 120%, not 120. */
   leading: number;
   color: string;
-  align: 'left' | 'center' | 'right';
+  align: "left" | "center" | "right";
   italic: boolean;
 }
 
 export interface ShapeContent {
   paths?: VectorPath[];
   [key: string]: unknown;
-  shape: 'rect' | 'ellipse' | 'polygon' | 'star' | 'line';
+  shape: "rect" | "ellipse" | "polygon" | "star" | "line";
   color: string;
   w: number;
   h: number;
@@ -195,7 +259,7 @@ export interface ShapeContent {
 export interface ImageContent {
   [key: string]: unknown;
   asset: string | null;
-  fit: 'cover' | 'contain' | 'stretch';
+  fit: "cover" | "contain" | "stretch";
   w: number;
   h: number;
 }
@@ -295,7 +359,7 @@ interface LayerBase<T extends LayerType, D extends object> {
   lock: boolean;
   shy: boolean;
   matteSource?: string | null;
-  matteMode?: Channel<'alpha'|'alpha-inverted'|'luma'|'luma-inverted'>;
+  matteMode?: Channel<"alpha" | "alpha-inverted" | "luma" | "luma-inverted">;
   solo?: boolean;
   collapsed: boolean;
   scaleLinked?: boolean;
@@ -307,7 +371,7 @@ interface LayerBase<T extends LayerType, D extends object> {
   /** Preferred lane in the track timeline, relative to the layer's group. */
   track?: number;
   parent: string | null;
-  p: T extends 'audio' ? Record<never, never> : TransformChannels;
+  p: T extends "audio" ? Record<never, never> : TransformChannels;
   fx: Effect[];
   audioFx?: AudioEffectInstance[];
   transitionIn?: Transition | null;
@@ -317,18 +381,18 @@ interface LayerBase<T extends LayerType, D extends object> {
   locked_intent: Record<string, LockedIntentEntry | Record<string, unknown>>;
 }
 
-export type SolidLayer = LayerBase<'solid', SolidContent>;
-export type TextLayer = LayerBase<'text', TextContent>;
-export type ShapeLayer = LayerBase<'shape', ShapeContent>;
-export type ImageLayer = LayerBase<'image', ImageContent>;
-export type VideoLayer = LayerBase<'video', VideoContent>;
-export type AudioLayer = LayerBase<'audio', AudioContent>;
-export type AdjustmentLayer = LayerBase<'adjustment', AdjustmentContent>;
-export type ShaderLayer = LayerBase<'shader', ShaderContent>;
-export type ExtensionLayer = LayerBase<'extension', ExtensionLayerContent>;
-export type NullLayer = LayerBase<'null', NullContent>;
-export type PrecompLayer = LayerBase<'precomp', PrecompContent>;
-export type CaptionsLayer = LayerBase<'captions', CaptionsContent>;
+export type SolidLayer = LayerBase<"solid", SolidContent>;
+export type TextLayer = LayerBase<"text", TextContent>;
+export type ShapeLayer = LayerBase<"shape", ShapeContent>;
+export type ImageLayer = LayerBase<"image", ImageContent>;
+export type VideoLayer = LayerBase<"video", VideoContent>;
+export type AudioLayer = LayerBase<"audio", AudioContent>;
+export type AdjustmentLayer = LayerBase<"adjustment", AdjustmentContent>;
+export type ShaderLayer = LayerBase<"shader", ShaderContent>;
+export type ExtensionLayer = LayerBase<"extension", ExtensionLayerContent>;
+export type NullLayer = LayerBase<"null", NullContent>;
+export type PrecompLayer = LayerBase<"precomp", PrecompContent>;
+export type CaptionsLayer = LayerBase<"captions", CaptionsContent>;
 
 /** `type` and `d` narrow together, matching mkLayer's DEFAULTS table. */
 export type Layer =
@@ -342,7 +406,7 @@ export type Layer =
   | ShaderLayer
   | ExtensionLayer
   | NullLayer
-  | LayerBase<'group', GroupContent>
+  | LayerBase<"group", GroupContent>
   | PrecompLayer
   | CaptionsLayer;
 
@@ -353,7 +417,7 @@ export interface FillStop {
 }
 
 export interface Fill {
-  type: 'solid' | 'linear' | 'radial' | 'none';
+  type: "solid" | "linear" | "radial" | "none";
   angle: number;
   stops: FillStop[];
 }
@@ -371,29 +435,33 @@ interface SceneParamBase {
 }
 
 export interface NumberSceneParam extends SceneParamBase {
-  control: 'num';
+  control: "num";
   value: number;
   min?: number;
   max?: number;
 }
 
 export interface ColorSceneParam extends SceneParamBase {
-  control: 'color';
+  control: "color";
   value: string;
 }
 
 export interface ToggleSceneParam extends SceneParamBase {
-  control: 'toggle';
+  control: "toggle";
   value: boolean;
 }
 
 export interface SelectSceneParam extends SceneParamBase {
-  control: 'select';
+  control: "select";
   value: unknown;
   options: SceneSelectOption[];
 }
 
-export type SceneParam = NumberSceneParam | ColorSceneParam | ToggleSceneParam | SelectSceneParam;
+export type SceneParam =
+  | NumberSceneParam
+  | ColorSceneParam
+  | ToggleSceneParam
+  | SelectSceneParam;
 
 export interface Marker {
   /** Legacy demo markers predate marker IDs, while Edit.add_marker always adds one. */
@@ -461,7 +529,7 @@ export interface Comp {
 
 export interface Project extends Comp {
   /** Project-wide working precision; absent in older projects means 16-bit float. */
-  colorDepth?: import('../color-depth').ColorDepth;
+  colorDepth?: import("../color-depth").ColorDepth;
   /** Id of the composition open in the Timeline; the other compositions live in `comps`. */
   compId?: string;
   /** Name of the open composition (`name` is the project's). */

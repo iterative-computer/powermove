@@ -1,5 +1,13 @@
 import type { AudioEffectsAPI } from "./audio-effects";
-export type { AudioBinding, AudioEffectInstance, AudioEffectDefinition, AudioEffectsAPI, AudioFilter, AudioParameter, AudioProcessor } from "./audio-effects";
+export type {
+  AudioBinding,
+  AudioEffectInstance,
+  AudioEffectDefinition,
+  AudioEffectsAPI,
+  AudioFilter,
+  AudioParameter,
+  AudioProcessor,
+} from "./audio-effects";
 /*
  * Powermove kernel API — the surface every extension programs against.
  * FROZEN for apiVersion 1. Additive changes only; breaking changes bump
@@ -9,11 +17,22 @@ export type { AudioBinding, AudioEffectInstance, AudioEffectDefinition, AudioEff
  * `src/extensions/*` (built-ins) and user extensions get the same object.
  */
 
-import type { Component } from 'svelte';
-import type { Scene3D, SceneObject, SceneLight, SceneSource } from '../core/scene3d/schema';
-import type { Scene3DEdit } from '../core/scene3d/operations';
-export type { Scene3D, SceneObject, SceneLight, SceneSource, SceneChannel } from '../core/scene3d/schema';
-export type { Scene3DEdit } from '../core/scene3d/operations';
+import type { Component } from "svelte";
+import type {
+  Scene3D,
+  SceneObject,
+  SceneLight,
+  SceneSource,
+} from "../core/scene3d/schema";
+import type { Scene3DEdit } from "../core/scene3d/operations";
+export type {
+  Scene3D,
+  SceneObject,
+  SceneLight,
+  SceneSource,
+  SceneChannel,
+} from "../core/scene3d/schema";
+export type { Scene3DEdit } from "../core/scene3d/operations";
 import type {
   BlendMode,
   Channel,
@@ -25,11 +44,21 @@ import type {
   Layer,
   LayerType,
   Mask,
-  Project
-} from '../core/types/project';
-import type { EditCommand, EditMeta, EditResult, JsonObject } from '../core/types/commands';
-import type { WorkspaceManifest } from '../core/types/workspace';
-import type { ExtensionHealth, ExtensionManifest, ExtensionRecord, ExtensionScope } from '../../../shared/extensions';
+  Project,
+} from "../core/types/project";
+import type {
+  EditCommand,
+  EditMeta,
+  EditResult,
+  JsonObject,
+} from "../core/types/commands";
+import type { WorkspaceManifest } from "../core/types/workspace";
+import type {
+  ExtensionHealth,
+  ExtensionManifest,
+  ExtensionRecord,
+  ExtensionScope,
+} from "../../../shared/extensions";
 
 export type {
   BlendMode,
@@ -50,7 +79,7 @@ export type {
   LayerType,
   Mask,
   Project,
-  WorkspaceManifest
+  WorkspaceManifest,
 };
 
 export interface Disposable {
@@ -81,7 +110,10 @@ export interface PanelDefinition {
   /** Svelte component mounted into the panel body. Either `component` or `build` is required. */
   component?: Component<PanelProps>;
   /** Imperative alternative: populate `body`; return a disposer if you attach listeners. */
-  build?: (body: HTMLElement, inst: { spec: Record<string, unknown> }) => void | (() => void);
+  build?: (
+    body: HTMLElement,
+    inst: { spec: Record<string, unknown> },
+  ) => void | (() => void);
   /** Optional header renderer for imperative panels. */
   header?: (header: HTMLElement, inst: Record<string, unknown>) => void;
   size?: number;
@@ -95,12 +127,14 @@ export interface PanelDefinition {
   /** Choose a meaningful, distinct icon from the kernel icon set for every new panel. */
   icon?: string;
   /** Library presentation is definition-owned, never inferred from the active workspace layout. */
-  library?: false | {
-    width: number;
-    height: number;
-    /** Re-render stateful surfaces (for example canvas/WebGL) at the canonical size. */
-    render?: (context: PanelLibraryPreviewContext) => void;
-  };
+  library?:
+    | false
+    | {
+        width: number;
+        height: number;
+        /** Re-render stateful surfaces (for example canvas/WebGL) at the canonical size. */
+        render?: (context: PanelLibraryPreviewContext) => void;
+      };
 }
 
 export interface PanelsAPI {
@@ -116,8 +150,11 @@ export interface PanelsAPI {
   refresh(id: string): void;
 }
 
-export type PanelDock = 'left' | 'center' | 'right' | 'bottom';
-export interface PanelOpenOptions { dock?: PanelDock; index?: number }
+export type PanelDock = "left" | "center" | "right" | "bottom";
+export interface PanelOpenOptions {
+  dock?: PanelDock;
+  index?: number;
+}
 
 /* ── commands & keybindings ──────────────────────────────── */
 
@@ -185,13 +222,30 @@ export interface ParameterPresentation {
 }
 
 export type ParameterWidget =
-  | { kind: 'ramp'; start: string; end: string; midpoint?: string; mode?: string }
-  | { kind: 'point'; x: string; y: string; label?: string; advanced?: boolean };
+  | {
+      kind: "ramp";
+      start: string;
+      end: string;
+      midpoint?: string;
+      mode?: string;
+    }
+  | { kind: "point"; x: string; y: string; label?: string; advanced?: boolean };
 
-export type EffectParamDefinition = ParameterPresentation & (
-  | { k: string; label: string; def: number; min: number; max: number; step?: number; unit?: string; type?: 'number' }
-  | { k: string; label: string; def: string; type: 'color' }
-  | { k: string; label: string; def: boolean; type: 'toggle' });
+export type EffectParamDefinition = ParameterPresentation &
+  (
+    | {
+        k: string;
+        label: string;
+        def: number;
+        min: number;
+        max: number;
+        step?: number;
+        unit?: string;
+        type?: "number";
+      }
+    | { k: string; label: string; def: string; type: "color" }
+    | { k: string; label: string; def: boolean; type: "toggle" }
+  );
 
 /**
  * Fragment shader body contract (GLSL ES 3.00). The kernel prepends the common
@@ -278,67 +332,81 @@ export interface ExtensionLayerDefinition {
   /** Visual controls bind existing keys; project data and animation paths stay the same. */
   ui?: ParameterWidget[];
   defaults?: JsonObject;
-  renderer: {
-    kind: 'fragment';
-    /** Full GLSL `void main()` body. Powermove supplies its standard layer preamble and `u_<param>` uniforms. */
-    fragment: string;
-  } | {
-    kind: 'mesh';
-    /** Key inside layer `data` containing the durable model asset id. */
-    assetField: string;
-  } | {
-    /** Kernel-owned physically based scene renderer; data.scene is validated project source. */
-    kind: 'scene3d';
-  } | {
-    kind: 'layer3d';
-    role: 'object'|'light'|'camera';
-  };
+  renderer:
+    | {
+        kind: "fragment";
+        /** Full GLSL `void main()` body. Powermove supplies its standard layer preamble and `u_<param>` uniforms. */
+        fragment: string;
+      }
+    | {
+        kind: "mesh";
+        /** Key inside layer `data` containing the durable model asset id. */
+        assetField: string;
+      }
+    | {
+        /** Kernel-owned physically based scene renderer; data.scene is validated project source. */
+        kind: "scene3d";
+      }
+    | {
+        kind: "layer3d";
+        role: "object" | "light" | "camera";
+      };
 }
 
 export interface Scene3DGizmo {
-  update(rect:{x:number;y:number;width:number;height:number},selection?:string[]):void;
-  hover(clientX:number,clientY:number):boolean;
-  pointerDown(event:PointerEvent):boolean;
-  active():boolean;
-  covers(ids:readonly string[]):boolean;
-  cancel():void;
-  dispose():void;
+  update(
+    rect: { x: number; y: number; width: number; height: number },
+    selection?: string[],
+  ): void;
+  hover(clientX: number, clientY: number): boolean;
+  pointerDown(event: PointerEvent): boolean;
+  active(): boolean;
+  covers(ids: readonly string[]): boolean;
+  cancel(): void;
+  dispose(): void;
 }
 export interface Scene3DAPI {
-  isGroup(layerId:string):boolean;
-  getView():'camera'|'editor';
-  setView(mode:'camera'|'editor'):void;
-  onViewChange(listener:(mode:'camera'|'editor')=>void):Disposable;
-  getNavigationMode():'select'|'orbit'|'pan'|'dolly';
-  setNavigationMode(mode:'select'|'orbit'|'pan'|'dolly'):void;
-  onNavigationChange(listener:(mode:'select'|'orbit'|'pan'|'dolly')=>void):Disposable;
-  createNavigation(element:HTMLElement):{
-    update(rect:{width:number;height:number},selection:string[]):void;
-    pointerDown(event:PointerEvent):boolean;
-    wheel(event:WheelEvent):boolean;
-    frame(selected?:boolean):void;
-    active():boolean;
-    cancel():void;
-    dispose():void;
+  isGroup(layerId: string): boolean;
+  getView(): "camera" | "editor";
+  setView(mode: "camera" | "editor"): void;
+  onViewChange(listener: (mode: "camera" | "editor") => void): Disposable;
+  getNavigationMode(): "select" | "orbit" | "pan" | "dolly";
+  setNavigationMode(mode: "select" | "orbit" | "pan" | "dolly"): void;
+  onNavigationChange(
+    listener: (mode: "select" | "orbit" | "pan" | "dolly") => void,
+  ): Disposable;
+  createNavigation(element: HTMLElement): {
+    update(rect: { width: number; height: number }, selection: string[]): void;
+    pointerDown(event: PointerEvent): boolean;
+    wheel(event: WheelEvent): boolean;
+    frame(selected?: boolean): void;
+    active(): boolean;
+    cancel(): void;
+    dispose(): void;
   };
-  frame(selected?:boolean):void;
-  getMode(): 'translate'|'rotate'|'scale';
-  setMode(mode:'translate'|'rotate'|'scale'):void;
-  getSpace():'world'|'local';
-  setSpace(space:'world'|'local'):void;
-  onGizmoChange(listener:(state:{mode:'translate'|'rotate'|'scale';space:'world'|'local'})=>void):Disposable;
-  createGizmo(element:HTMLElement):Scene3DGizmo;
+  frame(selected?: boolean): void;
+  getMode(): "translate" | "rotate" | "scale";
+  setMode(mode: "translate" | "rotate" | "scale"): void;
+  getSpace(): "world" | "local";
+  setSpace(space: "world" | "local"): void;
+  onGizmoChange(
+    listener: (state: {
+      mode: "translate" | "rotate" | "scale";
+      space: "world" | "local";
+    }) => void,
+  ): Disposable;
+  createGizmo(element: HTMLElement): Scene3DGizmo;
   /** Pack selected OBJ/MTL/texture files into a durable GLB, or return a standalone model. */
   prepareImport(files: File[]): Promise<File>;
   /** Explicit undoable upgrade of a v1 model layer, preserving channels and baking camera animation. */
   convert(layerId: string): EditResult;
   createScene(): Scene3D;
-  createObject(id: string,source?: SceneSource,name?: string): SceneObject;
-  createLight(id: string,type?: SceneLight['type'],name?: string): SceneLight;
-  edit(args: Scene3DEdit,meta?: EditMeta): EditResult;
-  describe(layerId?: string): Scene3D|null;
-  selection(): {layerId: string|null;ids: string[]};
-  select(layerId: string|null,ids: string[]): void;
+  createObject(id: string, source?: SceneSource, name?: string): SceneObject;
+  createLight(id: string, type?: SceneLight["type"], name?: string): SceneLight;
+  edit(args: Scene3DEdit, meta?: EditMeta): EditResult;
+  describe(layerId?: string): Scene3D | null;
+  selection(): { layerId: string | null; ids: string[] };
+  select(layerId: string | null, ids: string[]): void;
 }
 
 export interface ExtensionLayersAPI {
@@ -369,7 +437,10 @@ export interface AssetsAPI {
   /** Open the system file picker. A cancellation resolves to an empty array. */
   pick(options?: { accept?: string; multiple?: boolean }): Promise<File[]>;
   /** Import into Powermove's durable project media store. The file remains after layer Undo. */
-  import(file: File, options?: { layerDefinition?: string }): Promise<AssetRecord>;
+  import(
+    file: File,
+    options?: { layerDefinition?: string },
+  ): Promise<AssetRecord>;
   /**
    * Download an https image, video or audio file (at most 512 MiB) and import it
    * like `import`; resolves to the new asset's id. Sandboxed, it needs `assets`
@@ -390,7 +461,7 @@ export interface ThemeDefinition {
   id: string;
   name: string;
   /** `light` | `dark` | `auto` (follows system, tokens may provide both). */
-  scheme: 'light' | 'dark' | 'auto';
+  scheme: "light" | "dark" | "auto";
   /** CSS custom properties applied on :root, e.g. { '--accent': '#f60' }. Keys must start with `--`. */
   tokens?: Record<string, string>;
   /** Dark-scheme overrides when scheme is `auto`. */
@@ -409,8 +480,8 @@ export interface ThemeAPI {
   list(): ThemeDefinition[];
   /** Kernel scheme preference (System/Light/Dark) as chosen in Settings; sandboxed, the scheme the panel shows
    * (`light` or `dark`). Reactive (see {@link ProjectAPI}). */
-  scheme(): 'light' | 'dark' | 'system';
-  setScheme(mode: 'light' | 'dark' | 'system'): void;
+  scheme(): "light" | "dark" | "system";
+  setScheme(mode: "light" | "dark" | "system"): void;
 }
 
 /* ── palette, menus, status ──────────────────────────────── */
@@ -424,25 +495,50 @@ export interface PaletteEntry {
 }
 /** Called for every query. A Promise lands in the palette when it settles,
  *  if the palette still shows the query it was asked for. */
-export type PaletteProvider = (query: string) => PaletteEntry[] | Promise<PaletteEntry[]>;
+export type PaletteProvider = (
+  query: string,
+) => PaletteEntry[] | Promise<PaletteEntry[]>;
 
-export type MenuLocation = 'titlebar:right' | 'panel:context' | 'layer:context' | 'timeline:context' | 'viewer:context';
+export type MenuLocation =
+  | "titlebar:right"
+  | "panel:context"
+  | "layer:context"
+  | "timeline:context"
+  | "viewer:context";
 
 export type MenuContribution =
-  | '-'
+  | "-"
   | { header: string }
-  | { label: string; icon?: string; kb?: string | null; on?: boolean; disabled?: boolean; run?: () => unknown };
+  | {
+      label: string;
+      icon?: string;
+      kb?: string | null;
+      on?: boolean;
+      disabled?: boolean;
+      run?: () => unknown;
+    };
 
 export interface MenusAPI {
   /** Called on every open with that open's `ctx`. A Promise is waited for at
    *  most 100 ms; items that arrive later are left out of that open. */
-  contribute(location: MenuLocation, items: (ctx: Record<string, unknown>) => MenuContribution[] | Promise<MenuContribution[]>): Disposable;
+  contribute(
+    location: MenuLocation,
+    items: (
+      ctx: Record<string, unknown>,
+    ) => MenuContribution[] | Promise<MenuContribution[]>,
+  ): Disposable;
   /** Everything contributed for a location, in registration order. Only
    *  synchronous contributions: asynchronous ones answer the menus they open. */
-  collect(location: MenuLocation, ctx?: Record<string, unknown>): MenuContribution[];
+  collect(
+    location: MenuLocation,
+    ctx?: Record<string, unknown>,
+  ): MenuContribution[];
   /** Everything contributed for one open, asynchronous contributions
    *  included, once they answered or 100 ms passed. Hand it to `ui.menu`. */
-  gather(location: MenuLocation, ctx?: Record<string, unknown>): Promise<MenuContribution[]>;
+  gather(
+    location: MenuLocation,
+    ctx?: Record<string, unknown>,
+  ): Promise<MenuContribution[]>;
 }
 
 export interface StatusItem {
@@ -450,7 +546,7 @@ export interface StatusItem {
   /** Return text (or null to hide). Called on every status tick. */
   text: () => string | null;
   title?: string;
-  side?: 'left' | 'right';
+  side?: "left" | "right";
   onClick?: () => void;
 }
 
@@ -497,7 +593,10 @@ export interface ProjectAPI {
   /** Reactive; synchronous in the sandbox; needs no permission. */
   revision(): number;
   /** Typed, validated, undoable edit. `meta.origin` is forced to `ext:<id>`. Returns a Promise when sandboxed. */
-  apply(commands: EditCommand | EditCommand[], meta?: Omit<EditMeta, 'origin'>): EditResult;
+  apply(
+    commands: EditCommand | EditCommand[],
+    meta?: Omit<EditMeta, "origin">,
+  ): EditResult;
   /** Reactive; synchronous in the sandbox; needs no permission. */
   selection(): Selection;
   /** Returns a Promise when the extension runs sandboxed (Store installs). */
@@ -523,59 +622,139 @@ export interface ProjectAPI {
 /* ── editor kernel façades ──────────────────────────────── */
 
 export type AffineMatrix = [number, number, number, number, number, number];
-export type Mat3 = [number, number, number, number, number, number, number, number, number];
-export type Mat4 = [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number];
-export interface Point { x: number; y: number }
-export interface Bounds { x0: number; x1: number; y0: number; y1: number; cx?: number; cy?: number }
-export interface PropertyEntry { key: string; prop: Channel; label: string; group: string }
+export type Mat3 = [
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+];
+export type Mat4 = [
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+];
+export interface Point {
+  x: number;
+  y: number;
+}
+export interface Bounds {
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+  cx?: number;
+  cy?: number;
+}
+export interface PropertyEntry {
+  key: string;
+  prop: Channel;
+  label: string;
+  group: string;
+}
 
 /**
  * Animation evaluates channels and hierarchy transforms without changing the project, except for the key/easing helpers and `touch`, which mutate channel data and invalidate animation-derived caches. Expression evaluation records failures in `expressionErrors` but does not emit project events.
  */
 export interface AnimAPI {
   ev(layer: Layer, key: string, time: number): ChannelValue | null;
-  evP(layer: Layer, prop: Channel, time: number, key: string): ChannelValue | null;
+  evP(
+    layer: Layer,
+    prop: Channel,
+    time: number,
+    key: string,
+  ): ChannelValue | null;
   active(layer: Layer, time: number): boolean;
   findProp(layer: Layer, key: string): Channel | null;
   allProps(layer: Layer): PropertyEntry[];
   hasKeyAt(layer: Layer, prop: Channel, time: number): Keyframe | null;
-  setKey(layer: Layer, key: string, time: number, value: ChannelValue, ease?: string): Keyframe | null;
-  setKeyOn(prop: Channel, localTime: number, value: ChannelValue, ease?: string, fps?: number): Keyframe | null;
+  setKey(
+    layer: Layer,
+    key: string,
+    time: number,
+    value: ChannelValue,
+    ease?: string,
+  ): Keyframe | null;
+  setKeyOn(
+    prop: Channel,
+    localTime: number,
+    value: ChannelValue,
+    ease?: string,
+    fps?: number,
+  ): Keyframe | null;
   removeKey(prop: Channel, key: Keyframe): void;
   applyEaseTo(keys: Keyframe[], name: string): void;
   wouldCycle(layer: Layer, parentId: string | null): boolean;
-  resolveContent(layer: Layer, time?: number): Layer['d'];
+  resolveContent(layer: Layer, time?: number): Layer["d"];
   readonly expressionErrors: WeakMap<object, string>;
   version(): number;
   touch(): void;
   worldMatrix(layer: Layer, time: number): AffineMatrix;
   localMatrix(layer: Layer, time: number): AffineMatrix;
-  transformParentMatrix(layer: Layer, time: number, parent?: Layer | null): AffineMatrix;
-  mul(left: Readonly<AffineMatrix>, right: Readonly<AffineMatrix>): AffineMatrix;
+  transformParentMatrix(
+    layer: Layer,
+    time: number,
+    parent?: Layer | null,
+  ): AffineMatrix;
+  mul(
+    left: Readonly<AffineMatrix>,
+    right: Readonly<AffineMatrix>,
+  ): AffineMatrix;
 }
 
-export interface ChannelDefinition { label: string; group: string; unit?: string; step?: number; min?: number; max?: number }
+export interface ChannelDefinition {
+  label: string;
+  group: string;
+  unit?: string;
+  step?: number;
+  min?: number;
+  max?: number;
+}
 export interface LayerFactoryOptions {
   name?: string;
   from?: number;
   dur?: number;
   color?: string;
   p?: Partial<Record<string, ChannelValue>>;
-  d?: Partial<Layer['d']>;
+  d?: Partial<Layer["d"]>;
 }
 
 /**
  * Model exposes the canonical factories, schema tables, and current-composition lookups. Factories allocate detached project objects; lookups are read-only, and callers must use edit/history APIs to make durable project mutations.
  */
 export interface ModelAPI {
-  P<T extends ChannelValue>(value: T, options?: Partial<Channel<T>>): Channel<T>;
+  P<T extends ChannelValue>(
+    value: T,
+    options?: Partial<Channel<T>>,
+  ): Channel<T>;
   readonly CH: Readonly<Record<string, ChannelDefinition>>;
-  KF<T extends ChannelValue>(time: number, value: T, ease?: string): Keyframe<T>;
+  KF<T extends ChannelValue>(
+    time: number,
+    value: T,
+    ease?: string,
+  ): Keyframe<T>;
   readonly BLENDS: readonly BlendMode[];
-  readonly TYPE_META: typeof import('../core/types/project').TYPE_META;
-  readonly MASK_SHAPES: readonly Mask['shape'][];
+  readonly TYPE_META: typeof import("../core/types/project").TYPE_META;
+  readonly MASK_SHAPES: readonly Mask["shape"][];
   mkLayer(type: LayerType, options?: LayerFactoryOptions, comp?: Comp): Layer;
-  mkMask(shape?: Mask['shape'], comp?: Comp): Mask;
+  mkMask(shape?: Mask["shape"], comp?: Comp): Mask;
   mkProject(options?: Partial<Project>): Project;
   cloneLayer(layer: Layer): Layer;
   normalizeFill(value: unknown, fallback?: string): Fill;
@@ -607,15 +786,30 @@ export interface GroupsAPI {
   ancestors(layer: Layer, layers?: Layer[]): Layer[];
   transformRoots(ids: string[]): Layer[];
   /** Bounds of a group's active visual descendants in the group's local space. */
-  bounds(group: Layer, time: number): (Bounds & { w: number; h: number; ax: number; ay: number }) | null;
+  bounds(
+    group: Layer,
+    time: number,
+  ): (Bounds & { w: number; h: number; ax: number; ay: number }) | null;
   span(group: Layer): { from: number; dur: number };
   expand(ids: string[]): string[];
   normalizeStack(): void;
-  moveToGroup(ids: string[], target: string | null): { ids: string[]; group: string | null };
+  moveToGroup(
+    ids: string[],
+    target: string | null,
+  ): { ids: string[]; group: string | null };
 }
 
-export interface TransportPerformance { fps: number; ms: number; drops: number; budget: number; auto: boolean }
-export interface SetTimeOptions { raw?: boolean; force?: boolean }
+export interface TransportPerformance {
+  fps: number;
+  ms: number;
+  drops: number;
+  budget: number;
+  auto: boolean;
+}
+export interface SetTimeOptions {
+  raw?: boolean;
+  force?: boolean;
+}
 
 /**
  * Transport owns mutable playhead, playback and preview-quality state. Changing time or playback emits the backing transport events and invalidates rendering/UI; `invalidate` preserves the legacy immediate-render and coalesced UI invalidation behavior.
@@ -641,7 +835,11 @@ export interface TransportAPI {
   previewResolution: string | number | null;
 }
 
-export interface HistoryExternalOptions { bytes?: number; cleanup?: () => void; group?: string | null }
+export interface HistoryExternalOptions {
+  bytes?: number;
+  cleanup?: () => void;
+  group?: string | null;
+}
 
 /**
  * History brackets raw mutations, commits undo/redo patches, and publishes the same project invalidations as the legacy stack. Selection entries are ignored while another transaction is pending, preserving atomic edit behavior.
@@ -653,7 +851,12 @@ export interface HistoryAPI {
   cancel(): void;
   undo(): boolean;
   redo(): boolean;
-  external(label: string, undo: () => void, redo: () => void, options?: HistoryExternalOptions): string | null;
+  external(
+    label: string,
+    undo: () => void,
+    redo: () => void,
+    options?: HistoryExternalOptions,
+  ): string | null;
   selection(before: Selection, after: Selection): string | null;
 }
 
@@ -669,24 +872,37 @@ export interface EditAPI {
   mutate<T>(label: string, action: () => T, meta?: EditMeta): T | EditResult;
 }
 
-export interface ImportPlacement { at: number; index?: number }
+export interface ImportPlacement {
+  at: number;
+  index?: number;
+}
 /** Normalized anchor within imported visual content: 0 = start, 0.5 = center, 1 = end. */
-export interface ImportDefaults { anchor: { x: number; y: number } }
-export interface InspectorSectionContext { layerIds: string[] }
+export interface ImportDefaults {
+  anchor: { x: number; y: number };
+}
+export interface InspectorSectionContext {
+  layerIds: string[];
+}
 export interface InspectorSectionDefinition {
   id: string;
   title: string;
-  after?: 'content' | 'transform' | 'effects';
+  after?: "content" | "transform" | "effects";
   when?(context: InspectorSectionContext): boolean;
   /** Mount controls; return cleanup. Rebuilt when the selection changes. */
-  build(target: HTMLElement, context: InspectorSectionContext): void | (() => void) | Disposable;
+  build(
+    target: HTMLElement,
+    context: InspectorSectionContext,
+  ): void | (() => void) | Disposable;
 }
 export interface InspectorAPI {
   registerSection(section: InspectorSectionDefinition): Disposable;
   sections(): InspectorSectionDefinition[];
 }
 export interface ImportFilesOptions {
-  project?: Project; placement?: ImportPlacement | null; sequence?: boolean; replaceAssetId?: string;
+  project?: Project;
+  placement?: ImportPlacement | null;
+  sequence?: boolean;
+  replaceAssetId?: string;
   /** Media folder (`project.assetFolders` id) that receives the imported media. */
   folder?: string | null;
   /** For a dropped folder: keep it as a media folder of individual files rather than an image sequence. */
@@ -732,7 +948,7 @@ export interface RuntimeAsset extends AssetRecord {
    *
    * A three.js object tree for an imported model (OBJ, glTF).
    */
-  object3d?: import('three').Object3D;
+  object3d?: import("three").Object3D;
   [key: string]: unknown;
 }
 
@@ -740,13 +956,15 @@ export interface RuntimeAsset extends AssetRecord {
 export interface AssetSource {
   /** An object URL your own `<img>`, `<video>` or `<audio>` element can play. Valid until the asset is removed. */
   url: string;
-  kind: 'image' | 'video' | 'audio' | 'model';
+  kind: "image" | "video" | "audio" | "model";
   /** The rendition's MIME type when known. */
   mime: string | null;
   /** True when the URL is a generated web rendition rather than the original bytes. */
   rendition: boolean;
 }
-export interface WaveformOptions { [key: string]: unknown }
+export interface WaveformOptions {
+  [key: string]: unknown;
+}
 export interface FontCatalog {
   bundled: string[];
   system: string[];
@@ -766,7 +984,9 @@ export interface MediaAPI {
   /** Latest active mod's override, or null for the native import behavior. Returns a Promise when sandboxed. */
   getImportDefaults(): ImportDefaults | null;
   readonly timing: {
-    isTimed(layer: Layer): boolean; rate(layer: Layer): number; earliestStart(layer: Layer): number;
+    isTimed(layer: Layer): boolean;
+    rate(layer: Layer): number;
+    earliestStart(layer: Layer): number;
     /** Content patch keeping the clip's content in place when its In point moves to `nextFrom` (media trim, caption cues); null when untimed. */
     startPatch(layer: Layer, nextFrom: number): JsonObject | null;
     /** Content patch for the head of a split at composition time `cut` (caption cues past the cut leave); null when nothing changes. */
@@ -774,23 +994,35 @@ export interface MediaAPI {
   };
   /** Requires the full-access permission for Store extensions. */
   /** Pass a drop's DataTransfer to import dropped folders as well as files. */
-  importFiles(files: FileList | File[] | DataTransfer, options?: ImportFilesOptions): Promise<unknown>;
+  importFiles(
+    files: FileList | File[] | DataTransfer,
+    options?: ImportFilesOptions,
+  ): Promise<unknown>;
   commandForAsset(id?: string, at?: number): EditCommand | undefined;
   /** Requires the full-access permission for Store extensions. */
-  readonly audio: { drawWaveform(ctx: CanvasRenderingContext2D, layer: Layer, options?: WaveformOptions): boolean };
+  readonly audio: {
+    drawWaveform(
+      ctx: CanvasRenderingContext2D,
+      layer: Layer,
+      options?: WaveformOptions,
+    ): boolean;
+  };
   /** Requires the full-access permission for Store extensions. */
   readonly assets: {
     /** The live asset. Its `url`, `el`, `audioBlob` and `object3d` fields are deprecated compatibility members. */
     get(id: string): RuntimeAsset | undefined;
     add(file: File, options?: Record<string, unknown>): Promise<RuntimeAsset>;
-    kind(file: File): 'image' | 'video' | 'audio' | 'model' | null;
+    kind(file: File): "image" | "video" | "audio" | "model" | null;
     /**
      * A browser-playable URL for the asset (apiVersion 4; available to every
      * apiVersion). Waits up to `timeoutMs` (default 30 s) for the asset to load
      * and its rendition to exist; null when there is no such asset, or it has no
      * playable media (a model, or media that failed to load).
      */
-    source(id: string, options?: { timeoutMs?: number }): Promise<AssetSource | null>;
+    source(
+      id: string,
+      options?: { timeoutMs?: number },
+    ): Promise<AssetSource | null>;
     /**
      * The asset's audio (an audio asset, or a video's soundtrack) as a Blob
      * (apiVersion 4; available to every apiVersion). Waits like `source`; null
@@ -802,11 +1034,50 @@ export interface MediaAPI {
   readonly fonts: FontCatalog;
 }
 
-export interface PreviewViewport { x: number; y: number; width: number; height: number; [key: string]: unknown }
-export interface RasterWindow { x?: number; y?: number; w?: number; h?: number; [key: string]: unknown }
-export interface TextCaretLine { text: string; start: number; x: number; y: number; baseline: number; width: number; boundaries: { index: number; x: number }[] }
-export interface TextCaretLayout { lines: TextCaretLine[]; lineHeight: number; size: number; length: number; align: 'left' | 'center' | 'right'; boxWidth: number; boxHeight: number }
-export interface RasterSurface { cv?: HTMLCanvasElement; canvas?: HTMLCanvasElement; bitmap?: ImageBitmap; anchorX?: number; anchorY?: number; x?: number; y?: number; w?: number; h?: number; [key: string]: unknown }
+export interface PreviewViewport {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  [key: string]: unknown;
+}
+export interface RasterWindow {
+  x?: number;
+  y?: number;
+  w?: number;
+  h?: number;
+  [key: string]: unknown;
+}
+export interface TextCaretLine {
+  text: string;
+  start: number;
+  x: number;
+  y: number;
+  baseline: number;
+  width: number;
+  boundaries: { index: number; x: number }[];
+}
+export interface TextCaretLayout {
+  lines: TextCaretLine[];
+  lineHeight: number;
+  size: number;
+  length: number;
+  align: "left" | "center" | "right";
+  boxWidth: number;
+  boxHeight: number;
+}
+export interface RasterSurface {
+  cv?: HTMLCanvasElement;
+  canvas?: HTMLCanvasElement;
+  bitmap?: ImageBitmap;
+  anchorX?: number;
+  anchorY?: number;
+  x?: number;
+  y?: number;
+  w?: number;
+  h?: number;
+  [key: string]: unknown;
+}
 
 /**
  * Render provides WebGL setup, picking/bounds, raster cache access and frame capture. Rendering may allocate or invalidate GPU/CPU caches and temporarily change preview quality, but it does not make durable project edits.
@@ -814,10 +1085,22 @@ export interface RasterSurface { cv?: HTMLCanvasElement; canvas?: HTMLCanvasElem
 export interface RenderAPI {
   readonly gl: {
     bounds(layer: Layer, time: number): Bounds | null;
-    pick(x: number, y: number, time: number, options?: { includeLocked?: boolean }): Layer | null;
+    pick(
+      x: number,
+      y: number,
+      time: number,
+      options?: { includeLocked?: boolean },
+    ): Layer | null;
     /** Binds the editor's frame presentation to `canvas` (a custom viewer). With "Use New Engine" on, the engine presents into it. */
-    init(canvas: HTMLCanvasElement, options?: { alpha?: boolean; quiet?: boolean }): boolean;
-    resize(width: number, height: number, previewViewport?: PreviewViewport | null): boolean;
+    init(
+      canvas: HTMLCanvasElement,
+      options?: { alpha?: boolean; quiet?: boolean },
+    ): boolean;
+    resize(
+      width: number,
+      height: number,
+      previewViewport?: PreviewViewport | null,
+    ): boolean;
     compileError(key: string): string | null;
     readonly previewViewport: PreviewViewport | null;
     /**
@@ -855,7 +1138,13 @@ export interface RenderAPI {
    * A layer's raster surface, synchronously. With "Use New Engine" on the
    * pixels come from the engine through a synchronous request.
    */
-  raster(layer: Layer, scale?: number, time?: number, uploaded?: (key: string) => unknown, crop?: RasterWindow): RasterSurface | null;
+  raster(
+    layer: Layer,
+    scale?: number,
+    time?: number,
+    uploaded?: (key: string) => unknown,
+    crop?: RasterWindow,
+  ): RasterSurface | null;
   /** Caret geometry for a text layer in its local space, produced by the same
       measuring and wrapping as the rasterizer. */
   textLayout(layer: Layer, time?: number): TextCaretLayout | null;
@@ -866,7 +1155,12 @@ export interface RenderAPI {
    * Renders a frame of the open composition into a new opaque canvas,
    * synchronously (the editor waits while the engine draws it).
    */
-  renderFrameTo(time: number, width: number, height: number, options?: Record<string, unknown>): HTMLCanvasElement;
+  renderFrameTo(
+    time: number,
+    width: number,
+    height: number,
+    options?: Record<string, unknown>,
+  ): HTMLCanvasElement;
   /**
    * @deprecated Compatibility member (apiVersion 1 to 3). Use
    * `await api.render.snapshotAsync(time, maxWidth)`.
@@ -882,18 +1176,32 @@ export interface RenderAPI {
    */
   snapshotAsync(time: number, maxWidth?: number): Promise<string>;
   /** `renderFrameTo` without blocking the editor. apiVersion 4; available to every apiVersion. */
-  renderFrameToAsync(time: number, width: number, height: number, options?: Record<string, unknown>): Promise<HTMLCanvasElement>;
+  renderFrameToAsync(
+    time: number,
+    width: number,
+    height: number,
+    options?: Record<string, unknown>,
+  ): Promise<HTMLCanvasElement>;
   /**
    * `raster` without blocking the editor: the same surface shape (`cv`, `w`,
    * `h`, `anchorX`, `anchorY`, `selection`, and `fontOffset` for text), or null
    * when the layer draws nothing then. A registered `raster` service override
    * runs around it as for `raster`. apiVersion 4; available to every apiVersion.
    */
-  rasterAsync(layer: Layer, scale?: number, time?: number, crop?: RasterWindow | null): Promise<RasterSurface | null>;
+  rasterAsync(
+    layer: Layer,
+    scale?: number,
+    time?: number,
+    crop?: RasterWindow | null,
+  ): Promise<RasterSurface | null>;
 }
 
-export interface KeyHandleState { [key: string]: unknown }
-export interface ShaderMeta { [key: string]: unknown }
+export interface KeyHandleState {
+  [key: string]: unknown;
+}
+export interface ShaderMeta {
+  [key: string]: unknown;
+}
 
 /**
  * UI state stores non-project disclosure, graph-handle, reveal and shader metadata. Setters mutate only the backing UI-state caches and compatibility fields; they do not create project history entries or render output directly.
@@ -922,11 +1230,28 @@ export interface DragOptions {
   cursor?: string;
   infinite?: boolean;
 }
-export interface EditGestureAPI { begin(): void; write(value: unknown): void; commit(): void; cancel(): void; once(value: unknown): unknown }
-export interface EditGestureConstructor { new(binding: ControlEditBinding): EditGestureAPI }
+export interface EditGestureAPI {
+  begin(): void;
+  write(value: unknown): void;
+  commit(): void;
+  cancel(): void;
+  once(value: unknown): unknown;
+}
+export interface EditGestureConstructor {
+  new (binding: ControlEditBinding): EditGestureAPI;
+}
 
-export interface AssetDragPayload { id: string; name: string; kind: string; dur?: number }
-export interface FxDragPayload { kind: 'effect' | 'transition'; id: string; label: string }
+export interface AssetDragPayload {
+  id: string;
+  name: string;
+  kind: string;
+  dur?: number;
+}
+export interface FxDragPayload {
+  kind: "effect" | "transition";
+  id: string;
+  label: string;
+}
 
 /**
  * Drag-and-drop serializes asset/FX payloads to the canonical MIME keys and proxies the live in-process media drag. Reads are side-effect free; `startAssetDrag` writes the DataTransfer, while `applyFxDrop` performs the backing undoable edit and invalidates the viewer.
@@ -934,25 +1259,41 @@ export interface FxDragPayload { kind: 'effect' | 'transition'; id: string; labe
 export interface DndAPI {
   readonly ASSET_MIME: string;
   readonly FX_MIME: string;
-  startAssetDrag(dataTransfer: DataTransfer | null | undefined, payload: AssetDragPayload): void;
+  startAssetDrag(
+    dataTransfer: DataTransfer | null | undefined,
+    payload: AssetDragPayload,
+  ): void;
   mediaDrag: AssetDragPayload | null;
   hasAssetDrag(dataTransfer: DataTransfer | null | undefined): boolean;
   hasFileDrag(dataTransfer: DataTransfer | null | undefined): boolean;
   hasMediaDrag(dataTransfer: DataTransfer | null | undefined): boolean;
-  readAssetDrag(dataTransfer: DataTransfer | null | undefined): AssetDragPayload | null;
+  readAssetDrag(
+    dataTransfer: DataTransfer | null | undefined,
+  ): AssetDragPayload | null;
   hasFxDrag(dataTransfer: DataTransfer | null | undefined): boolean;
-  readFxDrag(dataTransfer: DataTransfer | null | undefined): FxDragPayload | null;
-  applyFxDrop(payload: FxDragPayload, layerId: string | null | undefined, edge?: 'in' | 'out'): boolean;
+  readFxDrag(
+    dataTransfer: DataTransfer | null | undefined,
+  ): FxDragPayload | null;
+  applyFxDrop(
+    payload: FxDragPayload,
+    layerId: string | null | undefined,
+    edge?: "in" | "out",
+  ): boolean;
 }
 
-export interface WorkspaceMutateOptions { inPlace?: boolean }
+export interface WorkspaceMutateOptions {
+  inPlace?: boolean;
+}
 
 /**
  * Workspace exposes the active layout and persists mutations through the legacy workspace manager, including built-in-to-user cloning unless `inPlace` is requested. For user mods, current() returns a snapshot; mutate() owns appearance changes (density, theme overrides, chrome and dock/panel geometry) until unload, retaining later user edits. Panel membership/order remains a saved layout edit. Panel operations normalize dock fill, apply the layout and emit workspace/layout events; they do not touch project history.
  */
 export interface WorkspaceAPI {
   current(): WorkspaceManifest | null;
-  mutate(fn: (workspace: WorkspaceManifest) => void, options?: WorkspaceMutateOptions): WorkspaceManifest | null;
+  mutate(
+    fn: (workspace: WorkspaceManifest) => void,
+    options?: WorkspaceMutateOptions,
+  ): WorkspaceManifest | null;
   hasPanel(id: string): boolean;
   addPanel(id: string, dock?: PanelDock, index?: number): void;
   movePanel(id: string, dock: PanelDock, index: number): boolean;
@@ -981,7 +1322,10 @@ export interface UtilAPI {
 /**
  * Ease exposes the immutable preset table and identifies matching temporal handles. Both operations are read-only and do not mutate channels, history, or render state.
  */
-export interface EaseAPI { nameOf(easeOut: number[], easeIn: number[]): string; readonly PRESETS: Readonly<Record<string, number[]>> }
+export interface EaseAPI {
+  nameOf(easeOut: number[], easeIn: number[]): string;
+  readonly PRESETS: Readonly<Record<string, number[]>>;
+}
 
 /**
  * Space3D computes bound-PM layer, parent and perspective transforms plus plane projection/containment. These helpers are read-only; the adapter supplies the legacy PM argument so extensions never receive or pass the registry.
@@ -996,7 +1340,13 @@ export interface Space3DAPI {
   planeMatrix(layer: Layer, time: number, positioning?: boolean): Mat3;
   projectPoint(matrix: Readonly<Mat3>, point: Point): Point;
   inversePlane(matrix: Readonly<Mat3>): Mat3 | null;
-  planeContains(layer: Layer, time: number, x: number, y: number, bounds: Bounds): boolean;
+  planeContains(
+    layer: Layer,
+    time: number,
+    x: number,
+    y: number,
+    bounds: Bounds,
+  ): boolean;
 }
 
 /* ── ui helpers ──────────────────────────────────────────── */
@@ -1004,9 +1354,15 @@ export interface Space3DAPI {
 export type ControlComponent = Component<Record<string, unknown>>;
 
 export type ControlEditBinding =
-  | { mode: 'command'; label: string; origin?: string; prepare?: () => void; command: EditCommand | ((value: unknown) => EditCommand | EditCommand[]) }
-  | { mode: 'local'; label: string; set(value: unknown): void }
-  | { mode: 'set'; label: string; set(value: unknown): void };
+  | {
+      mode: "command";
+      label: string;
+      origin?: string;
+      prepare?: () => void;
+      command: EditCommand | ((value: unknown) => EditCommand | EditCommand[]);
+    }
+  | { mode: "local"; label: string; set(value: unknown): void }
+  | { mode: "set"; label: string; set(value: unknown): void };
 
 export interface ControlBindingOptions {
   label?: string;
@@ -1014,7 +1370,12 @@ export interface ControlBindingOptions {
 }
 
 export interface ControlsAPI {
-  readonly Segmented: Component<{options:{id:string;label:string}[];value:string;onChange:(id:string)=>void;label?:string}>;
+  readonly Segmented: Component<{
+    options: { id: string; label: string }[];
+    value: string;
+    onChange: (id: string) => void;
+    label?: string;
+  }>;
   /** Kernel-provided control components; props match src/renderer/src/controls — stable within apiVersion 1. */
   readonly NumField: ControlComponent;
   readonly ColorField: ControlComponent;
@@ -1037,11 +1398,22 @@ export interface ControlsAPI {
     channelBinding(
       layerId: string,
       channel: string,
-      options?: ControlBindingOptions & { time?: number | (() => number) }
+      options?: ControlBindingOptions & { time?: number | (() => number) },
     ): ControlEditBinding;
-    layerFieldBinding(layerId: string, field: string, options?: ControlBindingOptions): ControlEditBinding;
-    contentBinding(layerId: string, field: string, options?: ControlBindingOptions): ControlEditBinding;
-    compositionBinding(field: string, options?: ControlBindingOptions): ControlEditBinding;
+    layerFieldBinding(
+      layerId: string,
+      field: string,
+      options?: ControlBindingOptions,
+    ): ControlEditBinding;
+    contentBinding(
+      layerId: string,
+      field: string,
+      options?: ControlBindingOptions,
+    ): ControlEditBinding;
+    compositionBinding(
+      field: string,
+      options?: ControlBindingOptions,
+    ): ControlEditBinding;
   };
 }
 
@@ -1058,7 +1430,7 @@ export interface UIAPI {
       /** Which family the notice belongs to. An extension raises a `status` or
           an `alert`; it cannot raise an editor error, and the kernel attributes
           whatever it sends to the extension by name. */
-      kind?: 'status' | 'alert';
+      kind?: "status" | "alert";
       /** State the outcome rather than letting the message text be sniffed, so a
           success that quotes a user-chosen name stays a success. A failure the
           extension states becomes its alert, not an editor error. */
@@ -1069,12 +1441,12 @@ export interface UIAPI {
       /** Replace an earlier toast with the same key instead of stacking. */
       key?: string;
       /** Persistent notices sit in a corner; status toasts stay bottom-center. */
-      corner?: 'top-right' | 'bottom-right';
+      corner?: "top-right" | "bottom-right";
       /** One primary action rendered inside the toast. */
       action?: { label: string; run: () => void };
       /** Called only on explicit user dismissal. */
       onDismiss?: () => void;
-    }
+    },
   ): void;
   confirm(title: string, body?: string): Promise<boolean>;
   /**
@@ -1090,16 +1462,31 @@ export interface UIAPI {
   /** Requires the full-access permission for Store extensions. A Promise of
    *  items opens the menu when it settles with any, unless another menu
    *  opened or menus closed first. */
-  menu(anchor: HTMLElement | { x: number; y: number }, items: MenuContribution[] | Promise<MenuContribution[]>): void;
+  menu(
+    anchor: HTMLElement | { x: number; y: number },
+    items: MenuContribution[] | Promise<MenuContribution[]>,
+  ): void;
   /** Requires the full-access permission for Store extensions. */
-  modal(opts: { title?: string; body?: HTMLElement | string; width?: number; actions?: Array<{ label: string; pri?: boolean; run?: () => unknown }> }): { close(): void; body: HTMLElement };
+  modal(opts: {
+    title?: string;
+    body?: HTMLElement | string;
+    width?: number;
+    actions?: Array<{ label: string; pri?: boolean; run?: () => unknown }>;
+  }): { close(): void; body: HTMLElement };
   /** Icon SVG markup by name from the kernel set. Returns a Promise when sandboxed. */
   icon(name: string): string;
   /** Requires the full-access permission for Store extensions. */
   drag(event: PointerEvent, options: DragOptions): { cancel(): void };
   closeMenus(): void;
-  showLayerMenu(layer: Layer, event: { clientX: number; clientY: number }, origin?: string): void;
-  showParentMenu(ids: string[], event: { clientX: number; clientY: number }): HTMLElement | undefined;
+  showLayerMenu(
+    layer: Layer,
+    event: { clientX: number; clientY: number },
+    origin?: string,
+  ): void;
+  showParentMenu(
+    ids: string[],
+    event: { clientX: number; clientY: number },
+  ): HTMLElement | undefined;
   beginParentPick(event: PointerEvent, ids: string[]): void;
   openShaderEditor(layer?: Layer): void;
   /** Requires the full-access permission for Store extensions. */
@@ -1114,8 +1501,15 @@ export interface SourcePreview {
   readonly activeId: string | null;
   readonly playing: boolean;
 }
-export interface SnapAxisCandidate { value: number; point: Point; [key: string]: unknown }
-export interface SnapCandidates { x: SnapAxisCandidate[]; y: SnapAxisCandidate[] }
+export interface SnapAxisCandidate {
+  value: number;
+  point: Point;
+  [key: string]: unknown;
+}
+export interface SnapCandidates {
+  x: SnapAxisCandidate[];
+  y: SnapAxisCandidate[];
+}
 
 export interface TimelineService {
   graph: boolean;
@@ -1142,7 +1536,10 @@ export interface ViewerService {
   ov: HTMLCanvasElement | null;
   attach(stage: HTMLElement): ViewerService | void;
   worldBounds(layer: Layer, time: number): Bounds | null;
-  snapshotSnapCandidates(time: number, selectionLayers: Layer[]): SnapCandidates;
+  snapshotSnapCandidates(
+    time: number,
+    selectionLayers: Layer[],
+  ): SnapCandidates;
   isNavigating(): boolean;
   deferNavigationRender(now: number): boolean;
   setZoom(zoom: number): number | false;
@@ -1159,8 +1556,14 @@ export interface InspectorService {
   pasteCopiedEffects(): boolean;
   body: HTMLElement | null;
 }
-export interface ToolService { tool: string; toolShape: string; setTool(tool: string, detail?: string): void }
-export interface ShaderHooks { syncShaderUniforms(layer: Layer): void }
+export interface ToolService {
+  tool: string;
+  toolShape: string;
+  setTool(tool: string, detail?: string): void;
+}
+export interface ShaderHooks {
+  syncShaderUniforms(layer: Layer): void;
+}
 
 /**
  * Captions service, registered by the host as `captions`. The timeline and
@@ -1168,7 +1571,10 @@ export interface ShaderHooks { syncShaderUniforms(layer: Layer): void }
  * caption workflows (import, export, generation, inline editing). Cue edits
  * themselves are ordinary `add_captions` / `edit_captions` commands.
  */
-export interface CaptionSelection { layerId: string | null; cues: string[] }
+export interface CaptionSelection {
+  layerId: string | null;
+  cues: string[];
+}
 export interface CaptionsService {
   selection(): CaptionSelection;
   /** Select cues of one captions layer (also selects the layer); null clears. */
@@ -1178,13 +1584,17 @@ export interface CaptionsService {
   /** Ask the surface showing the cue to start editing its text in place. */
   editCue(layerId: string, cueId: string): void;
   /** The surface that owns inline editing registers here; returns unregister. */
-  onEditRequest(listener: (request: { layerId: string; cueId: string }) => boolean | void): () => void;
+  onEditRequest(
+    listener: (request: { layerId: string; cueId: string }) => boolean | void,
+  ): () => void;
   /** Import an SRT or WebVTT file as a new captions layer. */
   importFile(file?: File, options?: { at?: number }): Promise<string | null>;
   /** Export a captions layer as a sidecar file (asks for options when omitted). */
-  exportFile(layerId?: string, format?: 'srt' | 'vtt'): Promise<boolean>;
+  exportFile(layerId?: string, format?: "srt" | "vtt"): Promise<boolean>;
   /** Transcribe audio/video layers into a new captions layer. */
-  generate(layerIds?: string[]): Promise<{ ok: boolean; layerId?: string; message?: string }>;
+  generate(
+    layerIds?: string[],
+  ): Promise<{ ok: boolean; layerId?: string; message?: string }>;
 }
 
 /**
@@ -1211,14 +1621,14 @@ export interface ServicesAPI {
    * `api.layers.register` or `api.effects.register` (GLSL) instead, and read
    * a layer's pixels with `await api.render.rasterAsync(layer)`.
    */
-  register(name: 'raster', implementation: RenderAPI['raster']): Disposable;
+  register(name: "raster", implementation: RenderAPI["raster"]): Disposable;
   register<T>(name: string, implementation: T): Disposable;
   /**
    * @deprecated Compatibility member (apiVersion 1 to 3; it keeps working
    * fully). Capturing the `raster` service to wrap it: read a layer's pixels
    * with `await api.render.rasterAsync(layer)` instead.
    */
-  get(name: 'raster'): RenderAPI['raster'] | null;
+  get(name: "raster"): RenderAPI["raster"] | null;
   get<T>(name: string): T | null;
 }
 
@@ -1236,38 +1646,55 @@ export interface StorageAPI {
 /* ── events ──────────────────────────────────────────────── */
 
 export interface KernelEvents {
-  'scene3d:selection': {layerId: string|null;ids: string[]};
-  'inspector:changed': undefined;
-  'project:changed': { kind: 'values' | 'structure' | 'project' | 'assets' | 'library' | 'history' | 'replace' };
+  "scene3d:selection": { layerId: string | null; ids: string[] };
+  "inspector:changed": undefined;
+  "project:changed": {
+    kind:
+      | "values"
+      | "structure"
+      | "project"
+      | "assets"
+      | "library"
+      | "history"
+      | "replace";
+  };
   selection: Selection;
   time: number;
   transport: { playing: boolean };
   /** Font family catalogue changed; payload is the complete ordered families list. */
   fonts: string[];
   layout: undefined;
-  'theme:changed': { id: string; scheme: 'light' | 'dark' };
-  'extension:loaded': { id: string };
-  'extension:unloaded': { id: string };
+  "theme:changed": { id: string; scheme: "light" | "dark" };
+  "extension:loaded": { id: string };
+  "extension:unloaded": { id: string };
   /** Any extension record changed (health, enablement, rebuild) — re-read `extensions.list()`. */
-  'extensions:ready': undefined;
-  'extensions:changed': { ids: string[]; reason: string };
+  "extensions:ready": undefined;
+  "extensions:changed": { ids: string[]; reason: string };
   /** The compositor presented a frame. `viewport` is the exact preview viewport
    * object it drew into (identity-comparable with `render.gl.previewViewport`),
    * so a viewer can tell a fresh presentation from a reused one. */
-  'frame:rendered': { time: number; viewport: PreviewViewport | null; version: number | undefined; quality: number };
+  "frame:rendered": {
+    time: number;
+    viewport: PreviewViewport | null;
+    version: number | undefined;
+    quality: number;
+  };
   /** The engine finished a frame and overlays (selection, guides) should redraw. */
   overlay: undefined;
   /** Coalesced repaint request from the host: 'render' fires immediately for
    * the compositor; 'timeline', 'ui', and 'status' fire once per animation
    * frame after any host-side invalidation (reveal, collapse, history restore,
    * selection restore). Extensions that cache derived rows or panels rebuild on it. */
-  invalidate: 'render' | 'timeline' | 'ui' | 'status';
+  invalidate: "render" | "timeline" | "ui" | "status";
 }
 
 export interface EventsAPI {
   /** Sandboxed, listeners run in the extension's document and occurrences arrive batched once per host flush
    * (`time` and `selection` keep the latest value). */
-  on<K extends keyof KernelEvents>(event: K, fn: (payload: KernelEvents[K]) => void): Disposable;
+  on<K extends keyof KernelEvents>(
+    event: K,
+    fn: (payload: KernelEvents[K]) => void,
+  ): Disposable;
   emit<K extends keyof KernelEvents>(event: K, payload: KernelEvents[K]): void;
 }
 
@@ -1352,7 +1779,11 @@ export interface HostAPI {
     readonly perf: unknown;
   };
   /** Mount a Svelte component into an element (kernel-provided svelte runtime). */
-  mount<P extends Record<string, unknown>>(component: Component<P>, target: HTMLElement, props: P): () => void;
+  mount<P extends Record<string, unknown>>(
+    component: Component<P>,
+    target: HTMLElement,
+    props: P,
+  ): () => void;
   /** Native haptic feedback (the Mac trackpad's snap tick). Does nothing where there is none. */
   readonly haptic: { alignment(): void };
 }
@@ -1416,13 +1847,19 @@ export interface PowermoveAPI {
   readonly host: HostAPI;
 
   /** Shorthand for events.on. */
-  on: EventsAPI['on'];
-  log(level: 'info' | 'warn' | 'error', message: string, ...data: unknown[]): void;
+  on: EventsAPI["on"];
+  log(
+    level: "info" | "warn" | "error",
+    message: string,
+    ...data: unknown[]
+  ): void;
   /** Register a disposer to run on deactivate. */
   onDispose(fn: () => void): void;
 }
 
-export type ActivateFn = (api: PowermoveAPI) => void | Disposable | Promise<void | Disposable>;
+export type ActivateFn = (
+  api: PowermoveAPI,
+) => void | Disposable | Promise<void | Disposable>;
 
 export interface ExtensionModule {
   default: ActivateFn;
@@ -1430,4 +1867,4 @@ export interface ExtensionModule {
   deactivate?: () => void | Promise<void>;
 }
 
-export * from './editor-helpers';
+export * from "./editor-helpers";

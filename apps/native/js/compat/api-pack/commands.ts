@@ -1,48 +1,51 @@
-import type { BlendMode, Layer, LayerType } from './project';
-import type { TransformInput } from './transform';
+import type { BlendMode, Layer, LayerType } from "./project";
+import type { TransformInput } from "./transform";
 
 export const COMMAND_TYPES = [
-  'set_property',
-  'replace_keyframes',
-  'simplify_keyframes',
-  'set_easing',
-  'set_expression',
-  'set_content',
-  'set_layer',
-  'set_composition',
-  'add_layer',
-  'delete_layers',
-  'reorder_layer',
-  'group_layers',
-  'ungroup_layers',
-  'move_to_group',
-  'add_audio_effect',
-  'remove_audio_effect',
-  'reorder_audio_effect',
-  'enable_audio_effect',
-  'set_audio_effect_parameter',
-  'add_effect',
-  'remove_effect',
-  'set_effect',
-  'set_transition',
-  'set_scene_parameter',
-  'add_marker',
-  'remove_marker',
-  'create_section',
-  'update_section',
-  'transform_layers',
-  'add_captions',
-  'edit_captions'
+  "set_property",
+  "replace_keyframes",
+  "simplify_keyframes",
+  "set_easing",
+  "set_expression",
+  "set_content",
+  "set_layer",
+  "set_composition",
+  "add_layer",
+  "delete_layers",
+  "reorder_layer",
+  "group_layers",
+  "ungroup_layers",
+  "move_to_group",
+  "add_audio_effect",
+  "remove_audio_effect",
+  "reorder_audio_effect",
+  "enable_audio_effect",
+  "set_audio_effect_parameter",
+  "add_effect",
+  "remove_effect",
+  "set_effect",
+  "set_transition",
+  "set_scene_parameter",
+  "add_marker",
+  "remove_marker",
+  "create_section",
+  "update_section",
+  "transform_layers",
+  "add_captions",
+  "edit_captions",
 ] as const;
 
 export type EditCommandType = (typeof COMMAND_TYPES)[number];
 
 export type JsonPrimitive = string | number | boolean | null;
-export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+export type JsonValue =
+  | JsonPrimitive
+  | JsonValue[]
+  | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
 /** A falsey/missing target means the current selection in the legacy editor. */
-export type LayerTarget = null | '$selection' | 'selection' | number | string;
+export type LayerTarget = null | "$selection" | "selection" | number | string;
 
 export type EasingCurve = readonly [number, number, number, number];
 export type Easing = string | EasingCurve;
@@ -54,7 +57,7 @@ export interface CommandKeyframe {
   hold?: boolean;
   /** Native editor round trips preserve identity and independent temporal sides. */
   id?: string;
-  temporal?: import('../anim/temporal-ease').TemporalEaseFields;
+  temporal?: import("../anim/temporal-ease").TemporalEaseFields;
   spring?: JsonObject | null;
   /** Unit handles for color channels, whose values are strings. */
   handles?: EasingCurve;
@@ -72,19 +75,25 @@ interface IntentAwareCommand {
   preserveHandEdits?: boolean;
 }
 
-export interface SetPropertyCommand extends LayerTargetedCommand, LockableCommand, IntentAwareCommand {
-  type: 'set_property';
+export interface SetPropertyCommand
+  extends LayerTargetedCommand,
+    LockableCommand,
+    IntentAwareCommand {
+  type: "set_property";
   path: string;
   value: JsonValue;
   time?: number;
-  mode?: 'auto' | 'static' | 'keyframe';
+  mode?: "auto" | "static" | "keyframe";
   ease?: string;
   hold?: boolean;
   markIntent?: boolean | string;
 }
 
-export interface ReplaceKeyframesCommand extends LayerTargetedCommand, LockableCommand, IntentAwareCommand {
-  type: 'replace_keyframes';
+export interface ReplaceKeyframesCommand
+  extends LayerTargetedCommand,
+    LockableCommand,
+    IntentAwareCommand {
+  type: "replace_keyframes";
   path: string;
   keyframes: CommandKeyframe[];
   replace?: boolean;
@@ -92,8 +101,8 @@ export interface ReplaceKeyframesCommand extends LayerTargetedCommand, LockableC
 }
 
 export interface SimplifyKeyframesCommand {
-  type: 'simplify_keyframes';
-  scope?: 'project' | 'layers' | 'properties';
+  type: "simplify_keyframes";
+  scope?: "project" | "layers" | "properties";
   /** Explicit IDs; omitted layers use the current layer selection. */
   targets?: string[];
   /** Explicit property paths from get_project_state. */
@@ -101,19 +110,21 @@ export interface SimplifyKeyframesCommand {
 }
 
 export interface SetEasingCommand {
-  type: 'set_easing';
+  type: "set_easing";
   keyframes: string[];
   curve: Easing;
 }
 
 export interface SetExpressionCommand extends LayerTargetedCommand {
-  type: 'set_expression';
+  type: "set_expression";
   path: string;
   expression: string | null;
 }
 
-export interface SetContentCommand extends LayerTargetedCommand, LockableCommand {
-  type: 'set_content';
+export interface SetContentCommand
+  extends LayerTargetedCommand,
+    LockableCommand {
+  type: "set_content";
   patch: JsonObject;
 }
 
@@ -136,13 +147,13 @@ export interface LayerPatch {
 }
 
 export interface SetLayerCommand extends LayerTargetedCommand {
-  type: 'set_layer';
+  type: "set_layer";
   patch: LayerPatch;
 }
 
 export interface CompositionPatch {
   /** Project-wide working precision, in bits per color channel. */
-  colorDepth?: import('../color-depth').ColorDepth;
+  colorDepth?: import("../color-depth").ColorDepth;
   name?: string;
   width?: number;
   height?: number;
@@ -158,12 +169,12 @@ export interface CompositionPatch {
 }
 
 export interface SetCompositionCommand {
-  type: 'set_composition';
+  type: "set_composition";
   patch: CompositionPatch;
 }
 
 export interface AddLayerCommand {
-  type: 'add_layer';
+  type: "add_layer";
   id?: string;
   layerType: LayerType;
   name?: string;
@@ -185,24 +196,37 @@ export interface AddLayerCommand {
 }
 
 export interface DeleteLayersCommand extends LayerTargetedCommand {
-  type: 'delete_layers';
+  type: "delete_layers";
   targets?: LayerTarget[];
 }
 
 export interface ReorderLayerCommand extends LayerTargetedCommand {
-  type: 'reorder_layer';
+  type: "reorder_layer";
   index: number;
 }
 
 export type AudioEffectEditCommand =
   | (LayerTargetedCommand & { type: "add_audio_effect"; effect: string })
   | (LayerTargetedCommand & { type: "remove_audio_effect"; effect: string })
-  | (LayerTargetedCommand & { type: "reorder_audio_effect"; effect: string; index: number })
-  | (LayerTargetedCommand & { type: "enable_audio_effect"; effect: string; enabled: boolean })
-  | (LayerTargetedCommand & { type: "set_audio_effect_parameter"; effect: string; key: string; value: number | boolean | string });
+  | (LayerTargetedCommand & {
+      type: "reorder_audio_effect";
+      effect: string;
+      index: number;
+    })
+  | (LayerTargetedCommand & {
+      type: "enable_audio_effect";
+      effect: string;
+      enabled: boolean;
+    })
+  | (LayerTargetedCommand & {
+      type: "set_audio_effect_parameter";
+      effect: string;
+      key: string;
+      value: number | boolean | string;
+    });
 
 export interface AddEffectCommand extends LayerTargetedCommand {
-  type: 'add_effect';
+  type: "add_effect";
   effect: string;
   parameters?: JsonObject;
   open?: boolean;
@@ -211,12 +235,12 @@ export interface AddEffectCommand extends LayerTargetedCommand {
 }
 
 export interface RemoveEffectCommand extends LayerTargetedCommand {
-  type: 'remove_effect';
+  type: "remove_effect";
   effect: string;
 }
 
 export interface SetEffectCommand extends LayerTargetedCommand {
-  type: 'set_effect';
+  type: "set_effect";
   effect: string;
   patch: {
     enabled?: boolean;
@@ -227,9 +251,9 @@ export interface SetEffectCommand extends LayerTargetedCommand {
 }
 
 export interface SetTransitionCommand {
-  type: 'set_transition';
+  type: "set_transition";
   layer: LayerTarget;
-  edge: 'in' | 'out';
+  edge: "in" | "out";
   transition: {
     type: string;
     dur?: number;
@@ -238,7 +262,7 @@ export interface SetTransitionCommand {
 }
 
 export interface SetSceneParameterCommand {
-  type: 'set_scene_parameter';
+  type: "set_scene_parameter";
   name: string;
   label?: string;
   control?: string;
@@ -249,14 +273,14 @@ export interface SetSceneParameterCommand {
 }
 
 export interface AddMarkerCommand {
-  type: 'add_marker';
+  type: "add_marker";
   id?: string;
   time?: number;
   name?: string;
 }
 
 export interface RemoveMarkerCommand {
-  type: 'remove_marker';
+  type: "remove_marker";
   /** Position in the current composition's marker list, including legacy markers without IDs. */
   index: number;
 }
@@ -286,12 +310,12 @@ export interface SectionManifest {
 }
 
 export interface CreateSectionCommand {
-  type: 'create_section';
+  type: "create_section";
   section: SectionManifest;
 }
 
 export interface UpdateSectionCommand {
-  type: 'update_section';
+  type: "update_section";
   sectionId: string;
   layers: Layer[];
   thumb?: string | null;
@@ -300,7 +324,7 @@ export interface UpdateSectionCommand {
 }
 
 export interface TransformLayersCommand {
-  type: 'transform_layers';
+  type: "transform_layers";
   transform: TransformInput;
   state?: Record<string, JsonValue>;
 }
@@ -323,13 +347,13 @@ export interface CaptionCuePatch {
 }
 
 export interface AddCaptionsCommand {
-  type: 'add_captions';
+  type: "add_captions";
   id?: string;
   name?: string;
   cues?: CaptionCueInput[];
   /** SRT or WebVTT source to import instead of `cues`. */
   text?: string;
-  format?: 'srt' | 'vtt' | 'auto';
+  format?: "srt" | "vtt" | "auto";
   /** Seconds added to every imported or listed cue. */
   offset?: number;
   /** A preset id plus any style overrides. */
@@ -341,9 +365,20 @@ export interface AddCaptionsCommand {
   select?: boolean;
 }
 
-export interface EditCaptionsCommand extends LayerTargetedCommand, LockableCommand {
-  type: 'edit_captions';
-  op: 'replace' | 'insert' | 'update' | 'delete' | 'split' | 'merge' | 'move' | 'import' | 'style';
+export interface EditCaptionsCommand
+  extends LayerTargetedCommand,
+    LockableCommand {
+  type: "edit_captions";
+  op:
+    | "replace"
+    | "insert"
+    | "update"
+    | "delete"
+    | "split"
+    | "merge"
+    | "move"
+    | "import"
+    | "style";
   /** replace / insert: cues; update: patches by id. */
   cues?: Array<CaptionCueInput | CaptionCuePatch>;
   /** delete / merge / move. Move without ids shifts every cue. */
@@ -355,7 +390,7 @@ export interface EditCaptionsCommand extends LayerTargetedCommand, LockableComma
   by?: number;
   /** import: SRT or WebVTT source; replaces the cues unless replace is false. */
   text?: string;
-  format?: 'srt' | 'vtt' | 'auto';
+  format?: "srt" | "vtt" | "auto";
   replace?: boolean;
   offset?: number;
   /** style: a preset id and/or overrides. */
@@ -363,7 +398,12 @@ export interface EditCaptionsCommand extends LayerTargetedCommand, LockableComma
   language?: string | null;
 }
 
-export interface GroupLayersCommand { type: 'group_layers' | 'ungroup_layers' | 'move_to_group'; targets: string[]; name?: string; group?: string | null; }
+export interface GroupLayersCommand {
+  type: "group_layers" | "ungroup_layers" | "move_to_group";
+  targets: string[];
+  name?: string;
+  group?: string | null;
+}
 
 export type EditCommand =
   | AudioEffectEditCommand
@@ -416,6 +456,9 @@ export type EditResult =
       };
     };
 
-export function assertNever(value: never, message = 'Unhandled edit command'): never {
+export function assertNever(
+  value: never,
+  message = "Unhandled edit command",
+): never {
   throw new Error(`${message}: ${String(value)}`);
 }
