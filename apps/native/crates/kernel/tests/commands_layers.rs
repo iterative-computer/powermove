@@ -995,7 +995,7 @@ fn g3_speed_two_trim_has_half_the_source_handle_length() {
 
 #[test]
 fn g3_speed_ripples_only_its_track_and_undo_restores_everything() {
-    for tracks in [false, true] {
+    for (tracks, property) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut s = store();
         run(
             &mut s,
@@ -1019,14 +1019,12 @@ fn g3_speed_ripples_only_its_track_and_undo_restores_everything() {
         std::sync::Arc::make_mut(&mut state.ui).insert("P".into(), ui);
         s.set_runtime_state("P", state, None);
         let before = s.root().unwrap().to_value();
-        run(
-            &mut s,
-            pm_kernel::ContentCommand::Set {
-                layer_id: "clip".into(),
-                patch: [("speed".into(), Value::from(2.0))].into_iter().collect(),
-                time: 0.0,
-            },
-        );
+        let speed: Command = if property {
+            pm_kernel::PropertyCommand::Set(pm_kernel::commands::properties::SetProperty::new("clip", "c.speed", 2.0, 0.0)).into()
+        } else {
+            pm_kernel::ContentCommand::Set { layer_id: "clip".into(), patch: [("speed".into(), Value::from(2.0))].into_iter().collect(), time: 0.0 }.into()
+        };
+        run(&mut s, speed);
         assert_eq!(num(&layer(&s, "clip"), &["from"]), 2.);
         assert_eq!(num(&layer(&s, "clip"), &["dur"]), 2.);
         assert_eq!(

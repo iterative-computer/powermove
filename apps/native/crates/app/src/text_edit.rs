@@ -1202,7 +1202,8 @@ fn text_tool_duration(p: &pm_kernel::Published, time: f64) -> Option<f64> {
         return None;
     }
     let root = p.snapshot.root()?;
-    let comp = pm_kernel::model::comp_node(root, None)?;
+    let comp_id = pm_kernel::model::open_comp_id(root);
+    let comp = pm_kernel::model::comp_node(root, comp_id.as_deref())?;
     let duration = comp.get("dur").and_then(pm_kernel::model::number_of)?;
     let fps = comp
         .get("fps")

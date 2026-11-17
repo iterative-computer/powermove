@@ -1141,7 +1141,9 @@ impl DocumentStore {
         {
             let tree = root.as_ref().ok_or(TransactionError::NoDocument)?;
             let property = match command {
-                Some(Command::Property(crate::PropertyCommand::Set(c))) => Some(c),
+                // Speed needs the project mode to ripple its track. Plan it with
+                // runtime state rather than the state-free keyframe batch.
+                Some(Command::Property(crate::PropertyCommand::Set(c))) if c.channel != "c.speed" => Some(c),
                 _ => None,
             };
             let mut ops = if property.is_none() {
