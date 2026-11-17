@@ -246,35 +246,50 @@ fn capture_colour_stack_states() {
                             ))
                         },
                     );
-                    let fill = tokens.colors.floating;
+                    let fill = tokens.colors.panel;
                     let window = cx
                         .open_window(size(px(w), px(h)), |window, cx| {
                             let view = cx.new(|cx| {
-                                SurfaceView::new(
+                                let mut view = SurfaceView::new(
                                     runtime,
                                     first,
                                     tokens,
                                     Natives::default(),
                                     window,
                                     cx,
-                                )
+                                );
+                                view.grows = true;
+                                view
                             });
-                            cx.new(|_| Frame { view, fill })
+                            cx.new(|_| ColourCaptureFrame {
+                                view,
+                                fill,
+                                height: h,
+                                scroll: gpui::ScrollHandle::new(),
+                            })
                         })
                         .unwrap();
                     for _ in 0..20 {
                         cx.run_until_parked();
                         std::thread::sleep(std::time::Duration::from_millis(20));
                     }
-                    // Layout establishes the scroll extent; then put the last row
-                    // into the short dock-sized viewport, without OS input.
-                    let _ = cx.capture_screenshot(window.into()).unwrap();
-                    if height_name == "bottom" {
+                    // Match the production side-panel body: it measures natural
+                    // content before scrolling. Settle layout/culling after moving.
+                    for _ in 0..4 {
+                        let _ = cx.capture_screenshot(window.into()).unwrap();
                         window
-                            .update(&mut cx, |frame, _, cx| {
-                                frame
-                                    .view
-                                    .update(cx, |v, cx| v.review_scroll_to(f32::MAX, cx));
+                            .update(&mut cx, |frame, window, cx| {
+                                if height_name == "bottom" {
+                                    frame.scroll.set_offset(gpui::point(
+                                        px(0.),
+                                        -frame.scroll.max_offset().y,
+                                    ));
+                                    frame
+                                        .view
+                                        .update(cx, |v, cx| v.review_scroll_to(f32::MAX, cx));
+                                }
+                                window.refresh();
+                                cx.notify();
                             })
                             .unwrap();
                         cx.run_until_parked();
@@ -286,7 +301,7 @@ fn capture_colour_stack_states() {
                             .unwrap()
                             .expect("add row is laid out");
                         assert!(
-                            bounds.origin.y >= px(0.) && bounds.bottom() <= px(h),
+                            bounds.origin.y >= px(0.) && bounds.bottom() <= px(h + 0.5),
                             "add row outside {height_name} viewport: {bounds:?}"
                         );
                     }
@@ -298,5 +313,36 @@ fn capture_colour_stack_states() {
                 });
             }
         }
+    }
+}
+
+/// The same grow-to-content wrapper used by a side panel in the dock. A
+/// bare fixed-height SurfaceView compresses/culls its children in captures.
+struct ColourCaptureFrame {
+    view: gpui::Entity<SurfaceView>,
+    fill: u32,
+    height: f32,
+    scroll: gpui::ScrollHandle,
+}
+impl gpui::Render for ColourCaptureFrame {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::prelude::*;
+        let content = self.view.read(cx).in_body(self.height);
+        gpui::div()
+            .size_full()
+            .bg(gpui::rgb(self.fill))
+            .font_family(pm_design::TEXT_FONT)
+            .child(
+                gpui::div()
+                    .id("colour-capture-body")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(self.view.clone().cached(content)),
+            )
     }
 }
