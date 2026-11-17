@@ -832,6 +832,10 @@ impl Builtins {
                     .notes
                     .push("The file chosen is not the one that went missing".into());
             }
+            // A missing item's file found: it is relinked, not imported.
+            if !originals.contains_key(&replaced) {
+                outcome.relinked = std::mem::take(&mut outcome.imported);
+            }
             let Some(folder) = chosen.as_deref().and_then(Path::parent) else {
                 return Ok(outcome);
             };
@@ -1626,6 +1630,7 @@ mod tests {
         let b2 = write(&moved, "B renamed.png", &b_bytes);
         write(&moved, "C.png", &[PNG, b"unrelated"].concat());
         let outcome = import_with(&f, vec![a2.clone()], Some(&ids[0]), &[], None);
+        assert_eq!(outcome.summary(), "Relinked A.png · Relinked 1 more from the same folder");
         assert!(
             outcome.notes.contains(&"Relinked 1 more from the same folder".to_owned()),
             "{outcome:?}"
@@ -2282,7 +2287,7 @@ mod tests {
         });
         assert_eq!(
             relinked.summary(),
-            "Imported shot.[0001-0007].png · frames 1–7, were 1–6 · frame 3 missing"
+            "Relinked shot.[0001-0007].png · frames 1–7, were 1–6 · frame 3 missing"
         );
         assert_eq!(relinked.assets, std::slice::from_ref(&id));
         let published = f.actor.handle().published("p").unwrap();
