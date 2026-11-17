@@ -775,6 +775,46 @@ impl Controller {
         off
     }
 }
+/// The file name a project's first save or Save As proposes: its own name
+/// (v1), without characters a file name cannot hold.
+fn save_name(project: &str) -> String {
+    let name: String = project
+        .trim()
+        .chars()
+        .map(|c| if matches!(c, '/' | ':') { '-' } else { c })
+        .collect();
+    let name = name.trim_start_matches('.');
+    format!("{}.pmv", if name.is_empty() { "Untitled" } else { name })
+}
+/// The note after a save to a place chosen in the save panel: the file and
+/// the folder it is in, as Finder names them.
+fn saved_where(path: &std::path::Path) -> String {
+    let file = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let folder = path
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "your Mac".into());
+    format!("Saved “{file}” in {folder}. File ▸ Show in Finder shows it.")
+}
+#[cfg(test)]
+mod first_save_tests {
+    #[test]
+    fn a_first_save_proposes_the_projects_own_name() {
+        assert_eq!(super::save_name("Paper"), "Paper.pmv");
+        assert_eq!(super::save_name("Cut 2/3: final"), "Cut 2-3- final.pmv");
+        assert_eq!(super::save_name("  "), "Untitled.pmv");
+        assert_eq!(super::save_name(".hidden"), "hidden.pmv");
+    }
+    #[test]
+    fn a_save_to_a_chosen_place_says_where() {
+        let note = super::saved_where(std::path::Path::new("/Users/someone/Movies/Paper.pmv"));
+        assert_eq!(note, "Saved “Paper.pmv” in Movies. File ▸ Show in Finder shows it.");
+    }
+}
 /// Whether `text` is a program's error value rather than a sentence: a type
 /// or variant name with its fields, as `Storage("Kernel state changed")` or
 /// `Closed { id: 3 }` print.
@@ -3082,13 +3122,22 @@ impl Controller {
                         displaced,
                     })) => {
                         v.session = Some(session);
-                        if as_path.is_some() {
+                        let chosen = as_path.is_some();
+                        if chosen {
                             v.path = as_path;
                         }
                         v.unprotected = false;
                         v.message = recovery_copy.map_or(String::new(), |_| {
                             "Its file couldn’t be written, so your changes were saved as a recovered copy in your projects.".into()
                         });
+                        // Saved to a place chosen now: where it went is said.
+                        if v.message.is_empty()
+                            && let Some(path) = &v.path
+                            && chosen
+                        {
+                            let note = saved_where(path);
+                            v.note(note, cx);
+                        }
                         v.load_recent(cx);
                         if let Some(kept) = displaced {
                             v.other_version_kept(kept, cx);
@@ -3310,8 +3359,21 @@ impl Controller {
             }
         }
     }
+    /// Whether the project saves to a file of its own (not only kept in
+    /// the library).
+    fn has_file(&self) -> bool {
+        self.published.as_ref().is_some_and(|p| {
+            p.session
+                .as_ref()
+                .is_some_and(|s| matches!(s.destination, SessionDestination::File(_)))
+        })
+    }
     pub fn save_dialog(&mut self, cx: &mut Context<Self>) {
-        let rx = platform::paths(&self.host.borrow().window, true);
+        let rx = platform::paths_named(
+            &self.host.borrow().window,
+            true,
+            &save_name(&self.project_name()),
+        );
         cx.spawn(async move |this, cx| {
             if let Ok(Some(path)) = rx.recv().await {
                 let _ = this.update(cx, |v, cx| v.save(Some(path), cx));
@@ -3821,6 +3883,9 @@ impl Controller {
                 })
                 .detach();
             }
+            // v1: the first save of a project with no file of its own asks
+            // where it goes, named for the project; later saves go there.
+            "save" if self.session.is_some() && !self.has_file() => self.save_dialog(cx),
             "save" => self.save(None, cx),
             "native.saveTake" => {
                 crate::takes_panel::dispatch(&cmd.name, || self.save_take(cx));

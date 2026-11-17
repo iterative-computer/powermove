@@ -1288,6 +1288,15 @@ impl Kernel {
                 path = None;
             }
         }
+        // A Save As to the file the session already is (the same name
+        // chosen again, Replace) is a save in place: its lock is the
+        // session's own, and taking it again failed with an OS error.
+        if path
+            .as_deref()
+            .is_some_and(|p| self.is_own_file(&session.project, p))
+        {
+            path = None;
+        }
         if path.is_none() {
             self.follow_file(&session.project);
         }
@@ -2579,6 +2588,15 @@ impl Kernel {
         .map_err(failure)?;
         Ok(id)
     }
+    /// Whether `path` names the file the session `id` already saves to.
+    fn is_own_file(&self, id: &str, path: &std::path::Path) -> bool {
+        let Destination::File(now) = &self.sessions[id].destination else {
+            return false;
+        };
+        now == path
+            || matches!((std::fs::canonicalize(now), std::fs::canonicalize(path)),
+                (Ok(a), Ok(b)) if a == b)
+    }
     fn save_session(
         &mut self,
         handle: &SessionHandle,
@@ -2586,6 +2604,8 @@ impl Kernel {
     ) -> Result<ShellReply, KernelFailure> {
         self.ensure_idle(handle)?;
         let id = &handle.project;
+        // Save As to its own file: a save in place (see `prepare_save_of`).
+        let save_as = save_as.filter(|(path, _)| !self.is_own_file(id, path));
         if save_as.is_none() {
             self.follow_file(id);
         }
