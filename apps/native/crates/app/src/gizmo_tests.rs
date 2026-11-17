@@ -1944,6 +1944,123 @@ fn the_first_pen_click_makes_a_path_layer_in_one_undo_step(cx: &mut TestAppConte
     s.rig.kernel.call(PROJECT, undo()).wait().unwrap().unwrap();
     assert_eq!(count(&s), before, "two clicks, two steps, nothing left");
 }
+/// Quick clicks with the Pen, each before the last one's edit has landed,
+/// are four corner vertices on one new path layer: none is lost, none makes
+/// a layer of its own, and no tangent follows the pointer afterwards.
+#[gpui::test]
+fn quick_pen_clicks_each_place_a_corner_vertex(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let clear = SelectionCall::Layers {
+        ids: vec![],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), clear))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.recorder.tool.set(Some(Tool::Pen));
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    cx.run_until_parked();
+    let count = |kernel: &pm_kernel::KernelHandle| {
+        let p = kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None).len()
+    };
+    let before = count(&s.rig.kernel);
+    for at in [[300., 100.], [400., 100.], [400., 250.], [300., 250.]] {
+        let p = s.point_of(at);
+        s.vcx.simulate_click(p, Modifiers::none());
+    }
+    let kernel = s.rig.kernel.clone();
+    let vertices = move |kernel: &pm_kernel::KernelHandle| {
+        let p = kernel.published(PROJECT).unwrap();
+        let id = p.selection.layers().first().cloned()?;
+        let layer = layer_value(kernel, &id)?;
+        let paths = layer.get("d")?.get("paths")?.as_array()?.clone();
+        Some(
+            paths
+                .iter()
+                .map(|path| path.get("vertices").and_then(|v| v.as_array()).cloned())
+                .collect::<Option<Vec<_>>>()?,
+        )
+    };
+    let surface = s.surface.clone();
+    settle(cx, move |cx| {
+        surface.read_with(cx, |g, _| g.idle())
+            && vertices(&kernel).is_some_and(|paths| paths.len() == 1 && paths[0].len() == 4)
+    });
+    assert_eq!(count(&s.rig.kernel), before + 1, "one new path layer");
+    let paths = vertices(&s.rig.kernel).unwrap();
+    for v in &paths[0] {
+        for k in ["inX", "inY", "outX", "outY"] {
+            assert_eq!(
+                v.get("p").and_then(|p| p.get(k)?.get("v")?.as_f64()),
+                Some(0.),
+                "a click is a corner: {k}"
+            );
+        }
+    }
+}
+/// A read that lands while the first Pen click is still held (its vertex
+/// added, its new layer not yet selected) keeps the open path: the next
+/// click adds to it instead of starting a second path.
+#[gpui::test]
+fn a_read_during_a_held_pen_click_keeps_the_open_path(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let clear = SelectionCall::Layers {
+        ids: vec![],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), clear))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.recorder.tool.set(Some(Tool::Pen));
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    cx.run_until_parked();
+    let first = s.point_of([300., 100.]);
+    s.vcx
+        .simulate_mouse_down(first, MouseButton::Left, Modifiers::none());
+    // Held: its vertex lands, then a read lands before the release, as a
+    // document change makes one in the app.
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    for _ in 0..40 {
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    s.vcx
+        .simulate_mouse_up(first, MouseButton::Left, Modifiers::none());
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    cx.run_until_parked();
+    let second = s.point_of([400., 100.]);
+    s.vcx.simulate_click(second, Modifiers::none());
+    let kernel = s.rig.kernel.clone();
+    let paths = move |kernel: &pm_kernel::KernelHandle| {
+        let p = kernel.published(PROJECT).unwrap();
+        let id = p.selection.layers().first().cloned()?;
+        let layer = layer_value(kernel, &id)?;
+        let paths = layer.get("d")?.get("paths")?.as_array()?.clone();
+        Some(
+            paths
+                .iter()
+                .map(|path| path.get("vertices").and_then(|v| v.as_array()).map(Vec::len))
+                .collect::<Option<Vec<_>>>()?,
+        )
+    };
+    let surface = s.surface.clone();
+    settle(cx, move |cx| {
+        surface.read_with(cx, |g, _| g.idle())
+            && paths(&kernel).is_some_and(|p| p.iter().sum::<usize>() == 2)
+    });
+    assert_eq!(paths(&s.rig.kernel), Some(vec![2]), "one path, both vertices");
+}
 /// A new path layer's path closes on a click on its first vertex, as a
 /// mask path does.
 #[gpui::test]

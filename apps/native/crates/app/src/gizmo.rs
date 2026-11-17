@@ -415,10 +415,11 @@ pub struct GizmoSurface {
     pen_reading: u64,
     /// The layer and open path new clicks extend.
     pen_active: Option<(String, String)>,
-    /// A pen read has landed since the tool was chosen.
+    /// A pen read that includes the Pen's own last press has landed.
     pen_ready: bool,
-    /// A press that came before the read, replayed when it lands.
-    pen_waiting: Option<(MouseDownEvent, [f64; 2], f64)>,
+    /// Presses, moves and releases that came before that read, replayed in
+    /// order when it lands.
+    pen_waiting: VecDeque<pen::PenInput>,
     /// Path and vertex whose tangents show.
     pen_selected: Option<(String, String)>,
     pen_drag: Option<pen::PenDrag>,
@@ -696,7 +697,7 @@ impl GizmoSurface {
             pen_reading: 0,
             pen_active: None,
             pen_ready: false,
-            pen_waiting: None,
+            pen_waiting: VecDeque::new(),
             pen_selected: None,
             pen_drag: None,
             pen_pointer: None,
@@ -1849,6 +1850,10 @@ impl GizmoSurface {
         // pick has not answered yet, waits for the release as a drag does.
         let held = self.drag.is_some()
             || self.pen_drag.is_some()
+            || matches!(
+                self.pen_waiting.back(),
+                Some(pen::PenInput::Down(..) | pen::PenInput::Move(..))
+            )
             || self.panning.is_some()
             || self.rulers.dragging.is_some()
             || self.marquee.is_some()
@@ -2103,6 +2108,10 @@ impl GizmoSurface {
                     s.gesture = None;
                 }
                 s.pump(cx);
+                // Clicks the Pen holds act once its own work has landed.
+                if !s.busy && s.queue.is_empty() && !s.pen_waiting.is_empty() {
+                    s.refresh(cx);
+                }
             });
         })
         .detach();
