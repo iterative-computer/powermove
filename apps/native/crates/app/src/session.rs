@@ -887,7 +887,7 @@ mod first_save_tests {
 }
 /// A project in a tab behind asks something (its Recover question): the
 /// editor whose tab is shown says so in its status line, once.
-fn tell_front_waiting(asking: gpui::EntityId, name: &str, cx: &mut App) {
+pub(crate) fn tell_front_waiting(asking: gpui::EntityId, name: &str, cx: &mut App) {
     let shown = crate::entry::editors(cx)
         .into_iter()
         .find(|c| c.entity_id() != asking && c.read(cx).host.borrow().tab_shown());
