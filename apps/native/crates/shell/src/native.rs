@@ -2877,11 +2877,12 @@ impl ToolbarDelegate {
         // it and sizes it. Export is the bar's one prominent item, tinted
         // with the accent.
         let &(_, sym, label) = TOOLBAR_BUTTONS.iter().find(|(n, ..)| *n == name.as_str())?;
-        item.setImage(Some(&if name == "agent" {
+        let image = if name == "agent" {
             agent_toolbar_image(&AgentStatus::default(), 0., t)
         } else {
             toolbar_symbol(sym, label, t)
-        }));
+        };
+        item.setImage(Some(&image));
         unsafe {
             item.setTarget(Some(target));
             item.setAction(Some(sel!(act:)));
