@@ -54,6 +54,8 @@ mod panel_id_tests {
         assert!(pm_builtins::builtin_panel(pm_builtins::PROJECT_PANEL).is_some());
     }
 }
+/// How far either side of a cut a dropped transition still goes across it.
+const CUT_REACH: f64 = 8.;
 /// An effect dragged from the Effects panel `panel` dropped on `layer`'s row
 /// (`None`: no row there, and the selected layer takes it, as v1.2.0).
 #[derive(Clone, Debug, PartialEq)]
@@ -1662,6 +1664,14 @@ impl TimelineSurface {
     ) {
         use pm_kernel::commands::effects::Edge as Side;
         let (x, y) = self.local(position);
+        // Tracks: a drop within a few points either side of a cut on the
+        // track under the pointer goes across it (the gap between the two
+        // strips is no clip's, and a point just inside one is still the cut).
+        if self.model.mode == TimelineMode::Tracks
+            && let Some((left, right)) = self.cut_near(x, y, CUT_REACH)
+        {
+            return (Some(right), Some(Side::In), Some(left));
+        }
         let layer = self
             .clip_at(x, y)
             .map(|(id, _)| id)
@@ -1680,6 +1690,52 @@ impl TimelineSurface {
             _ => None,
         };
         (layer, edge, across)
+    }
+    /// The cut nearest `x` within `reach` points on the track at `y`: the
+    /// clip ending there and the clip starting there, by their drawn layer
+    /// edges (a transition across the cut lets them overlap by its length).
+    fn cut_near(&self, x: f64, y: f64, reach: f64) -> Option<(String, String)> {
+        let frame = self.frame.as_ref()?;
+        let row: Vec<(&str, f64, f64)> = frame
+            .ops
+            .iter()
+            .filter(|o| o.shape == "clip" && o.bounds.y <= y && y < o.bounds.y + o.bounds.height)
+            .filter_map(|o| {
+                let id = o.id.strip_prefix("clip:")?;
+                let edges = o.detail["sourceEdges"].as_array()?;
+                Some((id, edges[0].as_f64()?, edges[1].as_f64()?))
+            })
+            .collect();
+        let mut best: Option<(f64, String, String)> = None;
+        for &(left, _, end) in &row {
+            for &(right, start, stop) in &row {
+                if left == right || start >= end + 1. || stop <= end {
+                    continue;
+                }
+                let index = &self.model.index;
+                let fade = index
+                    .layer(right)
+                    .and_then(|l| l.transitions[0].as_ref().map(|t| t.duration))
+                    .unwrap_or(0.)
+                    .max(
+                        index
+                            .layer(left)
+                            .and_then(|l| l.transitions[1].as_ref().map(|t| t.duration))
+                            .unwrap_or(0.),
+                    )
+                    * self.view.pps;
+                // Butted, or overlapping by no more than a transition.
+                if end - start > fade + 1. {
+                    continue;
+                }
+                let cut = (start + end) / 2.;
+                let distance = (x - cut).abs();
+                if distance <= reach && best.as_ref().is_none_or(|(d, ..)| distance < *d) {
+                    best = Some((distance, left.to_owned(), right.to_owned()));
+                }
+            }
+        }
+        best.map(|(_, left, right)| (left, right))
     }
     fn effect_moved(&mut self, bounds: Bounds<Pixels>, at: Point<Pixels>, cx: &mut Context<Self>) {
         let over = bounds.contains(&at).then_some(at);
@@ -3851,7 +3907,11 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         Edge::Out => pm_kernel::commands::timing::TimeEdge::Out,
     };
     use pm_kernel::TimingCommand as Timing;
-    if layered && matches!(spec, Spec::Ripple(_) | Spec::Roll(_) | Spec::Slide) {
+    // Roll and slide run the layer-level edits in both modes (any clip kind,
+    // neighbours on its own track; in Tracks the shown lanes are pinned
+    // first), as their keys do: the media-only edits refused a still or a
+    // clip with no neighbour on one side, so the drag did nothing.
+    if matches!(spec, Spec::Roll(_) | Spec::Slide) || layered && matches!(spec, Spec::Ripple(_)) {
         let id = primary()?;
         return Ok(DragKind::Timing(match spec {
             Spec::Ripple(edge) => Timing::RippleTrim {

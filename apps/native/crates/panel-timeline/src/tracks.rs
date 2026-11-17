@@ -238,17 +238,18 @@ fn pack(
     // keeps its lane only if its time is unchanged); then every other one
     // above whatever it overlaps (a new clip, or one an edit moved).
     let overlap = |a: &Unit, b: (f64, f64)| a.held().0 < b.1 - 1e-5 && b.0 < a.held().1 - 1e-5;
-    let mut placed: Vec<(f64, f64, usize, usize)> = Vec::new();
+    // Each placed unit: its held time, its lanes, and its place in the stack.
+    let mut placed: Vec<(f64, f64, usize, usize, usize)> = Vec::new();
     let mut rest = Vec::new();
     for &i in ids.iter().rev() {
         let u = &units[i];
         match holds.get(&i).copied() {
             Some(lane)
-                if !placed.iter().any(|&(f, e, lo, hi)| {
+                if !placed.iter().any(|&(f, e, lo, hi, _)| {
                     overlap(u, (f, e)) && lane < hi && lo < lane + u.height
                 }) =>
             {
-                placed.push((u.held().0, u.held().1, lane, lane + u.height));
+                placed.push((u.held().0, u.held().1, lane, lane + u.height, i));
                 units[i].base = lane;
             }
             _ => rest.push(i),
@@ -256,24 +257,35 @@ fn pack(
     }
     for i in rest {
         let u = &units[i];
-        let mut base = index.layers[i].preferred_track;
-        // The lowest lane at or above its preferred track free over its time.
+        // A clip getting its first lane (a new layer) goes above every clip
+        // it overlaps that is under it in the stack: the higher track is drawn
+        // on top, so the timeline never contradicts the picture. One an edit
+        // moved keeps its track where it can (nothing else re-packs).
+        let fresh = !held.contains_key(&index.layers[i].id);
+        let floor = placed
+            .iter()
+            .filter(|&&(f, e, _, _, at)| fresh && at > i && overlap(u, (f, e)))
+            .map(|&(_, _, _, hi, _)| hi)
+            .max()
+            .unwrap_or(0);
+        let mut base = floor.max(index.layers[i].preferred_track);
+        // Then the lowest lane from there free over its time.
         loop {
             let top = base + u.height;
             match placed
                 .iter()
-                .filter(|&&(f, e, lo, hi)| overlap(u, (f, e)) && base < hi && lo < top)
-                .map(|&(_, _, _, hi)| hi)
+                .filter(|&&(f, e, lo, hi, _)| overlap(u, (f, e)) && base < hi && lo < top)
+                .map(|&(_, _, _, hi, _)| hi)
                 .max()
             {
                 Some(hi) => base = hi,
                 None => break,
             }
         }
-        placed.push((u.held().0, u.held().1, base, base + u.height));
+        placed.push((u.held().0, u.held().1, base, base + u.height, i));
         units[i].base = base;
     }
-    placed.iter().map(|&(_, _, _, hi)| hi).max().unwrap_or(0)
+    placed.iter().map(|&(_, _, _, hi, _)| hi).max().unwrap_or(0)
 }
 fn pack_fresh(ids: &[usize], units: &mut [Unit], index: &TimelineIndex) -> usize {
     let mut starts: Vec<_> = ids.iter().map(|i| Total(units[*i].held().0)).collect();

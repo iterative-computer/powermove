@@ -1442,7 +1442,10 @@ impl Drag {
         let lanes = (model.mode == crate::TimelineMode::Tracks
             && matches!(
                 kind,
-                DragKind::ProEdit(_) | DragKind::TrimIn { .. } | DragKind::TrimOut { .. }
+                DragKind::ProEdit(_)
+                    | DragKind::Timing(_)
+                    | DragKind::TrimIn { .. }
+                    | DragKind::TrimOut { .. }
             ))
         .then(|| crate::tracks::relative_lanes(index, &model.reveal));
         Ok(Self {
