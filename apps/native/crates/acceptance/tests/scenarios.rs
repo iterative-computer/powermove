@@ -41,6 +41,10 @@ fn corpus_pmv4() {
 /// additions, pinned here (id, chord, command, arguments as JSON) so none
 /// goes unchecked.
 const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
+    ("native.agentPause", "cmd+shift+.", "agent.pause", "[]"),
+    ("native.agentStop", "cmd+alt+.", "agent.stop", "[]"),
+    ("native.agentUndoTurn", "cmd+alt+z", "agent.undoTurn", "[]"),
+    ("native.agentSteer", "cmd+shift+'", "agent.steer", "[]"),
     ("K196", "`", "maximizePanel", "[]"),
     ("K197", "m", "toggleLayerStrips", "[]"),
     ("main.viewer.tab", "tab", "composition.flowchart", "[]"),
@@ -442,7 +446,7 @@ const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
 fn every_shipped_binding_under_seven_routing_contexts() {
     let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
     let shipped = keyboard::production::shipped();
-    assert_eq!(shipped.len(), 292);
+    assert_eq!(shipped.len(), 296);
     assert_eq!(c.bindings.len() + NATIVE_BINDINGS.len(), shipped.len());
     for real in &shipped {
         let binding = match c.bindings.iter().find(|b| b.id == real.id) {
