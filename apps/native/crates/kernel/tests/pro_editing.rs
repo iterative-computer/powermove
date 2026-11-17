@@ -203,7 +203,10 @@ fn locked_ancestor_and_animated_timing_are_atomic() {
     let g = json!({"id":"g","type":"group","lock":true,"from":0,"dur":12});
     let mut s = store(vec![g, a, b]);
     reject(&mut s, roll(1.));
-    for key in ["trim", "speed", "sourceTime", "timeRemap"] {
+    // Animated trim or speed, or a remap switch that is itself animated,
+    // refuse. (A keyed `sourceTime` is how a remapped clip shows its source:
+    // it slips; see `retimed_clips_trim_and_slip_like_any_other`.)
+    for key in ["trim", "speed", "timeRemap"] {
         let mut b = clip("b", 4., 4., 0);
         b["d"][key] = json!({"v":1,"kf":[{"t":0,"v":1,"i":"timing"}],"expr":null});
         let mut s = store(vec![b]);
@@ -650,4 +653,55 @@ fn malformed_source_content_or_links_are_refused_without_panicking() {
             linked: true,
         },
     );
+}
+/// A retimed clip trims, slides and slips as any other: audio at another
+/// speed moves its source at that speed; a remapped clip (Time Remap, Freeze
+/// Frame, Time-Reverse) keeps showing the same source frame at the same
+/// composition time through an In trim (its remap keys move with it), and a
+/// slip moves every remapped source time.
+#[test]
+fn retimed_clips_trim_and_slip_like_any_other() {
+    let mut sound = audio("sound", 4., 4., 1);
+    sound["d"]["speed"] = json!(2.);
+    let mut b = clip("b", 4., 4., 0);
+    b["d"]["timeRemap"] = json!({"v": true, "kf": [], "expr": null});
+    b["d"]["sourceTime"] = json!({"v": 0, "kf": [
+        {"i": "s0", "t": 0, "v": 3, "eo": [0, 0], "ei": [1, 1]},
+        {"i": "s1", "t": 4, "v": 1, "eo": [0, 0], "ei": [1, 1]}], "expr": null});
+    let mut s = store(vec![b, sound]);
+    roundtrip(
+        &mut s,
+        Edit::Trim {
+            layer_ids: ids(&["sound"]),
+            edge: Edge::In,
+            delta: 0.5,
+            linked: false,
+        },
+    );
+    assert_eq!(n(&layer(&s, "sound"), &["d", "trim", "v"]), 7.);
+    roundtrip(
+        &mut s,
+        Edit::Trim {
+            layer_ids: ids(&["b"]),
+            edge: Edge::In,
+            delta: 1.,
+            linked: false,
+        },
+    );
+    let b = layer(&s, "b");
+    assert_eq!(n(&b, &["from"]), 5.);
+    // The keys moved back by the trim: the frame at 8 s is still source 1.
+    assert_eq!(n(&b, &["d", "sourceTime", "kf", "1", "t"]), 3.);
+    roundtrip(
+        &mut s,
+        Edit::Slip {
+            layer_ids: ids(&["b"]),
+            delta: 0.5,
+            linked: false,
+        },
+    );
+    let b = layer(&s, "b");
+    assert_eq!(n(&b, &["d", "sourceTime", "kf", "0", "v"]), 3.5);
+    assert_eq!(n(&b, &["d", "sourceTime", "kf", "1", "v"]), 1.5);
+    assert_eq!(n(&b, &["from"]), 5.);
 }

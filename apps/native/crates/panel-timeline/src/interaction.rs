@@ -1055,6 +1055,9 @@ pub struct DragSample {
 #[derive(Clone, Debug)]
 pub struct Drag {
     work_duration: f64,
+    /// Tracks mode: the lanes shown when the drag began, written as tracks
+    /// ahead of a pro edit so it keeps every clip on its track.
+    lanes: Option<Vec<(String, u32)>>,
     pub kind: DragKind,
     pub start: Arc<TimelineIndex>,
     pub snap: DirectionalSnap,
@@ -1338,7 +1341,11 @@ impl Drag {
             }),
             _ => None,
         };
+        let lanes = (model.mode == crate::TimelineMode::Tracks
+            && matches!(kind, DragKind::ProEdit(_)))
+        .then(|| crate::tracks::relative_lanes(index, &model.reveal));
         Ok(Self {
+            lanes,
             handle_key,
             speed_eases,
             kind,
@@ -1499,6 +1506,14 @@ impl Drag {
                     // source frames (the kernel's delta is the source's).
                     Pro::Slip { delta, .. } => *delta = -sample.time_delta,
                     _ => return Err(ModelError::InvalidGesture),
+                }
+                if let Some(lanes) = &self.lanes {
+                    out.push(
+                        pm_kernel::TimingCommand::PinTracks {
+                            lanes: lanes.clone(),
+                        }
+                        .into(),
+                    );
                 }
                 out.push(command.into());
             }

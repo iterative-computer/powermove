@@ -400,3 +400,98 @@ fn a_ripple_trim_past_the_edge_lengthens_the_layer_and_pushes_what_follows() {
     assert_eq!(span(&s, "b"), (2.0, 4.0));
     assert_eq!(span(&s, "c").0, 6.0);
 }
+
+/// The Tracks timeline: A [0,2] and B [2,4] on one lane, C [3,5] on the lane
+/// above, none with a stored track (as v1 files are). An edit made there
+/// keeps every clip on the lane it shows on (`TimingCommand::InTracks`).
+const LANES: &str = r##"{
+  "id": "P", "name": "Lanes", "compId": "C1", "compName": "Main",
+  "w": 200, "h": 100, "fps": 30, "dur": 10, "bg": "#000000", "assets": {},
+  "layers": [
+    {"id": "c", "type": "shape", "name": "C", "from": 3, "dur": 2, "p": {}},
+    {"id": "b", "type": "shape", "name": "B", "from": 2, "dur": 2, "p": {}},
+    {"id": "a", "type": "shape", "name": "A", "from": 0, "dur": 2, "p": {}}
+  ]
+}"##;
+
+fn lanes() -> Vec<(String, u32)> {
+    vec![("a".into(), 0), ("b".into(), 0), ("c".into(), 1)]
+}
+
+fn field(s: &DocumentStore, id: &str, key: &str) -> Option<f64> {
+    layer(s, id).get(key).and_then(Value::as_f64)
+}
+
+#[test]
+fn a_ripple_trim_in_tracks_closes_time_on_its_own_track_only() {
+    let mut s = DocumentStore::new_untitled(parse(LANES).unwrap());
+    // In the Layers timeline (After Effects) every later layer moves back.
+    let mut layers = DocumentStore::new_untitled(parse(LANES).unwrap());
+    run(
+        &mut layers,
+        TimingCommand::RippleTrim {
+            layer_ids: vec!["a".into()],
+            edge: TimeEdge::Out,
+            time: 1.0,
+        },
+    );
+    assert_eq!(field(&layers, "c", "from"), Some(2.0));
+    run(
+        &mut s,
+        TimingCommand::InTracks {
+            lanes: lanes(),
+            command: Box::new(TimingCommand::RippleTrim {
+                layer_ids: vec!["a".into()],
+                edge: TimeEdge::Out,
+                time: 1.0,
+            }),
+        },
+    );
+    assert_eq!(field(&s, "a", "dur"), Some(1.0));
+    assert_eq!(
+        field(&s, "b", "from"),
+        Some(1.0),
+        "B follows A on its track"
+    );
+    assert_eq!(
+        field(&s, "c", "from"),
+        Some(3.0),
+        "C, on another track, stays"
+    );
+    assert_eq!(
+        field(&s, "c", "track"),
+        Some(1.0),
+        "lanes are written as tracks"
+    );
+    assert_eq!(
+        field(&s, "b", "track"),
+        None,
+        "a lane equal to the stored track is not written"
+    );
+    s.undo().unwrap();
+    assert_eq!(field(&s, "c", "track"), None);
+    assert_eq!(field(&s, "b", "from"), Some(2.0));
+}
+
+#[test]
+fn a_slide_in_tracks_takes_its_neighbours_on_its_own_track() {
+    let mut s = DocumentStore::new_untitled(parse(LANES).unwrap());
+    run(
+        &mut s,
+        TimingCommand::InTracks {
+            lanes: lanes(),
+            command: Box::new(TimingCommand::Slide {
+                layer_id: "b".into(),
+                delta: -0.5,
+            }),
+        },
+    );
+    assert_eq!(field(&s, "b", "from"), Some(1.5));
+    assert_eq!(
+        field(&s, "a", "dur"),
+        Some(1.5),
+        "A, before B on its track, gives way"
+    );
+    assert_eq!(field(&s, "c", "from"), Some(3.0));
+    assert_eq!(field(&s, "c", "dur"), Some(2.0));
+}

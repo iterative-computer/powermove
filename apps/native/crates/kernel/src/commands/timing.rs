@@ -102,6 +102,23 @@ pub enum TimingCommand {
     /// Clamped at the neighbours' limits; refuses when it cannot move.
     /// Label "Slide Layer".
     Slide { layer_id: String, delta: f64 },
+    /// A Ripple Trim, Roll or Slide made in the Tracks timeline, where a
+    /// clip's track is the lane it shows on. `lanes` gives that lane for the
+    /// layers of the levels the edit reaches (relative to their group, as a
+    /// layer's stored `track` is): each unlocked one whose stored `track`
+    /// differs is written first, so the edit's neighbours are the ones on
+    /// its track and no clip changes track with it. A ripple then closes or
+    /// opens time on the edited clips' own tracks only (Premiere without
+    /// sync lock). Any other command runs as it is. Label: the command's.
+    InTracks {
+        lanes: Vec<(String, u32)>,
+        command: Box<TimingCommand>,
+    },
+    /// Writes each unlocked layer's lane in the Tracks timeline as its
+    /// stored `track` where they differ (see `InTracks`), first in a
+    /// transaction whose edit (a pro edit's drag) decides tracks from them.
+    /// Label "Edit Clips" (it travels with the edit it serves).
+    PinTracks { lanes: Vec<(String, u32)> },
     /// Lift (`close: false`) or Extract (`close: true`) `start..end`
     /// (After Effects Edit ▸ Lift/Extract Work Area): the layers' parts
     /// inside the range go (a layer across the whole range is split, its
@@ -155,6 +172,8 @@ impl TimingCommand {
             TimingCommand::RippleTrim { .. } => "Ripple Trim",
             TimingCommand::Roll { .. } => "Roll Edit",
             TimingCommand::Slide { .. } => "Slide Layer",
+            TimingCommand::InTracks { command, .. } => return command.label(),
+            TimingCommand::PinTracks { .. } => "Edit Clips",
             TimingCommand::RemoveRange { close: false, .. } => "Lift Work Area",
             TimingCommand::RemoveRange { close: true, .. } => "Extract Work Area",
             TimingCommand::Retime { mode, .. } => match mode {
@@ -208,7 +227,19 @@ impl TimingCommand {
                 layer_ids,
                 edge,
                 time,
-            } => ripple_trim(cx, layer_ids, *edge, *time),
+            } => ripple_trim(cx, layer_ids, *edge, *time, false),
+            TimingCommand::InTracks { lanes, command } => {
+                pin_tracks(cx, lanes)?;
+                match command.as_ref() {
+                    TimingCommand::RippleTrim {
+                        layer_ids,
+                        edge,
+                        time,
+                    } => ripple_trim(cx, layer_ids, *edge, *time, true),
+                    other => other.plan(cx),
+                }
+            }
+            TimingCommand::PinTracks { lanes } => pin_tracks(cx, lanes),
             TimingCommand::Roll {
                 layer_id,
                 edge,
@@ -835,20 +866,49 @@ fn first_start(layer: &Value) -> f64 {
     }
 }
 
+/// A layer's track key: its group and stored `track` (Tracks timeline).
+fn track_of(layer: &Value) -> (Option<String>, f64) {
+    (
+        values::text(layer, "group").map(str::to_owned),
+        values::num(layer, "track").unwrap_or(0.0),
+    )
+}
+
+/// Writes each unlocked layer's lane as its stored `track` where they differ.
+fn pin_tracks(cx: &mut Cx<'_>, lanes: &[(String, u32)]) -> Result<(), CommandError> {
+    for (id, lane) in lanes {
+        let Ok(loc) = cx.find(id) else { continue };
+        let Ok((_, layer)) = cx.layer(id) else {
+            continue;
+        };
+        let lane = f64::from(*lane);
+        if values::num(&layer, "track").unwrap_or(0.0) == lane || cx.check_lock(&loc, id).is_err() {
+            continue;
+        }
+        let mut path = loc.path();
+        path.push("track".into());
+        cx.set(path, Value::Number(lane))?;
+    }
+    Ok(())
+}
+
 fn ripple_trim(
     cx: &mut Cx<'_>,
     ids: &[String],
     edge: TimeEdge,
     time: f64,
+    by_track: bool,
 ) -> Result<(), CommandError> {
     let time = values::finite(time, "time")?;
     let (comp, targets) = leaves(cx, ids)?;
     let frame = 1.0 / cx.fps(comp.as_deref());
-    let mut removed: Vec<(f64, f64)> = vec![];
-    // An edge dragged outward: (the layer's old end, the time it gained).
-    let mut grown: Vec<(String, f64, f64)> = vec![];
+    let mut removed: Vec<(f64, f64, Option<(Option<String>, f64)>)> = vec![];
+    // An edge dragged outward: (the layer's old end, the time it gained,
+    // its track when the ripple keeps to tracks).
+    let mut grown: Vec<(String, f64, f64, Option<(Option<String>, f64)>)> = vec![];
     for layer in targets {
         let (from, end) = ends(&layer);
+        let track = by_track.then(|| track_of(&layer));
         let id = values::text(&layer, "id").unwrap_or_default().to_owned();
         match edge {
             TimeEdge::In if time < from - EDGE_EPS => {
@@ -858,22 +918,22 @@ fn ripple_trim(
                     let mut longer = cut_head(&layer, layer.clone(), t);
                     values::obj(&mut longer).insert("from", Value::Number(from));
                     put(cx, longer)?;
-                    grown.push((id, end, from - t));
+                    grown.push((id, end, from - t, track));
                 }
             }
             TimeEdge::Out if time > end + EDGE_EPS => {
                 put(cx, with_dur(layer, time - from))?;
-                grown.push((id, end, time - end));
+                grown.push((id, end, time - end, track));
             }
             _ if time <= from + EDGE_EPS || time >= end - EDGE_EPS => {}
             TimeEdge::In => {
                 let t = time.min(end - frame);
-                removed.push((from, t));
+                removed.push((from, t, track));
                 put(cx, cut_head(&layer, layer.clone(), t))?;
             }
             TimeEdge::Out => {
                 let t = time.max(from + frame);
-                removed.push((t, end));
+                removed.push((t, end, track));
                 put(cx, with_dur(layer, t - from))?;
             }
         }
@@ -897,8 +957,10 @@ fn ripple_trim(
             let (from, _) = ends(layer);
             let shift: f64 = grown
                 .iter()
-                .filter(|(_, pivot, _)| from >= pivot - EDGE_EPS)
-                .map(|(.., gained)| gained)
+                .filter(|(_, pivot, _, track)| {
+                    from >= pivot - EDGE_EPS && track.as_ref().is_none_or(|t| *t == track_of(layer))
+                })
+                .map(|(_, _, gained, _)| gained)
                 .sum();
             if shift > 0.0 {
                 let mut path = cx.find(id)?.path();
@@ -912,17 +974,19 @@ fn ripple_trim(
 
 /// Every unlocked layer moves back by the removed time that ends at or
 /// before its start (overlapping removed spans count once).
+/// With a track on a span (a ripple kept to tracks), only layers on that
+/// track move for it.
 fn close_up(
     cx: &mut Cx<'_>,
     comp: Option<&str>,
-    mut removed: Vec<(f64, f64)>,
+    mut removed: Vec<(f64, f64, Option<(Option<String>, f64)>)>,
 ) -> Result<(), CommandError> {
     removed.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut spans: Vec<(f64, f64)> = vec![];
-    for (start, end) in removed {
-        match spans.last_mut() {
+    let mut spans: Vec<(f64, f64, Option<(Option<String>, f64)>)> = vec![];
+    for (start, end, track) in removed {
+        match spans.iter_mut().rev().find(|s| s.2 == track) {
             Some(last) if start <= last.1 + EDGE_EPS => last.1 = last.1.max(end),
-            _ => spans.push((start, end)),
+            _ => spans.push((start, end, track)),
         }
     }
     let layers = cx.layers(comp);
@@ -933,8 +997,10 @@ fn close_up(
         let (from, _) = ends(layer);
         let shift: f64 = spans
             .iter()
-            .filter(|(_, end)| from >= end - EDGE_EPS)
-            .map(|(start, end)| end - start)
+            .filter(|(_, end, track)| {
+                from >= end - EDGE_EPS && track.as_ref().is_none_or(|t| *t == track_of(layer))
+            })
+            .map(|(start, end, _)| end - start)
             .sum();
         if shift > 0.0 {
             let id = values::text(layer, "id").unwrap_or_default();

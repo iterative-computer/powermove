@@ -1735,16 +1735,21 @@ impl Controller {
         }
         let (name, args, time) = (name.to_owned(), args.to_vec(), self.time());
         cx.spawn(async move |this, cx| {
-            let plan = cx
+            let (plan, reason) = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::layer_commands::command_plan(&name, &args, &published, time)
+                    let plan = crate::layer_commands::command_plan(&name, &args, &published, time);
+                    let reason = plan
+                        .is_none()
+                        .then(|| crate::layer_commands::nothing_reason(&name, &published))
+                        .flatten();
+                    (plan, reason)
                 })
                 .await;
             let _ = this.update(cx, |v, cx| match plan {
                 Some(plan) => v.run_layer_plan(plan, cx),
                 None => {
-                    v.message = "Nothing to change".into();
+                    v.message = reason.unwrap_or("Nothing to change").into();
                     cx.notify();
                 }
             });

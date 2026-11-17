@@ -285,6 +285,30 @@ pub struct MovedLayer {
     pub from: f64,
     pub track: usize,
 }
+/// Every layer's lane as the Tracks timeline shows it, relative to its group
+/// (a layer's stored `track`), for an edit that must keep clips on their
+/// tracks (`TimingCommand::InTracks`).
+pub fn relative_lanes(index: &TimelineIndex, reveal: &RevealState) -> Vec<(String, u32)> {
+    plan_move(index, reveal, &[], 0., LaneDelta::default())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|l| (l.id, u32::try_from(l.track).unwrap_or(u32::MAX)))
+        .collect()
+}
+
+/// `command` as the Tracks timeline makes it: wrapped with the lanes it
+/// shows, so the kernel keeps every clip on its track.
+pub fn in_tracks(
+    index: &TimelineIndex,
+    reveal: &RevealState,
+    command: pm_kernel::commands::timing::TimingCommand,
+) -> pm_kernel::commands::timing::TimingCommand {
+    pm_kernel::commands::timing::TimingCommand::InTracks {
+        lanes: relative_lanes(index, reveal),
+        command: Box::new(command),
+    }
+}
+
 /// Pure track drag preview, track-layout.ts:230–304. The kernel owner must add
 /// a validated atomic track/stack command before this can be committed.
 pub fn plan_move(
