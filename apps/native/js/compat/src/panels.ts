@@ -27,6 +27,9 @@ export class CompatPanels {
     private document: any,
     private sections?: Registry<any>,
     private layerIds: () => string[] = () => [],
+    /** No window shows this realm's panels (an export's): they open and close
+     * as asked, but none is built, so none runs or fetches. */
+    private windowless = false,
   ) {
     this.subscription = registry.onChange(({ id }) => {
       if (this.openPanels.has(id)) this.refresh(id);
@@ -76,12 +79,13 @@ export class CompatPanels {
     this.windowShown = shown;
     this.onShowingChange?.();
   };
-  isOpen = (id: string) => this.openPanels.has(id);
+  isOpen = (id: string) =>
+    this.openPanels.has(id) || (this.windowless && this.wanted.has(id));
   isHidden = (id: string) => this.hidden.has(id);
   open = (id: string, _dock?: unknown) => {
     this.hidden.delete(id);
     this.wanted.add(id);
-    if (this.openPanels.has(id)) return;
+    if (this.windowless || this.openPanels.has(id)) return;
     const definition =
       id === SECTIONS_PANEL
         ? { build: (root: any) => this.buildSections(root) }

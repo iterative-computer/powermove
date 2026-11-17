@@ -451,7 +451,9 @@ impl Run {
                 .progress
                 .note("waiting for memory for the export's extensions".into());
         })?;
-        crate::boot_realm(&realm, &host, "")?;
+        // No window shows an export's panels: its realm builds none of them
+        // (a panel's fetch or timers would hold its start for nothing).
+        crate::boot_realm(&realm, &host, "globalThis.__compatWindowless=true")?;
         self.router = Some(
             RemoteDomPanel::new(
                 PANEL,

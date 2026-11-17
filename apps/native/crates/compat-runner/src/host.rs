@@ -5438,6 +5438,32 @@ mod tests {
         assert_eq!(answer_of(&answered, 1, Duration::from_secs(40)), json!(5));
         cancel.store(true, Ordering::Release);
     }
+    /// An export's realm builds no panel: nothing shows it, and what it
+    /// would start (a search over the network, timers) would only hold the
+    /// export's start. The window's realm builds it as before.
+    #[test]
+    fn an_export_realm_builds_no_panels() {
+        let source = "export default function activate(api: any){
+            globalThis.built = false;
+            api.panels.register({id:'shows.panel', title:'Shows',
+              build: (root: any) => { globalThis.built = true; root.textContent = 'panel';
+                setTimeout(() => {}, 3000); } });
+            api.panels.open('shows.panel');
+            api.services.register('raster',()=>{
+              const c=document.createElement('canvas'); c.width=globalThis.built ? 3 : 1; c.height=1;
+              return {cv:c,w:c.width,h:1,anchorX:0,anchorY:0} }) }";
+        let (fixture, answered) = export_window(&[("shows", source)], "text", None);
+        let inbox = fixture.host.raster_inbox();
+        let live = fixture.kernel.published("window").unwrap().revision();
+        inbox.ask(1, needs(&fixture), json!({"revision": live}));
+        assert_eq!(answer_of(&answered, 1, Duration::from_secs(20)), json!(3));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let frozen = fixture.kernel.published("window").unwrap();
+        inbox.export("job-7", frozen, cancel.clone()).unwrap();
+        inbox.ask(2, needs(&fixture), json!({"job":"job-7"}));
+        assert_eq!(answer_of(&answered, 2, Duration::from_secs(40)), json!(1));
+        cancel.store(true, Ordering::Release);
+    }
     #[test]
     fn the_projects_text_faces_and_pm_fonts_reach_the_window() {
         let root = tempfile::tempdir().unwrap();

@@ -2143,6 +2143,9 @@ impl Controller {
     }
     /// The ghost's picture goes (its own frame is retired at the next draw).
     pub(crate) fn ghost_retire(&mut self) {
+        if self.ghost_picture.is_some() {
+            crate::diag::line(serde_json::json!({"poster": "retired"}));
+        }
         self.ghost_retired.extend(self.ghost_picture.take());
     }
     /// `project` opening: the picture its viewer last showed stands in the
@@ -2165,6 +2168,9 @@ impl Controller {
             .as_deref()
             .and_then(crate::poster::decode)
             .and_then(|(w, h, rgba)| pm_shell::symbol::picture(w, h, rgba));
+        crate::diag::line(serde_json::json!({"poster": "staged", "project": project,
+            "picture": picture, "file": poster.as_ref().map(|p| p.display().to_string()),
+            "decoded": self.ghost_picture.is_some()}));
         self.viewer_poster = poster;
         self.last_frame_watch.shown = None;
         // Its own panels at their sizes, the viewer's slot included, not
@@ -2879,7 +2885,8 @@ impl Controller {
         cx: &mut Context<Self>,
     ) {
         if let Some(g) = self.builtins.gizmos.clone() {
-            g.update(cx, |g, cx| g.studio_fly_end(false, cx));
+            // It draws, which reads the controller: after this update.
+            cx.defer(move |cx| g.update(cx, |g, cx| g.studio_fly_end(false, cx)));
         }
         if let Some(viewer) = self.viewer.take() {
             viewer.retire();
@@ -3208,7 +3215,7 @@ impl Controller {
                             v.other_version_kept(kept, cx);
                         }
                         v.write_poster(cx);
-                        v.keep_last_frame(None, cx);
+                        v.keep_or_watch_last_frame(cx);
                     }
                     other => {
                         // A Save As whose folder is gone by now (its disk
@@ -3772,7 +3779,7 @@ impl Controller {
                 let Some(gizmos) = self.builtins.gizmos.clone() else {
                     return false;
                 };
-                return gizmos.update(cx, |g, cx| g.edit_selected_text(window, cx));
+                return crate::gizmo::text::edit_selected_text_after(gizmos, window, cx);
             }
             // The viewer's View-menu actions, for the palette and for keys.
             "viewer.safeAreas"
@@ -4321,8 +4328,12 @@ impl Controller {
             // The button came up somewhere in the window (after the views
             // heard it): a pointer gesture whose own view never did ends now.
             "pointerReleased" => {
+                // Ending its gesture reads the controller (the tool, the
+                // frame): after this update (PM-480).
                 if let Some(g) = self.builtins.gizmos.clone() {
-                    g.update(cx, |g, cx| g.release_unheard(window, cx));
+                    window.defer(cx, move |window, cx| {
+                        g.update(cx, |g, cx| g.release_unheard(window, cx));
+                    });
                 }
                 for view in self.builtins.views.values().cloned().collect::<Vec<_>>() {
                     view.update(cx, |v, cx| v.release_unheard(window, cx));

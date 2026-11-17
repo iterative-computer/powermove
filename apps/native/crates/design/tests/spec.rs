@@ -160,6 +160,10 @@ const ROLES: &[(&str, &str)] = &[
         "Least width of an inspector row's value column",
     ),
     (
+        "metrics.align_well",
+        "Least width of an alignment well: three cells at the least hit target",
+    ),
+    (
         "metrics.value_column_most",
         "Most width of a capped inspector row's value column (Effect Controls)",
     ),
