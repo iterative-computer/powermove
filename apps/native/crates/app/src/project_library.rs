@@ -170,6 +170,15 @@ pub struct ProjectLibrary {
     kernel: KernelHandle,
 }
 impl ProjectLibrary {
+    /// The window's tokens now (Settings › Appearance switched while Home
+    /// was made): Home's grid, cards and sidebar rows follow, as every panel
+    /// does (`SurfaceView::retheme`).
+    pub(crate) fn set_tokens(&mut self, tokens: Tokens, cx: &mut Context<Self>) {
+        if self.tokens != tokens {
+            self.tokens = tokens;
+            cx.notify();
+        }
+    }
     /// The worker and its wake channel, started before the view exists.
     pub fn port(
         kernel: KernelHandle,

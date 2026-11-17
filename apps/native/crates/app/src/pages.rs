@@ -181,6 +181,8 @@ impl Controller {
                         store
                     }
                 };
+                let tokens = self.host.borrow().tokens.clone();
+                store.update(cx, |store, cx| store.set_tokens(tokens, cx));
                 Some(store.into_any_element())
             }
             _ => None,
