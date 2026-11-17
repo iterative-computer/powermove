@@ -406,6 +406,15 @@ pub(crate) fn effect_steps_frame<'d>(
                 }
                 continue;
             }
+            // A program the definition has but the renderer could not get
+            // (its translation failed for a passing reason: a busy or slow
+            // compiler) is never drawn as nothing: the frame names it, and
+            // an export refuses. A definition with no program draws nothing
+            // by itself.
+            None if def.glsl.is_some() => {
+                refuse(Feature::Definition(format!("effect {ty} (no program)")));
+                continue;
+            }
             None => continue,
         }
         if effects.watchdog.is_disabled(DefinitionKind::Effect, &ty) {

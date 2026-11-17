@@ -63,7 +63,7 @@ pub mod vector;
 
 pub use assets::{AssetResolver, MapResolver, SourcePaths};
 pub use capability::{
-    Feature, Unsupported, unsupported, unsupported_for, unsupported_with_definitions,
+    Feature, PROGRAM_PENDING, Unsupported, unsupported, unsupported_for, unsupported_with_definitions,
     unsupported_with_fonts, unsupported_with_media,
 };
 pub use effects::{Effects, builtin_definitions};

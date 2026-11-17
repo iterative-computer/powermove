@@ -31,6 +31,9 @@ pub struct Unsupported {
 }
 
 /// What is unsupported.
+/// The words a frame names a still-building program with ([`Feature::ProgramPending`]).
+pub const PROGRAM_PENDING: &str = "is still being built";
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Feature {
     /// A layer type this renderer does not draw (text, captions, ...).
@@ -72,6 +75,10 @@ pub enum Feature {
     /// fallback runner (`crate::shader_layers::fallback`), so it is not
     /// headless-renderable.
     ShaderFallback(String),
+    /// An effect or transition whose program is still being built after a
+    /// passing compiler failure (busy, slow or restarted): the frame is not
+    /// the picture and is drawn again, never delivered without it.
+    ProgramPending(String),
     /// Text content this renderer does not draw (color vector glyphs, no
     /// configured fonts).
     Text(String),
@@ -115,6 +122,7 @@ impl fmt::Display for Feature {
             Feature::Definition(d) => write!(f, "no definition for {d}"),
             Feature::EffectAsset(sentence) => f.write_str(sentence),
             Feature::ShaderFallback(d) => write!(f, "{d} needs the GLSL fallback runner"),
+            Feature::ProgramPending(d) => write!(f, "{d} {PROGRAM_PENDING}"),
             Feature::Text(t) => write!(f, "text: {t}"),
         }
     }
@@ -746,6 +754,16 @@ fn check_media(
 mod tests {
     use super::*;
     use pm_protocol::patch::{FIELD_TABLE, LegacyBehavior};
+
+    /// A program still being built is named so that a frame's reader (the
+    /// engine) knows to draw it again, apart from a fallback-only program.
+    #[test]
+    fn a_pending_program_is_named_apart_from_a_fallback() {
+        let pending = Feature::ProgramPending("pm.history.main.blur.2".into()).to_string();
+        assert!(pending.ends_with(PROGRAM_PENDING), "{pending}");
+        let fallback = Feature::ShaderFallback("pm.history.main.blur.2".into()).to_string();
+        assert!(!fallback.ends_with(PROGRAM_PENDING), "{fallback}");
+    }
 
     #[test]
     fn shown_assets_follow_what_the_composition_can_show() {

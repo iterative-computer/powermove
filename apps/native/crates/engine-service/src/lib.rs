@@ -4157,12 +4157,25 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
 /// Windowless renderer for CLI/MCP and independent pixel comparisons.
 pub struct Headless {
     engine: render::Engine,
+    /// The layers the last frame left out, and why.
+    last_failures: Vec<pm_render::LayerFailure>,
 }
 impl Headless {
     /// Why the last frame drew some effect as nothing (its definition could
     /// not be built), if it did.
     pub fn definition_failure(&self) -> Option<&str> {
         self.engine.definition_failure.as_deref()
+    }
+    /// What the last frame left out (a bypassed effect, an omitted layer)
+    /// and the effects the document names that the renderer does not have.
+    pub fn last_omissions(&self) -> Vec<String> {
+        let failures = self.last_failures.iter().map(|f| format!("{f:?}"));
+        let missing = self
+            .engine
+            .missing_effects
+            .iter()
+            .map(|m| format!("missing {m:?}"));
+        failures.chain(missing).collect()
     }
     pub fn memory_usage(&self) -> memory::CacheUsage {
         self.engine.memory_usage()
@@ -4256,6 +4269,7 @@ impl Headless {
         objc2::rc::autoreleasepool(|_| {
             Ok(Self {
                 engine: render::Engine::new(pm_gpu::Gpu::new("pm-headless")?)?,
+                last_failures: Vec::new(),
             })
         })
     }
@@ -4326,6 +4340,7 @@ impl Headless {
                     let s = s.ok_or_else(|| anyhow::anyhow!("no offscreen target"))?;
                     s.commit();
                     s.complete()?;
+                    self.last_failures = s.failures.to_vec();
                     let from_disk = trace.lock().unwrap().disk == 2;
                     return Ok((s.pixels(), from_disk));
                 }

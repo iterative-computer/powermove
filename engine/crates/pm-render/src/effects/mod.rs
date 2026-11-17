@@ -533,7 +533,17 @@ impl Effects {
         {
             return definition_error(&snapshot.id, &entry.status);
         }
-        let prepared = self.cache.prepare(&glsl.source, glsl.body_line_offset);
+        // A busy, slow or restarted compiler says nothing about the source:
+        // asked again (a few times) before the definition is given up for
+        // this registration.
+        let mut prepared = self.cache.prepare(&glsl.source, glsl.body_line_offset);
+        for wait in [100, 400] {
+            if !matches!(prepared.as_ref(), Err(f) if f.stage.retryable()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(wait));
+            prepared = self.cache.prepare(&glsl.source, glsl.body_line_offset);
+        }
         if let Err(f) = prepared.as_ref()
             && f.stage.retryable()
         {

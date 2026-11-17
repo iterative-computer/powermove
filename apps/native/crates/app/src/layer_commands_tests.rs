@@ -392,8 +392,13 @@ fn every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path() {
         );
         if draw(&mut headless, &kernel) != plain {
             changed.push(entry.id.clone());
-        } else if let Some(failure) = headless.definition_failure() {
-            failed.push(format!("{}: {failure}", entry.id));
+        } else {
+            failed.push(format!(
+                "{}: definition {:?}, omitted {:?}",
+                entry.id,
+                headless.definition_failure(),
+                headless.last_omissions()
+            ));
         }
         send(&kernel, HistoryCall::Undo.into());
     }

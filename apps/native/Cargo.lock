@@ -5185,6 +5185,7 @@ dependencies = [
  "pm-export",
  "pm-expr",
  "pm-first-launch",
+ "pm-glsl",
  "pm-gpu",
  "pm-kernel",
  "pm-mcp",

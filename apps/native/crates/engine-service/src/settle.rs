@@ -522,7 +522,10 @@ fn draw(
             Arc::as_ptr(&job.resources) as usize,
         );
         if *document != Some(state) {
-            let busy = |e: &str| e.contains("compiler-busy");
+            // A compiler that was busy, slow or gone says nothing about the
+            // program: the frame waits and is drawn again with it, never
+            // without it.
+            let busy = |e: &str| crate::render::compile_was_passing(e);
             let failures = renderer
                 .set_document_effects(&scene.doc, &job.resources.definitions)
                 .map_err(|e| {

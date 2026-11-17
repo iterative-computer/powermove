@@ -429,8 +429,26 @@ impl std::fmt::Display for SettledPending {
     }
 }
 impl std::error::Error for SettledPending {}
+/// Whether a definition failure is a passing one of the GLSL compiler (pm-glsl's
+/// retryable stages: busy, deadline, process, resources), named in it as
+/// `({stage}: …)` or as the bare stage.
+pub(crate) fn compile_was_passing(error: &str) -> bool {
+    ["compiler-busy", "compiler-process", "compiler-resources", "(deadline:"]
+        .iter()
+        .any(|stage| error.contains(stage))
+}
+/// A frame drawn while one of its effects' programs was still being built.
+#[derive(Debug)]
+pub(crate) struct ProgramPending(pub(crate) String);
+impl std::fmt::Display for ProgramPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::error::Error for ProgramPending {}
 pub(crate) fn transient(error: &anyhow::Error) -> bool {
-    error.is::<FontsPending>()
+    error.is::<ProgramPending>()
+        || error.is::<FontsPending>()
         || error.is::<DefinitionsPending>()
         || error.is::<CompilerBusy>()
         || error.is::<DiskFramePending>()
@@ -1502,7 +1520,10 @@ impl Engine {
             }
             // A bad contribution draws nothing and is reported; frames carry on.
             // A compiler slot that was busy is retried, never reported as broken.
-            let busy = |e: &str| e.contains("compiler-busy");
+            // A compiler that was busy, slow or gone says nothing about the
+            // program: the frame waits and is drawn again with it, never
+            // without it.
+            let busy = |e: &str| crate::render::compile_was_passing(e);
             let failures = self
                 .renderer
                 .set_document_effects(&scene.doc, &self.resources.definitions)
@@ -1941,6 +1962,16 @@ impl Engine {
                 }
                 if let Some(error) = self.fonts.as_ref().and_then(|f| f.after_render()) {
                     return Err(FontsPending(error.to_string()).into());
+                }
+                // An effect whose program is still being built (a passing
+                // compiler failure) leaves this frame short of it: drawn
+                // again, never delivered without the effect.
+                if let Some(pending) = rendered
+                    .failures
+                    .iter()
+                    .find(|f| f.message.ends_with(pm_render::PROGRAM_PENDING))
+                {
+                    return Err(ProgramPending(pending.message.clone()).into());
                 }
                 let failures: Arc<[LayerFailure]> = rendered.failures.into();
                 stand_ins = !rendered.stand_ins.is_empty() || !compat_late.is_empty();
@@ -5248,4 +5279,20 @@ fn keep_paused_decoders() -> bool {
     }
     let app = objc2_app_kit::NSRunningApplication::currentApplication();
     app.isActive() && !app.isHidden()
+}
+
+#[cfg(test)]
+mod passing_compile_tests {
+    /// A busy, slow or restarted compiler is passing (the frame waits and
+    /// draws again); a shader that does not compile is not.
+    #[test]
+    fn a_busy_or_slow_compiler_is_passing_and_a_bad_shader_is_not() {
+        let said = |stage: &str| format!("The shader of fx compiles in WebGL but not in the native engine's pipeline ({stage}: x).");
+        for stage in ["compiler-busy", "compiler-process", "compiler-resources", "deadline"] {
+            assert!(super::compile_was_passing(&said(stage)), "{stage}");
+        }
+        for stage in ["es-validate", "naga-validate", "metal", "draw-deadline"] {
+            assert!(!super::compile_was_passing(&said(stage)), "{stage}");
+        }
+    }
 }

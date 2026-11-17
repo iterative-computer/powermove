@@ -453,6 +453,13 @@ impl<'c> Gpu<'c> {
         current.map(|r| self.decode_e(r, working))
     }
 
+    fn pending(&mut self, layer: &str, definition: &str) {
+        self.unsupported.push(Unsupported {
+            composition: None,
+            layer: Some(layer.to_owned()),
+            feature: Feature::ProgramPending(definition.to_owned()),
+        });
+    }
     fn fallback(&mut self, layer: &str, definition: &str) {
         self.unsupported.push(Unsupported {
             composition: None,
@@ -479,6 +486,12 @@ impl<'c> Gpu<'c> {
             self.effects
                 .program(device, DefinitionKind::Effect, &step.definition, format)
         {
+            // A program that failed for a passing reason is pending, not a
+            // fallback: the frame says so and is drawn again with it.
+            if failure.stage.retryable() {
+                self.pending(layer, &step.definition);
+                return None;
+            }
             // WebGL draws it and the engine cannot: the fallback runner
             // draws it when one is attached, else the frame routes.
             if !self.effects.fallback.runner {
@@ -786,6 +799,10 @@ impl<'c> Gpu<'c> {
             self.effects
                 .program(device, DefinitionKind::Transition, &step.definition, format)
         {
+            if failure.stage.retryable() {
+                self.pending(layer, &step.definition);
+                return None;
+            }
             if !self.effects.fallback.runner {
                 self.fallback(layer, &step.definition);
                 return None;

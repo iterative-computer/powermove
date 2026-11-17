@@ -92,6 +92,11 @@ features = ["test-support"]
 [dev-dependencies.pm-proxy]
 path = "../../../../engine/crates/pm-proxy"
 features = ["test-hooks"]
+# Parallel test fixtures wait for a compiler slot (pm-glsl `test-admission`):
+# without it a busy compiler is a definition that cannot be drawn.
+[dev-dependencies.pm-glsl]
+path = "../../../../engine/crates/pm-glsl"
+features = ["test-admission"]
 [dev-dependencies.pm-native-migrate]
 path = "../migrate"
 [dev-dependencies.ed25519-dalek]
