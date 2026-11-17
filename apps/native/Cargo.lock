@@ -4691,6 +4691,7 @@ dependencies = [
  "libc",
  "libm",
  "pm-eval",
+ "pm-fx-defs",
  "pm-media",
  "pm-model",
  "pm-protocol",

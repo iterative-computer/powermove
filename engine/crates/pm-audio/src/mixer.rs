@@ -1,11 +1,13 @@
 //! The mixer: clip voices → per-layer strips → master, in f32 at the
 //! project's `audioSampleRate`.
 //!
-//! [`Mixer::render`] is a pure function of the document, the composition,
+//! Dry [`Mixer::render`] is a pure function of the document, the composition,
 //! and the project sample range: no state carries from one render to the
 //! next except caches. A render that starts at sample n returns what a
 //! render through n returns there, so seeking, looping, and pre-roll are
-//! deterministic and the preview equals the export.
+//! deterministic and the preview equals the export. Audio effect chains carry
+//! history during a continuous run; explicit seeks clear that history and
+//! bridge the output over 5 ms. Fresh playback and export share the same DSP.
 //!
 //! # Automation
 //!
@@ -166,6 +168,8 @@ enum Reader {
 }
 
 struct Voice {
+    effects: Vec<crate::effects::Chain>,
+    effect_matrix: Vec<Vec<f32>>,
     reader: Reader,
     matrix: Vec<Vec<f32>>,
     strip: usize,
@@ -220,6 +224,7 @@ pub fn stretches(plan: &VoicePlan, project: u32) -> bool {
 pub type Retired = Box<dyn std::any::Any + Send>;
 
 struct Outgoing {
+    monitor_gains: Vec<f32>,
     doc: Arc<Document>,
     graph: Arc<MixGraph>,
     voices: Vec<Voice>,
@@ -232,6 +237,7 @@ struct Outgoing {
 
 /// Mixes one composition.
 pub struct Mixer {
+    monitor_gains: Vec<f32>,
     format: MixFormat,
     doc: Arc<Document>,
     graph: Arc<MixGraph>,
@@ -850,6 +856,7 @@ impl Mixer {
         cache: Arc<SourceCache>,
     ) -> Mixer {
         let mut m = Mixer {
+            monitor_gains: vec![],
             master_tap: Tap::new(format.channels()),
             format,
             doc,
@@ -893,6 +900,48 @@ impl Mixer {
         m.glide_len = (m.format.sample_rate as usize * RETUNE_GLIDE_MS as usize / 1000).max(1);
         m.set_graph(m.doc.clone(), graph);
         m
+    }
+
+    /// Install preallocated exclusive DSP state between blocks. Callers build
+    /// this on their control thread and transfer ownership with the project.
+    pub fn set_audio_effects(&mut self, prepared: crate::effects::Prepared) {
+        for (index, voice) in prepared.voices.into_iter().enumerate() {
+            let crate::effects::PreparedVoice {
+                id,
+                mut chains,
+                matrix,
+            } = voice;
+            if self.graph.voices.get(index).is_none_or(|p| p.id != id) {
+                continue;
+            }
+            let previous = if self.voices[index].effects.is_empty() {
+                self.outgoing.last().and_then(|g| {
+                    g.graph
+                        .voices
+                        .iter()
+                        .position(|p| p.id == id && p.map_key == self.graph.voices[index].map_key)
+                        .map(|i| &g.voices[i].effects)
+                })
+            } else {
+                Some(&self.voices[index].effects)
+            };
+            if let Some(previous) = previous {
+                for chain in &mut chains {
+                    for old in previous {
+                        chain.inherit(old);
+                    }
+                }
+            }
+            self.voices[index].effect_matrix = matrix;
+            let retired = std::mem::replace(&mut self.voices[index].effects, chains);
+            if !retired.is_empty() {
+                self.retire(Box::new(retired));
+            }
+        }
+    }
+
+    pub fn has_audio_effects(&self) -> bool {
+        self.voices.iter().any(|v| !v.effects.is_empty())
     }
 
     pub fn format(&self) -> &MixFormat {
@@ -1158,6 +1207,7 @@ impl Mixer {
             self.retire(Box::new(oldest));
         }
         self.outgoing.push(Outgoing {
+            monitor_gains: std::mem::take(&mut self.monitor_gains),
             doc: self.doc.clone(),
             graph: self.graph.clone(),
             voices: std::mem::take(&mut self.voices),
@@ -1187,6 +1237,15 @@ impl Mixer {
                 run.lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .abandon_retry();
+            }
+        }
+        for voice in self
+            .voices
+            .iter_mut()
+            .chain(self.outgoing.iter_mut().flat_map(|g| &mut g.voices))
+        {
+            for effect in &mut voice.effects {
+                effect.abandon_retry();
             }
         }
     }
@@ -1629,6 +1688,7 @@ impl Mixer {
             prepared.started = started;
             prepared.critical = critical;
         }
+        self.monitor_gains.resize(graph.strips.len(), 1.0);
         let p = self.format.sample_rate;
         // Stretches in progress carry over to voices whose map did not
         // change (a fader drag during playback must not restart them).
@@ -1658,6 +1718,8 @@ impl Mixer {
             .map(|v| {
                 let stretched = stretches(v, p);
                 Voice {
+                    effects: vec![],
+                    effect_matrix: vec![],
                     reader: reader_for(v, p),
                     matrix: layout::matrix(&v.source.info.speakers, &self.format.speakers),
                     strip: graph.strips.iter().position(|s| *s == v.strip).unwrap_or(0),
@@ -1727,6 +1789,17 @@ impl Mixer {
         out: &mut [Vec<f32>],
         options: &RenderOptions,
     ) -> Result<RenderReport> {
+        if frames > crate::effects::MAX_BLOCK_FRAMES
+            && self
+                .voices
+                .iter()
+                .chain(self.outgoing.iter().flat_map(|g| &g.voices))
+                .any(|v| !v.effects.is_empty())
+        {
+            return Err(crate::AudioError::invalid(
+                "audioFx.block: at most 65536 frames per render",
+            ));
+        }
         let mut report =
             self.render_current(start, frames, out, options, options.monitor_solo.as_ref())?;
         if !self.outgoing.is_empty() && frames > 0 {
@@ -1843,6 +1916,7 @@ impl Mixer {
     }
 
     fn swap_state(&mut self, g: &mut Outgoing) {
+        std::mem::swap(&mut self.monitor_gains, &mut g.monitor_gains);
         std::mem::swap(&mut self.doc, &mut g.doc);
         std::mem::swap(&mut self.graph, &mut g.graph);
         std::mem::swap(&mut self.voices, &mut g.voices);
@@ -2168,13 +2242,32 @@ impl Mixer {
                 Err(e) => report.errors.push((plan.id.clone(), e.to_string())),
             }
         }
+        let smooth_solo = self.has_audio_effects();
         for (si, strip) in self.strips.iter().enumerate() {
-            if solo.is_some_and(|s| !s.contains(&graph.strips[si])) {
-                continue;
-            }
-            for (o, c) in out.iter_mut().zip(strip) {
-                for (a, b) in o.iter_mut().zip(c) {
-                    *a += *b;
+            let target = if solo.is_some_and(|s| !s.contains(&graph.strips[si])) {
+                0.0
+            } else {
+                1.0
+            };
+            if smooth_solo {
+                // Solo changes only the post-effect strip level, preserving
+                // filter/delay history rather than rebuilding the effect chain.
+                let gain = &mut self.monitor_gains[si];
+                let step = 1.0 / self.glide_len as f32;
+                for i in 0..frames {
+                    *gain += (target - *gain).clamp(-step, step);
+                    for (o, c) in out.iter_mut().zip(strip) {
+                        o[i] += c[i] * *gain;
+                    }
+                }
+            } else {
+                if target == 0.0 {
+                    continue;
+                }
+                for (o, c) in out.iter_mut().zip(strip) {
+                    for (a, b) in o.iter_mut().zip(c) {
+                        *a += *b;
+                    }
                 }
             }
         }
@@ -2282,7 +2375,7 @@ impl Mixer {
         let source_rate = plan.source.sample_rate() as f64;
         if let (false, Some(pt)) = (plan.animated, plan.static_point.filter(|_| linear)) {
             // Static and linear: the local time is the master time shifted.
-            if !pt.active || pt.gain == 0.0 {
+            if !pt.active || (pt.gain == 0.0 && self.voices[vi].effects.is_empty()) {
                 return Ok(None);
             }
             let local0 = plan.static_at - pt.local;
@@ -2307,7 +2400,10 @@ impl Mixer {
                 c += CONTROL;
             }
             let on = |pt: &Point| pt.active && (linear || pt.in_span);
-            if self.points.iter().all(|pt| !on(pt) || pt.gain == 0.0) {
+            if self.points.iter().all(|pt| !on(pt))
+                || (self.voices[vi].effects.is_empty()
+                    && self.points.iter().all(|pt| !on(pt) || pt.gain == 0.0))
+            {
                 return Ok(None);
             }
             self.locals.clear();
@@ -2368,10 +2464,10 @@ impl Mixer {
                 )
                 .map(Some);
         }
-        if self.gains.iter().all(|&g| g == 0.0) {
+        if self.voices[vi].effects.is_empty() && self.gains.iter().all(|&g| g == 0.0) {
             return Ok(None);
         }
-        let voice = &self.voices[vi];
+        let voice = &mut self.voices[vi];
         if let (Reader::Free, Some(o)) = (&voice.reader, plan.offset) {
             // A linear map at a ratio too fine for an exact-phase bank.
             self.positions.clear();
@@ -2544,6 +2640,13 @@ impl Mixer {
             &self.gains,
             offset,
             n,
+            if complete {
+                &mut voice.effects
+            } else {
+                &mut []
+            },
+            &voice.effect_matrix,
+            a,
         );
         Ok(Some(!complete))
     }
@@ -2696,7 +2799,7 @@ impl Mixer {
             }
             x += 1.0;
         }
-        let voice = &self.voices[vi];
+        let voice = &mut self.voices[vi];
         fold(
             &mut self.strips[voice.strip],
             if self.bus > 2 {
@@ -2708,6 +2811,13 @@ impl Mixer {
             &self.gains,
             offset,
             n,
+            if complete {
+                &mut voice.effects
+            } else {
+                &mut []
+            },
+            &voice.effect_matrix,
+            a,
         );
         Ok(Some(!complete))
     }
@@ -2803,7 +2913,7 @@ impl Mixer {
             drop(run);
             complete
         };
-        let voice = &self.voices[vi];
+        let voice = &mut self.voices[vi];
         fold(
             &mut self.strips[voice.strip],
             if self.bus > 2 {
@@ -2815,6 +2925,13 @@ impl Mixer {
             &self.gains,
             offset,
             n,
+            if complete {
+                &mut voice.effects
+            } else {
+                &mut []
+            },
+            &voice.effect_matrix,
+            a,
         );
         Ok(!complete)
     }
@@ -3101,6 +3218,7 @@ fn today_candidate(plan: &VoicePlan) -> bool {
 
 /// Adds a voice's channels into its strip through its fold matrix, with the
 /// per-sample gain.
+#[allow(clippy::too_many_arguments)]
 fn fold(
     strip: &mut [Vec<f32>],
     matrix: &[Vec<f32>],
@@ -3108,7 +3226,37 @@ fn fold(
     gains: &[f32],
     offset: usize,
     n: usize,
+    effects: &mut [crate::effects::Chain],
+    effect_matrix: &[Vec<f32>],
+    first: i64,
 ) {
+    if !effects.is_empty() {
+        let strip_channels = strip.len();
+        for effect in effects.iter_mut() {
+            effect.begin_block(first);
+        }
+        for i in 0..n {
+            let mut frame = [0.0f32; 2];
+            for (ch, dst) in frame.iter_mut().enumerate() {
+                if let Some(row) = effect_matrix.get(ch) {
+                    for (source, &m) in voice_out.iter().zip(row) {
+                        *dst += source[i] * (m * gains[i]);
+                    }
+                }
+            }
+            for effect in effects.iter_mut() {
+                frame = effect.process_frame(frame);
+            }
+            for (ch, bus) in strip.iter_mut().enumerate() {
+                if strip_channels == 1 {
+                    bus[offset + i] += (frame[0] + frame[1]) * 0.5;
+                } else if ch < 2 {
+                    bus[offset + i] += frame[ch];
+                }
+            }
+        }
+        return;
+    }
     for (bus, row) in strip.iter_mut().zip(matrix) {
         for (c, &m) in row.iter().enumerate() {
             if m == 0.0 {

@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+pm-fx-defs = { path = "../pm-fx-defs" }
 pm-time = { path = "../pm-time" }
 pm-protocol = { path = "../pm-protocol" }
 pm-model = { path = "../pm-model" }

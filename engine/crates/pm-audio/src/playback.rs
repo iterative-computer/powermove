@@ -173,6 +173,7 @@ enum Control {
     Project(
         Arc<Document>,
         Arc<MixGraph>,
+        crate::effects::Prepared,
         Option<pm_time::Rate>,
         Option<i64>,
     ),
@@ -1080,11 +1081,31 @@ impl Playback {
         comp_id: &str,
         resolver: &dyn AssetResolver,
     ) -> Result<Vec<(String, String, String)>> {
+        self.set_project_with_audio_effects(
+            doc,
+            comp_id,
+            resolver,
+            &crate::effects::builtin_registry(),
+        )
+    }
+
+    /// Capture a winning audio registry and allocate its complete DSP state on
+    /// this control thread. The producer receives it with the graph revision.
+    pub fn set_project_with_audio_effects(
+        &self,
+        doc: Arc<Document>,
+        comp_id: &str,
+        resolver: &dyn AssetResolver,
+        registry: &crate::effects::Registry,
+    ) -> Result<Vec<(String, String, String)>> {
         let graph = {
             let mut ev = self.builder.lock().unwrap_or_else(|e| e.into_inner());
             MixGraph::build(&doc, comp_id, &mut ev, &self.cache, resolver)?
         };
-        let problems = graph.problems.clone();
+        let prepared =
+            crate::effects::Prepared::build(&doc, &graph, registry, self.format.sample_rate)?;
+        let mut problems = graph.problems.clone();
+        problems.extend(prepared.problems.clone());
         let comp = pm_eval::Comp::resolve(&doc, comp_id)?;
         let rate = comp.rate().map(|r| r.rate);
         let dur = comp.duration();
@@ -1093,7 +1114,7 @@ impl Playback {
             .then(|| (dur * TICKS_PER_SECOND as f64).round() as i64)
             .filter(|&e| e > 0);
         self.tx
-            .send(Control::Project(doc, Arc::new(graph), rate, end))
+            .send(Control::Project(doc, Arc::new(graph), prepared, rate, end))
             .map_err(|_| AudioError::Device("playback stopped".into()))?;
         Ok(problems)
     }
@@ -2401,7 +2422,7 @@ impl RenderThread {
                 let _ = reply.send(result.map(|_| ()));
                 restart
             }
-            Control::Project(doc, graph, rate, end) => {
+            Control::Project(doc, graph, prepared, rate, end) => {
                 if !self.preparation.is_standard() {
                     self.mixer.invalidate_prepared();
                 }
@@ -2414,12 +2435,14 @@ impl RenderThread {
                 } else {
                     self.mixer.set_graph(doc, graph);
                 }
+                self.mixer.set_audio_effects(prepared);
                 self.transport.set_composition(rate, end);
                 self.pending_prepare = true;
                 false
             }
             Control::Solo(s) => {
-                if self.transport.is_running() && s != self.solo {
+                if self.transport.is_running() && s != self.solo && !self.mixer.has_audio_effects()
+                {
                     let (doc, graph) = (self.mixer.document().clone(), self.mixer.graph().clone());
                     self.mixer.glide_to(doc, graph, self.solo.clone());
                 }
