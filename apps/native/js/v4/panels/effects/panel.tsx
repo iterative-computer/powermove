@@ -42,7 +42,7 @@ export function EffectsPanel({
     model.focus === "list" && model.focused === row.key;
   // Design review 2026-11-01: presets speak their kind like effects do.
   const itemLabel = (row: Extract<Row, { type: "item" }>) =>
-    `${row.item.label}, ${row.item.kind === "effect" ? "effect" : "preset"}, ${row.item.group}`;
+    `${row.item.label}, ${row.item.kind === "preset" ? "preset" : row.item.kind}, ${row.item.group}`;
   return (
     <div
       id={ids.panel}
@@ -325,7 +325,9 @@ export function EffectsPanel({
                       justifyContent: "space-between",
                     }}
                     metadata={{
-                      item: item.id,
+                      // A transition's drag names it as one: the timeline
+                      // drops it on the clip edge under the pointer.
+                      item: item.kind === "transition" ? `transition:${item.id}` : item.id,
                       kind: item.kind,
                       parent: row.parent,
                       focused,

@@ -62,6 +62,9 @@ pub struct EffectDrop {
     pub definition: String,
     pub label: String,
     pub layer: Option<String>,
+    /// A transition (`definition` reads `transition:<id>`): the clip edge it
+    /// landed on, the nearer half (v1: left half In, right half Out).
+    pub edge: Option<pm_kernel::commands::effects::Edge>,
 }
 pub trait Delegate: 'static {
     fn time(&self, cx: &App) -> f64;
@@ -1626,6 +1629,28 @@ impl TimelineSurface {
         };
         let top = scene.scroll_for(&v4::row_id(&RowId::Layer(layer.clone())))?;
         Some((layer, ruler + top - self.view.scroll_y))
+    }
+    /// Where a transition dropped at `position` goes: the clip under it (a
+    /// layer bar, or a clip on a track) and its nearer edge; the layer row's
+    /// clip when the pointer is beside the bar.
+    fn transition_target(
+        &self,
+        position: Point<Pixels>,
+    ) -> (Option<String>, Option<pm_kernel::commands::effects::Edge>) {
+        use pm_kernel::commands::effects::Edge as Side;
+        let (x, y) = self.local(position);
+        let layer = self
+            .clip_at(x, y)
+            .map(|(id, _)| id)
+            .or_else(|| self.layer_under(position).map(|(id, _)| id));
+        let edge = layer.as_deref().and_then(|id| self.model.index.layer(id)).map(|l| {
+            if self.time_at(x) < l.from + l.duration / 2. {
+                Side::In
+            } else {
+                Side::Out
+            }
+        });
+        (layer, edge)
     }
     fn effect_moved(&mut self, bounds: Bounds<Pixels>, at: Point<Pixels>, cx: &mut Context<Self>) {
         let over = bounds.contains(&at).then_some(at);
@@ -4426,13 +4451,18 @@ impl Render for TimelineSurface {
                 {
                     cx.stop_propagation();
                     s.effect_over = None;
-                    let layer = s.layer_under(window.mouse_position()).map(|(id, _)| id);
+                    let (layer, edge) = if definition.starts_with("transition:") {
+                        s.transition_target(window.mouse_position())
+                    } else {
+                        (s.layer_under(window.mouse_position()).map(|(id, _)| id), None)
+                    };
                     s.delegate.drop_effect(
                         EffectDrop {
                             panel: drag.panel.clone(),
                             definition: definition.to_string(),
                             label: drag.label.to_string(),
                             layer,
+                            edge,
                         },
                         cx,
                     );

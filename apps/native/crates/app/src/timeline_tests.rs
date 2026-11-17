@@ -2974,6 +2974,7 @@ fn an_effect_dropped_on_a_layers_bar_goes_to_that_layer(cx: &mut TestAppContext)
             definition: "gaussianBlur".into(),
             label: "Gaussian Blur".into(),
             layer: Some(layer),
+            edge: None,
         }]
     );
 }

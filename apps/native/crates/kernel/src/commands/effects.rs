@@ -622,6 +622,65 @@ fn is_hex_color(v: &Value) -> bool {
 }
 
 /// `setTransition(command)`.
+/// A transition from the `transitions` registry (v1's transitions-basic,
+/// and any an extension registers) as [`EffectCommand::SetTransition`]
+/// takes it: its type and parameter definitions. `None` for an unknown id
+/// or one whose defaults are resolved at runtime.
+pub fn registered_transition(
+    state: &crate::state::StateSnapshot,
+    id: &str,
+) -> Option<TransitionDefinition> {
+    let registration = state.provider("transitions", id)?;
+    let params = registration
+        .definition
+        .get("params")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|p| {
+            if p.get("defaultFrom").is_some() {
+                return None;
+            }
+            let kind = p.get("type").and_then(Value::as_str).unwrap_or("number").to_owned();
+            Some(ParamDefinition {
+                key: p.get("k")?.as_str()?.to_owned(),
+                reference: kind == "layer" || kind == "texture",
+                kind,
+                default: p.get("def").cloned().unwrap_or(Value::Null),
+                min: p.get("min").and_then(Value::as_f64),
+                max: p.get("max").and_then(Value::as_f64),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(TransitionDefinition {
+        transition_type: id.to_owned(),
+        params,
+    })
+}
+
+/// The transition `id` on `edge` of `layer_id` at `duration` (or v1's
+/// 0.5 s), with its defaults: what a drop or Add from the Effects browser
+/// and the default-transition command write.
+pub fn add_transition(
+    state: &crate::state::StateSnapshot,
+    layer_id: &str,
+    edge: Edge,
+    id: &str,
+    duration: Option<f64>,
+) -> Result<EffectCommand, CommandError> {
+    let definition = registered_transition(state, id)
+        .ok_or_else(|| CommandError::Invalid(format!("Unknown transition: {id}")))?;
+    Ok(EffectCommand::SetTransition {
+        layer_id: layer_id.to_owned(),
+        edge,
+        transition: Some(Box::new(TransitionSpec {
+            definition,
+            duration,
+            params: Map::new(),
+        })),
+    })
+}
+
 fn set_transition(
     cx: &mut Cx<'_>,
     layer_id: &str,

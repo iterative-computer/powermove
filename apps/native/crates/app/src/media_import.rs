@@ -266,6 +266,9 @@ impl Controller {
         if let Some(view) = self.builtins.views.get(&drop.panel).cloned() {
             view.update(cx, |v, cx| v.end_drag(cx));
         }
+        if let Some(id) = drop.definition.strip_prefix("transition:") {
+            return self.drop_transition(id, &drop, cx);
+        }
         let layer = drop.layer.clone().or_else(|| {
             self.published
                 .as_ref()
@@ -313,6 +316,68 @@ impl Controller {
                 cx.notify();
             }
         }
+    }
+    /// A transition from the Effects panel on a clip's edge (v1's timeline
+    /// drop: the nearer half); without a clip under it, the selected layer's
+    /// In. An audio clip fades over the transition's length instead (its
+    /// crossfade). One undo step, "Set <transition>".
+    fn drop_transition(
+        &mut self,
+        id: &str,
+        drop: &crate::timeline_surface::EffectDrop,
+        cx: &mut Context<Self>,
+    ) {
+        use pm_kernel::commands::effects::Edge;
+        let Some(published) = self.published.clone() else {
+            return;
+        };
+        let Some(layer) = drop
+            .layer
+            .clone()
+            .or_else(|| published.selection.primary().map(str::to_owned))
+        else {
+            self.message = format!("Drop {} on a clip's edge, or select one first", drop.label);
+            return cx.notify();
+        };
+        let edge = drop.edge.unwrap_or(Edge::In);
+        let kind = published.snapshot.root().and_then(|root| {
+            let at = pm_kernel::model::find_layer(root, &layer)?;
+            Some(pm_kernel::model::layer_at(root, &at)?.get("type")?.to_value().as_str()?.to_owned())
+        });
+        let command: pm_kernel::Command = if kind.as_deref() == Some("audio") {
+            let mut patch = pm_model::Map::new();
+            let field = if edge == Edge::In { "fadeIn" } else { "fadeOut" };
+            patch.insert(field, pm_model::Value::Number(0.5));
+            pm_kernel::ContentCommand::Set {
+                layer_id: layer.clone(),
+                patch,
+                time: self.time(),
+            }
+            .into()
+        } else {
+            match pm_kernel::commands::effects::add_transition(
+                &self.kernel.state(),
+                &layer,
+                edge,
+                id,
+                None,
+            ) {
+                Ok(c) => c.into(),
+                Err(e) => {
+                    self.message = e.to_string();
+                    return cx.notify();
+                }
+            }
+        };
+        self.run_layer_plan(
+            crate::layer_commands::Plan {
+                label: format!("Set {}", drop.label),
+                commands: vec![command],
+                select: Some(vec![layer]),
+                count_keys: None,
+            },
+            cx,
+        );
     }
     pub(crate) fn place_project_items(
         &mut self,

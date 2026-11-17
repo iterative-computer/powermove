@@ -24,11 +24,17 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
         },
       },
       target: () => native("effects.target") as Target | null,
+      // A transition goes on the selection's In, as v1's Add did.
       add: (item, target) => [
-        {
-          command: "effect.add",
-          args: { definition: item.id, target: target.id },
-        },
+        item.kind === "transition"
+          ? {
+              command: "transition.set",
+              args: { definition: item.id, target: target.id, edge: "in" },
+            }
+          : {
+              command: "effect.add",
+              args: { definition: item.id, target: target.id },
+            },
       ],
       reveal: (_item, target) => ({
         command: "effect.reveal",
