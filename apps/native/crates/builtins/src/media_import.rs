@@ -312,6 +312,9 @@ pub struct ImportRequest {
     /// originals): an item not here is missing. A file that is one of them
     /// is that item again ([`known`]).
     pub originals: std::collections::BTreeMap<String, PathBuf>,
+    /// How long a placed still lasts (Settings › Media › Still Duration;
+    /// `None`: until the composition ends).
+    pub still: Option<f64>,
 }
 /// How far an import has come: files read of the total, and the file
 /// being read. Shared with whoever shows it; the import only writes.
@@ -878,7 +881,7 @@ impl Builtins {
                 None => fresh.push(path),
             }
         }
-        let (place_at, place_index) = (request.place_at, request.place_index);
+        let (place_at, place_index, still) = (request.place_at, request.place_index, request.still);
         let mut outcome = if fresh.is_empty() {
             Outcome::default()
         } else {
@@ -918,16 +921,22 @@ impl Builtins {
         if let Some(at) = place_at
             && !placed.is_empty()
         {
-            self.place_known(&placed, at, place_index)?;
+            self.place_known(&placed, at, place_index, still)?;
         }
         Ok(outcome)
     }
     /// Items already in the project, placed as an import places its new ones,
     /// in one Undo step, and selected.
-    fn place_known(&self, assets: &[String], at: f64, index: Option<usize>) -> Result<(), String> {
+    fn place_known(
+        &self,
+        assets: &[String],
+        at: f64,
+        index: Option<usize>,
+        still: Option<f64>,
+    ) -> Result<(), String> {
         let project = &self.broker.project;
         let published = self.broker.kernel.published(project).ok_or(SWITCHED)?;
-        let (layers, commands) = place_items(&published, assets, &[], at, index)?;
+        let (layers, commands) = place_items(&published, assets, &[], at, index, still)?;
         let call = pm_kernel::Call::Transact {
             label: Some("Add to Timeline".into()),
             expected_revision: Some(published.revision()),
@@ -1183,6 +1192,7 @@ impl Builtins {
                         at,
                         request.place_index,
                         request.placed_as.as_ref(),
+                        request.still,
                     )
                     .ok_or(SWITCHED)?
                 }
@@ -1263,6 +1273,7 @@ pub fn place_items(
     compositions: &[String],
     at: f64,
     index: Option<usize>,
+    still: Option<f64>,
 ) -> Result<(Vec<String>, Vec<Command>), String> {
     let root = published.snapshot.root().ok_or("Open a project first")?;
     let records = root
@@ -1274,7 +1285,7 @@ pub fn place_items(
         .filter_map(|id| Some((id.as_str(), records.get(id)?)))
         .collect();
     let (mut layers, mut commands) =
-        placement(published, &items, at, index, None).ok_or("Open a project first")?;
+        placement(published, &items, at, index, None, still).ok_or("Open a project first")?;
     let open = published.snapshot.open_comp();
     let comps = root
         .get("comps")
@@ -1365,7 +1376,7 @@ pub fn comp_from_asset(
             background: None,
         },
     };
-    let (layers, mut commands) = placement(published, &[(asset, &record)], 0., None, None)
+    let (layers, mut commands) = placement(published, &[(asset, &record)], 0., None, None, None)
         .ok_or("Open a project first")?;
     for command in &mut commands {
         if let Command::Layer(LayerCommand::Add(add)) = command {
@@ -1385,6 +1396,7 @@ fn placement(
     at: f64,
     index: Option<usize>,
     placed_as: Option<&PlacedAs>,
+    still: Option<f64>,
 ) -> Option<(Vec<String>, Vec<Command>)> {
     let root = published.snapshot.root()?;
     let open = published.snapshot.open_comp();
@@ -1451,8 +1463,12 @@ fn placement(
                 comp: None,
                 name,
                 from: None,
-                // The whole source, even past the composition end.
-                duration: Some(field("dur").unwrap_or_else(|| (dur - at).max(1. / fps))),
+                // The whole source, even past the composition end; a still
+                // as long as Settings › Media › Still Duration says, else
+                // to the composition end.
+                duration: Some(field("dur").unwrap_or_else(|| {
+                    still.unwrap_or_else(|| (dur - at).max(1. / fps))
+                })),
                 content,
                 properties: Map::new(),
                 color: None,
@@ -1535,6 +1551,57 @@ mod tests {
             runtime,
         };
         (fixture, session)
+    }
+    /// Projects opened in turn keep their own items: media imported into
+    /// one, and the archive and library stores it fills, never show up in
+    /// the next, nor does a file already in the first count as known in the
+    /// second (PM-486: a new project listed an item it never had; that was
+    /// an extension importing into each project it mounted in).
+    #[test]
+    fn projects_opened_in_turn_keep_their_own_items() {
+        let f = fixture();
+        let a = write(&f.root, "A.png", PNG);
+        let first = import_with(&f, vec![a.clone()], None, &[], None);
+        assert_eq!(first.assets.len(), 1);
+        let kernel = f.actor.handle();
+        let open = |id: &str| {
+            let project = pm_model::json::parse(&format!(
+                r##"{{"id":"{id}","name":"{id}","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{{}},"comps":{{}},"layers":[]}}"##
+            ))
+            .unwrap();
+            kernel
+                .shell(ShellCall::Open {
+                    id: id.into(),
+                    source: SessionSource::New(project),
+                    electron_profile: None,
+                })
+                .wait()
+                .unwrap()
+                .unwrap();
+        };
+        open("q");
+        let items = |id: &str| {
+            let published = kernel.published(id).unwrap();
+            let catalog = pm_panel_media::Catalog::published(&published).unwrap();
+            catalog.assets.keys().cloned().collect::<Vec<_>>()
+        };
+        assert_eq!(items("p"), first.assets, "the first keeps its item");
+        assert!(items("q").is_empty(), "the second never had one: {:?}", items("q"));
+        // Importing the same file into the second makes its own item there.
+        let second = Builtins::new(kernel.clone(), "q", || {}).unwrap();
+        let document = kernel.published("q").unwrap().snapshot.doc_id;
+        let outcome = second
+            .import_media(
+                document,
+                &f.root,
+                ImportRequest { paths: vec![a], ..Default::default() },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(outcome.imported, ["A.png"], "{outcome:?}");
+        assert!(outcome.reused.is_empty() && outcome.relinked.is_empty());
+        assert_eq!(items("q"), outcome.assets);
+        assert_eq!(items("p"), first.assets, "and the first is untouched");
     }
     /// Imports `paths` as the Project panel does, with `originals` the
     /// files the project's items play from now.
@@ -1708,7 +1775,7 @@ mod tests {
         commit(vec![LayerCommand::Add(Box::new(solid)).into()]);
         let published = kernel.published("p").unwrap();
         let (placed, commands) =
-            place_items(&published, &outcome.assets, &[], 1.5, Some(1)).unwrap();
+            place_items(&published, &outcome.assets, &[], 1.5, Some(1), None).unwrap();
         assert_eq!(placed.len(), 2);
         commit(commands);
         let published = kernel.published("p").unwrap();
@@ -1735,7 +1802,7 @@ mod tests {
             assert_eq!(layer.get("from").unwrap().as_f64(), Some(1.5));
         }
         assert_eq!(
-            place_items(&published, &[], open.as_slice(), 0., None).unwrap_err(),
+            place_items(&published, &[], open.as_slice(), 0., None, None).unwrap_err(),
             "A composition can't be placed inside itself"
         );
     }
@@ -1807,6 +1874,25 @@ mod tests {
         );
     }
 
+    /// A placed still lasts Settings › Media › Still Duration, else to the
+    /// composition end (PM-486).
+    #[test]
+    fn a_placed_still_lasts_the_still_duration() {
+        let (f, _) = opened(
+            r##"{"id":"p","name":"Film","compId":"c","w":640,"h":360,"fps":25,"dur":30,"bg":"#000000","assets":{"a":{"id":"a","name":"Sky.png","kind":"image","w":200,"h":100}},"comps":{},"layers":[]}"##,
+        );
+        let p = f.actor.handle().published("p").unwrap();
+        let length = |still: Option<f64>| {
+            let (_, commands) = place_items(&p, &["a".into()], &[], 2., None, still).unwrap();
+            match &commands[0] {
+                Command::Layer(LayerCommand::Add(add)) => add.duration,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(length(None), Some(28.), "to the composition end");
+        assert_eq!(length(Some(5.)), Some(5.));
+    }
+
     #[test]
     fn parity_add_composition_uses_drop_placement_at_playhead() {
         let (f, _) = opened(
@@ -1814,7 +1900,7 @@ mod tests {
         );
         let kernel = f.actor.handle();
         let p = kernel.published("p").unwrap();
-        let (ids, commands) = place_items(&p, &[], &["nested".into()], 2.5, None).unwrap();
+        let (ids, commands) = place_items(&p, &[], &["nested".into()], 2.5, None, None).unwrap();
         assert_eq!(ids.len(), 1);
         kernel
             .call(

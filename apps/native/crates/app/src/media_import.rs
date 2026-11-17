@@ -335,7 +335,8 @@ impl Controller {
             pm_panel_media::ItemId::Composition(id) => (vec![], vec![id.clone()]),
             _ => (drag.assets.clone(), vec![]),
         };
-        match pm_builtins::media_import::place_items(&published, &assets, &compositions, at, index)
+        let still = self.pro_media.preferences().still();
+        match pm_builtins::media_import::place_items(&published, &assets, &compositions, at, index, still)
         {
             Ok((layers, commands)) => {
                 let label = format!("Add {}", drag.name);
@@ -712,6 +713,7 @@ impl Controller {
         };
         // What plays now: an imported file that is a missing item relinks it.
         request.originals = self.media_base.originals.clone();
+        request.still = self.pro_media.preferences().still();
         // Close and quit wait for this fence, so an import never lands half way.
         let Some(operation) = self.mcp.try_operation() else {
             self.imports.push_front((request, extension));
