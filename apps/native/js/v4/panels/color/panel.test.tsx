@@ -309,9 +309,9 @@ test("stacked grades end with reachable add actions", async () => {
     count: 3,
     range: [0, 3],
     rows: [
-      wheels,
-      tool("c", "colorCurves", "Curve"),
-      tool("l", "applyColorLut", "LUT"),
+      { ...wheels, ordinal: 0 },
+      { ...tool("c", "colorCurves", "Curve"), ordinal: 1 },
+      { ...tool("l", "applyColorLut", "LUT"), ordinal: 2 },
     ],
   });
   const content = named(root, `${PANEL_ID}:content`);
@@ -325,6 +325,7 @@ test("stacked grades end with reachable add actions", async () => {
   expect(sent).toContainEqual({
     type: "add",
     definition: "colorCurves",
+    slot: 3,
     parameters: { channel: 0 },
   });
   await root.dispose();

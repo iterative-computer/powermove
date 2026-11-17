@@ -223,46 +223,80 @@ fn capture_colour_stack_states() {
         }
         let surface = Arc::new(surface);
         let name = file.file_stem().unwrap().to_string_lossy().to_string();
-        for (scheme_name, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
-            objc2::rc::autoreleasepool(|_| {
-                let tokens = Tokens::new(scheme, Accessibility::default());
-                let (w, h) = (360., 1600.);
-                let first = pm_builtins::Publication {
-                    panel: "agent".into(),
-                    generation: 1,
-                    surface: surface.clone(),
-                };
-                let runtime = r.runtime.clone();
-                let mut cx = HeadlessAppContext::with_platform(
-                    Arc::new(
-                        gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
-                            .with_automatic_optical_sizing(),
-                    ),
-                    Arc::new(()),
-                    || {
-                        Some(Box::new(
-                            gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+        for (height_name, h) in [("full", 1600.), ("bottom", 620.)] {
+            for (scheme_name, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
+                objc2::rc::autoreleasepool(|_| {
+                    let tokens = Tokens::new(scheme, Accessibility::default());
+                    let w = 360.;
+                    let first = pm_builtins::Publication {
+                        panel: "agent".into(),
+                        generation: 1,
+                        surface: surface.clone(),
+                    };
+                    let runtime = r.runtime.clone();
+                    let mut cx = HeadlessAppContext::with_platform(
+                        Arc::new(
+                            gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                                .with_automatic_optical_sizing(),
+                        ),
+                        Arc::new(()),
+                        || {
+                            Some(Box::new(
+                                gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                            ))
+                        },
+                    );
+                    let fill = tokens.colors.floating;
+                    let window = cx
+                        .open_window(size(px(w), px(h)), |window, cx| {
+                            let view = cx.new(|cx| {
+                                SurfaceView::new(
+                                    runtime,
+                                    first,
+                                    tokens,
+                                    Natives::default(),
+                                    window,
+                                    cx,
+                                )
+                            });
+                            cx.new(|_| Frame { view, fill })
+                        })
+                        .unwrap();
+                    for _ in 0..20 {
+                        cx.run_until_parked();
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    // Layout establishes the scroll extent; then put the last row
+                    // into the short dock-sized viewport, without OS input.
+                    let _ = cx.capture_screenshot(window.into()).unwrap();
+                    if height_name == "bottom" {
+                        window
+                            .update(&mut cx, |frame, _, cx| {
+                                frame
+                                    .view
+                                    .update(cx, |v, cx| v.review_scroll_to(f32::MAX, cx));
+                            })
+                            .unwrap();
+                        cx.run_until_parked();
+                    }
+                    let image = cx.capture_screenshot(window.into()).unwrap();
+                    if name == "after" {
+                        let bounds = cx
+                            .debug_bounds(window.into(), "color:add-row")
+                            .unwrap()
+                            .expect("add row is laid out");
+                        assert!(
+                            bounds.origin.y >= px(0.) && bounds.bottom() <= px(h),
+                            "add row outside {height_name} viewport: {bounds:?}"
+                        );
+                    }
+                    image
+                        .save(format!(
+                            "{dir}/colour-{name}-{height_name}-{scheme_name}.png"
                         ))
-                    },
-                );
-                let fill = tokens.colors.floating;
-                let window = cx
-                    .open_window(size(px(w), px(h)), |window, cx| {
-                        let view = cx.new(|cx| {
-                            SurfaceView::new(runtime, first, tokens, Natives::default(), window, cx)
-                        });
-                        cx.new(|_| Frame { view, fill })
-                    })
-                    .unwrap();
-                for _ in 0..20 {
-                    cx.run_until_parked();
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                let image = cx.capture_screenshot(window.into()).unwrap();
-                image
-                    .save(format!("{dir}/colour-{name}-{scheme_name}.png"))
-                    .unwrap();
-            });
+                        .unwrap();
+                });
+            }
         }
     }
 }
