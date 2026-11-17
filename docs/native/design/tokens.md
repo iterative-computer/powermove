@@ -71,6 +71,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.agent_gap` | Space between turns in the Agent conversation | 16 | 16 | 16 | 16 |
 | `metrics.agent_height` | Agent popover height when the window has room | 680 | 680 | 680 | 680 |
 | `metrics.agent_width` | Default agent panel width | 440 | 440 | 440 | 440 |
+| `metrics.align_well` | Least width of an alignment well: three cells at the least hit target | 72 | 72 | 72 | 72 |
 | `metrics.anchor_mark` | Anchor point crosshair circle | 11 | 11 | 11 | 11 |
 | `metrics.band_least` | Least height of the timeline's dock | 120 | 120 | 120 | 120 |
 | `metrics.band_room` | Height the timeline's dock leaves above it | 160 | 160 | 160 | 160 |

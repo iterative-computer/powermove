@@ -216,9 +216,15 @@ function AlignmentStrip({
       focusRequest={focusRequest}
       style={{
         ...horizontal,
+        // In a dock too narrow for its three wells a well moves to a second
+        // line, which the row's one-line height hides, instead of standing
+        // over the next (each cell keeps the pointer's least target;
+        // distribute is also in the palette).
+        flexWrap: "wrap",
         gap: token("metrics.gap"),
         height: token("metrics.row"),
         minHeight: token("metrics.row"),
+        overflow: "hidden",
         paddingLeft: token("metrics.inset"),
         paddingRight: token("metrics.inset"),
       }}
@@ -245,6 +251,9 @@ function AlignmentStrip({
               ...horizontal,
               ...well,
               flexGrow: 1,
+              // Never narrower than its three cells: a narrower dock wraps
+              // the strip instead.
+              minWidth: token("metrics.align_well"),
               // Cells keep the pointer's least target, so the strip's
               // wells are that high.
               height: token("metrics.hit"),
