@@ -1007,7 +1007,8 @@ fn g3_speed_ripples_only_its_track_and_undo_restores_everything() {
                 },
             },
         );
-        run(&mut s, LayerCommand::Set { layer_id: "bottom".into(), patch: LayerPatch { from: Some(6.), track: Some(1), ..Default::default() } });
+        run(&mut s, LayerCommand::Set { layer_id: "bottom".into(), patch: LayerPatch { from: Some(6.), ..Default::default() } });
+        run(&mut s, TimingCommand::PinTracks { lanes: vec![("clip".into(), 0), ("top".into(), 0), ("bottom".into(), 1)] });
         let mut state = pm_kernel::state::StateSnapshot::default();
         let mut ui = pm_kernel::state::UiState::default();
         ui.timeline = parse(if tracks {
