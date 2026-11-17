@@ -94,7 +94,7 @@ pub fn permits(subset: &str, name: &str) -> bool {
         .iter()
         .any(|n| n == name)
 }
-/// Every tool name, then the subset a planning (editor) run may call.
+/// Every public tool name.
 pub fn names() -> Vec<String> {
     tools()
         .iter()
@@ -102,7 +102,7 @@ pub fn names() -> Vec<String> {
         .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
         .collect()
 }
-/// What a Composition-only run may call: inspection, plus edits that go through
+/// What an internal Editor run may call: inspection, plus edits that go through
 /// its own session, so the provider's shell and files stay out of reach.
 pub fn composition_names() -> Vec<String> {
     const EDITS: &[&str] = &[
@@ -115,6 +115,11 @@ pub fn composition_names() -> Vec<String> {
         "edit_layer_strips",
         "edit_video",
         "edit_3d",
+        "fork_builtin_extension",
+        "stage_fork_rebase",
+        "publish_extensions",
+        "panel_begin",
+        "panel_build",
     ];
     names()
         .into_iter()

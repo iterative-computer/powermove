@@ -122,7 +122,7 @@ test("actual Rust model through HostRouter/HostDataService drives Send, Stop, co
   expect(f.model.inspect().snapshot.stopping).toBe(true);
   expect(f.pendingEffects).toBe(2);
   await f.model.dispatch({ type: "setAccess", access: "full" });
-  expect(f.model.inspect().snapshot.settings.access).toBe("editor");
+  expect(f.model.inspect().snapshot.settings.access).toBe("auto");
   expect(f.pendingEffects).toBe(3);
   const validated = Bun.spawnSync([process.env.PM_UI_KIT_WIRE!], {
     stdin: new TextEncoder().encode(

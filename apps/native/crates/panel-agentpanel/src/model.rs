@@ -61,10 +61,10 @@ impl Settings {
             model: v["model"].as_str().unwrap_or_default().into(),
             effort: v["reasoningEffort"].as_str().unwrap_or_default().into(),
             // A persisted computer grant is intent, never live authority.
-            access: if matches!(v["access"].as_str(), Some("project" | "computer")) {
-                Access::Project
-            } else {
+            access: if v["access"] == "editor" {
                 Access::Editor
+            } else {
+                Access::Project
             },
             approval: if v["approvalMode"] == "supervised" {
                 ApprovalMode::Supervised
@@ -349,7 +349,9 @@ pub enum ShellAction {
     Pin,
     BeginDrag,
     CancelDrag,
-    CommitDrag { dock: Option<String> },
+    CommitDrag {
+        dock: Option<String>,
+    },
     OpenGlobal,
     ImportWorkspace,
     RepairExtension(String),
@@ -933,7 +935,8 @@ impl Panel {
         if steer {
             session.archive_trace(now, true)?;
         }
-        session.append(json!({"role":"user","text":typed,"attachments":placed,"steering":steer}))?;
+        session
+            .append(json!({"role":"user","text":typed,"attachments":placed,"steering":steer}))?;
         session.archive_result()?;
         session.draft.clear_after_send();
         session.plan = None;

@@ -512,7 +512,10 @@ impl Builtins {
             return describe(&thread_arg, json!({}));
         }
         if self.broker.application && caller == "editor" {
-            return Err("Start an app thread with Project access. Planning threads need an attached project.".into());
+            return Err(
+                "Start an app thread with Project access. Editor threads need an attached project."
+                    .into(),
+            );
         }
         // A retried request returns its first answer; a reused id refuses.
         let target = &args["target"];
@@ -2627,7 +2630,9 @@ impl Builtins {
                 for f in all.values() {
                     for root in &roots {
                         if f.path.starts_with(&all[root].path) {
-                            if let Some(state) = folders.get(root).cloned() { folders.insert(f.id.clone(), state); }
+                            if let Some(state) = folders.get(root).cloned() {
+                                folders.insert(f.id.clone(), state);
+                            }
                         }
                     }
                 }

@@ -397,6 +397,8 @@ fn stop_lands_while_a_stream_republishes_the_panel() {
     let actor = actor();
     let mut panel = Agent::mount(&actor, environment(root.path(), "stream"));
     panel.connected(Provider::Chatgpt);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-access", "editor");
     panel.send("Go");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !panel.text().contains("token") {
@@ -490,6 +492,8 @@ fn signing_out_during_a_run_keeps_its_conversation_and_stop() {
     let actor = actor();
     let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
     panel.connected(Provider::Chatgpt);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-access", "editor");
     panel.send("Wait");
     let agent = panel.agent();
     let thread = thread_id(&agent);
@@ -604,6 +608,8 @@ fn composition_run_gets_session_and_edit_tools_and_the_chosen_model() {
     ];
     let mut panel = Agent::mount(&actor, environment);
     panel.connected(Provider::Claude);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-access", "editor");
     panel.choose("agent-model", "provider:claude");
     panel.choose("agent-model", "model:fixture");
     panel.choose("agent-effort", "high");
@@ -1048,12 +1054,18 @@ fn full_access_runs_once_the_person_consents_and_asks_again_otherwise() {
         let state = agent.lock().unwrap();
         let s = state.panel.session(state.panel.active_id()).unwrap();
         assert_eq!(s.settings.access, pm_agents::Access::Computer);
-        assert!(s.computer_consent, "the card's answer is kept for the thread");
+        assert!(
+            s.computer_consent,
+            "the card's answer is kept for the thread"
+        );
     }
     panel.send("Hi");
     panel.wait(idle);
     let text = panel.text();
-    assert!(text.contains("Saw: Hi"), "the run reached the provider: {text}");
+    assert!(
+        text.contains("Saw: Hi"),
+        "the run reached the provider: {text}"
+    );
     assert!(
         !text.contains("fresh approval"),
         "no dead-end refusal: {text}"
@@ -1081,7 +1093,17 @@ fn an_auto_run_reaches_the_provider_and_shows_what_it_did() {
     let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
     panel.connected(Provider::Chatgpt);
     // Auto runs the autonomous CLI (`codex exec`), not the App Server.
-    panel.choose("agent-access", "auto");
+    {
+        let agent = panel.agent();
+        let state = agent.lock().unwrap();
+        let settings = &state
+            .panel
+            .session(state.panel.active_id())
+            .unwrap()
+            .settings;
+        assert_eq!(settings.access, pm_agents::Access::Project);
+        assert_eq!(settings.approval, pm_agents::ApprovalMode::Auto);
+    }
     panel.send("Hi");
     panel.wait(idle);
     let text = panel.text();
@@ -1129,6 +1151,8 @@ fn a_quiet_run_still_republishes_its_working_time() {
     let actor = actor();
     let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
     panel.connected(Provider::Chatgpt);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-access", "editor");
     panel.send("Make the headline");
     panel.wait(|s| !s.runs.is_empty());
     // The original's timer copy: "Working for 0s".
@@ -1362,7 +1386,10 @@ fn select_part_of_the_screen_asks_the_window_for_a_pick() {
     panel.click("agent-pick-region");
     let requests = panel.panels.take_platform_requests();
     assert_eq!(
-        requests.iter().filter(|r| r.operation == "agent.pickRegion").count(),
+        requests
+            .iter()
+            .filter(|r| r.operation == "agent.pickRegion")
+            .count(),
         1,
         "{:?}",
         requests.iter().map(|r| &r.operation).collect::<Vec<_>>()
@@ -1465,6 +1492,8 @@ fn a_delegated_task_runs_and_its_result_resumes_the_calling_run() {
     let actor = actor();
     let mut panel = Agent::mount(&actor, slow_environment(root.path(), "1.0"));
     panel.connected(Provider::Chatgpt);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-access", "editor");
     let agent = panel.agent();
     let thread = thread_id(&agent);
     panel.send("Make a title card");
@@ -1560,6 +1589,8 @@ fn wait_mode_status_cancel_and_send_follow_mains_contract() {
     let actor = actor();
     let mut panel = Agent::mount(&actor, slow_environment(root.path(), "0.6"));
     panel.connected(Provider::Chatgpt);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-access", "editor");
     let agent = panel.agent();
     let thread = thread_id(&agent);
     // Its turn holds, as a real provider's does while it waits on a tool
@@ -1685,6 +1716,8 @@ fn stopping_a_run_that_waits_for_its_subagent_stops_both() {
     let actor = actor();
     let mut panel = Agent::mount(&actor, slow_environment(root.path(), "0.3"));
     panel.connected(Provider::Chatgpt);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-access", "editor");
     let agent = panel.agent();
     let thread = thread_id(&agent);
     panel.send("Go");
@@ -1807,6 +1840,8 @@ fn a_private_answer_reaches_the_subagent_but_never_its_prompt() {
     let actor = actor();
     let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
     panel.connected(Provider::Chatgpt);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-access", "editor");
     let agent = panel.agent();
     let thread = thread_id(&agent);
     panel.send("Hold: Coordinate");
@@ -2170,6 +2205,8 @@ fn a_connected_model_runs_with_the_powermove_tools_and_streams_its_reply() {
     let mut panel = Agent::mount(&actor, compatible_environment(root.path(), &model));
     panel.choose("agent-model", "provider:compatible");
     panel.connected(Provider::Compatible);
+    // This fixture exercises the Editor tool set / App Server protocol.
+    panel.choose("agent-access", "editor");
     assert!(!panel.text().contains("Connect ChatGPT"));
     panel.send("Use a tool please");
     panel.wait(idle);

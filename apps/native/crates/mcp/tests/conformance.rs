@@ -1114,3 +1114,106 @@ fn the_agent_sets_the_project_output() {
         "{refused}"
     );
 }
+
+fn internal_editor(f: &Fixture) -> McpSession {
+    f.host.lock().unwrap().agent_grants = Some(Arc::new(|token| {
+        (token == "synthetic-editor-token").then(|| ("run-editor".into(), "editor".into()))
+    }));
+    let mut s = f.session();
+    s.set_agent_run("synthetic-editor-token");
+    let started = value(s.call("start_session", json!({"prompt":"Build"})));
+    assert_eq!(started["access"], "editor");
+    s
+}
+#[test]
+fn internal_editor_receives_staging_workspace() {
+    let f = Fixture::new();
+    f.create();
+    let mut s = internal_editor(&f);
+    value(s.call("finish_session", json!({"commit":true})));
+    let started = value(s.call("start_session", json!({"prompt":"Build"})));
+    for key in [
+        "workspace",
+        "stagingDirectory",
+        "apiPackDirectory",
+        "artifactsDirectory",
+    ] {
+        assert!(
+            std::path::Path::new(started[key].as_str().unwrap()).is_dir(),
+            "{key}"
+        );
+    }
+}
+#[test]
+fn internal_editor_can_select_layers() {
+    let f = Fixture::new();
+    f.create();
+    let mut setup = f.session();
+    start(&mut setup);
+    add(&mut setup, "L-editor");
+    value(setup.call("finish_session", json!({"commit":true})));
+    let mut s = internal_editor(&f);
+    assert_eq!(
+        value(s.call("select_layers", json!({"layerIds":["L-editor"]})))["selection"]["layers"],
+        json!(["L-editor"])
+    );
+}
+#[test]
+fn internal_editor_can_apply_commands() {
+    let f = Fixture::new();
+    let id = f.create();
+    let mut s = internal_editor(&f);
+    add(&mut s, "L-editor");
+    assert_eq!(
+        f.host.lock().unwrap().read_document(&id).unwrap()["layers"][0]["id"],
+        "L-editor"
+    );
+}
+#[test]
+fn internal_editor_authority_cannot_be_forged_widened_or_used_after_revocation() {
+    let f = Fixture::new();
+    f.create();
+    let mut s = internal_editor(&f);
+    for name in [
+        "Bash",
+        "Read",
+        "Write",
+        "read_file",
+        "write_file",
+        "run_command",
+        "import_media",
+    ] {
+        assert!(s.dispatch(name, &json!({})).is_err(), "{name}");
+    }
+    value(s.call("finish_session", json!({"commit":true})));
+    assert!(
+        s.dispatch(
+            "start_session",
+            &json!({"prompt":"Build","access":"project"})
+        )
+        .is_err()
+    );
+    value(s.call("start_session", json!({"prompt":"Build"})));
+    f.host.lock().unwrap().agent_grants = Some(Arc::new(|_| None));
+    assert!(
+        s.dispatch("select_layers", &json!({"layerIds":[]}))
+            .is_err()
+    );
+    for result in [
+        s.call("project_memory", json!({"action":"read"})),
+        s.call("finish_session", json!({"commit":true})),
+    ] {
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            result["content"][0]["text"],
+            "This agent run is no longer active."
+        );
+    }
+    let mut forged = f.session();
+    forged.set_agent_run("run-editor");
+    assert!(
+        forged
+            .dispatch("start_session", &json!({"prompt":"Build"}))
+            .is_err()
+    );
+}

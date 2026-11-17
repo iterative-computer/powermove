@@ -340,7 +340,7 @@ fn question_skip_only_reply_transport_and_message_answer_preserves_composer() {
 fn computer_access_needs_matching_consent_and_late_grants_cannot_override_choice() {
     let mut p = panel();
     let effect = p.set_access("t", "full").unwrap().unwrap();
-    assert_eq!(p.session("t").unwrap().settings.access, Access::Editor);
+    assert_eq!(p.session("t").unwrap().settings.access, Access::Project);
     p.set_access("t", "editor").unwrap();
     assert!(p.acknowledge(effect.id, true).is_err());
     let effect = p.set_access("t", "full").unwrap().unwrap();

@@ -330,3 +330,37 @@ fn forks_copy_a_pristine_base_and_rebases_merge_upstream_changes() {
         "Only user extensions can be rebased: timeline"
     );
 }
+
+#[test]
+fn internal_editor_can_fork_and_publish_builtin_properties() {
+    let f = Fixture::new();
+    extension(
+        &f.host.builtins,
+        "panel-properties",
+        "export function view() {}",
+    );
+    let live = f.live();
+    let mut host =
+        crate::Automation::new(f.dir.path().join("profile"), f.dir.path().join("exports")).unwrap();
+    host.create_project(&json!({"name":"Synthetic"})).unwrap();
+    host.extensions = Some(std::sync::Arc::new(f.host));
+    host.agent_grants = Some(std::sync::Arc::new(|token| {
+        (token == "editor-token").then(|| ("run-editor".into(), "editor".into()))
+    }));
+    let mut session = crate::McpSession::new(std::sync::Arc::new(StdMutex::new(host)));
+    session.set_agent_run("editor-token");
+    session
+        .dispatch("start_session", &json!({"prompt":"Build"}))
+        .unwrap();
+    let fork = session
+        .dispatch("fork_builtin_extension", &json!({"id":"panel-properties"}))
+        .unwrap();
+    assert_eq!(fork["forkId"], "panel-properties-fork");
+    session
+        .dispatch(
+            "publish_extensions",
+            &json!({"extensions":[change("panel-properties-fork", "created")]}),
+        )
+        .unwrap();
+    assert!(live.join("panel-properties-fork/manifest.json").is_file());
+}
