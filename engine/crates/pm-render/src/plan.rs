@@ -944,6 +944,7 @@ fn draw_layer<'d>(
             scale,
             time,
             final_output: b.final_output,
+            bounds3d: None,
         };
         match b.effects {
             None => {
@@ -1008,6 +1009,7 @@ fn draw_layer<'d>(
                 scale,
                 time,
                 final_output: b.final_output,
+                bounds3d: None,
             };
             match host.prepare_transition(scope, layer, frame)? {
                 Ok(t) => t,
@@ -3070,6 +3072,7 @@ fn source_plan<'d>(
                 scale,
                 time,
                 final_output: b.final_output,
+                bounds3d: None,
             },
             prefix,
             raster,
@@ -3191,10 +3194,17 @@ fn prepare_effects<'d>(
     scope: &mut Scope<'_, 'd>,
     b: &mut Build<'_>,
     layer: &'d Node,
-    frame: composite::effects::EffectFrame,
+    mut frame: composite::effects::EffectFrame,
     prefix: Option<usize>,
 ) -> JsResult<Result<Option<composite::PreparedEffects>, Feature>> {
     let host = b.effects.expect("effect host checked by caller");
+    frame.bounds3d = crate::scene3d::bounds::object_bounds(
+        scope,
+        layer,
+        frame.time,
+        b.assets,
+        b.options3d.studio.is_some(),
+    )?;
     let result = host.prepare_measured(
         scope,
         layer,
@@ -3352,12 +3362,20 @@ fn effect_inputs_once<'d>(
             producers.push(producer);
             continue;
         }
+        let bounds3d = crate::scene3d::bounds::object_bounds(
+            scope,
+            source,
+            at,
+            b.assets,
+            b.options3d.studio.is_some(),
+        )?;
         let owner_binding = match crate::effects::plan::owner(
             scope,
             source,
             at,
             scale,
             &mut b.text.as_deref_mut().and_then(|t| t.measure()),
+            bounds3d,
         )? {
             Ok(o) => o,
             Err(f) => return Ok(Err(f)),
@@ -3425,6 +3443,7 @@ fn effect_inputs_once<'d>(
                         scale,
                         time: at,
                         final_output: b.final_output,
+                        bounds3d: None,
                     },
                     request.prefix,
                 )? {
