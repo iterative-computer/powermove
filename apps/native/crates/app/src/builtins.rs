@@ -2293,10 +2293,18 @@ impl Controller {
                         ],
                     )
                     .critical()
-                    .sheet(&self.host.borrow().window);
+                    // On the popover itself, as its file picker is: on the
+                    // editor it took key from the popover, which closed, and
+                    // the person had to open it again to send (PM-507).
+                    .sheet(
+                        &crate::platform::ns_window(window)
+                            .unwrap_or_else(|| self.host.borrow().window.clone()),
+                    );
+                    self.builtins.agent_picking = true;
                     let runtime = runtime.clone();
-                    cx.spawn(async move |_, cx| {
+                    cx.spawn(async move |this, cx| {
                         let accepted = rx.recv().await == Ok(Some(true));
+                        let _ = this.update(cx, |v, _| v.builtins.agent_picking = false);
                         let _ = cx
                             .background_executor()
                             .spawn(async move { runtime.agent_consent(effect, accepted) })
