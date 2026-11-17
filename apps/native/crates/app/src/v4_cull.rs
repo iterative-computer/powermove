@@ -186,13 +186,20 @@ impl SurfaceView {
             window.request_animation_frame();
         }
         if crate::diag::enabled() {
-            let scrollers: Vec<(f32, f32, f32)> = self
+            let scrollers: Vec<(f32, f32, f32, f32)> = self
                 .prepared
                 .nodes
                 .values()
                 .filter(|n| n.scroll_y)
                 .filter_map(|n| self.scrolls.get(&n.id))
-                .map(|h| (f32::from(h.bounds().origin.y), f32::from(h.bounds().size.height), -f32::from(h.offset().y)))
+                .map(|h| {
+                    (
+                        f32::from(h.bounds().origin.y),
+                        f32::from(h.bounds().size.height),
+                        -f32::from(h.offset().y),
+                        f32::from(h.max_offset().y),
+                    )
+                })
                 .collect();
             crate::diag::line(serde_json::json!({"ui": "cull", "nodes": self.prepared.nodes.len(),
                 "culled": self.cull.culled.len(), "measured": self.cull.measured.len(),
