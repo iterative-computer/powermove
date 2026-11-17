@@ -6,7 +6,7 @@ pub use flowchart::FlowchartRow;
 use crate::{
     keyboard::{Class, Effect, Key, POINTER, Resolver},
     menu,
-    native_control::SegmentedControl,
+    native_control::{SEGMENT_MENU_INDICATOR, SegmentedControl},
     transient::{Choice, Picker},
 };
 use foreign_types::ForeignType;
@@ -1005,34 +1005,9 @@ define_class!(
                 let command = toolbar_click_command(command, double_click);
                 let _ = tx.try_send(Command { name: command.to_string(), args: vec![], token: None });
             }
-            // A click on the Shape segment's menu indicator lists the
-            // variants at once; holding still does (PM-502).
-            if sender.selectedSegment() == SHAPE_SEGMENT
-                && let Some(event) = NSApplication::sharedApplication(self.mtm()).currentEvent()
-            {
-                let at = sender.convertPoint_fromView(event.locationInWindow(), None);
-                let widths: Vec<f64> = (0..sender.segmentCount())
-                    .map(|i| sender.widthForSegment(i))
-                    .collect();
-                if let Some(start) = on_menu_indicator(at.x, &widths, SHAPE_SEGMENT as usize) {
-                    let menu: Option<Retained<NSMenu>> =
-                        unsafe { msg_send![sender, menuForSegment: SHAPE_SEGMENT] };
-                    if let Some(menu) = menu {
-                        let below = objc2_foundation::NSPoint::new(start, sender.bounds().size.height + 2.);
-                        menu.popUpMenuPositioningItem_atLocation_inView(None, below, Some(sender));
-                    }
-                }
-            }
         }
     }
 );
-/// Where the Shape segment starts when `x` (in the control) falls on its
-/// menu indicator, the right `TOOL_MENU_INDICATOR` points of the segment.
-fn on_menu_indicator(x: f64, widths: &[f64], segment: usize) -> Option<f64> {
-    let start: f64 = widths.iter().take(segment).sum();
-    let end = start + *widths.get(segment)?;
-    (x >= end - TOOL_MENU_INDICATOR - 2. && x <= end + 2.).then_some(start)
-}
 impl Target {
     fn new(
         mtm: MainThreadMarker,
@@ -1479,9 +1454,8 @@ pub const SHAPES: [(&str, &str, &str); 5] = [
     ("star", "Star", "star"),
 ];
 const SHAPE_SEGMENT: isize = 5;
-/// A tool segment's width, and the room AppKit's menu indicator takes in one.
+/// A toolbar tool segment's width, before its optional menu indicator.
 const TOOL_SEGMENT: f64 = 34.;
-const TOOL_MENU_INDICATOR: f64 = 12.;
 /// The toolbar's symbol buttons: name (a `TOOLBAR` slot, whose index is the
 /// item's tag), symbol, label.
 const TOOLBAR_BUTTONS: [(&str, &str, &str); 4] = [
@@ -1506,18 +1480,6 @@ mod strip_page_tests {
         // The front tab without it: the other tab's cell, unlit.
         let cells = super::strip_pages(1, &[], None, &[(2, vec![store()]), (3, vec![store()])]);
         assert_eq!(cells, vec![(2, 0, "Store".into(), false)]);
-    }
-}
-#[cfg(test)]
-mod shape_indicator_tests {
-    /// A click on the Shape segment's indicator opens its variants; one on
-    /// its glyph only picks the tool (PM-502).
-    #[test]
-    fn the_shape_menu_opens_on_a_click_on_its_indicator() {
-        let widths = [30., 30., 30., 30., 30., 42., 30.];
-        assert_eq!(super::on_menu_indicator(185., &widths, 5), Some(150.));
-        assert_eq!(super::on_menu_indicator(165., &widths, 5), None, "the glyph");
-        assert_eq!(super::on_menu_indicator(200., &widths, 5), None, "the next tool");
     }
 }
 #[cfg(test)]
@@ -2899,7 +2861,7 @@ impl ToolbarDelegate {
                 // Keep the symbol at the same size when a segment has a menu.
                 let width = TOOL_SEGMENT
                     + if i == SHAPE_SEGMENT {
-                        TOOL_MENU_INDICATOR
+                        SEGMENT_MENU_INDICATOR
                     } else {
                         0.
                     };
@@ -2932,11 +2894,7 @@ impl ToolbarDelegate {
                 });
                 menu.addItem(&item);
             }
-            unsafe {
-                let _: () = msg_send![&*control, setMenu: &*menu, forSegment: SHAPE_SEGMENT];
-                let _: () =
-                    msg_send![&*control, setShowsMenuIndicator: true, forSegment: SHAPE_SEGMENT];
-            }
+            control.set_variants(SHAPE_SEGMENT, &menu);
             control.sizeToFit();
             item.setView(Some(&control));
             item.setLabel(&NSString::from_str("Tools"));
@@ -5997,26 +5955,29 @@ impl Host {
             if item.itemIdentifier().to_string() != "tools" {
                 continue;
             }
-            let Some(view) = item.view() else { continue };
-            unsafe {
-                let menu: Option<Retained<NSMenu>> =
-                    msg_send![&*view, menuForSegment: SHAPE_SEGMENT];
-                for entry in menu.map(|m| m.itemArray().to_vec()).unwrap_or_default() {
-                    let id: Option<Retained<NSString>> = entry
+            let Some(control) = item
+                .view()
+                .and_then(|v| v.downcast::<SegmentedControl>().ok())
+            else {
+                continue;
+            };
+            if let Some(menu) = control.menuForSegment(SHAPE_SEGMENT) {
+                for entry in menu.itemArray().to_vec() {
+                    let on = entry
                         .representedObject()
-                        .map(|o| Retained::cast_unchecked(o));
-                    let on = id.is_some_and(|id| id.to_string() == variant);
+                        .and_then(|o| o.downcast::<NSString>().ok())
+                        .is_some_and(|id| id.to_string() == variant);
                     entry.setState(if on {
                         NSControlStateValueOn
                     } else {
                         NSControlStateValueOff
                     });
                 }
-                let image = toolbar_symbol(glyph, &format!("Shape: {label} (Q)"), &self.tokens);
-                let _: () = msg_send![&*view, setImage: &*image, forSegment: SHAPE_SEGMENT];
-                let tip = NSString::from_str(&format!("{label} (Q)"));
-                let _: () = msg_send![&*view, setToolTip: &*tip, forSegment: SHAPE_SEGMENT];
             }
+            let title = format!("Shape: {label} (Q)");
+            let image = toolbar_symbol(glyph, &title, &self.tokens);
+            control.set_segment_image(SHAPE_SEGMENT, &image, &title);
+            control.setToolTip_forSegment(Some(&NSString::from_str(&title)), SHAPE_SEGMENT);
         }
     }
     pub fn select_tool(&self, command: &str) {

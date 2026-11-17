@@ -24,7 +24,24 @@ define_class!(
     #[name = "PMSegmentedControl"]
     pub(crate) struct SegmentedControl;
 
-    impl SegmentedControl {}
+    impl SegmentedControl {
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            let secondary = event.modifierFlags().contains(NSEventModifierFlags::Control);
+            if !self.open_variant_menu(event, secondary) {
+                // AppKit handles ordinary selection and press-and-hold
+                // on any segment with an attached menu.
+                unsafe { let _: () = msg_send![super(self), mouseDown: event]; }
+            }
+        }
+
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &NSEvent) {
+            if !self.open_variant_menu(event, true) {
+                unsafe { let _: () = msg_send![super(self), rightMouseDown: event]; }
+            }
+        }
+    }
 );
 
 impl SegmentedControl {
@@ -42,10 +59,100 @@ impl SegmentedControl {
         control
     }
 
+    /// Adds a native hold menu and chevron to a fixed-width toolbar segment.
+    pub(crate) fn set_variants(&self, index: isize, menu: &NSMenu) {
+        self.setMenu_forSegment(Some(menu), index);
+        self.setShowsMenuIndicator_forSegment(true, index);
+    }
+
+    fn open_variant_menu(&self, event: &NSEvent, secondary: bool) -> bool {
+        if !self.isEnabled() {
+            return false;
+        }
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        let bounds = self.bounds();
+        if !self.mouse_inRect(at, bounds) {
+            return false;
+        }
+        let mut start = bounds.origin.x;
+        for index in 0..self.segmentCount() {
+            let width = self.widthForSegment(index);
+            if let Some(menu) = self.menuForSegment(index)
+                && self.isEnabledForSegment(index)
+                && opens_variant_menu(
+                    at.x - start,
+                    width,
+                    self.selectedSegment() == index,
+                    self.showsMenuIndicatorForSegment(index),
+                    secondary,
+                )
+            {
+                let below = if self.isFlipped() {
+                    bounds.size.height + 2.
+                } else {
+                    -2.
+                };
+                menu.popUpMenuPositioningItem_atLocation_inView(
+                    None,
+                    NSPoint::new(start, below),
+                    Some(self),
+                );
+                return true;
+            }
+            start += width;
+        }
+        false
+    }
+
     pub(crate) fn set_segment_image(&self, index: isize, image: &NSImage, title: &str) {
         image.setTemplate(true);
         image.setAccessibilityDescription(Some(&NSString::from_str(title)));
         self.setImage_forSegment(Some(image), index);
+    }
+}
+
+/// Leave room for the indicator beside a full-size toolbar glyph. The
+/// segment has this same width reserved for its indicator hit target.
+pub(crate) const SEGMENT_MENU_INDICATOR: f64 = 12.;
+
+fn opens_variant_menu(
+    x: f64,
+    width: f64,
+    selected: bool,
+    indicator: bool,
+    secondary: bool,
+) -> bool {
+    (0. ..width).contains(&x)
+        && (secondary || selected || (indicator && x >= width - SEGMENT_MENU_INDICATOR))
+}
+
+#[cfg(test)]
+mod variant_click_tests {
+    use super::opens_variant_menu;
+
+    #[test]
+    fn primary_click_selects_an_inactive_tool_and_keeps_appkit_hold_tracking() {
+        assert!(!opens_variant_menu(16., 46., false, true, false));
+    }
+
+    #[test]
+    fn primary_click_reopens_the_active_tools_variants() {
+        assert!(opens_variant_menu(16., 46., true, true, false));
+    }
+
+    #[test]
+    fn secondary_click_opens_variants_with_either_selection() {
+        for selected in [false, true] {
+            assert!(opens_variant_menu(16., 46., selected, true, true));
+        }
+    }
+
+    #[test]
+    fn indicator_opens_variants_and_does_not_extend_into_the_next_tool() {
+        assert!(opens_variant_menu(40., 46., false, true, false));
+        assert!(!opens_variant_menu(40., 46., false, false, false));
+        assert!(!opens_variant_menu(46., 46., true, true, true));
+        assert!(!opens_variant_menu(-1., 46., true, true, true));
     }
 }
 
