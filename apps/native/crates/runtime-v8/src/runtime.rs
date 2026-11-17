@@ -460,19 +460,24 @@ pub struct Admission {
 struct Queue {
     /// The next ticket handed out.
     next: u64,
-    /// Tickets waiting for room, and whether each is a shown window's: those
-    /// are served first, in order, then the hidden ones' (PM-513).
-    waiting: std::collections::BTreeMap<u64, bool>,
+    /// Tickets waiting for room: whether each is a shown window's, and how
+    /// much it asks for (PM-513).
+    waiting: std::collections::BTreeMap<u64, (bool, usize)>,
     /// Bumped whenever the account changes, so a waiter can tell busy from stuck.
     changes: u64,
 }
 impl Queue {
-    /// Whose turn it is: the first shown window's waiter, else the first.
-    fn turn(&self) -> Option<u64> {
+    /// Whose turn it is with `free` bytes of room: a shown window's waiters
+    /// first, always (while one waits, nothing hidden is served), and among
+    /// them the first in line that fits, so a large request that does not fit
+    /// yet never holds back smaller ones that do (a shown tab's panels stayed
+    /// waiting behind a realm's start after room came back).
+    fn turn(&self, free: usize) -> Option<u64> {
+        let shown_waits = self.waiting.values().any(|(shown, _)| *shown);
         self.waiting
             .iter()
-            .find(|(_, shown)| **shown)
-            .or_else(|| self.waiting.iter().next())
+            .filter(|(_, (shown, _))| *shown == shown_waits)
+            .find(|(_, (_, bytes))| *bytes <= free)
             .map(|(ticket, _)| *ticket)
     }
 }
@@ -511,7 +516,7 @@ impl Admission {
     /// Whether a shown window's isolate waits for room now: nothing hidden
     /// takes room ahead of it.
     fn shown_waiting(&self) -> bool {
-        self.queue.0.lock().unwrap().waiting.values().any(|shown| *shown)
+        self.queue.0.lock().unwrap().waiting.values().any(|(shown, _)| *shown)
     }
     /// Room was given back (or the account changed): waiters look again.
     fn changed(&self) {
@@ -594,15 +599,16 @@ impl Admission {
         let mut q = queue.lock().unwrap();
         let ticket = q.next;
         q.next += 1;
-        q.waiting.insert(ticket, shown());
+        q.waiting.insert(ticket, (shown(), bytes));
         let mut seen = q.changes;
         let mut since = Instant::now();
         let result = loop {
             let now = shown();
-            if q.waiting.get(&ticket) != Some(&now) {
-                q.waiting.insert(ticket, now);
+            if q.waiting.get(&ticket) != Some(&(now, bytes)) {
+                q.waiting.insert(ticket, (now, bytes));
             }
-            if q.turn() == Some(ticket) && self.take(bytes) {
+            let free = self.budget.saturating_sub(self.used());
+            if q.turn(free) == Some(ticket) && self.take(bytes) {
                 break Ok(());
             }
             if !wanted() || since.elapsed() >= self.patience {

@@ -1149,6 +1149,42 @@ fn a_shown_windows_request_is_served_before_a_hidden_ones() {
     assert_eq!(*order.lock().unwrap(), ["shown", "hidden"]);
     drop((shown, hidden));
 }
+/// PM-513: a request that does not fit yet never holds back a smaller one
+/// that does: a shown tab's 16 MiB panels start when room for them comes
+/// back, though a 128 MiB realm start waits ahead of them in line.
+#[test]
+fn a_large_request_that_does_not_fit_never_holds_back_one_that_does() {
+    let mib = 1024 * 1024;
+    let account = Admission::new(160 * mib);
+    let most = account.hold(128 * mib).unwrap();
+    let rest = account.hold(32 * mib).unwrap();
+    let shown = || Arc::new(AtomicBool::new(true));
+    let big = {
+        let account = account.clone();
+        let shown = shown();
+        thread::spawn(move || account.reserve_waiting(128 * mib, shown, || true))
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while account.waiting() < 1 {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(2));
+    }
+    let small = {
+        let account = account.clone();
+        let shown = shown();
+        thread::spawn(move || account.reserve_waiting(16 * mib, shown, || true))
+    };
+    while account.waiting() < 2 {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(2));
+    }
+    // Room for the small one only.
+    drop(rest);
+    let small = small.join().unwrap().expect("the small request was served");
+    assert_eq!(account.waiting(), 1, "the large one still waits");
+    drop((small, most));
+    assert!(big.join().unwrap().is_ok(), "and is served once there is room");
+}
 /// A hidden window's realm that must grow while the account is full waits
 /// (its work pauses) instead of failing, and goes on once room is given back.
 #[test]
