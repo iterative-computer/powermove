@@ -4230,7 +4230,7 @@ impl Render for TimelineSurface {
         let region = self.graph_region();
         let column = self.view.layer_column;
         let decorations = self.decorations.clone();
-        let hover_clip = self.hover_clip.clone();
+        let hover_clip = (self.model.edit_tool != EditTool::Split).then(|| self.hover_clip.clone()).flatten();
         let skimmer = self.skimmer_at();
         let marquee = match &self.gesture {
             Gesture::Marquee { origin, at, .. } => Some(Bounds::from_corners(
