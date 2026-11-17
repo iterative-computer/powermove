@@ -318,6 +318,7 @@ impl Client {
     }
     pub fn receive(&mut self, msg: Value, now: u64) -> Effects {
         let mut e = Effects::default();
+        e.events.extend(crate::user_mcp::startup_warnings(&msg));
         // Server requests take precedence over response IDs, which may collide.
         if (msg["id"].is_number()
             || msg["id"]

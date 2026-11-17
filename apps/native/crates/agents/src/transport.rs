@@ -154,8 +154,15 @@ pub struct Handle {
     surface: Surface,
     /// Lives as long as the handle (a run's tool grant).
     held: Vec<Box<dyn Send>>,
+    pending_events: std::cell::RefCell<std::collections::VecDeque<Event>>,
 }
 impl Handle {
+    /// Host preparation notices arrive before provider events, through both drain APIs.
+    pub(crate) fn prepend_events(self, events: Vec<Event>) -> Self {
+        self.pending_events.borrow_mut().extend(events);
+        self
+    }
+
     /// Keep `value` alive until this handle drops.
     pub fn hold(mut self, value: impl Send + 'static) -> Self {
         self.held.push(Box::new(value));
@@ -191,11 +198,12 @@ impl Handle {
     /// Consume the same mailbox as `try_event`, preserving inspection events as
     /// typed observations instead of provider callbacks. Choose one drain API.
     pub fn try_delivery(&self) -> Result<Delivery, mpsc::TryRecvError> {
-        self.events
-            .try_recv()
-            .map(|e| delivery::event(self.surface, e))
+        self.try_event().map(|e| delivery::event(self.surface, e))
     }
     pub fn try_event(&self) -> Result<Event, mpsc::TryRecvError> {
+        if let Some(event) = self.pending_events.borrow_mut().pop_front() {
+            return Ok(event);
+        }
         self.events.try_recv()
     }
 }
@@ -223,12 +231,14 @@ pub(crate) fn worker(surface: Surface) -> (Handle, Receiver<Queued>, SyncSender<
         events,
         surface,
         held: Vec::new(),
+        pending_events: Default::default(),
     };
     (handle, actions, etx)
 }
 enum Input {
     Stdout(Vec<u8>),
     Stderr,
+    McpStartupWarning(String),
     Eof,
     WriteFailed,
 }
@@ -331,6 +341,11 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
                     }
                 }
                 Ok(Input::Stderr) => {} // drained on a bounded reader; never forward secrets.
+                Ok(Input::McpStartupWarning(message)) => {
+                    if surface == Surface::CodexExec {
+                        let _ = etx.try_send(Event::Warning(message));
+                    }
+                }
                 Ok(Input::WriteFailed) => {
                     reason = "Agent runtime closed its input pipe.".into();
                     stop = true;
@@ -387,6 +402,7 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
         events,
         surface,
         held: Vec::new(),
+        pending_events: Default::default(),
     }
 }
 fn read_output(path: &Path) -> io::Result<String> {
@@ -411,11 +427,17 @@ fn read_output(path: &Path) -> io::Result<String> {
 fn reader(mut r: impl Read + Send + 'static, tx: SyncSender<Input>, stderr: bool) {
     thread::spawn(move || {
         let mut buf = [0; 8192];
+        let mut startup = crate::user_mcp::StderrFailures::default();
         loop {
             match r.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     let v = if stderr {
+                        for message in startup.push(&buf[..n]) {
+                            if tx.send(Input::McpStartupWarning(message)).is_err() {
+                                return;
+                            }
+                        }
                         Input::Stderr
                     } else {
                         Input::Stdout(buf[..n].to_vec())
@@ -426,7 +448,11 @@ fn reader(mut r: impl Read + Send + 'static, tx: SyncSender<Input>, stderr: bool
                 }
             }
         }
-        if !stderr {
+        if stderr {
+            for message in startup.finish() {
+                let _ = tx.send(Input::McpStartupWarning(message));
+            }
+        } else {
             let _ = tx.send(Input::Eof);
         }
     });
@@ -481,4 +507,25 @@ fn terminate(child: &mut Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(test)]
+mod user_mcp_stderr_tests {
+    use super::*;
+    #[test]
+    fn stderr_reader_only_exposes_sanitized_mcp_startup_notices() {
+        let (tx, rx) = mpsc::sync_channel(32);
+        reader(std::io::Cursor::new(b"ordinary sensitive stderr\nMCP client for `fixture` failed to start: sensitive-fixture\n".to_vec()),tx,true);
+        let mut messages = vec![];
+        for input in rx {
+            match input {
+                Input::Stderr => {}
+                Input::McpStartupWarning(message) => messages.push(message),
+                _ => panic!("stderr must not become provider protocol input"),
+            }
+        }
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("fixture"));
+        assert!(!messages[0].contains("sensitive"));
+    }
 }

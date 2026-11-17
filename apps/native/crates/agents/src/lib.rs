@@ -18,6 +18,7 @@ pub mod protocol;
 pub mod runtime;
 pub mod trace;
 pub mod transport;
+pub mod user_mcp;
 pub mod visual;
 pub mod workspace;
 
