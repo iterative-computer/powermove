@@ -1458,7 +1458,7 @@ fn workspace_menu(state: &MenuState) -> Vec<Retained<NSMenuItem>> {
 }
 const TOOLS: [(&str, &str, &str); 8] = [
     ("toolSelect", "cursorarrow", "Select (V)"),
-    ("toolHand", "hand.raised", "Hand (H)"),
+    ("toolHand", "hand.raised.fill", "Hand (H)"),
     ("toolZoom", "magnifyingglass", "Zoom (Z)"),
     ("toolRotate", "crop.rotate", "Rotate (W)"),
     ("toolAnchor", "scope", "Anchor (Y)"),
@@ -2725,14 +2725,80 @@ fn symbol(s: &str, label: &str) -> Retained<NSImage> {
     )
     .expect("SF Symbol")
 }
+/// A vendored glyph (`crate::icons`) as a template image `points` square, so
+/// AppKit tints it as it tints a symbol (drawn at 3x: crisp on any display).
+pub(crate) fn glyph_image(glyph: crate::icons::Glyph, points: f64, label: &str) -> Option<Retained<NSImage>> {
+    use objc2::AnyThread;
+    let side = (points * 3.).ceil().max(1.) as u32;
+    let coverage = crate::icons::coverage(glyph, side)?;
+    let rep = unsafe {
+        objc2_app_kit::NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            objc2_app_kit::NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            side as isize,
+            side as isize,
+            8,
+            4,
+            true,
+            false,
+            objc2_app_kit::NSDeviceRGBColorSpace,
+            side as isize * 4,
+            32,
+        )?
+    };
+    let data = rep.bitmapData();
+    if data.is_null() {
+        return None;
+    }
+    let pixels = unsafe { std::slice::from_raw_parts_mut(data, (side * side * 4) as usize) };
+    // Black at the glyph's coverage, premultiplied: a template takes its shape.
+    for (p, a) in pixels.chunks_exact_mut(4).zip(coverage) {
+        p.copy_from_slice(&[0, 0, 0, a]);
+    }
+    let size = NSSize::new(points, points);
+    rep.setSize(size);
+    let image = NSImage::initWithSize(NSImage::alloc(), size);
+    image.addRepresentation(&rep);
+    image.setTemplate(true);
+    image.setAccessibilityDescription(Some(&NSString::from_str(label)));
+    Some(image)
+}
 /// A toolbar glyph: every item draws its symbol at `metrics.symbol_toolbar`
 /// in one weight, whichever control hosts it.
+/// A menu row's glyph: the vendored one where it stands for `s`, at the size
+/// AppKit gives a symbol in a menu, else the symbol.
+fn menu_symbol(s: &str, label: &str) -> Retained<NSImage> {
+    crate::icons::glyph(s)
+        .and_then(|g| glyph_image(g, 16., label))
+        .unwrap_or_else(|| symbol(s, label))
+}
+/// A toolbar item draws an SF Symbol of the toolbar's point size with about
+/// 18 pt of ink (measured at 14 pt: hand, zoom, gear, sparkles); a filled
+/// vendored glyph reads as large at about 16 pt, so its square is this much
+/// larger. A glyph matched to its SF Symbol on its own (Home) keeps its size.
+const TOOLBAR_GLYPH: f64 = 1.4;
+/// Apple's own drawings stand in the toolbar where the vendored family has no
+/// good one: the filled hand for the Hand tool, and Export's box and arrow at
+/// semibold (its filled twin closes into a block on the accent button at 1x).
+/// At the toolbar's 14 pt an SF Symbol draws about 18 pt of ink; among the
+/// vendored glyphs (about 16 pt) these are drawn at this size instead.
+const SF_AMONG_GLYPHS: f64 = 12.5;
 fn toolbar_symbol(s: &str, label: &str, t: &Tokens) -> Retained<NSImage> {
+    if let Some(glyph) = crate::icons::glyph(s) {
+        let points = t.metrics.symbol_toolbar as f64;
+        let points = if glyph.size == 1. { points * TOOLBAR_GLYPH } else { points };
+        if let Some(image) = glyph_image(glyph, points, label) {
+            return image;
+        }
+    }
     let image = symbol(s, label);
-    let config = objc2_app_kit::NSImageSymbolConfiguration::configurationWithPointSize_weight(
-        t.metrics.symbol_toolbar as f64,
-        unsafe { objc2_app_kit::NSFontWeightRegular },
-    );
+    let (points, weight) = match s {
+        "hand.raised.fill" => (SF_AMONG_GLYPHS, unsafe { objc2_app_kit::NSFontWeightRegular }),
+        "square.and.arrow.up" => (SF_AMONG_GLYPHS, unsafe { objc2_app_kit::NSFontWeightSemibold }),
+        _ => (t.metrics.symbol_toolbar as f64, unsafe { objc2_app_kit::NSFontWeightRegular }),
+    };
+    let config =
+        objc2_app_kit::NSImageSymbolConfiguration::configurationWithPointSize_weight(points, weight);
     image.imageWithSymbolConfiguration(&config).unwrap_or(image)
 }
 impl ToolbarDelegate {
@@ -2840,7 +2906,7 @@ impl ToolbarDelegate {
                     item.setRepresentedObject(Some(&NSString::from_str(variant)));
                     item.setTarget(Some(target));
                 }
-                item.setImage(Some(&symbol(glyph, label)));
+                item.setImage(Some(&menu_symbol(glyph, label)));
                 item.setState(if variant == "rect" {
                     NSControlStateValueOn
                 } else {
@@ -4430,6 +4496,11 @@ impl Host {
             view.removeFromSuperview();
         }
         let glyph = |name: &str, label: &str, points: f64| {
+            if let Some(image) =
+                crate::icons::glyph(name).and_then(|g| glyph_image(g, points, label))
+            {
+                return image;
+            }
             let config =
                 NSImageSymbolConfiguration::configurationWithPointSize_weight(points, unsafe {
                     NSFontWeightMedium
@@ -4862,6 +4933,11 @@ impl Host {
             view.removeFromSuperview();
         }
         let glyph = |name: &str, label: &str, points: f64| {
+            if let Some(image) =
+                crate::icons::glyph(name).and_then(|g| glyph_image(g, points, label))
+            {
+                return image;
+            }
             let config =
                 NSImageSymbolConfiguration::configurationWithPointSize_weight(points, unsafe {
                     NSFontWeightMedium
@@ -5869,7 +5945,7 @@ impl Host {
                         NSControlStateValueOff
                     });
                 }
-                let image = symbol(glyph, &format!("Shape: {label} (Q)"));
+                let image = toolbar_symbol(glyph, &format!("Shape: {label} (Q)"), &self.tokens);
                 let _: () = msg_send![&*view, setImage: &*image, forSegment: SHAPE_SEGMENT];
                 let tip = NSString::from_str(&format!("{label} (Q)"));
                 let _: () = msg_send![&*view, setToolTip: &*tip, forSegment: SHAPE_SEGMENT];

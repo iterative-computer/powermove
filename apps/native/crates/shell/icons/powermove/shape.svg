@@ -1,0 +1,5 @@
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16"><rect width="16" height="16" fill="white"/><rect x="4.75" y="4.75" width="11.5" height="11.5" rx="3" fill="black"/></mask>
+<circle cx="5.5" cy="5.5" r="5" fill="black" mask="url(#m)"/>
+<rect x="6.5" y="6.5" width="8.5" height="8.5" rx="2" fill="black"/>
+</svg>

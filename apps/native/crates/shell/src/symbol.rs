@@ -70,6 +70,14 @@ fn draw(
     color: u32,
     scale: f32,
 ) -> Option<Arc<RenderImage>> {
+    // A vendored glyph that stands for this symbol (`crate::icons`): drawn
+    // from its SVG on the same square, in the same tint.
+    if let Some(glyph) = crate::icons::glyph(name) {
+        let side = (points * scale).ceil().max(1.) as u32;
+        let pixels = crate::icons::tinted_bgra(glyph, side, color)?;
+        let buffer = image::RgbaImage::from_raw(side, side, pixels)?;
+        return Some(Arc::new(RenderImage::new([image::Frame::new(buffer)])));
+    }
     let symbol = NSImage::imageWithSystemSymbolName_accessibilityDescription(
         &NSString::from_str(name),
         None,
