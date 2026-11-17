@@ -3368,6 +3368,8 @@ pub struct Host {
     /// The pages (Settings, the Store) open in this window's strip at the
     /// last quit, which open again behind the project.
     pub restored_pages: Vec<String>,
+    /// The restored project's name as the window last showed it.
+    pub restored_name: Option<String>,
     menu_state: RefCell<Option<MenuState>>,
     /// The open Save Workspace sheet (kept alive while attached).
     sheet: RefCell<Option<Sheet>>,
@@ -3563,6 +3565,7 @@ impl Host {
             restored_project: None,
             restored_front: false,
             restored_pages: Vec::new(),
+            restored_name: None,
             menu_state: RefCell::new(None),
             sheet: RefCell::new(None),
             definition: RefCell::new(None),
@@ -4248,6 +4251,12 @@ impl Host {
         self.set_document_metadata("Home", "", false, None);
         HOME_WINDOWS.with(|h| h.borrow_mut().insert(self.window.windowNumber()));
         self.sync_tabs();
+    }
+    /// The project name the window shows, if it shows one (not Home, nor
+    /// the untitled window before a project).
+    pub fn shown_project_name(&self) -> Option<String> {
+        let title = self.document.borrow().0.clone();
+        (!title.is_empty() && title != "Untitled" && title != "Home").then_some(title)
     }
     pub fn set_document_metadata(
         &self,

@@ -233,6 +233,7 @@ fn win(id: u64, tab: Option<u64>) -> WindowState {
         tab_index: 0,
         pages: Vec::new(),
         fullscreen: false,
+        name: None,
     }
 }
 

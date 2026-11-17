@@ -626,6 +626,7 @@ impl Editor {
             tab_index: host.tab_index(),
             pages: host.page_ids(),
             fullscreen: host.is_fullscreen(),
+            name: (!self.project.is_empty()).then(|| host.shown_project_name()).flatten(),
         })
     }
     /// Queues this window's state for the shared session file (other windows
@@ -4287,6 +4288,7 @@ mod tests {
                 tab_index: 0,
                 pages: vec![],
                 fullscreen: false,
+                name: None,
             });
             e
         });
