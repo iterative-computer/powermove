@@ -1920,6 +1920,14 @@ impl Owner {
             return;
         }
         for message in &delivered.0 {
+            // The page could not apply a batch: its extension panels stop
+            // drawing. Say which batch and why.
+            if message["kind"] == "fault" {
+                eprintln!(
+                    "extension page fault at batch {}: {}",
+                    message["seq"], message["message"]
+                );
+            }
             // A synchronous layout read is waiting for this answer: it goes to
             // the blocked realm directly (and through its queue as usual).
             if message["kind"] == "layout"
