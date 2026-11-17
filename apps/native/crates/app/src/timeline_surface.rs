@@ -4261,7 +4261,6 @@ impl Render for TimelineSurface {
                     .role(Role::Button).aria_label(label).aria_selected(self.model.edit_tool == tool)
                     .tooltip(pm_shell::kit::tooltip(t, label))
                     .children(image.map(|im| img(ImageSource::Render(im)).size(px(t.metrics.symbol_panel))))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |s, _, _, cx| { s.command(&tool.command(), 0., None, false, cx); }))
             }));
         // Media dragged over the timeline: where it would land, an
