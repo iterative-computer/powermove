@@ -586,7 +586,7 @@ fn media_engine_boundaries_match_all_four_tagged_tool_bodies() {
     for r in engine.calls.lock().unwrap().iter() {
         assert_eq!(r.snapshot.project_id, f.id);
         assert_eq!(r.snapshot.revision, before["revision"]);
-        assert_eq!(r.snapshot.project, before);
+        assert_eq!(*r.snapshot.project, before);
     }
 }
 #[test]
@@ -678,7 +678,7 @@ fn export_child_defaults_formats_no_clobber_errors_and_caption_text() {
     assert_eq!(result["fps"], before["fps"]);
     let calls = child.requests.lock().unwrap();
     let r = &calls[0];
-    assert_eq!(r.snapshot.project, before);
+    assert_eq!(*r.snapshot.project, before);
     assert_eq!(r.options.format, "mp4");
     assert_eq!(r.options.range, "all");
     assert!(r.options.audio && r.options.motion_blur && !r.options.alpha);

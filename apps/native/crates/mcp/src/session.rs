@@ -543,7 +543,7 @@ impl McpSession {
             assert_project(session, &host, id)?;
             let jobs = host.export_jobs.clone();
             let pending = jobs.prepare(
-                host.freeze(id)?,
+                host.freeze_head(id)?,
                 args,
                 host.export_child.clone(),
                 host.exports.clone(),

@@ -2,14 +2,16 @@
 //! standalone builds fail explicitly when no real host is installed.
 use crate::{Automation, CaptureRequest, Error, Result};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 #[derive(Clone, Debug)]
 pub struct FrozenProject {
     pub project_id: String,
     pub document_id: u64,
     pub revision: u64,
-    pub project: Value,
+    /// The project as tools read it (shared: an export job and its worker
+    /// hold the same one).
+    pub project: Arc<Value>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MediaOperation {
@@ -269,7 +271,24 @@ impl Automation {
             project_id: id.into(),
             document_id: self.view(id)?.document,
             revision: self.revision(id)?,
-            project: self.read_document(id)?,
+            project: Arc::new(self.read_document(id)?),
+        })
+    }
+    /// What an export freezes: the project's identity and its own fields
+    /// (size, rate, name, time, the open composition's), without layers,
+    /// compositions or assets. The export renders the kernel's snapshot at
+    /// this revision; the whole project as JSON was gigabytes for a large one.
+    pub fn freeze_head(&self, id: &str) -> Result<FrozenProject> {
+        let view = self.view(id)?;
+        let root = view
+            .snapshot
+            .root()
+            .ok_or_else(|| Error::invalid("Missing document"))?;
+        Ok(FrozenProject {
+            project_id: id.into(),
+            document_id: view.document,
+            revision: self.revision(id)?,
+            project: Arc::new(crate::automation::project_head(root, view.snapshot.revision)),
         })
     }
     pub fn render(&self, id: &str, args: &Value) -> Result<ToolOutput> {

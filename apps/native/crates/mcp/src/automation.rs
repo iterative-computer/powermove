@@ -1307,6 +1307,44 @@ pub(crate) fn document_json(snapshot: &pm_kernel::Snapshot) -> Result<Value> {
     Ok(project)
 }
 
+/// A project's own fields as tools read them (the open composition's size,
+/// rate and name realized onto it), without layers, compositions or assets.
+pub(crate) fn project_head(root: &pm_model::doc::Node, revision: u64) -> Value {
+    use pm_model::doc::NodeKind;
+    const HEAVY: [&str; 4] = ["layers", "assets", "comps", "nativeMediaVersions"];
+    let fields = |node: &pm_model::doc::Node| -> pm_model::Map {
+        let mut out = pm_model::Map::new();
+        if let NodeKind::Object(map) = node.kind() {
+            for (key, value) in map.iter() {
+                if !key.as_str().is_some_and(|k| HEAVY.contains(&k)) {
+                    out.insert(key.clone(), value.to_value());
+                }
+            }
+        }
+        out
+    };
+    let mut head = fields(root);
+    let open = root.get("compId").and_then(|id| match id.kind() {
+        NodeKind::String(id) => Some(id.clone()),
+        _ => None,
+    });
+    if let Some(id) = open
+        && let Some(comp) = root.get("comps").and_then(|comps| comps.get(&id.to_string()))
+    {
+        let mut comps = pm_model::Map::new();
+        comps.insert(id, pm_model::Value::Object(fields(comp)));
+        head.insert("comps", pm_model::Value::Object(comps));
+    }
+    let mut project = json_value(&pm_model::canonical::realize_project(
+        pm_model::Value::Object(head),
+    ));
+    if let Some(object) = project.as_object_mut() {
+        object.remove("comps");
+    }
+    project["revision"] = json!(revision);
+    project
+}
+
 /// Change only a private snapshot's projection; never publish navigation.
 pub fn composition_snapshot(snapshot: &Snapshot, comp: &str) -> Result<Snapshot> {
     let root = snapshot
