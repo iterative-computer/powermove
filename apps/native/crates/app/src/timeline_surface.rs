@@ -1806,7 +1806,7 @@ impl TimelineSurface {
             && y >= self.tokens.metrics.ruler as f64 {
             self.split_preview_hidden = true;
             cx.notify();
-            if let Some((id, _)) = self.clip_at(x, y) {
+            if let Some(id) = self.split_clip_at(x, y) {
                 let at = self.model.split_time(self.time_at(x), self.delegate.time(cx), self.snap_radius());
                 let all = event.modifiers.shift;
                 let locked = self.model.index.layers.iter().any(|l| (all || l.id == id)
@@ -3248,6 +3248,14 @@ impl TimelineSurface {
             .and_then(|f| f.hit_clip(x, y))
             .map(|(id, edge)| (id.to_owned(), edge))
     }
+    /// A razor targets only the visible bar, without a trim handle's reach
+    /// into the neighbouring empty space.
+    fn split_clip_at(&self, x: f64, y: f64) -> Option<String> {
+        let (id, _) = self.clip_at(x, y)?;
+        self.frame.as_ref()?.ops.iter()
+            .find(|op| op.id.strip_prefix("clip:") == Some(id.as_str()) && op.bounds.contains(x, y))
+            .map(|_| id)
+    }
     /// The layer bar hovered now (tests).
     pub fn hovered_clip(&self) -> Option<String> {
         self.hover_clip.as_ref().map(|(id, _)| id.clone())
@@ -3291,7 +3299,7 @@ impl TimelineSurface {
         }
         self.hover_clip = hovered;
         let m = self.tokens.metrics;
-        let cursor = if self.model.edit_tool == pm_panel_timeline::EditTool::Split && self.clip_at(x, y).is_some()
+        let cursor = if self.model.edit_tool == pm_panel_timeline::EditTool::Split && self.split_clip_at(x, y).is_some()
             && (x - self.view.layer_column).abs() > m.hit as f64 / 4. {
             CursorStyle::Split
         } else if let Some(cursor) = self.graph_cursor(x, y) {
@@ -4250,7 +4258,7 @@ impl Render for TimelineSurface {
             let (x, y) = self.local(pointer);
             if self.model.edit_tool == EditTool::Split
                 && (x - self.view.layer_column).abs() > self.tokens.metrics.hit as f64 / 4.
-                && (self.clip_at(x, y).is_some() || self.frame.is_none() && self.hover_clip.is_some()) {
+                && (self.split_clip_at(x, y).is_some() || self.frame.is_none() && self.hover_clip.is_some()) {
                 self.cursor = CursorStyle::Split;
             } else if self.cursor == CursorStyle::Split { self.cursor = CursorStyle::Arrow; }
         } else if self.cursor == CursorStyle::Split { self.cursor = CursorStyle::Arrow; }
@@ -4853,7 +4861,7 @@ impl Render for TimelineSurface {
                             if surface.model.edit_tool == pm_panel_timeline::EditTool::Split && !surface.split_preview_hidden {
                                 if let Some(pointer) = surface.pointer {
                                     let (x, y) = surface.local(pointer);
-                                    if let Some((id, _)) = surface.clip_at(x, y)
+                                    if let Some(id) = surface.split_clip_at(x, y)
                                         && (x - surface.view.layer_column).abs() > tokens.metrics.hit as f64 / 4. {
                                         let at = surface.model.split_time(surface.time_at(x), surface.delegate.time(cx), surface.snap_radius());
                                         let cut_x = surface.view.layer_column + (at - surface.view.scroll_time) * surface.view.pps;
