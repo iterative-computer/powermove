@@ -4251,6 +4251,19 @@ impl Render for TimelineSurface {
         let decorations = self.decorations.clone();
         let hover_clip = (self.model.edit_tool != EditTool::Split).then(|| self.hover_clip.clone()).flatten();
         let skimmer = self.skimmer_at();
+        // The readout can stand in the ruler. As for the skimmer, omit a
+        // tick label it would partially cover instead of cutting its text.
+        let split_ruler_chip = (self.model.edit_tool == EditTool::Split && !self.split_preview_hidden)
+            .then_some(self.pointer).flatten().and_then(|pointer| {
+                let (x, y) = self.local(pointer);
+                let id = self.split_clip_at(x, y)?;
+                let clip = self.frame.as_ref()?.ops.iter().find(|op| op.id.strip_prefix("clip:") == Some(id.as_str()))?;
+                if (clip.bounds.y as f32 - 24.).max(2.) >= self.tokens.metrics.ruler { return None; }
+                let at = self.model.split_time(self.time_at(x), self.delegate.time(cx), self.snap_radius());
+                let cut_x = self.view.layer_column + (at - self.view.scroll_time) * self.view.pps;
+                let left = (cut_x as f32 + 12.).min(f32::from(self.bounds.size.width) - 100.) as f64;
+                Some((left - 4., left + 90.))
+            });
         let marquee = match &self.gesture {
             Gesture::Marquee { origin, at, .. } => Some(Bounds::from_corners(
                 point(origin.x.min(at.x), origin.y.min(at.y)),
@@ -4268,7 +4281,7 @@ impl Render for TimelineSurface {
             } else if self.cursor == CursorStyle::Split { self.cursor = CursorStyle::Arrow; }
         } else if self.cursor == CursorStyle::Split { self.cursor = CursorStyle::Arrow; }
         let t = &self.tokens;
-        let tools = div().absolute().left(px(t.metrics.inset)).top(px(0.)).h(px(t.metrics.ruler))
+        let tools = div().id("timeline-ruler-tools").occlude().absolute().left(px(t.metrics.inset)).top(px(0.)).h(px(t.metrics.ruler))
             .flex().items_center().children([
                 (EditTool::Selection, "cursorarrow", "Selection (V)"),
                 (EditTool::Roll, "arrow.left.and.right.righttriangle.left.righttriangle.right", "Roll — or ⌥-drag a cut"),
@@ -4801,7 +4814,7 @@ impl Render for TimelineSurface {
                                     let left = x + reach + (m.border * 2.) as f64;
                                     let gutter = (m.gap + m.border * 2.) as f64;
                                     (left, left + f32::from(text.width) as f64 + gutter)
-                                });
+                                }).or_else(|| split_ruler_chip.map(|(left, right)| (left + reach, right + reach)));
                                 let ops: Vec<Op> = frame.ops[..frame.fixed]
                                     .iter()
                                     .filter(|o| {
@@ -4978,7 +4991,9 @@ impl Render for TimelineSurface {
             .children(reorder.into_iter().flatten().flatten())
             .children(effect_row)
             .children(tip)
-            .child(tools)
+            // The DOM outline's scroll hitbox covers the column, including
+            // its transparent ruler band. Keep these native controls above it.
+            .child(gpui::deferred(tools))
             .children(self.graph_readout_element())
     }
 }
