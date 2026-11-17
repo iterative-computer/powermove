@@ -90,9 +90,11 @@ pub fn plan(published: &Published, shape: ShapeBox, time: f64, variant: &str) ->
         "star" => ("star", "Star", "Draw star", 0.),
         _ => ("rect", "Rect", "Draw rect", 0.),
     };
+    // A selected layer takes the box as a mask (After Effects' Shape tools
+    // over a selected layer); with none selected it is a new shape layer.
     let mask = match variant {
         "ellipse" => Some(MaskShape::Ellipse),
-        "rect" | "" => Some(MaskShape::Rect),
+        "rect" | "rounded" | "" => Some(MaskShape::Rect),
         _ => None,
     };
     if let Some(plan) = mask.and_then(|m| mask_plan(published, shape, time, m)) {
@@ -149,7 +151,11 @@ fn mask_plan(
     let info = pm_kernel::model::list_layers(root, None)
         .into_iter()
         .find(|l| l.id == layer)?;
-    if info.effectively_locked || matches!(info.kind.as_str(), "shape" | "audio") {
+    // Shape layers too (v1 drew a new layer over them); layers with no
+    // pixels of their own take no mask.
+    if info.effectively_locked
+        || matches!(info.kind.as_str(), "audio" | "null" | "camera" | "light")
+    {
         return None;
     }
     let world = QueryMirror::new(published)
