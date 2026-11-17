@@ -293,6 +293,22 @@ impl Controller {
             profile: self.mcp.profile.clone(),
         }));
         runtime.set_agent_environment(environment, Arc::new(pm_agents::account::open_in_browser));
+        let observation_kernel = self.kernel.clone();
+        runtime.set_agent_capture(Arc::new(move |project, document, revision, time| {
+            let matches = || {
+                observation_kernel
+                    .published(project)
+                    .is_some_and(|p| p.snapshot.doc_id == document && p.revision() == revision)
+            };
+            if !matches() {
+                return Err("Document changed before frame capture".into());
+            }
+            let png = crate::mcp::still(project, time, 960)?;
+            if !matches() {
+                return Err("Document changed during frame capture".into());
+            }
+            Ok(png)
+        }));
         runtime.set_agent_notices(crate::notifications::sink(self.window_key));
         runtime.share_effect_clipboard(crate::extensions::effect_clipboard());
         let mut tickets = vec![];
