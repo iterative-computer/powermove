@@ -174,6 +174,8 @@ enum Input {
     Kernel,
     Sync(Sender<()>),
     Viewport(f32, f32, f32),
+    /// Whether the person can see the window (a tab behind another cannot).
+    WindowShown(bool),
     Realm(Writer, RealmEnvelope),
     Moved,
     /// The viewer presented a frame; the latest waits in `presented`.
@@ -894,6 +896,7 @@ impl ExtensionHost {
             confined: BTreeMap::new(),
             open: BTreeMap::new(),
             viewport: None,
+            window_hidden: false,
             shared: shared.clone(),
             inbox: inbox.clone(),
             transport: transport.clone(),
@@ -1202,6 +1205,12 @@ impl ExtensionHost {
     pub fn set_viewport(&self, width: f32, height: f32, scale: f32) {
         let _ = self.inbox.send(Input::Viewport(width, height, scale));
     }
+    /// Whether the person can see the window: a tab behind another cannot, and
+    /// its extension panels count as not showing (they get no animation
+    /// frames) until it is selected.
+    pub fn set_window_shown(&self, shown: bool) {
+        let _ = self.inbox.send(Input::WindowShown(shown));
+    }
     /// The app's clock moved. Cheap enough for every presented frame.
     pub fn publish_time(&self, time: f64, playing: bool) {
         if let Some(host) = &*self.transport.lock().unwrap() {
@@ -1319,6 +1328,7 @@ struct Owner {
     open: BTreeMap<String, Option<[f32; 4]>>,
     /// The editor window's viewport, replayed into a rebuilt realm before boot.
     viewport: Option<(f32, f32, f32)>,
+    window_hidden: bool,
     config: HostConfig,
     shared: Arc<Shared>,
     inbox: Sender<Input>,
@@ -1584,6 +1594,10 @@ impl Owner {
             Input::Viewport(width, height, scale) => {
                 self.viewport = Some((width, height, scale));
                 self.eval(&format!("__compat.viewport({width},{height},{scale})"));
+            }
+            Input::WindowShown(shown) => {
+                self.window_hidden = !shown;
+                self.eval(&format!("__compat.windowShown({shown})"));
             }
             Input::Place(id, rect) => {
                 if let Some(placed) = self.open.get_mut(&id) {
@@ -2607,6 +2621,9 @@ impl Owner {
     fn replay_window(&mut self) {
         if let Some((width, height, scale)) = self.viewport {
             self.eval(&format!("__compat.viewport({width},{height},{scale})"));
+        }
+        if self.window_hidden {
+            self.eval("__compat.windowShown(false)");
         }
         if !self.shell.is_empty() {
             let shell = Value::Object(self.shell.clone());

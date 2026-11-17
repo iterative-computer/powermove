@@ -61,6 +61,7 @@ export class CompatPanels {
    * animation frames wait, as a hidden page's do in a browser. */
   showingOwners = () => {
     const owners = new Set<string>();
+    if (!this.windowShown) return owners;
     for (const entry of this.registry.entries())
       if (this.openPanels.has(entry.id) && this.rects.get(entry.id))
         owners.add(entry.ownerId);
@@ -68,6 +69,13 @@ export class CompatPanels {
   };
   /** Called when a panel opens, closes or is placed (shown or hidden). */
   onShowingChange?: () => void;
+  /** Whether the window can be seen (a tab behind another cannot). */
+  private windowShown = true;
+  setWindowShown = (shown: boolean) => {
+    if (this.windowShown === shown) return;
+    this.windowShown = shown;
+    this.onShowingChange?.();
+  };
   isOpen = (id: string) => this.openPanels.has(id);
   isHidden = (id: string) => this.hidden.has(id);
   open = (id: string, _dock?: unknown) => {

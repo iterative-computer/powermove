@@ -105,8 +105,37 @@ globalThis.__compat = {
     let lastFrame = 0;
     const askedBy = () =>
       /pmext:\/\/([^/]+)\//.exec(new Error().stack ?? "")?.[1] ?? null;
+    // Whether an extension shows something now. One that owns no panel
+    // keeps its frames (its surface may be a viewer overlay, a gizmo, a tool,
+    // a popover or a service pacing work), as do extensions of API 1 and 2,
+    // whose surfaces are hooks no owner is known for. One that owns panels
+    // keeps them while a panel shows or while it contributes any other
+    // surface: a status item, a theme (it restyles the window), an inspector
+    // section, a palette provider, a viewer overlay or frame listener.
+    const VIEW_EVENTS = ["overlay", "frame:rendered"];
+    const legacy = (owner) =>
+      (this.loader?.records() ?? []).some(
+        (record) => record.id === owner && Number(record.manifest?.apiVersion ?? 1) < 3,
+      );
+    const otherSurface = (owner) => {
+      const kernel = this.realm.kernel;
+      return (
+        kernel.status.ownerEntries(owner).length > 0 ||
+        kernel.themes.ownerEntries(owner).length > 0 ||
+        kernel.inspectorSections.ownerEntries(owner).length > 0 ||
+        kernel.paletteProviders().some((entry) => entry.ownerId === owner) ||
+        VIEW_EVENTS.some((event) =>
+          (kernel.events.map.get(event) ?? []).some((record) => record.ownerId === owner),
+        )
+      );
+    };
     const shows = (owner) =>
-      !owner || !this.panels || this.panels.showingOwners().has(owner);
+      !owner ||
+      !this.panels ||
+      this.realm.kernel.panels.ownerEntries(owner).length === 0 ||
+      this.panels.showingOwners().has(owner) ||
+      legacy(owner) ||
+      otherSurface(owner);
     const start = (id, frame) => {
       const delay = frame.owner && this.realm?.PM?.playing ? PLAYING_FRAME_MS : 16;
       frame.timer = setTimeout(() => {
@@ -1535,6 +1564,11 @@ globalThis.__compat = {
         this.realm.reportError(error),
       );
     });
+  },
+  /** Whether the person can see this window (a tab behind another cannot):
+   * its panels count as not showing while it cannot. */
+  windowShown(shown) {
+    this.panels?.setWindowShown(!!shown);
   },
   /** The page's messages since the last look, as data, in one flush. */
   receivePage() {
