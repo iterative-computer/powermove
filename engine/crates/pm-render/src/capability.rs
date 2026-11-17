@@ -33,6 +33,9 @@ pub struct Unsupported {
 /// What is unsupported.
 /// The words a frame names a still-building program with ([`Feature::ProgramPending`]).
 pub const PROGRAM_PENDING: &str = "is still being built";
+/// The words a frame names a program the compiler gave up on with
+/// ([`Feature::CompilerGaveUp`]).
+pub const COMPILER_GAVE_UP: &str = "could not be built: the shader compiler failed";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Feature {
@@ -79,6 +82,12 @@ pub enum Feature {
     /// passing compiler failure (busy, slow or restarted): the frame is not
     /// the picture and is drawn again, never delivered without it.
     ProgramPending(String),
+    /// An effect or transition whose program the shader compiler kept
+    /// failing to build (crashed, past its deadline, out of resources, or
+    /// could not start): (definition, the compiler's message). Terminal until
+    /// a retry or a reload, and never delivered without it: no frame of it
+    /// is kept, exported or settled.
+    CompilerGaveUp(String, String),
     /// Text content this renderer does not draw (color vector glyphs, no
     /// configured fonts).
     Text(String),
@@ -90,6 +99,12 @@ impl Feature {
     /// bypassed.
     pub fn pending(&self) -> bool {
         matches!(self, Feature::ProgramPending(_))
+    }
+    /// A frame missing this feature's effect is not the picture: still being
+    /// built, or given up on by the compiler. Never a bypass, never kept or
+    /// delivered (a runner that really draws the effect aside).
+    pub fn undeliverable(&self) -> bool {
+        matches!(self, Feature::ProgramPending(_) | Feature::CompilerGaveUp(..))
     }
 }
 
@@ -132,6 +147,7 @@ impl fmt::Display for Feature {
             Feature::EffectAsset(sentence) => f.write_str(sentence),
             Feature::ShaderFallback(d) => write!(f, "{d} needs the GLSL fallback runner"),
             Feature::ProgramPending(d) => write!(f, "{d} {PROGRAM_PENDING}"),
+            Feature::CompilerGaveUp(d, why) => write!(f, "{d} {COMPILER_GAVE_UP} ({why})"),
             Feature::Text(t) => write!(f, "text: {t}"),
         }
     }

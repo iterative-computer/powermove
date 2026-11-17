@@ -385,6 +385,9 @@ fn run(
     // with its first settled picture.
     renderer.swap_effects(&mut effects);
     drop(effects);
+    // Like the viewer's: a shader that cannot start now builds in the
+    // background in its turn, and the settling retry draws it then.
+    renderer.set_interactive(true);
     configure(&mut renderer, budget);
     renderer.set_slices(Some(Slices::new(
         Duration::from_secs_f64(crate::policy::SETTLE_SLICE_SECONDS),
@@ -530,13 +533,13 @@ fn draw(
                 .set_document_effects(&scene.doc, &job.resources.definitions)
                 .map_err(|e| {
                     if busy(&e) {
-                        anyhow::Error::new(crate::render::CompilerBusy)
+                        crate::render::pending_registration(&e)
                     } else {
                         anyhow::Error::msg(e)
                     }
                 })?;
-            if failures.iter().any(|failure| busy(&failure.message)) {
-                return Err(anyhow::Error::new(crate::render::CompilerBusy));
+            if let Some(pending) = failures.iter().find(|failure| busy(&failure.message)) {
+                return Err(crate::render::pending_registration(&pending.message));
             }
             #[cfg(feature = "kernel")]
             crate::studio::attach(renderer, scene.doc.clone(), scene.media.as_ref());
@@ -604,6 +607,13 @@ fn draw(
                         crate::render::ProgramPending(pending.message.clone()),
                     )));
                 }
+                // One the compiler gave up on: never settled, kept, cached or
+                // made a poster; not drawn again by itself (not transient).
+                if let Some(gave_up) = rendered.failures.iter().find(|f| f.compiler_gave_up()) {
+                    return Ok(Outcome::Failed(anyhow::Error::new(
+                        crate::render::EffectGaveUp(gave_up.message.clone()),
+                    )));
+                }
                 Outcome::Drawn {
                     exact: rendered.stand_ins.is_empty() && font_failure.is_none(),
                     failures: rendered.failures,
@@ -613,6 +623,9 @@ fn draw(
             Err(pm_render::RenderError::CompatPending(needs)) => Outcome::Pending(needs),
             Err(error) if error.program_pending() => Outcome::Failed(anyhow::Error::new(
                 crate::render::ProgramPending(error.to_string()),
+            )),
+            Err(error) if error.compiler_gave_up() => Outcome::Failed(anyhow::Error::new(
+                crate::render::EffectGaveUp(error.to_string()),
             )),
             Err(error) => Outcome::Failed(error.into()),
         })

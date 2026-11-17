@@ -240,6 +240,12 @@ impl RenderError {
         matches!(self, RenderError::Unsupported(u)
             if u.iter().any(|u| matches!(u.feature, crate::Feature::ProgramPending(_))))
     }
+    /// Whether the frame was refused because the compiler gave up on a
+    /// program of it: terminal until a retry or reload, never delivered.
+    pub fn compiler_gave_up(&self) -> bool {
+        matches!(self, RenderError::Unsupported(u)
+            if u.iter().any(|u| matches!(u.feature, crate::Feature::CompilerGaveUp(..))))
+    }
 }
 
 /// A layer that failed while the rest of the frame rendered (section 8,
@@ -258,6 +264,16 @@ impl LayerFailure {
     /// being built: the picture is not the frame's, drawn again later.
     pub fn program_pending(&self) -> bool {
         self.message.contains(crate::capability::PROGRAM_PENDING)
+    }
+    /// Whether the layer failed because the compiler gave up on a program
+    /// of it (terminal until a retry or reload).
+    pub fn compiler_gave_up(&self) -> bool {
+        self.message.contains(crate::capability::COMPILER_GAVE_UP)
+    }
+    /// A frame with this failure is not the picture: no exact keeper
+    /// (settle, frame cache, poster, still, export) takes it.
+    pub fn blocks_delivery(&self) -> bool {
+        self.program_pending() || self.compiler_gave_up()
     }
 }
 

@@ -60,6 +60,12 @@ pub enum Status {
     /// A WebGL-valid program the engine cannot run: it needs the decision 19
     /// fallback runner, so layers using it are routed (not drawn wrong).
     NeedsFallback(Failure),
+    /// The shader compiler kept failing to build it (crashed, past its
+    /// deadline, out of resources: [`retry::LIMIT`] of one kind), or cannot
+    /// start: nothing about the source. Its layers are refused, never drawn
+    /// without it and never kept, until a retry, a reload of its definitions
+    /// or a build of the same source by another renderer.
+    GaveUp(Failure),
 }
 
 struct Entry {
@@ -156,6 +162,10 @@ pub struct Effects {
     /// A job's cancel flag: registration stops before the next definition
     /// (and so before another compiler call) once it is set.
     pub(crate) cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// The interactive viewer: a compile that cannot start now is done in
+    /// the background, in its turn, and the frame stays pending meanwhile
+    /// (no frame thread waits for a compiler slot).
+    pub(crate) interactive: bool,
     pub(crate) file_app_version: Option<String>,
     pub(crate) versioned_builtins: bool,
     /// Viewer frames: an effect whose provider isn't installed is bypassed
@@ -307,20 +317,10 @@ pub(crate) fn truncate(mut message: String) -> String {
     message
 }
 
-/// Consecutive passing compile or build failures of one unchanged source
-/// before it is given up as a visible refusal: a crashed, out-of-resources
-/// or timed-out compiler a few times; a busy one (its slots taken by other
-/// builds, each bounded by its deadline) for longer.
-pub const PASSING_LIMIT: u32 = 5;
-pub const BUSY_LIMIT: u32 = 30;
-
-pub(crate) fn limit(f: &Failure) -> u32 {
-    if f.stage == pm_glsl::FailureStage::CompilerBusy {
-        BUSY_LIMIT
-    } else {
-        PASSING_LIMIT
-    }
-}
+/// Failures of one kind (crash, deadline, resources) of one unchanged
+/// source before the compiler is given up on for it. A busy compiler is no
+/// failure: the request waits its turn ([`pm_glsl::Admission`]).
+pub const PASSING_LIMIT: u32 = retry::LIMIT;
 
 /// The definition-scoped error of a program still being built after a
 /// passing compiler failure: retried (never a bypass), its own diagnostic
@@ -350,10 +350,10 @@ pub fn definition_error(id: &DefinitionId, status: &Status) -> Option<EngineErro
     let (code, failure, what) = match status {
         Status::Ready => return None,
         Status::Refused(f) => (ErrorCode::ShaderCompile, f, "does not compile"),
-        Status::NeedsFallback(f) if f.stage.retryable() => (
+        Status::GaveUp(f) => (
             ErrorCode::NotHeadlessRenderable,
             f,
-            "could not be built by the shader compiler",
+            crate::capability::COMPILER_GAVE_UP,
         ),
         Status::NeedsFallback(f) => (
             ErrorCode::NotHeadlessRenderable,
@@ -427,6 +427,7 @@ impl Effects {
             entries: BTreeMap::new(),
             passing: BTreeMap::new(),
             cancel: None,
+            interactive: false,
             cache,
             context,
             watchdog: Watchdog::default(),
@@ -504,7 +505,7 @@ impl Effects {
                 self.passing.remove(&key);
                 if matches!(
                     self.entries.get(&key).map(|e| &e.status),
-                    Some(Status::NeedsFallback(f)) if f.stage.retryable()
+                    Some(Status::GaveUp(_))
                 ) {
                     self.entries.remove(&key);
                 }
@@ -545,6 +546,9 @@ impl Effects {
             .map(|d| (d.kind, d.id.clone()))
             .collect();
         self.drop_entries(|k| !live.contains(k));
+        // Definitions sent again (the app's resources, an extension
+        // reloaded): one the compiler gave up on is asked afresh.
+        self.retry_given_up();
         let mut failures = Vec::new();
         for snapshot in &snapshot.definitions {
             if self.cancelled() {
@@ -555,6 +559,33 @@ impl Effects {
             }
         }
         Ok(failures)
+    }
+
+    /// Asks the compiler afresh for every definition it gave up on (an
+    /// explicit retry; definitions sent again do the same). Returns how many.
+    pub fn retry_given_up(&mut self) -> usize {
+        let given_up: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| matches!(e.status, Status::GaveUp(_)))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &given_up {
+            self.entries.remove(key);
+            self.passing.remove(key);
+        }
+        given_up.len()
+    }
+
+    /// How a compiler request of this renderer is admitted: a job waits its
+    /// turn until cancelled; the interactive viewer does not wait on its
+    /// frame thread; anything else waits its turn.
+    fn admission(&self) -> pm_glsl::Admission {
+        match &self.cancel {
+            Some(cancel) => pm_glsl::Admission::WaitUnless(cancel.clone()),
+            None if self.interactive => pm_glsl::Admission::Now,
+            None => pm_glsl::Admission::Wait,
+        }
     }
 
     fn cancelled(&self) -> bool {
@@ -608,7 +639,15 @@ impl Effects {
         if let Some(entry) = self.entries.get(&key)
             && entry.key == source_key
         {
-            return definition_error(&snapshot.id, &entry.status);
+            // Given up on, but translated since (another renderer, in its
+            // turn): asked again.
+            let recovered = matches!(entry.status, Status::GaveUp(_))
+                && self.cache.peek(source_key).is_some_and(|e| e.is_ok());
+            if !recovered {
+                return definition_error(&snapshot.id, &entry.status);
+            }
+            self.entries.remove(&key);
+            self.passing.remove(&key);
         }
         // Still in its backoff: pending without starting the compiler again.
         if let Some((k, retry)) = self.passing.get(&key)
@@ -617,40 +656,64 @@ impl Effects {
         {
             return pending_error(&snapshot.id, f);
         }
+        // Being translated in the background, in its turn.
+        if self.cache.in_background(source_key) {
+            return pending_error(
+                &snapshot.id,
+                &Failure::new(pm_glsl::FailureStage::CompilerBusy, pm_glsl::QUEUED),
+            );
+        }
         #[cfg(any(test, feature = "test-hooks"))]
         let injected = crate::test_hooks::next_compile(snapshot.id.as_str());
         #[cfg(not(any(test, feature = "test-hooks")))]
         let injected: Option<Failure> = None;
-        let prepared = match injected {
+        // A background translation that failed for a passing reason counts
+        // once, like one made here.
+        let landed = self.cache.take_landed(source_key);
+        let prepared = match injected.or(landed) {
             Some(f) => Arc::new(Err(f)),
-            None => self.cache.prepare(&glsl.source, glsl.body_line_offset),
+            None => pm_glsl::with_admission(self.admission(), || {
+                self.cache.prepare(&glsl.source, glsl.body_line_offset)
+            }),
         };
-        // A busy, slow or restarted compiler says nothing about the source:
-        // the definition is pending (never remembered, never a bypass) and a
-        // later registration asks again, without waiting here (the viewer's
-        // retry, a job's cancellable wait). A compiler that cannot be
-        // started, or keeps failing for one unchanged source, ends in the
-        // visible refusal below with its own diagnostic.
-        match prepared.as_ref() {
-            Err(f) if f.stage.retryable() && !f.compiler_unavailable() => {
-                let previous = self
-                    .passing
-                    .get(&key)
-                    .filter(|(k, _)| *k == source_key)
-                    .map(|(_, r)| r);
-                let retry = retry::Retry::after(previous, f.clone());
-                if retry.failures() < limit(f) {
-                    self.entries.remove(&key);
-                    self.passing.insert(key, (source_key, retry));
-                    return pending_error(&snapshot.id, f);
-                }
+        // Every compiler slot taken: no failure. The definition is pending
+        // and builds in its turn (the viewer's in the background; a job
+        // waited and was cancelled). Never counted, never remembered.
+        if let Err(f) = prepared.as_ref()
+            && f.admission()
+        {
+            if f.message == pm_glsl::QUEUED {
+                self.cache
+                    .prepare_in_background(&glsl.source, glsl.body_line_offset);
             }
-            _ => {}
+            self.entries.remove(&key);
+            return pending_error(&snapshot.id, f);
+        }
+        // A crashed, slow or starved compiler says nothing about the source:
+        // pending, asked again after its backoff, until one kind of failure
+        // used up its budget or the compiler cannot start at all: then given
+        // up (a terminal refusal with the compiler's own message).
+        if let Err(f) = prepared.as_ref()
+            && f.stage.retryable()
+            && !f.compiler_unavailable()
+        {
+            let previous = self
+                .passing
+                .get(&key)
+                .filter(|(k, _)| *k == source_key)
+                .map(|(_, r)| r);
+            let retry = retry::Retry::after(previous, f.clone());
+            if !retry.exhausted() {
+                self.entries.remove(&key);
+                self.passing.insert(key, (source_key, retry));
+                return pending_error(&snapshot.id, f);
+            }
         }
         self.passing.remove(&key);
         let (status, prepared) = match prepared.as_ref() {
             Ok(p) => (Status::Ready, Some(Arc::new(p.clone()))),
             Err(f) if f.stage.webgl_refuses() => (Status::Refused(f.clone()), None),
+            Err(f) if f.stage.retryable() => (Status::GaveUp(f.clone()), None),
             Err(f) => (Status::NeedsFallback(f.clone()), None),
         };
         let error = definition_error(&snapshot.id, &status);
@@ -850,18 +913,14 @@ impl Effects {
                 continue;
             }
             match b.result {
-                Ok(program) => entry.program = Some(program),
-                // Built again by the first frame that draws it after the
-                // backoff, unless the compiler gave up on it.
-                Err(f) => {
-                    let retry = retry::Retry::after(entry.retry.as_ref(), f.clone());
-                    if remembered(&f) || f.compiler_unavailable() || retry.failures() >= limit(&f) {
-                        entry.status = Status::NeedsFallback(f);
-                        entry.retry = None;
-                    } else {
-                        entry.retry = Some(retry);
-                    }
+                Ok(program) => {
+                    self.cache.note_built(entry.key);
+                    entry.program = Some(program);
+                    entry.retry = None;
                 }
+                // Cancelled while it waited its turn: built later.
+                Err(f) if f.admission() => {}
+                Err(f) => settle_build_failure(entry, f),
             }
         }
     }
@@ -901,6 +960,10 @@ impl Effects {
             else {
                 continue;
             };
+            // Its backoff runs: not built again before it ends.
+            if entry.retry.as_ref().is_some_and(|r| r.waiting().is_some()) {
+                continue;
+            }
             if self
                 .prewarm
                 .queue(key.clone(), entry.key, prepared.clone(), device, format)
@@ -950,18 +1013,24 @@ impl Effects {
         id: &str,
         format: wgpu::TextureFormat,
     ) -> Result<&mut GpuProgram, Failure> {
-        let entry = self
-            .entries
-            .get_mut(&(kind, DefinitionId::from(id)))
-            .ok_or_else(|| {
-                Failure::new(
-                    pm_glsl::FailureStage::Rewrite,
-                    format!("{id} has no program"),
-                )
-            })?;
+        let key = (kind, DefinitionId::from(id));
+        let cache = self.cache.clone();
+        let entry = self.entries.get_mut(&key).ok_or_else(|| {
+            Failure::new(
+                pm_glsl::FailureStage::Rewrite,
+                format!("{id} has no program"),
+            )
+        })?;
         match &entry.status {
             Status::Ready => {}
-            Status::Refused(f) | Status::NeedsFallback(f) => return Err(f.clone()),
+            // Given up on, but built since by another renderer: built again.
+            Status::GaveUp(_) if entry.prepared.is_some() && cache.was_built(entry.key) => {
+                entry.status = Status::Ready;
+                entry.retry = None;
+            }
+            Status::Refused(f) | Status::NeedsFallback(f) | Status::GaveUp(f) => {
+                return Err(f.clone());
+            }
         }
         pm_perf::cache(
             pm_perf::Counter::ProgramCacheHits,
@@ -974,21 +1043,32 @@ impl Effects {
             .is_none()
             .then(|| pm_perf::Span::new(pm_perf::Counter::ProgramMicros));
         if entry.program.is_none() {
-            // Built ahead (decision PROBE-1): taken if it finished, waited
-            // for if it is being built now.
-            let key = (kind, DefinitionId::from(id));
+            // Built ahead (decision PROBE-1): taken if it finished; waited
+            // for if it is being built now, except on the interactive
+            // viewer's frame thread, whose frame stays pending meanwhile.
             let done = if self.prewarm.in_flight(&key) && !self.prewarm.reclaim(&key) {
-                self.prewarm.wait_for(&key)
+                if self.interactive {
+                    let done = self.prewarm.take();
+                    self.absorb(done);
+                    if self.prewarm.in_flight(&key) {
+                        return Err(Failure::new(
+                            pm_glsl::FailureStage::CompilerBusy,
+                            pm_glsl::QUEUED,
+                        ));
+                    }
+                    Vec::new()
+                } else {
+                    self.prewarm.wait_for(&key)
+                }
             } else {
                 self.prewarm.take()
             };
             self.absorb(done);
         }
-        let entry = self
-            .entries
-            .get_mut(&(kind, DefinitionId::from(id)))
-            .expect("looked up above");
-        if let Status::Refused(f) | Status::NeedsFallback(f) = &entry.status {
+        let admission = self.admission();
+        let interactive = self.interactive;
+        let entry = self.entries.get_mut(&key).expect("looked up above");
+        if let Status::Refused(f) | Status::NeedsFallback(f) | Status::GaveUp(f) = &entry.status {
             return Err(f.clone());
         }
         if entry.program.is_none() {
@@ -1006,51 +1086,86 @@ impl Effects {
             let forced = crate::test_hooks::next_build(id);
             #[cfg(not(any(test, feature = "test-hooks")))]
             let forced: Option<Failure> = None;
+            let entry = self.entries.get_mut(&key).expect("looked up above");
             let built = match forced {
                 Some(f) => Err(f),
-                None => entry
-                    .prepared
-                    .as_ref()
-                    .ok_or_else(|| {
+                None => {
+                    let prepared = entry.prepared.clone().ok_or_else(|| {
                         Failure::new(pm_glsl::FailureStage::Rewrite, "no prepared program")
-                    })?
-                    .finish()
-                    .and_then(|p| GpuProgram::new(device, p, id)),
+                    })?;
+                    pm_glsl::with_admission(admission, || {
+                        prepared
+                            .finish()
+                            .and_then(|p| GpuProgram::new(device, p, id))
+                    })
+                }
             };
             match built {
                 Ok(p) => {
+                    cache.note_built(entry.key);
                     entry.program = Some(p);
                     entry.retry = None;
                 }
-                Err(f) => {
-                    let retry = retry::Retry::after(entry.retry.as_ref(), f.clone());
-                    // A compiler that cannot start, or that keeps failing
-                    // this program, is given up: a visible refusal.
-                    if remembered(&f) || f.compiler_unavailable() || retry.failures() >= limit(&f) {
-                        entry.status = Status::NeedsFallback(f.clone());
-                        entry.retry = None;
-                    } else {
-                        entry.retry = Some(retry);
+                // Every compiler slot taken: no failure. The viewer's build
+                // goes to the background, in its turn; a job was cancelled.
+                Err(f) if f.admission() => {
+                    if interactive
+                        && f.message == pm_glsl::QUEUED
+                        && let Some(prepared) = entry.prepared.clone()
+                    {
+                        let source = entry.key;
+                        self.prewarm
+                            .queue(key.clone(), source, prepared, device, format);
                     }
+                    return Err(f);
+                }
+                Err(f) => {
+                    settle_build_failure(entry, f.clone());
                     return Err(f);
                 }
             }
         }
-        let program = entry.program.as_mut().expect("built above");
+        let program = entry_program(&mut self.entries, &key);
         let piped = program.pipeline(device, format).map(|_| ());
         if let Some(at) = building {
             self.frame_build_us += at.elapsed().as_micros() as u64;
         }
-        let entry = self
-            .entries
-            .get_mut(&(kind, DefinitionId::from(id)))
-            .expect("looked up above");
+        let entry = self.entries.get_mut(&key).expect("looked up above");
         if let Err(f) = piped {
             entry.status = Status::NeedsFallback(f.clone());
             entry.program = None;
             return Err(f);
         }
         Ok(entry.program.as_mut().expect("still built"))
+    }
+}
+
+fn entry_program<'a>(
+    entries: &'a mut BTreeMap<(DefinitionKind, DefinitionId), Entry>,
+    key: &(DefinitionKind, DefinitionId),
+) -> &'a mut GpuProgram {
+    entries
+        .get_mut(key)
+        .and_then(|e| e.program.as_mut())
+        .expect("built above")
+}
+
+/// A program build that failed: a failure of its source is remembered (a
+/// fallback); a crashed, slow or starved compiler is retried after its
+/// backoff, and given up on once one kind used up its budget or when it
+/// cannot start.
+fn settle_build_failure(entry: &mut Entry, f: Failure) {
+    if remembered(&f) {
+        entry.status = Status::NeedsFallback(f);
+        entry.retry = None;
+        return;
+    }
+    let retry = retry::Retry::after(entry.retry.as_ref(), f.clone());
+    if f.compiler_unavailable() || retry.exhausted() {
+        entry.status = Status::GaveUp(f);
+        entry.retry = None;
+    } else {
+        entry.retry = Some(retry);
     }
 }
 
@@ -1443,6 +1558,19 @@ pub(crate) fn transition_features(
     out
 }
 
+/// The feature a definition the compiler gave up on refuses its layers with,
+/// carrying the compiler's own message.
+pub(crate) fn gave_up(id: &str, f: &Failure) -> crate::Feature {
+    crate::Feature::CompilerGaveUp(
+        id.to_owned(),
+        format!(
+            "{}: {}",
+            f.stage.name(),
+            f.message.lines().next().unwrap_or_default()
+        ),
+    )
+}
+
 fn definition_feature(effects: &Effects, kind: DefinitionKind, id: &str) -> Option<crate::Feature> {
     let what = match kind {
         DefinitionKind::Effect => "effect",
@@ -1453,8 +1581,11 @@ fn definition_feature(effects: &Effects, kind: DefinitionKind, id: &str) -> Opti
         return (!effects.is_missing(kind, id))
             .then(|| crate::Feature::Definition(format!("{what} {id}")));
     }
-    matches!(effects.status(kind, id), Some(Status::NeedsFallback(_)))
-        .then(|| crate::Feature::ShaderFallback(id.to_owned()))
+    match effects.status(kind, id) {
+        Some(Status::NeedsFallback(_)) => Some(crate::Feature::ShaderFallback(id.to_owned())),
+        Some(Status::GaveUp(f)) => Some(gave_up(id, f)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -715,8 +715,20 @@ impl Renderer {
         let (own, pinned): (Vec<_>, Vec<_>) = failures.into_iter().partition(|failure| {
             matches!(&failure.scope, ErrorScope::Definition { definition } if accepted.contains(definition))
         });
-        if !pinned.is_empty() {
-            return Err(pinned_failure(&pinned));
+        // A built-in still being built (waiting its turn, or retried after
+        // a passing compiler failure) is pending, not broken: its own
+        // message says so, and the caller waits as for a contributed one.
+        let pending = |f: &pm_protocol::error::EngineError| {
+            f.message.contains(crate::capability::PROGRAM_PENDING)
+        };
+        if let Some(waiting) = pinned.iter().find(|f| pending(f))
+            && pinned.iter().all(pending)
+        {
+            return Err(waiting.message.clone());
+        }
+        let broken: Vec<_> = pinned.into_iter().filter(|f| !pending(f)).collect();
+        if !broken.is_empty() {
+            return Err(pinned_failure(&broken));
         }
         self.effects.versioned_builtins = true;
         self.effects.file_app_version = document.saving_app_version().map(str::to_owned);
@@ -800,6 +812,20 @@ impl Renderer {
     /// definition once it is set (the caller then sees its cancel).
     pub fn set_registration_cancel(&mut self, cancel: Option<Arc<std::sync::atomic::AtomicBool>>) {
         self.effects.cancel = cancel;
+    }
+
+    /// The interactive viewer: a shader compile that cannot start now waits
+    /// its turn in the background and the frame stays pending, so no frame
+    /// thread waits for a compiler slot. Jobs (with a cancel flag) and other
+    /// renderers wait their turn.
+    pub fn set_interactive(&mut self, on: bool) {
+        self.effects.interactive = on;
+    }
+
+    /// Asks the shader compiler afresh for every definition it gave up on
+    /// (an explicit retry). Returns how many.
+    pub fn retry_given_up(&mut self) -> usize {
+        self.effects.retry_given_up()
     }
 
     /// Forgets every definition: effects and transitions are routed again.

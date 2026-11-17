@@ -33,7 +33,7 @@ pub mod rewrite;
 pub mod safety;
 
 pub use cache::{Cache, Key};
-pub use compiler::CANNOT_START;
+pub use compiler::{Admission, CANCELLED, CANNOT_START, QUEUED, with_admission};
 pub use errors::Diagnostic;
 pub use pipeline::{
     Failure, FailureStage, Prepared, PreparedStage, Program, StageModule, VARYINGS, VERTEX,

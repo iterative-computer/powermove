@@ -12,6 +12,11 @@ use std::{collections::HashMap, sync::Mutex};
 pub const ENV: &str = "PM_RENDER_TEST_FAILURES";
 
 fn from_env() {
+    // Only a build with debug assertions reads it (`lib.rs` refuses the
+    // feature otherwise); a malformed item is ignored, never a panic.
+    if !cfg!(debug_assertions) {
+        return;
+    }
     static READ: std::sync::Once = std::sync::Once::new();
     READ.call_once(|| {
         let Ok(spec) = std::env::var(ENV) else { return };
@@ -19,26 +24,30 @@ fn from_env() {
             let mut parts = item.splitn(3, ':');
             let (Some(what), Some(id), Some(stage)) = (parts.next(), parts.next(), parts.next())
             else {
-                panic!("{ENV}: {item}");
+                continue;
             };
             let (stage, n) = match stage.split_once('*') {
-                Some((stage, n)) => (stage, n.parse().expect("a count")),
+                Some((stage, n)) => match n.parse() {
+                    Ok(n) => (stage, n),
+                    Err(_) => continue,
+                },
                 None => (stage, 1),
             };
-            let stage = [
+            let Some(stage) = [
                 FailureStage::CompilerBusy,
                 FailureStage::CompilerProcess,
                 FailureStage::CompilerResources,
                 FailureStage::Deadline,
             ]
             .into_iter()
-            .find(|s| s.name() == stage)
-            .unwrap_or_else(|| panic!("{ENV}: stage {stage}"));
+            .find(|s| s.name() == stage) else {
+                continue;
+            };
             let failures = vec![Failure::new(stage, format!("injected {}", stage.name())); n];
             match what {
                 "compile" => fail_compiles(id, failures),
                 "build" => fail_builds(id, failures),
-                _ => panic!("{ENV}: {item}"),
+                _ => {}
             }
         }
     });

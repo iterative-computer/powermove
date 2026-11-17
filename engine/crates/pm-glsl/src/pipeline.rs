@@ -177,6 +177,12 @@ impl Failure {
         self.stage == FailureStage::CompilerProcess
             && self.message.starts_with(crate::compiler::CANNOT_START)
     }
+    /// Admission said no for now (every slot taken, or the waiting job was
+    /// cancelled): not a failure of the compiler, never counted against the
+    /// source.
+    pub fn admission(&self) -> bool {
+        self.stage == FailureStage::CompilerBusy
+    }
     pub fn new(stage: FailureStage, message: impl Into<String>) -> Self {
         Failure {
             stage,

@@ -395,16 +395,6 @@ impl std::fmt::Display for DefinitionsPending {
     }
 }
 impl std::error::Error for DefinitionsPending {}
-/// Every compiler slot was taken while definitions were installing. Nothing is
-/// wrong with the shader; a sticky error here would stick to a healthy project.
-#[derive(Debug)]
-pub(crate) struct CompilerBusy;
-impl std::fmt::Display for CompilerBusy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("every shader compiler slot is busy")
-    }
-}
-impl std::error::Error for CompilerBusy {}
 /// A playing frame is on disk and was still being read when its turn came.
 /// It gives way for a tick (the clock goes on and the reader catches up)
 /// instead of being drawn again: it is on disk because drawing it takes
@@ -435,7 +425,10 @@ impl std::error::Error for SettledPending {}
 pub(crate) fn program_pending(error: &str) -> bool {
     error.contains(pm_render::PROGRAM_PENDING)
 }
-/// A frame drawn while one of its effects' programs was still being built.
+/// A frame drawn while one of its effects' programs was still being built
+/// (waiting its turn for the compiler, or retried after a passing failure):
+/// its message is the definition's own (what the viewer's "Still waiting"
+/// names). Nothing is wrong with the shader.
 #[derive(Debug)]
 pub(crate) struct ProgramPending(pub(crate) String);
 impl std::fmt::Display for ProgramPending {
@@ -444,11 +437,26 @@ impl std::fmt::Display for ProgramPending {
     }
 }
 impl std::error::Error for ProgramPending {}
+/// A frame one of whose effects the shader compiler gave up on (it kept
+/// crashing, running past its deadline or out of resources, or cannot
+/// start): the layer's refusal with the compiler's message. Not transient:
+/// drawn again only after a retry, a reload of the definitions or an edit.
+#[derive(Debug)]
+pub(crate) struct EffectGaveUp(pub(crate) String);
+impl std::fmt::Display for EffectGaveUp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::error::Error for EffectGaveUp {}
+/// Why a registration says pending, as an error the frame waits on.
+pub(crate) fn pending_registration(message: &str) -> anyhow::Error {
+    anyhow::Error::new(ProgramPending(message.to_owned()))
+}
 pub(crate) fn transient(error: &anyhow::Error) -> bool {
     error.is::<ProgramPending>()
         || error.is::<FontsPending>()
         || error.is::<DefinitionsPending>()
-        || error.is::<CompilerBusy>()
         || error.is::<DiskFramePending>()
         || error.is::<SettledPending>()
         || matches!(
@@ -1088,6 +1096,10 @@ impl Engine {
             )
         });
         let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
+        // The viewer's frame thread never waits for a compiler slot: a
+        // shader that cannot start now builds in its turn in the background
+        // and the frame stays pending meanwhile.
+        renderer.set_interactive(true);
         renderer.apply_media_lease(pm_media::decode::service::MediaLease {
             frame_cache: 24 << 20,
             decoders: 32 << 20,
@@ -1527,13 +1539,13 @@ impl Engine {
                 .set_document_effects(&scene.doc, &self.resources.definitions)
                 .map_err(|e| {
                     if busy(&e) {
-                        anyhow::Error::new(CompilerBusy)
+                        pending_registration(&e)
                     } else {
                         anyhow::Error::msg(e)
                     }
                 })?;
-            if failures.iter().any(|failure| busy(&failure.message)) {
-                return Err(anyhow::Error::new(CompilerBusy));
+            if let Some(pending) = failures.iter().find(|failure| busy(&failure.message)) {
+                return Err(pending_registration(&pending.message));
             }
             self.missing_effects = self.renderer.missing_effects().to_vec();
             // Not installed only once extensions have settled; until then the
@@ -1956,6 +1968,8 @@ impl Engine {
                 let rendered = rendered.map_err(|e| {
                     if e.program_pending() {
                         anyhow::Error::new(ProgramPending(e.to_string()))
+                    } else if e.compiler_gave_up() {
+                        anyhow::Error::new(EffectGaveUp(e.to_string()))
                     } else {
                         e.into()
                     }
@@ -1972,6 +1986,11 @@ impl Engine {
                 // again, never delivered without the effect.
                 if let Some(pending) = rendered.failures.iter().find(|f| f.program_pending()) {
                     return Err(ProgramPending(pending.message.clone()).into());
+                }
+                // One the compiler gave up on: the layer's refusal, with the
+                // compiler's message; never shown, cached or kept without it.
+                if let Some(gave_up) = rendered.failures.iter().find(|f| f.compiler_gave_up()) {
+                    return Err(EffectGaveUp(gave_up.message.clone()).into());
                 }
                 let failures: Arc<[LayerFailure]> = rendered.failures.into();
                 stand_ins = !rendered.stand_ins.is_empty() || !compat_late.is_empty();
@@ -5144,7 +5163,7 @@ mod frame_cache_tests {
                         }
                     }
                     Ok(None) => {}
-                    Err(e) => assert!(e.is::<CompilerBusy>(), "{e:#}"),
+                    Err(e) => assert!(e.is::<ProgramPending>(), "{e:#}"),
                 }
                 assert!(Instant::now() < deadline, "the frame never settled");
                 std::thread::sleep(Duration::from_millis(5));

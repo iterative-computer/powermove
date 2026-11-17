@@ -550,7 +550,7 @@ fn every_shader_matches_webgl() {
                         "{shown}: WebGL draws {w}, engine {:?}",
                         s.map(|s| match s {
                             Status::Ready => "ready".to_owned(),
-                            Status::Refused(f) | Status::NeedsFallback(f) =>
+                            Status::Refused(f) | Status::NeedsFallback(f) | Status::GaveUp(f) =>
                                 format!("{}: {}", f.stage.name(), f.message),
                         })
                     )),

@@ -399,6 +399,13 @@ pub(crate) fn effect_steps_frame<'d>(
                 refuse(Feature::ShaderFallback(ty.clone()));
                 continue;
             }
+            // Given up on by the compiler: drawn only by a runner that really
+            // draws it; else refused, never a bypass (like a pending one).
+            Some(Status::GaveUp(_)) if effects.fallback.runner => {}
+            Some(Status::GaveUp(f)) => {
+                refused.get_or_insert(super::gave_up(&ty, f));
+                continue;
+            }
             // Refused programs render nothing today: skipped.
             Some(Status::Refused(failure)) => {
                 if effects.bypass_missing {
@@ -717,7 +724,11 @@ pub fn transition_at<'d>(
         Some(Status::NeedsFallback(_)) if !effects.fallback.runner => {
             return Ok(Err(Feature::ShaderFallback(ty)));
         }
-        Some(Status::Ready | Status::NeedsFallback(_))
+        // Given up on by the compiler: never composited without it.
+        Some(Status::GaveUp(f)) if !effects.fallback.runner => {
+            return Ok(Err(super::gave_up(&ty, f)));
+        }
+        Some(Status::Ready | Status::NeedsFallback(_) | Status::GaveUp(_))
             if !effects
                 .watchdog
                 .is_disabled(DefinitionKind::Transition, &ty) => {}

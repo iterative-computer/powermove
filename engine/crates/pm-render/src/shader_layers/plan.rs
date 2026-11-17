@@ -450,7 +450,12 @@ pub(crate) fn extension_layer<'d>(
                 failure.message.lines().next().unwrap_or_default()
             ))));
         }
-        Some(Status::NeedsFallback(failure)) => {
+        Some(Status::GaveUp(failure)) if !fallback_runner => {
+            return Ok(Some(Planned::Unsupported(crate::effects::gave_up(
+                &id, failure,
+            ))));
+        }
+        Some(Status::NeedsFallback(failure) | Status::GaveUp(failure)) => {
             if !fallback_runner {
                 return Ok(Some(Planned::Unsupported(Feature::ShaderFallback(id))));
             }
@@ -517,6 +522,7 @@ pub(crate) fn extension_feature(effects: &Effects, definition: &str) -> Option<F
             .status(DefinitionKind::Layer, definition)
         {
             Some(Status::NeedsFallback(_)) => Some(Feature::ShaderFallback(definition.to_owned())),
+            Some(Status::GaveUp(f)) => Some(crate::effects::gave_up(definition, f)),
             Some(_) => None,
             None => Some(Feature::Definition(format!(
                 "layer {definition} (no program)"

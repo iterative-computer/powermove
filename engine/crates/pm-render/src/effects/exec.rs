@@ -460,6 +460,20 @@ impl<'c> Gpu<'c> {
             feature: Feature::ProgramPending(definition.to_owned()),
         });
     }
+    /// A program the compiler gave up on, with no runner that draws it: the
+    /// layer is refused (never drawn without it, never kept).
+    fn gave_up(&mut self, layer: &str, kind: DefinitionKind, definition: &str) -> bool {
+        let Some(Status::GaveUp(f)) = self.effects.status(kind, definition) else {
+            return false;
+        };
+        let feature = super::gave_up(definition, f);
+        self.unsupported.push(Unsupported {
+            composition: None,
+            layer: Some(layer.to_owned()),
+            feature,
+        });
+        true
+    }
     fn fallback(&mut self, layer: &str, definition: &str) {
         self.unsupported.push(Unsupported {
             composition: None,
@@ -488,8 +502,6 @@ impl<'c> Gpu<'c> {
         {
             // A program that failed for a passing reason is pending, not a
             // fallback: the frame says so and is drawn again with it.
-            // Given up (an unavailable compiler, too many failures):
-            // a fallback like any other.
             if failure.stage.retryable()
                 && matches!(
                     self.effects
@@ -501,9 +513,12 @@ impl<'c> Gpu<'c> {
                 return None;
             }
             // WebGL draws it and the engine cannot: the fallback runner
-            // draws it when one is attached, else the frame routes.
+            // draws it when one is attached, else the frame routes. One the
+            // compiler gave up on is refused unless a runner draws it.
             if !self.effects.fallback.runner {
-                self.fallback(layer, &step.definition);
+                if !self.gave_up(layer, DefinitionKind::Effect, &step.definition) {
+                    self.fallback(layer, &step.definition);
+                }
                 return None;
             }
             let mut result = self.runner_effect(
@@ -807,8 +822,6 @@ impl<'c> Gpu<'c> {
             self.effects
                 .program(device, DefinitionKind::Transition, &step.definition, format)
         {
-            // Given up (an unavailable compiler, too many failures):
-            // a fallback like any other.
             if failure.stage.retryable()
                 && matches!(
                     self.effects
@@ -820,7 +833,9 @@ impl<'c> Gpu<'c> {
                 return None;
             }
             if !self.effects.fallback.runner {
-                self.fallback(layer, &step.definition);
+                if !self.gave_up(layer, DefinitionKind::Transition, &step.definition) {
+                    self.fallback(layer, &step.definition);
+                }
                 return None;
             }
             return self.runner_transition(layer, step, before, with_layer, time, failure);

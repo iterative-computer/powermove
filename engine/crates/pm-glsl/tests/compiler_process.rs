@@ -98,7 +98,7 @@ fn helper_finishes_cached_spirv_and_preserves_msl_exactly() {
     assert_eq!(pool.active(), 0);
 }
 #[test]
-fn timeouts_reap_workers_and_admission_never_queues() {
+fn timeouts_reap_workers_and_a_request_that_cannot_wait_is_busy_at_once() {
     // A deliberately non-reading process makes saturation deterministic,
     // independent of compiler optimization. /bin/sleep rejects the worker
     // argument, so use a private executable shell script that execs sleep.
@@ -124,13 +124,16 @@ fn timeouts_reap_workers_and_admission_never_queues() {
             assert!(start.elapsed() < Duration::from_secs(2));
             std::thread::yield_now();
         }
-        assert_eq!(
+        // The interactive viewer's request: busy at once, never queued.
+        let asked = Instant::now();
+        let busy = pm_glsl::with_admission(pm_glsl::Admission::Now, || {
             pool.run(request(SRC), Duration::from_secs(5))
-                .err()
-                .unwrap()
-                .stage,
-            FailureStage::CompilerBusy
-        );
+        })
+        .err()
+        .unwrap();
+        assert_eq!(busy.stage, FailureStage::CompilerBusy);
+        assert_eq!(busy.message, pm_glsl::QUEUED);
+        assert!(asked.elapsed() < Duration::from_millis(100));
         for job in jobs {
             assert_eq!(job.join().unwrap(), FailureStage::Deadline);
         }
@@ -138,38 +141,50 @@ fn timeouts_reap_workers_and_admission_never_queues() {
     }
     std::fs::remove_file(file).unwrap();
 }
+/// A request that waits is admitted in its turn, oldest first; its compile
+/// deadline starts once admitted; a cancelled job stops waiting.
 #[test]
-fn test_admission_waits_for_a_slot_within_the_deadline() {
+fn admission_is_a_fair_cancellable_queue() {
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
     let file = std::env::temp_dir().join(format!("pm-glsl-wait-{}", std::process::id()));
     std::fs::write(&file, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let pool = Arc::new(Pool::new(file.clone(), 1).with_test_admission());
+    let pool = Arc::new(Pool::new(file.clone(), 1));
+    let order = Arc::new(std::sync::Mutex::new(Vec::new()));
     let holder = {
         let pool = pool.clone();
-        std::thread::spawn(move || {
-            pool.run(request(SRC), Duration::from_millis(300))
-                .err()
-                .unwrap()
-                .stage
-        })
+        std::thread::spawn(move || pool.run(request(SRC), Duration::from_millis(300)).err().unwrap().stage)
     };
-    let start = Instant::now();
     while pool.active() != 1 {
-        assert!(start.elapsed() < Duration::from_secs(2));
         std::thread::yield_now();
     }
-    // Admitted once the holder is reaped, then stopped by its own deadline.
-    let waited = Instant::now();
-    let stage = pool
-        .run(request(SRC), Duration::from_secs(2))
-        .err()
-        .unwrap()
-        .stage;
-    assert_eq!(stage, FailureStage::Deadline);
-    assert!(waited.elapsed() >= Duration::from_millis(150));
+    // Three waiters, asking in turn; each is admitted in that order, and
+    // each one's own 200 ms deadline (not the wait) ends it.
+    let waiters: Vec<_> = (0..3)
+        .map(|i| {
+            let shared = pool.clone();
+            let order = order.clone();
+            let started = Instant::now();
+            let handle = std::thread::spawn(move || {
+                let stage = shared.run(request(SRC), Duration::from_millis(200)).err().unwrap().stage;
+                order.lock().unwrap().push(i);
+                (stage, started.elapsed())
+            });
+            while pool.waiting() != i + 1 {
+                std::thread::yield_now();
+            }
+            handle
+        })
+        .collect();
     assert_eq!(holder.join().unwrap(), FailureStage::Deadline);
-    // A deadline that ends while waiting is still a busy compiler.
+    for (i, waiter) in waiters.into_iter().enumerate() {
+        let (stage, took) = waiter.join().unwrap();
+        assert_eq!(stage, FailureStage::Deadline, "waiter {i} waited, never busy");
+        assert!(took >= Duration::from_millis(300 + 200 * i as u64 - 50), "waiter {i}: {took:?}");
+    }
+    assert_eq!(*order.lock().unwrap(), [0, 1, 2], "oldest first");
+    // A cancelled job stops waiting.
     let holder = {
         let pool = pool.clone();
         std::thread::spawn(move || pool.run(request(SRC), Duration::from_millis(500)))
@@ -177,13 +192,23 @@ fn test_admission_waits_for_a_slot_within_the_deadline() {
     while pool.active() != 1 {
         std::thread::yield_now();
     }
-    assert_eq!(
-        pool.run(request(SRC), Duration::from_millis(50))
-            .err()
-            .unwrap()
-            .stage,
-        FailureStage::CompilerBusy
-    );
+    let cancel = Arc::new(AtomicBool::new(false));
+    let waiter = {
+        let pool = pool.clone();
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            pm_glsl::with_admission(pm_glsl::Admission::WaitUnless(cancel), || {
+                pool.run(request(SRC), Duration::from_secs(5))
+            })
+        })
+    };
+    while pool.waiting() != 1 {
+        std::thread::yield_now();
+    }
+    cancel.store(true, Ordering::Release);
+    let cancelled = waiter.join().unwrap().err().unwrap();
+    assert_eq!(cancelled.message, pm_glsl::CANCELLED);
+    assert_eq!(pool.waiting(), 0);
     holder.join().unwrap().err().unwrap();
     assert_eq!(pool.active(), 0);
     std::fs::remove_file(file).unwrap();

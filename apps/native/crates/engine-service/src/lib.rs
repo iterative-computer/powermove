@@ -6723,7 +6723,7 @@ fn refusal_kind(error: &anyhow::Error) -> &'static str {
         Some(pm_render::RenderError::WatchdogPending) => "watchdog",
         Some(pm_render::RenderError::ShaderFallbackPending(_)) => "shader-fallback",
         Some(pm_render::RenderError::MediaPending) => "still",
-        _ if error.is::<render::CompilerBusy>() => "shader-compiler",
+        _ if error.is::<render::ProgramPending>() => "shader-compiler",
         _ if error.is::<render::DiskFramePending>() => "disk-frame",
         _ if error.is::<render::DefinitionsPending>() => "definitions",
         _ => "fonts",

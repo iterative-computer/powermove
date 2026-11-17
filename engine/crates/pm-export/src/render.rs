@@ -1831,12 +1831,12 @@ where
                            read: Result<ReadFrame, JobError>|
          -> Result<bool, JobError> {
             let mut f = read?;
-            // A program still being built (a passing compiler failure) leaves
-            // the frame short of its effect: never delivered, not even by a
-            // renderer that leaves failing layers out (a preview, an agent's
-            // still).
-            if let Some(pending) = f.failures.iter().find(|l| l.program_pending()) {
-                return Err(JobError::Render(pending.message.clone()));
+            // A program still being built, or one the compiler gave up on,
+            // leaves the frame short of its effect: never delivered, not even
+            // by a renderer that leaves failing layers out (a preview, an
+            // agent's still).
+            if let Some(short) = f.failures.iter().find(|l| l.blocks_delivery()) {
+                return Err(JobError::Render(short.message.clone()));
             }
             // A renderer that leaves failing layers out drew the rest.
             if isolated {

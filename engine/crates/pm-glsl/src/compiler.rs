@@ -91,21 +91,62 @@ pub struct Pool {
     capacity: usize,
     active: AtomicUsize,
     resident_limit: u64,
-    /// Test builds only (`test-admission`): the process-wide pool waits for
-    /// a slot within the request's deadline instead of failing, so parallel
-    /// test fixtures never see a busy compiler as a broken shader.
-    waits: bool,
-    freed: (std::sync::Mutex<()>, std::sync::Condvar),
+    /// Requests waiting for a slot, in the order they asked: the oldest is
+    /// admitted first (a fair queue, never a busy answer to one that waits).
+    queue: (std::sync::Mutex<Waiting>, std::sync::Condvar),
 }
+
+#[derive(Default)]
+struct Waiting {
+    next: u64,
+    tickets: std::collections::BTreeSet<u64>,
+}
+
+/// How a request on this thread is admitted when every compiler slot is
+/// taken ([`with_admission`]).
+#[derive(Clone, Default)]
+pub enum Admission {
+    /// Waits its turn in the queue (a job: it stops waiting once `cancel`
+    /// is set, answering [`CANCELLED`]).
+    #[default]
+    Wait,
+    WaitUnless(std::sync::Arc<std::sync::atomic::AtomicBool>),
+    /// Runs only if it can start now, with nobody ahead of it; otherwise
+    /// answers busy ([`QUEUED`]) at once, and the caller has the work done
+    /// in the background (the interactive viewer, whose frame stays
+    /// pending meanwhile).
+    Now,
+}
+
+thread_local! {
+    static ADMISSION: std::cell::RefCell<Admission> = std::cell::RefCell::new(Admission::Wait);
+}
+
+/// Runs `f` with the compiler requests of this thread admitted as `admission` says.
+pub fn with_admission<T>(admission: Admission, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Admission>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                ADMISSION.with(|a| *a.borrow_mut() = previous);
+            }
+        }
+    }
+    let _restore = Restore(Some(ADMISSION.with(|a| a.replace(admission))));
+    f()
+}
+
+/// The busy answer to a request that could not start at once ([`Admission::Now`]).
+pub const QUEUED: &str = "every shader compiler slot is taken by earlier builds; it builds in its turn";
+/// The answer to a waiting request whose job was cancelled.
+pub const CANCELLED: &str = "cancelled while waiting for a shader compiler slot";
 
 struct Permit<'a>(&'a Pool);
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
         self.0.active.fetch_sub(1, Ordering::AcqRel);
-        if self.0.waits {
-            let _guard = self.0.freed.0.lock().unwrap_or_else(|e| e.into_inner());
-            self.0.freed.1.notify_one();
-        }
+        let _guard = self.0.queue.0.lock().unwrap_or_else(|e| e.into_inner());
+        self.0.queue.1.notify_all();
     }
 }
 struct Worker(Child);
@@ -302,16 +343,8 @@ impl Pool {
             capacity,
             active: AtomicUsize::new(0),
             resident_limit: MAX_RESIDENT_BYTES,
-            waits: false,
-            freed: Default::default(),
+            queue: Default::default(),
         }
-    }
-    /// Waits for a free slot within each request's deadline instead of
-    /// failing busy. Test fixtures only (`test-admission`); production
-    /// admission never queues.
-    pub fn with_test_admission(mut self) -> Self {
-        self.waits = true;
-        self
     }
     /// Host-selected memory budget; source code cannot change it.
     pub fn with_resident_limit(mut self, bytes: u64) -> Self {
@@ -321,42 +354,59 @@ impl Pool {
     pub fn active(&self) -> usize {
         self.active.load(Ordering::Acquire)
     }
-    fn admit(&self, deadline: Instant) -> Result<Permit<'_>, Failure> {
-        let take = || {
-            self.active
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                    (n < self.capacity).then_some(n + 1)
-                })
-                .is_ok()
-        };
-        let mut guard = None;
-        loop {
-            if take() {
-                return Ok(Permit(self));
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if !self.waits || left.is_zero() {
-                return Err(Failure::new(
-                    FailureStage::CompilerBusy,
-                    "all GLSL compiler process slots are occupied; retry later",
-                ));
-            }
-            let held = match guard.take() {
-                Some(held) => held,
-                None => self.freed.0.lock().unwrap_or_else(|e| e.into_inner()),
-            };
-            // Re-check under the lock: a release between the failed take and
-            // the wait has already notified.
-            if take() {
-                return Ok(Permit(self));
-            }
-            let (held, _) = self
-                .freed
-                .1
-                .wait_timeout(held, left)
-                .unwrap_or_else(|e| e.into_inner());
-            guard = Some(held);
+    fn take(&self) -> bool {
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < self.capacity).then_some(n + 1)
+            })
+            .is_ok()
+    }
+    /// A slot for this thread's request, as its [`Admission`] says: at once
+    /// when one is free and nobody waits; else in its turn (oldest first),
+    /// or busy at once for [`Admission::Now`]. Waiting never fails by itself:
+    /// only a cancelled job stops.
+    fn admit(&self) -> Result<Permit<'_>, Failure> {
+        let admission = ADMISSION.with(|a| a.borrow().clone());
+        let mut waiting = self.queue.0.lock().unwrap_or_else(|e| e.into_inner());
+        if waiting.tickets.is_empty() && self.take() {
+            return Ok(Permit(self));
         }
+        let cancel = match admission {
+            Admission::Now => return Err(Failure::new(FailureStage::CompilerBusy, QUEUED)),
+            Admission::Wait => None,
+            Admission::WaitUnless(cancel) => Some(cancel),
+        };
+        let ticket = waiting.next;
+        waiting.next += 1;
+        waiting.tickets.insert(ticket);
+        loop {
+            if waiting.tickets.first() == Some(&ticket) && self.take() {
+                waiting.tickets.remove(&ticket);
+                self.queue.1.notify_all();
+                return Ok(Permit(self));
+            }
+            if cancel.as_ref().is_some_and(|c| c.load(Ordering::Acquire)) {
+                waiting.tickets.remove(&ticket);
+                self.queue.1.notify_all();
+                return Err(Failure::new(FailureStage::CompilerBusy, CANCELLED));
+            }
+            // A release notifies; the timeout only polls the cancel flag.
+            waiting = self
+                .queue
+                .1
+                .wait_timeout(waiting, Duration::from_millis(20))
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+    /// Requests waiting for a slot now.
+    pub fn waiting(&self) -> usize {
+        self.queue
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .tickets
+            .len()
     }
 
     #[cfg(unix)]
@@ -368,10 +418,12 @@ impl Pool {
         let _test_guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         #[cfg(test)]
         TEST_REQUEST_START.set(Some(Instant::now()));
+        // Its deadline is the compile's own: the time it waited its turn
+        // does not count against it.
+        let _permit = self.admit()?;
         let deadline = Instant::now()
             .checked_add(timeout)
             .ok_or_else(|| process_error("invalid compiler deadline"))?;
-        let _permit = self.admit(deadline)?;
         let (mut host, child) = UnixStream::pair()
             .map_err(|e| process_error(format!("cannot create compiler IPC socket: {e}")))?;
         // Darwin refuses timeout socket options once the peer has closed,
@@ -472,12 +524,7 @@ pub fn default_pool() -> &'static Pool {
                 };
                 dir.join("pm-glsl-compiler")
             });
-        let pool = Pool::new(executable, PROCESS_SLOTS);
-        if cfg!(feature = "test-admission") {
-            pool.with_test_admission()
-        } else {
-            pool
-        }
+        Pool::new(executable, PROCESS_SLOTS)
     })
 }
 

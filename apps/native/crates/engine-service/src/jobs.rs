@@ -725,15 +725,20 @@ pub(crate) fn register_effects(
 ) -> Result<Vec<pm_protocol::error::EngineError>> {
     renderer.set_registration_cancel(Some(cancel.clone()));
     let registered = (|| loop {
-        let failures = renderer
-            .set_document_effects(doc, definitions)
-            .map_err(anyhow::Error::msg)?;
+        // A built-in still being built comes back as an error: waited out
+        // like a contributed one, never the end of the job.
+        let failures = match renderer.set_document_effects(doc, definitions) {
+            Ok(failures) => Some(failures),
+            Err(e) if crate::render::program_pending(&e) => None,
+            Err(e) => return Err(anyhow::Error::msg(e)),
+        };
         if cancel.load(Ordering::Acquire) {
             anyhow::bail!("cancelled");
         }
-        if !failures
-            .iter()
-            .any(|failure| crate::render::program_pending(&failure.message))
+        if let Some(failures) = failures
+            && !failures
+                .iter()
+                .any(|failure| crate::render::program_pending(&failure.message))
         {
             return Ok(failures);
         }
@@ -745,7 +750,8 @@ pub(crate) fn register_effects(
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     })();
-    renderer.set_registration_cancel(None);
+    // The job's cancel stays with its renderer: a program build waiting its
+    // turn for the compiler during a frame stops waiting too.
     registered
 }
 
@@ -1397,12 +1403,13 @@ pub fn run_child() -> Result<()> {
         // A viewer still already isolates failing layers below. Definition
         // validation must not reject the whole project before that isolation
         // can draw its healthy layers. Deliveries continue to refuse it.
-        if !request.preview
-            && let Some(failure) = failures.iter().find(|failure| {
-                matches!(&failure.scope, pm_protocol::error::ErrorScope::Definition { definition }
+        // One the shader compiler gave up on refuses even a viewer still:
+        // that still would be the picture without the effect.
+        if let Some(failure) = failures.iter().find(|failure| {
+            (!request.preview || failure.message.contains(pm_render::COMPILER_GAVE_UP))
+                && matches!(&failure.scope, pm_protocol::error::ErrorScope::Definition { definition }
                     if request.document.contains(&format!("\"{}\"", definition.as_str())))
-            })
-        {
+        }) {
             anyhow::bail!("{}", failure.message);
         }
         #[cfg(feature = "kernel")]

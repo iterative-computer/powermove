@@ -82,6 +82,17 @@ pub struct Cache {
     dir: Option<PathBuf>,
     deadline: Duration,
     memory: Mutex<Memory>,
+    /// Translations running in the background, waiting their turn for the
+    /// compiler ([`Cache::prepare_in_background`]).
+    in_flight: Mutex<std::collections::HashSet<Key>>,
+    /// A background translation's passing failure (crash, deadline,
+    /// resources), for the definition that asked to count once.
+    landed: Mutex<HashMap<Key, Failure>>,
+    /// Background translations finished so far: a waiting viewer draws again.
+    finished: std::sync::atomic::AtomicU64,
+    /// Sources some renderer built a program of: a definition another
+    /// renderer gave up on builds again.
+    built: Mutex<std::collections::HashSet<Key>>,
 }
 
 impl Cache {
@@ -93,7 +104,105 @@ impl Cache {
             dir,
             deadline: DEFAULT_DEADLINE,
             memory: Mutex::new((HashMap::new(), 0)),
+            in_flight: Mutex::default(),
+            landed: Mutex::default(),
+            finished: Default::default(),
+            built: Mutex::default(),
         }
+    }
+
+    /// The translation if this process has it (memory only), without
+    /// starting the compiler.
+    pub fn peek(&self, key: Key) -> Option<Entry> {
+        self.memory_get(key)
+    }
+
+    /// Translates in the background, waiting its turn for the compiler,
+    /// unless it is already running: the caller (the interactive viewer)
+    /// keeps its frame pending and asks [`Cache::prepare`] again, which then
+    /// finds it in memory. A passing failure (crash, deadline, resources) is
+    /// kept for [`Cache::take_landed`]. Returns whether it is running.
+    pub fn prepare_in_background(self: &Arc<Self>, fragment: &str, line_offset: u32) -> bool {
+        let key = self.key(fragment, line_offset);
+        if !self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key)
+        {
+            return true;
+        }
+        let cache = self.clone();
+        let fragment = fragment.to_owned();
+        let spawned = std::thread::Builder::new()
+            .name("pm-glsl-translate".into())
+            .spawn(move || {
+                let entry = crate::compiler::with_admission(crate::compiler::Admission::Wait, || {
+                    cache.prepare(&fragment, line_offset)
+                });
+                if let Err(f) = entry.as_ref()
+                    && f.stage.retryable()
+                {
+                    cache
+                        .landed
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(key, f.clone());
+                }
+                cache
+                    .in_flight
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&key);
+                cache
+                    .finished
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            });
+        if spawned.is_err() {
+            self.in_flight
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&key);
+            return false;
+        }
+        true
+    }
+
+    /// Whether a background translation of `key` is running.
+    pub fn in_background(&self, key: Key) -> bool {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&key)
+    }
+
+    /// A background translation's passing failure, once.
+    pub fn take_landed(&self, key: Key) -> Option<Failure> {
+        self.landed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key)
+    }
+
+    /// Background translations finished so far.
+    pub fn finished(&self) -> u64 {
+        self.finished.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// A renderer built a program of `key`.
+    pub fn note_built(&self, key: Key) {
+        self.built
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key);
+    }
+
+    /// Whether some renderer built a program of `key`.
+    pub fn was_built(&self, key: Key) -> bool {
+        self.built
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&key)
     }
 
     pub fn set_dir(&mut self, dir: Option<PathBuf>) {

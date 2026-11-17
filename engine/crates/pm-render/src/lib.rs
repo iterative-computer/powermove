@@ -64,8 +64,12 @@ pub mod vector;
 pub use assets::{AssetResolver, MapResolver, SourcePaths};
 #[cfg(any(test, feature = "test-hooks"))]
 pub mod test_hooks;
+// Injected compile failures exist for test builds only: never in a build
+// without debug assertions (a release), even with the feature turned on.
+#[cfg(all(feature = "test-hooks", not(debug_assertions)))]
+compile_error!("pm-render's `test-hooks` feature is for test builds only, never a release build");
 pub use capability::{
-    Feature, PROGRAM_PENDING, Unsupported, unsupported, unsupported_for, unsupported_with_definitions,
+    COMPILER_GAVE_UP, Feature, PROGRAM_PENDING, Unsupported, unsupported, unsupported_for, unsupported_with_definitions,
     unsupported_with_fonts, unsupported_with_media,
 };
 pub use effects::{Effects, builtin_definitions};
