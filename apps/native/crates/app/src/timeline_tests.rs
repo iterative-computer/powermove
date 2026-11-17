@@ -3464,7 +3464,7 @@ fn g3_capture_trim_review() {
             origin + point(px((v.layer_column + (2. - v.scroll_time) * v.pps - 2.) as f32), px((clip.bounds.y + clip.bounds.height / 2.) as f32))
         });
         cx.update_window(window.into(), |_, w, cx| {
-            w.dispatch_event(gpui::MouseMoveEvent { position, ..Default::default() }.into(), cx);
+            w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, ..Default::default() }), cx);
         }).unwrap();
         pump(&mut cx);
         let cursor = cx.update(|cx| surface.read(cx).cursor_style());
@@ -3472,13 +3472,13 @@ fn g3_capture_trim_review() {
         std::fs::write(format!("{dir}/roll-cursor-{name}.txt"), format!("{cursor:?}\n")).unwrap();
         cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/roll-cursor-{name}.png")).unwrap();
         cx.update_window(window.into(), |_, w, cx| {
-            w.dispatch_event(MouseDownEvent { button: MouseButton::Left, position, ..Default::default() }.into(), cx);
-            w.dispatch_event(gpui::MouseMoveEvent { position: position + point(px(35.), px(0.)), pressed_button: Some(MouseButton::Left), ..Default::default() }.into(), cx);
+            w.dispatch_event(gpui::PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position, ..Default::default() }), cx);
+            w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position: position + point(px(35.), px(0.)), pressed_button: Some(MouseButton::Left), ..Default::default() }), cx);
         }).unwrap();
         pump(&mut cx);
         cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/roll-progress-{name}.png")).unwrap();
         cx.update_window(window.into(), |_, w, cx| {
-            w.dispatch_event(MouseUpEvent { button: MouseButton::Left, position: position + point(px(35.), px(0.)), ..Default::default() }.into(), cx);
+            w.dispatch_event(gpui::PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: position + point(px(35.), px(0.)), ..Default::default() }), cx);
         }).unwrap();
         pump(&mut cx);
         // A media-clamped out edge: 12 s source, trim 2 s, rate 2.

@@ -1204,10 +1204,10 @@ fn text_tool_duration(p: &pm_kernel::Published, time: f64) -> Option<f64> {
     let root = p.snapshot.root()?;
     let comp_id = pm_kernel::model::open_comp_id(root);
     let comp = pm_kernel::model::comp_node(root, comp_id.as_deref())?;
-    let duration = comp.get("dur").and_then(pm_kernel::model::number_of)?;
+    let duration = comp.get("dur").and_then(|node| node.to_value().as_f64())?;
     let fps = comp
         .get("fps")
-        .and_then(pm_kernel::model::number_of)
+        .and_then(|node| node.to_value().as_f64())
         .unwrap_or(30.)
         .max(1.);
     Some((duration - time).min(5.).max(1. / fps))
