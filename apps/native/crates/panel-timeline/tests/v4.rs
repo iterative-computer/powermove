@@ -248,6 +248,17 @@ fn host_effects_are_requests_not_transport_or_import_success() {
     assert!(
         matches!(&dispatch(&mut c, json!({"type":"import"})).unwrap()[0], HostEffect::Import { time, before_layer: None, as_folder: false } if *time == 0.)
     );
+    // The empty composition's buttons run the app's own commands; only those.
+    for command in v4::RUN_COMMANDS {
+        assert_eq!(
+            dispatch(&mut c, json!({"type":"run","command":command})).unwrap(),
+            [HostEffect::Run(command.into())]
+        );
+    }
+    assert!(matches!(
+        dispatch(&mut c, json!({"type":"run","command":"quit"})),
+        Err(v4::Error::InvalidIntent(_))
+    ));
     assert!(matches!(
         dispatch(&mut c, json!({"type":"tab","id":"c","close":true})),
         Err(v4::Error::MissingHost(_))
@@ -1082,4 +1093,31 @@ fn revealed_properties_can_be_hidden_by_the_twirl() {
         .unwrap();
         assert_eq!(c.model.reveal.layers["a:[]"].collapsed, !open);
     }
+}
+
+/// Tracks mode with a clip's properties revealed: the outline (the header
+/// column) and the painted rows count the same rows in the same order, so a
+/// deep scroll still shows each row's name beside its keys.
+#[test]
+fn tracks_outline_and_painted_rows_agree_with_properties_revealed() {
+    let (_actor, mut c) = client();
+    c.model.toggle_disclosure("a:[]").unwrap();
+    c.model.mode = TimelineMode::Tracks;
+    let t = Tokens::new(Scheme::Dark, Accessibility::default());
+    let scene = paint::Scene::from_model(&c.model, &Presentation, &t, 0.).unwrap();
+    let outline = v4::project_window(&c.model, 0, 500).unwrap();
+    let ids: Vec<String> = outline["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        outline["window"]["total"].as_u64().unwrap() as usize,
+        scene.total()
+    );
+    let painted: Vec<String> = (0..scene.total())
+        .map(|i| scene.span(i).unwrap().0.id.clone())
+        .collect();
+    assert_eq!(ids, painted);
 }

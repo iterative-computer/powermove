@@ -1427,7 +1427,14 @@ fn starter(layers: &[Value], id: &str) -> Vec<Value> {
     if lit {
         return vec![];
     }
-    vec![
+    // Among 2D layers the 3D layer composites in stack order over a clear
+    // background, as a 3D layer does in After Effects (and v1.2): the sky
+    // lights it without being seen and there is no floor. The seamless set
+    // is for a composition that is only 3D.
+    let flat = layers
+        .iter()
+        .any(|l| schema::role(l).is_none() && l["type"] != "audio");
+    let mut set = vec![
         json!({"operation":"set_world","id":format!("{id}w"),"world":{"mode":"sky","preset":"clear-noon","p":{"elevation":35,"intensity":0.6,"sunIntensity":0.5,"haze":3}}}),
         json!({"operation":"add_light","id":format!("{id}k"),"name":"Key","light":{"type":"area","p":{
             "x":-2.6,"y":3.4,"z":3.2,"targetX":0,"targetY":0.3,"targetZ":0,"width":2.4,"height":1.6,"intensity":9}}}),
@@ -1438,7 +1445,12 @@ fn starter(layers: &[Value], id: &str) -> Vec<Value> {
             "source":{"primitive":"plane","parameters":{"width":200,"height":200}},
             "p":{"y":-0.5,"rx":-90},
             "material":{"p":{"color":"#8A8781","roughness":0.32,"metalness":0}}}}),
-    ]
+    ];
+    if flat {
+        set.truncate(2);
+        set[0]["world"]["p"]["visible"] = json!(false);
+    }
+    set
 }
 
 /// Light for extruded artwork in an unlit composition: the soft sky as

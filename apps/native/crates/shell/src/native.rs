@@ -4,7 +4,7 @@ mod flowchart;
 pub use flowchart::FlowchartRow;
 
 use crate::{
-    keyboard::{Class, Effect, Key, Resolver},
+    keyboard::{Class, Effect, Key, POINTER, Resolver},
     menu,
     transient::{Choice, Picker},
 };
@@ -35,6 +35,12 @@ thread_local! {
     static ROUTES:RefCell<HashMap<isize,async_channel::Sender<Command>>>=RefCell::new(HashMap::new());
     static MENU_TARGET:RefCell<Option<Retained<Target>>>=const{RefCell::new(None)};
     static REPLAYING:Cell<bool>=const{Cell::new(false)};
+    /// A press replayed in its turn: the key monitor handles it as a press
+    /// but does not queue it again.
+    static ORDERED:Cell<bool>=const{Cell::new(false)};
+    /// Each editor window's host by window number, for what must reach it
+    /// from outside its own event handling (the text being typed, flushed).
+    static HOSTS:RefCell<HashMap<isize,std::rc::Weak<RefCell<Host>>>>=RefCell::new(HashMap::new());
     /// Latest shell state per editor window number, read by menus and the palette.
     static MENU_STATES:RefCell<HashMap<isize,MenuState>>=RefCell::new(HashMap::new());
     /// AppKit window number → session window id.
@@ -276,6 +282,73 @@ fn active_send(command: Command) {
                 let _ = tx.try_send(command);
             }
         });
+    }
+}
+/// A press or its gesture's other events (not a move or a scroll).
+fn is_pointer(e: &NSEvent) -> bool {
+    matches!(
+        e.r#type(),
+        NSEventType::LeftMouseDown
+            | NSEventType::LeftMouseUp
+            | NSEventType::LeftMouseDragged
+            | NSEventType::RightMouseDown
+            | NSEventType::RightMouseUp
+            | NSEventType::RightMouseDragged
+    )
+}
+/// Sends an event the key queue held, in its turn. A key goes past the key
+/// monitor (it was handled there); a press goes through it, so its pointer
+/// handling runs, without being queued again; afterwards the keys queued
+/// behind it go where the keyboard now is (a click that opened a text).
+fn send_replayed(event: &NSEvent, host: Option<&Rc<RefCell<Host>>>) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    if is_pointer(event) {
+        ORDERED.with(|guard| {
+            guard.set(true);
+            app.sendEvent(event);
+            guard.set(false);
+        });
+        if let Some(mut h) = host.and_then(|h| h.try_borrow_mut().ok()) {
+            if crate::typing::expecting() {
+                // The press opens a text a turn from now: what was typed
+                // after it waits for that text, in order (typing::hold).
+                for key in h.resolver.take_queued() {
+                    h.typed.remove(&key.token);
+                    if let Some(event) = h.events.remove(&key.token) {
+                        crate::typing::hold(event);
+                    }
+                }
+            } else {
+                let field = h.text_has_keyboard();
+                h.resolver.retarget(field);
+            }
+        }
+    } else {
+        REPLAYING.with(|guard| {
+            guard.set(true);
+            app.sendEvent(event);
+            guard.set(false);
+        });
+    }
+}
+/// Every key still on its way to the text being edited in the key window
+/// reaches it now, in order (`Host::flush_typing`): the canvas text editor
+/// asks before it commits, so no key typed before the edit ends is lost.
+pub fn flush_typing() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(number) = NSApplication::sharedApplication(mtm)
+        .keyWindow()
+        .map(|w| w.windowNumber())
+    else {
+        return;
+    };
+    if let Some(host) = HOSTS.with(|h| h.borrow().get(&number).and_then(|w| w.upgrade())) {
+        Host::flush_typing(&host);
     }
 }
 /// Sends `name` to the current editor exactly as its menu item would.
@@ -619,6 +692,9 @@ pub fn contents(v: &NSView) -> Retained<NSView> {
 type PendingMenu = (Retained<NSMenu>, NSPoint, Retained<NSView>);
 struct TargetState {
     replays: RefCell<HashMap<usize, u64>>,
+    /// The host whose keys it replays: a replay completes there at once,
+    /// without a turn through the editor's command queue.
+    host: RefCell<std::rc::Weak<RefCell<Host>>>,
     commands: Vec<(String, Vec<serde_json::Value>)>,
     sender: Option<async_channel::Sender<Command>>,
     /// A context menu to pop up on the next run-loop turn (outside GPUI's event dispatch).
@@ -886,8 +962,24 @@ define_class!(
         #[unsafe(method(replayEvent:))]
         fn replay_event(&self,event:&NSEvent){
             let token=self.ivars().replays.borrow_mut().remove(&(event as *const NSEvent as usize));
-            REPLAYING.with(|guard|{guard.set(true);NSApplication::sharedApplication(self.mtm()).sendEvent(event);guard.set(false);});
-            if let (Some(token),Some(sender))=(token,&self.ivars().sender){let _=sender.try_send(Command{name:"shellReplayComplete".into(),args:vec![],token:Some(token)});}
+            let host=self.ivars().host.borrow().upgrade();
+            // Typed for a text that has since lost the keyboard (Escape or a
+            // click ended it, another app came forward): it goes nowhere, as
+            // keys held for a field that never came do; replayed now it would
+            // be a shortcut on the canvas.
+            let stale=token.is_some_and(|t|host.as_ref().and_then(|h|h.try_borrow_mut().ok()).is_some_and(|mut h|h.typed.remove(&t)&&!h.text_has_keyboard()));
+            if !stale{send_replayed(event,host.as_ref());}
+            let Some(token)=token else{return};
+            // The next key goes on now: a turn through the editor's queue per
+            // key let typing fall behind a busy frame (and Escape or a click
+            // overtake it). A host being changed hears it through the queue.
+            if let Some(mut h)=host.as_ref().and_then(|h|h.try_borrow_mut().ok()){
+                h.in_flight.remove(&token);
+                h.replayed(token);
+                drop(h);
+                // The keys queued behind it go on in this same turn.
+                if let Some(host)=&host{Host::deliver_waiting(host);}
+            }else if let Some(sender)=&self.ivars().sender{let _=sender.try_send(Command{name:"shellReplayComplete".into(),args:vec![],token:Some(token)});}
         }
         /// A Shape variant from the Shape segment's menu.
         #[unsafe(method(shapeVariant:))]
@@ -922,6 +1014,7 @@ impl Target {
             msg_send![
                 super(Self::alloc(mtm).set_ivars(TargetState {
                     replays: RefCell::new(HashMap::new()),
+                    host: RefCell::new(std::rc::Weak::new()),
                     commands,
                     sender,
                     pending_menu: RefCell::new(None),
@@ -1247,6 +1340,32 @@ fn named_item(mtm: MainThreadMarker, label: &str, command: &str) -> Retained<NSM
     });
     item
 }
+/// The strip's page cells (window, place, title, lit): this window's pages,
+/// then the other tabs' pages it does not have. A page is one cell for the
+/// group, the front tab's when it has it open: two tabs with the Store open
+/// show one Store cell, not two.
+fn strip_pages(
+    own: isize,
+    own_pages: &[(String, String)],
+    shown: Option<usize>,
+    others: &[(isize, Vec<(String, String)>)],
+) -> Vec<(isize, usize, String, bool)> {
+    let mut seen: Vec<&str> = vec![];
+    let mut cells = vec![];
+    for (i, (id, title)) in own_pages.iter().enumerate() {
+        seen.push(id);
+        cells.push((own, i, title.clone(), shown == Some(i)));
+    }
+    for (number, pages) in others {
+        for (i, (id, title)) in pages.iter().enumerate() {
+            if !seen.contains(&id.as_str()) {
+                seen.push(id);
+                cells.push((*number, i, title.clone(), false));
+            }
+        }
+    }
+    cells
+}
 fn rebuild_menu(menu: &NSMenu, kind: MenuKind) {
     let mtm = MainThreadMarker::new().unwrap();
     let state = active_state();
@@ -1342,6 +1461,24 @@ const TOOLBAR_BUTTONS: [(&str, &str, &str); 4] = [
     ("panelLibrary", "square.grid.2x2", "Panels"),
     ("settings", "gearshape", "Settings"),
 ];
+#[cfg(test)]
+mod strip_page_tests {
+    /// Two tabs with the Store open: one Store cell, the front tab's (lit
+    /// when it shows); a page only another tab has is still listed.
+    #[test]
+    fn a_page_open_in_two_tabs_is_one_cell_the_front_tabs() {
+        let store = || ("store".to_owned(), "Store".to_owned());
+        let other = || ("other".to_owned(), "Other".to_owned());
+        let cells = super::strip_pages(1, &[store()], Some(0), &[(2, vec![store(), other()])]);
+        assert_eq!(
+            cells,
+            vec![(1, 0, "Store".into(), true), (2, 1, "Other".into(), false)]
+        );
+        // The front tab without it: the other tab's cell, unlit.
+        let cells = super::strip_pages(1, &[], None, &[(2, vec![store()]), (3, vec![store()])]);
+        assert_eq!(cells, vec![(2, 0, "Store".into(), false)]);
+    }
+}
 #[cfg(test)]
 mod toolbar_tag_tests {
     /// Each button the toolbar builds has a tag (its `TOOLBAR` slot);
@@ -2209,6 +2346,27 @@ pub fn live_window_ids() -> Vec<u64> {
 /// yet to show its first frame: the other restored windows open theirs
 /// after it, so the one a person sees opens alone (PM-384). 0: none.
 static FRONT_RESTORING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Whether the person can see `window`'s content: on screen, not
+/// minimized, and the selected tab of its group (a tab behind another
+/// reports itself visible).
+pub fn window_shown(window: &NSWindow) -> bool {
+    window.isVisible()
+        && !window.isMiniaturized()
+        && window
+            .tabGroup()
+            .and_then(|group| group.selectedWindow())
+            .is_none_or(|selected| std::ptr::eq(&*selected, window))
+}
+/// A restored session's windows are still joining their tab groups: a
+/// window's visibility says nothing yet about which tab the person sees.
+static RESTORE_ARRANGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_restore_arranging(arranging: bool) {
+    RESTORE_ARRANGING.store(arranging, std::sync::atomic::Ordering::Release);
+}
+/// Whether restored windows are still joining their tab groups.
+pub fn restore_arranging() -> bool {
+    RESTORE_ARRANGING.load(std::sync::atomic::Ordering::Acquire)
+}
 pub fn set_front_restoring(id: Option<u64>) {
     FRONT_RESTORING.store(id.unwrap_or(0), std::sync::atomic::Ordering::Release);
 }
@@ -3173,6 +3331,12 @@ pub struct Host {
     /// The next key pressed goes to Settings › Shortcuts, not to a command.
     recording: bool,
     events: HashMap<u64, Retained<NSEvent>>,
+    /// Keys posted for replay and not yet replayed, by token: a flush
+    /// takes them back and hands them over at once.
+    in_flight: HashMap<u64, Retained<NSEvent>>,
+    /// Keys typed while a text field had the keyboard: replayed after it
+    /// lost it, they go nowhere rather than act as shortcuts.
+    typed: std::collections::HashSet<u64>,
     /// Commands owed when a held key comes up, by key code ([`Host::on_release`]).
     releases: Rc<RefCell<HashMap<u16, Command>>>,
     /// Pending keys that came up before their command was answered.
@@ -3380,6 +3544,8 @@ impl Host {
             contributed: vec![],
             recording: false,
             events: HashMap::new(),
+            in_flight: HashMap::new(),
+            typed: Default::default(),
             releases: Default::default(),
             up_early: Default::default(),
             next_token: 0,
@@ -3409,6 +3575,11 @@ impl Host {
             pages: RefCell::default(),
             sidebar: RefCell::new(None),
         }));
+        HOSTS.with(|h| {
+            h.borrow_mut()
+                .insert(host.borrow().window.windowNumber(), Rc::downgrade(&host))
+        });
+        host.borrow()._target.ivars().host.replace(Rc::downgrade(&host));
         let weak = Rc::downgrade(&host);
         let native_rects = host.borrow().native_panel_clips.clone();
         let reg = gpui_macos::composition::register_tracked(
@@ -3448,6 +3619,39 @@ impl Host {
                     return event.as_ptr();
                 }
                 if let Some(host) = weak.upgrade() {
+                    // PM-465: input is handled in the order it arrived. A
+                    // press made while keys still wait their turn (⌘T whose
+                    // command the editor has not answered yet, behind a slow
+                    // frame) joins their queue, with the rest of its gesture:
+                    // a click after ⌘T acts with the Text tool.
+                    if is_pointer(e) && !ORDERED.with(|o| o.get()) {
+                        let mut h = host.borrow_mut();
+                        if e.windowNumber() == h.window.windowNumber() && h.resolver.busy() {
+                            h.next_token += 1;
+                            let token = h.next_token;
+                            h.events
+                                .insert(token, unsafe { Retained::retain(event.as_ptr()).unwrap() });
+                            let effects = h.resolver.submit(Key {
+                                token,
+                                chord: POINTER.into(),
+                                field: false,
+                                repeat: false,
+                                up: false,
+                                compat: false,
+                            });
+                            h.effects(effects);
+                            return std::ptr::null_mut();
+                        }
+                    }
+                    // Drags and the right button's release only take a turn.
+                    if matches!(
+                        e.r#type(),
+                        NSEventType::LeftMouseDragged
+                            | NSEventType::RightMouseUp
+                            | NSEventType::RightMouseDragged
+                    ) {
+                        return event.as_ptr();
+                    }
                     // Every release of the button is told to the session, which
                     // ends a pointer gesture whose own view never heard it (it
                     // was drawn again, or covered, while held).
@@ -3469,6 +3673,13 @@ impl Host {
                         e.r#type(),
                         NSEventType::LeftMouseDown | NSEventType::RightMouseDown
                     ) {
+                        // Keys typed before this press reach the text first:
+                        // the press may take the keyboard from it (a click
+                        // elsewhere, a toolbar tool), and keys replayed after
+                        // that would land on the canvas as shortcuts.
+                        if e.windowNumber() == window.windowNumber() {
+                            Host::flush_typing(&host);
+                        }
                         host.borrow().keyboard_navigated.set(false);
                         // A press on the window's own content (a timeline, a
                         // canvas, a list), not on a hosted control or inside
@@ -3743,6 +3954,9 @@ impl Host {
                         up: e.r#type() == NSEventType::KeyUp,
                         compat: false,
                     };
+                    if field {
+                        h.typed.insert(token);
+                    }
                     h.events
                         .insert(token, unsafe { Retained::retain(event.as_ptr()).unwrap() });
                     let effects = h.resolver.submit(key);
@@ -3757,7 +3971,10 @@ impl Host {
                     | NSEventMask::KeyUp
                     | NSEventMask::LeftMouseDown
                     | NSEventMask::LeftMouseUp
-                    | NSEventMask::RightMouseDown,
+                    | NSEventMask::LeftMouseDragged
+                    | NSEventMask::RightMouseDown
+                    | NSEventMask::RightMouseUp
+                    | NSEventMask::RightMouseDragged,
                 &handler,
             )
         };
@@ -3918,6 +4135,7 @@ impl Host {
                 }
                 Effect::Replay(token) => {
                     if let Some(event) = self.events.remove(&token) {
+                        self.in_flight.insert(token, event.clone());
                         self._target
                             .ivars()
                             .replays
@@ -3930,6 +4148,7 @@ impl Host {
                 }
                 Effect::Consumed(token) => {
                     self.events.remove(&token);
+                    self.typed.remove(&token);
                 }
             }
         }
@@ -4076,24 +4295,16 @@ impl Host {
         let group = tab_windows(&self.window);
         // Every tab's open pages, this window's first: Settings or the Store
         // opened in one tab stays in the strip whichever tab shows.
-        let mut page_cells: Vec<(isize, usize, String, bool)> = vec![];
-        {
+        let others: Vec<(isize, Vec<(String, String)>)> = group
+            .iter()
+            .map(|w| w.windowNumber())
+            .filter(|n| *n != own)
+            .map(|n| (n, PAGES.with(|p| p.borrow().get(&n).cloned().unwrap_or_default())))
+            .collect();
+        let page_cells = {
             let own_pages = self.pages.borrow();
-            for (i, (_, title)) in own_pages.0.iter().enumerate() {
-                page_cells.push((own, i, title.clone(), own_pages.1 == Some(i)));
-            }
-        }
-        for w in &group {
-            let number = w.windowNumber();
-            if number == own {
-                continue;
-            }
-            PAGES.with(|p| {
-                for (i, (_, title)) in p.borrow().get(&number).into_iter().flatten().enumerate() {
-                    page_cells.push((number, i, title.clone(), false));
-                }
-            });
-        }
+            strip_pages(own, &own_pages.0, own_pages.1, &others)
+        };
         // The group, by its first window, whatever shows in its windows.
         let strip_group = group.iter().map(|w| w.windowNumber()).min().unwrap_or(0);
         // A window with no project is Home, not a project: it is never a tab
@@ -5146,6 +5357,104 @@ impl Host {
         let effects = self.resolver.replayed(token);
         self.effects(effects);
     }
+    /// Every key the shell still holds for the text being edited reaches it
+    /// now, in the order typed: keys held for a field on its way, the one
+    /// posted for replay, and those queued behind it. Whatever ends the edit
+    /// (Escape, Command-Return, a click elsewhere, another tool) then reads
+    /// all of them; none is left to land on the canvas as a shortcut after.
+    /// Stops at a key that waits on a command's answer.
+    pub fn flush_typing(host: &Rc<RefCell<Self>>) {
+        {
+            let Ok(mut h) = host.try_borrow_mut() else {
+                return;
+            };
+            let field = h.window.firstResponder().is_some_and(|r| unsafe {
+                msg_send![&*r, isKindOfClass: NSTextView::class()]
+            });
+            if !field {
+                return;
+            }
+            // Typed before the field had the keyboard: first in line.
+            for event in crate::typing::take_held() {
+                h.next_token += 1;
+                let token = h.next_token;
+                let key = Key {
+                    token,
+                    chord: chord(&event),
+                    field: true,
+                    repeat: event.isARepeat(),
+                    up: event.r#type() == NSEventType::KeyUp,
+                    compat: false,
+                };
+                h.events.insert(token, event);
+                let effects = h.resolver.submit(key);
+                h.effects(effects);
+            }
+        }
+        Self::deliver_waiting(host);
+    }
+    /// Hands every key already waiting its replay to the window now, in
+    /// order, each freeing the next; stops at one that waits on a command's
+    /// answer. One key per run-loop turn let typing fall seconds behind a
+    /// slow frame, and what came after it (Escape's blurField) land on the
+    /// next text. A key typed for a text that has since lost the keyboard
+    /// goes nowhere (it would be a shortcut on the canvas).
+    fn deliver_waiting(host: &Rc<RefCell<Self>>) {
+        // Bounded: a key handed over can queue no more than it was.
+        for _ in 0..4096 {
+            let next = {
+                let Ok(mut h) = host.try_borrow_mut() else {
+                    return;
+                };
+                h.take_in_flight().map(|(token, event)| {
+                    let stale = h.typed.remove(&token) && !h.text_has_keyboard();
+                    (token, event, stale)
+                })
+            };
+            let Some((token, event, stale)) = next else { return };
+            if !stale {
+                send_replayed(&event, Some(host));
+            }
+            let Ok(mut h) = host.try_borrow_mut() else {
+                return;
+            };
+            h.replayed(token);
+        }
+    }
+    /// Whether a text field in this window has the keyboard.
+    fn text_has_keyboard(&self) -> bool {
+        self.window.firstResponder().is_some_and(|r| unsafe {
+            msg_send![&*r, isKindOfClass: NSTextView::class()]
+        })
+    }
+    /// The key posted for replay that has not reached the window yet, its
+    /// posting withdrawn; one already replayed completes here and the next
+    /// is looked at.
+    fn take_in_flight(&mut self) -> Option<(u64, Retained<NSEvent>)> {
+        loop {
+            let token = self.resolver.waiting_replay()?;
+            let event = self.in_flight.remove(&token)?;
+            let posted = self
+                ._target
+                .ivars()
+                .replays
+                .borrow_mut()
+                .remove(&(Retained::as_ptr(&event) as usize))
+                .is_some();
+            if posted {
+                unsafe {
+                    let _: () = msg_send![
+                        NSObject::class(),
+                        cancelPreviousPerformRequestsWithTarget: &*self._target,
+                        selector: sel!(replayEvent:),
+                        object: &*event
+                    ];
+                }
+                return Some((token, event));
+            }
+            self.replayed(token);
+        }
+    }
     pub fn resolve(&mut self, token: u64, handled: bool) {
         let effects = self.resolver.resolve(token, handled);
         self.effects(effects);
@@ -5915,6 +6224,7 @@ impl Drop for Host {
             r.borrow_mut().remove(&self.window.windowNumber());
         });
         MENU_STATES.with(|m| m.borrow_mut().remove(&self.window.windowNumber()));
+        HOSTS.with(|h| h.borrow_mut().remove(&self.window.windowNumber()));
         WINDOW_IDS.with(|m| m.borrow_mut().remove(&self.window.windowNumber()));
         self.registration.take();
         self.viewer.removeFromSuperview();

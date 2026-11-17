@@ -4761,6 +4761,69 @@ fn storage_rows_show_without_a_project_and_a_new_measurement_republishes() {
         "storage.delete.backups"
     ));
 }
+/// PM-435: Settings › Extensions turns an extension off and then on again,
+/// each time with the revision of the page it was shown on.
+#[test]
+fn settings_turn_an_extension_off_and_on_again() {
+    let actor = actor();
+    actor
+        .handle()
+        .state_transaction(pm_kernel::state::StateTransaction {
+            expected_revision: None,
+            ops: vec![pm_kernel::state::StateOp::Extension(
+                pm_kernel::state::ExtensionEntry {
+                    id: "com.example.glow".into(),
+                    installed: true,
+                    enabled: true,
+                    version: "1.0.0".into(),
+                    source: pm_model::json::parse(
+                        r#"{"hostRecord":{"name":"Glow","trust":"local","health":{"state":"ok"}}}"#,
+                    )
+                    .unwrap(),
+                },
+            )],
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend =
+        data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    let enabled = |b: &mut data::Backend| {
+        b.settings_snapshot().unwrap()["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == "com.example.glow")
+            .unwrap()["enabled"]
+            .clone()
+    };
+    for on in [false, true, false, true] {
+        let revision = backend.settings_snapshot().unwrap()["revision"].clone();
+        let args = json!({"revision":revision,"action":{"type":"extension.enabled","id":"com.example.glow","enabled":on}});
+        let models::NativeCommand::State(tx) =
+            backend.native_command("panel.settings", &args).unwrap()
+        else {
+            panic!("a state transaction")
+        };
+        actor.handle().state_transaction(tx).wait().unwrap().unwrap();
+        assert_eq!(enabled(&mut backend), json!(on), "turned {on}");
+    }
+    // The page moved on since it was shown (the host unloaded it): the
+    // switch still stands, for an extension still listed.
+    let stale = backend.settings_snapshot().unwrap()["revision"].as_u64().unwrap() + 7;
+    let args = json!({"revision":stale,"action":{"type":"extension.enabled","id":"com.example.glow","enabled":false}});
+    assert!(matches!(
+        backend.native_command("panel.settings", &args),
+        Ok(models::NativeCommand::State(_))
+    ));
+    let gone = json!({"revision":stale,"action":{"type":"extension.enabled","id":"com.example.none","enabled":false}});
+    assert!(backend.native_command("panel.settings", &gone).is_err());
+}
 #[test]
 fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed() {
     let actor = actor();

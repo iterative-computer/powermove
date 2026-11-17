@@ -895,6 +895,19 @@ impl Journal {
         Ok(())
     }
 
+    /// A checkpoint of `state`, durable before returning: a save whose
+    /// file a reopen reads with other key ids than this session's (keys
+    /// stored without ids, named by place, that the session moved) must not
+    /// leave recovery replaying this session's lines onto that reopen.
+    pub(crate) fn checkpoint_now(
+        &mut self,
+        durability: &Durability,
+        state: CheckpointState,
+    ) -> io::Result<()> {
+        self.rotate(durability, state)?;
+        durability.barrier()
+    }
+
     /// Records that a save is about to publish the state as of this line
     /// (document hash `hash` and undo history `history`, at `revision`) and
     /// makes it durable before returning: the barrier a save must pass

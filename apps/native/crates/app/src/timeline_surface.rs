@@ -717,6 +717,16 @@ impl TimelineSurface {
         });
         self.pump(cx);
     }
+    /// A row chosen from one of the timeline's own context menus.
+    pub(crate) fn choose_menu(&mut self, context: MenuContext, action: &str, cx: &mut Context<Self>) {
+        let time = self.delegate.time(cx);
+        self.queue.push_back(Job::Menu {
+            context,
+            action: action.to_owned(),
+            time,
+        });
+        self.pump(cx);
+    }
     /// Menu checkmarks: the timeline shows tracks, and clips snap in them.
     pub fn toggles(&self) -> (bool, bool) {
         (
@@ -1216,6 +1226,16 @@ impl TimelineSurface {
         self.outline.set_scene(self.scene.clone());
         self.frame = None;
         self.clamp_scroll();
+        // The names follow the new scene at once: a switch between Layers and
+        // Tracks at the same offset kept the outline's old window and offset,
+        // and the header column drew nothing beside the tracks until a scroll
+        // (PM-477).
+        self.outline.scrolled(
+            self.view.scroll_y as f32,
+            self.view.layer_column as f32,
+            self.visible_rows(),
+            cx,
+        );
         let duration = self.model.index.duration;
         if duration > 0. && self.bounds.size.width > px(0.) {
             let width = (f32::from(self.bounds.size.width) as f64 - self.view.layer_column).max(1.);
@@ -1736,9 +1756,13 @@ impl TimelineSurface {
                 f.hit_op("work-area", x, y, 0.).is_some()
                     && (event.modifiers.alt || y <= WORK_BAR_STRIP)
             });
+        // Final Cut's skimming: a press in Tracks mode moves the playhead to
+        // the skimmer. In the Layers timeline a press selects and never moves
+        // the playhead (v1 and After Effects: only the ruler does).
         if let Some(at) = self.skimmer
             && !grabs
             && !scrubs
+            && self.model.mode == TimelineMode::Tracks
         {
             self.delegate.seek(at, cx);
         }
@@ -3006,15 +3030,7 @@ impl TimelineSurface {
                 let Some(action) = index.and_then(|i| ids.get(i)) else {
                     return;
                 };
-                let _ = weak.update(cx, |s, cx| {
-                    let time = s.delegate.time(cx);
-                    s.queue.push_back(Job::Menu {
-                        context,
-                        action: (*action).to_owned(),
-                        time,
-                    });
-                    s.pump(cx);
-                });
+                let _ = weak.update(cx, |s, cx| s.choose_menu(context, action, cx));
             }),
         );
     }
@@ -3564,8 +3580,6 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             frames,
             shift,
         } => {
-            let persist =
-                id.starts_with("timeline.") || id.starts_with("graph") || id == "toggleLayerStrips";
             let plan = client
                 .model
                 .command(
@@ -3578,9 +3592,7 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
                 )
                 .map_err(|e| e.to_string())?;
             let effects = client.dispatch(plan).await.map_err(text)?;
-            if persist {
-                client.publish_view().await.map_err(text)?;
-            }
+            client.publish_view_if_changed().await.map_err(text)?;
             Ok(effects)
         }
         Job::Menu {
@@ -3588,15 +3600,14 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             action,
             time,
         } => {
-            let persist = action == "mode.toggle" || action.starts_with("graph.");
             let plan = client
                 .model
                 .menu_action(&context, &action, time)
                 .map_err(|e| e.to_string())?;
             let effects = client.dispatch(plan).await.map_err(text)?;
-            if persist {
-                client.publish_view().await.map_err(text)?;
-            }
+            // The menu and the Layers | Tracks control drive one state: a
+            // mode chosen here reaches the header and the layer column.
+            client.publish_view_if_changed().await.map_err(text)?;
             Ok(effects)
         }
         Job::Reveal { layer, keys } => {
@@ -3842,13 +3853,27 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         Spec::Ripple(edge) => {
             let id = primary()?;
             let layer = model.index.layer(&id).ok_or("Unknown clip")?;
+            // The track it shows on (its lane is written as its track ahead
+            // of the edit), in its own area: V1 is not A1.
+            let lane = pm_panel_timeline::tracks::relative_lanes(&model.index, &model.reveal)
+                .into_iter()
+                .find(|(l, _)| *l == id)
+                .map_or(layer.preferred_track as i32, |(_, lane)| lane as i32);
             DragKind::ProEdit(Pro::RippleTrim {
                 layer_id: id.clone(),
                 edge: pro_edge(edge),
                 delta: 0.,
                 tracks: vec![TrackTarget {
-                    track: layer.preferred_track as i32,
+                    track: lane,
                     group_id: layer.group.clone(),
+                    area: Some(
+                        if layer.kind == "audio" {
+                            "audio"
+                        } else {
+                            "video"
+                        }
+                        .into(),
+                    ),
                 }],
                 linked: true,
             })

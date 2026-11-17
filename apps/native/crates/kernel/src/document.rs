@@ -229,6 +229,55 @@ pub(crate) enum Tap {
 
 /// Most changes kept for [`DocumentStore::changes_since`].
 const CHANGE_LOG: usize = 256;
+// Incremental readers can resync from the current snapshot. A count alone
+// retains arbitrarily large decoded layer stacks after structural edits.
+const CHANGE_LOG_BYTES: usize = 16 * 1024 * 1024;
+
+fn change_bytes(ops: &[Op]) -> usize {
+    use std::mem::size_of;
+    fn value(v: &Value) -> usize {
+        match v {
+            Value::String(s) => s.heap_bytes(),
+            Value::Array(a) => {
+                a.capacity() * size_of::<Value>() + a.iter().map(value).sum::<usize>()
+            }
+            // Charge schema storage conservatively even when shared.
+            Value::Object(m) => {
+                m.len() * (size_of::<Value>() + size_of::<pm_model::JsString>() + 32)
+                    + m.iter()
+                        .map(|(k, v)| k.heap_bytes() + value(v))
+                        .sum::<usize>()
+            }
+            _ => 0,
+        }
+    }
+    ops.len() * size_of::<Op>()
+        + ops
+            .iter()
+            .map(|op| {
+                let path = op.path().len() * size_of::<pm_model::patch::PathPart>()
+                    + op.path()
+                        .iter()
+                        .map(|p| match p {
+                            pm_model::patch::PathPart::Key(s) => s.heap_bytes(),
+                            _ => 0,
+                        })
+                        .sum::<usize>();
+                path + match op {
+                    Op::Leaf(p) => p.value.as_ref().map_or(0, value),
+                    Op::Insert { value: v, .. } => value(v),
+                    Op::Order { ids, .. } => {
+                        ids.capacity() * size_of::<pm_model::JsString>()
+                            + ids
+                                .iter()
+                                .map(pm_model::JsString::heap_bytes)
+                                .sum::<usize>()
+                    }
+                    Op::Delete { id, .. } => id.heap_bytes(),
+                }
+            })
+            .sum::<usize>()
+}
 
 type Listener = Box<dyn FnMut(&StoreEvent) + Send + 'static>;
 
@@ -280,6 +329,7 @@ pub struct DocumentStore {
     /// pending one is `file.envelope.workspace`.
     saved_workspace: Option<Value>,
     log: VecDeque<Arc<Change>>,
+    log_bytes: usize,
     listeners: Vec<(u64, Listener)>,
     next_listener: u64,
     save_ticket: Weak<()>,
@@ -412,6 +462,7 @@ impl DocumentStore {
             saved_steps,
             saved_workspace,
             log: VecDeque::new(),
+            log_bytes: 0,
             listeners: Vec::new(),
             next_listener: 1,
             save_ticket: Weak::new(),
@@ -1255,10 +1306,27 @@ impl DocumentStore {
         cause: ChangeCause,
     ) -> Result<HistoryStep, TransactionError> {
         let ops = &self.keep_open_composition(ops);
-        let staged = self.stage_history_ops(ops)?;
+        let mut staged = self.stage_history_ops(ops)?;
         let skipped = staged.forward.len() != ops.len();
+        // A key the step brought back without an id, or under a derived id
+        // its track already has, is named (see `model::naming_ops`).
+        let naming = staged
+            .document
+            .root()
+            .map(|root| model::naming_ops(root, Some(&staged.forward)))
+            .unwrap_or_default();
+        if !naming.is_empty() {
+            let revision = staged.document.revision();
+            let mut root = staged.document.root().cloned();
+            for op in &naming {
+                root = apply_one(root, op, revision)?.0;
+            }
+            staged.document = Document::from_root(root, revision);
+        }
+        let mut published = staged.forward.clone();
+        published.extend(naming);
         let applied: Arc<[Op]> = staged.forward.into();
-        self.publish(staged.document, applied.clone(), cause);
+        self.publish(staged.document, published.into(), cause);
         if !skipped {
             return Ok((applied, reverse.clone()));
         }
@@ -1415,9 +1483,12 @@ impl DocumentStore {
                 ops: change.ops.clone(),
             });
         }
+        self.log_bytes += change_bytes(&change.ops);
         self.log.push_back(change.clone());
-        while self.log.len() > CHANGE_LOG {
-            self.log.pop_front();
+        while self.log.len() > CHANGE_LOG || self.log_bytes > CHANGE_LOG_BYTES {
+            if let Some(old) = self.log.pop_front() {
+                self.log_bytes -= change_bytes(&old.ops);
+            }
         }
         let pruned = self.prune_selection();
         self.emit(StoreEvent::Changed(change));
@@ -1647,7 +1718,12 @@ impl DocumentStore {
             doc_id: self.doc_id,
             state_token: self.state_token,
             outside_writes: self.outside_writes,
-            document: self.current.clone(),
+            // Ids given to keys stored without one stay in memory.
+            document: if unchanged.is_some() {
+                self.current.clone()
+            } else {
+                model::without_derived_key_ids(&self.current)
+            },
             had_comps: self.file.envelope.had_comps,
             history,
             workspace: self.file.envelope.workspace.clone(),

@@ -277,6 +277,79 @@ pub(crate) fn find(layer: &Value, channel: &str) -> Option<Vec<Step>> {
     }
 }
 
+/// Every channel of a layer that can hold keys: [`all`] and the vector path
+/// channels (`g.<path>…` on a shape layer's `d.paths`, `mp.<mask>…` on a
+/// mask's `path`), named as the timeline names them. v1's `PM.allProps`
+/// with its `structuredProperties`.
+pub(crate) fn keyed(layer: &Value) -> Vec<(String, Vec<Step>)> {
+    let mut out = all(layer);
+    let paths = layer
+        .get("d")
+        .and_then(|d| d.get("paths"))
+        .and_then(Value::as_array);
+    for (i, item) in paths.into_iter().flatten().enumerate() {
+        if let Some(id) = item.get("id").and_then(Value::as_str) {
+            path_channels(
+                item,
+                vec![key("d"), key("paths"), Step::Index(i)],
+                &format!("g.{id}"),
+                &mut out,
+            );
+        }
+    }
+    let masks = layer.get("masks").and_then(Value::as_array);
+    for (i, mask) in masks.into_iter().flatten().enumerate() {
+        if let (Some(id), Some(path)) = (mask.get("id").and_then(Value::as_str), mask.get("path")) {
+            path_channels(
+                path,
+                vec![key("masks"), Step::Index(i), key("path")],
+                &format!("mp.{id}"),
+                &mut out,
+            );
+        }
+    }
+    out
+}
+
+/// A vector path's own channels (`<prefix>.<key>`) and its vertices'
+/// (`<prefix>.v.<vertex>.<key>`).
+fn path_channels(path: &Value, at: Vec<Step>, prefix: &str, out: &mut Vec<(String, Vec<Step>)>) {
+    direct_channels(
+        path.get("p"),
+        [at.clone(), vec![key("p")]].concat(),
+        prefix,
+        out,
+    );
+    let vertices = path.get("vertices").and_then(Value::as_array);
+    for (j, vertex) in vertices.into_iter().flatten().enumerate() {
+        if let Some(id) = vertex.get("id").and_then(Value::as_str) {
+            let steps = [at.clone(), vec![key("vertices"), Step::Index(j), key("p")]].concat();
+            direct_channels(vertex.get("p"), steps, &format!("{prefix}.v.{id}"), out);
+        }
+    }
+}
+
+fn direct_channels(
+    node: Option<&Value>,
+    at: Vec<Step>,
+    prefix: &str,
+    out: &mut Vec<(String, Vec<Step>)>,
+) {
+    for (k, v) in node
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|m| m.iter())
+    {
+        if is_property(v) {
+            let k = k.to_string_lossy();
+            out.push((
+                format!("{prefix}.{k}"),
+                [at.clone(), vec![Step::Key(k)]].concat(),
+            ));
+        }
+    }
+}
+
 /// Every channel of a layer with its key (`PM.allProps`, without the
 /// structured and 3D scene channels).
 pub(crate) fn all(layer: &Value) -> Vec<(String, Vec<Step>)> {

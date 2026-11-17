@@ -253,6 +253,93 @@ impl TimelineModel {
             self.index.revision,
         ))
     }
+    /// A track row's switch (Tracks mode, v1's track view): `lock` locks or
+    /// unlocks every clip on the lane, `visibility` hides or shows them (an
+    /// audio lane mutes or unmutes them), one undo step named for the track.
+    /// The state flips from what the row shows: locked when every clip is,
+    /// on when every clip is.
+    pub fn track_switch(
+        &self,
+        area: crate::tracks::Area,
+        lane: usize,
+        switch: &str,
+        time: f64,
+    ) -> Result<Plan, ModelError> {
+        use crate::tracks::Area;
+        let layout = crate::tracks::layout(&self.index, &self.reveal);
+        let clips: Vec<_> = layout
+            .items
+            .iter()
+            .filter(|i| i.area == area && i.lane == lane)
+            .filter_map(|i| self.index.layer(&i.id))
+            .collect();
+        if clips.is_empty() {
+            return Err(ModelError::UnknownId(format!(
+                "{area:?} track {}",
+                lane + 1
+            )));
+        }
+        let audio = area == Area::Audio;
+        let (label, commands): (&str, Vec<Command>) = match switch {
+            "lock" => {
+                let locked = clips.iter().all(|l| l.locked);
+                let commands = clips
+                    .iter()
+                    .map(|l| {
+                        LayerCommand::Set {
+                            layer_id: l.id.clone(),
+                            patch: LayerPatch {
+                                locked: Some(!locked),
+                                ..Default::default()
+                            },
+                        }
+                        .into()
+                    })
+                    .collect();
+                (if locked { "Unlock Track" } else { "Lock Track" }, commands)
+            }
+            "visibility" if audio => {
+                let on = clips.iter().all(|l| !l.audio_muted);
+                let commands = clips
+                    .iter()
+                    .map(|l| {
+                        let mut patch = Map::new();
+                        patch.insert("audioMuted", Value::Bool(on));
+                        ContentCommand::Set {
+                            layer_id: l.id.clone(),
+                            patch,
+                            time,
+                        }
+                        .into()
+                    })
+                    .collect();
+                (if on { "Mute Track" } else { "Unmute Track" }, commands)
+            }
+            "visibility" => {
+                let on = clips.iter().all(|l| l.visible);
+                let commands = clips
+                    .iter()
+                    .map(|l| {
+                        LayerCommand::Set {
+                            layer_id: l.id.clone(),
+                            patch: LayerPatch {
+                                visible: Some(!on),
+                                ..Default::default()
+                            },
+                        }
+                        .into()
+                    })
+                    .collect();
+                (if on { "Hide Track" } else { "Show Track" }, commands)
+            }
+            other => return Err(ModelError::UnknownId(other.into())),
+        };
+        let mut plan = Plan::edit(commands, self.index.revision);
+        if let Some(pm_kernel::Call::Transact { label: slot, .. }) = plan.calls.first_mut() {
+            *slot = Some(label.into());
+        }
+        Ok(plan)
+    }
     /// Reorder is addressed by destination ID; resolve index in this revision and
     /// fence the transaction. Group pose/cycle and lock validation stays in kernel.
     pub fn reorder(

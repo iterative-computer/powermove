@@ -181,6 +181,7 @@ fn track(v: &Value) -> Result<TrackTarget, CommandError> {
     Ok(TrackTarget {
         group_id: optional_text(v, "groupId")?,
         track: t as i32,
+        area: None,
     })
 }
 fn tracks(v: &Value) -> Result<Vec<TrackTarget>, CommandError> {

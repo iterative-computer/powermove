@@ -13,6 +13,32 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+/// A media file's identity as v1 kept it (`fingerprint`): stable across
+/// renames and moves, from its size and three 64 KiB samples (start, middle,
+/// end), so it never reads a whole file. `v2:<size>:<sha256 hex>`.
+pub fn sampled_fingerprint(path: &Path, size: u64) -> std::io::Result<String> {
+    use std::io::{Seek, SeekFrom};
+    const SAMPLE: u64 = 64 << 10;
+    let sample = SAMPLE.min(size);
+    let mut digest = Sha256::new();
+    digest.update(format!("powermove-media-v2\n{size}\n"));
+    let mut file = File::open(path)?;
+    let mut offsets = vec![0, (size - sample) / 2, size - sample];
+    offsets.dedup();
+    let mut buffer = vec![0; sample as usize];
+    for offset in offsets {
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut buffer)?;
+        digest.update(&buffer);
+    }
+    let hex = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("v2:{size}:{hex}"))
+}
+
 #[derive(Clone, Debug)]
 pub struct Archive {
     root: PathBuf,

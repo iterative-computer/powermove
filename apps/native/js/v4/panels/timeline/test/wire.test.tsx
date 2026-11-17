@@ -259,15 +259,32 @@ test("an empty composition: the layer area holds a centred, inset invitation; th
     gap: { token: "metrics.inset" },
     padding: { token: "metrics.inset" },
   });
-  const [sentence, button] = empty.children;
+  // v1's empty composition: a heading, what to add first, then the drop.
+  const [sentence, buttons, drop] = empty.children;
   expect(sentence.props.style).toMatchObject({
     textAlign: "center",
     whiteSpace: "normal",
   });
-  // Import… is a push button (a control's hit target and hover), not text.
-  expect(button.props["data-pm-component"]).toBe("push-button");
-  await drive(root, "timeline:import");
-  expect(actions).toEqual([{ type: "import" }]);
+  expect(drop.props.style).toMatchObject({ textAlign: "center" });
+  // Each is a push button (a control's hit target and hover), not text,
+  // in v1's order: Text, Shape, Solid, Null, Import….
+  expect(buttons.children.map((b) => b.props.label)).toEqual([
+    "Text",
+    "Shape",
+    "Solid",
+    "Null",
+    "Import…",
+  ]);
+  expect(
+    buttons.children.every((b) => b.props["data-pm-component"] === "push-button"),
+  ).toBe(true);
+  expect(buttons.children[1].props.title).toBe("Shape (⇧⌘Y)");
+  await drive(root, "timeline:empty:newText");
+  await drive(root, "timeline:empty:import");
+  expect(actions).toEqual([
+    { type: "run", command: "newText" },
+    { type: "run", command: "import" },
+  ]);
   // The empty block is not a row of the outline.
   expect(byId(root, "timeline:tracks").children.length).toBe(0);
   // The composition tab: centred in the bar at a control's height.

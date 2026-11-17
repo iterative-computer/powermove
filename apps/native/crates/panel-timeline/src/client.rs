@@ -156,10 +156,24 @@ impl TimelineClient {
                 .source
                 .as_ref()
                 .ok_or(ModelError::InvalidGesture)?;
+            // Checked as it will run: after the lanes it shows are written.
+            let mut scratch =
+                pm_model::Document::from_root(source.root().cloned(), source.revision);
+            if let Some(pin) = drag.pin_command() {
+                let ops = pin
+                    .plan(
+                        scratch.root().ok_or(ModelError::InvalidGesture)?,
+                        self.caller.origin,
+                    )
+                    .map_err(|e| ClientError::Rejected(e.to_string()))?;
+                scratch
+                    .apply_ops(&ops)
+                    .map_err(|e| ClientError::Rejected(format!("{e:?}")))?;
+            }
             let command: pm_kernel::Command = command.clone().into();
             command
                 .plan(
-                    source.root().ok_or(ModelError::InvalidGesture)?,
+                    scratch.root().ok_or(ModelError::InvalidGesture)?,
                     self.caller.origin,
                 )
                 .map_err(|e| ClientError::Rejected(e.to_string()))?;
@@ -286,6 +300,17 @@ impl TimelineClient {
         self.adopted = Some(view);
         self.model.restore_ui(&p.ui_state);
         Ok(true)
+    }
+    /// [`publish_view`](Self::publish_view) when the view differs from the
+    /// one published: every view the panel draws from (the mode, the graph,
+    /// reveals) follows whatever changed the model, menu, key or control.
+    pub async fn publish_view_if_changed(&self) -> Result<(), ClientError> {
+        let state = self.kernel.state();
+        let old = state.ui.get(&self.project).cloned().unwrap_or_default();
+        if self.model.patch_ui(&old) == old {
+            return Ok(());
+        }
+        self.publish_view().await
     }
     pub async fn publish_view(&self) -> Result<(), ClientError> {
         self.publish_view_from(self.kernel.state()).await

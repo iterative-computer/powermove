@@ -788,11 +788,6 @@ impl Backend {
                     (true, Some("local")) => "Custom",
                     _ => "Installed",
                 };
-                // D11 Stop turns it off for this run, not in the saved preference.
-                let stopped = host
-                    .and_then(|h| h.get("stopped"))
-                    .and_then(pm_model::Value::as_bool)
-                    == Some(true);
                 // Its folder can't be reached (an unmounted volume): kept, said so.
                 let about = if host
                     .and_then(|h| h.get("unavailable"))
@@ -804,12 +799,19 @@ impl Backend {
                     text("about").unwrap_or_default()
                 };
                 json!({"id":e.id,"name":text("name").unwrap_or_else(|| e.id.clone()),"type":extension_kind(&includes),"source":source,
-                    "enabled":e.enabled && !stopped,"about":about,"includes":includes,
+                    // A D11 Stop turns it off for this run, not in the saved choice.
+                    "enabled":e.enabled && !e.stopped_this_run(),"about":about,"includes":includes,
                     "shortcuts":[],"files":[],"variables":[],"canArchive":can_archive})
             })
             .collect::<Vec<_>>();
         // Like kinds together, in the order the page lists them, then by name.
+        // Each row's switch is a local control: its lease only names it.
         let mut extensions = extensions;
+        for e in &mut extensions {
+            let name = format!("extension.{}", e["id"].as_str().unwrap_or(""));
+            let lease = self.fields(&json!([name]))?;
+            e["binding"] = lease[&name].clone();
+        }
         extensions.sort_by_cached_key(|e| {
             let kind = e["type"].as_str().unwrap_or("Other");
             (
@@ -997,6 +999,10 @@ impl Backend {
                 // The editor's own timeline fits its view to the curves.
                 HostEffect::FitCurves(..) => json!({"kind":"command","name":"graph.fit"}),
                 HostEffect::OpenComposition(id) => json!({"kind":"openComposition","id":id}),
+                // The empty composition's buttons: the app's own commands.
+                HostEffect::Run(name) => json!({"kind":"command","name":name}),
+                // Import… from the timeline: File › Import…, at the playhead.
+                HostEffect::Import { .. } => json!({"kind":"command","name":"import"}),
                 other => return Some(Err(format!("Timeline host effect unavailable: {other:?}"))),
             };
             actions.push(("timeline.effect".into(), action));
