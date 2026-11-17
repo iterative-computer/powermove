@@ -2674,3 +2674,34 @@ fn a_slide_into_another_tracks_time_moves_no_clip_to_another_lane() {
     c.sync().unwrap();
     assert_eq!(lanes(&c), before);
 }
+/// PM-477 by hand: in Tracks mode an edge trim that frees room on a lower
+/// lane leaves an untouched clip on its own: K rests on lane 2 because E
+/// overlapped it; trimming E's Out edge away from K keeps K where it is.
+#[test]
+fn an_edge_trim_in_tracks_moves_no_untouched_clip_to_another_lane() {
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"Lanes","w":200,"h":100,"fps":30,"dur":10,"comps":{},"assets":{},"layers":[
+        {"id":"k","name":"K","type":"shape","from":2.5,"dur":1.5,"on":true,"p":{}},
+        {"id":"e","name":"E","type":"shape","from":0,"dur":3,"on":true,"p":{}},
+        {"id":"n","name":"N","type":"shape","from":0,"dur":6,"on":true,"p":{}}
+        ]}"##,
+    )
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    let lanes = |c: &TimelineClient| {
+        let layout = pm_panel_timeline::tracks::layout(&c.model.index, &c.model.reveal);
+        ["k", "e", "n"].map(|id| layout.item(id).unwrap().lane)
+    };
+    let before = lanes(&c);
+    assert_eq!(before, [2, 1, 0]);
+    block_on(c.begin_drag(DragKind::TrimOut {
+        ids: vec!["e".into()],
+    }))
+    .unwrap();
+    block_on(c.drag(sample(-1.))).unwrap();
+    block_on(c.finish_drag(true)).unwrap();
+    c.sync().unwrap();
+    assert_eq!(c.model.index.layer("e").unwrap().duration, 2.);
+    assert_eq!(lanes(&c), before);
+}

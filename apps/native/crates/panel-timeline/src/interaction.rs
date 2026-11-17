@@ -1352,7 +1352,10 @@ impl Drag {
             _ => None,
         };
         let lanes = (model.mode == crate::TimelineMode::Tracks
-            && matches!(kind, DragKind::ProEdit(_)))
+            && matches!(
+                kind,
+                DragKind::ProEdit(_) | DragKind::TrimIn { .. } | DragKind::TrimOut { .. }
+            ))
         .then(|| crate::tracks::relative_lanes(index, &model.reveal));
         Ok(Self {
             lanes,
@@ -1516,14 +1519,6 @@ impl Drag {
                     // source frames (the kernel's delta is the source's).
                     Pro::Slip { delta, .. } => *delta = -sample.time_delta,
                     _ => return Err(ModelError::InvalidGesture),
-                }
-                if let Some(lanes) = &self.lanes {
-                    out.push(
-                        pm_kernel::TimingCommand::PinTracks {
-                            lanes: lanes.clone(),
-                        }
-                        .into(),
-                    );
                 }
                 out.push(command.into());
             }
@@ -1900,6 +1895,14 @@ impl Drag {
                     .into(),
                 );
             }
+        }
+        // Tracks mode: the lanes shown when the drag began go first, so the
+        // edit keeps every clip on its track (an edge trim that freed room on
+        // a lower lane let an untouched clip drop into it).
+        if !out.is_empty()
+            && let Some(pin) = self.pin_command()
+        {
+            out.insert(0, pin);
         }
         Ok(out)
     }
