@@ -1851,8 +1851,23 @@ impl Controller {
                                 pm_panel_media::Effect::NewComposition => {
                                     self.composition_sheet(false, None, cx)
                                 }
+                                // A file that is gone: its nearest folder still
+                                // there, said (v1 revealed nothing).
                                 pm_panel_media::Effect::Reveal { path, .. } => {
-                                    crate::platform::reveal(std::path::Path::new(&path))
+                                    let path = std::path::Path::new(&path);
+                                    match crate::platform::revealable(path) {
+                                        Some(shown) if shown == path => crate::platform::reveal(path),
+                                        Some(shown) => {
+                                            crate::platform::reveal(&shown);
+                                            self.message = format!(
+                                                "{} is missing · showing the folder it was in",
+                                                path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+                                            );
+                                        }
+                                        None => {
+                                            self.message = "That file and its folder are gone".into();
+                                        }
+                                    }
                                 }
                                 pm_panel_media::Effect::PickFiles { replace } => {
                                     let place = replace.is_none();

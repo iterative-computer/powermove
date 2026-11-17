@@ -568,7 +568,7 @@ pub fn update_checks(
                         pm_shell::viewer_preference("PowermoveGuidesLocked", false),
                         pm_shell::viewer_preference("PowermoveViewerSnapping", true),
                     ),
-                    Action::ToggleProxies => false,
+                    Action::ToggleProxies => proxies_on(media),
                     Action::SafeAreas => safe,
                     Action::Guides => guides,
                     Action::Popout => popout,
@@ -1127,9 +1127,10 @@ impl Controller {
             Action::Media(mode) => self.set_media_mode(mode, cx),
             // Premiere's toggle: proxies where they exist, or originals.
             Action::ToggleProxies => self.set_media_mode(
-                match self.media_mode {
-                    MediaMode::ProxyPreferred | MediaMode::ProxyOnly => MediaMode::Originals,
-                    MediaMode::Automatic | MediaMode::Originals => MediaMode::ProxyPreferred,
+                if proxies_on(self.media_mode) {
+                    MediaMode::Originals
+                } else {
+                    MediaMode::ProxyPreferred
                 },
                 cx,
             ),
@@ -1460,6 +1461,11 @@ const GUIDE_TOGGLES: [(&str, Action); 2] = [
     ("Lock Guides", Action::LockGuides),
     ("Snapping", Action::Snapping),
 ];
+/// View ▸ Toggle Proxies is checked while the viewer plays proxies, and
+/// switches between them and the originals.
+fn proxies_on(media: MediaMode) -> bool {
+    matches!(media, MediaMode::ProxyPreferred | MediaMode::ProxyOnly)
+}
 fn guide_checked(action: Action, locked: bool, snapping: bool) -> bool {
     match action {
         Action::LockGuides => locked,
@@ -1469,6 +1475,13 @@ fn guide_checked(action: Action, locked: bool, snapping: bool) -> bool {
 }
 #[cfg(test)]
 mod guide_menu_tests {
+    /// Toggle Proxies shows its check while proxies play (PM-496: it never did).
+    #[test]
+    fn toggle_proxies_is_checked_while_proxies_play() {
+        use super::{MediaMode, proxies_on};
+        assert!(proxies_on(MediaMode::ProxyPreferred) && proxies_on(MediaMode::ProxyOnly));
+        assert!(!proxies_on(MediaMode::Originals) && !proxies_on(MediaMode::Automatic));
+    }
     use super::*;
     #[test]
     fn guide_toggles_follow_their_independent_states() {

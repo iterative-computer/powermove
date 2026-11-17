@@ -584,6 +584,14 @@ pub fn open_document(path: &std::path::Path) -> bool {
     true
 }
 /// Selects `path` in Finder.
+/// What Show in Finder can show for `path`: itself, else the nearest
+/// folder above it that is still there; `None` when nothing is.
+pub fn revealable(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    if path.exists() {
+        return Some(path.to_path_buf());
+    }
+    path.ancestors().skip(1).find(|p| p.is_dir() && p.parent().is_some()).map(Into::into)
+}
 pub fn reveal(path: &std::path::Path) {
     use objc2_app_kit::NSWorkspace;
     use objc2_foundation::{NSArray, NSURL};
@@ -986,5 +994,20 @@ pub fn request_attention() {
     let app = NSApplication::sharedApplication(mtm);
     if !app.isActive() {
         app.requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
+    }
+}
+
+#[cfg(test)]
+mod revealable_tests {
+    /// Show in Finder on a file that is gone shows the nearest folder that
+    /// is still there (PM-496: it did nothing).
+    #[test]
+    fn a_missing_file_reveals_its_nearest_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("clip.mov");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(super::revealable(&file).as_deref(), Some(file.as_path()));
+        let gone = dir.path().join("moved").join("clip.mov");
+        assert_eq!(super::revealable(&gone).as_deref(), Some(dir.path()));
     }
 }
