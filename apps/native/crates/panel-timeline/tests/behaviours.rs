@@ -2931,6 +2931,7 @@ fn in_tracks_no_edit_from_any_source_moves_an_untouched_clip() {
         content: Default::default(),
         properties: Default::default(),
         color: None,
+        track: None,
         index: None,
         parent: None,
         blend: None,
