@@ -7922,9 +7922,11 @@ pub fn bring_forward(window: &NSWindow) {
     if let Some(group) = top.tabGroup() {
         group.setSelectedWindow(Some(&top));
     }
-    top.makeKeyAndOrderFront(None);
+    // Through the window policy, as every show is: at once while the app is
+    // active, else as soon as the activation asked for above lands.
+    gpui_macos::child_window::show(&top, true);
     if !std::ptr::eq(&*top, window) {
-        window.makeKeyAndOrderFront(None);
+        gpui_macos::child_window::show(window, true);
     }
     NSBeep();
 }
