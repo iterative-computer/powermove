@@ -538,12 +538,20 @@ function Property({
                   row.animation === "static" ? "colors.muted" : "colors.accent",
                 ),
               }}
+              // Option-click adds (or edits) an expression, as Option-click
+              // on After Effects' stopwatch does (PM-502).
               onActivate={(event) =>
-                session.send({
-                  type: "key",
-                  row: row.id,
-                  removeAnimation: !!event.altKey,
-                })
+                event.altKey
+                  ? session.send({
+                      type: "row-action",
+                      row: row.id,
+                      action: "edit-expression",
+                    })
+                  : session.send({
+                      type: "key",
+                      row: row.id,
+                      removeAnimation: false,
+                    })
               }
             />
           ) : (
