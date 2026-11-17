@@ -407,12 +407,12 @@ pub(crate) fn effect_steps_frame<'d>(
                 continue;
             }
             // A program the definition has but the renderer could not get
-            // (its translation failed for a passing reason: a busy or slow
-            // compiler) is never drawn as nothing: the frame names it, and
-            // an export refuses. A definition with no program draws nothing
-            // by itself.
+            // yet (its compile failed for a passing reason: a busy or slow
+            // compiler) is pending: never a bypass, even for viewer frames,
+            // so no picture without it is delivered or kept. A definition
+            // with no program draws nothing by itself.
             None if def.glsl.is_some() => {
-                refuse(Feature::Definition(format!("effect {ty} (no program)")));
+                refused.get_or_insert(Feature::ProgramPending(ty.clone()));
                 continue;
             }
             None => continue,

@@ -429,13 +429,11 @@ impl std::fmt::Display for SettledPending {
     }
 }
 impl std::error::Error for SettledPending {}
-/// Whether a definition failure is a passing one of the GLSL compiler (pm-glsl's
-/// retryable stages: busy, deadline, process, resources), named in it as
-/// `({stage}: …)` or as the bare stage.
-pub(crate) fn compile_was_passing(error: &str) -> bool {
-    ["compiler-busy", "compiler-process", "compiler-resources", "(deadline:"]
-        .iter()
-        .any(|stage| error.contains(stage))
+/// Whether a definition failure is a program still being built (a passing
+/// compiler failure pm-render retries, bounded): the frame waits. One the
+/// compiler gave up on is reported like any other definition failure.
+pub(crate) fn program_pending(error: &str) -> bool {
+    error.contains(pm_render::PROGRAM_PENDING)
 }
 /// A frame drawn while one of its effects' programs was still being built.
 #[derive(Debug)]
@@ -1523,7 +1521,7 @@ impl Engine {
             // A compiler that was busy, slow or gone says nothing about the
             // program: the frame waits and is drawn again with it, never
             // without it.
-            let busy = |e: &str| crate::render::compile_was_passing(e);
+            let busy = |e: &str| crate::render::program_pending(e);
             let failures = self
                 .renderer
                 .set_document_effects(&scene.doc, &self.resources.definitions)
@@ -1955,7 +1953,13 @@ impl Engine {
                     .as_ref()
                     .map(|store| store.end_frame())
                     .unwrap_or_default();
-                let rendered = rendered?;
+                let rendered = rendered.map_err(|e| {
+                    if e.program_pending() {
+                        anyhow::Error::new(ProgramPending(e.to_string()))
+                    } else {
+                        e.into()
+                    }
+                })?;
                 self.renderer.trim_submitted_frame_caches();
                 if let Some(error) = self.failed.lock().unwrap().take() {
                     bail!("The GPU refused this frame: {error}");
@@ -1966,11 +1970,7 @@ impl Engine {
                 // An effect whose program is still being built (a passing
                 // compiler failure) leaves this frame short of it: drawn
                 // again, never delivered without the effect.
-                if let Some(pending) = rendered
-                    .failures
-                    .iter()
-                    .find(|f| f.message.ends_with(pm_render::PROGRAM_PENDING))
-                {
+                if let Some(pending) = rendered.failures.iter().find(|f| f.program_pending()) {
                     return Err(ProgramPending(pending.message.clone()).into());
                 }
                 let failures: Arc<[LayerFailure]> = rendered.failures.into();
@@ -5281,18 +5281,183 @@ fn keep_paused_decoders() -> bool {
     app.isActive() && !app.isHidden()
 }
 
+/// Frames drawn while an effect's program is still being built (a busy
+/// compiler) are never delivered or kept, and the next try draws it.
 #[cfg(test)]
-mod passing_compile_tests {
-    /// A busy, slow or restarted compiler is passing (the frame waits and
-    /// draws again); a shader that does not compile is not.
+pub(crate) mod pending_program_tests {
+    use super::*;
+    use pm_protocol::definitions::{
+        DefinitionFlags, DefinitionKind, DefinitionOrigin, DefinitionSnapshot, ParamSpec,
+        WrappedGlsl,
+    };
+
+    /// The shapes fixture with a contributed effect `id` that draws its
+    /// layer black on its first layer, and that definition.
+    pub(crate) fn black(id: &str) -> (Scene, Scene, DefinitionSnapshot) {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        let plain = value.clone();
+        value["layers"][0]["fx"] = serde_json::json!([{
+            "id":"fx1","type":id,"version":1,"on":true,
+            "p":{"amount":{"v":1,"kf":[],"expr":null}}
+        }]);
+        let body = "o = vec4(0.0, 0.0, 0.0, src(v_uv).a * u_amount);";
+        let source = format!(
+            "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform sampler2D u_tex;\nout vec4 o;\nvec4 src(vec2 uv){{return texture(u_tex,uv);}}\nuniform float u_amount;\nvoid main(){{\n{body}\n}}\n"
+        );
+        let definition = DefinitionSnapshot {
+            id: id.into(),
+            kind: DefinitionKind::Effect,
+            version: 0,
+            origin: DefinitionOrigin::Local,
+            renderer: None,
+            glsl: Some(WrappedGlsl {
+                body_line_offset: 8,
+                body_utf16_len: body.len() as u32,
+                body_utf8_len: body.len() as u32,
+                source,
+            }),
+            params: vec![ParamSpec::Number {
+                key: "amount".into(),
+                default: 1.,
+                min: 0.,
+                max: 1.,
+                step: None,
+            }],
+            flags: DefinitionFlags::default(),
+        };
+        let scene = |value: &serde_json::Value, content| {
+            let parsed = pm_model::json::parse(&value.to_string()).unwrap();
+            let comp = parsed.get("compId").unwrap().as_str().unwrap().to_owned();
+            Scene {
+                doc: Arc::new(pm_model::Document::new(
+                    Some(pm_model::canonical::canonical_project(parsed)),
+                    content,
+                )),
+                comp,
+                media: Default::default(),
+                content,
+            }
+        };
+        (scene(&value, 1), scene(&plain, 2), definition)
+    }
+    fn engine(name: &str, definition: &DefinitionSnapshot) -> Engine {
+        let mut engine = Engine::new(Gpu::new(name).unwrap()).unwrap();
+        engine.set_resources(Arc::new(crate::resources::ResourceSnapshot {
+            definitions: vec![definition.clone()],
+            ..Default::default()
+        }));
+        engine
+    }
+    pub(crate) fn busy() -> pm_glsl::Failure {
+        pm_glsl::Failure::new(
+            pm_glsl::FailureStage::CompilerBusy,
+            "all GLSL compiler process slots are occupied; retry later",
+        )
+    }
+    fn output() -> Output {
+        Output {
+            width: 160,
+            height: 90,
+            display: 0,
+            headroom: 1.,
+            crop: None,
+        }
+    }
+
+    /// The settling renderer meets a busy compiler building the effect's
+    /// program after a good registration: no settled picture, no frame
+    /// cache entry (so no poster either); asked again once the backoff
+    /// ran, the picture it keeps has the effect.
     #[test]
-    fn a_busy_or_slow_compiler_is_passing_and_a_bad_shader_is_not() {
-        let said = |stage: &str| format!("The shader of fx compiles in WebGL but not in the native engine's pipeline ({stage}: x).");
-        for stage in ["compiler-busy", "compiler-process", "compiler-resources", "deadline"] {
-            assert!(super::compile_was_passing(&said(stage)), "{stage}");
+    fn a_settled_picture_without_its_pending_program_is_never_kept() {
+        let id = "synthetic.settle-pending";
+        let (scene, plain, definition) = black(id);
+        let mut engine = engine("settle-pending", &definition);
+        let spec = FrameSpec {
+            scale: 4.,
+            exact: false,
+            ..FrameSpec::exact(Ticks::from_whole_seconds(1), output())
+        };
+        pm_render::test_hooks::fail_builds(id, vec![busy()]);
+        let refused = engine.settle_now(&scene, spec, || false).unwrap_err();
+        assert!(
+            refused.is::<ProgramPending>() && transient(&refused),
+            "{refused:#}"
+        );
+        assert_eq!(
+            pm_render::test_hooks::left(id),
+            (0, 0),
+            "the build met the busy compiler"
+        );
+        assert!(engine.settled.is_none() && engine.cache.is_empty());
+        let read = |engine: &Engine| {
+            let surface = engine.settled.as_ref().unwrap().surface.clone();
+            pm_gpu::readback::read_f32(&engine.gpu.device, &engine.gpu.queue, &surface.texture)
+                .unwrap()
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            std::thread::sleep(Duration::from_millis(50));
+            match engine.settle_now(&scene, spec, || false) {
+                Ok(kept) => {
+                    assert!(kept);
+                    break;
+                }
+                Err(e) => assert!(transient(&e), "{e:#}"),
+            }
+            assert!(Instant::now() < deadline, "never settled");
         }
-        for stage in ["es-validate", "naga-validate", "metal", "draw-deadline"] {
-            assert!(!super::compile_was_passing(&said(stage)), "{stage}");
-        }
+        let with = read(&engine);
+        let mut bare = Engine::new(Gpu::new("settle-pending-plain").unwrap()).unwrap();
+        assert!(bare.settle_now(&plain, spec, || false).unwrap());
+        assert_ne!(with, read(&bare), "the kept picture has the effect");
+    }
+
+    /// A viewer whose effect's compile meets a busy compiler waits without
+    /// blocking the render worker: the frame is refused at once as
+    /// transient (no sleep in registration), another viewer's frame draws
+    /// meanwhile, and after the backoff the effect draws.
+    #[test]
+    fn a_pending_registration_does_not_hold_the_render_worker() {
+        let id = "synthetic.viewer-pending";
+        let (scene, plain, definition) = black(id);
+        let mut engine = engine("viewer-pending", &definition);
+        let spec = FrameSpec::exact(Ticks::from_whole_seconds(1), output());
+        let mut frame = |engine: &mut Engine, scene: &Scene| {
+            engine
+                .frame(scene, spec, None, &Default::default(), true, Arc::default())
+                .map(|sub| {
+                    let sub = sub.unwrap();
+                    sub.commit();
+                    sub.complete().unwrap();
+                    sub.pixels()
+                })
+        };
+        pm_render::test_hooks::fail_compiles(id, vec![busy()]);
+        let asked = Instant::now();
+        let refused = frame(&mut engine, &scene).unwrap_err();
+        assert!(transient(&refused), "{refused:#}");
+        assert!(
+            asked.elapsed() < Duration::from_millis(400),
+            "registration waited {:?}",
+            asked.elapsed()
+        );
+        let other = loop {
+            match frame(&mut engine, &plain) {
+                Ok(pixels) => break pixels,
+                Err(e) => assert!(transient(&e), "{e:#}"),
+            }
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let with = loop {
+            std::thread::sleep(Duration::from_millis(20));
+            match frame(&mut engine, &scene) {
+                Ok(pixels) => break pixels,
+                Err(e) => assert!(transient(&e), "{e:#}"),
+            }
+            assert!(Instant::now() < deadline, "never drawn");
+        };
+        assert_ne!(with, other, "the effect drew");
     }
 }

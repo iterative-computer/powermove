@@ -233,6 +233,15 @@ impl UnreadFrame {
     }
 }
 
+impl RenderError {
+    /// Whether the frame was refused because a program is still being
+    /// built (a passing compiler failure): drawn again, never delivered.
+    pub fn program_pending(&self) -> bool {
+        matches!(self, RenderError::Unsupported(u)
+            if u.iter().any(|u| matches!(u.feature, crate::Feature::ProgramPending(_))))
+    }
+}
+
 /// A layer that failed while the rest of the frame rendered (section 8,
 /// "Isolation": a failing node marks its layer failed and outputs
 /// transparency).
@@ -242,6 +251,14 @@ pub struct LayerFailure {
     pub composition: String,
     pub layer: String,
     pub message: String,
+}
+
+impl LayerFailure {
+    /// Whether the layer failed only because a program of it is still
+    /// being built: the picture is not the frame's, drawn again later.
+    pub fn program_pending(&self) -> bool {
+        self.message.contains(crate::capability::PROGRAM_PENDING)
+    }
 }
 
 #[cfg(test)]

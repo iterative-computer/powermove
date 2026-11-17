@@ -153,6 +153,9 @@ mod physical_tests {
 
 /// The renderer's definitions and their programs.
 pub struct Effects {
+    /// A job's cancel flag: registration stops before the next definition
+    /// (and so before another compiler call) once it is set.
+    pub(crate) cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) file_app_version: Option<String>,
     pub(crate) versioned_builtins: bool,
     /// Viewer frames: an effect whose provider isn't installed is bypassed
@@ -169,6 +172,11 @@ pub struct Effects {
     /// carries ids without kinds; contract 10, open question 3).
     missing_ids: std::collections::BTreeSet<DefinitionId>,
     entries: BTreeMap<(DefinitionKind, DefinitionId), Entry>,
+    /// Consecutive passing compile failures (busy, slow, restarted compiler)
+    /// of each definition's current source: asked again by a later
+    /// registration once its backoff ran, given up as a visible refusal
+    /// after [`limit`] of them.
+    passing: BTreeMap<(DefinitionKind, DefinitionId), (pm_glsl::Key, retry::Retry)>,
     /// Shared by the renderers' definition sets ([`Effects::sibling`]).
     cache: Arc<pm_glsl::Cache>,
     context: String,
@@ -299,11 +307,54 @@ pub(crate) fn truncate(mut message: String) -> String {
     message
 }
 
+/// Consecutive passing compile or build failures of one unchanged source
+/// before it is given up as a visible refusal: a crashed, out-of-resources
+/// or timed-out compiler a few times; a busy one (its slots taken by other
+/// builds, each bounded by its deadline) for longer.
+pub const PASSING_LIMIT: u32 = 5;
+pub const BUSY_LIMIT: u32 = 30;
+
+pub(crate) fn limit(f: &Failure) -> u32 {
+    if f.stage == pm_glsl::FailureStage::CompilerBusy {
+        BUSY_LIMIT
+    } else {
+        PASSING_LIMIT
+    }
+}
+
+/// The definition-scoped error of a program still being built after a
+/// passing compiler failure: retried (never a bypass), its own diagnostic
+/// kept.
+pub fn pending_error(id: &DefinitionId, failure: &Failure) -> Option<EngineError> {
+    let message = truncate(format!(
+        "The shader of {} {} ({}: {}).",
+        id.as_str(),
+        crate::capability::PROGRAM_PENDING,
+        failure.stage.name(),
+        failure.message.lines().next().unwrap_or_default()
+    ));
+    Some(
+        EngineError::new(
+            ErrorCode::NotHeadlessRenderable,
+            ErrorScope::Definition {
+                definition: id.clone(),
+            },
+            message,
+        )
+        .with_retry(Retry::After { ms: 500 }),
+    )
+}
+
 /// The definition-scoped error a failure is reported as (contract 7).
 pub fn definition_error(id: &DefinitionId, status: &Status) -> Option<EngineError> {
     let (code, failure, what) = match status {
         Status::Ready => return None,
         Status::Refused(f) => (ErrorCode::ShaderCompile, f, "does not compile"),
+        Status::NeedsFallback(f) if f.stage.retryable() => (
+            ErrorCode::NotHeadlessRenderable,
+            f,
+            "could not be built by the shader compiler",
+        ),
         Status::NeedsFallback(f) => (
             ErrorCode::NotHeadlessRenderable,
             f,
@@ -374,6 +425,8 @@ impl Effects {
             configured: false,
             missing_ids: Default::default(),
             entries: BTreeMap::new(),
+            passing: BTreeMap::new(),
+            cancel: None,
             cache,
             context,
             watchdog: Watchdog::default(),
@@ -440,8 +493,21 @@ impl Effects {
             self.drop_entries(|k| *k == key);
         }
         for snapshot in &update.upserts {
+            if self.cancelled() {
+                break;
+            }
             if !update.full {
                 self.watchdog.forget(snapshot.kind, &snapshot.id);
+                // Sent again on its own (reloaded, retried): a compiler that
+                // gave up on it is asked afresh.
+                let key = (snapshot.kind, snapshot.id.clone());
+                self.passing.remove(&key);
+                if matches!(
+                    self.entries.get(&key).map(|e| &e.status),
+                    Some(Status::NeedsFallback(f)) if f.stage.retryable()
+                ) {
+                    self.entries.remove(&key);
+                }
             }
             if let Some(e) = self.translate(snapshot) {
                 failures.push(e);
@@ -481,11 +547,20 @@ impl Effects {
         self.drop_entries(|k| !live.contains(k));
         let mut failures = Vec::new();
         for snapshot in &snapshot.definitions {
+            if self.cancelled() {
+                break;
+            }
             if let Some(e) = self.translate(snapshot) {
                 failures.push(e);
             }
         }
         Ok(failures)
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire))
     }
 
     /// Drops the entries `gone` selects, with their watchdog records.
@@ -495,6 +570,7 @@ impl Effects {
             self.entries.remove(&key);
             self.watchdog.forget(key.0, &key.1);
         }
+        self.passing.retain(|k, _| !gone(k));
     }
 
     /// Forgets every definition: effects and transitions are routed again.
@@ -503,6 +579,7 @@ impl Effects {
         self.configured = false;
         self.missing_ids.clear();
         self.entries.clear();
+        self.passing.clear();
         self.watchdog.reset();
         self.prewarm = Default::default();
         self.uniforms = Default::default();
@@ -533,25 +610,44 @@ impl Effects {
         {
             return definition_error(&snapshot.id, &entry.status);
         }
-        // A busy, slow or restarted compiler says nothing about the source:
-        // asked again (a few times) before the definition is given up for
-        // this registration.
-        let mut prepared = self.cache.prepare(&glsl.source, glsl.body_line_offset);
-        for wait in [100, 400] {
-            if !matches!(prepared.as_ref(), Err(f) if f.stage.retryable()) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(wait));
-            prepared = self.cache.prepare(&glsl.source, glsl.body_line_offset);
-        }
-        if let Err(f) = prepared.as_ref()
-            && f.stage.retryable()
+        // Still in its backoff: pending without starting the compiler again.
+        if let Some((k, retry)) = self.passing.get(&key)
+            && *k == source_key
+            && let Some(f) = retry.waiting()
         {
-            // A busy or crashed compiler says nothing about this source:
-            // remembering it would refuse a healthy definition until it changes.
-            self.entries.remove(&key);
-            return definition_error(&snapshot.id, &Status::NeedsFallback(f.clone()));
+            return pending_error(&snapshot.id, f);
         }
+        #[cfg(any(test, feature = "test-hooks"))]
+        let injected = crate::test_hooks::next_compile(snapshot.id.as_str());
+        #[cfg(not(any(test, feature = "test-hooks")))]
+        let injected: Option<Failure> = None;
+        let prepared = match injected {
+            Some(f) => Arc::new(Err(f)),
+            None => self.cache.prepare(&glsl.source, glsl.body_line_offset),
+        };
+        // A busy, slow or restarted compiler says nothing about the source:
+        // the definition is pending (never remembered, never a bypass) and a
+        // later registration asks again, without waiting here (the viewer's
+        // retry, a job's cancellable wait). A compiler that cannot be
+        // started, or keeps failing for one unchanged source, ends in the
+        // visible refusal below with its own diagnostic.
+        match prepared.as_ref() {
+            Err(f) if f.stage.retryable() && !f.compiler_unavailable() => {
+                let previous = self
+                    .passing
+                    .get(&key)
+                    .filter(|(k, _)| *k == source_key)
+                    .map(|(_, r)| r);
+                let retry = retry::Retry::after(previous, f.clone());
+                if retry.failures() < limit(f) {
+                    self.entries.remove(&key);
+                    self.passing.insert(key, (source_key, retry));
+                    return pending_error(&snapshot.id, f);
+                }
+            }
+            _ => {}
+        }
+        self.passing.remove(&key);
         let (status, prepared) = match prepared.as_ref() {
             Ok(p) => (Status::Ready, Some(Arc::new(p.clone()))),
             Err(f) if f.stage.webgl_refuses() => (Status::Refused(f.clone()), None),
@@ -755,10 +851,17 @@ impl Effects {
             }
             match b.result {
                 Ok(program) => entry.program = Some(program),
-                Err(f) if remembered(&f) => entry.status = Status::NeedsFallback(f),
                 // Built again by the first frame that draws it after the
-                // backoff.
-                Err(f) => entry.retry = Some(retry::Retry::after(entry.retry.as_ref(), f)),
+                // backoff, unless the compiler gave up on it.
+                Err(f) => {
+                    let retry = retry::Retry::after(entry.retry.as_ref(), f.clone());
+                    if remembered(&f) || f.compiler_unavailable() || retry.failures() >= limit(&f) {
+                        entry.status = Status::NeedsFallback(f);
+                        entry.retry = None;
+                    } else {
+                        entry.retry = Some(retry);
+                    }
+                }
             }
         }
     }
@@ -895,9 +998,13 @@ impl Effects {
             #[cfg(test)]
             let forced = {
                 self.builds += 1;
-                self.fail_builds.clone()
+                self.fail_builds
+                    .clone()
+                    .or_else(|| crate::test_hooks::next_build(id))
             };
-            #[cfg(not(test))]
+            #[cfg(all(not(test), feature = "test-hooks"))]
+            let forced = crate::test_hooks::next_build(id);
+            #[cfg(not(any(test, feature = "test-hooks")))]
             let forced: Option<Failure> = None;
             let built = match forced {
                 Some(f) => Err(f),
@@ -916,10 +1023,14 @@ impl Effects {
                     entry.retry = None;
                 }
                 Err(f) => {
-                    if remembered(&f) {
+                    let retry = retry::Retry::after(entry.retry.as_ref(), f.clone());
+                    // A compiler that cannot start, or that keeps failing
+                    // this program, is given up: a visible refusal.
+                    if remembered(&f) || f.compiler_unavailable() || retry.failures() >= limit(&f) {
                         entry.status = Status::NeedsFallback(f.clone());
+                        entry.retry = None;
                     } else {
-                        entry.retry = Some(retry::Retry::after(entry.retry.as_ref(), f.clone()));
+                        entry.retry = Some(retry);
                     }
                     return Err(f);
                 }
@@ -1459,6 +1570,207 @@ mod tests {
             .program(&gpu.device, def.kind, def.id.as_str(), format)
             .unwrap();
         assert_eq!(effects.builds, 4);
+    }
+
+    /// One contributed effect named `id` (a built-in's program), alone in
+    /// its set: injected failures (`test_hooks`) are keyed by it.
+    fn one(id: &str) -> DefinitionSetSnapshot {
+        let mut set = builtin_definitions();
+        let mut def = set
+            .definitions
+            .into_iter()
+            .find(|d| d.kind == DefinitionKind::Effect)
+            .unwrap();
+        def.id = id.into();
+        set.definitions = vec![def];
+        set
+    }
+    fn expire(effects: &mut Effects) {
+        for (_, retry) in effects.passing.values_mut() {
+            retry.expire();
+        }
+        for entry in effects.entries.values_mut() {
+            if let Some(retry) = &mut entry.retry {
+                retry.expire();
+            }
+        }
+    }
+    fn failure(stage: pm_glsl::FailureStage, message: &str) -> Failure {
+        Failure::new(stage, message)
+    }
+
+    /// A compiler that keeps crashing, timing out or running out of
+    /// resources on one unchanged source is asked a bounded number of
+    /// times, each a pending registration, then gives up in a visible
+    /// refusal with its own diagnostic; nothing asks it again by itself.
+    #[test]
+    fn a_compiler_that_keeps_failing_one_source_ends_in_a_refusal() {
+        use pm_glsl::FailureStage::*;
+        for stage in [CompilerProcess, Deadline, CompilerResources] {
+            let id = format!("test.keeps-failing.{}", stage.name());
+            let set = one(&id);
+            let said = format!("the compiler said {}", stage.name());
+            crate::test_hooks::fail_compiles(&id, vec![failure(stage, &said); 8]);
+            let mut effects = Effects::new("test");
+            for attempt in 1..PASSING_LIMIT {
+                let failures = effects.set_snapshot(&set).unwrap();
+                assert!(
+                    failures[0].message.contains(crate::PROGRAM_PENDING)
+                        && failures[0].message.contains(&said),
+                    "attempt {attempt}: {failures:?}"
+                );
+                assert!(effects.status(DefinitionKind::Effect, &id).is_none());
+                // Asked again within the backoff: no compiler call.
+                effects.set_snapshot(&set).unwrap();
+                assert_eq!(crate::test_hooks::left(&id).0, 8 - attempt as usize);
+                expire(&mut effects);
+            }
+            let failures = effects.set_snapshot(&set).unwrap();
+            assert!(
+                !failures[0].message.contains(crate::PROGRAM_PENDING)
+                    && failures[0].message.contains(&said)
+                    && failures[0].message.contains(stage.name()),
+                "{failures:?}"
+            );
+            assert!(matches!(
+                effects.status(DefinitionKind::Effect, &id),
+                Some(Status::NeedsFallback(f)) if f.stage == stage
+            ));
+            let left = crate::test_hooks::left(&id).0;
+            for _ in 0..5 {
+                expire(&mut effects);
+                effects.set_snapshot(&set).unwrap();
+            }
+            assert_eq!(
+                crate::test_hooks::left(&id).0,
+                left,
+                "{stage:?} asked again"
+            );
+            // Sent again on its own (an explicit retry): asked afresh.
+            effects
+                .apply(&DefinitionsUpdate {
+                    generation: Seq::new(2).unwrap(),
+                    full: false,
+                    upserts: set.definitions.clone(),
+                    removals: vec![],
+                })
+                .unwrap();
+            assert_eq!(crate::test_hooks::left(&id).0, left - 1);
+        }
+    }
+
+    /// A compiler that cannot be started is final at once, for a
+    /// registration and for a program build.
+    #[test]
+    fn an_unstartable_compiler_is_refused_at_once() {
+        let gpu = pm_gpu::Gpu::new("unstartable compiler test").unwrap();
+        let gone = failure(
+            pm_glsl::FailureStage::CompilerProcess,
+            &format!("{}: No such file or directory", pm_glsl::CANNOT_START),
+        );
+        let id = "test.unstartable.compile";
+        crate::test_hooks::fail_compiles(id, vec![gone.clone()]);
+        let mut effects = Effects::new("test");
+        let failures = effects.set_snapshot(&one(id)).unwrap();
+        assert!(
+            failures[0].message.contains("No such file")
+                && !failures[0].message.contains(crate::PROGRAM_PENDING),
+            "{failures:?}"
+        );
+        assert!(matches!(
+            effects.status(DefinitionKind::Effect, id),
+            Some(Status::NeedsFallback(_))
+        ));
+        let id = "test.unstartable.build";
+        let mut effects = Effects::new("test");
+        assert!(effects.set_snapshot(&one(id)).unwrap().is_empty());
+        crate::test_hooks::fail_builds(id, vec![gone]);
+        let format = wgpu::TextureFormat::Rgba16Float;
+        assert!(
+            effects
+                .program(&gpu.device, DefinitionKind::Effect, id, format)
+                .is_err()
+        );
+        assert!(matches!(
+            effects.status(DefinitionKind::Effect, id),
+            Some(Status::NeedsFallback(_))
+        ));
+        let failure = effects.failures().pop().unwrap();
+        assert!(failure.message.contains("No such file"), "{failure:?}");
+    }
+
+    /// A program build that keeps failing for the compiler is given up
+    /// after the bound: a refusal, and no build after it.
+    #[test]
+    fn a_program_build_that_keeps_failing_ends_in_a_refusal() {
+        let gpu = pm_gpu::Gpu::new("bounded build test").unwrap();
+        let format = wgpu::TextureFormat::Rgba16Float;
+        let id = "test.bounded.build";
+        let mut effects = Effects::new("test");
+        assert!(effects.set_snapshot(&one(id)).unwrap().is_empty());
+        let crashed = failure(
+            pm_glsl::FailureStage::CompilerProcess,
+            "the compiler crashed",
+        );
+        crate::test_hooks::fail_builds(id, vec![crashed; PASSING_LIMIT as usize + 3]);
+        for _ in 1..PASSING_LIMIT {
+            assert!(
+                effects
+                    .program(&gpu.device, DefinitionKind::Effect, id, format)
+                    .is_err()
+            );
+            assert!(matches!(
+                effects.status(DefinitionKind::Effect, id),
+                Some(Status::Ready)
+            ));
+            expire(&mut effects);
+        }
+        assert!(
+            effects
+                .program(&gpu.device, DefinitionKind::Effect, id, format)
+                .is_err()
+        );
+        assert!(matches!(
+            effects.status(DefinitionKind::Effect, id),
+            Some(Status::NeedsFallback(_))
+        ));
+        for _ in 0..5 {
+            expire(&mut effects);
+            let _ = effects.program(&gpu.device, DefinitionKind::Effect, id, format);
+        }
+        assert_eq!(
+            crate::test_hooks::left(id).1,
+            3,
+            "no build after the refusal"
+        );
+    }
+
+    /// A busy compiler (its slots taken by other builds) is a pending
+    /// registration that becomes ready once it answers, with no trace.
+    #[test]
+    fn a_busy_compiler_recovers_without_a_trace() {
+        let id = "test.busy.recovers";
+        let set = one(id);
+        let busy = failure(
+            pm_glsl::FailureStage::CompilerBusy,
+            "all slots are occupied",
+        );
+        crate::test_hooks::fail_compiles(id, vec![busy; 2]);
+        let mut effects = Effects::new("test");
+        for _ in 0..2 {
+            let failures = effects.set_snapshot(&set).unwrap();
+            assert!(
+                failures[0].message.contains(crate::PROGRAM_PENDING),
+                "{failures:?}"
+            );
+            expire(&mut effects);
+        }
+        assert!(effects.set_snapshot(&set).unwrap().is_empty());
+        assert!(matches!(
+            effects.status(DefinitionKind::Effect, id),
+            Some(Status::Ready)
+        ));
+        assert!(effects.passing.is_empty());
     }
 
     #[test]

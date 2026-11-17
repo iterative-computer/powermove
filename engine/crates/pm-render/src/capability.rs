@@ -84,6 +84,15 @@ pub enum Feature {
     Text(String),
 }
 
+impl Feature {
+    /// A program still being built (a passing compiler failure): the layer
+    /// is refused, never drawn without the effect, even where refusals are
+    /// bypassed.
+    pub fn pending(&self) -> bool {
+        matches!(self, Feature::ProgramPending(_))
+    }
+}
+
 impl Unsupported {
     pub fn request(what: &str) -> Unsupported {
         Unsupported {

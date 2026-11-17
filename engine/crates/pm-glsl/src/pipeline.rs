@@ -170,6 +170,13 @@ pub struct Failure {
 }
 
 impl Failure {
+    /// The compiler executable could not be started (missing, not
+    /// executable): unlike a busy, slow or crashed compiler, waiting does not
+    /// bring it back, so it ends retrying at once.
+    pub fn compiler_unavailable(&self) -> bool {
+        self.stage == FailureStage::CompilerProcess
+            && self.message.starts_with(crate::compiler::CANNOT_START)
+    }
     pub fn new(stage: FailureStage, message: impl Into<String>) -> Self {
         Failure {
             stage,

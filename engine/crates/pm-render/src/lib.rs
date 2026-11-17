@@ -62,6 +62,8 @@ mod upload;
 pub mod vector;
 
 pub use assets::{AssetResolver, MapResolver, SourcePaths};
+#[cfg(any(test, feature = "test-hooks"))]
+pub mod test_hooks;
 pub use capability::{
     Feature, PROGRAM_PENDING, Unsupported, unsupported, unsupported_for, unsupported_with_definitions,
     unsupported_with_fonts, unsupported_with_media,

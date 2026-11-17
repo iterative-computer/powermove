@@ -709,6 +709,46 @@ impl std::fmt::Display for OfflineRefusal {
 }
 impl std::error::Error for OfflineRefusal {}
 /// The note an export made without its offline clips carries: which it left out.
+/// How long a job waits before asking again for a program still being built.
+const PENDING_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Registers a job's effects. A program still being built (a passing
+/// compiler failure) is asked again after a wait, never drawn without:
+/// pm-render bounds the attempts and ends them in a refusal with the
+/// compiler's diagnostic. A cancel ends the wait, and the registration
+/// before its next definition, so no further compiler call starts.
+pub(crate) fn register_effects(
+    renderer: &mut pm_render::Renderer,
+    doc: &pm_model::Document,
+    definitions: &[pm_protocol::definitions::DefinitionSnapshot],
+    cancel: &Arc<AtomicBool>,
+) -> Result<Vec<pm_protocol::error::EngineError>> {
+    renderer.set_registration_cancel(Some(cancel.clone()));
+    let registered = (|| loop {
+        let failures = renderer
+            .set_document_effects(doc, definitions)
+            .map_err(anyhow::Error::msg)?;
+        if cancel.load(Ordering::Acquire) {
+            anyhow::bail!("cancelled");
+        }
+        if !failures
+            .iter()
+            .any(|failure| crate::render::program_pending(&failure.message))
+        {
+            return Ok(failures);
+        }
+        let until = std::time::Instant::now() + PENDING_WAIT;
+        while std::time::Instant::now() < until {
+            if cancel.load(Ordering::Acquire) {
+                anyhow::bail!("cancelled");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    })();
+    renderer.set_registration_cancel(None);
+    registered
+}
+
 fn left_out_note(clips: &[pm_export::render::OfflineClip]) -> String {
     let names: Vec<_> = clips.iter().take(3).map(|c| c.name.as_str()).collect();
     let more = match clips.len().saturating_sub(3) {
@@ -1300,9 +1340,8 @@ pub fn run_child() -> Result<()> {
             renderer.set_compat_rasters(Some(rasters.clone()));
         }
         // An export never ships silently without an effect the project uses.
-        let failures = renderer
-            .set_document_effects(&doc, &request.resources.definitions)
-            .map_err(anyhow::Error::msg)?;
+        let failures =
+            register_effects(&mut renderer, &doc, &request.resources.definitions, &cancel)?;
         // What a job's start cost (diagnostics only).
         job_diagnostic(serde_json::json!({
             "job_start": if fill.is_some() { "fill" } else { "export" },
@@ -3141,5 +3180,73 @@ mod tests {
             file: file.path().to_owned(),
         };
         assert!(JobRasters::raster(short).is_err());
+    }
+}
+
+#[cfg(test)]
+mod register_tests {
+    use super::*;
+    use crate::render::pending_program_tests::{black, busy};
+
+    /// A cancel during the wait after a pending registration ends it
+    /// before the next compile; a cancel already set translates no
+    /// definition at all.
+    #[test]
+    fn a_cancel_ends_the_registration_wait_before_another_compile() {
+        let id = "synthetic.job-cancel";
+        let (scene, _, definition) = black(id);
+        pm_render::test_hooks::fail_compiles(id, vec![busy(); 3]);
+        let mut renderer = pm_render::Renderer::headless().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        // The built-in definitions translated first: what is timed is the wait.
+        register_effects(&mut renderer, &scene.doc, &[], &cancel).unwrap();
+        let setter = cancel.clone();
+        let cancelling = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            setter.store(true, Ordering::Release);
+        });
+        let asked = std::time::Instant::now();
+        let ended = register_effects(&mut renderer, &scene.doc, &[definition.clone()], &cancel)
+            .unwrap_err();
+        cancelling.join().unwrap();
+        assert!(ended.to_string().contains("cancelled"), "{ended:#}");
+        assert!(asked.elapsed() < PENDING_WAIT, "{:?}", asked.elapsed());
+        assert_eq!(
+            pm_render::test_hooks::left(id).0,
+            2,
+            "one compile, none after the cancel"
+        );
+        // Cancelled before it starts: nothing is translated.
+        let other = "synthetic.job-cancel-before";
+        let (scene, _, mut definition) = black(other);
+        definition.id = other.into();
+        pm_render::test_hooks::fail_compiles(other, vec![busy()]);
+        let mut renderer = pm_render::Renderer::headless().unwrap();
+        assert!(register_effects(&mut renderer, &scene.doc, &[definition], &cancel).is_err());
+        assert_eq!(pm_render::test_hooks::left(other).0, 1);
+        assert!(
+            renderer
+                .effects()
+                .status(pm_protocol::definitions::DefinitionKind::Effect, other)
+                .is_none()
+        );
+    }
+
+    /// A busy compiler at registration is waited out, never a bypass.
+    #[test]
+    fn a_pending_registration_is_waited_out() {
+        let id = "synthetic.job-waits";
+        let (scene, _, definition) = black(id);
+        pm_render::test_hooks::fail_compiles(id, vec![busy(); 2]);
+        let mut renderer = pm_render::Renderer::headless().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let failures = register_effects(&mut renderer, &scene.doc, &[definition], &cancel).unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(matches!(
+            renderer
+                .effects()
+                .status(pm_protocol::definitions::DefinitionKind::Effect, id),
+            Some(pm_render::effects::Status::Ready)
+        ));
     }
 }

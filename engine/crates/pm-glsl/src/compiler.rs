@@ -77,6 +77,9 @@ pub struct Slot {
     pub sampler: Option<u8>,
 }
 
+/// What a failure to start the compiler executable says first: no wait
+/// starts it, so a caller stops retrying ([`Failure::compiler_unavailable`]).
+pub const CANNOT_START: &str = "cannot start pm-glsl-compiler";
 fn process_error(message: impl Into<String>) -> Failure {
     Failure::new(FailureStage::CompilerProcess, message)
 }
@@ -391,7 +394,7 @@ impl Pool {
                 .stdout(Stdio::from(output))
                 .stderr(Stdio::null())
                 .spawn()
-                .map_err(|e| process_error(format!("cannot start pm-glsl-compiler: {e}")))?,
+                .map_err(|e| process_error(format!("{CANNOT_START}: {e}")))?,
         );
         let io_error = |e: std::io::Error| {
             if Instant::now() >= deadline

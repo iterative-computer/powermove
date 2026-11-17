@@ -796,6 +796,12 @@ impl Renderer {
         out
     }
 
+    /// A job's cancel flag: definition registration stops before the next
+    /// definition once it is set (the caller then sees its cancel).
+    pub fn set_registration_cancel(&mut self, cancel: Option<Arc<std::sync::atomic::AtomicBool>>) {
+        self.effects.cancel = cancel;
+    }
+
     /// Forgets every definition: effects and transitions are routed again.
     pub fn clear_definitions(&mut self) {
         self.effects.clear();

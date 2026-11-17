@@ -1368,3 +1368,104 @@ fn an_unreadable_file_of_an_image_sequence_says_why_it_could_not_be_read() {
     }
     assert!(!destination.exists());
 }
+
+/// An agent's still (a preview job: failing layers left out, uninstalled
+/// effects bypassed) is never a successful PNG without an effect whose
+/// program is still being built: a compile that meets a busy compiler is
+/// waited out and the still has the effect; a program build that meets
+/// one fails the still instead of writing it without the effect.
+#[test]
+fn an_agent_still_never_succeeds_without_a_pending_program() {
+    use pm_protocol::definitions::*;
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let id = "synthetic.still-black";
+    let mut project: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/shapes.json")).unwrap();
+    let plain = project.to_string();
+    project["layers"][0]["fx"] = json!([{
+        "id":"fx1","type":id,"version":1,"on":true,
+        "p":{"amount":{"v":1,"kf":[],"expr":null}}
+    }]);
+    let body = "o = vec4(0.0, 0.0, 0.0, src(v_uv).a * u_amount);";
+    let source = format!(
+        "#version 300 es\nprecision highp float;\nin vec2 v_uv;\nuniform sampler2D u_tex;\nout vec4 o;\nvec4 src(vec2 uv){{return texture(u_tex,uv);}}\nuniform float u_amount;\nvoid main(){{\n{body}\n}}\n"
+    );
+    let definition = DefinitionSnapshot {
+        id: id.into(),
+        kind: DefinitionKind::Effect,
+        version: 0,
+        origin: DefinitionOrigin::Local,
+        renderer: None,
+        glsl: Some(WrappedGlsl {
+            body_line_offset: 8,
+            body_utf16_len: body.len() as u32,
+            body_utf8_len: body.len() as u32,
+            source,
+        }),
+        params: vec![ParamSpec::Number {
+            key: "amount".into(),
+            default: 1.,
+            min: 0.,
+            max: 1.,
+            step: None,
+        }],
+        flags: DefinitionFlags::default(),
+    };
+    // The engine with injected compiler failures (pm-render `test_hooks`).
+    let service = Path::new(env!("CARGO_BIN_EXE_pm-engine-service"));
+    let with_failures = |name: &str, failures: &str| {
+        let script = dir.path().join(name);
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n{}='{failures}' exec '{}' \"$@\"\n",
+                pm_render::test_hooks::ENV,
+                service.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    };
+    let still = |document: &str, name: &str| {
+        let mut r = request_for(document, dir.path().join(name), 1);
+        r.preview = true;
+        r.bypass_missing_effects = true;
+        r.resources.definitions = vec![definition.clone()];
+        let JobSpec::Export { settings, .. } = &mut r.spec else {
+            unreachable!()
+        };
+        settings.format = ExportFormat::PngStill { sixteen_bit: false };
+        settings.range.end = Ticks::new(settings.range.start.get() + 1).unwrap();
+        r
+    };
+    let run = |exe: &Path, request: ExportRequest| {
+        ExportHandle::start(exe, request).unwrap().wait().unwrap()
+    };
+    let bare = run(service, still(&plain, "bare.png"));
+    assert_eq!(bare.state, JobState::Done, "{bare:?}");
+    let drawn = run(service, still(&project.to_string(), "drawn.png"));
+    assert_eq!(drawn.state, JobState::Done, "{drawn:?}");
+    let png = |name: &str| std::fs::read(dir.path().join(name)).unwrap();
+    assert_ne!(png("drawn.png"), png("bare.png"), "the effect draws");
+
+    // Busy at registration: waited out, the still has the effect.
+    let waited = run(
+        &with_failures("compile.sh", &format!("compile:{id}:compiler-busy*2")),
+        still(&project.to_string(), "waited.png"),
+    );
+    assert_eq!(waited.state, JobState::Done, "{waited:?}");
+    assert_eq!(png("waited.png"), png("drawn.png"));
+
+    // Busy while its program is built: the still fails, nothing written.
+    let refused = run(
+        &with_failures("build.sh", &format!("build:{id}:compiler-busy")),
+        still(&project.to_string(), "refused.png"),
+    );
+    assert_eq!(refused.state, JobState::Failed, "{refused:?}");
+    let message = refused.error.unwrap().message;
+    assert!(message.contains(id), "{message}");
+    assert!(!dir.path().join("refused.png").exists());
+}

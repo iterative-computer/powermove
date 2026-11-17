@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Lets another crate's tests make a definition's compile or program build
+# fail (`pm_render::test_hooks`), keyed by definition so parallel tests
+# never see each other's.
+test-hooks = []
+
 [dependencies]
 pm-protocol = { path = "../pm-protocol" }
 # Work counters (docs/engine/perfbench.md).
@@ -39,6 +45,8 @@ blake3 = "1.8"
 serde_json.workspace = true
 
 [dev-dependencies]
+# Integration tests inject compile and build failures (`test_hooks`).
+pm-render = { path = ".", features = ["test-hooks"] }
 # Parallel test fixtures wait for a compiler slot (pm-glsl `test-admission`).
 pm-glsl = { path = "../pm-glsl", features = ["test-admission"] }
 tempfile = "3"

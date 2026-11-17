@@ -56,6 +56,8 @@ pm-audio = { path = "../../../../engine/crates/pm-audio", features = ["test-hook
 # Parallel test fixtures wait for a compiler slot (pm-glsl `test-admission`).
 pm-glsl = { path = "../../../../engine/crates/pm-glsl", features = ["test-admission"] }
 tempfile = "3"
+# Effect tests make a definition's compile or program build fail (pm-render `test-hooks`).
+pm-render = { path = "../../../../engine/crates/pm-render", features = ["test-hooks"] }
 # The colour tests read a proxy the app's own generator made.
 pm-proxy = { path = "../../../../engine/crates/pm-proxy" }
 # Sequence export tests write 16-bit frames.

@@ -960,7 +960,7 @@ fn draw_layer<'d>(
             Some(host) => match prepare_effects(scope, b, layer, frame, None)? {
                 Ok(e) => e,
                 Err(f) => {
-                    if !host.bypasses_refusals() {
+                    if !host.bypasses_refusals() || f.pending() {
                         refuse(b, f);
                         return Ok(None);
                     }
@@ -977,7 +977,7 @@ fn draw_layer<'d>(
         {
             Ok(effects) => Some(effects),
             Err(f) => {
-                if !b.effects.is_some_and(|h| h.bypasses_refusals()) {
+                if !b.effects.is_some_and(|h| h.bypasses_refusals()) || f.pending() {
                     refuse(b, f);
                     return Ok(None);
                 }
@@ -3096,7 +3096,7 @@ fn source_plan<'d>(
         b.failures.extend(host.take_bypassed());
         let (effects, grown) = match prepared? {
             Ok(e) => e,
-            Err(f) if host.bypasses_refusals() => {
+            Err(f) if host.bypasses_refusals() && !f.pending() => {
                 layer_failure(b, scope.comp, layer, format!("effects bypassed: {f}"));
                 (None, raster)
             }
@@ -3251,7 +3251,7 @@ fn effect_inputs<'d>(
         )? {
             Ok(effects) => return Ok(Ok(effects)),
             Err(feature) => {
-                if !b.effects.is_some_and(|h| h.bypasses_refusals()) {
+                if !b.effects.is_some_and(|h| h.bypasses_refusals()) || feature.pending() {
                     return Ok(Err(feature));
                 }
                 let Some(instance) = failed else {

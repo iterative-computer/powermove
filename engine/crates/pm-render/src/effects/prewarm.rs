@@ -96,6 +96,10 @@ pub(crate) fn build(
     label: &str,
     format: wgpu::TextureFormat,
 ) -> Result<GpuProgram, Failure> {
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some(f) = crate::test_hooks::next_build(label) {
+        return Err(f);
+    }
     let mut program = prepared
         .finish()
         .and_then(|p| GpuProgram::new(device, p, label))?;

@@ -34,6 +34,15 @@ impl Retry {
         }
     }
 
+    /// Consecutive failures so far.
+    pub(crate) fn failures(&self) -> u32 {
+        self.failures
+    }
+    /// Ends the wait now (tests: the next attempt without sleeping).
+    #[cfg(test)]
+    pub(crate) fn expire(&mut self) {
+        self.after = Instant::now();
+    }
     /// The failure a draw reports while the backoff runs.
     pub(crate) fn waiting(&self) -> Option<&Failure> {
         (Instant::now() < self.after).then_some(&self.failure)

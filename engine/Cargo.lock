@@ -2267,6 +2267,7 @@ dependencies = [
  "pm-protocol",
  "pm-proxy",
  "pm-reference",
+ "pm-render",
  "pm-studio",
  "pm-text",
  "pm-time",

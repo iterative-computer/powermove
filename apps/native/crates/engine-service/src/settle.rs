@@ -525,7 +525,7 @@ fn draw(
             // A compiler that was busy, slow or gone says nothing about the
             // program: the frame waits and is drawn again with it, never
             // without it.
-            let busy = |e: &str| crate::render::compile_was_passing(e);
+            let busy = |e: &str| crate::render::program_pending(e);
             let failures = renderer
                 .set_document_effects(&scene.doc, &job.resources.definitions)
                 .map_err(|e| {
@@ -596,6 +596,14 @@ fn draw(
             Ok(rendered) => {
                 // Its slices have all run: the hang guard judges them.
                 renderer.watchdog_reports(false);
+                // A program still being built leaves the picture short of its
+                // effect: never settled, kept, cached or made a poster; the
+                // settling retry draws it again.
+                if let Some(pending) = rendered.failures.iter().find(|f| f.program_pending()) {
+                    return Ok(Outcome::Failed(anyhow::Error::new(
+                        crate::render::ProgramPending(pending.message.clone()),
+                    )));
+                }
                 Outcome::Drawn {
                     exact: rendered.stand_ins.is_empty() && font_failure.is_none(),
                     failures: rendered.failures,
@@ -603,6 +611,9 @@ fn draw(
             }
             Err(pm_render::RenderError::Abandoned) => Outcome::GaveWay,
             Err(pm_render::RenderError::CompatPending(needs)) => Outcome::Pending(needs),
+            Err(error) if error.program_pending() => Outcome::Failed(anyhow::Error::new(
+                crate::render::ProgramPending(error.to_string()),
+            )),
             Err(error) => Outcome::Failed(error.into()),
         })
     })()

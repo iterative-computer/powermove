@@ -19,7 +19,7 @@ use pm_protocol::definitions::DefinitionKind;
 use super::plan::{Binding, EffectStep, Param, TransitionStep};
 use super::program::{Call, GpuProgram, active};
 use super::watchdog::{FrameTimer, Span, Subject};
-use super::{Effects, SimpleOp};
+use super::{Effects, SimpleOp, Status};
 use crate::capability::{Feature, Unsupported};
 use crate::composite::effects::{Covered, EffectContext, EffectPasses, TransitionPasses};
 use crate::exec::Region;
@@ -488,7 +488,15 @@ impl<'c> Gpu<'c> {
         {
             // A program that failed for a passing reason is pending, not a
             // fallback: the frame says so and is drawn again with it.
-            if failure.stage.retryable() {
+            // Given up (an unavailable compiler, too many failures):
+            // a fallback like any other.
+            if failure.stage.retryable()
+                && matches!(
+                    self.effects
+                        .status(DefinitionKind::Effect, &step.definition),
+                    Some(Status::Ready)
+                )
+            {
                 self.pending(layer, &step.definition);
                 return None;
             }
@@ -799,7 +807,15 @@ impl<'c> Gpu<'c> {
             self.effects
                 .program(device, DefinitionKind::Transition, &step.definition, format)
         {
-            if failure.stage.retryable() {
+            // Given up (an unavailable compiler, too many failures):
+            // a fallback like any other.
+            if failure.stage.retryable()
+                && matches!(
+                    self.effects
+                        .status(DefinitionKind::Transition, &step.definition),
+                    Some(Status::Ready)
+                )
+            {
                 self.pending(layer, &step.definition);
                 return None;
             }

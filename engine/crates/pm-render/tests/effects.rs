@@ -1890,3 +1890,184 @@ fn raster_crop_preserves_owner_gradient_and_shadow() {
         );
     }
 }
+
+/// An effect whose program is still being built (its compile met a busy
+/// compiler) is never drawn as nothing: enabled, it refuses its layer (an
+/// image, an adjustment layer, a layer of a nested composition) in an
+/// export and, as a named pending failure (never a bypass), in a viewer;
+/// disabled, it costs nothing. Registered again once the compiler
+/// answers, the refusals are gone and the effect draws.
+#[test]
+fn a_pending_program_refuses_its_layer_until_it_registers() {
+    let _gpu = gpu();
+    let id = "pending.gain";
+    pm_render::test_hooks::fail_compiles(
+        id,
+        vec![pm_glsl::Failure::new(
+            pm_glsl::FailureStage::CompilerBusy,
+            "all GLSL compiler process slots are occupied; retry later",
+        )],
+    );
+    let gain = raw_effect(id, GAIN, gain_params(), false);
+    let mut r = Renderer::headless().unwrap();
+    let failures = r
+        .apply_definitions(&update(1, true, vec![gain.clone()], vec![]))
+        .unwrap();
+    assert!(
+        failures.len() == 1 && failures[0].message.contains(pm_render::PROGRAM_PENDING),
+        "{failures:?}"
+    );
+    let dur = 2.0;
+    let effect = |on: bool| {
+        let mut f = fx("f1", id, json!({ "gain": ch(json!(4)) }));
+        f["on"] = json!(on);
+        json!([f])
+    };
+    let back = layer(
+        "back",
+        "solid",
+        json!({ "color": "#336699", "w": W, "h": H }),
+        0.0,
+        0.0,
+        dur,
+    );
+    // (document, the layer the effect is on, its composition)
+    let cases = |on: bool| -> Vec<(pm_model::Document, &'static str, &'static str)> {
+        let mut image = layer(
+            "img",
+            "solid",
+            json!({ "color": "#204060", "w": 160, "h": 90 }),
+            60.0,
+            40.0,
+            dur,
+        );
+        image["fx"] = effect(on);
+        let mut adj = layer("adj", "adjustment", json!({}), 0.0, 0.0, dur);
+        adj["fx"] = effect(on);
+        let mut inner = layer(
+            "i",
+            "solid",
+            json!({ "color": "#204060", "w": 100, "h": 60 }),
+            10.0,
+            10.0,
+            dur,
+        );
+        inner["fx"] = effect(on);
+        let pre = layer(
+            "pre",
+            "precomp",
+            json!({ "comp": "inner", "w": 120, "h": 80 }),
+            160.0,
+            60.0,
+            dur,
+        );
+        let mut nested = project(W, H, dur, solid_fill("#000000"), vec![pre, back.clone()]);
+        composition(&mut nested, "inner", 120, 80, dur, vec![inner]);
+        vec![
+            (
+                load(&project(
+                    W,
+                    H,
+                    dur,
+                    solid_fill("#000000"),
+                    vec![image, back.clone()],
+                )),
+                "img",
+                "Ptest-root",
+            ),
+            (
+                load(&project(
+                    W,
+                    H,
+                    dur,
+                    solid_fill("#000000"),
+                    vec![adj, back.clone()],
+                )),
+                "adj",
+                "Ptest-root",
+            ),
+            (load(&nested), "i", "inner"),
+        ]
+    };
+    let res = MapResolver::default();
+    let pending = |u: &[pm_render::Unsupported]| {
+        u.iter()
+            .any(|u| u.feature == Feature::ProgramPending(id.into()))
+    };
+    let mut off = Vec::new();
+    for (doc, _, _) in cases(false) {
+        off.push(render(&mut r, &doc, &res, 0.5, &request()).unwrap());
+    }
+    for (doc, layer_id, _) in cases(true) {
+        match r.render(&doc, "Ptest-root", ticks(0.5), &request(), &res) {
+            Err(e @ RenderError::Unsupported(_)) => {
+                assert!(e.program_pending(), "{layer_id}: {e:?}");
+                let RenderError::Unsupported(u) = e else {
+                    unreachable!()
+                };
+                assert!(pending(&u), "{layer_id}: {u:?}");
+            }
+            other => panic!(
+                "{layer_id}: expected a refusal, got {:?}",
+                other.map(|f| f.failures)
+            ),
+        }
+        r.set_isolate_layers(true);
+        r.set_bypass_missing_effects(true);
+        let frame = r
+            .render(&doc, "Ptest-root", ticks(0.5), &request(), &res)
+            .unwrap();
+        r.set_isolate_layers(false);
+        r.set_bypass_missing_effects(false);
+        assert!(
+            frame.failures.iter().any(|f| f.layer == layer_id
+                && f.program_pending()
+                && !f.message.contains("bypassed")),
+            "{layer_id}: {:?}",
+            frame.failures
+        );
+    }
+    // Asked again within its backoff: still pending, no compiler call.
+    let failures = r
+        .apply_definitions(&update(2, true, vec![gain.clone()], vec![]))
+        .unwrap();
+    assert!(
+        failures[0].message.contains(pm_render::PROGRAM_PENDING),
+        "{failures:?}"
+    );
+    // The compiler answers after it: registered again, the effect draws.
+    std::thread::sleep(Duration::from_millis(150));
+    let failures = r
+        .apply_definitions(&update(3, true, vec![gain], vec![]))
+        .unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    // Exactly what a renderer that never waited draws; on the image and the
+    // nested layer the gain shows.
+    let mut fresh = Renderer::headless().unwrap();
+    fresh
+        .apply_definitions(&update(
+            1,
+            true,
+            vec![raw_effect(id, GAIN, gain_params(), false)],
+            vec![],
+        ))
+        .unwrap();
+    for ((doc, layer_id, _), off) in cases(true).into_iter().zip(&off) {
+        r.set_isolate_layers(true);
+        let frame = r
+            .render(&doc, "Ptest-root", ticks(0.5), &request(), &res)
+            .unwrap();
+        r.set_isolate_layers(false);
+        assert!(
+            frame.failures.is_empty(),
+            "{layer_id}: {:?}",
+            frame.failures
+        );
+        let drawn = r.read_rgba(&frame).unwrap();
+        let expected = render(&mut fresh, &doc, &res, 0.5, &request()).unwrap();
+        assert_eq!(drawn, expected, "{layer_id}: drawn as without the wait");
+        if layer_id != "adj" {
+            assert!(max_diff(&drawn, off) > 0.1, "{layer_id}: the effect drew");
+        }
+    }
+}
