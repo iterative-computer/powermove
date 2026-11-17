@@ -1017,7 +1017,7 @@ fn g3_speed_ripples_only_its_track_and_undo_restores_everything() {
         })
         .unwrap();
         std::sync::Arc::make_mut(&mut state.ui).insert("P".into(), ui);
-        s.set_runtime_state("P", state, None);
+        s.set_runtime_state_for_project("P", state, None);
         let before = s.root().unwrap().to_value();
         let speed: Command = if property {
             pm_kernel::PropertyCommand::Set(pm_kernel::commands::properties::SetProperty::new("clip", "c.speed", 2.0, 0.0)).into()

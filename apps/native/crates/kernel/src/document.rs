@@ -484,13 +484,23 @@ impl DocumentStore {
     /// Contribution facts for worker-side planning. Never authored or persisted.
     pub fn set_runtime_state(
         &mut self,
-        project: &str,
         state: crate::state::StateSnapshot,
         text: Option<crate::text_host::SharedTextHost>,
     ) {
         self.runtime_state = Some(state);
-        self.runtime_project = Some(project.to_owned());
         self.text_host = text;
+    }
+
+    /// The kernel slot id can differ from the project's authored id. Keep
+    /// its UI mode available without changing the scratch planner API.
+    pub fn set_runtime_state_for_project(
+        &mut self,
+        project: &str,
+        state: crate::state::StateSnapshot,
+        text: Option<crate::text_host::SharedTextHost>,
+    ) {
+        self.set_runtime_state(state, text);
+        self.runtime_project = Some(project.to_owned());
     }
 
     pub fn doc_id(&self) -> u64 {
