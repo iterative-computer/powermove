@@ -134,6 +134,7 @@ pub fn persist(profile: &Path, cx: &mut App) {
     if WORKER.get().is_some() {
         return;
     }
+    crate::quit_limit::set_log_dir(profile.join("diagnostics"));
     let marker = profile.join("diagnostics").join(SIGNAL_QUIT);
     LAST_QUIT_BY_SIGNAL.store(std::fs::remove_file(&marker).is_ok(), Ordering::Relaxed);
     let (tx, rx) = mpsc::channel();
