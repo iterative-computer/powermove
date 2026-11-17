@@ -4,6 +4,44 @@ use pm_services::surface_backing::mixer::Meter;
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
+struct TapAge {
+    stamp: Option<i64>,
+    raw: Option<[f64; 2]>,
+    heard: Option<Instant>,
+}
+impl TapAge {
+    fn changed(&self, incoming: Option<([f64; 2], i64, bool)>) -> bool {
+        match incoming {
+            Some((peaks, stamp, playing)) => {
+                playing || self.stamp != Some(stamp) || self.raw != Some(peaks)
+            }
+            None => self.stamp.is_some() || self.raw.is_some(),
+        }
+    }
+    fn observe(
+        &mut self,
+        incoming: Option<([f64; 2], i64, bool)>,
+        now: Instant,
+    ) -> Option<[f64; 2]> {
+        let Some((peaks, stamp, playing)) = incoming else {
+            *self = Self::default();
+            return None;
+        };
+        // A scrub may repeat at the same media tick. Silence -> sound is fresh too.
+        if self.changed(incoming) {
+            self.stamp = Some(stamp);
+            self.heard = Some(now);
+        }
+        self.raw = Some(peaks);
+        (playing
+            || (peaks.iter().any(|v| v.abs() > 0.)
+                && self.heard.is_some_and(|at| {
+                    now.saturating_duration_since(at) < Duration::from_millis(150)
+                })))
+        .then_some(peaks)
+    }
+}
+#[derive(Default)]
 pub(super) struct AudioState {
     #[cfg(test)]
     baseline_capture: bool,
@@ -12,8 +50,7 @@ pub(super) struct AudioState {
     ops: Vec<Op>,
     meters: [Meter; 2],
     sampled: Option<Instant>,
-    stamp: Option<i64>,
-    heard: Option<Instant>,
+    tap: TapAge,
     painted: Option<Instant>,
     running: bool,
 }
@@ -389,7 +426,21 @@ impl TimelineSurface {
                                 s.audio.running = false;
                                 return false;
                             }
-                            cx.notify();
+                            let active = s.audio.tap.changed(s.delegate.audio_peaks(cx))
+                                || s.audio.drag.is_some()
+                                || s.audio
+                                    .meters
+                                    .iter()
+                                    .any(|m| m.peak_db > -60. || m.hold_db > -60.);
+                            // Keep live/hold ballistics at 30 Hz. A quiet heartbeat
+                            // discovers a hidden panel without repainting idle graphs.
+                            if active
+                                || s.audio
+                                    .painted
+                                    .is_some_and(|p| p.elapsed() >= Duration::from_millis(500))
+                            {
+                                cx.notify();
+                            }
                             true
                         })
                         .unwrap_or(false);
@@ -406,19 +457,8 @@ impl TimelineSurface {
             .sampled
             .map_or(0., |at| now.duration_since(at).as_secs_f64());
         self.audio.sampled = Some(now);
-        let peaks = self.delegate.audio_peaks(cx);
-        let peaks = peaks.and_then(|(peaks, stamp, playing)| {
-            if playing || self.audio.stamp != Some(stamp) {
-                self.audio.stamp = Some(stamp);
-                self.audio.heard = Some(now);
-            }
-            (playing
-                || self
-                    .audio
-                    .heard
-                    .is_some_and(|at| now.duration_since(at) < Duration::from_millis(150)))
-            .then_some(peaks)
-        });
+        let incoming = self.delegate.audio_peaks(cx);
+        let peaks = self.audio.tap.observe(incoming, now);
         for (i, meter) in self.audio.meters.iter_mut().enumerate() {
             if let Some(peaks) = peaks {
                 let _ = meter.step(peaks[i], 0., dt);
@@ -790,6 +830,7 @@ mod captures {
                     },
                 );
                 let mut captured_surface = None;
+                let mut captured_root = None;
                 let window = cx
                     .open_window(size(px(1100.), px(320.)), |window, cx| {
                         let surface = cx.new(|cx| {
@@ -826,10 +867,15 @@ mod captures {
                             )
                         });
                         outline.bind(view.downgrade());
-                        cx.new(|_| CaptureFrame {
+                        let root = cx.new(|_| CaptureFrame {
                             view,
                             fill: tokens.colors.panel,
-                        })
+                            caption_fill: tokens.colors.floating,
+                            caption_ink: tokens.colors.text,
+                            baseline: false,
+                        });
+                        captured_root = Some(root.clone());
+                        root
                     })
                     .unwrap();
                 playback
@@ -843,6 +889,8 @@ mod captures {
                     device.callback(&mut output, 2, pm_audio::clock::host_now_us() + 20_000);
                     if let Some(tap) = playback.meters() {
                         let levels = tap.to_levels(48000);
+                        *recorder.time.borrow_mut() = levels.media_time.get() as f64
+                            / pm_protocol::common::TICKS_PER_SECOND as f64;
                         *recorder.audio.borrow_mut() = Some((
                             std::array::from_fn(|i| {
                                 levels.master.peak.get(i).copied().unwrap_or(0.) as f64
@@ -899,12 +947,17 @@ mod captures {
                     .unwrap()
                     .save(format!("{dir}/audio-after-{name}.png"))
                     .unwrap();
+                let root = captured_root.unwrap();
                 cx.update(|cx| {
                     surface.update(cx, |s, cx| {
                         s.audio.baseline_capture = true;
                         s.rows = None;
                         cx.notify();
-                    })
+                    });
+                    root.update(cx, |r, cx| {
+                        r.baseline = true;
+                        cx.notify();
+                    });
                 });
                 for _ in 0..3 {
                     cx.run_until_parked();
@@ -923,13 +976,22 @@ mod captures {
     struct CaptureFrame {
         view: Entity<SurfaceView>,
         fill: u32,
+        caption_fill: u32,
+        caption_ink: u32,
+        baseline: bool,
     }
     impl Render for CaptureFrame {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
+                .relative()
                 .size_full()
                 .bg(rgb(self.fill))
                 .child(self.view.clone())
+                .children(self.baseline.then(|| div().absolute().left_0().right_0().bottom_0()
+                    .h(px(22.)).px(px(8.)).flex().items_center()
+                    .bg(rgb(self.caption_fill)).text_color(rgb(self.caption_ink)).text_size(px(10.))
+                    .child("BEFORE — baseline-op replay of cea9fdb46 · Not a running release screenshot")
+                    .into_any_element()))
         }
     }
 }
@@ -1195,5 +1257,44 @@ mod mix_tap_tests {
             drop(mixer);
             cache.shutdown();
         }
+    }
+}
+
+#[cfg(test)]
+mod tap_tests {
+    use super::*;
+    #[test]
+    fn repeated_paused_scrub_at_same_time_is_fresh_after_silence() {
+        let start = Instant::now();
+        let half = Some(([0.5, 0.5], 10, false));
+        let mut tap = TapAge::default();
+        assert_eq!(tap.observe(half, start), Some([0.5, 0.5]));
+        assert_eq!(
+            tap.observe(Some(([0., 0.], 10, false)), start + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            tap.observe(half, start + Duration::from_millis(1010)),
+            Some([0.5, 0.5])
+        );
+    }
+    #[test]
+    fn paused_stale_tap_expires_and_silence_goes_to_floor() {
+        let start = Instant::now();
+        let mut tap = TapAge::default();
+        let half = Some(([0.5, 0.5], 10, false));
+        assert_eq!(tap.observe(half, start), Some([0.5, 0.5]));
+        assert_eq!(tap.observe(half, start + Duration::from_millis(151)), None);
+        assert_eq!(
+            tap.observe(Some(([0.5, 0.5], 10, true)), start + Duration::from_secs(1)),
+            Some([0.5, 0.5])
+        );
+        assert_eq!(
+            tap.observe(
+                Some(([0., 0.], 10, false)),
+                start + Duration::from_millis(1010)
+            ),
+            None
+        );
     }
 }
