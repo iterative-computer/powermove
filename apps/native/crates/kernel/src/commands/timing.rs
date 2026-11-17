@@ -119,11 +119,14 @@ pub enum TimingCommand {
     /// same media (never past the media's end). With `ripple`, the later
     /// clips on its track move by the change, so no gap opens and nothing is
     /// covered (inside `InTracks`, its track is the lane it shows on). An
-    /// animated speed or a remapped clip refuses. Label "Change Speed".
+    /// animated speed or a remapped clip refuses. `keep_pitch` sets how its
+    /// audio sounds at that speed (`d.pitch`: kept, or following the speed
+    /// as tape would); `None` leaves it. Label "Change Speed".
     SetSpeed {
         layer_id: String,
         speed: f64,
         ripple: bool,
+        keep_pitch: Option<bool>,
     },
     /// Writes each unlocked layer's lane in the Tracks timeline as its
     /// stored `track` where they differ (see `InTracks`), first in a
@@ -256,7 +259,8 @@ impl TimingCommand {
                 layer_id,
                 speed,
                 ripple,
-            } => set_speed(cx, layer_id, *speed, *ripple),
+                keep_pitch,
+            } => set_speed(cx, layer_id, *speed, *ripple, *keep_pitch),
             TimingCommand::Roll {
                 layer_id,
                 edge,
@@ -932,7 +936,13 @@ fn media_limit(cx: &Cx<'_>, layer: &Value) -> Option<f64> {
 }
 
 /// Speed/Duration (see `TimingCommand::SetSpeed`).
-fn set_speed(cx: &mut Cx<'_>, id: &str, speed: f64, ripple: bool) -> Result<(), CommandError> {
+fn set_speed(
+    cx: &mut Cx<'_>,
+    id: &str,
+    speed: f64,
+    ripple: bool,
+    keep_pitch: Option<bool>,
+) -> Result<(), CommandError> {
     let speed = values::finite(speed, "speed")?;
     if !(0.05..=100.0).contains(&speed) {
         return Err(CommandError::Invalid(
@@ -950,12 +960,20 @@ fn set_speed(cx: &mut Cx<'_>, id: &str, speed: f64, ripple: bool) -> Result<(), 
             "The clip's speed is animated or remapped: change it in Properties.".into(),
         ));
     };
+    let mut next = layer.clone();
+    if let Some(keep) = keep_pitch {
+        let pitch = if keep { "preserve" } else { "follow" };
+        values::obj(&mut next)
+            .get_mut("d")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| CommandError::Invalid("The clip has no source content.".into()))?
+            .insert("pitch", Value::from(pitch));
+    }
     if (previous - speed).abs() < 1e-12 {
-        return Ok(());
+        return put(cx, next);
     }
     let frame = 1.0 / cx.fps(comp.as_deref());
     let (from, end) = ends(&layer);
-    let mut next = layer.clone();
     set_content(&mut next, "speed", Value::Number(speed));
     let mut dur = ((end - from) * previous / speed).max(frame);
     if let Some(limit) = media_limit(cx, &next) {

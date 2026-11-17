@@ -439,6 +439,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 r_args("Move Ten Frames Earlier", "nudgeLayerTime", json!([-10])),
                 r_args("Move Ten Frames Later", "nudgeLayerTime", json!([10])),
                 sep(),
+                r("Speed/Duration…", "speedDuration"),
                 r("Enable Time Remapping", "timeRemapLayers"),
                 r("Time-Reverse Layer", "reverseLayers"),
                 r("Freeze Frame", "freezeFrame"),

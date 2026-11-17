@@ -2490,6 +2490,16 @@
     "loose": false
   },
   {
+    "id": "native.speedDuration",
+    "chord": "",
+    "command": "speedDuration",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
     "id": "native.timeReverse",
     "chord": "cmd+alt+r",
     "command": "reverseLayers",

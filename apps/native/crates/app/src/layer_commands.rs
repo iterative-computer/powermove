@@ -56,7 +56,7 @@ fn kind(layer: &Value) -> Option<&str> {
 /// A ripple, roll or slide made while the timeline shows tracks keeps every
 /// clip on the track it shows on (`TimingCommand::InTracks`); in the Layers
 /// timeline it is After Effects' layer edit, as it is.
-fn in_tracks(published: &Published, command: TimingCommand) -> TimingCommand {
+pub(crate) fn in_tracks(published: &Published, command: TimingCommand) -> TimingCommand {
     let mut view = pm_panel_timeline::TimelineModel::default();
     view.restore_ui(&published.ui_state);
     if view.mode != pm_panel_timeline::TimelineMode::Tracks {
@@ -64,6 +64,13 @@ fn in_tracks(published: &Published, command: TimingCommand) -> TimingCommand {
     }
     let index = pm_panel_timeline::TimelineIndex::from_snapshot(&published.snapshot);
     pm_panel_timeline::tracks::in_tracks(&index, &view.reveal, command)
+}
+
+/// Whether the timeline shows tracks (its published view).
+pub(crate) fn shows_tracks(published: &Published) -> bool {
+    let mut view = pm_panel_timeline::TimelineModel::default();
+    view.restore_ui(&published.ui_state);
+    view.mode == pm_panel_timeline::TimelineMode::Tracks
 }
 
 fn plain(label: &str, commands: Vec<Command>) -> Plan {
@@ -1861,6 +1868,7 @@ pub fn disabled(
         );
     }
     set("slipLayers", free(&["video", "audio"]));
+    set("speedDuration", free(&["video", "audio"]));
     for name in ["timeRemapLayers", "freezeFrame", "reverseLayers"] {
         set(name, free(&["video", "precomp"]));
     }
@@ -1972,6 +1980,7 @@ const DOCUMENT: &[&str] = &[
     "newComposition",
     "compositionSettings",
     "interpretFootage",
+    "speedDuration",
 ];
 
 /// A command that acts on the project: asked for while one is still

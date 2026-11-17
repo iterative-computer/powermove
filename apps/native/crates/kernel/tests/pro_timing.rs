@@ -555,6 +555,7 @@ fn a_speed_change_scales_the_clip_and_ripples_its_track() {
             layer_id: "b".into(),
             speed: 2.0,
             ripple: true,
+            keep_pitch: None,
         },
     );
     let b = layer(&s, "b");
@@ -581,6 +582,7 @@ fn a_speed_change_scales_the_clip_and_ripples_its_track() {
             layer_id: "b".into(),
             speed: 2.0,
             ripple: false,
+            keep_pitch: None,
         },
     );
     assert_eq!(field(&s, "c", "from"), Some(5.0));
@@ -591,6 +593,7 @@ fn a_speed_change_scales_the_clip_and_ripples_its_track() {
                 layer_id: "title".into(),
                 speed: 2.0,
                 ripple: false,
+                keep_pitch: None,
             },
         )
         .contains("video or audio")
@@ -608,6 +611,7 @@ fn a_trim_stops_at_the_end_of_the_media_at_the_clips_speed() {
             layer_id: "b".into(),
             speed: 2.0,
             ripple: false,
+            keep_pitch: None,
         },
     );
     run(
