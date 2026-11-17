@@ -352,17 +352,31 @@ pub struct MovedLayer {
 /// stack), a layer of another group, a 3D layer or any layer when the block is
 /// 3D (a 3D run's separators stay), or a track matte pair. Then only the
 /// lane changes.
-pub fn move_order(index: &TimelineIndex, ids: &[String], planned: &[String]) -> Option<Vec<String>> {
+pub fn move_order(
+    index: &TimelineIndex,
+    ids: &[String],
+    planned: &[String],
+) -> Option<Vec<String>> {
     let moved: HashSet<String> = index.expanded_ids(ids).into_iter().collect();
     let original: Vec<&str> = index.layers.iter().map(|l| l.id.as_str()).collect();
-    let block: Vec<&str> = original.iter().copied().filter(|id| moved.contains(*id)).collect();
+    let block: Vec<&str> = original
+        .iter()
+        .copied()
+        .filter(|id| moved.contains(*id))
+        .collect();
     let first = *block.first()?;
-    let rest: Vec<&str> = original.iter().copied().filter(|id| !moved.contains(*id)).collect();
+    let rest: Vec<&str> = original
+        .iter()
+        .copied()
+        .filter(|id| !moved.contains(*id))
+        .collect();
     // Where the lanes put the block: before the first untouched layer that
     // follows it in `planned`, else at the end.
     let at = planned.iter().position(|id| id == first)?;
     let anchor = planned[at..].iter().find(|id| !moved.contains(*id));
-    let insert = anchor.and_then(|a| rest.iter().position(|id| id == a)).unwrap_or(rest.len());
+    let insert = anchor
+        .and_then(|a| rest.iter().position(|id| id == a))
+        .unwrap_or(rest.len());
     let mut candidate = rest.clone();
     for (i, id) in block.iter().enumerate() {
         candidate.insert(insert + i, id);
@@ -376,21 +390,31 @@ pub fn move_order(index: &TimelineIndex, ids: &[String], planned: &[String]) -> 
     };
     let root = index.layer(first)?;
     let matte = |id: &str| {
-        index.source.as_ref().and_then(|s| {
-            let root = s.root()?;
-            let loc = pm_kernel::model::find_layer(root, id)?;
-            let node = pm_kernel::model::layer_at(root, &loc)?;
-            Some(node.get("matteMode").is_some_and(|m| !matches!(m.kind(), pm_model::NodeKind::Null)))
-        })
-        .unwrap_or(false)
+        index
+            .source
+            .as_ref()
+            .and_then(|s| {
+                let root = s.root()?;
+                let loc = pm_kernel::model::find_layer(root, id)?;
+                let node = pm_kernel::model::layer_at(root, &loc)?;
+                Some(
+                    node.get("matteMode")
+                        .is_some_and(|m| !matches!(m.kind(), pm_model::NodeKind::Null)),
+                )
+            })
+            .unwrap_or(false)
     };
-    let three_d = block.iter().any(|id| index.layer(id).is_some_and(|l| l.three_d));
+    let three_d = block
+        .iter()
+        .any(|id| index.layer(id).is_some_and(|l| l.three_d));
     let block_matte = block.iter().any(|id| matte(id));
     for id in &rest {
         if before(&original, id) == before(&candidate, id) {
             continue;
         }
-        let Some(x) = index.layer(id) else { return None };
+        let Some(x) = index.layer(id) else {
+            return None;
+        };
         if x.effectively_locked
             || area(&x.kind) != area(&root.kind)
             || x.group != root.group
