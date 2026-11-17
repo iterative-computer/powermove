@@ -72,6 +72,8 @@ impl Item {
         }
     }
 }
+/// The Quit item's action, answered by the app's quit delegate.
+pub const QUIT_ACTION: &str = "pmQuit:";
 /// Menus (and submenus, by their item command) whose key equivalents are shown
 /// but never matched by AppKit. Their shortcuts come from the W1 registry and are
 /// resolved only by the shell's ordered key resolver, so a declined key replays
@@ -286,7 +288,12 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 Item::role("Hide Others", "hideOtherApplications:", "Command+Alt+H"),
                 Item::role("Show All", "unhideAllApplications:", ""),
                 sep(),
-                Item::role("Quit Powermove", "terminate:", "Command+Q"),
+                // Not `terminate:`: AppKit drops that while any window shows
+                // a sheet, so Quit did nothing with the Export sheet (or any
+                // question) up (PM-464). The app's quit delegate answers this
+                // action at the end of the responder chain and hands it to the
+                // quit coordinator, which says what holds the quit.
+                Item::role("Quit Powermove", QUIT_ACTION, "Command+Q"),
             ],
         ),
         (

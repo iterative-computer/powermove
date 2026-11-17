@@ -2037,6 +2037,22 @@ impl Panels {
             .unwrap_or_else(|| builtin_title(id))
     }
 }
+/// A name for a panel id nothing has titled yet: `background-remover.panel`
+/// reads "Background Remover".
+pub fn readable_title(id: &str) -> String {
+    let base = id.strip_suffix(".panel").unwrap_or(id);
+    let base = base.rsplit_once('.').map_or(base, |(_, last)| last);
+    base.split(['-', '_', ' '])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_uppercase().chain(c).collect::<String>())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 fn builtin_title(id: &str) -> &str {
     match id {
         "assets" => "Project",

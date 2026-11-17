@@ -2,6 +2,8 @@
 //! the only document writer. GPUI consumes immutable accepted surfaces.
 #![cfg_attr(test, recursion_limit = "512")]
 mod agent_host;
+/// A run's tool session rolled its edits back after it ended (PM-507).
+pub use agent_host::rolled_back as agent_run_rolled_back;
 pub use agent_host::NoticeSink;
 mod agent_tasks;
 mod chrome;
@@ -988,6 +990,37 @@ impl Builtins {
             } => Ok(commands),
             _ => Err("This effect can't be added here.".into()),
         }
+    }
+    /// The answer to the Project panel's Delete Media question (its
+    /// `ConfirmDelete` effect): approved, the deletion it held, as the
+    /// kernel call to make; declined or stale, nothing.
+    pub fn project_confirm_delete(
+        &self,
+        owner: pm_panel_media::Stamp,
+        token: u64,
+        approved: bool,
+    ) -> Result<Option<pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>>>
+    {
+        let backend = self.backend(PROJECT_PANEL)?;
+        let command = {
+            let mut backend = backend.shared();
+            let request = pm_panel_media::v4::Request {
+                owner,
+                action: pm_panel_media::v4::Action::Input(pm_panel_media::Input::ConfirmDelete {
+                    token,
+                    approved,
+                }),
+            };
+            backend
+                .native_command("panel.project", &serde_json::to_value(request).map_err(|e| Error::Host(e.to_string()))?)
+                .map_err(Error::Host)?
+        };
+        Ok(match command {
+            models::NativeCommand::Kernel(request) => {
+                Some(self.broker.kernel.call(&self.broker.project, request))
+            }
+            _ => None,
+        })
     }
     /// The Project panel's selected assets, in its order.
     pub fn project_selection(&self) -> Vec<String> {
@@ -2081,6 +2114,9 @@ impl EngineProxy for Broker {
                 && let Some(state) = self.carried.shared().take()
             {
                 backend.shared().native.agent = Some(state);
+            }
+            if let Some(state) = backend.shared().native.agent.clone() {
+                agent_host::register(&state, &self.agent, &self.kernel, self.application);
             }
             let facts = self.facts.shared().clone();
             if !facts.is_null() && facts.as_object().is_some_and(|m| !m.is_empty()) {

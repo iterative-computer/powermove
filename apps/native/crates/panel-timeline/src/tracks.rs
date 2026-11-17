@@ -114,7 +114,7 @@ pub fn layout(index: &TimelineIndex, reveal: &RevealState) -> Layout {
                 .map(|d| d.group_collapsed)
                 .unwrap_or(l.group_collapsed);
             let inner = if open {
-                pack(&kids, &mut units, index)
+                pack(&kids, &mut units, index, &reveal.held)
             } else {
                 0
             };
@@ -142,7 +142,7 @@ pub fn layout(index: &TimelineIndex, reveal: &RevealState) -> Layout {
             }
             roots.len()
         } else {
-            pack(&roots, &mut units, index)
+            pack(&roots, &mut units, index, &reveal.held)
         };
         match current {
             Area::Video => out.video = height,
@@ -190,7 +190,66 @@ pub fn layout(index: &TimelineIndex, reveal: &RevealState) -> Layout {
     }
     out
 }
-fn pack(ids: &[usize], units: &mut [Unit], index: &TimelineIndex) -> usize {
+fn pack(
+    ids: &[usize],
+    units: &mut [Unit],
+    index: &TimelineIndex,
+    held: &HashMap<String, crate::reveal::Held>,
+) -> usize {
+    let holds: HashMap<usize, usize> = ids
+        .iter()
+        .filter_map(|&i| {
+            let u = &units[i];
+            held.get(&index.layers[i].id)
+                .filter(|h| (h.from - u.from).abs() < 1e-6 && (h.end - u.end).abs() < 1e-6)
+                .map(|h| (i, h.lane))
+        })
+        .collect();
+    if holds.is_empty() {
+        return pack_fresh(ids, units, index);
+    }
+    // Held clips first, each on its lane when free there (an edited clip
+    // keeps its lane only if its time is unchanged); then every other one
+    // above whatever it overlaps (a new clip, or one an edit moved).
+    let overlap = |a: &Unit, b: (f64, f64)| a.from < b.1 - 1e-5 && b.0 < a.end - 1e-5;
+    let mut placed: Vec<(f64, f64, usize, usize)> = Vec::new();
+    let mut rest = Vec::new();
+    for &i in ids.iter().rev() {
+        let u = &units[i];
+        match holds.get(&i).copied() {
+            Some(lane)
+                if !placed.iter().any(|&(f, e, lo, hi)| {
+                    overlap(u, (f, e)) && lane < hi && lo < lane + u.height
+                }) =>
+            {
+                placed.push((u.from, u.end, lane, lane + u.height));
+                units[i].base = lane;
+            }
+            _ => rest.push(i),
+        }
+    }
+    for i in rest {
+        let u = &units[i];
+        let mut base = index.layers[i].preferred_track;
+        // The lowest lane at or above its preferred track free over its time.
+        loop {
+            let top = base + u.height;
+            match placed
+                .iter()
+                .filter(|&&(f, e, lo, hi)| overlap(u, (f, e)) && base < hi && lo < top)
+                .map(|&(_, _, _, hi)| hi)
+                .max()
+            {
+                Some(hi) => base = hi,
+                None => break,
+            }
+        }
+        placed.push((u.from, u.end, base, base + u.height));
+        units[i].base = base;
+    }
+    placed.iter().map(|&(_, _, _, hi)| hi).max().unwrap_or(0)
+}
+fn pack_fresh(ids: &[usize], units: &mut [Unit], index: &TimelineIndex) -> usize {
     let mut starts: Vec<_> = ids.iter().map(|i| Total(units[*i].from)).collect();
     starts.sort();
     starts.dedup();
@@ -285,6 +344,127 @@ pub struct MovedLayer {
     pub from: f64,
     pub track: usize,
 }
+/// The stack after a Tracks move: the moved layers (with their groups'
+/// members) taken out as one block and put back where `planned` (the lanes'
+/// order) puts them, every other layer keeping its order. `None` keeps the
+/// stack as it is: when the block would end where it was, or would cross a
+/// locked layer, a layer of another area (a caption composites in the same
+/// stack), a layer of another group, a 3D layer or any layer when the block is
+/// 3D (a 3D run's separators stay), or a track matte pair. Then only the
+/// lane changes.
+pub fn move_order(
+    index: &TimelineIndex,
+    ids: &[String],
+    planned: &[String],
+) -> Option<Vec<String>> {
+    let moved: HashSet<String> = index.expanded_ids(ids).into_iter().collect();
+    let original: Vec<&str> = index.layers.iter().map(|l| l.id.as_str()).collect();
+    let block: Vec<&str> = original
+        .iter()
+        .copied()
+        .filter(|id| moved.contains(*id))
+        .collect();
+    let first = *block.first()?;
+    let rest: Vec<&str> = original
+        .iter()
+        .copied()
+        .filter(|id| !moved.contains(*id))
+        .collect();
+    // Where the lanes put the block: before the first untouched layer that
+    // follows it in `planned`, else at the end.
+    let at = planned.iter().position(|id| id == first)?;
+    let anchor = planned[at..].iter().find(|id| !moved.contains(*id));
+    let insert = anchor
+        .and_then(|a| rest.iter().position(|id| id == a))
+        .unwrap_or(rest.len());
+    let mut candidate = rest.clone();
+    for (i, id) in block.iter().enumerate() {
+        candidate.insert(insert + i, id);
+    }
+    if candidate == original {
+        return None;
+    }
+    // The untouched layers the block passes.
+    let before = |order: &[&str], id: &str| {
+        order.iter().position(|x| *x == id) < order.iter().position(|x| *x == first)
+    };
+    let root = index.layer(first)?;
+    let matte = |id: &str| {
+        index
+            .source
+            .as_ref()
+            .and_then(|s| {
+                let root = s.root()?;
+                let loc = pm_kernel::model::find_layer(root, id)?;
+                let node = pm_kernel::model::layer_at(root, &loc)?;
+                Some(
+                    node.get("matteMode")
+                        .is_some_and(|m| !matches!(m.kind(), pm_model::NodeKind::Null)),
+                )
+            })
+            .unwrap_or(false)
+    };
+    let three_d = block
+        .iter()
+        .any(|id| index.layer(id).is_some_and(|l| l.three_d));
+    let block_matte = block.iter().any(|id| matte(id));
+    for id in &rest {
+        if before(&original, id) == before(&candidate, id) {
+            continue;
+        }
+        let Some(x) = index.layer(id) else {
+            return None;
+        };
+        if x.effectively_locked
+            || area(&x.kind) != area(&root.kind)
+            || x.group != root.group
+            || x.three_d
+            || three_d
+            || block_matte
+            || matte(id)
+        {
+            return None;
+        }
+    }
+    // A track matte reads the layer directly above it: the layer that now
+    // sits below the block, or below where it was, must not use one.
+    let last = *block.last()?;
+    for order in [&original, &candidate] {
+        let next = order
+            .iter()
+            .position(|x| *x == last)
+            .and_then(|i| order.get(i + 1))
+            .copied();
+        if let Some(next) = next
+            && !moved.contains(next)
+            && matte(next)
+        {
+            return None;
+        }
+    }
+    Some(candidate.into_iter().map(str::to_owned).collect())
+}
+
+/// The lanes the Tracks timeline shows now, with each clip's time, to hold
+/// through the next change (`RevealState::held`).
+pub fn shown(index: &TimelineIndex, reveal: &RevealState) -> HashMap<String, crate::reveal::Held> {
+    let current = layout(index, reveal);
+    relative_lanes(index, reveal)
+        .into_iter()
+        .filter_map(|(id, lane)| {
+            let item = current.item(&id)?;
+            Some((
+                id,
+                crate::reveal::Held {
+                    lane: lane as usize,
+                    from: item.from,
+                    end: item.from + item.duration,
+                },
+            ))
+        })
+        .collect()
+}
+
 /// Every layer's lane as the Tracks timeline shows it, relative to its group
 /// (a layer's stored `track`), for an edit that must keep clips on their
 /// tracks (`TimingCommand::InTracks`).

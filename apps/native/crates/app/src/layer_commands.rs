@@ -814,6 +814,7 @@ fn new_layer(published: &Published, kind: &str, name: &str, centred: bool, time:
         visible: None,
         shy: None,
         collapsed: None,
+        track: None,
         time,
     };
     Plan {
@@ -1685,6 +1686,7 @@ fn layer_menu_plan(
                 visible: muted.then_some(false),
                 shy: None,
                 collapsed: None,
+                track: None,
                 time,
             };
             Some(Plan {
@@ -1867,7 +1869,13 @@ pub fn disabled(
                 .any(|l| !l.effectively_locked && l.kind != "group"),
         );
     }
-    set("slipLayers", free(&["video", "audio"]));
+    // Enabled for any unlocked layer: with no video or audio clip selected,
+    // Slip says why in the status line instead of doing nothing (a disabled
+    // command's key was silent).
+    set(
+        "slipLayers",
+        selected.iter().any(|l| !l.effectively_locked && l.kind != "group"),
+    );
     set("speedDuration", free(&["video", "audio"]));
     for name in ["timeRemapLayers", "freezeFrame", "reverseLayers"] {
         set(name, free(&["video", "precomp"]));

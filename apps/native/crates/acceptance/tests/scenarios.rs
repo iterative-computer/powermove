@@ -57,6 +57,7 @@ const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
     ("native.renameLayer", "enter", "renameLayer", "[]"),
     // Menu-only commands: shipped without a key, so the person can assign one.
     ("native.saveTake", "", "native.saveTake", "[]"),
+    ("native.speedDuration", "", "speedDuration", "[]"),
     (
         "native.addCompositionToTimeline",
         "",
@@ -442,7 +443,7 @@ const NATIVE_BINDINGS: &[(&str, &str, &str, &str)] = &[
 fn every_shipped_binding_under_seven_routing_contexts() {
     let c = pm_acceptance::catalog::Catalog::embedded().unwrap();
     let shipped = keyboard::production::shipped();
-    assert_eq!(shipped.len(), 292);
+    assert_eq!(shipped.len(), 293);
     assert_eq!(c.bindings.len() + NATIVE_BINDINGS.len(), shipped.len());
     for real in &shipped {
         let binding = match c.bindings.iter().find(|b| b.id == real.id) {

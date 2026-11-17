@@ -292,6 +292,11 @@ fn open_editor_window(
                 host.borrow_mut().restored_project = Some((s.project.clone(), keeps_windows()));
                 host.borrow_mut().restored_front = native::front_restoring() == Some(s.id);
                 host.borrow_mut().restored_pages = s.pages.clone();
+                host.borrow_mut().restored_name = s.name.clone();
+                // Its tab says which project it is from the first frame.
+                if let Some(name) = &s.name {
+                    window.set_window_title(name);
+                }
             }
             if visible {
                 let h = host.borrow();

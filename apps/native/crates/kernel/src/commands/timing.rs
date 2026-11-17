@@ -1026,6 +1026,8 @@ fn track_of(layer: &Value) -> (Option<String>, f64) {
 }
 
 /// Writes each unlocked layer's lane as its stored `track` where they differ.
+/// The stack is never touched here: a trim, roll, slide or slip changes no
+/// layer's place in it (the timeline's view state holds the lanes it shows).
 fn pin_tracks(cx: &mut Cx<'_>, lanes: &[(String, u32)]) -> Result<(), CommandError> {
     for (id, lane) in lanes {
         let Ok(loc) = cx.find(id) else { continue };

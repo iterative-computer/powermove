@@ -805,7 +805,13 @@ impl Backend {
             })
             .collect::<Vec<_>>();
         // Like kinds together, in the order the page lists them, then by name.
+        // Each row's switch is a local control: its lease only names it.
         let mut extensions = extensions;
+        for e in &mut extensions {
+            let name = format!("extension.{}", e["id"].as_str().unwrap_or(""));
+            let lease = self.fields(&json!([name]))?;
+            e["binding"] = lease[&name].clone();
+        }
         extensions.sort_by_cached_key(|e| {
             let kind = e["type"].as_str().unwrap_or("Other");
             (
@@ -1991,7 +1997,15 @@ impl Backend {
                     if crate::agent_host::sends(action) {
                         crate::agent_host::admit_send(&state, &thread)?;
                     }
-                    let run = new_id("run");
+                    // A fresh run, or, while the thread runs, the current
+                    // one: a message sent then steers it (PM-506: a fresh id
+                    // there was refused as stale, and the steer was lost).
+                    let run = state
+                        .panel
+                        .session(&thread)
+                        .ok()
+                        .and_then(|s| s.run.as_ref().map(|r| r.id.clone()))
+                        .unwrap_or_else(|| new_id("run"));
                     let request = new_id("request");
                     let new_thread = new_id("thread");
                     let catalogs = |provider| link.catalog(provider);

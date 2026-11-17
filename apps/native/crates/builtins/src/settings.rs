@@ -488,6 +488,16 @@ impl Backend {
                     .any(|row| row["id"] == action["id"] && row["fixed"] != true)
             }));
         }
+        // On or off is the person's whole choice, not an edit of what the
+        // page showed: it stands while the extension is listed. (Turning one
+        // off moves the page on at once, as its host unloads it; the next
+        // switch was refused as stale.)
+        if action["type"] == "extension.enabled" {
+            let latest = self.settings_snapshot()?;
+            return Ok(latest["extensions"]
+                .as_array()
+                .is_some_and(|all| all.iter().any(|e| e["id"] == action["id"])));
+        }
         if action["type"] != "row" {
             return Ok(false);
         }

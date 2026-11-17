@@ -685,7 +685,24 @@ impl Controller {
         let gizmos = self.builtins.gizmos.clone();
         let views: Vec<_> = self.builtins.views.values().cloned().collect();
         timeline.is_some_and(|t| t.update(cx, |t, cx| t.cancel(cx)))
-            || gizmos.is_some_and(|g| g.update(cx, |g, cx| g.cancel(cx)))
+            || gizmos.is_some_and(|g| {
+                // A text session ends here (it reads nothing of this
+                // controller, and its keys keep their order, PM-459); a
+                // pointer gesture's end reads the controller through its
+                // host, so it ends after this update (PM-480).
+                if g.update(cx, |g, cx| g.finish_text(false, cx)) {
+                    return true;
+                }
+                if !g.read(cx).gesture_to_cancel() {
+                    return false;
+                }
+                cx.defer(move |cx| {
+                    g.update(cx, |g, cx| {
+                        g.cancel(cx);
+                    })
+                });
+                true
+            })
             || views
                 .into_iter()
                 .any(|view| view.update(cx, |view, cx| view.cancel_gesture(cx)))
@@ -1887,6 +1904,29 @@ impl Controller {
                                     .collect();
                                     crate::quick_look::toggle(files);
                                 }
+                                // Double-click or Return on a ready item, and the
+                                // item menus (v1 `addFromAsset`, `Comps.fromAsset`,
+                                // `Comps.addToTimeline`).
+                                pm_panel_media::Effect::AddAsset(id) => {
+                                    self.add_to_timeline(&[id], &[], cx)
+                                }
+                                pm_panel_media::Effect::NestComposition(id) => {
+                                    self.add_to_timeline(&[], &[id], cx)
+                                }
+                                pm_panel_media::Effect::NewCompFromAsset(id) => {
+                                    self.new_comp_from_asset(&id, cx)
+                                }
+                                pm_panel_media::Effect::ConfirmDelete {
+                                    token,
+                                    assets,
+                                    references,
+                                } => self.confirm_delete_media(
+                                    effect.owner.clone(),
+                                    token,
+                                    &assets,
+                                    references,
+                                    cx,
+                                ),
                                 pm_panel_media::Effect::Focus(_)
                                 | pm_panel_media::Effect::ClearPreview => {}
                                 other => {
@@ -2253,10 +2293,18 @@ impl Controller {
                         ],
                     )
                     .critical()
-                    .sheet(&self.host.borrow().window);
+                    // On the popover itself, as its file picker is: on the
+                    // editor it took key from the popover, which closed, and
+                    // the person had to open it again to send (PM-507).
+                    .sheet(
+                        &crate::platform::ns_window(window)
+                            .unwrap_or_else(|| self.host.borrow().window.clone()),
+                    );
+                    self.builtins.agent_picking = true;
                     let runtime = runtime.clone();
-                    cx.spawn(async move |_, cx| {
+                    cx.spawn(async move |this, cx| {
                         let accepted = rx.recv().await == Ok(Some(true));
+                        let _ = this.update(cx, |v, _| v.builtins.agent_picking = false);
                         let _ = cx
                             .background_executor()
                             .spawn(async move { runtime.agent_consent(effect, accepted) })
@@ -2547,10 +2595,9 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         }
     }
     fn report(&self, message: String, cx: &mut App) {
-        let _ = self.0.update(cx, |v, cx| {
-            v.message = message;
-            cx.notify();
-        });
+        // A passing note: it clears once its moment is over (PM-476 kept a
+        // timeline view write's failure in the status line for good).
+        let _ = self.0.update(cx, |v, cx| v.note(message, cx));
     }
     fn command(&self, name: &str, cx: &mut App) {
         crate::timeline_surface::Delegate::run(self, name, vec![], cx);
@@ -3073,7 +3120,7 @@ impl Render for SurfaceWindow {
             // A focused control that went away leaves nothing focused.
             self.keys.claim(window, cx);
         }
-        let (mut fill, mut band) = (0, 0.);
+        let (mut fill, mut band, mut head_h) = (0, 0., 0.);
         let (head, body) = self.owner.update(cx, |v, cx| {
             let (header, colour, titlebar) = {
                 let t = &v.host.borrow().tokens;
@@ -3089,6 +3136,7 @@ impl Render for SurfaceWindow {
                 (t.metrics.header, colour, t.metrics.titlebar)
             };
             fill = colour;
+            head_h = header;
             // Windows with a transparent title bar keep their content below it.
             band = if popover || sheet || settings {
                 0.
@@ -3177,8 +3225,15 @@ impl Render for SurfaceWindow {
             .bg(rgb(fill))
             // The popover's header is its handle (popover_drag).
             .children(head.map(|head| {
+                // Its own row, as tall as a header: the cached header has no
+                // height of its own, so the conversation started under it
+                // and covered Thread, New Thread and Pin (PM-507).
                 div()
                     .id("agent-popover-handle")
+                    .w_full()
+                    .h(px(head_h))
+                    .flex_shrink_0()
+                    .bg(rgb(fill))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -3699,7 +3754,7 @@ mod project_view_tests {
 
 impl Controller {
     /// The open project's asset names, by id (what the Project shows).
-    fn asset_names(&self) -> std::collections::HashMap<String, String> {
+    pub(crate) fn asset_names(&self) -> std::collections::HashMap<String, String> {
         let Some(published) = &self.published else {
             return Default::default();
         };

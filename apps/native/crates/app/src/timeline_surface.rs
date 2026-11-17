@@ -1226,6 +1226,16 @@ impl TimelineSurface {
         self.outline.set_scene(self.scene.clone());
         self.frame = None;
         self.clamp_scroll();
+        // The names follow the new scene at once: a switch between Layers and
+        // Tracks at the same offset kept the outline's old window and offset,
+        // and the header column drew nothing beside the tracks until a scroll
+        // (PM-477).
+        self.outline.scrolled(
+            self.view.scroll_y as f32,
+            self.view.layer_column as f32,
+            self.visible_rows(),
+            cx,
+        );
         let duration = self.model.index.duration;
         if duration > 0. && self.bounds.size.width > px(0.) {
             let width = (f32::from(self.bounds.size.width) as f64 - self.view.layer_column).max(1.);
@@ -1746,9 +1756,13 @@ impl TimelineSurface {
                 f.hit_op("work-area", x, y, 0.).is_some()
                     && (event.modifiers.alt || y <= WORK_BAR_STRIP)
             });
+        // Final Cut's skimming: a press in Tracks mode moves the playhead to
+        // the skimmer. In the Layers timeline a press selects and never moves
+        // the playhead (v1 and After Effects: only the ruler does).
         if let Some(at) = self.skimmer
             && !grabs
             && !scrubs
+            && self.model.mode == TimelineMode::Tracks
         {
             self.delegate.seek(at, cx);
         }
@@ -3648,7 +3662,7 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             pending
                 .await
                 .ok_or("Kernel closed")?
-                .map_err(|e| format!("{e:?}"))?;
+                .map_err(|e| e.to_string())?;
             Ok(vec![])
         }
     }
