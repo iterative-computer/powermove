@@ -2314,6 +2314,12 @@ impl Render for Editor {
                 })
                 .cloned()
                 && let Some(bounds) = self.geometry.side_docks.get(&p.dock).copied()
+                // Only a panel scrolled wholly out of the column (reached by
+                // the keyboard) is brought into view. One that shows is where
+                // the person is working: a press in it (focusing it) must not
+                // move it, or the control under the pointer leaves before the
+                // release (the Colour panel's Add row, scrolled past its tabs).
+                && (p.rect.y + p.rect.h <= bounds.y || p.rect.y >= bounds.y + bounds.h)
             {
                 let by = if p.rect.y < bounds.y {
                     p.rect.y - bounds.y

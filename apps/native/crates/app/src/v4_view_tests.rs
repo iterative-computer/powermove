@@ -2023,3 +2023,115 @@ fn a_header_alone_in_its_row_takes_the_rows_width(cx: &mut TestAppContext) {
     let pop = bounds(&mut vcx, "pop");
     assert!(pop.right() > px(590.), "the trailing pop-up stands at the row's end: {pop:?}");
 }
+/// A side panel whose content grows or shrinks after it is shown (a grade
+/// block added in the Colour panel, a section expanded or collapsed): what a
+/// wheel reaches follows the content. The panel had been taller once (its
+/// content outside a scroller, as an empty state shows it); its page then
+/// scrolls inside a scroll node that fills the panel, which must not keep
+/// the old height (the body would scroll part of the page, the page the
+/// rest, and neither follow the content).
+#[gpui::test]
+fn a_side_panels_reach_follows_its_content_as_it_grows_and_shrinks(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let column = json!({"display":"flex","flexDirection":"column","flexGrow":1});
+    let block = |id: u64, parent: u64, height: f64| {
+        node_ops(id, parent, "div", json!({"style":{"height":height,"flexShrink":0}}), &[])
+    };
+    // Its content as a plain column (the empty state's layout) ...
+    let plain = |height: f64| {
+        let mut ops = node_ops(1, 0, "div", json!({ "style": column }), &[]);
+        ops.extend(node_ops(2, 1, "div", json!({}), &[]));
+        ops.extend(block(3, 2, height));
+        ops
+    };
+    // ... and in a scroll node, as the Colour panel builds its page.
+    let paged = |height: f64| {
+        let mut ops = node_ops(1, 0, "div", json!({ "style": column }), &[]);
+        ops.extend(node_ops(
+            2,
+            1,
+            "scroll",
+            json!({"style":{"display":"flex","flexDirection":"column"}}),
+            &[],
+        ));
+        ops.extend(block(3, 2, height));
+        ops
+    };
+    cx.executor().allow_parking();
+    let runtime = rig.runtime.clone();
+    let first = synthetic(&rig, plain(400.));
+    let scroll = gpui::ScrollHandle::new();
+    let handle = scroll.clone();
+    let (body, mut vcx) = cx.add_window_view(move |window, cx| {
+        let view = cx.new(|cx| {
+            let mut v = SurfaceView::new(runtime, first, tokens(), Default::default(), window, cx);
+            v.grows = true;
+            v
+        });
+        ScrollingBody {
+            view,
+            scroll: handle,
+        }
+    });
+    vcx.simulate_resize(size(px(400.), px(300.)));
+    let settle = |vcx: &mut VisualTestContext| {
+        for _ in 0..4 {
+            vcx.run_until_parked();
+            vcx.update(|window, _| window.refresh());
+        }
+        vcx.run_until_parked();
+    };
+    settle(&mut vcx);
+    // What a person reaches: wheeled to the end, the last block's bottom
+    // sits at the body's bottom (60); content shorter than the body stays
+    // at its top.
+    let wheel = |dy: f32, vcx: &mut VisualTestContext| {
+        for _ in 0..4 {
+            vcx.simulate_event(ScrollWheelEvent {
+                position: point(px(100.), px(30.)),
+                delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+                ..Default::default()
+            });
+            settle(vcx);
+        }
+    };
+    let edges = |vcx: &mut VisualTestContext| {
+        let b = bounds(vcx, "n3");
+        (f32::from(b.top()), f32::from(b.bottom()))
+    };
+    wheel(-1000., &mut vcx);
+    assert_eq!(edges(&mut vcx).1, 60.);
+    let mut generation = 1;
+    let mut publish = |ops: Vec<Op>, vcx: &mut VisualTestContext| {
+        generation += 1;
+        let mut next = synthetic(&rig, ops);
+        next.generation = generation;
+        let view = body.read_with(vcx, |b, _| b.view.clone());
+        view.update(vcx, |v, cx| v.publish(next, cx));
+        settle(vcx);
+    };
+    // What the panel asks of its dock (`natural_panel_height`): its
+    // content's height, grown or shrunk, never what it was given.
+    let asks = |vcx: &mut VisualTestContext| {
+        let view = body.read_with(vcx, |b, _| b.view.clone());
+        view.read_with(vcx, |v, _| v.natural_body_height())
+    };
+    // The page in its scroll node: its end is where it ends, no blank past it.
+    publish(paged(100.), &mut vcx);
+    assert_eq!(asks(&mut vcx), 100.);
+    wheel(-1000., &mut vcx);
+    assert_eq!(edges(&mut vcx).1, 60., "no blank space past the page's end");
+    // A block added while scrolled to the end (the Add row): within reach.
+    publish(paged(400.), &mut vcx);
+    assert_eq!(asks(&mut vcx), 400., "the dock is asked for the grown page");
+    wheel(-1000., &mut vcx);
+    assert_eq!(edges(&mut vcx).1, 60., "the grown page's end is reachable");
+    // Folded while scrolled to the end: the page is back at the top.
+    publish(paged(30.), &mut vcx);
+    assert_eq!(asks(&mut vcx), 30., "the dock is asked for the shrunk page only");
+    assert_eq!(edges(&mut vcx), (0., 30.), "the shrunk page shows from its top");
+    wheel(-1000., &mut vcx);
+    assert_eq!(edges(&mut vcx), (0., 30.), "the shrunk page does not scroll");
+    let _ = scroll;
+}

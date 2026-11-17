@@ -1320,8 +1320,16 @@ impl Controller {
             .or_insert_with(|| cx.new(|cx| crate::v4_view::HeaderView::new(view, cx)))
             .clone();
         header.update(cx, |h, cx| h.set_tabbed(tabbed, cx));
-        // Cached: drawn again only when its panel changes (it observes the
-        // panel), not with every frame the window draws.
+        // Beside a group's tabs the header's actions take their own width
+        // (the dock gives them a box as wide as its content): a cached view
+        // is laid out only by the style it is given, so one there, asked for
+        // the full width of a box sized by it, came out with none and the
+        // panel's + and menu did not show. Drawn in place instead.
+        if tabbed {
+            return Some(div().flex().h_full().child(header).into_any_element());
+        }
+        // Alone in its row: cached, drawn again only when its panel changes
+        // (it observes the panel), not with every frame the window draws.
         Some(
             div()
                 .w_full()

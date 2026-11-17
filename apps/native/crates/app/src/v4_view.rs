@@ -356,6 +356,20 @@ pub struct SurfaceView {
     pub log: Vec<(Id, String, EventDetail)>,
     pub error: Option<String>,
 }
+/// The height of a scroller's content: where its last child ends below its
+/// top, in layout (which its offset does not move, nor its own height).
+fn content_height(scroll: &ScrollHandle) -> f32 {
+    let top = scroll.bounds().top();
+    let mut bottom = top;
+    for ix in 0.. {
+        let Some(child) = scroll.bounds_for_item(ix) else {
+            break;
+        };
+        bottom = bottom.max(child.bottom());
+    }
+    f32::from(bottom - top)
+}
+
 /// Fades over a scroller's viewport where content runs past its top or
 /// bottom edge, into `ground` (the colour under it), a row tall: a region
 /// that draws no scroller still shows there is more. Drawn over the content
@@ -2635,21 +2649,7 @@ impl SurfaceView {
             // A scroller may shrink to nothing unless its panel asks to keep
             // some rows (`metadata.rowFloor`, Effect Controls' effects): a
             // panel body shorter than those rows scrolls instead.
-            let floor = self
-                .publication
-                .surface
-                .node(id)
-                .and_then(|n| n.props.get("metadata"))
-                .and_then(|m| m.get("rowFloor"))
-                .and_then(Value::as_f64)
-                .filter(|rows| rows.is_finite() && *rows > 0.)
-                .map_or(0., |rows| {
-                    // Rows of a virtual list are its own height.
-                    let row = node
-                        .virtual_window
-                        .map_or(self.table.tokens.metrics.row, |w| w.item_size as f32);
-                    rows as f32 * row
-                });
+            let floor = self.row_floor(id);
             // A scroll region with a max height (a sheet body) keeps its
             // content height up to that cap; panel scrollers fill their dock.
             element = if node.style.max_size.height.is_some() {
@@ -4074,18 +4074,59 @@ impl Render for SurfaceView {
             // Measured each frame: a change resizes the body's content.
             let natural = self.natural.clone();
             let column_natural = self.column_natural.clone();
-            let scrolls: Vec<_> = self.scrolls.values().cloned().collect();
+            let scrolls: Vec<(Id, ScrollHandle)> =
+                self.scrolls.iter().map(|(id, h)| (*id, h.clone())).collect();
+            // The vertical scrollers shown, with their floors: each fills what
+            // the panel leaves it (`element`), so the panel's height is
+            // measured without what they stretched past their floor.
+            let fillers: Vec<(Id, ScrollHandle, f32)> = self
+                .prepared
+                .nodes
+                .values()
+                .filter(|n| n.scroll_y && !n.hidden && !self.left_out(n.id))
+                .filter_map(|n| {
+                    Some((n.id, self.scrolls.get(&n.id)?.clone(), self.row_floor(n.id)))
+                })
+                .collect();
             let origin = self.origin.clone();
+            let (panel, fit) = (self.publication.panel.clone(), self.fit.get());
             root.min_h(px(self.fit.get()))
                 .on_children_prepainted(move |children, window, _| {
-                    let height = children.first().map_or(0., |b| f32::from(b.size.height));
-                    let demand = scrolls.iter().fold(height, |height, scroll| {
-                        height.max(f32::from(
-                            scroll.bounds().bottom() - origin.get().y + scroll.max_offset().y,
-                        ))
+                    // Measured as painted, the panel would keep whatever height
+                    // it was given once (a scroller fills it, and is measured
+                    // filling it): its content then never grows past that old
+                    // height, nor shrinks back. Without the stretch it is the
+                    // content's own height; the scroller scrolls the rest.
+                    let painted = children.first().map_or(0., |b| f32::from(b.size.height));
+                    let stretch = fillers.iter().fold(0f32, |most, (_, scroll, floor)| {
+                        most.max(f32::from(scroll.bounds().size.height) - floor)
+                    });
+                    let height = (painted - stretch).max(0.);
+                    // What the panel asks of its dock: that height with each
+                    // scroller's content in full, measured from where its
+                    // children end (their layout, which a viewport stretched
+                    // or squeezed does not move), so a block added or folded
+                    // changes it both ways. Lists of their own (a floor) keep
+                    // what they ask.
+                    let pages = fillers.iter().fold(0f32, |most, (_, scroll, floor)| {
+                        most.max(content_height(scroll) - floor)
+                    });
+                    let demand = scrolls.iter().fold(height + pages, |height, (id, scroll)| {
+                        if fillers.iter().all(|(page, ..)| page != id) {
+                            height.max(f32::from(
+                                scroll.bounds().bottom() - origin.get().y + scroll.max_offset().y,
+                            ))
+                        } else {
+                            height
+                        }
                     });
                     let changed = (natural.replace(height) - height).abs() > 0.5;
                     let column_changed = (column_natural.replace(demand) - demand).abs() > 0.5;
+                    if (changed || column_changed) && crate::diag::enabled() {
+                        crate::diag::line(serde_json::json!({"ui": "natural",
+                            "panel": panel.as_str(), "painted": painted, "stretch": stretch,
+                            "natural": height, "demand": demand, "fit": fit}));
+                    }
                     if changed || column_changed {
                         window.refresh();
                     }
@@ -4539,6 +4580,28 @@ fn button_held() -> bool {
 }
 
 impl SurfaceView {
+    /// The height a scroller keeps however short its panel's body
+    /// (`metadata.rowFloor` rows; Effect Controls' effects); 0 for one that
+    /// may shrink to nothing.
+    fn row_floor(&self, id: Id) -> f32 {
+        let Some(node) = self.prepared.node(id) else {
+            return 0.;
+        };
+        self.publication
+            .surface
+            .node(id)
+            .and_then(|n| n.props.get("metadata"))
+            .and_then(|m| m.get("rowFloor"))
+            .and_then(Value::as_f64)
+            .filter(|rows| rows.is_finite() && *rows > 0.)
+            .map_or(0., |rows| {
+                // Rows of a virtual list are its own height.
+                let row = node
+                    .virtual_window
+                    .map_or(self.table.tokens.metrics.row, |w| w.item_size as f32);
+                rows as f32 * row
+            })
+    }
     /// Natural content demand includes inner lists before they are clipped.
     pub(crate) fn natural_body_height(&self) -> f32 {
         self.natural.get().max(self.column_natural.get())
