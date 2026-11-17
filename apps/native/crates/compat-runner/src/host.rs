@@ -1905,7 +1905,7 @@ impl Owner {
         if router.receive(message, &mut delivered).is_err() {
             return;
         }
-        for message in delivered.0 {
+        for message in &delivered.0 {
             // A synchronous layout read is waiting for this answer: it goes to
             // the blocked realm directly (and through its queue as usual).
             if message["kind"] == "layout"
@@ -1915,11 +1915,16 @@ impl Owner {
                     .measuring
                     .lock()
                     .unwrap()
-                    .answer(request, &message);
+                    .answer(request, message);
             }
-            self.eval(&format!(
-                "__compat.dom.receive({message});__compat.dom.flush()"
-            ));
+        }
+        // The realm takes them as data, all that came meanwhile in one task
+        // and one flush, not each as a script it compiles.
+        if !delivered.0.is_empty()
+            && let Some(live) = &self.realm
+            && live.host.push_page_messages(delivered.0)
+        {
+            self.eval("__compat.receivePage()");
         }
         self.drain_dom();
     }

@@ -677,7 +677,7 @@ impl Run {
         if router.receive(message, &mut delivered).is_err() {
             return;
         }
-        for message in delivered.0 {
+        for message in &delivered.0 {
             if message["kind"] == "layout"
                 && let Some(request) = message["request"].as_u64()
             {
@@ -685,11 +685,14 @@ impl Run {
                     .measuring
                     .lock()
                     .unwrap()
-                    .answer(request, &message);
+                    .answer(request, message);
             }
-            self.queue.push_back(format!(
-                "__compat.dom.receive({message});__compat.dom.flush()"
-            ));
+        }
+        if !delivered.0.is_empty()
+            && let Some((_, _, host)) = &self.live
+            && host.push_page_messages(std::mem::take(&mut delivered.0))
+        {
+            self.queue.push_back("__compat.receivePage()".into());
         }
         self.dispatch();
         self.drain_dom();

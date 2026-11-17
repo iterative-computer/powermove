@@ -665,6 +665,10 @@ export class CompatRealm {
       listeners.delete(listener);
     };
   }
+  /** Whether anything listens to `name` on the realm's bus. */
+  listens(name: string): boolean {
+    return (this.busListeners.get(name)?.size ?? 0) > 0;
+  }
   private busEmit(name: string, a: any, b: any): void {
     for (const listener of [...(this.busListeners.get(name) ?? [])]) {
       try {

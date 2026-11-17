@@ -599,6 +599,40 @@ mod tests {
         pixels.truncate(info.buffer_size());
         (info, pixels)
     }
+    /// An extension's animation frames wait while none of its panels shows
+    /// (not open, or placed behind another tab) and run while one does, as a
+    /// hidden page's do in a browser: a collapsed game panel kept the realm
+    /// busy on every frame.
+    #[test]
+    fn a_panel_that_does_not_show_gets_no_animation_frames() {
+        let runner = dom_runner();
+        let manifest =
+            json!({"id":"anim","name":"Anim","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){globalThis.ticks=0;
+                 api.panels.register({id:'anim.panel',title:'Anim',build(){}});
+                 const loop=()=>{globalThis.ticks++;requestAnimationFrame(loop)};requestAnimationFrame(loop);}",
+            )
+            .unwrap();
+        let ticks = || runner.json("globalThis.ticks").unwrap().as_f64().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(ticks(), 0., "no panel of it shows");
+        runner
+            .eval("__compat.openPanel('anim.panel');__compat.placePanel('anim.panel',[0,0,100,100])")
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ticks() < 3. {
+            assert!(std::time::Instant::now() < deadline, "a showing panel's frames run");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        runner.eval("__compat.placePanel('anim.panel',null)").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let held = ticks();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(ticks() <= held + 1., "behind another tab: {} after {held}", ticks());
+    }
     #[test]
     fn dom_canvas_uses_native_pixels_stable_context_and_immutable_png_resources() {
         let runner = dom_runner();
