@@ -750,7 +750,8 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
             if !window.is_window_active()
                 && let Some(g) = v.builtins.gizmos.clone()
             {
-                g.update(cx, |g, cx| g.studio_fly_end(false, cx));
+                // It draws, which reads the controller: after this update.
+                cx.defer(move |cx| g.update(cx, |g, cx| g.studio_fly_end(false, cx)));
             }
             // The key window is where MCP acts.
             if window.is_window_active() {
@@ -1219,7 +1220,8 @@ impl Controller {
     }
     pub fn complete_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
         if let Some(g) = self.builtins.gizmos.clone() {
-            g.update(cx, |g, cx| g.studio_fly_end(false, cx));
+            // It draws, which reads the controller: after this update.
+            cx.defer(move |cx| g.update(cx, |g, cx| g.studio_fly_end(false, cx)));
         }
         let kernel = self.kernel.clone();
         let session = self.session.clone();

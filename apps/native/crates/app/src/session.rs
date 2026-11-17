@@ -2876,7 +2876,8 @@ impl Controller {
         cx: &mut Context<Self>,
     ) {
         if let Some(g) = self.builtins.gizmos.clone() {
-            g.update(cx, |g, cx| g.studio_fly_end(false, cx));
+            // It draws, which reads the controller: after this update.
+            cx.defer(move |cx| g.update(cx, |g, cx| g.studio_fly_end(false, cx)));
         }
         if let Some(viewer) = self.viewer.take() {
             viewer.retire();
@@ -3760,7 +3761,7 @@ impl Controller {
                 let Some(gizmos) = self.builtins.gizmos.clone() else {
                     return false;
                 };
-                return gizmos.update(cx, |g, cx| g.edit_selected_text(window, cx));
+                return crate::gizmo::text::edit_selected_text_after(gizmos, window, cx);
             }
             // The viewer's View-menu actions, for the palette and for keys.
             "viewer.safeAreas"
@@ -4309,8 +4310,12 @@ impl Controller {
             // The button came up somewhere in the window (after the views
             // heard it): a pointer gesture whose own view never did ends now.
             "pointerReleased" => {
+                // Ending its gesture reads the controller (the tool, the
+                // frame): after this update (PM-480).
                 if let Some(g) = self.builtins.gizmos.clone() {
-                    g.update(cx, |g, cx| g.release_unheard(window, cx));
+                    window.defer(cx, move |window, cx| {
+                        g.update(cx, |g, cx| g.release_unheard(window, cx));
+                    });
                 }
                 for view in self.builtins.views.values().cloned().collect::<Vec<_>>() {
                     view.update(cx, |v, cx| v.release_unheard(window, cx));

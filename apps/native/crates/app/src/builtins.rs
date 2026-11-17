@@ -685,7 +685,24 @@ impl Controller {
         let gizmos = self.builtins.gizmos.clone();
         let views: Vec<_> = self.builtins.views.values().cloned().collect();
         timeline.is_some_and(|t| t.update(cx, |t, cx| t.cancel(cx)))
-            || gizmos.is_some_and(|g| g.update(cx, |g, cx| g.cancel(cx)))
+            || gizmos.is_some_and(|g| {
+                // A text session ends here (it reads nothing of this
+                // controller, and its keys keep their order, PM-459); a
+                // pointer gesture's end reads the controller through its
+                // host, so it ends after this update (PM-480).
+                if g.update(cx, |g, cx| g.finish_text(false, cx)) {
+                    return true;
+                }
+                if !g.read(cx).gesture_to_cancel() {
+                    return false;
+                }
+                cx.defer(move |cx| {
+                    g.update(cx, |g, cx| {
+                        g.cancel(cx);
+                    })
+                });
+                true
+            })
             || views
                 .into_iter()
                 .any(|view| view.update(cx, |view, cx| view.cancel_gesture(cx)))
