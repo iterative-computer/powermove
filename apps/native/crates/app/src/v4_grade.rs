@@ -457,7 +457,8 @@ impl SurfaceView {
                 let strip_binding = strip_binding.clone();
                 if event.click_count == 2 {
                     self.scrub = None;
-                    self.scrub_ops.push_back(ScrubOp::Begin);
+                    let name = self.undo_name(id);
+                    self.scrub_ops.push_back(ScrubOp::Begin(name));
                     self.scrub_ops
                         .push_back(ScrubOp::Value(strip_binding, json!(neutral)));
                     self.scrub_ops.push_back(ScrubOp::Finish(true));
@@ -502,7 +503,8 @@ impl SurfaceView {
                 _ => return,
             };
             self.scrub = None;
-            self.scrub_ops.push_back(ScrubOp::Begin);
+            let name = self.undo_name(id);
+            self.scrub_ops.push_back(ScrubOp::Begin(name));
             self.scrub_ops.push_back(ScrubOp::Value(binding, neutral));
             self.scrub_ops.push_back(ScrubOp::Finish(true));
             self.scrub_pump(cx);
@@ -532,7 +534,8 @@ impl SurfaceView {
                 GradeDrag::Ramp { live, .. } => json!(live),
                 _ => unreachable!(),
             };
-            self.scrub_ops.push_back(ScrubOp::Begin);
+            let name = self.undo_name(id);
+            self.scrub_ops.push_back(ScrubOp::Begin(name));
             self.scrub_ops.push_back(ScrubOp::Value(binding.clone(), value));
             self.scrub = Some(ScrubDrag {
                 id,
@@ -617,7 +620,8 @@ impl SurfaceView {
                     let GradeDrag::Curve { live, rest, .. } = &drag else {
                         unreachable!()
                     };
-                    self.scrub_ops.push_back(ScrubOp::Begin);
+                    let name = self.undo_name(id);
+                    self.scrub_ops.push_back(ScrubOp::Begin(name));
                     self.scrub_ops
                         .push_back(ScrubOp::Value(binding.clone(), json!(live.values(rest))));
                     self.scrub = Some(ScrubDrag {
@@ -648,6 +652,7 @@ impl SurfaceView {
 
     /// The pointer moved during a press on a grading control.
     pub(super) fn grade_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let grade_name = self.scrub.as_ref().and_then(|d| self.undo_name(d.id));
         // An easing handle follows the pointer from where it was grabbed
         // (finely with Option, on a twentieth grid with Shift); each move is
         // the panel's change.
@@ -701,7 +706,7 @@ impl SurfaceView {
                 return;
             }
             drag.active = true;
-            self.scrub_ops.push_back(ScrubOp::Begin);
+            self.scrub_ops.push_back(ScrubOp::Begin(grade_name.clone()));
         }
         let fine = if event.modifiers.alt { 0.1 } else { 1. };
         let Some(binding) = drag.binding.clone() else {
