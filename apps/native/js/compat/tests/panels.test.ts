@@ -278,7 +278,11 @@ test("failed legacy panel build remains visible and can reload", async () => {
       id: "anchor-fixture",
       title: "Anchor fixture",
       build(body: any) {
-        if (fail) throw new Error("Synthetic bounds failure");
+        if (fail) {
+          body.style.display = "none";
+          body.setAttribute("hidden", "");
+          throw new Error("Synthetic bounds failure");
+        }
         body.textContent = "Recovered anchor controls";
       },
     });
@@ -289,6 +293,9 @@ test("failed legacy panel build remains visible and can reload", async () => {
     const page = h.page.window.document;
     expect(page.body.textContent).toContain("Synthetic bounds failure");
     expect(page.body.textContent).toContain("Anchor fixture");
+    const errorBody = page.querySelector("[role=alert]")!.parentElement!;
+    expect(h.page.window.getComputedStyle(errorBody).display).toBe("block");
+    expect(errorBody.hasAttribute("hidden")).toBe(false);
     fail = false;
     page.querySelector("button")!.click();
     await h.settle();

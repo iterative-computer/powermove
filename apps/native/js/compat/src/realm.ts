@@ -443,6 +443,10 @@ export class CompatRealm {
       __powermove_runtime: { ...options.runtimeModules, powermove },
     };
   }
+  /** The owning remote document; logic-only realms have none. */
+  get document(): any {
+    return this.domConnection?.globals.document;
+  }
   private live(): void {
     if (this.disposed)
       throw new HostError("Disposed", "Compatibility realm is disposed");

@@ -55,6 +55,8 @@ globalThis.__storeCheck = {
     this.errors = [];
     this.rpc = rpc;
     this.views = new Map();
+    this.rects = new Map();
+    this.extensionName = init.manifest?.name ?? init.id;
     this.dom = new StoreCompat.RemoteDOM({
       session: { panel: "store", generation: 1 },
       realmGlobal: globalThis,
@@ -112,24 +114,47 @@ globalThis.__storeCheck = {
     root.setAttribute("data-pm-contribution", id);
     if (this.nativeStyle !== "full")
       root.setAttribute("data-pm-style", this.nativeStyle);
+    root.setAttribute(
+      "style",
+      StoreCompat.panelStyle(this.rects.get(id) ?? null),
+    );
+    const body = this.dom.document.createElement("div");
+    body.setAttribute("data-pm-panel-body", "");
+    body.setAttribute(
+      "style",
+      "position:relative;width:100%;height:100%;box-sizing:border-box;overflow:auto",
+    );
     this.dom.document.body.append(root);
+    root.append(body);
+    const entry = { root, cleanup: undefined };
+    this.views.set(id, entry);
     let cleanup;
-    if (definition.component) {
-      const svelte = StoreCompat.runtimeModules.svelte;
-      const instance = svelte.mount(definition.component, {
-        target: root,
-        props: { api: this.api },
-      });
-      cleanup = () => svelte.unmount(instance);
-    } else {
-      const built = definition.build(root, { spec: { id, panel: id } });
-      cleanup =
-        typeof built === "function" ? built : built?.dispose?.bind(built);
+    try {
+      if (definition.component) {
+        const svelte = StoreCompat.runtimeModules.svelte;
+        const instance = svelte.mount(definition.component, {
+          target: body,
+          props: { api: this.api },
+        });
+        cleanup = () => svelte.unmount(instance);
+      } else {
+        const built = definition.build(body, { spec: { id, panel: id } });
+        cleanup =
+          typeof built === "function" ? built : built?.dispose?.bind(built);
+      }
+      entry.cleanup = cleanup;
+    } catch (error) {
+      console.error(`Store panel ${id} build failed`, error);
+      this.errors.push({ name: error?.name, message: error?.message });
+      StoreCompat.panelFailure(body, this.extensionName, error, () =>
+        this.rpc.call("reload"),
+      );
+    } finally {
+      this.dom.flush();
     }
-    this.views.set(id, { root, cleanup });
-    this.dom.flush();
   },
   placePanel(id, rect) {
+    this.rects.set(id, rect);
     this.views
       .get(id)
       ?.root.setAttribute("style", StoreCompat.panelStyle(rect));

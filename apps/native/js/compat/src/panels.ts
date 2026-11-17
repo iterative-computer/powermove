@@ -18,6 +18,13 @@ export function panelFailure(
   reload: () => unknown,
 ) {
   body.replaceChildren();
+  // A failed build may have hidden or restyled its body while loading.
+  body.removeAttribute("class");
+  body.removeAttribute("hidden");
+  body.setAttribute(
+    "style",
+    "position:relative;width:100%;height:100%;box-sizing:border-box;overflow:auto;display:block",
+  );
   const doc = body.ownerDocument;
   const notice = doc.createElement("div");
   notice.setAttribute("role", "alert");
