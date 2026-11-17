@@ -128,8 +128,68 @@ struct Execution {
     started: Instant,
     /// Time blocked in engine calls, which the watchdog doesn't count.
     blocked: Arc<crate::vm::Blocked>,
+    /// The running thread's CPU clock, and its reading at the start.
+    clock: Option<(ThreadClock, Duration)>,
     noticed: bool,
     next_prompt: Duration,
+}
+impl Execution {
+    /// How long the task has run, as the watchdog counts it: time on a CPU,
+    /// so a thread a busy machine starves of CPU (it waits to be scheduled)
+    /// isn't taken for a hang; wall time less engine calls where the clock
+    /// can't be read, and past `backstop` (a task stuck in a wait).
+    fn ran(&self, backstop: Duration) -> Duration {
+        let wall = self.started.elapsed().saturating_sub(self.blocked.total());
+        match self
+            .clock
+            .and_then(|(clock, start)| Some(clock.cpu()?.saturating_sub(start)))
+        {
+            Some(cpu) if wall < backstop => cpu.min(wall),
+            _ => wall,
+        }
+    }
+}
+/// A thread's CPU time (user and system), readable from another thread.
+#[derive(Clone, Copy)]
+struct ThreadClock(#[cfg(target_os = "macos")] libc::mach_port_t);
+impl ThreadClock {
+    /// The calling thread's clock.
+    fn current() -> Option<Self> {
+        #[cfg(target_os = "macos")]
+        {
+            // SAFETY: the port of the calling thread, owned by its pthread.
+            let port = unsafe { libc::pthread_mach_thread_np(libc::pthread_self()) };
+            (port != 0).then_some(Self(port))
+        }
+        #[cfg(not(target_os = "macos"))]
+        None
+    }
+    fn cpu(&self) -> Option<Duration> {
+        #[cfg(target_os = "macos")]
+        {
+            // SAFETY: a THREAD_BASIC_INFO sized out-buffer and its count.
+            #[allow(deprecated)]
+            let (status, info) = unsafe {
+                let mut info: libc::thread_basic_info = std::mem::zeroed();
+                let mut count = libc::THREAD_BASIC_INFO_COUNT;
+                let status = libc::thread_info(
+                    self.0,
+                    libc::THREAD_BASIC_INFO as libc::thread_flavor_t,
+                    (&raw mut info).cast(),
+                    &mut count,
+                );
+                (status, info)
+            };
+            #[allow(deprecated)]
+            let time = |t: libc::time_value_t| {
+                Duration::from_secs(t.seconds.max(0) as u64)
+                    + Duration::from_micros(t.microseconds.max(0) as u64)
+            };
+            (status == libc::KERN_SUCCESS).then(|| time(info.user_time) + time(info.system_time))
+        }
+        #[cfg(not(target_os = "macos"))]
+        None
+    }
 }
 struct Control {
     active: Mutex<Option<Execution>>,
@@ -656,6 +716,11 @@ impl RuntimePool {
     }
 }
 
+/// A task that has waited this many times the prompt's limit (wall time,
+/// less engine calls) is asked about even if it used little CPU: stuck in a
+/// wait rather than starved.
+const BACKSTOP: u32 = 4;
+
 // One sleeping watchdog per owner, never a new thread per task or timer tick.
 struct WatchdogThread {
     control: Arc<Control>,
@@ -668,6 +733,7 @@ impl WatchdogThread {
         let hooks = config.watchdog_hooks.clone();
         let repeat = config.watchdog.repeat;
         let notice_after = config.watchdog.notice;
+        let backstop = config.watchdog.prompt * BACKSTOP;
         let join = thread::spawn(move || {
             loop {
                 let mut active = watched.active.lock().unwrap();
@@ -690,11 +756,9 @@ impl WatchdogThread {
                 execution
                     .handle
                     .request_interrupt(vm::check_external, std::ptr::null_mut());
-                // JS time only: waiting on the engine or kernel is not a hang.
-                let elapsed = execution
-                    .started
-                    .elapsed()
-                    .saturating_sub(execution.blocked.total());
+                // JS time only: waiting on the engine or kernel, or for a
+                // CPU on a busy machine, is not a hang.
+                let elapsed = execution.ran(backstop);
                 let notice = !execution.noticed && elapsed >= notice_after;
                 if notice {
                     execution.noticed = true;
@@ -773,6 +837,7 @@ impl Guard {
             cancellation: cancellation.clone(),
             started: Instant::now(),
             blocked: vm.blocked(),
+            clock: ThreadClock::current().and_then(|clock| Some((clock, clock.cpu()?))),
             noticed: false,
             next_prompt: config.watchdog.prompt,
         });
