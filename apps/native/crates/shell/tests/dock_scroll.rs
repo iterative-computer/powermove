@@ -561,3 +561,175 @@ fn wheel_over_dock_edge_and_panel_gap_scrolls_the_column() {
         });
     }
 }
+
+#[test]
+fn sticky_column_header_pins_and_is_pushed_headlessly() {
+    objc2::rc::autoreleasepool(|_| {
+        let mut cx = context();
+        let window = cx
+            .open_window(size(px(1000.), px(600.)), |_, cx| {
+                cx.new(|cx| {
+                    let mut e = Editor::new(
+                        Tokens::new(Scheme::Dark, Accessibility::default()),
+                        None,
+                        cx,
+                    );
+                    tall(&mut e);
+                    e
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let top = window
+            .update(&mut cx, |e, _, _| e.panel_rect("inspector").unwrap().y)
+            .unwrap();
+        window
+            .update(&mut cx, |e, _, cx| {
+                assert!(e.scroll_dock("right", 100.));
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |e, _, _| {
+                assert_eq!(e.panel_header_rect("inspector").unwrap().y, top);
+                assert_eq!(e.panel_rect("inspector").unwrap().y, top - 100.);
+            })
+            .unwrap();
+        let by = window
+            .update(&mut cx, |e, _, _| {
+                let next = e.panel_rect("easing").unwrap().y;
+                next - top
+                    - Tokens::new(Scheme::Dark, Accessibility::default())
+                        .metrics
+                        .header
+                        / 2.
+            })
+            .unwrap();
+        window
+            .update(&mut cx, |e, _, cx| {
+                assert!(e.scroll_dock("right", by));
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |e, _, _| {
+                let h = Tokens::new(Scheme::Dark, Accessibility::default())
+                    .metrics
+                    .header;
+                assert_eq!(
+                    e.panel_header_rect("inspector").unwrap().y,
+                    e.panel_header_rect("easing").unwrap().y - h
+                );
+            })
+            .unwrap();
+    });
+}
+
+#[test]
+fn sticky_header_click_switches_tabs_headlessly() {
+    objc2::rc::autoreleasepool(|_| {
+        let mut cx = context();
+        let window = cx
+            .open_window(size(px(1000.), px(600.)), |_, cx| {
+                cx.new(|cx| {
+                    let mut e = Editor::new(
+                        Tokens::new(Scheme::Dark, Accessibility::default()),
+                        None,
+                        cx,
+                    );
+                    tall(&mut e);
+                    let right = e.layout.docks.iter().position(|d| d.id == "right").unwrap();
+                    let left = e.layout.docks.iter().position(|d| d.id == "left").unwrap();
+                    e.layout.docks[left].groups = e.layout.docks[right].groups.clone();
+                    e.layout.docks[left].groups[0].tabs =
+                        vec!["assets".into(), "layer-effects".into()];
+                    e.layout.docks[left].groups[0].active = 1;
+                    e.layout.docks[right].groups.truncate(1);
+                    e
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let top = window
+            .update(&mut cx, |e, _, _| e.panel_rect("layer-effects").unwrap())
+            .unwrap();
+        window
+            .update(&mut cx, |e, _, cx| {
+                e.scroll_dock("left", 100.);
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let position = point(px(top.x + 45.), px(top.y + 14.));
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(
+                gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+            w.dispatch_event(
+                gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position,
+                    click_count: 1,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        window
+            .update(&mut cx, |e, _, _| {
+                let (d, g, _) = e.layout.find("assets").unwrap();
+                assert_eq!(e.layout.docks[d].groups[g].active(), "assets");
+            })
+            .unwrap();
+    });
+}
+
+#[test]
+fn sticky_header_light_and_dark_crops() {
+    let Ok(dir) = std::env::var("PM_DOCK_CAPTURE_DIR") else { return };
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, scheme) in [("light", Scheme::Light), ("dark", Scheme::Dark)] {
+        objc2::rc::autoreleasepool(|_| {
+            let mut cx = context();
+            let window = cx.open_window(size(px(1000.), px(600.)), |_, cx| {
+                cx.new(|cx| {
+                    let mut e = Editor::new(Tokens::new(scheme, Accessibility::default()), None, cx);
+                    tall(&mut e);
+                    e
+                })
+            }).unwrap();
+            cx.run_until_parked();
+            let panel = window.update(&mut cx, |e, _, _| e.panel_rect("inspector").unwrap()).unwrap();
+            let header = Tokens::new(scheme, Accessibility::default()).metrics.header;
+            for state in ["top", "pinned", "push", "next"] {
+                let by = match state {
+                    "pinned" => 100.,
+                    "push" => window.update(&mut cx, |e, _, _| {
+                        e.panel_rect("easing").unwrap().y - panel.y - header / 2.
+                    }).unwrap(),
+                    "next" => header,
+                    _ => 0.,
+                };
+                window.update(&mut cx, |e, _, cx| { e.scroll_dock("right", by); cx.notify(); }).unwrap();
+                cx.run_until_parked();
+                let image = cx.capture_screenshot(window.into()).unwrap();
+                let scale = image.width() as f32 / 1000.;
+                image::imageops::crop_imm(&image, (panel.x * scale) as u32, 0,
+                    (panel.w * scale) as u32, image.height()).to_image()
+                    .save(std::path::Path::new(&dir).join(format!("{name}-sticky-{state}.png"))).unwrap();
+            }
+        });
+    }
+}
