@@ -23,6 +23,7 @@ pub fn clip(id: &str) -> Clip {
         media: Media::Ready,
         audio: None,
         muted: false,
+        level: None,
         trim: None,
         missing_effect: None,
         cues: vec![],

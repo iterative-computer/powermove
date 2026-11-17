@@ -187,6 +187,8 @@ pub struct Clip {
     pub audio: Option<Option<Waveform>>,
     /// Its audio is muted: the waveform dims.
     pub muted: bool,
+    /// An audio clip's level line: its gain and fades.
+    pub level: Option<Level>,
     pub trim: Option<Edge>,
     /// The first missing extension effect: the clip carries a quiet badge.
     pub missing_effect: Option<String>,
@@ -219,6 +221,16 @@ pub struct Waveform {
     /// A retimed or reversed clip's media time, sampled evenly over the
     /// clip (`crate::waveform::mapped`); `None`: the trim, at speed 1.
     pub map: Option<std::sync::Arc<[f64]>>,
+}
+/// An audio clip's level as its line draws it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Level {
+    /// 1 = 0 dB (0–4).
+    pub gain: f64,
+    pub fade_in: f64,
+    pub fade_out: f64,
+    /// The gain is keyed: the line shows its base value.
+    pub animated: bool,
 }
 impl Waveform {
     /// A mono clip from its peaks per bucket (`rate` a second), its loudness
@@ -489,6 +501,7 @@ impl Scene {
                                     media: p.media(layer),
                                     audio: p.waveform(layer),
                                     muted: layer.audio_muted,
+                                    level: level_of(layer),
                                     trim: None,
                                     missing_effect: layer.missing_effects.first().cloned(),
                                     cues: p.cues(layer),
@@ -542,6 +555,7 @@ impl Scene {
                     media: p.media(layer),
                     audio: p.waveform(layer),
                     muted: layer.audio_muted,
+                    level: level_of(layer),
                     trim: None,
                     missing_effect: layer.missing_effects.first().cloned(),
                     cues: p.cues(layer),
@@ -1496,6 +1510,15 @@ fn minor_step(label_step: f64, pps: f64, fps: f64, frames: bool) -> Option<f64> 
         .map(|n| label_step / n)
         .find(|step| step * pps >= MINOR_ROOM)
 }
+/// An audio layer's level line.
+fn level_of(layer: &crate::Layer) -> Option<Level> {
+    (layer.kind == "audio").then_some(Level {
+        gain: layer.gain,
+        fade_in: layer.fade_in,
+        fade_out: layer.fade_out,
+        animated: layer.gain_animated,
+    })
+}
 /// A muted clip's waveform: dimmed, still there.
 const WAVEFORM_MUTED: f64 = 0.4;
 /// A row this tall (points) shows a stereo clip's two sides apart.
@@ -1801,6 +1824,9 @@ fn paint_clip(
         }
         o.detail = detail;
         ops.push(o);
+        if let Some(level) = c.level {
+            ops.push(level_line(c, level, r, v, inset, material.foreground, strength));
+        }
     } else {
         let mut o = Op::new(
             format!("clip-content:{}", c.id),
@@ -2745,4 +2771,43 @@ pub fn display_kind<'a>(kind: &'a str, definition: Option<&str>) -> &'a str {
         ("extension", Some("powermove.3d.camera")) => "camera3d",
         _ => kind,
     }
+}
+
+/// An audio clip's level line (Premiere's clip volume line): flat at its
+/// gain on the Mixer's fader law, rising from the floor over its fade in and
+/// falling over its fade out; `r` is the part of the strip inside the glass.
+/// A press near its flat part drags the gain.
+fn level_line(c: &Clip, level: Level, r: Rect, v: Viewport, inset: f64, light: u32, strength: f64) -> Op {
+    let top = r.y + inset;
+    let room = (r.height - 2. * inset).max(0.);
+    let floor = top + room;
+    let pos = crate::level::fader_position(crate::level::gain_db(level.gain));
+    let y = top + (1. - pos) * room;
+    let (start, end) = (v.x(c.from), v.x(c.from + c.duration));
+    let fade_in = (level.fade_in * v.pps).min(end - start);
+    let fade_out = (level.fade_out * v.pps).min(end - start - fade_in);
+    let mut points = vec![];
+    if fade_in > 0. {
+        points.push([start, floor]);
+    }
+    points.push([start + fade_in, y]);
+    points.push([end - fade_out, y]);
+    if fade_out > 0. {
+        points.push([end, floor]);
+    }
+    let mut o = Op::new(format!("level:{}", c.id), "levelline", r, light);
+    o.opacity = strength * if c.muted { 0.4 } else { 0.85 };
+    o.clip = Some(r);
+    o.detail = json!({
+        "points": points,
+        "y": y,
+        "from": (start + fade_in).max(r.x),
+        "to": (end - fade_out).min(r.x + r.width),
+        "gain": level.gain,
+        "room": room,
+        "db": crate::level::format_db(crate::level::gain_db(level.gain)),
+        "animated": level.animated,
+        "cursor": "resizeUpDown",
+    });
+    o
 }

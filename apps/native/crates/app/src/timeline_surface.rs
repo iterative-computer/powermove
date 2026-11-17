@@ -175,6 +175,13 @@ enum Spec {
         band: pm_panel_timeline::stagger::Band,
         end: bool,
     },
+    /// An audio clip's level line: its gain's place on the fader law when
+    /// pressed, and the height (points) the law spans.
+    Gain {
+        layer: String,
+        start: f64,
+        room: f64,
+    },
 }
 /// A transform box drag (v1's `dragGraphTransform`): the selected keys'
 /// span when the grip was pressed, which grip, and whether ⌘ scales about
@@ -326,6 +333,8 @@ enum Gesture {
         quick_limits: Vec<(f64, f64)>,
         /// A handle drag: its key's layer start, for layer-local handle times.
         handle: Option<f64>,
+        /// A level-line drag: the height the fader law spans.
+        gain_room: Option<f64>,
     },
     /// A ruler scrub and the frame time it last sought.
     Scrub(Scrub, f64),
@@ -1908,6 +1917,24 @@ impl TimelineSurface {
                 return;
             }
         }
+        // The level line of an audio clip: a press on it drags the gain.
+        if let Some((layer, start, room)) = level_line_at(&frame, x, y)
+            && !self
+                .model
+                .index
+                .layer(&layer)
+                .is_some_and(|l| l.effectively_locked)
+        {
+            self.queue
+                .push_back(Job::SelectLayer(layer.clone(), Mods::default()));
+            self.gesture = Gesture::Pressed(Press {
+                origin: event.position,
+                spec: Some(Spec::Gain { layer, start, room }),
+                release: None,
+            });
+            self.pump(cx);
+            return;
+        }
         if let Some((layer, edge)) = frame.hit_clip(x, y) {
             let layer = layer.to_owned();
             if self
@@ -2511,6 +2538,10 @@ impl TimelineSurface {
                         .map(|(l, _, _)| l.from),
                     _ => None,
                 };
+                let gain_room = match &spec {
+                    Spec::Gain { room, .. } => Some(*room),
+                    _ => None,
+                };
                 let time = self.delegate.time(cx);
                 // v1: a clip being moved is held (grabbing).
                 if matches!(spec, Spec::Layers | Spec::Duplicate) {
@@ -2524,6 +2555,7 @@ impl TimelineSurface {
                     quick,
                     quick_limits,
                     handle,
+                    gain_room,
                 };
             }
             _ => {}
@@ -2536,7 +2568,9 @@ impl TimelineSurface {
                 quick,
                 quick_limits,
                 handle,
+                gain_room,
             } => {
+                let gain_room = *gain_room;
                 if let Some((at, total, _)) = quick {
                     *at = event.position;
                     *total = f32::from(event.position.x - origin.x) as f64 / self.view.pps;
@@ -2550,6 +2584,9 @@ impl TimelineSurface {
                 }
                 let (origin, proedit, readout, handle) = (*origin, *proedit, *readout, *handle);
                 let mut sample = self.sample(origin, event.position, event.modifiers, cx);
+                if let Some(room) = gain_room.filter(|r| *r > 0.) {
+                    sample.value_delta = -(f32::from(event.position.y - origin.y) as f64) / room;
+                }
                 if let (Some(layer_from), Some(area), Some(graph)) =
                     (handle, self.graph_area(), self.graph.as_ref())
                 {
@@ -3269,6 +3306,9 @@ impl TimelineSurface {
             CursorStyle::OpenHand
         } else if x >= self.view.layer_column && (0. ..m.ruler as f64).contains(&y) {
             CursorStyle::ResizeLeftRight
+        } else if self.frame.as_ref().is_some_and(|f| level_line_at(f, x, y).is_some()) {
+            // The level line moves up and down.
+            CursorStyle::ResizeUpDown
         } else if self.frame.as_ref().is_some_and(|f| f.hit_layer_key_across(x, y, KEY_REACH, m.row as f64).is_some()) {
             // The owner's rule: no pointing hand; a key keeps the arrow.
             CursorStyle::Arrow
@@ -3842,6 +3882,7 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
                 time,
             }
         }
+        Spec::Gain { layer, start, .. } => DragKind::Gain { layer, start },
         Spec::WorkIn => DragKind::WorkIn,
         Spec::WorkOut => DragKind::WorkOut,
         Spec::WorkMove => DragKind::WorkMove,
@@ -5622,6 +5663,27 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 }
             }
         }
+        // An audio clip's level line: a hairline in its pale tint.
+        "levelline" => {
+            let Some(points) = op.detail["points"].as_array() else {
+                return;
+            };
+            let mut path = PathBuilder::stroke(px(1.));
+            for (i, p) in points.iter().enumerate() {
+                let (Some(x), Some(y)) = (p[0].as_f64(), p[1].as_f64()) else {
+                    continue;
+                };
+                let at = at(x, y);
+                if i == 0 {
+                    path.move_to(at);
+                } else {
+                    path.line_to(at);
+                }
+            }
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        }
         "text" => {
             let Some(text) = &op.text else {
                 return;
@@ -6051,4 +6113,24 @@ fn smooth_line(values: &[f32], x: &dyn Fn(usize) -> f32, y: impl Fn(f32) -> f32)
     path.move_to(point(px(x(0)), px(y(values[0]))));
     waveform_outline(&mut path, values, x, &y);
     path.build().ok()
+}
+
+/// The audio clip whose level line (its flat part) is under `x, y`: its
+/// layer, its gain's place on the fader law and the law's height.
+fn level_line_at(frame: &pm_panel_timeline::render::Frame, x: f64, y: f64) -> Option<(String, f64, f64)> {
+    const REACH: f64 = 4.;
+    frame.ops.iter().rev().find_map(|op| {
+        if op.shape != "levelline" {
+            return None;
+        }
+        let d = &op.detail;
+        let (line, from, to) = (d["y"].as_f64()?, d["from"].as_f64()?, d["to"].as_f64()?);
+        if (y - line).abs() > REACH || x < from || x > to {
+            return None;
+        }
+        let start = pm_panel_timeline::level::fader_position(pm_panel_timeline::level::gain_db(
+            d["gain"].as_f64()?,
+        ));
+        Some((op.id.strip_prefix("level:")?.to_owned(), start, d["room"].as_f64()?))
+    })
 }

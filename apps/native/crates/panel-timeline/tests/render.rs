@@ -640,6 +640,30 @@ fn audio_clips_draw_perceptual_columns_from_their_trimmed_media() {
     let wave = f.ops.iter().find(|o| o.id == "clip-content:a").unwrap();
     assert!(wave.opacity < 0.5 && wave.detail["peak"].as_str().is_some());
     audio.muted = false;
+    // The level line: 0 dB sits 72 % up the room (the Mixer's law), a fade
+    // in rises from the floor to it; it dims with the clip's mute.
+    audio.level = Some(Level {
+        gain: 1.,
+        fade_in: 1.,
+        fade_out: 0.,
+        animated: false,
+    });
+    let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
+    let line = f.ops.iter().find(|o| o.id == "level:a").unwrap();
+    assert_eq!(line.shape, "levelline");
+    let room = line.detail["room"].as_f64().unwrap();
+    let points = line.detail["points"].as_array().unwrap();
+    let floor = points[0][1].as_f64().unwrap();
+    let y = line.detail["y"].as_f64().unwrap();
+    assert!((floor - y - 0.72 * room).abs() < 1e-6, "0 dB at 72 % of {room}");
+    assert_eq!(points[1][1].as_f64().unwrap(), y, "the fade in rises to the level");
+    assert_eq!(line.detail["db"], "0.0");
+    audio.muted = true;
+    let f = scene_with(&t, audio.clone()).prepare(v, &t).unwrap();
+    let dim = f.ops.iter().find(|o| o.id == "level:a").unwrap();
+    assert!(dim.opacity < line.opacity);
+    audio.muted = false;
+    audio.level = None;
     // Offline audio names itself with the Offline lead instead.
     audio.media = Media::Offline;
     let f = scene_with(&t, audio).prepare(v, &t).unwrap();

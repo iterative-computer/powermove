@@ -634,6 +634,37 @@ fn work_out_drag_extends_live_keeps_peak_and_undo_restores_duration() {
     assert_eq!(c.model.index.duration, 10.);
     assert_eq!(c.model.index.work, [1., 9.]);
 }
+/// An audio clip's level line drags its gain along the Mixer's fader law,
+/// live, in one Undo step labelled as the Mixer labels it (PM-492).
+#[test]
+fn the_level_line_drags_an_audio_clips_gain() {
+    let project = parse(r##"{"id":"P","name":"p","compId":"c","w":640,"h":360,"fps":30,"dur":10,"bg":"#000000","assets":{"x":{"id":"x","name":"a.wav","kind":"audio","dur":5}},"comps":{},"layers":[{"id":"m","type":"audio","name":"a.wav","from":0,"dur":5,"d":{"asset":"x","trim":0,"gain":1,"fadeIn":0.5,"fadeOut":0}}]}"##).unwrap();
+    let (_a, mut c) = client_with(project);
+    let layer = c.model.index.layer("m").unwrap();
+    assert_eq!((layer.gain, layer.fade_in, layer.gain_animated), (1., 0.5, false));
+    let start = pm_panel_timeline::level::fader_position(0.);
+    block_on(c.begin_drag(DragKind::Gain {
+        layer: "m".into(),
+        start,
+    }))
+    .unwrap();
+    for up in [0.05, 0.1, 0.14] {
+        block_on(c.drag(DragSample {
+            value_delta: up,
+            ..sample(0.)
+        }))
+        .unwrap();
+    }
+    // 0.72 + 0.14 on the law is +6 dB.
+    let gain = c.model.index.layer("m").unwrap().gain;
+    assert!((pm_panel_timeline::level::gain_db(gain) - 6.).abs() < 1e-6, "{gain}");
+    block_on(c.finish_drag(true)).unwrap();
+    let published = c.kernel.published("P").unwrap();
+    assert_eq!(published.history.entries, 1);
+    assert_eq!(published.history.undo_label.as_deref(), Some("Gain"));
+    undo(&mut c);
+    assert_eq!(c.model.index.layer("m").unwrap().gain, 1.);
+}
 #[test]
 fn work_move_clamps_as_rigid_range() {
     let m = model(fixture());

@@ -1046,6 +1046,13 @@ pub enum DragKind {
     WorkIn,
     WorkOut,
     WorkMove,
+    /// An audio clip's level line: `start` is the gain's place on the fader
+    /// law (0 floor, 1 top) when the drag began; the sample's `value_delta`
+    /// moves it (a share of the clip's height).
+    Gain {
+        layer: String,
+        start: f64,
+    },
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DragSample {
@@ -1250,6 +1257,18 @@ impl Drag {
                     model.require_channel(l, c)?;
                 }
             }
+            DragKind::Gain { layer, start } => {
+                finite(*start)?;
+                let l = index
+                    .layer(layer)
+                    .ok_or_else(|| ModelError::UnknownId(layer.clone()))?;
+                if l.effectively_locked {
+                    return Err(ModelError::Locked(l.id.clone()));
+                }
+                if l.kind != "audio" {
+                    return Err(ModelError::UnknownId(layer.clone()));
+                }
+            }
             _ => {}
         }
         let mut anchors = Vec::new();
@@ -1431,6 +1450,8 @@ impl Drag {
                 _ => "Edit Properties".into(),
             },
             DragKind::WorkMove => "Move Work Area".into(),
+            // The Mixer names an audio layer's level edit the same.
+            DragKind::Gain { .. } => "Gain".into(),
             _ => "Work Area".into(),
         }
     }
@@ -1902,6 +1923,20 @@ impl Drag {
                             work_area: Some((a, b)),
                             ..Default::default()
                         }),
+                    }
+                    .into(),
+                );
+            }
+            DragKind::Gain { layer, start } => {
+                let at = (start + sample.value_delta).clamp(0., 1.);
+                let gain = crate::level::db_gain(crate::level::fader_db(at));
+                let mut patch = pm_model::Map::new();
+                patch.insert("gain", Value::Number(gain));
+                out.push(
+                    pm_kernel::ContentCommand::Set {
+                        layer_id: layer.clone(),
+                        patch,
+                        time: sample.playhead,
                     }
                     .into(),
                 );
