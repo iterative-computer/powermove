@@ -744,6 +744,7 @@ globalThis.__compat = {
         this.dom.document,
         this.realm.kernel.inspectorSections,
         () => [...this.realm.PM.sel.layers],
+        globalThis.__compatWindowless === true,
       );
     if (this.panels)
       this.realm.PM.bus.on("sel", () => this.panels.selectionChanged());
