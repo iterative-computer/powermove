@@ -458,6 +458,11 @@ impl Controller {
         else {
             return (Kept::Nothing, None);
         };
+        // A window not shown keeps its picture as it hides (`follow_shown`)
+        // and settles none meanwhile: nothing to look at again.
+        if !pm_shell::window_shown(&self.host.borrow().window) {
+            return (Kept::Nothing, None);
+        }
         let (project, doc) = (session.project.clone(), published.snapshot.doc_id);
         let status = viewer.status();
         let (Some(frame), Some(picture)) = (status.frame, status.settled_picture) else {
@@ -522,16 +527,10 @@ impl Controller {
         let Some(frame) = frame else {
             return;
         };
-        let shown = (frame.stamp.revision, frame.time.get(), frame.settled);
-        let watch = &mut self.last_frame_watch;
-        if watch.shown.is_some_and(|(was, _)| was == shown) {
-            return;
+        let now = std::time::Instant::now();
+        if self.last_frame_watch.saw(frame.stamp.revision, frame.time.get(), now) {
+            self.look_still_after(crate::poster::LAST_FRAME_STILL, cx);
         }
-        watch.shown = Some((shown, std::time::Instant::now()));
-        if std::mem::replace(&mut watch.watching, true) {
-            return;
-        }
-        self.look_still_after(crate::poster::LAST_FRAME_STILL, cx);
     }
     /// The still picture's watch: looks after `wait`, then as `look_still` says.
     fn look_still_after(&mut self, wait: std::time::Duration, cx: &mut Context<Self>) {
@@ -552,9 +551,13 @@ impl Controller {
     fn look_still(&mut self, cx: &mut Context<Self>) -> Option<std::time::Duration> {
         let now = std::time::Instant::now();
         let watch = &self.last_frame_watch;
-        let held = watch.shown.map_or(Default::default(), |(_, at)| now - at);
+        let held = watch.held(now);
         let since = watch.stored.map(|at| now - at);
         let busy = self.playing() || self.settling.is_some() || self.awaiting_extension_effects();
+        if busy && crate::diag::enabled() {
+            crate::diag::line(serde_json::json!({"last_frame": "busy", "playing": self.playing(),
+                "settling": self.settling.is_some(), "awaiting": self.awaiting_extension_effects()}));
+        }
         match crate::poster::still(held, since, watch.writing, busy) {
             crate::poster::Still::Wait(next) => Some(next),
             crate::poster::Still::Store => {

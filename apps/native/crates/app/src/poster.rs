@@ -372,15 +372,33 @@ pub(crate) fn look_again(kept: &Kept) -> Option<std::time::Duration> {
 /// The watch over the picture the viewer shows, for the last frame.
 #[derive(Default)]
 pub(crate) struct StillWatch {
-    /// The picture shown (its revision, time and whether it settled) and
-    /// since when.
-    pub shown: Option<((u64, i64, bool), std::time::Instant)>,
+    /// The picture shown (its revision and time) and since when.
+    pub shown: Option<((u64, i64), std::time::Instant)>,
     /// A watch is waiting for the picture to hold.
     pub watching: bool,
     /// A picture is being written.
     pub writing: bool,
     /// When the last one was kept.
     pub stored: Option<std::time::Instant>,
+}
+impl StillWatch {
+    /// The viewer reported the picture of `revision` at `time`: whether a
+    /// watch starts for it. The same picture reported again holds on, also
+    /// when the report turns settled or back (a paused picture does that
+    /// while the project's effects load): whether it settled is asked when
+    /// it is kept (`Kept::NotYet`), not here.
+    pub(crate) fn saw(&mut self, revision: u64, time: i64, now: std::time::Instant) -> bool {
+        let shown = (revision, time);
+        if self.shown.is_some_and(|(was, _)| was == shown) {
+            return false;
+        }
+        self.shown = Some((shown, now));
+        !std::mem::replace(&mut self.watching, true)
+    }
+    /// How long the picture shown has held, at `now`.
+    pub(crate) fn held(&self, now: std::time::Instant) -> std::time::Duration {
+        self.shown.map_or(Default::default(), |(_, at)| now - at)
+    }
 }
 /// Whether the stored last frame already shows `mark`.
 pub(crate) fn last_frame_current(profile: &Path, id: &str, mark: &str) -> bool {
@@ -444,8 +462,6 @@ mod tests {
         out
     }
 
-    /// A last frame is current only for the revision and time it shows; a
-    /// close or save with another one keeps it again (PM-384).
     /// A picture that could not be kept yet (still loading, not settled on
     /// the frame shown) is looked at again; one kept, current or with no
     /// project is not. Before, a watch that found it not ready stopped, and
@@ -457,6 +473,33 @@ mod tests {
             assert_eq!(look_again(&done), None, "{done:?}");
         }
     }
+    /// A paused picture whose report turns settled and back as the
+    /// project's effects load (every second or two, for the first 25 s of
+    /// Paper) still holds, and is kept 4 s after it was first shown. Before,
+    /// each turn started the hold again, so a busy session kept nothing and
+    /// a launch after a kill opened on grey (PM-384).
+    #[test]
+    fn a_picture_reported_settled_and_back_still_holds() {
+        use std::time::{Duration, Instant};
+        let ms = Duration::from_millis;
+        let start = Instant::now();
+        let mut watch = StillWatch::default();
+        assert!(watch.saw(1, 900, start), "the first picture starts a watch");
+        // The trace's reports of that picture, settled and not in turn.
+        for at in [1675, 3350, 5166, 5914, 6878] {
+            assert!(!watch.saw(1, 900, start + ms(at)), "the same picture again");
+        }
+        let looked = start + ms(7000);
+        assert_eq!(watch.held(looked), ms(7000));
+        assert_eq!(still(watch.held(looked), None, false, false), Still::Store);
+        // Another time or revision holds from when it is shown.
+        assert!(!watch.saw(1, 1200, looked), "a watch is already waiting");
+        assert_eq!(watch.held(looked + ms(500)), ms(500));
+        assert!(!watch.saw(2, 1200, looked + ms(600)));
+        assert_eq!(watch.held(looked + ms(700)), ms(100));
+    }
+    /// A last frame is current only for the revision and time it shows; a
+    /// close or save with another one keeps it again (PM-384).
     #[test]
     fn a_last_frame_is_current_for_its_revision_and_time() {
         let profile = std::env::temp_dir().join(format!("pm-last-frame-{}", std::process::id()));
