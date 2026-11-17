@@ -220,7 +220,7 @@ impl Node {
             Resolved::Limiter { .. } => {
                 let peak = input[0].abs().max(input[1].abs());
                 let reduction = if peak > c[0] { 1.0 - c[0] / peak } else { 0.0 };
-                self.reduction = reduction.max(c[1] * self.reduction);
+                self.reduction = clean(reduction.max(c[1] * self.reduction));
                 out.iter_mut()
                     .for_each(|v| *v = (*v * (1.0 - self.reduction)).clamp(-c[0], c[0]));
             }
@@ -521,4 +521,27 @@ pub fn builtin_registry() -> Registry {
         .iter()
         .map(|d| (d.definition().id.clone(), d.clone()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn limiter_release_flushes_its_envelope_before_denormals() {
+        let mut node = Node::new(
+            Resolved::Limiter {
+                ceiling: -6.0,
+                release: 0.001,
+            },
+            48_000,
+        );
+        node.process([1.0; 2]);
+        assert!(node.reduction > 0.0);
+        for _ in 0..48_000 {
+            node.process([0.0; 2]);
+        }
+        assert_eq!(node.reduction, 0.0);
+        assert!(!node.failed);
+    }
 }
