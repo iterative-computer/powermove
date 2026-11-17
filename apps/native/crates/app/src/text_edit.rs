@@ -1197,22 +1197,6 @@ impl GizmoSurface {
         }
     }
 }
-fn text_tool_duration(p: &pm_kernel::Published, time: f64) -> Option<f64> {
-    if p.ui_state.timeline.get("mode").and_then(Value::as_str) != Some("tracks") {
-        return None;
-    }
-    let root = p.snapshot.root()?;
-    let comp_id = pm_kernel::model::open_comp_id(root);
-    let comp = pm_kernel::model::comp_node(root, comp_id.as_deref())?;
-    let duration = comp.get("dur").and_then(|node| node.to_value().as_f64())?;
-    let fps = comp
-        .get("fps")
-        .and_then(|node| node.to_value().as_f64())
-        .unwrap_or(30.)
-        .max(1.);
-    Some((duration - time).min(5.).max(1. / fps))
-}
-
 /// The new layer and, for a paragraph, its box (viewer.ts `startText`).
 fn add_text(
     published: &pm_kernel::Published,
@@ -1253,7 +1237,7 @@ fn add_text(
         comp: None,
         name: Some("Text".into()),
         from: None,
-        duration: text_tool_duration(published, time),
+        duration: crate::layer_commands::text_layer_duration(published, time),
         content,
         properties,
         color: None,
@@ -1624,13 +1608,23 @@ mod tests {
     use super::{Align, Layout, Line, first_line, paragraph_range, word_range};
     #[test]
     fn g3_text_default_is_per_mode_and_clamped_to_comp_end() {
+        fn duration(p: &pm_kernel::Published, commands: &[pm_kernel::Command]) -> f64 {
+            let pm_kernel::Command::Layer(pm_kernel::LayerCommand::Add(add)) = &commands[0] else { panic!("text add"); };
+            let mut store = pm_kernel::DocumentStore::new_untitled(p.snapshot.root().unwrap().to_value());
+            store.transact("Text", pm_kernel::Origin::Interface, commands).unwrap();
+            let root = store.root().unwrap();
+            let loc = pm_kernel::model::find_layer(root, &add.id).unwrap();
+            pm_kernel::model::layer_at(root, &loc).unwrap().get("dur").unwrap().to_value().as_f64().unwrap()
+        }
         let rig = crate::v4_view_tests::rig("timeline", 0);
         let mut p = (*rig.kernel.published(crate::v4_view_tests::PROJECT).unwrap()).clone();
-        for (mode, time, expected) in [("layers", 2., None), ("tracks", 2., Some(5.)), ("tracks", 8., Some(2.))] {
+        for (mode, time, expected) in [("layers", 2., 8.), ("tracks", 2., 5.), ("tracks", 8., 2.), ("layers", 10. - 1. / 30., 1. / 30.)] {
             p.ui_state.timeline = pm_model::json::parse(&format!(r#"{{"mode":"{mode}"}}"#)).unwrap();
             let commands = super::add_text(&p, "title", [0., 0.], None, time);
-            let pm_kernel::Command::Layer(pm_kernel::LayerCommand::Add(add)) = &commands[0] else { panic!("text add"); };
-            assert_eq!(add.duration, expected);
+            assert!((duration(&p, &commands) - expected).abs() < 1e-8);
+            let plan = crate::layer_commands::command_plan("newText", &[], &p, time).unwrap();
+            let menu_expected = if mode == "layers" { expected.max(1.) } else { expected };
+            assert!((duration(&p, &plan.commands) - menu_expected).abs() < 1e-8);
         }
     }
     fn layout() -> Layout {
