@@ -773,6 +773,32 @@ fn watchdog_wait_then_explicit_stop_recreates_and_seals() {
     assert!(f.kernel.sealed.lock().unwrap().contains(&first.generation));
     close(&r);
 }
+/// A task waiting without using a CPU (as a realm does when a busy machine
+/// doesn't schedule it) is not taken for a hang until the backstop.
+#[test]
+fn a_task_that_waits_off_cpu_is_not_asked_about() {
+    let f = fixture();
+    let r = f.pool.realm(RealmKind::Compat).unwrap();
+    // 200 ms off-CPU: past the 80 ms prompt, short of the 320 ms backstop.
+    let waited = eval(
+        &r,
+        "const a=new Int32Array(new SharedArrayBuffer(4));Atomics.wait(a,0,0,200)",
+    );
+    assert_eq!(waited, "timed-out");
+    assert_eq!(f.watch.notices.load(Ordering::Relaxed), 0);
+    assert_eq!(f.watch.prompts.load(Ordering::Relaxed), 0);
+    // Past the backstop a stuck wait is asked about.
+    let stuck = r
+        .eval("const b=new Int32Array(new SharedArrayBuffer(4));Atomics.wait(b,0,0,1000)")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while f.watch.prompts.load(Ordering::Relaxed) == 0 {
+        assert!(Instant::now() < deadline, "no prompt past the backstop");
+        thread::sleep(Duration::from_millis(3));
+    }
+    let _ = wait(stuck);
+    close(&r);
+}
 #[test]
 fn watchdog_prompt_stop_and_microtask_runaway() {
     let f = fixture();
