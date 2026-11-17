@@ -864,6 +864,11 @@ struct Owner {
     surface: Option<Entity<GizmoSurface>>,
     overlays: usize,
 }
+impl gpui::Render for Owner {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        gpui::div()
+    }
+}
 struct OwnerHost(gpui::WeakEntity<Owner>);
 impl Host for OwnerHost {
     fn time(&self, cx: &App) -> f64 {
@@ -891,6 +896,67 @@ impl Host for OwnerHost {
     fn navigate(&self, _: Navigate, _: &mut App) {}
     fn layer_menu(&self, _: Option<String>, _: &mut gpui::Window, _: &mut App) {}
     fn report(&self, _: String, _: &mut App) {}
+    fn pause(&self, cx: &mut App) {
+        // As the app's: it reads the owner to reach the viewer.
+        if let Some(o) = self.0.upgrade() {
+            o.read(cx);
+        }
+    }
+}
+/// Acceptance run 26 (PM-480, 2 of 2): Return with a text layer selected,
+/// from the controller's own command. The edit reads the controller (the
+/// time, pausing playback) through the host: run inside the owner's update
+/// it aborted the app; it starts once that update is over.
+#[gpui::test]
+fn return_on_a_selected_text_during_the_owners_update_never_reads_it_while_leased(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig_project(
+        "viewer",
+        &project_of("text").replace(r#""d":{"w":100,"h":100}"#, r#""d":{"text":"Hi"}"#),
+    );
+    let select = SelectionCall::Layers {
+        ids: vec!["l0".into()],
+        add: false,
+    };
+    rig.kernel
+        .call(PROJECT, Request::new(Caller::native(), select))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let kernel = rig.kernel.clone();
+    cx.executor().allow_parking();
+    let (owner, vcx) = cx.add_window_view(|_, _| Owner {
+        surface: None,
+        overlays: 0,
+    });
+    let weak = owner.downgrade();
+    let surface = vcx.new(|_| {
+        GizmoSurface::new(kernel, PROJECT.into(), tokens(), Rc::new(OwnerHost(weak)))
+    });
+    owner.update(vcx, |o, _| o.surface = Some(surface.clone()));
+    // Controller::command("text.editSelected"), under the owner's lease.
+    let edits = owner.update_in(vcx, |o, window, cx| {
+        let surface = o.surface.clone().unwrap();
+        crate::gizmo::text::edit_selected_text_after(surface, window, cx)
+    });
+    assert!(edits, "one unlocked text layer is selected");
+    vcx.run_until_parked();
+    let open = surface.clone();
+    settle(cx, move |cx| open.read_with(cx, |g, _| g.text_open().is_some()));
+}
+/// Acceptance run 26 (PM-480): digits typed for a number field that did not
+/// take the click turned the view 3D (0) and orbited it. View ▸ 3D's keys
+/// act only while the 3D view has the keyboard, in Free View; elsewhere
+/// digits do what v1's did. Fly Navigation's key is not a digit.
+#[test]
+fn digits_reach_the_3d_view_only_while_it_has_the_keyboard_in_free_view() {
+    assert!(!crate::gizmo::studio_key("nav", true, true, false));
+    assert!(!crate::gizmo::studio_key("look", true, true, false), "0 never turns 3D on by key");
+    assert!(!crate::gizmo::studio_key("nav", false, true, true), "the 3D view has no keyboard");
+    assert!(crate::gizmo::studio_key("nav", true, true, true));
+    assert!(crate::gizmo::studio_key("look", true, true, true), "0 leaves Free View");
+    assert!(crate::gizmo::studio_key("fly", true, true, false));
 }
 #[gpui::test]
 fn refreshing_during_the_owners_update_never_reads_it_while_leased(cx: &mut TestAppContext) {
@@ -1112,7 +1178,9 @@ fn channel(layer: &pm_model::Value, mask: bool, key: &str) -> Option<f64> {
     owner.get("p")?.get(key)?.get("v")?.as_f64()
 }
 /// Shape tool over a selected shape layer: the drag draws a new shape layer
-/// whose Scale is the drawn size, selected, in one undo step.
+/// of the drawn size at Scale 100% (After Effects; v1 drew a 100 px shape
+/// scaled to it, which stretched strokes and corners), selected, in one
+/// undo step.
 #[gpui::test]
 fn the_shape_tool_draws_a_shape_layer_from_a_drag(cx: &mut TestAppContext) {
     let mut s = stage_on(cx, &project_of("shape"));
@@ -1132,11 +1200,30 @@ fn the_shape_tool_draws_a_shape_layer_from_a_drag(cx: &mut TestAppContext) {
     );
     assert_eq!(channel(&layer, false, "position.x"), Some(330.));
     assert_eq!(channel(&layer, false, "position.y"), Some(220.));
-    assert_eq!(channel(&layer, false, "scale.x"), Some(60.));
-    assert_eq!(channel(&layer, false, "scale.y"), Some(40.));
+    assert_eq!(channel(&layer, false, "scale.x").unwrap_or(100.), 100.);
+    assert_eq!(channel(&layer, false, "scale.y").unwrap_or(100.), 100.);
+    let content = |key: &str| layer.get("d")?.get(key)?.as_f64();
+    assert_eq!((content("w"), content("h")), (Some(60.), Some(40.)));
+    s.refresh(cx);
+    let corners = s.pose().corners;
+    assert_eq!((corners[0], corners[2]), ([300., 200.], [360., 240.]), "where it was drawn");
     let undo = Request::new(Caller::native(), Call::History(HistoryCall::Undo));
     s.rig.kernel.call(PROJECT, undo).wait().unwrap().unwrap();
     assert!(layer_value(&s.rig.kernel, &id).is_none(), "one undo step");
+}
+/// A shape v1 drew (a 100 px source scaled to the drawn size) opens and
+/// stands exactly where it did: only newly drawn shapes changed.
+#[gpui::test]
+fn a_shape_v1_drew_stands_where_it_did(cx: &mut TestAppContext) {
+    let v1 = project_of("shape")
+        .replace(r#""position.x":{"v":200,"#, r#""position.x":{"v":330,"#)
+        .replace(r#""position.y":{"v":150,"#, r#""position.y":{"v":220,"#)
+        .replace(r#""scale.x":{"v":100,"#, r#""scale.x":{"v":60,"#)
+        .replace(r#""scale.y":{"v":100,"#, r#""scale.y":{"v":40,"#);
+    let s = stage_on(cx, &v1);
+    let pose = s.pose();
+    assert_eq!(pose.scale, [60., 40.]);
+    assert_eq!((pose.corners[0], pose.corners[2]), ([300., 200.], [360., 240.]));
 }
 /// With a maskable layer selected the drawn box becomes a mask on it.
 #[gpui::test]

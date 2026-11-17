@@ -476,6 +476,15 @@ fn parent_inverse(world: &[f64; 6], local: &[f64; 6]) -> Option<[f64; 4]> {
         w[1] * inverse_local[2] + w[3] * inverse_local[3],
     ])
 }
+/// Whether a View ▸ 3D key acts. The number row and the numpad are the 3D
+/// view's only while it has the keyboard: the canvas focused on a scene in
+/// Free View. Anywhere else digits do what v1's did (nothing, or the field
+/// they are typed into), so a digit typed for a number field that did not
+/// take the click never turns the view into 3D and orbits it (PM-480). The
+/// menu items (no key) and Fly Navigation's key always act.
+pub(crate) fn studio_key(group: &str, focused: bool, active: bool, free_look: bool) -> bool {
+    focused && active && (group == "fly" || free_look)
+}
 fn round(value: f64, digits: i32) -> f64 {
     let unit = 10f64.powi(digits);
     (value * unit).round() / unit
@@ -974,12 +983,7 @@ impl GizmoSurface {
     /// next meaning; the menus and the bar still run the command.
     pub fn studio_takes_key(&self, group: &str, canvas: bool, window: &Window) -> bool {
         let focused = canvas || self.focus.as_ref().is_some_and(|f| f.is_focused(window));
-        focused
-            && self.studio.active()
-            && match group {
-                "look" | "fly" => true,
-                _ => self.studio.free_look,
-            }
+        studio_key(group, focused, self.studio.active(), self.studio.free_look)
     }
     /// View ▸ Show Rulers / Show Grid.
     pub fn set_rulers(&mut self, shown: bool, grid: bool, cx: &mut Context<Self>) {
@@ -1855,6 +1859,17 @@ impl GizmoSurface {
             self.on_up(true, Some(window), cx);
         }
         held
+    }
+    /// A pointer gesture Escape would cancel (not a text session): ending
+    /// one reads the controller (its tool, its frame), so the controller
+    /// asks first and has it ended after its own update (PM-480).
+    pub fn gesture_to_cancel(&self) -> bool {
+        self.pen_drag.is_some()
+            || self.marquee.is_some()
+            || self.studio.busy()
+            || self.drag.is_some()
+            || self.sketch.is_some()
+            || self.text_sketch.is_some()
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
         if self.finish_text(false, cx) {

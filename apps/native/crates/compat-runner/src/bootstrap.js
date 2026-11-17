@@ -324,7 +324,9 @@ globalThis.__compat = {
           );
           if (!result) return { hidden: true };
           if (realm.isBaseRaster(result, need)) return { native: true };
-          // Decided once every need ran: a later override may draw into it.
+          // The whole base, returned without the frame's crop: passed
+          // through too (an export, which never crops, draws it natively),
+          // decided once every need ran: a later override may draw into it.
           if (realm.isUncroppedBase?.(result, need)) return { pending: { value: result, need } };
           return canvasAnswer(result);
         } catch (error) {
@@ -335,15 +337,14 @@ globalThis.__compat = {
       });
       const pending = answers.flatMap((answer, i) => (answer.pending ? [[i, answer.pending]] : []));
       if (pending.length) {
-        let windows = [];
+        let untouched = [];
         try {
-          windows = realm.windowBases(pending.map(([, entry]) => entry));
+          untouched = realm.untouchedBases(pending.map(([, entry]) => entry));
         } catch (error) {
           this.reportFailure(error);
         }
         pending.forEach(([i, { value }], k) => {
-          const baseWindow = windows[k];
-          if (baseWindow) answers[i] = { baseWindow };
+          if (untouched[k]) answers[i] = { native: true };
           else {
             try {
               answers[i] = canvasAnswer(value);
@@ -743,6 +744,7 @@ globalThis.__compat = {
         this.dom.document,
         this.realm.kernel.inspectorSections,
         () => [...this.realm.PM.sel.layers],
+        globalThis.__compatWindowless === true,
       );
     if (this.panels)
       this.realm.PM.bus.on("sel", () => this.panels.selectionChanged());
