@@ -1882,6 +1882,145 @@ impl Controller {
         );
     }
     /// One Undo step, then the selection it leads to.
+    /// Project items as layers at the playhead, the first on top, in one
+    /// Undo step (Add Layer from Asset, Add Composition to Timeline, a
+    /// double-click in the Project panel).
+    pub(crate) fn add_to_timeline(
+        &mut self,
+        assets: &[String],
+        comps: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(published) = &self.published else {
+            return;
+        };
+        match pm_builtins::media_import::place_items(published, assets, comps, self.time(), None) {
+            Ok((layers, commands)) if !commands.is_empty() => self.run_layer_plan(
+                crate::layer_commands::Plan {
+                    label: "Add to Timeline".into(),
+                    commands,
+                    select: Some(layers),
+                    count_keys: None,
+                },
+                cx,
+            ),
+            Err(why) => {
+                self.message = why;
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+    /// Delete Media… on media that layers use asks first, as v1 did; the
+    /// answer goes back to the Project panel, which deletes the media and
+    /// its layers in one Undo step.
+    pub(crate) fn confirm_delete_media(
+        &mut self,
+        owner: pm_panel_media::Stamp,
+        token: u64,
+        assets: &[String],
+        references: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        let (title, detail) = delete_media_question(
+            assets
+                .first()
+                .filter(|_| assets.len() == 1)
+                .and_then(|id| self.asset_names().get(id).cloned())
+                .as_deref(),
+            assets.len(),
+            references,
+        );
+        use crate::alert::{Alert, Button};
+        let rx = Alert::new(
+            title,
+            detail,
+            vec![
+                Button::new("Delete", true).default().destructive(),
+                Button::new("Cancel", false).cancel(),
+            ],
+        )
+        .sheet(&self.host.borrow().window);
+        cx.spawn(async move |this, cx| {
+            let approved = rx.recv().await == Ok(Some(true));
+            let pending = cx
+                .background_executor()
+                .spawn(async move { runtime.project_confirm_delete(owner, token, approved) })
+                .await;
+            let failed = match pending {
+                Ok(Some(pending)) => match pending.await {
+                    Some(Ok(ack)) => match ack.reply {
+                        Reply::Throw(e) => Some(e.to_string()),
+                        _ => None,
+                    },
+                    Some(Err(e)) => Some(format!("{e:?}")),
+                    None => None,
+                },
+                Ok(None) => None,
+                Err(e) => Some(e.to_string()),
+            };
+            if let Some(message) = failed {
+                let _ = this.update(cx, |v, cx| {
+                    v.message = message;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+    /// Project panel ▸ New Comp from Selection: a composition matching the
+    /// media, holding it, opened (`media_import::comp_from_asset`).
+    pub(crate) fn new_comp_from_asset(&mut self, asset: &str, cx: &mut Context<Self>) {
+        let (Some(published), Some(session)) = (&self.published, &self.session) else {
+            return;
+        };
+        let (comp_id, layers, commands) =
+            match pm_builtins::media_import::comp_from_asset(published, asset) {
+                Ok(plan) => plan,
+                Err(why) => {
+                    self.message = why;
+                    cx.notify();
+                    return;
+                }
+            };
+        let plan = crate::layer_commands::Plan {
+            label: "New Comp from Selection".into(),
+            commands,
+            select: None,
+            count_keys: None,
+        };
+        let Some(call) = crate::layer_commands::transaction(&plan, Some(published.revision()))
+        else {
+            return;
+        };
+        let document = published.snapshot.doc_id;
+        let pending = self
+            .kernel
+            .call(&session.project, Request::new(Caller::native(), call));
+        cx.spawn(async move |this, cx| {
+            let result = pending.await;
+            let _ = this.update(cx, |v, cx| match result {
+                Some(Ok(ack)) => {
+                    if let Reply::Throw(e) = ack.reply {
+                        v.message = e.to_string();
+                        cx.notify();
+                        return;
+                    }
+                    v.call(Call::OpenComposition { comp_id, document }, cx);
+                    v.call(SelectionCall::Layers { ids: layers, add: false }.into(), cx);
+                }
+                Some(Err(e)) => {
+                    v.message = format!("{e:?}");
+                    cx.notify();
+                }
+                None => {}
+            });
+        })
+        .detach();
+    }
     pub(crate) fn run_layer_plan(
         &mut self,
         plan: crate::layer_commands::Plan,
@@ -3935,32 +4074,10 @@ impl Controller {
                 crate::takes_panel::dispatch(&cmd.name, || self.save_take(cx));
             }
             "native.addCompositionToTimeline" | "native.addLayerFromAsset" => {
-                if let (Some(runtime), Some(published)) = (&self.builtins.runtime, &self.published)
-                {
+                if let Some(runtime) = &self.builtins.runtime {
                     let (assets, comps) = runtime
                         .project_timeline_items(cmd.name == "native.addCompositionToTimeline");
-                    match pm_builtins::media_import::place_items(
-                        published,
-                        &assets,
-                        &comps,
-                        self.time(),
-                        None,
-                    ) {
-                        Ok((layers, commands)) if !commands.is_empty() => self.run_layer_plan(
-                            crate::layer_commands::Plan {
-                                label: "Add to Timeline".into(),
-                                commands,
-                                select: Some(layers),
-                                count_keys: None,
-                            },
-                            cx,
-                        ),
-                        Err(why) => {
-                            self.message = why;
-                            cx.notify();
-                        }
-                        _ => {}
-                    }
+                    self.add_to_timeline(&assets, &comps, cx);
                 }
             }
             "saveAs" => self.save_dialog(cx),
@@ -4901,5 +5018,23 @@ mod restore_tests {
             assert_eq!(restore_step(held), RestoreStep::Wait);
         }
         assert_eq!(restore_step(ready), RestoreStep::Open, "the quit was cancelled");
+    }
+}
+
+/// v1's Delete Media question: one item by name, several by count, and how
+/// many layers go with them.
+fn delete_media_question(name: Option<&str>, count: usize, references: usize) -> (String, String) {
+    match name {
+        Some(name) => (
+            format!("Delete “{name}”?"),
+            format!(
+                "This also removes {references} {} this media. You can undo this.",
+                if references == 1 { "layer that uses" } else { "layers that use" }
+            ),
+        ),
+        None => (
+            format!("Delete {count} media files?"),
+            "This also removes layers that use the selected media. You can undo this.".into(),
+        ),
     }
 }

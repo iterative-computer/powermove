@@ -1904,6 +1904,29 @@ impl Controller {
                                     .collect();
                                     crate::quick_look::toggle(files);
                                 }
+                                // Double-click or Return on a ready item, and the
+                                // item menus (v1 `addFromAsset`, `Comps.fromAsset`,
+                                // `Comps.addToTimeline`).
+                                pm_panel_media::Effect::AddAsset(id) => {
+                                    self.add_to_timeline(&[id], &[], cx)
+                                }
+                                pm_panel_media::Effect::NestComposition(id) => {
+                                    self.add_to_timeline(&[], &[id], cx)
+                                }
+                                pm_panel_media::Effect::NewCompFromAsset(id) => {
+                                    self.new_comp_from_asset(&id, cx)
+                                }
+                                pm_panel_media::Effect::ConfirmDelete {
+                                    token,
+                                    assets,
+                                    references,
+                                } => self.confirm_delete_media(
+                                    effect.owner.clone(),
+                                    token,
+                                    &assets,
+                                    references,
+                                    cx,
+                                ),
                                 pm_panel_media::Effect::Focus(_)
                                 | pm_panel_media::Effect::ClearPreview => {}
                                 other => {
@@ -3716,7 +3739,7 @@ mod project_view_tests {
 
 impl Controller {
     /// The open project's asset names, by id (what the Project shows).
-    fn asset_names(&self) -> std::collections::HashMap<String, String> {
+    pub(crate) fn asset_names(&self) -> std::collections::HashMap<String, String> {
         let Some(published) = &self.published else {
             return Default::default();
         };

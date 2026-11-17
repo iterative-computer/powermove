@@ -992,6 +992,58 @@ pub fn place_items(
     Ok((layers, commands))
 }
 
+/// Project panel ▸ New Comp from Selection (v1 `PM.Comps.fromAsset`): a
+/// composition the size of the media and as long as it (a still: as long
+/// as the open composition), at the open composition's frame rate, named
+/// after the file, holding the media as its one layer from 0, in one Undo
+/// step. The new composition's id, the layer's, and the commands.
+pub fn comp_from_asset(
+    published: &Published,
+    asset: &str,
+) -> Result<(String, Vec<String>, Vec<Command>), String> {
+    let root = published.snapshot.root().ok_or("Open a project first")?;
+    let record = root
+        .get("assets")
+        .and_then(|a| a.get(asset))
+        .map(|n| n.to_value())
+        .ok_or("That media is no longer in the project")?;
+    if matches!(
+        record.get("kind").and_then(Value::as_str),
+        Some("audio" | "model")
+    ) {
+        return Err("A composition can't be made from audio or a 3D model".into());
+    }
+    let field = |key: &str| record.get(key).and_then(Value::as_f64).filter(|n| *n > 0.);
+    let file = record.get("name").and_then(Value::as_str).unwrap_or("Comp");
+    let name = Path::new(file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(file);
+    let comp_id = pm_kernel::commands::new_id("C");
+    let create = pm_kernel::CompCommand::Create {
+        comp_id: comp_id.clone(),
+        settings: pm_kernel::commands::comps::NewComp {
+            name: Some(name.to_owned()),
+            width: field("w"),
+            height: field("h"),
+            // The open composition's (the kernel's default), as v1.
+            fps: None,
+            duration: field("dur").map(|d| d.clamp(0.1, 3600.)),
+            background: None,
+        },
+    };
+    let (layers, mut commands) = placement(published, &[(asset, &record)], 0., None, None)
+        .ok_or("Open a project first")?;
+    for command in &mut commands {
+        if let Command::Layer(LayerCommand::Add(add)) = command {
+            add.comp = Some(comp_id.clone());
+        }
+    }
+    commands.insert(0, Command::Comp(create));
+    Ok((comp_id, layers, commands))
+}
+
 /// `PM.commandForAsset` for each asset: new layer ids and the commands
 /// adding them at `at`, from stack `index` down. `None`: no project to
 /// place in.
