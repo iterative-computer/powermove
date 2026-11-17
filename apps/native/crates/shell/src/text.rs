@@ -328,6 +328,13 @@ impl TextField {
         self.slot.has_keyboard()
     }
     pub fn begin_editing(&mut self, cx: &mut Context<Self>) {
+        // Already typing in it: asked again (a double-click's second press,
+        // a focus that follows the first), it keeps the keyboard. Taking it
+        // again ends the edit, committing it and closing a field opened on
+        // demand, so the next ⌘A selected every layer.
+        if self.slot.has_keyboard() {
+            return;
+        }
         self.slot.begin_editing();
         self.await_keyboard();
         cx.notify();
@@ -347,7 +354,9 @@ impl TextField {
     }
     /// Focused with all its text selected, so typing replaces it.
     pub fn begin_editing_selecting_all(&mut self, cx: &mut Context<Self>) {
-        self.slot.begin_editing();
+        if !self.slot.has_keyboard() {
+            self.slot.begin_editing();
+        }
         self.slot.set_selection(0, usize::MAX);
         self.await_keyboard();
         cx.notify();
@@ -511,7 +520,10 @@ impl Render for TextField {
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
                     // A press on its picture goes to the editor once shown.
-                    if !this.picture.press(window) {
+                    // One while it already has the keyboard (a double-click's
+                    // second press) leaves it: taking it again ended the edit,
+                    // which commits and closes a field opened on demand.
+                    if !this.picture.press(window) && !this.slot.has_keyboard() {
                         this.slot.begin_editing();
                         // Under load the keyboard moves a slow frame later:
                         // what is typed until then is for this field, never
