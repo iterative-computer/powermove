@@ -29,6 +29,9 @@ struct Recorder {
     menus: Cell<usize>,
     commands: RefCell<Vec<String>>,
     input: RefCell<Option<Rc<FakeInput>>>,
+    /// The text editor takes the keyboard a present after it is asked to
+    /// (AppKit), not at once.
+    late_focus: Cell<bool>,
     variant: RefCell<Option<String>>,
     /// Input times drag steps stamped for the viewer trace.
     stamps: RefCell<Vec<f64>>,
@@ -54,6 +57,7 @@ pub(crate) struct FakeInput {
     events: RefCell<Vec<TextEvent>>,
     wake: RefCell<Option<Rc<dyn Fn()>>>,
     focused: Cell<bool>,
+    late_focus: Cell<bool>,
     /// Typed but not yet handed to the editor (the window's key queue
     /// behind a busy frame): it arrives when asked, or after the edit.
     pending: RefCell<String>,
@@ -101,7 +105,9 @@ impl TextInput for FakeInput {
         self.focused.get()
     }
     fn focus(&self) {
-        self.focused.set(true);
+        if !self.late_focus.get() {
+            self.focused.set(true);
+        }
     }
     fn set_font(&self, _: &str, _: f64) {}
     fn misspelled(&self) -> Vec<(usize, usize)> {
@@ -208,6 +214,7 @@ impl Host for Recording {
         _: &mut App,
     ) -> Option<Rc<dyn TextInput>> {
         let input = Rc::new(FakeInput::default());
+        input.late_focus.set(self.0.late_focus.get());
         *input.value.borrow_mut() = initial.into();
         *self.0.input.borrow_mut() = Some(input.clone());
         Some(input)
@@ -1152,6 +1159,27 @@ fn the_shape_tool_draws_a_mask_on_a_selected_image(cx: &mut TestAppContext) {
 
 fn text_of(layer: &pm_model::Value) -> Option<String> {
     layer.get("d")?.get("text")?.as_str().map(str::to_owned)
+}
+#[gpui::test]
+fn the_text_tool_keeps_the_key_typed_until_its_text_has_the_keyboard(cx: &mut TestAppContext) {
+    // Acceptance run 25: Command-T, a click, a key, 20 times under load; the
+    // first ones made nothing. The key typed after the click is held for
+    // the text; it was handed over when the editor was only asked for the
+    // keyboard, which AppKit moves a present later, so it ran as a shortcut
+    // and the empty text left nothing (PM-465).
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Text));
+    s.recorder.late_focus.set(true);
+    let at = s.point_of([400., 300.]);
+    s.vcx.simulate_click(at, Modifiers::none());
+    let recorder = s.recorder.clone();
+    settle(cx, move |_| recorder.input.borrow().is_some());
+    let input = s.recorder.input.borrow().clone().unwrap();
+    cx.run_until_parked();
+    assert!(!input.focused());
+    assert!(pm_shell::typing::expecting(), "still waiting: the editor has no keyboard yet");
+    input.focused.set(true);
+    settle(cx, |_| !pm_shell::typing::expecting());
 }
 /// The Text tool's click makes a layer inside one gesture: typing writes it,
 /// Command-Return commits, the layer is named after its text, the tool goes

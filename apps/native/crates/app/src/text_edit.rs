@@ -685,8 +685,28 @@ impl GizmoSurface {
             })
             .detach();
             input.focus();
-            // Letters typed before it had the keyboard go to it now, first.
-            pm_shell::typing::field_ready();
+            // Letters typed before it had the keyboard go to it once it has
+            // it. AppKit moves the keyboard at the next present: handed over
+            // before that, they arrived with no field to take them and ran
+            // as shortcuts, so the first texts under load came out empty
+            // (PM-465).
+            if input.focused() {
+                pm_shell::typing::field_ready();
+            } else {
+                let probe = input.clone();
+                cx.spawn(async move |_, cx| {
+                    while pm_shell::typing::expecting() {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(8))
+                            .await;
+                        if probe.focused() {
+                            pm_shell::typing::field_ready();
+                            return;
+                        }
+                    }
+                })
+                .detach();
+            }
         }
         let label = if fresh { None } else { Some("Edit Text") };
         let mut session = TextSession {
