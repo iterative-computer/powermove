@@ -6,6 +6,7 @@ pub use flowchart::FlowchartRow;
 use crate::{
     keyboard::{Class, Effect, Key, POINTER, Resolver},
     menu,
+    native_control::SegmentedControl,
     transient::{Choice, Picker},
 };
 use foreign_types::ForeignType;
@@ -997,7 +998,10 @@ define_class!(
             if let Some((command, _, _)) = TOOLS.get(sender.selectedSegment() as usize)
                 && let Some(tx) = &self.ivars().sender {
                 let double_click = NSApplication::sharedApplication(self.mtm())
-                    .currentEvent().is_some_and(|event| event.clickCount() == 2);
+                    .currentEvent().is_some_and(|event| {
+                        matches!(event.r#type(), NSEventType::LeftMouseDown | NSEventType::LeftMouseUp)
+                            && event.clickCount() == 2
+                    });
                 let command = toolbar_click_command(command, double_click);
                 let _ = tx.try_send(Command { name: command.to_string(), args: vec![], token: None });
             }
@@ -2883,37 +2887,28 @@ impl ToolbarDelegate {
         let item = NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(mtm), id);
         let name = id.to_string();
         if name == "tools" {
-            let images: Vec<_> = TOOLS
-                .iter()
-                .map(|(_, s, l)| toolbar_symbol(s, l, t))
-                .collect();
-            let control = unsafe {
-                NSSegmentedControl::segmentedControlWithImages_trackingMode_target_action(
-                    &NSArray::from_retained_slice(&images),
-                    NSSegmentSwitchTracking::SelectOne,
-                    Some(target),
-                    Some(sel!(tool:)),
-                    mtm,
-                )
-            };
-            for i in 0..TOOLS.len() {
-                // The Shape segment also holds a menu indicator: it is wider
-                // by the indicator, so its glyph is drawn at the size of its
-                // neighbours instead of being scaled down to make room.
-                let width = if i as isize == SHAPE_SEGMENT {
-                    TOOL_SEGMENT + TOOL_MENU_INDICATOR
-                } else {
-                    TOOL_SEGMENT
-                };
-                control.setWidth_forSegment(width, i as isize);
-                control.setImageScaling_forSegment(NSImageScaling::ScaleNone, i as isize);
+            let control = SegmentedControl::new(mtm, NSControlSize::Regular, TOOLS.len());
+            unsafe {
+                control.setTarget(Some(target));
+                control.setAction(Some(sel!(tool:)));
+            }
+            for (i, (_, symbol, label)) in TOOLS.iter().enumerate() {
+                let i = i as isize;
+                control.set_segment_image(i, &toolbar_symbol(symbol, label, t), label);
+                control.setToolTip_forSegment(Some(&NSString::from_str(label)), i);
+                // Keep the symbol at the same size when a segment has a menu.
+                let width = TOOL_SEGMENT
+                    + if i == SHAPE_SEGMENT {
+                        TOOL_MENU_INDICATOR
+                    } else {
+                        0.
+                    };
+                control.setWidth_forSegment(width, i);
+                control.setImageScaling_forSegment(NSImageScaling::ScaleNone, i);
             }
             control.setSelectedSegment(0);
             control.setAccessibilityLabel(Some(&NSString::from_str("Tools")));
             control.setAccessibilityIdentifier(Some(&NSString::from_str("shell.toolbar.tools")));
-            for (i, (_, _, l)) in TOOLS.iter().enumerate() {
-                control.setToolTip_forSegment(Some(&NSString::from_str(l)), i as isize);
-            }
             // Holding the Shape segment lists its variants.
             let menu = NSMenu::new(mtm);
             for (variant, label, glyph) in SHAPES {
@@ -2942,6 +2937,7 @@ impl ToolbarDelegate {
                 let _: () =
                     msg_send![&*control, setShowsMenuIndicator: true, forSegment: SHAPE_SEGMENT];
             }
+            control.sizeToFit();
             item.setView(Some(&control));
             item.setLabel(&NSString::from_str("Tools"));
             return Some(item);
@@ -4004,10 +4000,19 @@ impl Host {
                             let reverse = chord == "shift+tab";
                             if !h.advance_toolbar(reverse) {
                                 let native = responder.as_ref().is_some_and(|r| {
-                                    !std::ptr::eq(
-                                        &**r as *const _,
-                                        &*h.gpui as *const _ as *const NSResponder,
-                                    )
+                                    let hosted_segment =
+                                        r.downcast_ref::<SegmentedControl>().is_some_and(|c| {
+                                            NSAccessibilityElementProtocol::accessibilityIdentifier(
+                                                &**c,
+                                            )
+                                            .to_string()
+                                                != "shell.toolbar.tools"
+                                        });
+                                    !hosted_segment
+                                        && !std::ptr::eq(
+                                            &**r as *const _,
+                                            &*h.gpui as *const _ as *const NSResponder,
+                                        )
                                 });
                                 h.window.makeFirstResponder(Some(&h.gpui));
                                 h.send_command(
@@ -4055,6 +4060,14 @@ impl Host {
                             }
                             crate::typing::Hold::Pass => {}
                         }
+                    }
+                    if chord == "space"
+                        && host.borrow().keyboard_navigated.get()
+                        && responder
+                            .as_ref()
+                            .is_some_and(|r| r.isKindOfClass(SegmentedControl::class()))
+                    {
+                        return event.as_ptr();
                     }
                     if passes_straight(
                         &chord,
@@ -8350,32 +8363,6 @@ pub fn accent_color() -> Retained<NSColor> {
             let names = NSArray::from_slice(&list);
             let dark_match = appearance
                 .bestMatchFromAppearancesWithNames(&names)
-                .is_some_and(|n| n.to_string().contains("Dark"));
-            // Both colours live as long as the block (captured).
-            let color: &NSColor = if dark_match { &dark } else { &light };
-            std::ptr::NonNull::from(color)
-        },
-    );
-    unsafe { NSColor::colorWithName_dynamicProvider(None, &provider) }
-}
-/// The fill of a selected segment, in place of the accent an active window
-/// gives an "on" control: selection is neutral, the selected tab's pill
-/// (paper on a light ground, a lift of the ground on a dark one). AppKit
-/// would draw a title or template glyph white on it, so the control host
-/// gives each segment a face in the label ink (`native_control`).
-pub fn selected_color() -> Retained<NSColor> {
-    const LIGHT: (f64, f64) = (1., 0.96);
-    const DARK: (f64, f64) = (1., 0.16);
-    let of = |(white, alpha): (f64, f64)| {
-        NSColor::colorWithSRGBRed_green_blue_alpha(white, white, white, alpha)
-    };
-    let (light, dark) = (of(LIGHT), of(DARK));
-    let provider = block2::RcBlock::new(
-        move |appearance: std::ptr::NonNull<NSAppearance>| -> std::ptr::NonNull<NSColor> {
-            let appearance = unsafe { appearance.as_ref() };
-            let list = unsafe { [NSAppearanceNameAqua, NSAppearanceNameDarkAqua] };
-            let dark_match = appearance
-                .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&list))
                 .is_some_and(|n| n.to_string().contains("Dark"));
             // Both colours live as long as the block (captured).
             let color: &NSColor = if dark_match { &dark } else { &light };

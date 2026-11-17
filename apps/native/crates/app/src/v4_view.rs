@@ -747,10 +747,7 @@ impl SurfaceView {
                         );
                     }
                 }
-                // A native control is a Tab stop too: the panel draws its
-                // focus ring and forwards its keys (Full Keyboard Access).
-                // A search field and a segmented control take no forwarded
-                // keys (`NativeControl::key`), so Tab passes them.
+                // Segmented controls own their Tab stop in the kit.
                 if !view.disabled
                     && view.tab_index.is_none_or(|t| t >= 0)
                     && !matches!(
@@ -932,6 +929,10 @@ impl SurfaceView {
         let id = view.id;
         let segmented = matches!(kind, crate::v4_control::Kind::Segmented)
             .then(|| segments(&self.publication.surface, node));
+        // A segmented control in the panel's header is its mode switch, at
+        // the header's size; elsewhere the system's regular size.
+        let header_switch = matches!(kind, crate::v4_control::Kind::Segmented)
+            && (self.in_header(id) || crate::v4_compile::variant(node) == Some("glass"));
         let value = match &segmented {
             Some((_, selected, _)) => json!(selected),
             None => node.props.get("value").cloned().unwrap_or(Value::Null),
@@ -945,7 +946,10 @@ impl SurfaceView {
             .and_then(Value::as_str)
             .map(str::to_owned);
         if let Some(control) = self.controls.get(&id) {
-            control.update(cx, |v, _| v.display(display.as_deref()));
+            control.update(cx, |v, _| {
+                v.display(display.as_deref());
+                v.set_tab_index(view.tab_index.unwrap_or(0) as isize);
+            });
             if matches!(kind, crate::v4_control::Kind::Push)
                 && let Some(label) = node.props.get("label").and_then(Value::as_str)
             {
@@ -1009,7 +1013,7 @@ impl SurfaceView {
         let tokens = self.table.tokens.clone();
         let disabled = view.disabled;
         let control = cx.new(|cx| {
-            crate::v4_control::NativeControl::new(
+            let mut control = crate::v4_control::NativeControl::new(
                 crate::v4_control::ControlSpec {
                     kind,
                     label,
@@ -1030,14 +1034,16 @@ impl SurfaceView {
                     tint: None,
                     symbol: None,
                     // Every segmented control is the kit's one: the system's
-                    // Liquid Glass capsule (PM-409), Settings' as well; in a
-                    // row's value well it is the small size.
-                    glass: matches!(kind, crate::v4_control::Kind::Segmented),
+                    // Liquid Glass capsule (PM-409); large as a header's mode
+                    // switch, small in a row's value well.
+                    glass: header_switch,
                 },
                 &tokens,
                 window,
                 cx,
-            )
+            );
+            control.set_tab_index(view.tab_index.unwrap_or(0) as isize);
+            control
         });
         let generation = self.publication.generation;
         self.subscriptions.entry(id).or_default().push(cx.subscribe(
@@ -4271,13 +4277,12 @@ fn segments(surface: &pm_surface::Surface, node: &pm_surface::Node) -> (Vec<Valu
         if child.props.get("aria-checked") == Some(&Value::Bool(true)) {
             selected = ids.len() as i64;
         }
-        let label = child.props.get("label").cloned().unwrap_or(Value::Null);
-        options.push(
-            match child.props.get("attr").and_then(|a| a.get("symbol")) {
-                Some(symbol) => json!({"label": label, "symbol": symbol}),
-                None => json!({"label": label}),
-            },
-        );
+        options.push(json!({
+            "label": child.props.get("label"),
+            "symbol": child.props.get("attr").and_then(|a| a.get("symbol")),
+            "tip": child.props.get("title"),
+            "disabled": child.props.get("disabled"),
+        }));
         ids.push(child.id);
     }
     (options, selected, ids)
