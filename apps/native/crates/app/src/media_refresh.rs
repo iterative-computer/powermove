@@ -106,6 +106,7 @@ pub struct Refresh {
     settled: Option<Inputs>,
     resolved: bool,
     pending: Option<(u64, Inputs)>,
+    retry_pending: bool,
 }
 pub struct Plan {
     /// Source inputs that changed; `None` means a different document.
@@ -120,6 +121,14 @@ impl Refresh {
         self.settled = None;
         self.resolved = false;
         self.pending = None;
+        self.retry_pending = false;
+    }
+    /// A file became available without changing the document's inputs.
+    /// Keep the display paths and coalesce retries behind any current read.
+    pub(crate) fn retry(&mut self) {
+        self.settled = None;
+        self.resolved = false;
+        self.retry_pending = self.pending.is_some();
     }
     /// Settled at `inputs` (what a finished job leaves).
     #[cfg(test)]
@@ -169,6 +178,9 @@ impl Refresh {
         }
         let (_, inputs) = self.pending.take().unwrap();
         self.resolved = false;
+        if std::mem::take(&mut self.retry_pending) {
+            return false;
+        }
         if latest.as_ref().is_none_or(|latest| !inputs.same(latest)) {
             return false;
         }
@@ -570,5 +582,41 @@ mod tests {
         assert!(refresh.plan(failed.clone()).job.is_none());
         assert!(!refresh.catalog_ready(&failed));
         assert!(!refresh.catalog_ready(&inputs(2, "failed")));
+    }
+    #[test]
+    fn cloud_retries_keep_display_paths_and_coalesce_behind_the_current_read() {
+        let current = inputs(1, "download");
+        let mut refresh = Refresh::default();
+        refresh.adopt(current.clone());
+        refresh.retry();
+        let plan = refresh.plan(current.clone());
+        assert_eq!(plan.retire, Some(BTreeSet::new()));
+        let job = plan.job.unwrap();
+        for _ in 0..50 {
+            refresh.retry();
+            let plan = refresh.plan(current.clone());
+            assert_eq!(plan.retire, Some(BTreeSet::new()));
+            assert!(
+                plan.job.is_none(),
+                "downloads must not add parallel resolvers"
+            );
+        }
+        assert!(
+            !refresh.finish(job, Some(current.clone())),
+            "the read predates a downloaded file"
+        );
+        let job = refresh.plan(current.clone()).job.unwrap();
+        assert!(refresh.finish(job, Some(current.clone())));
+        refresh.catalog_adopted();
+        assert!(refresh.catalog_ready(&current));
+        assert!(refresh.plan(current.clone()).job.is_none());
+
+        // A cloud retry finishing after a document switch cannot publish.
+        refresh.retry();
+        let job = refresh.plan(current).job.unwrap();
+        let other = inputs(2, "other");
+        assert_eq!(refresh.plan(other.clone()).retire, None);
+        assert!(!refresh.finish(job, Some(other.clone())));
+        assert!(refresh.plan(other).job.is_some());
     }
 }
