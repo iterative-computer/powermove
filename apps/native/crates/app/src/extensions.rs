@@ -842,6 +842,13 @@ impl Controller {
                 crate::diag::line(serde_json::json!({"unresponsive": request["name"],
                     "where": request["where"], "seconds": request["seconds"]}));
                 let shell = self.host.borrow();
+                // A tab behind asks unseen: its tab is marked until the
+                // question is answered, and the window in front says so
+                // (PM-490: the window jumped to the asking project's tab).
+                let hidden = !shell.tab_shown();
+                if hidden {
+                    shell.set_attention(true);
+                }
                 use crate::alert::{Alert, Button};
                 let answer = Alert::new(
                     title,
@@ -854,9 +861,14 @@ impl Controller {
                 .sheet(&shell.window);
                 drop(shell);
                 self.extensions.unresponsive = Some(execution);
+                if hidden {
+                    let (asking, name) = (cx.entity_id(), self.project_name());
+                    cx.defer(move |cx| crate::session::tell_front_waiting(asking, &name, cx));
+                }
                 cx.spawn(async move |this, cx| {
                     let stop = answer.recv().await == Ok(Some(true));
                     let _ = this.update(cx, |v, _| {
+                        v.host.borrow().set_attention(false);
                         if v.extensions.unresponsive == Some(execution) {
                             v.extensions.unresponsive = None;
                         }

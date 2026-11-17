@@ -866,6 +866,13 @@ fn saved_where(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod first_save_tests {
     #[test]
+    fn a_tab_behind_waiting_for_an_answer_is_named_in_front() {
+        assert_eq!(
+            super::waiting_note("Paper"),
+            "“Paper” is waiting for an answer in its tab."
+        );
+    }
+    #[test]
     fn a_first_save_proposes_the_projects_own_name() {
         assert_eq!(super::save_name("Paper"), "Paper.pmv");
         assert_eq!(super::save_name("Cut 2/3: final"), "Cut 2-3- final.pmv");
@@ -877,6 +884,21 @@ mod first_save_tests {
         let note = super::saved_where(std::path::Path::new("/Users/someone/Movies/Paper.pmv"));
         assert_eq!(note, "Saved “Paper.pmv” in Movies. File ▸ Show in Finder shows it.");
     }
+}
+/// A project in a tab behind asks something (its Recover question): the
+/// editor whose tab is shown says so in its status line, once.
+pub(crate) fn tell_front_waiting(asking: gpui::EntityId, name: &str, cx: &mut App) {
+    let shown = crate::entry::editors(cx)
+        .into_iter()
+        .find(|c| c.entity_id() != asking && c.read(cx).host.borrow().tab_shown());
+    if let Some(front) = shown {
+        let text = waiting_note(name);
+        front.update(cx, |v, cx| v.note(text, cx));
+    }
+}
+/// The front window's line when a tab behind waits for an answer.
+fn waiting_note(name: &str) -> String {
+    format!("“{name}” is waiting for an answer in its tab.")
 }
 /// Whether `text` is a program's error value rather than a sentence: a type
 /// or variant name with its fields, as `Storage("Kernel state changed")` or
@@ -2557,13 +2579,27 @@ impl Controller {
                         }
                         v.recovery_pending = true;
                         v.mcp.awaiting_recovery(Some(name.clone()));
-                        recovery.alert.sheet(&v.host.borrow().window)
+                        // A tab behind asks unseen: its tab is marked until
+                        // the question is answered.
+                        let hidden = !v.host.borrow().tab_shown();
+                        if hidden {
+                            v.host.borrow().set_attention(true);
+                        }
+                        (recovery.alert.sheet(&v.host.borrow().window), hidden)
                     });
+                    // ... and the window in front says so, once.
+                    if let Ok((_, true)) = &answer {
+                        let asking = this.entity_id();
+                        let _ = cx.update(|cx| tell_front_waiting(asking, &name, cx));
+                    }
                     let response = match answer {
-                        Ok(rx) => rx.recv().await.ok().flatten(),
+                        Ok((rx, _)) => rx.recv().await.ok().flatten(),
                         Err(_) => None,
                     };
-                    let _ = this.update(cx, |v, _| v.mcp.awaiting_recovery(None));
+                    let _ = this.update(cx, |v, _| {
+                        v.mcp.awaiting_recovery(None);
+                        v.host.borrow().set_attention(false);
+                    });
                     match response.and_then(|action| recovery.decision(action)) {
                         Some(call) => result = kernel.shell(call).await,
                         // Cancelled (Escape) or never answered: nothing is
