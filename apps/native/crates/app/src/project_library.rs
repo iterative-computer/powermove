@@ -857,9 +857,9 @@ impl ProjectLibrary {
         label: &'static str,
         tip: &'static str,
     ) -> Stateful<Div> {
-        kit.icon_button(id, symbol, label, false)
+        kit.icon_button(id, symbol, tip, false)
+            .aria_label(label)
             .debug_selector(move || id.into())
-            .tooltip(kit::tooltip(&kit.t, tip))
     }
     /// The rows of a button menu.
     fn rows_of(&self, menu: Menu) -> Vec<pm_shell::transient::Choice> {
