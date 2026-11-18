@@ -978,7 +978,7 @@ impl pm_services::surface_backing::projects::ModsHost for PushMod<'_> {
         Ok(())
     }
 }
-/// Settings › Accounts › Powermove Account, from the app's `cloud` fact
+/// Settings › Account › Powermove Account, from the app's `cloud` fact
 /// Row actions that sign out, disconnect or delete: from an older Settings
 /// publication they land only on the target that publication showed.
 #[cfg(test)]
@@ -1037,7 +1037,7 @@ pub(crate) fn cloud_rows(cloud: &Value) -> Vec<Value> {
     delete["detail"] = json!("Your published extensions stay on the Store under your handle.");
     vec![account, remember, delete]
 }
-/// Settings › Accounts › API or Local Model, from the app's `provider` fact:
+/// Settings › Agents › API or Local Model, from the app's `provider` fact:
 /// what is connected (never the key), then Set Up… / Change… and Disconnect.
 /// The address, key and model are entered in the app's connection sheet.
 pub(crate) fn provider_rows(provider: &Value) -> Vec<Value> {
@@ -1109,7 +1109,7 @@ pub(crate) fn provider_rows(provider: &Value) -> Vec<Value> {
     }
     rows
 }
-/// Settings › Accounts › Other Agent Apps (main's AgentClientsSettings): one
+/// Settings › Agents › Other Agent Apps (main's AgentClientsSettings): one
 /// row per agent app on this Mac with Add Powermove / Remove, then Copy Setup
 /// for any other app.
 pub(crate) fn agent_client_rows(agents: &Value) -> Vec<Value> {

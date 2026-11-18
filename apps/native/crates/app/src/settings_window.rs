@@ -1,7 +1,7 @@
 //! Settings is a window of its own again, one for the app (PM-375). The
 //! editor that opened it supplies the settings model for the AppKit form. Another
-//! editor asking for Settings takes the window over, so the Project and
-//! Memory sections are always the project it was asked from.
+//! editor asking for Settings takes the window over, so Project settings and
+//! notes reflect the project it was asked from.
 pub(crate) mod form;
 
 use crate::session::Controller;

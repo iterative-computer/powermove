@@ -913,7 +913,7 @@ fn art(id: &str, dark: bool) -> Option<Art> {
             drawn: None,
             ..art!(
                 "general",
-                "info.circle.fill",
+                "info.circle",
                 ["#f7f5f3", "#f4f1ee", "#14110f8c"],
                 ["#817971", "#ffffff", "#4c47428c"]
             )
@@ -1009,7 +1009,9 @@ fn symbol_tile(tile: Retained<NSImage>, art: &Art, size: NSSize) -> Option<Retai
     let name = NSString::from_str(art.symbol);
     let base = NSImage::imageWithSystemSymbolName_accessibilityDescription(&name, None)?;
     let tint = |hex: &str| {
-        let v = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0xffffffff);
+        let hex = hex.trim_start_matches('#');
+        let rgb = u32::from_str_radix(hex, 16).unwrap_or(u32::MAX);
+        let v = if hex.len() == 6 { (rgb << 8) | 0xff } else { rgb };
         let c = |shift: u32| f64::from((v >> shift) & 0xff) / 255.;
         NSColor::colorWithSRGBRed_green_blue_alpha(c(24), c(16), c(8), c(0))
     };

@@ -174,6 +174,10 @@ test("sidebar arrows/Home/End navigate matching sections only; scroll tracking c
   await model.search("");
   model.trackSection("agents");
   expect(effects.at(-1)).toEqual(["title", "agents"]);
+  await model.search("instant");
+  model.select("account");
+  expect(model.active).toBe("account");
+  expect(model.query).toBe("");
 });
 test("reduced motion navigation jumps through the host contract", () => {
   const { model, effects } = fixture();
