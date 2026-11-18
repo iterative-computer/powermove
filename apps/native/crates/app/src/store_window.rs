@@ -1890,7 +1890,7 @@ impl StoreWindow {
             .clone()
             .map_or_else(
                 || kit.search(None, Some("⌘F")),
-                |field| kit.header_well(field),
+                |field| div().flex_none().child(field),
             )
             .w(px(SEARCH.min(width - SEARCH_ROOM).max(SEARCH_LEAST)));
         // v1.2.0's head: the title, then one toolbar: Discover · Library
