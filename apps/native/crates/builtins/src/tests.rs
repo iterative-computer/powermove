@@ -5967,6 +5967,12 @@ fn the_easing_panel_eases_the_selected_keyframes_in_one_undo_step() {
     };
     let before = key("k0");
     run(&mut backend, json!({"type":"preset","preset":"expoOut"}));
+    assert_eq!(kernel.published("synthetic").unwrap().history.undo_label.as_deref(), Some("Ease: Expo Out"));
+    assert_eq!(backend.easing_state().unwrap()["interpolation"], "bezier");
+    let displayed = backend.easing_state().unwrap();
+    for (i, expected) in pm_eval::easing::preset("expoOut").iter().enumerate() {
+        assert!((displayed["curve"][i].as_f64().unwrap() - expected).abs() < 1e-9, "one selected key retains both preset handles: {displayed}");
+    }
     let eased = key("k0");
     assert_eq!(eased["outInterp"], "bezier", "{eased}");
     assert_ne!(eased["outEase"], before["outEase"]);
@@ -6053,9 +6059,20 @@ fn the_easing_panel_eases_the_selected_keyframes_in_one_undo_step() {
                 .map(str::to_owned)
         })
         .collect();
-    for label in ["Expo Out", "Easy Ease", "Hold", "Apply Curve", "Outgoing X"] {
+    assert!(!labels.iter().any(|l| l == "Apply Curve"));
+    for label in ["Expo Out", "Easy Ease", "Interpolation", "Outgoing influence (%)"] {
         assert!(labels.iter().any(|l| l == label), "{label}: {labels:?}");
     }
+    // Save Current uses the existing durable library service from this panel,
+    // without requiring the Timeline panel or a prior library import.
+    let save = publication.surface.nodes().values().find(|node|
+        node.props.get("id").and_then(Value::as_str) == Some("easing:save")
+    ).unwrap().id;
+    finish(panels.event("easing", publication.generation, publication.surface.revision(), save, "click", Default::default()).unwrap());
+    let stored = data::wire(&kernel.state().settings[crate::timeline_easing::STORAGE]);
+    let library = &stored[pm_services::surfaces::easing::STORAGE_KEY];
+    assert_eq!(library["groups"][0]["presets"][0]["name"], "Custom easing");
+    assert_eq!(library["groups"][0]["presets"].as_array().unwrap().len(), 1);
 }
 #[test]
 fn composition_tab_closing_preserves_the_last_tab() {

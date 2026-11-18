@@ -10,7 +10,7 @@ use gpui::{
 };
 use pm_shell::ease;
 use pm_shell::grade::{self, Curve, Graph, Look};
-use pm_surface::Id;
+use pm_surface::{Id, events::EventDetail};
 use serde_json::json;
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
@@ -85,7 +85,7 @@ pub(super) enum GradeDrag {
 #[derive(Clone, Default)]
 pub(super) struct EaseState {
     seen: Rc<RefCell<HashMap<Id, ([f64; 4], std::time::Instant)>>>,
-    pending: Rc<RefCell<HashMap<Id, ([f64; 4], std::time::Instant)>>>,
+    pub(super) pending: Rc<RefCell<HashMap<Id, ([f64; 4], std::time::Instant)>>>,
 }
 /// How long the preview dot takes to run the curve.
 const PREVIEW: f32 = 1.2;
@@ -121,9 +121,8 @@ fn side(kit: &Kit, width: f32, t: &pm_design::Tokens) -> f32 {
     let m = &t.metrics;
     match kit {
         Kit::Curve { .. } => width.clamp(m.curve_editor, m.curve_editor_max),
-        // A little taller than wide: room above and below the square for
-        // handles that overshoot.
-        Kit::Ease { .. } => (width * 1.15).clamp(m.curve_editor, m.curve_editor_max),
+        // Easing retains its height across selection and preview changes.
+        Kit::Ease { .. } => m.curve_editor,
         // v1's: the pad two controls tall, the bar one.
         Kit::Pad { .. } => 2. * m.control,
         Kit::Ramp { .. } => m.control,
@@ -290,13 +289,21 @@ impl SurfaceView {
                 Kit::Ease {
                     curve,
                     thumbnail: true,
+                    ..
                 },
                 _,
             ) => {
                 let curve = *curve;
-                Box::new(move |b, window, _| ease::paint_thumbnail(b, &curve, &tokens, window))
+                let mut thumbnail_tokens = tokens.clone();
+                if disabled {
+                    thumbnail_tokens.colors.text = thumbnail_tokens.colors.muted;
+                }
+                Box::new(move |b, window, _| {
+                    ease::paint_thumbnail(b, &curve, &thumbnail_tokens, window)
+                })
             }
-            (Kit::Ease { curve, .. }, drag) => {
+            (Kit::Ease { curve, preview, .. }, drag) => {
+                let preview = *preview;
                 let published = *curve;
                 let (curve, held, range) = match drag {
                     Some(GradeDrag::Ease {
@@ -357,6 +364,9 @@ impl SurfaceView {
                         &tokens,
                         window,
                     );
+                    if let Some(preview) = preview {
+                        ease::paint_ghost(g, &preview, &tokens, window);
+                    }
                 })
             }
             _ => return None,
@@ -392,11 +402,12 @@ impl SurfaceView {
         let Some(node) = self.prepared.node(id) else {
             return;
         };
-        // An easing curve's handle: the panel owns the curve, so each move
-        // goes to it as a change (no document gesture).
+        // The panel owns an easing handle: preview locally during opt-in
+        // drags, then send its single document change on release.
         if let Kit::Ease {
             curve,
             thumbnail: false,
+            ..
         } = node.kit
         {
             if node.disabled {
@@ -418,6 +429,10 @@ impl SurfaceView {
                 return;
             };
             self.scrub = Some(ScrubDrag {
+                local_commit: node.commit_on_release.then(|| {
+                    let value = json!(shown);
+                    (value.clone(), value)
+                }),
                 id,
                 start: event.position,
                 number: Default::default(),
@@ -468,6 +483,7 @@ impl SurfaceView {
                 }
                 let (from, to, _) = grade::master_layout(strip, grade::wheel_diameter(square), &t);
                 self.scrub = Some(ScrubDrag {
+                    local_commit: None,
                     id,
                     start: event.position,
                     number: Default::default(),
@@ -539,6 +555,7 @@ impl SurfaceView {
             self.scrub_ops.push_back(ScrubOp::Begin(name));
             self.scrub_ops.push_back(ScrubOp::Value(binding.clone(), value));
             self.scrub = Some(ScrubDrag {
+                local_commit: None,
                 id,
                 start: event.position,
                 number: Default::default(),
@@ -626,6 +643,7 @@ impl SurfaceView {
                     self.scrub_ops
                         .push_back(ScrubOp::Value(binding.clone(), json!(live.values(rest))));
                     self.scrub = Some(ScrubDrag {
+                        local_commit: None,
                         id,
                         start: event.position,
                         number: Default::default(),
@@ -643,6 +661,7 @@ impl SurfaceView {
             _ => return,
         };
         self.scrub = Some(ScrubDrag {
+            local_commit: None,
             id,
             start: event.position,
             number: Default::default(),
@@ -657,10 +676,11 @@ impl SurfaceView {
     pub(super) fn grade_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         let grade_name = self.scrub.as_ref().and_then(|d| self.undo_name(d.id));
         // An easing handle follows the pointer from where it was grabbed
-        // (finely with Option, on a twentieth grid with Shift); each move is
-        // the panel's change.
+        // (finely with Option, on a twentieth grid with Shift). Opt-in local
+        // editors preview each move and commit once when released.
         if let Some(ScrubDrag {
             id,
+            local_commit,
             grade:
                 Some(GradeDrag::Ease {
                     graph,
@@ -688,12 +708,31 @@ impl SurfaceView {
             }
             live[*knob * 2] = x;
             live[*knob * 2 + 1] = y;
+            let value = json!(*live);
+            let deferred = if let Some((_, last)) = local_commit {
+                *last = value.clone();
+                true
+            } else {
+                false
+            };
             let (id, live) = (*id, *live);
             self.ease
                 .pending
                 .borrow_mut()
                 .insert(id, (live, std::time::Instant::now()));
-            self.change(id, json!(live), cx);
+            if deferred {
+                self.pointer(
+                    id,
+                    "input",
+                    EventDetail {
+                        value: Some(value),
+                        ..Default::default()
+                    },
+                    cx,
+                );
+            } else {
+                self.change(id, value, cx);
+            }
             cx.notify();
             return;
         }

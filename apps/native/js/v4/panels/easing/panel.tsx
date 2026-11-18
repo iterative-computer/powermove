@@ -6,87 +6,140 @@ import {
   PANEL_TITLE,
   presetName,
   status,
+  customPresets,
   type Curve,
   type EasingAction,
   type EasingModel,
+  type Interpolation,
 } from "./model";
-
 const t = UI.token;
 const stop = (e: SurfaceEvent) => e.stopPropagation();
 const row = {
   display: "flex",
   flexDirection: "row",
-  flexWrap: "wrap",
   alignItems: "center",
   gap: t("metrics.gap"),
   paddingLeft: t("metrics.inset"),
   paddingRight: t("metrics.inset"),
 };
-
-const pair = {
-  display: "flex",
-  flexDirection: "row",
-  alignItems: "center",
-  gap: t("metrics.gap"),
-};
-
 export interface EasingProps {
   model: EasingModel;
-  /** Host-owned local fields: the drawn curve and its four numbers. */
   bindings: {
     curve: string;
     outX: string;
     outY: string;
     inX: string;
     inY: string;
+    interpolation?: string;
+    name?: string;
   };
 }
-
-/** v1's Easing panel, on the native keyframe model: a curve you see and
- * drag (its two handles, as CSS writes `cubic-bezier`: the outgoing handle,
- * then the incoming, with the numbers beside it), the preset curves as
- * thumbnails, Easy Ease and the interpolations. Every action eases the
- * keyframes selected in the timeline as one Undo step; the Graph Editor
- * shows the result. */
+// Preserve preset order within families, including native's Quart and named curves.
+const groups = [
+  "Ease",
+  "Quad",
+  "Cubic",
+  "Quart",
+  "Expo",
+  "Circ",
+  "Back",
+  "Custom",
+];
+function family(id: string) {
+  return (
+    groups.find((g) => id.toLowerCase().startsWith(g.toLowerCase())) ??
+    (id === "linear" ? "Ease" : "Custom")
+  );
+}
 export function EasingPanel({ model, bindings }: EasingProps) {
   const [s, update] = useState(model.snapshot());
   const [message, setMessage] = useState(model.message);
+  const [draft, setCurve] = useState<Curve>(s.curve ?? [0, 0, 1, 1]);
+  const [hover, preview] = useState<Curve | undefined>();
+  const [saveName, setSaveName] = useState("Custom easing");
+  const [interpolation, setInterpolation] = useState(
+    s.interpolation ?? "linear",
+  );
   useLayoutEffect(
     () =>
       model.subscribe(() => {
-        update(model.snapshot());
+        const next = model.snapshot();
+        update(next);
         setMessage(model.message);
+        if (next.curve !== undefined) setCurve(next.curve ?? [0, 0, 1, 1]);
+        if (next.interpolation !== undefined)
+          setInterpolation(next.interpolation ?? "linear");
+        preview(undefined);
       }),
     [model],
   );
-  const [curve, setCurve] = useState<Curve>([0.42, 0, 0.58, 1]);
-  const [chosen, choose] = useState("easeInOut");
   const ready = s.open && s.count > 0;
-  const act = (action: EasingAction) => {
-    if (ready) model.send(action);
+  const curve: Curve = ready ? draft : [0, 0, 1, 1];
+  const caption = !ready
+    ? "Select keyframes in the timeline to ease them."
+    : s.mixed
+      ? "Mixed"
+      : status(s, message);
+  const act = (a: EasingAction) => {
+    if (ready) model.send(a);
   };
-  const number = (index: number, label: string, binding: string) => (
-    <UI.NumberField
-      id={`${PANEL_ID}:curve:${index}`}
-      label={label}
-      binding={binding}
-      value={curve[index]!}
-      step={0.01}
-      precision={2}
-      min={index % 2 === 0 ? 0 : -4}
-      max={index % 2 === 0 ? 1 : 4}
-      onKeyDown={stop}
-      onChange={(e: SurfaceEvent) => {
-        const value = Number(e.value);
-        if (!Number.isFinite(value)) return;
-        const next = [...curve] as Curve;
-        next[index] = value;
-        setCurve(next);
-        choose("");
-      }}
-      style={{ flexGrow: 1 }}
-    />
-  );
+  const edit = (next: Curve) => {
+    if (ready) {
+      setCurve(next);
+      act({ type: "curve", curve: next });
+    }
+  };
+  const influenceValue = (outgoing: boolean, raw: unknown, commit: boolean) => {
+    if (!ready) return;
+    const value = Number(raw) / 100;
+    if (!Number.isFinite(value) || value < 0 || value > 1) return;
+    const fraction = outgoing ? curve[0] : 1 - curve[2];
+    const next = [...curve] as Curve;
+    const speed = fraction
+      ? (outgoing ? curve[1] : 1 - curve[3]) / fraction
+      : 0;
+    if (outgoing) {
+      next[0] = value;
+      next[1] = speed * value;
+    } else {
+      next[2] = 1 - value;
+      next[3] = 1 - speed * value;
+    }
+    if (commit) edit(next);
+    else setCurve(next);
+  };
+  const influence = (outgoing: boolean) => {
+    const fraction = outgoing ? curve[0] : 1 - curve[2];
+    const label = outgoing ? "Outgoing" : "Incoming";
+    return (
+      <div style={{ display: "flex", flexDirection: "column", flexGrow: 1 }}>
+        <text
+          style={{
+            color: t("colors.secondary"),
+            fontSize: t("typography.minimum"),
+          }}
+        >
+          {label}
+        </text>
+        <UI.NumberField
+          id={`easing:influence:${label.toLowerCase()}`}
+          label={`${label} influence (%)`}
+          binding={outgoing ? bindings.outX : bindings.inX}
+          value={fraction * 100}
+          disabled={!ready}
+          step={1}
+          precision={1}
+          unit="%"
+          min={0.1}
+          max={100}
+          onKeyDown={stop}
+          metadata={{ commitOnRelease: true }}
+          onInput={(e) => influenceValue(outgoing, e.value, false)}
+          onChange={(e) => influenceValue(outgoing, e.value, true)}
+        />
+      </div>
+    );
+  };
   return (
     <div
       id={PANEL_ID}
@@ -98,19 +151,13 @@ export function EasingPanel({ model, bindings }: EasingProps) {
         borderRadius: t("metrics.panel_radius"),
         display: "flex",
         flexDirection: "column",
+        flexShrink: 0,
       }}
     >
       <div
-        id={`${PANEL_ID}:header`}
+        id="easing:header"
         data-pm-slot="header"
-        style={{
-          display: "flex",
-          flexDirection: "row",
-          alignItems: "center",
-          height: t("metrics.header"),
-          paddingLeft: t("metrics.inset"),
-          paddingRight: t("metrics.inset"),
-        }}
+        style={{ ...row, height: t("metrics.header") }}
       >
         <text
           style={{
@@ -122,199 +169,272 @@ export function EasingPanel({ model, bindings }: EasingProps) {
           {PANEL_TITLE}
         </text>
       </div>
-      <scroll
-        id={`${PANEL_ID}:content`}
+      <div
+        id="easing:content"
         role="group"
-        label={PANEL_TITLE}
+        label="Easing"
         style={{ display: "flex", flexDirection: "column" }}
       >
-        <text
-          id={`${PANEL_ID}:status`}
-          role="status"
-          label={status(s, message)}
-          style={{
-            paddingLeft: t("metrics.inset"),
-            paddingRight: t("metrics.inset"),
-            paddingBottom: t("metrics.gap"),
-            color: t(message ? "colors.text" : "colors.muted"),
-            fontSize: t("typography.minimum"),
-          }}
-        >
-          {status(s, message)}
-        </text>
         <UI.EaseCurve
-          id={`${PANEL_ID}:curve`}
+          id="easing:curve"
           label="Easing curve"
-          title="Drag a handle to shape the curve (⇧ snaps, ⌥ fine)"
           binding={bindings.curve}
           value={curve}
+          disabled={!ready}
+          metadata={{
+            commitOnRelease: true,
+            pmKit: hover ? { preview: hover } : {},
+          }}
           onKeyDown={stop}
-          onChange={(e: SurfaceEvent) => {
+          onInput={(e) => {
             const next = Array.isArray(e.value) ? e.value.map(Number) : [];
-            if (next.length !== 4 || !next.every(Number.isFinite)) return;
-            setCurve(next as Curve);
-            choose("");
+            if (ready && next.length === 4 && next.every(Number.isFinite))
+              setCurve(next as Curve);
+          }}
+          onChange={(e) => {
+            const next = Array.isArray(e.value) ? e.value.map(Number) : [];
+            if (next.length === 4 && next.every(Number.isFinite))
+              edit(next as Curve);
           }}
           style={{
+            height: t("metrics.curve_editor"),
+            minHeight: t("metrics.curve_editor"),
+            maxHeight: t("metrics.curve_editor"),
+            flexShrink: 0,
             marginLeft: t("metrics.inset"),
             marginRight: t("metrics.inset"),
-            marginTop: t("metrics.gap"),
-            marginBottom: t("metrics.gap"),
           }}
         />
-        <UI.InspectorRow label="Outgoing">
-          <div style={pair}>
-            {number(0, "Outgoing X", bindings.outX)}
-            {number(1, "Outgoing Y", bindings.outY)}
-          </div>
-        </UI.InspectorRow>
-        <UI.InspectorRow label="Incoming">
-          <div style={pair}>
-            {number(2, "Incoming X", bindings.inX)}
-            {number(3, "Incoming Y", bindings.inY)}
-          </div>
-        </UI.InspectorRow>
+        <text
+          id="easing:status"
+          role="status"
+          label={caption}
+          style={{
+            ...row,
+            height: t("metrics.row"),
+            color: t("colors.secondary"),
+            fontSize: t("typography.minimum"),
+            overflow: "hidden",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {caption}
+        </text>
+        <div role="group" label="Influence" style={row}>
+          {influence(true)}
+          {influence(false)}
+        </div>
         <div
           role="group"
-          label="Apply Curve"
-          style={{ ...row, paddingTop: t("metrics.gap") }}
+          label="Quick easing"
+          style={{ ...row, marginTop: t("metrics.gap") }}
         >
-          <UI.PushButton
-            id={`${PANEL_ID}:apply`}
-            label="Apply Curve"
-            title={`Apply cubic-bezier(${curve.join(", ")}) to the selected keyframes`}
-            role="default"
+          <UI.SegmentedControl
+            id="easing:quick"
+            label="Quick easing"
+            value=""
             disabled={!ready}
-            onKeyDown={stop}
-            onClick={(e: SurfaceEvent) => {
-              stop(e);
-              act({ type: "curve", curve });
+            options={[
+              { id: "both", label: "Easy Ease" },
+              { id: "in", label: "Ease In" },
+              { id: "out", label: "Ease Out" },
+            ]}
+            onChange={(side) => {
+              if (side === "both" || side === "in" || side === "out")
+                act({ type: "easyEase", side });
+            }}
+          />
+          <UI.PopUpButton
+            id="easing:interpolation"
+            label="Interpolation"
+            widthSample="Bezier"
+            binding={bindings.interpolation ?? "interpolation"}
+            value={interpolation}
+            disabled={!ready}
+            options={[
+              { v: "linear", label: "Linear" },
+              { v: "bezier", label: "Bezier" },
+              { v: "hold", label: "Hold" },
+              { v: "auto", label: "Auto" },
+            ]}
+            onChange={(e) => {
+              const v = String(e.value) as Interpolation;
+              if (!["linear", "bezier", "hold", "auto"].includes(v)) return;
+              setInterpolation(v);
+              act({
+                type: "interpolation",
+                interpolation: v,
+                side: "both",
+              });
             }}
           />
         </div>
-        <Subheading title="Presets" />
-        <div role="group" label="Presets" style={row}>
-          {s.presets.map((p) => (
-            <div
-              key={p.id}
-              id={`${PANEL_ID}:preset:${p.id}`}
-              role="button"
-              label={presetName(p.id)}
-              title={`${presetName(p.id)}: cubic-bezier(${p.curve.join(", ")})`}
-              aria-selected={chosen === p.id}
-              onKeyDown={stop}
-              onClick={(e: SurfaceEvent) => {
-                stop(e);
-                // The preset fills the editor, to start from, and eases the
-                // selected keyframes.
-                setCurve([...p.curve] as Curve);
-                choose(p.id);
-                act({ type: "preset", preset: p.id });
-              }}
+        {groups.map((group) => (
+          <div
+            key={group}
+            role="group"
+            label={group}
+            style={{ display: "flex", flexDirection: "column" }}
+          >
+            <text
+              role="heading"
               style={{
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                width: t("metrics.value_column"),
-                paddingTop: t("metrics.gap"),
-                paddingBottom: t("metrics.gap"),
-                borderRadius: t("metrics.control_radius"),
-                ...(chosen === p.id
-                  ? { background: t("colors.selected_fill") }
-                  : {}),
+                ...row,
+                height: t("metrics.row"),
+                color: t("colors.secondary"),
+                fontSize: t("typography.minimum"),
               }}
             >
-              <UI.EaseThumbnail
-                id={`${PANEL_ID}:thumb:${p.id}`}
-                label={presetName(p.id)}
-                value={p.curve}
-                style={{ width: t("metrics.header"), height: t("metrics.row") }}
-              />
-              <text
-                style={{
-                  color: t(
-                    chosen === p.id ? "colors.text" : "colors.secondary",
-                  ),
-                  fontSize: t("typography.minimum"),
-                  textAlign: "center",
-                }}
-              >
-                {presetName(p.id)}
-              </text>
+              {group}
+            </text>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(3, 1fr)",
+                gap: t("metrics.gap"),
+                paddingLeft: t("metrics.inset"),
+                paddingRight: t("metrics.inset"),
+              }}
+            >
+              {[
+                ...s.presets.filter((p) => family(p.id) === group),
+                ...(group === "Custom" ? customPresets(s.library?.source) : []),
+              ].map((p) => {
+                const selected =
+                  ready &&
+                  p.curve.every((v, i) => Math.abs(v - curve[i]!) < 0.0011);
+                return (
+                  <div
+                    key={p.id}
+                    id={`easing:preset:${p.id}`}
+                    role="button"
+                    label={"name" in p ? String(p.name) : presetName(p.id)}
+                    title={
+                      ready
+                        ? "name" in p
+                          ? String(p.name)
+                          : presetName(p.id)
+                        : "Select keyframes to ease"
+                    }
+                    disabled={!ready}
+                    aria-selected={selected}
+                    tabIndex={ready ? 0 : -1}
+                    preventDefault={{ keydown: ["Enter"] }}
+                    onPointerEnter={() => {
+                      if (ready) preview(p.curve);
+                    }}
+                    onPointerLeave={() => preview(undefined)}
+                    onFocus={() => {
+                      if (ready) preview(p.curve);
+                    }}
+                    onBlur={() => preview(undefined)}
+                    onKeyDown={(e) => {
+                      stop(e);
+                      if (e.key === "Enter") {
+                        if (ready) {
+                          setCurve(p.curve);
+                          act(
+                            p.id.startsWith("saved:")
+                              ? {
+                                  type: "curve",
+                                  curve: p.curve,
+                                  name:
+                                    "name" in p
+                                      ? String(p.name)
+                                      : presetName(p.id),
+                                }
+                              : { type: "preset", preset: p.id },
+                          );
+                        }
+                      }
+                    }}
+                    onClick={(e) => {
+                      stop(e);
+                      if (ready) {
+                        setCurve(p.curve);
+                        act(
+                          p.id.startsWith("saved:")
+                            ? {
+                                type: "curve",
+                                curve: p.curve,
+                                name:
+                                  "name" in p
+                                    ? String(p.name)
+                                    : presetName(p.id),
+                              }
+                            : { type: "preset", preset: p.id },
+                        );
+                      }
+                    }}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      paddingTop: t("metrics.gap"),
+                      paddingBottom: t("metrics.gap"),
+                      borderRadius: t("metrics.control_radius"),
+                      background: t("colors.panel"),
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        width: "100%",
+                        background: selected
+                          ? t("colors.selected_fill")
+                          : t("colors.panel"),
+                      }}
+                    >
+                      <UI.EaseThumbnail
+                        id={`easing:thumb:${p.id}`}
+                        label={"name" in p ? String(p.name) : presetName(p.id)}
+                        value={p.curve}
+                        disabled={!ready}
+                        style={{
+                          width: t("metrics.header"),
+                          height: t("metrics.row"),
+                        }}
+                      />
+                      <text
+                        style={{
+                          color: t(ready ? "colors.secondary" : "colors.muted"),
+                          fontSize: t("typography.minimum"),
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {"name" in p ? String(p.name) : presetName(p.id)}
+                      </text>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-          ))}
-        </div>
-        <Subheading title="Ease" />
-        <div role="group" label="Ease" style={row}>
-          {(
-            [
-              ["both", "Easy Ease", "F9"],
-              ["in", "Ease In", "⇧F9"],
-              ["out", "Ease Out", "⌘⇧F9"],
-            ] as const
-          ).map(([side, label, keys]) => (
-            <UI.PushButton
-              key={side}
-              id={`${PANEL_ID}:ease:${side}`}
-              label={label}
-              title={`${label} (${keys})`}
-              disabled={!ready}
-              onKeyDown={stop}
-              onClick={(e: SurfaceEvent) => {
-                stop(e);
-                act({ type: "easyEase", side });
-              }}
-            />
-          ))}
-        </div>
-        <Subheading title="Interpolation" />
-        <div
-          role="group"
-          label="Interpolation"
-          style={{ ...row, paddingBottom: t("metrics.inset") }}
-        >
-          {(
-            [
-              ["linear", "Linear"],
-              ["bezier", "Bézier"],
-              ["auto", "Auto Bézier"],
-              ["hold", "Hold"],
-            ] as const
-          ).map(([interpolation, label]) => (
-            <UI.PushButton
-              key={interpolation}
-              id={`${PANEL_ID}:interpolation:${interpolation}`}
-              label={label}
-              title={`${label} interpolation on both sides`}
-              disabled={!ready}
-              onKeyDown={stop}
-              onClick={(e: SurfaceEvent) => {
-                stop(e);
-                act({ type: "interpolation", interpolation, side: "both" });
-              }}
-            />
-          ))}
-        </div>
-      </scroll>
+            {group === "Custom" && (
+              <UI.InspectorRow label="Save Current…">
+                <div style={row}>
+                  <UI.TextField
+                    id="easing:save-name"
+                    binding={bindings.name ?? "name"}
+                    value={saveName}
+                    disabled={!ready}
+                    onChange={(e) => setSaveName(String(e.value))}
+                  />
+                  <UI.PushButton
+                    id="easing:save"
+                    label="Save"
+                    disabled={!ready || !saveName.trim()}
+                    onClick={() =>
+                      act({ type: "save", name: saveName.trim(), curve })
+                    }
+                  />
+                </div>
+              </UI.InspectorRow>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
-  );
-}
-
-function Subheading({ title }: { title: string }) {
-  return (
-    <text
-      role="heading"
-      style={{
-        display: "flex",
-        alignItems: "center",
-        height: t("metrics.row"),
-        paddingLeft: t("metrics.inset"),
-        color: t("colors.muted"),
-        fontSize: t("typography.minimum"),
-        fontWeight: t("typography.semibold_weight"),
-      }}
-    >
-      {title}
-    </text>
   );
 }

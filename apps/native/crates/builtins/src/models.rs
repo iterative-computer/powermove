@@ -1784,13 +1784,25 @@ impl Backend {
     pub(crate) fn easing_state(&mut self) -> Result<Value, String> {
         self.sync()?;
         let Some(p) = self.published() else {
-            return Ok(json!({"open": false, "count": 0, "presets": easing_presets()}));
+            return Ok(json!({"open": false, "count": 0, "presets": easing_presets(), "library": crate::timeline_easing::inspect(&self.kernel)}));
         };
+        let (curve, mixed) = p.snapshot.root().map(|root| crate::timeline_easing::selected_curve(root, p.selection.keys())).unwrap_or((None, false));
+        let interpolation = p.selection.keys().first().and_then(|id| {
+            let index = pm_panel_timeline::TimelineIndex::from_snapshot(&p.snapshot);
+            let key = wire(&index.key(id)?.2.stored.to_value());
+            Some(if key["autoBezier"] == true { "auto".to_owned() }
+                else if key["hold"] == true { "hold".to_owned() }
+                else { key["outInterp"].as_str().unwrap_or("linear").to_owned() })
+        });
         Ok(json!({
             "open": true,
+            "curve": curve,
+            "mixed": mixed,
+            "interpolation": interpolation,
             "count": p.selection.keys().len(),
             "revision": p.revision().to_string(),
             "presets": easing_presets(),
+            "library": crate::timeline_easing::inspect(&self.kernel),
         }))
     }
     /// An Easing panel action on the selected keyframes, as one Undo step:
@@ -1861,7 +1873,7 @@ impl Backend {
         Ok(Request::new(
             self.caller,
             Call::Transact {
-                label: None,
+                label: Some(if args["type"] == "preset" { format!("Ease: {}", crate::timeline_easing::preset_name(args["preset"].as_str().unwrap_or(""))) } else if let Some(name) = args["name"].as_str().filter(|n| !n.is_empty() && n.chars().count() <= 100) { format!("Ease: {name}") } else { "Adjust easing".into() }),
                 expected_revision: Some(p.revision()),
                 body: WriteBody::Commands(vec![command]),
             },

@@ -312,7 +312,7 @@ fn capture_agent_states() {
     };
     let dir = std::env::var("PM_PANEL_CAPTURE").unwrap_or_else(|_| "/tmp/pm-shots/panels".into());
     std::fs::create_dir_all(&dir).unwrap();
-    let panel = std::env::var("PM_CAPTURE_STATE_PANEL").unwrap_or_else(|_| "agent".into());
+    let panel = std::env::var("PM_CAPTURE_STATE_PANEL").or_else(|_| std::env::var("PM_CAPTURE_PANEL")).unwrap_or_else(|_| "agent".into());
     let r = rig(&panel, 1);
     let mut files: Vec<_> = std::fs::read_dir(&states)
         .unwrap()
@@ -336,6 +336,8 @@ fn capture_agent_states() {
                     (900., 200.)
                 } else if panel == "layer-effects" {
                     (320., 200.)
+                } else if panel == "easing" {
+                    (320., 1500.)
                 } else {
                     (tokens.metrics.agent_width, tokens.metrics.agent_height)
                 };

@@ -170,6 +170,7 @@ pub enum Kit {
     Ease {
         curve: [f64; 4],
         thumbnail: bool,
+        preview: Option<[f64; 4]>,
     },
     /// v1's point pad: the point (X, Y) and its bounds.
     Pad {
@@ -240,6 +241,7 @@ pub struct NodeView {
     pub binding: Option<SharedString>,
     pub number: Option<NumberFacts>,
     pub local_change: bool,
+    pub commit_on_release: bool,
     /// Escape reports an empty change, so a transient editor can close.
     pub cancel_change: bool,
     /// A click (1) or a double-click (2) here opens a text field
@@ -926,6 +928,12 @@ fn compile(
                 (Arc::new(labels), side("paddingLeft") + side("paddingRight") + inset)
             }),
         local_change: node.listeners.contains_key("change"),
+        commit_on_release: node.listeners.contains_key("input")
+            && node.listeners.contains_key("change")
+            && meta
+                .and_then(|m| m.get("commitOnRelease"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         cancel_change: meta
             .and_then(|m| m.get("cancelChange"))
             .and_then(Value::as_bool)
@@ -1251,6 +1259,13 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
             Kit::Ease {
                 curve: [at(0, 0.), at(1, 0.), at(2, 1.), at(3, 1.)],
                 thumbnail: component == Component::EaseThumbnail,
+                preview: node
+                    .props
+                    .get("metadata")
+                    .and_then(|m| m.get("pmKit"))
+                    .and_then(|m| m.get("preview"))
+                    .and_then(|v| serde_json::from_value::<[f64; 4]>(v.clone()).ok())
+                    .filter(|c| c.iter().all(|v| v.is_finite())),
             }
         }
         Some(Component::DisclosureButton) => {
