@@ -473,11 +473,10 @@ export function ProjectView(props: ProjectViewProps) {
             style={{
               position: "absolute",
               inset: "fill",
+              // A readiness refresh keeps the last good picture unchanged.
               opacity: f.attention
                 ? token("metrics.media_offline_opacity")
-                : f.loading
-                  ? token("metrics.media_loading_opacity")
-                  : null,
+                : null,
             }}
           />
         ) : (f.attention && !f.cloud) || (f.comp && f.poster) ? null : (

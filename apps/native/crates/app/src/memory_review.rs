@@ -1,7 +1,9 @@
 //! Opt-in GUI memory reproduction. A JSON command file is read only when
 //! PM_NATIVE_MEMORY_REVIEW names it in a development build. Commands carry
 //! increasing `id`s and an `action`: open (with `path`), play, stop, close,
-//! collect, pressure, sample, or quit. Numeric diagnostics go to a sibling
+//! collect, pressure, engine-pressure (normal/warn/critical), sample, or quit.
+//! Engine pressure uses the process-local cache governor, never OS pressure.
+//! Numeric diagnostics go to a sibling
 //! .samples.jsonl file, outside the project and the normal user profile.
 use crate::session::Controller;
 use gpui::*;
@@ -56,6 +58,15 @@ pub fn install(
                             runtime.memory_pressure();
                         }
                         pm_engine_service::memory::pressure_relief();
+                    }
+                    "engine-pressure" => {
+                        use pm_engine_service::memory::{Pressure, simulate_pressure};
+                        let level = match command["level"].as_str() {
+                            Some("critical") => Pressure::Critical,
+                            Some("warn") => Pressure::Warning,
+                            _ => Pressure::Normal,
+                        };
+                        simulate_pressure(level);
                     }
                     "quit" => cx.defer(crate::lifecycle::begin_quit),
                     _ => {}

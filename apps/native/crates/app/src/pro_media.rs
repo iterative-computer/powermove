@@ -2372,6 +2372,9 @@ impl crate::session::Controller {
     /// Project files that can't be played from here (the Project panel's
     /// Missing), for the status line.
     pub(crate) fn offline_count(&self) -> usize {
+        if !self.builtins.media_observation_current {
+            return 0;
+        }
         let Some(pm_model::NodeKind::Object(assets)) = self
             .published
             .as_ref()

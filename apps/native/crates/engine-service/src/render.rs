@@ -748,7 +748,9 @@ impl Engine {
             self.renderer.release_idle_media();
         }
         self.renderer.trim(0);
-        self.clear_cache();
+        // The displayed surfaces are presentation state, not an idle cache.
+        // Keep their pixels pinned until a replacement (or project close).
+        self.invalidate_cache();
         self.disk_next = None;
         self.pool.retain(|surface| Arc::strong_count(surface) > 1);
         self.offscreen = None;
@@ -779,6 +781,8 @@ impl Engine {
     }
 
     fn release_project_memory_inner(&mut self) {
+        // Closing a document ends its presentation lifetime as well.
+        self.showing.clear();
         self.release_idle_memory_inner();
         self.renderer.release_project_memory();
         if let Some(settler) = &self.settler {
@@ -1175,6 +1179,8 @@ impl Engine {
         self.settler = None;
         self.fonts = Some(fonts);
         self.font_generation = None;
+        // A replacement broker can reuse generation numbers. It is an
+        // explicit engine reset, unlike a generation update on that broker.
         self.clear_cache();
     }
     /// The font registry generation the next frame draws with: fonts sync
@@ -1188,7 +1194,7 @@ impl Engine {
         if let Some(fonts) = &self.fonts
             && fonts.sync(&mut self.renderer, &mut self.font_generation)
         {
-            self.clear_cache();
+            self.invalidate_cache();
         }
     }
     /// A transient zoom surface must not leave a retained presentation cache.
@@ -1196,10 +1202,15 @@ impl Engine {
         self.showing.retain(|(owner, _)| *owner != presenter);
         debug_assert!(self.showing.iter().all(|(owner, _)| *owner != presenter));
     }
-    /// Every kept picture goes, a settled one not shown yet with them.
-    pub fn clear_cache(&mut self) {
+    /// Input changes invalidate reusable pictures without ending the
+    /// displayed surface's lifetime. Its key prevents stale cache hits.
+    fn invalidate_cache(&mut self) {
         self.cache.clear();
         self.settled = None;
+    }
+    /// Explicit full reset, including displayed storage (e.g. GPU failure).
+    pub fn clear_cache(&mut self) {
+        self.invalidate_cache();
         self.showing.clear();
     }
     /// The key a frame of `spec` is kept in memory under.
@@ -1586,7 +1597,7 @@ impl Engine {
         let tone = view.and_then(|v| v.tone(self.mastering));
         if tone != self.output_tone {
             self.output_tone = tone;
-            self.clear_cache();
+            self.invalidate_cache();
         }
         view
     }
@@ -1718,7 +1729,9 @@ impl Engine {
         // A frame is of its key and its composition.
         let of = |c: &CachedFrame| c.key == key && c.composition == scene.comp;
         self.cache.retain(current);
-        self.showing.retain(|(_, c)| current(c));
+        // A viewer's last good surface stays pinned until its replacement
+        // is ready. Its old key cannot serve the new request. Offscreen
+        // reads likewise never retire a viewer's presentation.
         if self.settled.as_ref().is_some_and(|c| !current(c)) {
             self.settled = None;
         }
@@ -1967,6 +1980,33 @@ impl Engine {
                 (surface, failures)
             }
         };
+        // Keep every viewer's current good surface, including frames drawn
+        // directly rather than by the settler. Idle/cache eviction must not
+        // return visible storage to the reusable pool.
+        if !spec.exact
+            && !capture
+            && !stand_ins
+            && failures.is_empty()
+            && self.cache_enabled
+            && self
+                .cache
+                .iter()
+                .any(|c| of(c) && Arc::ptr_eq(&c.surface, &surface))
+        {
+            self.showing.retain(|(id, _)| *id != viewer);
+            if self.showing.len() >= 4 {
+                self.showing.remove(0);
+            }
+            self.showing.push((
+                viewer,
+                CachedFrame {
+                    key,
+                    composition: scene.comp.clone(),
+                    surface: surface.clone(),
+                    failures: failures.clone(),
+                },
+            ));
+        }
         if let Some((config, frames)) = &self.scope_frames {
             // An Output reading takes the project's output tone, as delivery
             // does: SDR white on the standard range, the mastering peak on PQ.
@@ -3138,18 +3178,23 @@ mod lifetime_tests {
         // Draws `spec` and says whether the frame cache served it.
         let draw = |engine: &mut Engine, spec: FrameSpec| {
             let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
-            while engine
-                .frame(
-                    &scene,
-                    spec,
-                    None,
-                    &Default::default(),
-                    false,
-                    trace.clone(),
-                )
-                .unwrap()
-                .is_none()
-            {}
+            loop {
+                if let Some(submission) = engine
+                    .frame(
+                        &scene,
+                        spec,
+                        None,
+                        &Default::default(),
+                        false,
+                        trace.clone(),
+                    )
+                    .unwrap()
+                {
+                    submission.commit();
+                    submission.complete().unwrap();
+                    break;
+                }
+            }
             trace.lock().unwrap().cache_hit
         };
         // The viewer's picture at that scale is a settled one: drawn off
@@ -3171,6 +3216,133 @@ mod lifetime_tests {
         assert!(
             draw(&mut engine, viewer),
             "the viewer frame is still served after the exact reads"
+        );
+        let another_time = FrameSpec {
+            time: Ticks::from_whole_seconds(2),
+            scale: 2.,
+            ..exact
+        };
+        assert!(!draw(&mut engine, another_time));
+        assert_eq!(
+            engine.showing.len(),
+            1,
+            "offscreen read dropped the visible frame"
+        );
+        assert!(
+            draw(&mut engine, viewer),
+            "offscreen reads preserve the viewer"
+        );
+        // The idle timer and critical-pressure path share this purge. Keep
+        // the displayed frame pinned until its replacement is handed over.
+        let surface = engine.showing[0].1.surface.clone();
+        let pixels =
+            pm_gpu::readback::read_f32(&engine.gpu.device, &engine.gpu.queue, &surface.texture)
+                .unwrap();
+        engine.release_idle_memory();
+        assert_eq!(
+            engine.showing.len(),
+            1,
+            "idle purge dropped the visible frame"
+        );
+        assert!(Arc::ptr_eq(&surface, &engine.showing[0].1.surface));
+        assert!(
+            draw(&mut engine, viewer),
+            "idle purge forced visible pixels to reload"
+        );
+        assert_eq!(
+            pixels,
+            pm_gpu::readback::read_f32(&engine.gpu.device, &engine.gpu.queue, &surface.texture,)
+                .unwrap()
+        );
+        engine
+            .memory_request
+            .store(0, std::sync::atomic::Ordering::Release);
+        engine.govern_memory();
+        assert_eq!(
+            engine.showing.len(),
+            1,
+            "budget trim dropped the visible frame"
+        );
+        assert!(Arc::ptr_eq(&surface, &engine.showing[0].1.surface));
+        crate::memory::simulate_pressure(crate::memory::Pressure::Critical);
+        engine.govern_memory();
+        crate::memory::simulate_pressure(crate::memory::Pressure::Normal);
+        assert!(
+            Arc::ptr_eq(&surface, &engine.showing[0].1.surface),
+            "critical pressure dropped the visible frame"
+        );
+        assert!(draw(&mut engine, viewer), "critical pressure forced a reload");
+        let edited = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+                )),
+                2,
+            )),
+            comp: scene.comp.clone(),
+            media: scene.media.clone(),
+            content: scene.content,
+        };
+        let pending = engine
+            .frame(
+                &edited,
+                viewer,
+                None,
+                &Default::default(),
+                false,
+                Arc::default(),
+            )
+            .err()
+            .expect("edited settled frame must wait for its replacement");
+        assert!(pending.is::<SettledPending>());
+        assert!(
+            Arc::ptr_eq(&surface, &engine.showing[0].1.surface),
+            "an edit discarded the picture before its replacement was ready"
+        );
+        assert!(engine.settle_now(&edited, viewer, || false).unwrap());
+        let replacement = engine
+            .frame(
+                &edited,
+                viewer,
+                None,
+                &Default::default(),
+                false,
+                Arc::default(),
+            )
+            .unwrap()
+            .unwrap();
+        replacement.commit();
+        replacement.complete().unwrap();
+        assert_eq!(engine.showing.len(), 1);
+        assert!(!Arc::ptr_eq(&surface, &engine.showing[0].1.surface));
+        let preview = FrameSpec {
+            scale: 1.,
+            ..viewer
+        };
+        let direct = engine
+            .frame(
+                &edited,
+                preview,
+                None,
+                &Default::default(),
+                false,
+                Arc::default(),
+            )
+            .unwrap()
+            .unwrap();
+        direct.commit();
+        direct.complete().unwrap();
+        assert_eq!(engine.showing.len(), 1);
+        assert!(Arc::ptr_eq(&direct.surface, &engine.showing[0].1.surface));
+        engine.release_idle_memory();
+        assert!(
+            Arc::ptr_eq(&direct.surface, &engine.showing[0].1.surface),
+            "a directly drawn preview must also survive idle purge"
+        );
+        engine.release_project_memory();
+        assert!(
+            engine.showing.is_empty(),
+            "project close releases the presentation"
         );
     }
 

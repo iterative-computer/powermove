@@ -28,9 +28,26 @@ impl ObservedRuntime {
         }
     }
     /// Carry these observations to a revision that changed no media input.
-    /// The caller proves that; `state` still refuses every other stamp.
+    /// The caller proves that; readiness still refuses every other stamp.
+    /// Only a last-good poster may stand in within the same document.
     pub fn rebound(mut self, stamp: Stamp) -> Self {
         self.stamp = Some(stamp);
+        self
+    }
+    /// Host-owned thumbnails remain valid while a new readiness probe runs.
+    /// A different stamp must not inherit decode readiness, only the supplied
+    /// current document's poster keys.
+    pub fn with_posters(
+        mut self,
+        stamp: Stamp,
+        posters: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        if self.stamp.as_ref() != Some(&stamp) {
+            self = Self::new(stamp, BTreeMap::new());
+        }
+        for (id, poster) in posters {
+            self.states.entry(id).or_default().poster = Some(poster);
+        }
         self
     }
     /// These observations with `f` applied to each asset's state (what the
@@ -48,7 +65,19 @@ impl MediaRuntime for ObservedRuntime {
     }
     fn state(&self, stamp: &Stamp, asset: &str) -> RuntimeState {
         if self.stamp.as_ref() != Some(stamp) {
-            return RuntimeState::default();
+            // Publications and page reads can overtake the readiness worker.
+            // A same-document poster is still a good picture; none of its
+            // older readiness, progress or rendition facts stand in.
+            let poster = self
+                .stamp
+                .as_ref()
+                .filter(|old| old.project == stamp.project && old.document == stamp.document)
+                .and_then(|_| self.states.get(asset))
+                .and_then(|state| state.poster.clone());
+            return RuntimeState {
+                poster,
+                ..Default::default()
+            };
         }
         self.states.get(asset).cloned().unwrap_or_default()
     }
@@ -57,6 +86,106 @@ impl MediaRuntime for ObservedRuntime {
 mod tests {
     use super::*;
     use crate::Availability;
+    #[test]
+    fn late_page_reads_keep_only_the_same_documents_last_good_poster() {
+        let stamp = Stamp {
+            project: "p".into(),
+            document: 1,
+            revision: 2,
+        };
+        let ready = RuntimeState {
+            availability: Availability::Ready,
+            poster: Some("thumb/last-good".into()),
+            proxy: crate::ProxyStatus::Ready {
+                version: "old".into(),
+            },
+            progress: Some(crate::DownloadProgress {
+                completed: 1,
+                total: 2,
+            }),
+            hdr: Some("HLG".into()),
+            ..Default::default()
+        };
+        let observed = ObservedRuntime::new(stamp.clone(), BTreeMap::from([("a".into(), ready)]));
+        let picture = RuntimeState {
+            poster: Some("thumb/last-good".into()),
+            ..Default::default()
+        };
+        for revision in [1, 3] {
+            let reading = Stamp {
+                revision,
+                ..stamp.clone()
+            };
+            assert_eq!(observed.state(&reading, "a"), picture);
+            assert_eq!(observed.state(&reading, "unseen"), RuntimeState::default());
+        }
+        let other_document = Stamp {
+            document: 2,
+            ..stamp.clone()
+        };
+        assert_eq!(
+            observed.state(&other_document, "a"),
+            RuntimeState::default()
+        );
+        let other_project = Stamp {
+            project: "other".into(),
+            ..stamp
+        };
+        assert_eq!(observed.state(&other_project, "a"), RuntimeState::default());
+    }
+    #[test]
+    fn posters_survive_republish_and_import_without_stale_readiness() {
+        let stamp = Stamp {
+            project: "p".into(),
+            document: 1,
+            revision: 2,
+        };
+        let mut ready = RuntimeState::default();
+        ready.poster = Some("thumb/a".into());
+        ready.availability = Availability::Ready;
+        let observed = ObservedRuntime::new(stamp.clone(), BTreeMap::from([("a".into(), ready)]));
+        let observed = observed.with_posters(stamp.clone(), [("a".into(), "thumb/a".into())]);
+        assert_eq!(
+            observed.state(&stamp, "a").availability,
+            Availability::Ready
+        );
+        let next = Stamp {
+            revision: 3,
+            ..stamp.clone()
+        };
+        let observed = observed.with_posters(
+            next.clone(),
+            [
+                ("a".into(), "thumb/a".into()),
+                ("imported".into(), "thumb/new".into()),
+            ],
+        );
+        assert_eq!(
+            observed.state(&next, "a").poster.as_deref(),
+            Some("thumb/a")
+        );
+        assert_eq!(
+            observed.state(&next, "imported").poster.as_deref(),
+            Some("thumb/new")
+        );
+        assert_eq!(
+            observed.state(&next, "a").availability,
+            RuntimeState::default().availability
+        );
+        assert_eq!(
+            observed.state(&stamp, "a"),
+            RuntimeState {
+                poster: Some("thumb/a".into()),
+                ..Default::default()
+            }
+        );
+        let other = Stamp {
+            project: "other".into(),
+            ..next
+        };
+        let observed = observed.with_posters(other.clone(), []);
+        assert_eq!(observed.state(&other, "a"), RuntimeState::default());
+    }
     #[test]
     fn missing_counts_files_the_offline_filter_lists() {
         let stamp = Stamp {

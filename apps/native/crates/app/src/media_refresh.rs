@@ -104,11 +104,14 @@ pub struct Refresh {
     serial: u64,
     visible: Option<Inputs>,
     settled: Option<Inputs>,
+    resolved: bool,
+    observation_epoch: u64,
     pending: Option<(u64, Inputs)>,
+    retry_pending: bool,
 }
 pub struct Plan {
-    /// Retire these ids' pixels and readiness before exposing a new selection.
-    /// `None` retires everything. Other ids keep showing through the refresh.
+    /// Source inputs that changed; `None` means a different document.
+    /// Same-document paths keep showing until the replacement resolves.
     pub retire: Option<BTreeSet<String>>,
     pub job: Option<u64>,
 }
@@ -117,7 +120,16 @@ impl Refresh {
         self.serial += 1;
         self.visible = None;
         self.settled = None;
+        self.resolved = false;
         self.pending = None;
+        self.retry_pending = false;
+    }
+    /// A file became available without changing the document's inputs.
+    /// Keep the display paths and coalesce retries behind any current read.
+    pub(crate) fn retry(&mut self) {
+        self.settled = None;
+        self.resolved = false;
+        self.retry_pending = self.pending.is_some();
     }
     /// Settled at `inputs` (what a finished job leaves).
     #[cfg(test)]
@@ -125,6 +137,21 @@ impl Refresh {
         self.reset();
         self.visible = Some(inputs.clone());
         self.settled = Some(inputs);
+        self.catalog_adopted();
+    }
+    pub(crate) fn catalog_ready(&self, inputs: &Inputs) -> bool {
+        self.resolved && self.settled.as_ref().is_some_and(|old| old.same(inputs))
+    }
+    pub(crate) fn observation_epoch(&self) -> u64 {
+        self.observation_epoch
+    }
+    fn catalog_adopted(&mut self) {
+        self.resolved = self.settled.is_some();
+        if self.resolved {
+            // A cloud restore can change readable bytes at the same path.
+            // Only observations made after this adoption can be reused.
+            self.observation_epoch += 1;
+        }
     }
     pub fn plan(&mut self, inputs: Inputs) -> Plan {
         let retire = match &self.visible {
@@ -136,6 +163,7 @@ impl Refresh {
         self.visible = Some(inputs.clone());
         if changed {
             self.settled = None;
+            self.resolved = false;
         }
         if self.pending.is_some() || self.settled.as_ref().is_some_and(|old| old.same(&inputs)) {
             return Plan { retire, job: None };
@@ -158,12 +186,29 @@ impl Refresh {
             return false;
         }
         let (_, inputs) = self.pending.take().unwrap();
+        self.resolved = false;
+        if std::mem::take(&mut self.retry_pending) {
+            return false;
+        }
         if latest.as_ref().is_none_or(|latest| !inputs.same(latest)) {
             return false;
         }
         self.settled = Some(inputs);
         true
     }
+}
+
+/// Only a document switch clears displayed source paths immediately. A
+/// same-document replacement is published atomically by adopt_media.
+fn retire_catalog(
+    catalog: &mut pm_engine_service::MediaCatalog,
+    ids: Option<BTreeSet<String>>,
+) -> bool {
+    if ids.is_some() {
+        return false;
+    }
+    *catalog = Default::default();
+    true
 }
 
 impl Controller {
@@ -181,15 +226,8 @@ impl Controller {
         }
     }
     fn retire_media(&mut self, ids: Option<BTreeSet<String>>, cx: &mut Context<Self>) {
-        match ids {
-            None => self.media_base = Default::default(),
-            Some(ids) if ids.is_empty() => return,
-            Some(ids) => {
-                for id in &ids {
-                    self.media_base.originals.remove(id);
-                    self.media_base.proxies.remove(id);
-                }
-            }
+        if !retire_catalog(&mut self.media_base, ids) {
+            return;
         }
         self.decorate_media(cx);
         self.publish_media_catalog();
@@ -209,8 +247,8 @@ impl Controller {
         let Some(job) = plan.job else {
             return;
         };
-        // Until the job lands, a clip whose file isn't known yet (just
-        // imported or relinked) draws nothing rather than Media Offline: the
+        // Until the job lands, a newly imported clip with no known file
+        // draws nothing rather than Media Offline: the
         // card is wrong for it, and drawing it held the viewer seconds after
         // an import.
         let resolving: BTreeSet<String> = published
@@ -273,6 +311,7 @@ impl Controller {
         self.media_resolved = true;
         let before = std::mem::take(&mut self.media);
         self.decorate_media(cx);
+        self.media_refresh.catalog_adopted();
         self.identify_media();
         if self.media != before {
             self.publish_media_catalog();
@@ -358,6 +397,30 @@ mod tests {
         }
     }
     #[test]
+    fn background_source_refresh_keeps_visible_paths_until_adoption() {
+        let mut catalog = pm_engine_service::MediaCatalog::default();
+        catalog
+            .originals
+            .insert("a".into(), "/synthetic/original.png".into());
+        catalog
+            .proxies
+            .insert("a".into(), "/synthetic/proxy.png".into());
+        let before = catalog.clone();
+        assert!(!retire_catalog(
+            &mut catalog,
+            Some(BTreeSet::from(["a".into()]))
+        ));
+        assert!(
+            catalog == before,
+            "background refresh removed displayed pixels"
+        );
+        assert!(retire_catalog(&mut catalog, None));
+        assert!(
+            catalog == Default::default(),
+            "document switches forget old sources"
+        );
+    }
+    #[test]
     fn rapid_relink_undo_and_reopen_never_publish_a_stale_catalog() {
         let a = inputs(1, "a");
         let b = inputs(1, "b");
@@ -426,5 +489,189 @@ mod tests {
         let plan = refresh.plan(after);
         assert_eq!(plan.retire, Some(BTreeSet::new()));
         assert!(plan.job.is_some(), "paths are still re-resolved");
+    }
+    fn probe_inputs(document: u64, asset: &str) -> crate::builtins::MediaProbeInputs {
+        (
+            inputs(document, asset),
+            Default::default(),
+            Default::default(),
+            0,
+        )
+    }
+    fn started(plan: crate::builtins::MediaProbePlan) -> u64 {
+        match plan {
+            crate::builtins::MediaProbePlan::Start(serial) => serial,
+            other => panic!("expected a new probe, got {other:?}"),
+        }
+    }
+    #[test]
+    fn probe_import_bursts_run_one_read_then_only_the_latest() {
+        use crate::builtins::{MediaProbePlan, MediaProbeRefresh};
+        let mut probe = MediaProbeRefresh::default();
+        let first = probe_inputs(1, "first");
+        let serial = started(probe.plan(first.clone()));
+        assert_eq!(
+            probe.plan(first.clone()),
+            MediaProbePlan::Waiting,
+            "queued work is not an observation that can be rebound"
+        );
+        for revision in 0..50 {
+            assert_eq!(
+                probe.plan(probe_inputs(1, &format!("import-{revision}"))),
+                MediaProbePlan::Waiting,
+                "an import must not add another worker"
+            );
+        }
+        let latest = probe_inputs(1, "last");
+        assert!(
+            !probe.finish(serial, Some(&latest)),
+            "stale observations must not publish"
+        );
+        let serial = started(probe.plan(latest.clone()));
+        assert_eq!(probe.plan(latest.clone()), MediaProbePlan::Waiting);
+        assert!(probe.finish(serial, Some(&latest)));
+        assert_eq!(probe.plan(latest), MediaProbePlan::Reuse);
+    }
+    #[test]
+    fn probe_path_changes_wait_and_undo_reuses_only_settled_inputs() {
+        use crate::builtins::{MediaProbePlan, MediaProbeRefresh};
+        let mut probe = MediaProbeRefresh::default();
+        let mut original = probe_inputs(1, "a");
+        original
+            .1
+            .insert("a".into(), "/synthetic/original.png".into());
+        let serial = started(probe.plan(original.clone()));
+        assert!(probe.finish(serial, Some(&original)));
+        let mut changed = original.clone();
+        changed.2.insert("a".into(), "/synthetic/proxy.png".into());
+        let serial = started(probe.plan(changed.clone()));
+        assert_eq!(probe.plan(changed.clone()), MediaProbePlan::Waiting);
+        // Undo can reuse what was actually observed, even while the other
+        // read finishes. That other read must never rebind its own result.
+        assert_eq!(probe.plan(original.clone()), MediaProbePlan::Reuse);
+        assert!(!probe.finish(serial, Some(&original)));
+        assert_eq!(probe.plan(original), MediaProbePlan::Reuse);
+    }
+    #[test]
+    fn a_probe_from_a_retired_host_cannot_finish_the_new_hosts_read() {
+        use crate::builtins::{MediaProbePlan, MediaProbeRefresh};
+        let mut old = MediaProbeRefresh::default();
+        let stale = started(old.plan(probe_inputs(1, "old")));
+        let mut next = MediaProbeRefresh::default();
+        let current = probe_inputs(2, "new");
+        let serial = started(next.plan(current.clone()));
+        assert_ne!(serial, stale);
+        assert!(!next.finish(stale, Some(&current)));
+        assert_eq!(next.plan(current.clone()), MediaProbePlan::Waiting);
+        assert!(next.finish(serial, Some(&current)));
+        assert_eq!(next.plan(current), MediaProbePlan::Reuse);
+    }
+    #[test]
+    fn a_restored_file_at_the_same_path_requires_a_fresh_observation() {
+        use crate::builtins::{MediaProbePlan, MediaProbeRefresh};
+        let mut probe = MediaProbeRefresh::default();
+        let original = probe_inputs(1, "a");
+        let serial = started(probe.plan(original.clone()));
+        assert!(probe.finish(serial, Some(&original)));
+        let mut restored = original.clone();
+        restored.3 += 1;
+        let serial = started(probe.plan(restored.clone()));
+        let mut newer = restored.clone();
+        newer.3 += 1;
+        assert_eq!(probe.plan(newer.clone()), MediaProbePlan::Waiting);
+        assert!(!probe.finish(serial, Some(&newer)));
+        let serial = started(probe.plan(newer.clone()));
+        assert!(probe.finish(serial, Some(&newer)));
+        assert_eq!(probe.plan(newer), MediaProbePlan::Reuse);
+    }
+
+    #[test]
+    fn probes_wait_for_an_adopted_catalog_and_never_probe_failed_resolution() {
+        let original = inputs(1, "original");
+        let changed = inputs(1, "changed");
+        let failed = inputs(1, "failed");
+        let mut refresh = Refresh::default();
+        refresh.adopt(original.clone());
+        let epoch = refresh.observation_epoch();
+        assert!(refresh.catalog_ready(&original));
+        let job = refresh.plan(changed.clone()).job.unwrap();
+        assert!(
+            !refresh.catalog_ready(&changed),
+            "held display paths are not new readiness evidence"
+        );
+        assert!(refresh.finish(job, Some(changed.clone())));
+        assert!(
+            !refresh.catalog_ready(&changed),
+            "completion is not catalog adoption"
+        );
+        refresh.catalog_adopted();
+        assert!(refresh.observation_epoch() > epoch);
+        assert!(refresh.catalog_ready(&changed));
+        assert!(!refresh.catalog_ready(&inputs(2, "changed")));
+        let job = refresh.plan(failed.clone()).job.unwrap();
+        assert!(refresh.finish(job, Some(failed.clone())));
+        // An error never calls catalog_adopted. It stays settled without
+        // launching probes against the retained display-only paths.
+        assert!(!refresh.catalog_ready(&failed));
+        assert!(refresh.plan(failed.clone()).job.is_none());
+        assert!(!refresh.catalog_ready(&failed));
+        assert!(!refresh.catalog_ready(&inputs(2, "failed")));
+    }
+    #[test]
+    fn cloud_retries_keep_display_paths_and_coalesce_behind_the_current_read() {
+        let current = inputs(1, "download");
+        let mut refresh = Refresh::default();
+        refresh.adopt(current.clone());
+        refresh.retry();
+        let plan = refresh.plan(current.clone());
+        assert_eq!(plan.retire, Some(BTreeSet::new()));
+        let job = plan.job.unwrap();
+        for _ in 0..50 {
+            refresh.retry();
+            let plan = refresh.plan(current.clone());
+            assert_eq!(plan.retire, Some(BTreeSet::new()));
+            assert!(
+                plan.job.is_none(),
+                "downloads must not add parallel resolvers"
+            );
+        }
+        assert!(
+            !refresh.finish(job, Some(current.clone())),
+            "the read predates a downloaded file"
+        );
+        let job = refresh.plan(current.clone()).job.unwrap();
+        assert!(refresh.finish(job, Some(current.clone())));
+        refresh.catalog_adopted();
+        assert!(refresh.catalog_ready(&current));
+        assert!(refresh.plan(current.clone()).job.is_none());
+
+        // A cloud retry finishing after a document switch cannot publish.
+        refresh.retry();
+        let job = refresh.plan(current).job.unwrap();
+        let other = inputs(2, "other");
+        assert_eq!(refresh.plan(other.clone()).retire, None);
+        assert!(!refresh.finish(job, Some(other.clone())));
+        assert!(refresh.plan(other).job.is_some());
+    }
+    #[test]
+    fn retry_and_reset_require_observations_after_the_new_catalog_adoption() {
+        let current = inputs(1, "same-path");
+        let mut refresh = Refresh::default();
+        refresh.adopt(current.clone());
+        let first = refresh.observation_epoch();
+        refresh.retry();
+        let job = refresh.plan(current.clone()).job.unwrap();
+        assert!(refresh.finish(job, Some(current.clone())));
+        refresh.catalog_adopted();
+        let restored = refresh.observation_epoch();
+        assert!(restored > first, "same paths can hold newly restored bytes");
+        refresh.reset();
+        let job = refresh.plan(current.clone()).job.unwrap();
+        assert!(refresh.finish(job, Some(current)));
+        refresh.catalog_adopted();
+        assert!(
+            refresh.observation_epoch() > restored,
+            "a reset cannot reuse an old observation identity"
+        );
     }
 }

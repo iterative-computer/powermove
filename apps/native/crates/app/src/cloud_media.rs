@@ -334,34 +334,8 @@ impl Controller {
     /// Resolves the open document's media again without retiring what shows
     /// (a file that came down from the cloud joins the catalog).
     fn resolve_media_again(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
-        let Some(published) = self.kernel.published(&session.project) else {
-            return;
-        };
-        let cache = crate::media::cache_root(&self.profile);
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    crate::media::for_session(
-                        &published.snapshot,
-                        &published.media,
-                        published.path.as_deref(),
-                        &cache,
-                    )
-                })
-                .await;
-            let _ = this.update(cx, |v, cx| {
-                if let Ok(resolution) = result {
-                    v.adopt_media(resolution, cx);
-                    v.update_builtins(cx);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        self.media_refresh.retry();
+        self.refresh_media(cx);
     }
 }
 #[cfg(test)]

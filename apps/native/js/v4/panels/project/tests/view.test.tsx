@@ -790,3 +790,38 @@ test("list video uses its resolved poster resource", async () => {
   ).toBe(true);
   await root.dispose();
 });
+
+test("readiness refresh keeps an existing poster unchanged in grid and list", async () => {
+  for (const viewMode of ["grid", "list"] as const) {
+    const { root, commits } = recorder();
+    const draw = async (availability: "Ready" | "Unknown", delayed = false) => {
+      const row = asset("a", availability);
+      if ("Asset" in row.data) row.data.Asset[1].poster = "last-good";
+      const view = projection([row]);
+      await root.render(
+        <ProjectView
+          view={view}
+          input={() => {}}
+          menu={() => {}}
+          page={() => {}}
+          native={native}
+          layout={layout}
+          viewMode={viewMode}
+          posters={new Map([["last-good", "thumb/last-good"]])}
+          unknownLoading={delayed ? new Set(["a"]) : undefined}
+        />,
+      );
+      const image = root.inspect().nodes.find(
+        (node) => node.props.resource === "thumb/last-good",
+      )!;
+      expect(image).toBeDefined();
+      return { id: image.id, style: image.props.style };
+    };
+    const ready = await draw("Ready");
+    expect(await draw("Unknown")).toEqual(ready);
+    expect(await draw("Unknown", true)).toEqual(ready);
+    expect(await draw("Ready")).toEqual(ready);
+    for (const report of replay(commits)) expect(report.accepted).toBe(true);
+    await root.dispose();
+  }
+});
