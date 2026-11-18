@@ -1114,6 +1114,7 @@ export function InspectorPanel({
         state={{ drop: drop && canDrop }}
         style={{
           ...column,
+          paddingBottom: token("metrics.inset"),
           ...(drop && canDrop
             ? { background: token("colors.accent_wash") }
             : {}),

@@ -258,6 +258,20 @@ fn capture_builtin_panels() {
                 if panel == "export" {
                     crate::media_thumbs::forget(preview_key);
                 }
+                if panel == "inspector" {
+                    window
+                        .update(&mut cx, |frame, _, cx| {
+                            frame
+                                .view
+                                .update(cx, |view, cx| view.review_scroll_to(f32::MAX, cx));
+                        })
+                        .unwrap();
+                    cx.run_until_parked();
+                    cx.capture_screenshot(window.into())
+                        .unwrap()
+                        .save(format!("{dir}/{panel}-{name}-bottom.png"))
+                        .unwrap();
+                }
                 drop(r);
             });
         }
@@ -298,7 +312,8 @@ fn capture_agent_states() {
     };
     let dir = std::env::var("PM_PANEL_CAPTURE").unwrap_or_else(|_| "/tmp/pm-shots/panels".into());
     std::fs::create_dir_all(&dir).unwrap();
-    let r = rig("agent", 1);
+    let panel = std::env::var("PM_CAPTURE_STATE_PANEL").unwrap_or_else(|_| "agent".into());
+    let r = rig(&panel, 1);
     let mut files: Vec<_> = std::fs::read_dir(&states)
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -319,11 +334,13 @@ fn capture_agent_states() {
                 let tokens = Tokens::new(scheme, Accessibility::default());
                 let (w, h) = if timeline {
                     (900., 200.)
+                } else if panel == "layer-effects" {
+                    (320., 200.)
                 } else {
                     (tokens.metrics.agent_width, tokens.metrics.agent_height)
                 };
                 let first = pm_builtins::Publication {
-                    panel: if timeline { "timeline" } else { "agent" }.into(),
+                    panel: panel.clone(),
                     generation: 1,
                     surface: surface.clone(),
                 };
@@ -369,7 +386,7 @@ fn capture_agent_states() {
                     .save(if timeline {
                         format!("{dir}/{name}-{scheme_name}.png")
                     } else {
-                        format!("{dir}/agent-{name}-{scheme_name}.png")
+                        format!("{dir}/{panel}-{name}-{scheme_name}.png")
                     })
                     .unwrap();
             });

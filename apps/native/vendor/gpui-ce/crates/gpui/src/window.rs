@@ -1370,6 +1370,7 @@ pub struct Window {
     focus_lost_path: SmallVec<[FocusId; 8]>,
     default_prevented: bool,
     mouse_position: Point<Pixels>,
+    scroll_remainder: Option<Point<Pixels>>,
     pointer_inside_window: bool,
     mouse_hit_test: HitTest,
     modifiers: Modifiers,
@@ -2167,6 +2168,7 @@ impl Window {
             focus_lost_path: SmallVec::new(),
             default_prevented: true,
             mouse_position,
+            scroll_remainder: None,
             pointer_inside_window: true,
             mouse_hit_test: HitTest::default(),
             modifiers,
@@ -6721,7 +6723,18 @@ impl Window {
         &self.mouse_hit_test
     }
 
+    /// Unconsumed wheel distance, shared by nested scrollers during bubbling.
+    pub fn scroll_delta_remaining(&self, delta: Point<Pixels>) -> Point<Pixels> {
+        self.scroll_remainder.unwrap_or(delta)
+    }
+
+    /// Record only the distance this scroll view actually moved.
+    pub fn consume_scroll_delta(&mut self, delta: Point<Pixels>, consumed: Point<Pixels>) {
+        self.scroll_remainder = Some(self.scroll_delta_remaining(delta) - consumed);
+    }
+
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
+        self.scroll_remainder = None;
         if event.is::<crate::MouseExitEvent>() {
             self.pointer_inside_window = false;
         } else if event.is::<MouseMoveEvent>()

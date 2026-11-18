@@ -95,6 +95,8 @@ export async function event(
 let target: string | undefined;
 export function buildNative() {
   if (target) return target;
+  if (process.env.PM_EFFECT_WIRE_TARGET)
+    return process.env.PM_EFFECT_WIRE_TARGET;
   const manifest = fileURLToPath(
     new URL("../native/Cargo.toml", import.meta.url),
   );
