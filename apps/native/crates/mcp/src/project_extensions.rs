@@ -290,7 +290,10 @@ impl Bundle {
     pub fn exclusions(&self, library: &BTreeMap<String, Installed>) -> BTreeSet<String> {
         self.entries
             .iter()
-            .filter(|entry| entry.status == Status::Invalid || self.needs_install(entry, library))
+            .filter(|entry| {
+                entry.status == Status::Invalid
+                    || (!entry.version.is_empty() && !available_locally(entry, library))
+            })
             .map(|entry| entry.id.clone())
             .collect()
     }
@@ -395,14 +398,14 @@ impl Bundle {
     }
 
     pub fn needs_install(&self, entry: &Entry, library: &BTreeMap<String, Installed>) -> bool {
-        entry.status == Status::Included && !same_version(entry, library)
+        entry.status == Status::Included && !available_locally(entry, library)
     }
 
     pub fn report(&self, library: &BTreeMap<String, Installed>) -> Value {
         let missing: Vec<_> = self
             .entries
             .iter()
-            .filter(|item| item.status == Status::Invalid || !same_version(item, library))
+            .filter(|item| item.status == Status::Invalid || !available_locally(item, library))
             .collect();
         if self.entries.is_empty() {
             return json!({});
@@ -524,11 +527,11 @@ pub fn open_report(extra: &pm_model::json::Map, profile: &Path) -> (Value, BTree
     }
 }
 
-fn same_version(entry: &Entry, library: &BTreeMap<String, Installed>) -> bool {
+pub fn available_locally(entry: &Entry, library: &BTreeMap<String, Installed>) -> bool {
     library
         .get(&entry.id)
         .and_then(|found| found.manifest.as_ref())
-        .is_some_and(|m| m["version"] == entry.version)
+        .is_some_and(|m| entry.version.is_empty() || m["version"] == entry.version)
 }
 
 fn builtin_dependency(id: &str, definitions: &BTreeSet<(String, String)>) -> bool {

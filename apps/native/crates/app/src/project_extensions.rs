@@ -3,7 +3,7 @@ use gpui::{
     AppContext, AsyncApp, Bounds, WindowBounds, WindowKind, WindowOptions, point, px, size,
 };
 use pm_compat_runner::host::ProjectScope;
-use pm_mcp::project_extensions::{Bundle, Entry, Status, installed};
+use pm_mcp::project_extensions::{Bundle, Entry, Status, available_locally, installed};
 use pm_shell::welcome::{Button, Frame, Row, Severity};
 use std::{
     fs,
@@ -39,40 +39,40 @@ impl Open {
             ));
             Bundle::default()
         });
-        let mut excluded = bundle.exclusions(&library);
-        let required =
-            bundle
-                .entries
-                .iter()
-                .filter(|entry| {
-                    match entry.status {
+        let excluded = bundle.exclusions(&library);
+        let mut required = vec![];
+        for entry in &bundle.entries {
+            let installed = available_locally(entry, &library);
+            match entry.status {
                 Status::Invalid => warnings.push(format!(
                     "{} couldn’t be used because its integrity hash or package did not match.",
                     entry.name
                 )),
-                Status::StoreOnly if !library.contains_key(&entry.id) => warnings.push(format!(
+                Status::StoreOnly if !installed => warnings.push(format!(
                     "{} is needed to render. Install it from the Store ({}).",
-                    entry.name, entry.store_id.as_deref().unwrap_or(&entry.id)
+                    entry.name,
+                    entry.store_id.as_deref().unwrap_or(&entry.id)
+                )),
+                Status::Unavailable | Status::Excluded if !installed => warnings.push(format!(
+                    "{} is needed to render and is unavailable.",
+                    entry.name
                 )),
                 _ => {}
             }
-                    if !bundle.needs_install(entry, &library) {
-                        return false;
-                    }
-                    let valid = bundle
-                        .files(&entry.id)
-                        .and_then(|files| files.get("manifest.json"))
-                        .and_then(|raw| serde_json::from_slice(raw).ok())
-                        .and_then(|raw| pm_compat_runner::manifest::parse(&raw).ok())
-                        .is_some();
-                    if !valid {
-                        excluded.insert(entry.id.clone());
-                        warnings.push(format!("{} has an invalid extension manifest.", entry.name));
-                    }
-                    valid
-                })
-                .cloned()
-                .collect();
+            if bundle.needs_install(entry, &library) {
+                let valid = bundle
+                    .files(&entry.id)
+                    .and_then(|files| files.get("manifest.json"))
+                    .and_then(|raw| serde_json::from_slice(raw).ok())
+                    .and_then(|raw| pm_compat_runner::manifest::parse(&raw).ok())
+                    .is_some();
+                if valid {
+                    required.push(entry.clone());
+                } else {
+                    warnings.push(format!("{} has an invalid extension manifest.", entry.name));
+                }
+            }
+        }
         Self {
             bundle,
             required,
