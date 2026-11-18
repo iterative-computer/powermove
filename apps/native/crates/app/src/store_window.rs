@@ -27,9 +27,10 @@ use pm_shell::{
     symbol::Weight,
 };
 use serde_json::{Value, json};
-use std::{path::PathBuf, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, sync::Arc};
 
 pub type Client = StoreClient<Box<dyn StoreTransport + Send>>;
+type CardAnchors = Rc<RefCell<HashMap<String, Bounds<Pixels>>>>;
 /// What the window reaches outside itself; tests hand in a fixture Store.
 #[derive(Clone)]
 pub struct Services {
@@ -202,7 +203,7 @@ pub struct StoreWindow {
     listing_scroll: Point<Pixels>,
     discover_scroll: Point<Pixels>,
     detail_origin: Option<Bounds<Pixels>>,
-    art_anchors: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Bounds<Pixels>>>>,
+    art_anchors: CardAnchors,
     frame_kit: Option<Kit>,
     services: Services,
     tokens: Tokens,
@@ -239,10 +240,10 @@ pub struct StoreWindow {
     /// A Library card's open "…" menu (v1.2.0's card menu), each card's
     /// button where it was drawn, and the row the pointer lights.
     card_menu: Option<CardMenu>,
-    card_anchors: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Bounds<Pixels>>>>,
+    card_anchors: CardAnchors,
     card_lit: Option<usize>,
     /// Each installed card's real NSSwitch, by extension id.
-    switches: std::collections::HashMap<String, Entity<NativeControl>>,
+    switches: HashMap<String, Entity<NativeControl>>,
 }
 /// The Library card whose "…" menu is open.
 #[derive(Clone, Debug, PartialEq)]

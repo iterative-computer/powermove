@@ -1886,7 +1886,6 @@ impl Render for ProjectLibrary {
             .or_else(|| self.notice.clone());
         // Newer work in the original app: one quiet line, never in the way.
         let recent = opening.is_none() && crate::recent_work::newer();
-        let tr = t.translucency;
         if self.new_project.is_none() && pm_shell::text::available(window) {
             let tokens = t.clone();
             let new_project = cx.new(|cx| {
