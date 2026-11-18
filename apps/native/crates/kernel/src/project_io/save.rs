@@ -593,7 +593,7 @@ impl SavePlan {
             ("extensions/files", files),
         ] {
             if let Some(value) = value {
-                self.extra.insert(key.into(), value);
+                self.extra.insert(key, value);
             } else {
                 self.extra.remove(key);
             }

@@ -454,7 +454,7 @@ impl Kernel {
         let mut extension_bundle = pm_model::json::Map::new();
         for key in ["extensions/manifest", "extensions/files"] {
             if let Some(value) = project.store().file().envelope.extra.get(key) {
-                extension_bundle.insert(key.into(), value.clone());
+                extension_bundle.insert(key, value.clone());
             }
         }
         let info = OpenInfo {

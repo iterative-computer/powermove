@@ -53,7 +53,7 @@ fn package_verification_covers_every_file() {
     let bytes: usize = files.values().map(Vec::len).sum();
     let mut extra = pm_model::json::Map::new();
     extra.insert(
-        MANIFEST.into(),
+        MANIFEST,
         model_value(json!({"version":1,"entries":[Entry {
             hash: Some(hash), bytes, ..entry
         }]}))
@@ -64,7 +64,7 @@ fn package_verification_covers_every_file() {
             .iter()
             .map(|(path, data)| (path, STANDARD.encode(data)))
             .collect();
-        extra.insert(FILES.into(), model_value(json!({"toy":encoded})).unwrap());
+        extra.insert(FILES, model_value(json!({"toy":encoded})).unwrap());
     };
     write(&mut extra, &files);
     assert!(Bundle::read(&extra).unwrap().files("toy").is_some());
