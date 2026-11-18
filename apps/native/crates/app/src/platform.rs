@@ -820,13 +820,22 @@ pub fn export_destination(
     name: &str,
     start: Option<PathBuf>,
 ) -> async_channel::Receiver<Option<PathBuf>> {
+    export_destination_in(window, folder, name, start.as_deref())
+}
+
+pub fn export_destination_in(
+    window: &NSWindow,
+    folder: bool,
+    name: &str,
+    directory: Option<&std::path::Path>,
+) -> async_channel::Receiver<Option<PathBuf>> {
     if let Some(path) = review_destination(name) {
         let (tx, rx) = async_channel::bounded(1);
         let _ = tx.try_send(Some(path));
         return rx;
     }
     if !folder {
-        return paths_named_in(window, true, name, start.as_deref());
+        return paths_named_in(window, true, name, directory);
     }
     let (tx, rx) = async_channel::bounded(1);
     let mtm = MainThreadMarker::new().unwrap();
@@ -835,7 +844,7 @@ pub fn export_destination(
     panel.setCanChooseFiles(false);
     panel.setAllowsMultipleSelection(false);
     panel.setCanCreateDirectories(true);
-    start_in(&panel, start.as_deref());
+    start_in(&panel, directory);
     let retained = panel.clone();
     // The suggestion is authored by the Export model, never a pathname.
     let name = PathBuf::from(name).file_name().map(|s| s.to_owned());

@@ -1199,3 +1199,37 @@ async fn a_new_tabs_project_waits_for_the_fence_instead_of_being_dropped(
     drop(taken);
     assert!(!host.operation_in_progress());
 }
+
+/// MCP saves use the headless host, even when the UI project has no file.
+#[test]
+fn first_save_mcp_never_requires_a_window_or_panel() {
+    let fixture = Fixture::new();
+    let mut connection = fixture.connection();
+    start(&mut connection);
+    add(&mut connection, "agent-save");
+    assert!(
+        fixture
+            .host
+            .kernel
+            .published("test")
+            .unwrap()
+            .path
+            .is_none()
+    );
+    let first = connection.dispatch("save_project", &json!({})).unwrap();
+    let path = std::path::Path::new(first["path"].as_str().unwrap());
+    assert!(path.is_file());
+    assert!(path.starts_with(&fixture.host.profile));
+    let again = connection.dispatch("save_project", &json!({})).unwrap();
+    assert_ne!(first["path"], again["path"]);
+    assert!(
+        fixture
+            .host
+            .kernel
+            .published("test")
+            .unwrap()
+            .path
+            .is_none()
+    );
+    assert!(!fixture.host.profile.join("document-folders").exists());
+}

@@ -273,6 +273,8 @@ pub struct Controller {
     /// Commands that cannot run now; menus and the palette show them off.
     pub disabled: std::collections::BTreeSet<String>,
     pub save_pending: bool,
+    /// A save panel is busy, but no document write has started.
+    choosing_save_path: bool,
     pub close_after_save: Option<crate::lifecycle::Intent>,
     /// Queued batches and the cancel flag of the running one.
     pub(crate) imports: std::collections::VecDeque<(
@@ -1288,6 +1290,7 @@ impl Controller {
             clipboard: Default::default(),
             disabled: crate::layer_commands::disabled(None, &[], &Default::default()),
             save_pending: false,
+            choosing_save_path: false,
             close_after_save: None,
             imports: Default::default(),
             importing: None,
@@ -1722,7 +1725,7 @@ impl Controller {
             self.offer_reopen(&p, cx);
         }
         self.follow_project_output();
-        let saving = p.saving || self.save_pending;
+        let saving = p.saving || (self.save_pending && !self.choosing_save_path);
         if let Some(note) = save_note(self.saving_note, saving, p.dirty, &self.message) {
             self.message = note.into();
         }
@@ -3560,6 +3563,13 @@ impl Controller {
         if self.edit_left_open(cx) {
             self.call(Call::History(HistoryCall::Seal), cx);
         }
+        if as_path.is_none()
+            && self.session.is_some()
+            && crate::document_paths::needs_panel(self.has_file(), false)
+        {
+            self.save_dialog(cx);
+            return;
+        }
         let path = as_path.clone();
         if self.finish_edits_then(cx, move |v, cx| v.save(path, cx)) {
             return;
@@ -3579,6 +3589,10 @@ impl Controller {
                     .as_ref()
                     .is_some_and(|s| matches!(s.destination, SessionDestination::File(_)))
             });
+        let profile = self.profile.clone();
+        let remembered_path = as_path.clone().or_else(|| self.path.clone());
+        let old_path = self.path.clone();
+        let export_id = session.project.clone();
         let started = crate::diag::enabled().then(std::time::Instant::now);
         cx.spawn(async move |this, cx| {
             let result = if file_save {
@@ -3601,6 +3615,13 @@ impl Controller {
             } else {
                 kernel.shell(ShellCall::Save(session)).await
             };
+            if matches!(&result, Some(Ok(ShellReply::Saved { recovery_copy: None, .. })))
+                && let Some(path) = remembered_path {
+                cx.background_executor().spawn(async move {
+                    crate::document_paths::carry_export_folder(&profile, &export_id, old_path.as_deref(), &path);
+                    crate::document_paths::remember(&profile, None, &path);
+                }).await;
+            }
             if let Some(started) = started {
                 crate::diag::line(serde_json::json!({
                     "save": (started.elapsed().as_secs_f64() * 1000.).round(),
@@ -3875,15 +3896,55 @@ impl Controller {
         })
     }
     pub fn save_dialog(&mut self, cx: &mut Context<Self>) {
-        let rx = platform::paths_named(
-            &self.host.borrow().window,
-            true,
-            &save_name(&self.project_name()),
-        );
+        if self.recovery_pending || self.save_pending || self.session.is_none() {
+            return;
+        }
+        self.save_pending = true;
+        self.choosing_save_path = true;
+        let profile = self.profile.clone();
+        let current_path = self.path.clone();
+        let name = current_path
+            .as_deref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| save_name(&self.project_name()));
+        let session = self.session.clone();
         cx.spawn(async move |this, cx| {
-            if let Ok(Some(path)) = rx.recv().await {
-                let _ = this.update(cx, |v, cx| v.save(Some(path), cx));
-            }
+            let folder = cx
+                .background_executor()
+                .spawn(async move {
+                    // V1 Save As starts beside the existing file; only a
+                    // first save uses the last project folder / Movies.
+                    match current_path.as_deref().and_then(std::path::Path::parent) {
+                        Some(folder) => folder.to_path_buf(),
+                        None => crate::document_paths::save_folder(&profile),
+                    }
+                })
+                .await;
+            let rx = this
+                .update(cx, |v, _| platform::paths_named_in(
+                    &v.host.borrow().window,
+                    true,
+                    &name,
+                    Some(&folder),
+                ))
+                .ok();
+            let Some(rx) = rx else { return };
+            let path = rx.recv().await.ok().flatten();
+            let _ = this.update(cx, |v, cx| {
+                v.save_pending = false;
+                v.choosing_save_path = false;
+                cx.notify();
+                if v.session != session {
+                    return;
+                }
+                if let Some(path) = path {
+                    v.save(Some(path), cx);
+                } else if v.close_after_save.take().is_some() {
+                    v.cancel_close(cx);
+                }
+            });
         })
         .detach();
     }
@@ -4468,7 +4529,6 @@ impl Controller {
             }
             // v1: the first save of a project with no file of its own asks
             // where it goes, named for the project; later saves go there.
-            "save" if self.session.is_some() && !self.has_file() => self.save_dialog(cx),
             "save" => self.save(None, cx),
             "native.saveTake" => {
                 crate::takes_panel::dispatch(&cmd.name, || self.save_take(cx));

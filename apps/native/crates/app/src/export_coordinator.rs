@@ -257,10 +257,8 @@ impl Controller {
         // appeared since Choose, ask before replacing it.
         let panel_asks = chosen.as_ref().map_or(
             typed.format != Format::Png && !crate::platform::reviewing_saves(), |d| d.1);
-        let picker = if saved.is_none() && chosen.is_none() {
-            Some(crate::platform::export_destination(&self.host.borrow().window,
-                typed.format == Format::Png, &filename, crate::platform::export_start(self.path.as_deref())))
-        } else { None };
+        let profile = self.profile.clone();
+        let project_path = self.path.clone();
         let job = Arc::new(Run {
             handle: Mutex::new(None),
             cancel: AtomicBool::new(false),
@@ -270,6 +268,33 @@ impl Controller {
         let tasks = self.builtins.export_tasks.clone();
         let resources = self.extensions.resources.clone();
         cx.spawn(async move |this, cx| {
+            let folder_profile = profile.clone();
+            let id = p.project.clone();
+            let (folder, export_key) = cx
+                .background_executor()
+                .spawn(async move {
+                    let key = crate::document_paths::export_key(&id, project_path.as_deref());
+                    let folder = crate::document_paths::export_folder(
+                        &folder_profile,
+                        &key,
+                        project_path.as_deref(),
+                    );
+                    (folder, key)
+                })
+                .await;
+            let picker = if saved.is_none() && chosen.is_none() && !job.cancel.load(Ordering::Acquire) {
+                this.update(cx, |v, _| {
+                    crate::platform::export_destination_in(
+                        &v.host.borrow().window,
+                        typed.format == Format::Png,
+                        &filename,
+                        Some(&folder),
+                    )
+                })
+                .ok()
+            } else {
+                None
+            };
             let destination = if let Some(frozen) = saved {
                 Some((frozen.destination, frozen.replace))
             } else if let Some(destination) = match chosen {
@@ -277,6 +302,14 @@ impl Controller {
                 None => match picker { Some(picker) => picker.recv().await.ok().flatten(), None => None },
             } {
                 crate::platform::exported_to(&destination);
+                let profile = profile.clone();
+                let id = export_key;
+                let chosen = destination.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        crate::document_paths::remember(&profile, Some(&id), &chosen);
+                    })
+                    .await;
                 // What the export would replace is one decision: the save
                 // panel's Replace answers for the video alone; caption files
                 // (or no panel) take one question listing every file.
