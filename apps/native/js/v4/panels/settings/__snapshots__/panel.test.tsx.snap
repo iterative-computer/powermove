@@ -1640,3 +1640,96 @@ exports[`shortcuts-asked: six-op tree snapshot passes the real Rust wire and kit
                 text "Q is used by Ripple Trim In Point to Playhead. Press it again to move it here, or Esc to cancel."
 Focus: ["Search Commands","Change the shortcut for Ripple Trim In Point to Playhead","Type a shortcut. Escape cancels."]"
 `;
+exports[`transcription available wire/AX state 1`] = `
+"root
+  div group settings label="Settings"
+    scroll group settings.detail label="Transcription"
+      div group settings.section.transcription label="Transcription"
+        div group label="Models"
+          text heading
+            text "Models"
+          div group label="Models"
+            div form-group group label="Models"
+              div group label="Fixture speech"
+                div
+                  text
+                    text "Fixture speech"
+                  text
+                    text "Fixture size"
+                div
+                  button push-button label="Download"
+                    text "Download"
+Focus: ["Download"]"
+`;
+
+exports[`transcription downloading wire/AX state 1`] = `
+"root
+  div group settings label="Settings"
+    scroll group settings.detail label="Transcription"
+      div group settings.section.transcription label="Transcription"
+        div group label="Models"
+          text heading
+            text "Models"
+          div group label="Models"
+            div form-group group label="Models"
+              div group label="Fixture speech"
+                div
+                  text
+                    text "Fixture speech"
+                  text
+                    text "Fixture size"
+                div
+                  div progress-row progressbar label="Fixture speech" value=0.25
+                    text "Fixture speech"
+                  button push-button label="Cancel"
+                    text "Cancel"
+Focus: ["Cancel"]"
+`;
+
+exports[`transcription installed wire/AX state 1`] = `
+"root
+  div group settings label="Settings"
+    scroll group settings.detail label="Transcription"
+      div group settings.section.transcription label="Transcription"
+        div group label="Models"
+          text heading
+            text "Models"
+          div group label="Models"
+            div form-group group label="Models"
+              div group label="Fixture speech"
+                div
+                  text
+                    text "Fixture speech"
+                  text
+                    text "Fixture size"
+                div
+                  button push-button label="Use"
+                    text "Use"
+                  button push-button label="Delete…"
+                    text "Delete…"
+Focus: ["Use","Delete…"]"
+`;
+
+exports[`transcription error wire/AX state 1`] = `
+"root
+  div group settings label="Settings"
+    scroll group settings.detail label="Transcription"
+      div group settings.section.transcription label="Transcription"
+        div group label="Models"
+          text heading
+            text "Models"
+          div group label="Models"
+            div form-group group label="Models"
+              div group label="Fixture speech"
+                div
+                  text
+                    text "Fixture speech"
+                  text
+                    text "Fixture size"
+                div
+                  div status label="Fixture service error"
+                    text "Fixture service error"
+                  button push-button label="Retry"
+                    text "Retry"
+Focus: ["Retry"]"
+`;
