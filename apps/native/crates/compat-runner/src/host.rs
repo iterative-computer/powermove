@@ -146,6 +146,93 @@ pub fn rescan_all() {
         .retain(|inbox| inbox.send(Input::Rescan).is_ok());
 }
 
+// Weak handles fence a window's owner without retaining or replacing its realm.
+type DefinitionBarrier = (KernelHandle, String, std::sync::Weak<Shared>, Sender<Input>);
+static DEFINITION_BARRIERS: Mutex<Vec<DefinitionBarrier>> = Mutex::new(Vec::new());
+
+/// Wait for existing owners of a document before taking a window resource pin.
+/// A windowless document with no host is started by the caller's normal loader.
+pub fn settle_document(
+    document: u64,
+    timeout: Duration,
+    stop: &dyn Fn() -> bool,
+) -> Result<Option<Publication>> {
+    let barriers = {
+        let mut all = DEFINITION_BARRIERS.lock().unwrap();
+        all.retain(|(_, _, shared, _)| shared.strong_count() > 0);
+        all.iter()
+            .filter_map(|(kernel, project, shared, inbox)| {
+                shared
+                    .upgrade()
+                    .filter(|shared| !shared.closing.load(Ordering::Acquire))
+                    .map(|shared| (kernel.clone(), project.clone(), shared, inbox.clone()))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut publication = None;
+    for (kernel, project, shared, inbox) in barriers {
+        // Windows can start their host before the project finishes opening.
+        // Resolve its document now, rather than losing that owner at startup.
+        if kernel.published(&project).is_some_and(|p| p.snapshot.doc_id == document) {
+            publication = Some(wait_definitions(&inbox, &shared, timeout, stop)?);
+        }
+    }
+    Ok(publication)
+}
+fn wait_definitions(
+    inbox: &Sender<Input>,
+    shared: &Shared,
+    timeout: Duration,
+    stop: &dyn Fn() -> bool,
+) -> Result<Publication> {
+    const POLL: Duration = Duration::from_millis(50);
+    let deadline = std::time::Instant::now() + timeout;
+    let unfinished = |loading: &[(String, String)]| -> Result<()> {
+        if stop() {
+            return Err(Error::Host(WAIT_STOPPED.into()));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::Host(not_finished(loading)));
+        }
+        Ok(())
+    };
+    // Fence saved enable changes and disk reloads on the owner before
+    // reading its publication. A request immediately after Disable must
+    // not pin the definitions from before that change.
+    let (tx, rx) = mpsc::channel();
+    inbox
+        .send(Input::Sync(tx))
+        .map_err(|_| Error::Host("The extension host stopped".into()))?;
+    loop {
+        match rx.recv_timeout(POLL) {
+            Ok(()) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                unfinished(&shared.published.lock().unwrap().publication().loading)?
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(Error::Host("The extension host stopped".into()));
+            }
+        }
+    }
+    let mut published = shared.published.lock().unwrap();
+    loop {
+        if let Some(failure) = &published.failed {
+            return Err(Error::Host(failure.clone()));
+        }
+        // Ready, and nothing still loading (a Store helper, a reload).
+        if published.ready && published.publication().settled {
+            break;
+        }
+        unfinished(&published.publication().loading)?;
+        published = shared.changed.wait_timeout(published, POLL).unwrap().0;
+    }
+    // The cancel may have come as the load settled.
+    if stop() {
+        return Err(Error::Host(WAIT_STOPPED.into()));
+    }
+    Ok(published.publication())
+}
+
 pub struct HostConfig {
     pub kernel: KernelHandle,
     pub project: String,
@@ -267,6 +354,7 @@ impl Published {
                 ))
             });
         Publication {
+            native_surfaces: !self.surfaces.is_empty(),
             revision: self.revision,
             settled: self.starting.is_empty()
                 && match &self.contributions {
@@ -336,6 +424,8 @@ fn not_finished(loading: &[(String, String)]) -> String {
 /// another could pair a finished-looking list with a load still running.
 #[derive(Clone, Debug, Default)]
 pub struct Publication {
+    /// Native v4 isolates still have to mount after their graphs load.
+    pub native_surfaces: bool,
     pub revision: u64,
     /// `None` until the first activation pass publishes (or with no
     /// extension to run).
@@ -889,6 +979,13 @@ impl ExtensionHost {
         forward_kernel(&config.kernel, inbox.clone());
         forward_mailbox(&config.kernel, writer, inbox.clone());
         HOSTS.lock().unwrap().push(inbox.clone());
+        DEFINITION_BARRIERS.lock().unwrap().push((
+            config.kernel.clone(),
+            config.project.clone(),
+            Arc::downgrade(&shared),
+            inbox.clone(),
+        ));
+
         let owner = Owner {
             writer,
             retired: false,
@@ -948,54 +1045,11 @@ impl ExtensionHost {
         timeout: Duration,
         stop: &dyn Fn() -> bool,
     ) -> Result<(u64, Arc<Value>)> {
-        const POLL: Duration = Duration::from_millis(50);
-        let deadline = std::time::Instant::now() + timeout;
-        let unfinished = |loading: &[(String, String)]| -> Result<()> {
-            if stop() {
-                return Err(Error::Host(WAIT_STOPPED.into()));
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(Error::Host(not_finished(loading)));
-            }
-            Ok(())
-        };
-        // Fence saved enable changes and disk reloads on the owner before
-        // reading its publication. A request immediately after Disable must
-        // not pin the definitions from before that change.
-        let (tx, rx) = mpsc::channel();
-        self.inbox
-            .send(Input::Sync(tx))
-            .map_err(|_| Error::Host("The extension host stopped".into()))?;
-        loop {
-            match rx.recv_timeout(POLL) {
-                Ok(()) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => unfinished(&self.publication().loading)?,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(Error::Host("The extension host stopped".into()));
-                }
-            }
-        }
-        let mut published = self.shared.published.lock().unwrap();
-        loop {
-            if let Some(failure) = &published.failed {
-                return Err(Error::Host(failure.clone()));
-            }
-            // Ready, and nothing still loading (a Store helper, a reload).
-            if published.ready && published.publication().settled {
-                break;
-            }
-            unfinished(&published.publication().loading)?;
-            published = self.shared.changed.wait_timeout(published, POLL).unwrap().0;
-        }
-        // The cancel may have come as the load settled.
-        if stop() {
-            return Err(Error::Host(WAIT_STOPPED.into()));
-        }
+        let publication = wait_definitions(&self.inbox, &self.shared, timeout, stop)?;
         Ok((
-            published.revision,
-            published
+            publication.revision,
+            publication
                 .contributions
-                .clone()
                 .unwrap_or_else(|| Arc::new(json!({}))),
         ))
     }
@@ -3735,6 +3789,90 @@ mod tests {
         let fixture = Fixture::start(root);
         fixture.until("an empty boot settles", |host| host.publication().settled);
         assert!(fixture.host.contributions().is_none());
+    }
+    #[test]
+    fn definition_fence_finds_a_host_started_before_project_open() {
+        let root = tempfile::tempdir().unwrap();
+        extension(
+            &root.path().join("extensions"),
+            "early",
+            &[(
+                "index.ts",
+                "export default function(api){api.effects.register({id:'early.fx',label:'Early',group:'Test',params:[],frag:'o=src(v_uv);'})}",
+            )],
+        );
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let host = ExtensionHost::start(HostConfig {
+            kernel: kernel.clone(),
+            project: "window".into(),
+            roots: vec![root.path().join("extensions")],
+            cache: root.path().join("cache"),
+            owner: None,
+            text: None,
+            frames: None,
+            rasters: None,
+            clipboard: None,
+            vars: None,
+            wake: Arc::new(|| {}),
+        });
+        let document = pm_model::json::parse(&crate::initial()["document"].to_string()).unwrap();
+        kernel
+            .open("window", OpenSource::Untitled(document))
+            .wait()
+            .unwrap()
+            .unwrap();
+        let doc = kernel.published("window").unwrap().snapshot.doc_id;
+        let publication = settle_document(doc, Duration::from_secs(20), &|| false)
+            .unwrap()
+            .expect("the pre-open host must fence first-frame definitions");
+        assert!(publication.settled);
+        assert!(kernel.state().provider("effects", "early.fx").is_some());
+        drop(host);
+        actor.shutdown();
+    }
+    #[test]
+    fn document_definition_fence_observes_reload_before_snapshot_pin() {
+        let root = tempfile::tempdir().unwrap();
+        let source = |label: &str| {
+            format!(
+                "export default function(api){{api.effects.register({{id:'fence.fx',label:'{label}',group:'Test',params:[],frag:'o=src(v_uv);'}})}}"
+            )
+        };
+        extension(
+            &root.path().join("extensions"),
+            "fence",
+            &[("index.ts", &source("Before"))],
+        );
+        let fixture = Fixture::start(root);
+        let doc = fixture.kernel.published("window").unwrap().snapshot.doc_id;
+        settle_document(doc, Duration::from_secs(20), &|| false).unwrap();
+        fs::write(
+            fixture._root.path().join("extensions/fence/index.ts"),
+            source("After"),
+        )
+        .unwrap();
+        fixture.host.inbox.send(Input::Rescan).unwrap();
+        let publication = settle_document(doc, Duration::from_secs(20), &|| false)
+            .unwrap()
+            .unwrap();
+        assert!(publication.settled);
+        assert_eq!(
+            fixture
+                .kernel
+                .state()
+                .provider("effects", "fence.fx")
+                .unwrap()
+                .definition
+                .get("label")
+                .unwrap()
+                .as_str(),
+            Some("After")
+        );
+        assert_eq!(
+            publication.contributions.unwrap()["effects"][0]["label"],
+            "After"
+        );
     }
     #[test]
     fn contributed_effects_reach_kernel_registries_and_engine_definitions() {

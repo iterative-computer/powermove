@@ -1,0 +1,203 @@
+[
+  {
+    "id": "corner-pin-snap.fx",
+    "origin": "local",
+    "kind": "effect",
+    "version": 0,
+    "renderer": null,
+    "glsl": {
+      "source": "#version 300 es\nprecision highp float;\nprecision highp int;\nin vec2 v_st;\nout vec4 o;\nuniform sampler2D u_tex;\nuniform mat3 u_layerUV, u_ownerFromUV;\nuniform vec2 u_res;\nuniform float u_frame, u_ownerValid;\nuniform float u_amount;\nuniform float u_every;\nuniform float u_sharpness;\nuniform float u_hold;\nuniform float u_seed;\nuniform float u_seedOffset;\nuniform float u_perspective;\nuniform float u_tlX;\nuniform float u_tlY;\nuniform float u_trX;\nuniform float u_trY;\nuniform float u_brX;\nuniform float u_brY;\nuniform float u_blX;\nuniform float u_blY;\nuniform float u_padding;\n// Integer hash avoids device-dependent sin/fract pose changes.\nfloat randomPin(uint index) {\n  uint x = index ^ (uint(max(0.0,floor(u_seed+0.5))) + uint(max(0.0,floor(u_seedOffset+0.5)))*747796405u);\n  x = (x ^ (x >> 16u))*2246822519u;\n  x = (x ^ (x >> 13u))*3266489917u;\n  return float(x ^ (x >> 16u))/4294967295.0;\n}\nvec2 pin(float pose, uint corner, vec2 base) {\n  uint key = uint(max(0.0,pose))*8u+corner*2u;\n  vec2 jitter = vec2(randomPin(key),randomPin(key+1u))*2.0-1.0;\n  float perspective = clamp(u_perspective/100.0,0.0,1.0);\n  float amount = clamp(u_amount/100.0,0.0,1.0);\n  float direction = floor(randomPin(uint(max(0.0,pose))*8u+100003u)*4.0);\n  // Keep random poses convex: taper one of four edges, then add bounded tilt.\n  if(direction < 2.0) {\n    float edge = direction < 1.0 ? base.y : 1.0-base.y;\n    float vanishing = mix(1.0,0.4,perspective*edge);\n    vec2 taper = vec2((0.5-base.x)*perspective*edge*0.55,0.0);\n    return base + amount*(taper+jitter*vec2(0.22*vanishing,0.12));\n  }\n  float edge = direction < 3.0 ? base.x : 1.0-base.x;\n  float vanishing = mix(1.0,0.4,perspective*edge);\n  vec2 taper = vec2(0.0,(0.5-base.y)*perspective*edge*0.55);\n  return base + amount*(taper+jitter*vec2(0.12,0.22*vanishing));\n}\nvoid main() {\n  if(u_ownerValid < 0.5) { o=texture(u_tex,v_st); return; }\n  float frame = u_hold > 0.5 ? 0.0 : max(0.0,u_frame);\n  float interval = max(1.0,floor(u_every+0.5));\n  float pose = floor(frame/interval);\n  float easeFrames = 2.0*(1.0-u_sharpness/100.0);\n  float blend = easeFrames < 0.001 || pose < 1.0 ? 1.0 : smoothstep(0.0,easeFrames,mod(frame,interval));\n  vec2 a = mix(pin(max(0.0,pose-1.0),0u,vec2(0,0)),pin(pose,0u,vec2(0,0)),blend)+vec2(u_tlX,u_tlY)/100.0;\n  vec2 b = mix(pin(max(0.0,pose-1.0),1u,vec2(1,0)),pin(pose,1u,vec2(1,0)),blend)+vec2(u_trX,u_trY)/100.0;\n  vec2 c = mix(pin(max(0.0,pose-1.0),2u,vec2(1,1)),pin(pose,2u,vec2(1,1)),blend)+vec2(u_brX,u_brY)/100.0;\n  vec2 d = mix(pin(max(0.0,pose-1.0),3u,vec2(0,1)),pin(pose,3u,vec2(0,1)),blend)+vec2(u_blX,u_blY)/100.0;\n  vec2 delta = a-b+c-d, e = b-c, f = d-c;\n  float det = e.x*f.y-f.x*e.y;\n  vec2 projective = abs(det)<1e-7 ? vec2(0) : vec2(delta.x*f.y-f.x*delta.y,e.x*delta.y-delta.x*e.y)/det;\n  mat3 forward = mat3(vec3(b-a+projective.x*b,projective.x),vec3(d-a+projective.y*d,projective.y),vec3(a,1));\n  if(abs(determinant(forward))<1e-7) { o=texture(u_tex,v_st); return; }\n  // Texture UV is bottom-origin; owner transforms use top-origin pixels.\n  vec2 outputPixel = vec2(v_st.x,1.0-v_st.y)*u_res;\n  vec3 local = u_layerUV*vec3(outputPixel,1);\n  if(abs(local.z)<1e-7) { o=vec4(0); return; }\n  vec3 source = inverse(forward)*vec3(local.xy/local.z,1);\n  if(abs(source.z)<1e-7) { o=vec4(0); return; }\n  vec2 uv = source.xy/source.z;\n  vec2 edgeWidth = max(0.5*fwidth(uv),vec2(1e-6));\n  vec2 coverage = smoothstep(-edgeWidth,edgeWidth,uv)*(1.0-smoothstep(1.0-edgeWidth,1.0+edgeWidth,uv));\n  vec3 pixel = u_ownerFromUV*vec3(uv,1);\n  if(abs(pixel.z)<1e-7) { o=vec4(0); return; }\n  vec2 texUV = pixel.xy/pixel.z/u_res;\n  texUV.y = 1.0-texUV.y;\n  o=texture(u_tex,texUV)*(coverage.x*coverage.y);\n}",
+      "bodyLineOffset": 0,
+      "bodyUtf16Len": 3682,
+      "bodyUtf8Len": 3682
+    },
+    "params": [
+      {
+        "type": "number",
+        "key": "amount",
+        "default": 60,
+        "min": 0,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "every",
+        "default": 12,
+        "min": 1,
+        "max": 120,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "sharpness",
+        "default": 100,
+        "min": 0,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "toggle",
+        "key": "hold",
+        "default": false
+      },
+      {
+        "type": "number",
+        "key": "seed",
+        "default": 1,
+        "min": 0,
+        "max": 65535,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "seedOffset",
+        "default": 0,
+        "min": 0,
+        "max": 65535,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "perspective",
+        "default": 70,
+        "min": 0,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "tlX",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "tlY",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "trX",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "trY",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "brX",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "brY",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "blX",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "blY",
+        "default": 0,
+        "min": -100,
+        "max": 100,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "padding",
+        "default": 512,
+        "min": 0,
+        "max": 4096,
+        "step": null
+      }
+    ],
+    "flags": {
+      "passes": 1,
+      "keepOrig": false,
+      "backdrop": false,
+      "rawShader": true,
+      "viewportSafe": false,
+      "viewportPadding": [
+        "padding"
+      ],
+      "clamp": false
+    }
+  },
+  {
+    "id": "gradient-tint.effect",
+    "origin": "local",
+    "kind": "effect",
+    "version": 0,
+    "renderer": null,
+    "glsl": {
+      "source": "#version 300 es\nprecision highp float;\nin vec2 v_uv; in vec2 v_st; in vec2 v_px;\nuniform sampler2D u_tex;\nuniform vec2 u_res;\nuniform vec2 u_coordRes;     // full composition pixel size for cropped effects\nuniform vec2 u_pxOrigin;     // cropped viewport origin in composition pixels\nuniform vec2 u_texel;\nuniform float u_time;\nuniform float u_prog;\nout vec4 o;\nvec4 src(vec2 uv){ return texture(u_tex, uv); }\nfloat luma(vec3 c){ return dot(c, vec3(.2126,.7152,.0722)); }\nvec3 hue2rgb(float h){ return clamp(abs(mod(h*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.); }\nvec3 rgb2hsv(vec3 c){\n  vec4 K=vec4(0.,-1./3.,2./3.,-1.); vec4 p=mix(vec4(c.bg,K.wz),vec4(c.gb,K.xy),step(c.b,c.g));\n  vec4 q=mix(vec4(p.xyw,c.r),vec4(c.r,p.yzx),step(p.x,c.r));\n  float d=q.x-min(q.w,q.y); float e=1e-10;\n  return vec3(abs(q.z+(q.w-q.y)/(6.*d+e)), d/(q.x+e), q.x);\n}\nvec3 hsv2rgb(vec3 c){ return c.z*mix(vec3(1.),clamp(abs(mod(c.x*6.+vec3(0.,4.,2.),6.)-3.)-1.,0.,1.),c.y); }\nfloat hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }\nfloat noise(vec2 p){\n  vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);\n  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);\n}\nfloat fbm(vec2 p){ float v=0.,a=.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.03; a*=.5; } return v; }\n\nuniform vec3 u_startColor;\nuniform vec3 u_endColor;\nuniform float u_angle;\nuniform float u_amount;\nuniform int u_pass;\n#define u_c0 u_startColor\n#define u_c1 u_endColor\n#define u_p2 u_angle\n#define u_p3 u_amount\nvoid main(){\n\n    vec4 source = texture(u_tex, v_st);\n    float angle = radians(u_angle);\n    vec2 direction = vec2(cos(angle), sin(angle));\n    float position = clamp(dot(v_st - 0.5, direction) + 0.5, 0.0, 1.0);\n    vec3 tint = mix(u_startColor, u_endColor, position);\n    o = vec4(mix(source.rgb, tint * source.a, u_amount), source.a);\n  \n}\n",
+      "bodyLineOffset": 38,
+      "bodyUtf16Len": 327,
+      "bodyUtf8Len": 327
+    },
+    "params": [
+      {
+        "type": "color",
+        "key": "startColor",
+        "default": "#ff3366"
+      },
+      {
+        "type": "color",
+        "key": "endColor",
+        "default": "#3366ff"
+      },
+      {
+        "type": "number",
+        "key": "angle",
+        "default": 0,
+        "min": -180,
+        "max": 180,
+        "step": null
+      },
+      {
+        "type": "number",
+        "key": "amount",
+        "default": 1,
+        "min": 0,
+        "max": 1,
+        "step": 0.01
+      }
+    ],
+    "flags": {
+      "passes": 1,
+      "keepOrig": false,
+      "backdrop": false,
+      "rawShader": false,
+      "viewportSafe": false,
+      "viewportPadding": [],
+      "clamp": false
+    }
+  }
+]

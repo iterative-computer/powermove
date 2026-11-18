@@ -27,6 +27,11 @@ pub struct CaptureRequest {
 }
 /// Renders a project's frames as MCP base64 image blocks.
 pub trait EngineHook: Send + Sync {
+    /// Settle live extension registrations before registry-dependent edits.
+    /// Called on the MCP worker without the Automation mutex held.
+    fn prepare_definitions(&self, _project: &str, _document: u64, _revision: u64) -> Result<()> {
+        Ok(())
+    }
     fn capture(&self, request: &CaptureRequest) -> Result<Value>;
     fn capture_snapshot(
         &self,

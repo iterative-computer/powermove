@@ -1324,6 +1324,7 @@ impl Builtins {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
+        self.broker.forget_effects(panel);
         self.broker.entries.shared().remove(panel);
         self.broker.publications.shared().remove(panel);
         self.broker.forget_commands(panel);
@@ -1418,6 +1419,7 @@ impl Builtins {
         }
         self.broker.extensions.shared().remove(id);
         // Its surface and router go too; a late call from it is a stale generation.
+        self.broker.forget_effects(id);
         self.broker.entries.shared().remove(id);
         self.broker.forget_commands(id);
         self.broker.forget_themes(id);
@@ -2210,6 +2212,93 @@ impl EngineProxy for Broker {
                 entry.router.retire().map_err(Error::Host)?;
                 Ok(Value::Null)
             }
+            "effects.set" => {
+                let list = input
+                    .as_array()
+                    .filter(|a| a.len() <= 64)
+                    .ok_or(Error::Invalid("effect definition list"))?;
+                let owner = entry.backend.shared().caller.writer;
+                let state = self.kernel.state();
+                let previous: Vec<_> = state
+                    .registries
+                    .get("effects")
+                    .into_iter()
+                    .flatten()
+                    .filter(|registration| registration.owner == owner)
+                    .cloned()
+                    .collect();
+                let mut tokens = std::collections::BTreeSet::new();
+                let mut ops = vec![];
+                for item in list {
+                    let mut definition = item["definition"].clone();
+                    let snapshot: pm_protocol::definitions::DefinitionSnapshot =
+                        serde_json::from_value(item["snapshot"].clone())
+                            .map_err(|e| Error::Host(e.to_string()))?;
+                    pm_protocol::Validate::validate(&snapshot)
+                        .map_err(|e| Error::Host(e.message))?;
+                    let id = definition["id"]
+                        .as_str()
+                        .ok_or(Error::Invalid("effect id"))?
+                        .to_owned();
+                    if snapshot.id.as_str() != id
+                        || snapshot.kind != pm_protocol::definitions::DefinitionKind::Effect
+                    {
+                        return Err(Error::Invalid("effect snapshot identity"));
+                    }
+                    let registration = item["registration"]
+                        .as_u64()
+                        .filter(|n| *n > 0)
+                        .ok_or(Error::Invalid("effect registration identity"))?;
+                    let token = format!(
+                        "v4.{}.{}.effects.{registration}",
+                        owner.realm, owner.generation
+                    );
+                    if !tokens.insert(token.clone()) {
+                        return Err(Error::Invalid("duplicate effect registration"));
+                    }
+                    definition["nativeSnapshot"] = item["snapshot"].clone();
+                    let definition = data::model(&definition).map_err(Error::Host)?;
+                    if let Some(old) = previous.iter().find(|old| old.token == token) {
+                        if old.id == id && old.definition == definition {
+                            continue;
+                        }
+                        ops.push(pm_kernel::state::StateOp::Dispose {
+                            token: token.clone(),
+                        });
+                    }
+                    ops.push(pm_kernel::state::StateOp::Register {
+                        registry: "effects".into(),
+                        entry: pm_kernel::state::Registration {
+                            token,
+                            owner,
+                            id,
+                            definition,
+                        },
+                    });
+                }
+                // Removing a top registration reveals the preceding provider
+                // at its original position, including providers in other realms.
+                ops.extend(
+                    previous
+                        .iter()
+                        .filter(|old| !tokens.contains(&old.token))
+                        .map(|old| pm_kernel::state::StateOp::Dispose {
+                            token: old.token.clone(),
+                        }),
+                );
+                if !ops.is_empty() {
+                    self.kernel
+                        .state_transaction(pm_kernel::state::StateTransaction {
+                            expected_revision: None,
+                            ops,
+                        })
+                        .wait()
+                        .ok_or(Error::Invalid("kernel stopped"))?
+                        .map_err(|e| Error::Host(e.to_string()))?;
+                }
+                (self.wake)();
+                Ok(Value::Null)
+            }
             "themes.set" => {
                 let valid = input.as_array().is_some_and(|list| {
                     list.len() <= 32
@@ -2522,6 +2611,7 @@ impl KernelHooks for Broker {
         self.forget_painter(&panel);
         self.forget_themes(&panel);
         self.forget_commands(&panel);
+        self.forget_effects(&panel);
         (self.wake)();
     }
     fn seal_open_gestures(&self, _: &Generation) {}
@@ -2565,6 +2655,18 @@ impl Broker {
         let mut themes = self.themes.shared();
         if themes.1.remove(panel).is_some() {
             themes.0 += 1;
+        }
+    }
+    fn forget_effects(&self, panel: &str) {
+        if let Some(entry) = self.entry(panel) {
+            let owner = entry.shared().backend.shared().caller.writer;
+            let _ = self
+                .kernel
+                .state_transaction(pm_kernel::state::StateTransaction {
+                    expected_revision: None,
+                    ops: vec![pm_kernel::state::StateOp::DisposeOwner { owner }],
+                })
+                .wait();
         }
     }
     fn forget_commands(&self, panel: &str) {

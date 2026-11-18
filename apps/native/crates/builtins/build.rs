@@ -20,6 +20,15 @@ fn main() {
                 .display()
         );
     }
+    // Native effects reuse the compatibility wrapper, not a second prelude.
+    for file in [
+        "../compat/src/definitions.ts",
+        "../compat/src/frozen/host/glsl.js",
+        "../compat/src/frozen/host/extension-layers.js",
+        "../compat/src/frozen/reference/legacy/gl/shader-prelude.ts",
+    ] {
+        println!("cargo:rerun-if-changed={}", source.join(file).display());
+    }
     let output = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("builtins.js");
     let status = Command::new("bun")
         .current_dir(&source)

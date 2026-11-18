@@ -599,6 +599,24 @@ impl McpSession {
             .ok_or_else(|| Error::invalid("This tool requires an attached project."))?
             .clone();
         assert_project(session, &host, &id)?;
+        // Publication validates in an isolated realm. A windowless project may
+        // not have a live realm yet, and reloads register asynchronously. Use
+        // the same loader as captures before reading the kernel's providers.
+        let needs_definitions = cleaned_commands.as_ref().is_some_and(|commands| {
+            commands.iter().any(|command| {
+                matches!(
+                    command["type"].as_str(),
+                    Some("add_effect" | "set_transition")
+                )
+            })
+        });
+        if needs_definitions && let Some(engine) = host.engine.clone() {
+            let view = host.view(&id)?;
+            drop(host);
+            engine.prepare_definitions(&id, view.document, view.revision)?;
+            host = Automation::fenced(&shared, session.document)?;
+            assert_project(session, &host, &id)?;
+        }
         if ["get_project_state", "get_timeline", "list_media"].contains(&name) {
             let result = if name == "get_project_state" {
                 views::project_state(&host, &id, args)?

@@ -1890,3 +1890,92 @@ fn raster_crop_preserves_owner_gradient_and_shadow() {
         );
     }
 }
+
+#[test]
+fn corner_pin_extension_identity_translation_and_deterministic_snaps() {
+    let _gpu = gpu();
+    let mut r = Renderer::headless().unwrap();
+    let set = DefinitionSetSnapshot {
+        generation: Seq::new(1).unwrap(),
+        definitions: serde_json::from_str(include_str!("fixtures/extension-effects.json")).unwrap(),
+        missing: vec![],
+    };
+    assert!(r.set_definitions(&set).unwrap().is_empty());
+    let make = |params: Value| {
+        let mut plate = layer(
+            "plate",
+            "solid",
+            json!({"color":"#FFFFFF","w":80,"h":40}),
+            80.,
+            60.,
+            2.,
+        );
+        plate["fx"] = json!([fx("pin", "corner-pin-snap.fx", params)]);
+        load(&project(W, H, 2., solid_fill("#FF0000"), vec![plate]))
+    };
+    let res = MapResolver::default();
+    let pixel = |pixels: &[f32], x: usize| pixels[(80 * W as usize + x) * 4..][..4].to_vec();
+    let mut params = json!({"amount":ch(json!(0))});
+    let identity = render(&mut r, &make(params.clone()), &res, 0., &request()).unwrap();
+    assert_eq!(pixel(&identity, 100), vec![1., 1., 1., 1.]);
+    assert_eq!(pixel(&identity, 180), vec![1., 0., 0., 1.]);
+    for key in ["tlX", "trX", "brX", "blX"] {
+        params[key] = ch(json!(50));
+    }
+    let moved = render(&mut r, &make(params), &res, 0., &request()).unwrap();
+    assert_eq!(pixel(&moved, 100), vec![1., 0., 0., 1.]);
+    assert_eq!(pixel(&moved, 180), vec![1., 1., 1., 1.]);
+    let trapezoid = make(json!({"amount":ch(json!(0)),"tlX":ch(json!(25)),"trX":ch(json!(-25))}));
+    let warped = render(&mut r, &trapezoid, &res, 0., &request()).unwrap();
+    let sample = |x: usize, y: usize| warped[(y * W as usize + x) * 4..][..4].to_vec();
+    assert_eq!(sample(88, 68), vec![1., 0., 0., 1.], "narrow top edge");
+    assert_eq!(sample(88, 92), vec![1., 1., 1., 1.], "wide bottom edge");
+    let doc =
+        make(json!({"amount":ch(json!(100)),"every":ch(json!(12)),"sharpness":ch(json!(100))}));
+    let a = render(&mut r, &doc, &res, 0., &request()).unwrap();
+    let held = render(&mut r, &doc, &res, 11. / 30., &request()).unwrap();
+    let b = render(&mut r, &doc, &res, 12. / 30., &request()).unwrap();
+    assert_eq!(a, held);
+    assert!(max_diff(&a, &b) > 0.1);
+    assert_eq!(a, render(&mut r, &doc, &res, 0., &request()).unwrap());
+}
+
+#[test]
+fn legacy_gradient_tint_extension_matches_v2_formula() {
+    let _gpu = gpu();
+    let mut r = Renderer::headless().unwrap();
+    let set = DefinitionSetSnapshot {
+        generation: Seq::new(1).unwrap(),
+        definitions: serde_json::from_str(include_str!("fixtures/extension-effects.json")).unwrap(),
+        missing: vec![],
+    };
+    assert!(r.set_definitions(&set).unwrap().is_empty());
+    let mut plate = layer(
+        "plate",
+        "solid",
+        json!({"color":"#FFFFFF","w":W,"h":H}),
+        0.,
+        0.,
+        2.,
+    );
+    plate["fx"] = json!([fx(
+        "tint",
+        "gradient-tint.effect",
+        json!({
+            "startColor":ch(json!("#FF0000")),"endColor":ch(json!("#0000FF")),"angle":ch(json!(0)),"amount":ch(json!(1))
+        })
+    )]);
+    let doc = load(&project(W, H, 2., solid_fill("#000000"), vec![plate]));
+    let image = render(&mut r, &doc, &MapResolver::default(), 0., &request()).unwrap();
+    for x in [20usize, 100, 220, 300] {
+        let pixel = &image[(90 * W as usize + x) * 4..][..4];
+        let uv = (x as f32 + 0.5) / W as f32;
+        assert!(
+            pixel
+                .iter()
+                .zip([1. - uv, 0., uv, 1.])
+                .all(|(a, b)| (a - b).abs() < 0.003),
+            "{x}: {pixel:?}"
+        );
+    }
+}
