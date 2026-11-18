@@ -6350,3 +6350,45 @@ fn properties_show_and_edit_a_layer_transition() {
     send(request);
     assert!(snapshot(&mut presenter).0.is_empty());
 }
+
+#[test]
+fn properties_key_intent_reveals_the_row_in_the_next_timeline_projection() {
+    let actor = actor();
+    let kernel = actor.handle();
+    select_layer(&kernel, "a");
+    let identity = pm_surface::host_api::Identity {
+        realm: "reveal-contract".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(kernel.clone(), identity, "inspector", false).unwrap();
+    let before = backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    assert!(
+        !before["window"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["path"] == "opacity")
+    );
+    backend.inspector_snapshot().unwrap();
+    let models::NativeCommand::Kernel(request) = backend
+        .native_command("panel.inspector", &json!({"type":"key","row":"opacity"}))
+        .unwrap()
+    else {
+        panic!("Properties diamond must edit the kernel")
+    };
+    kernel.call("synthetic", request).wait().unwrap().unwrap();
+    let after = backend
+        .timeline_frame(&json!({"first":0,"visible":20}))
+        .unwrap();
+    let row = after["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["path"] == "opacity")
+        .expect("new row");
+    assert_eq!(row["animated"], true);
+    assert_eq!(row["keyAtPlayhead"], true);
+}

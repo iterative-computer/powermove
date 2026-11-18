@@ -1230,6 +1230,31 @@ impl TimelineSurface {
                 .detach();
             }
         }
+        if built.model.reveal_serial != self.model.reveal_serial {
+            if let Some((layer, path)) = &built.model.reveal_target {
+                let target = built.model.rows().iter().find(|row| match &row.id {
+                    RowId::Property { layer_id, channel } if layer_id == layer => built
+                        .model
+                        .track_channels(layer, channel)
+                        .iter()
+                        .any(|c| &c.path == path),
+                    _ => false,
+                });
+                if let Some(top) =
+                    target.and_then(|row| built.scene.scroll_for(&pm_panel_timeline::v4::row_id(&row.id)))
+                {
+                    let height = (f32::from(self.bounds.size.height) as f64
+                        - self.tokens.metrics.ruler as f64)
+                        .max(0.);
+                    let bottom = top + self.tokens.metrics.track_row as f64;
+                    if top < self.view.scroll_y {
+                        self.view.scroll_y = top;
+                    } else if bottom > self.view.scroll_y + height {
+                        self.view.scroll_y = (bottom - height).max(0.);
+                    }
+                }
+            }
+        }
         self.model = built.model;
         self.scene = Some(self.with_focus(built.scene.clone()));
         self.graph = steady_graph(&self.gesture, self.graph.as_deref(), built.graph.clone());

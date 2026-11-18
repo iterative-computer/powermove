@@ -3389,3 +3389,155 @@ fn a_tracks_slide_drag_works_on_a_still_and_with_one_neighbour() {
         layout.item("b").unwrap().lane
     );
 }
+
+#[test]
+fn revealing_a_property_opens_its_collapsed_parent_group() {
+    let mut m = model(parse(r#"{"layers":[{"id":"g","type":"group","groupCollapsed":true},{"id":"child","type":"shape","group":"g","collapsed":true,"p":{"opacity":{"v":100,"kf":[]}}}]}"#).unwrap());
+    m.reveal_paths("child", &["opacity".into()]).unwrap();
+    assert!(m.rows().iter().any(|r| matches!(&r.id, RowId::Property { layer_id, channel } if layer_id == "child" && channel == "opacity")));
+}
+
+fn add_reveal_key(c: &mut TimelineClient, layer: &str, path: &str, id: &str, time: f64) {
+    edit(
+        c,
+        vec![
+            KeyframeCommand::Add {
+                layer_id: layer.into(),
+                channel: path.into(),
+                time,
+                key_id: id.into(),
+                value: None,
+            }
+            .into(),
+        ],
+    );
+}
+fn has_property(c: &TimelineClient, layer: &str, path: &str) -> bool {
+    c.model.rows().iter().any(|r| {
+        matches!(&r.id, RowId::Property { layer_id, channel }
+        if layer_id == layer && channel == path)
+    })
+}
+#[test]
+fn keyframe_reveal_opens_a_collapsed_layer_and_explicit_property_filter() {
+    let (_actor, mut c) = client();
+    c.model.reveal.layers.insert(
+        "c".into(),
+        Disclosure {
+            collapsed: true,
+            paths: Some(vec!["rotation".into()]),
+            ..Default::default()
+        },
+    );
+    c.model.rebuild_rows();
+    assert!(!has_property(&c, "c", "opacity"));
+    add_reveal_key(&mut c, "c", "opacity", "new", 0.);
+    assert!(has_property(&c, "c", "opacity"));
+    assert_eq!(c.model.reveal_target, Some(("c".into(), "opacity".into())));
+}
+#[test]
+fn keyframe_reveal_does_not_reopen_a_user_collapse_until_the_next_edit() {
+    let (_actor, mut c) = client();
+    add_reveal_key(&mut c, "c", "opacity", "new", 0.);
+    let serial = c.model.reveal_serial;
+    c.model.reveal.layers.get_mut("c").unwrap().collapsed = true;
+    c.model.rebuild_rows();
+    c.sync().unwrap();
+    assert!(!has_property(&c, "c", "opacity"));
+    assert_eq!(c.model.reveal_serial, serial);
+    add_reveal_key(&mut c, "c", "opacity", "next", 1.);
+    assert!(has_property(&c, "c", "opacity"));
+    assert!(c.model.reveal_serial > serial);
+}
+#[test]
+fn keyframe_reveal_keeps_the_last_removed_keys_row_until_animated_refresh() {
+    let (_actor, mut c) = client();
+    add_reveal_key(&mut c, "c", "opacity", "new", 0.);
+    let serial = c.model.reveal_serial;
+    edit(
+        &mut c,
+        vec![
+            KeyframeCommand::Delete {
+                key_ids: vec!["new".into()],
+            }
+            .into(),
+        ],
+    );
+    assert!(has_property(&c, "c", "opacity"));
+    assert_eq!(c.model.reveal_serial, serial);
+    select(&mut c, &["c"]);
+    c.model
+        .reveal_property('u', false, 1000, &PropertyFacts::default())
+        .unwrap();
+    assert!(!has_property(&c, "c", "opacity"));
+}
+
+#[test]
+fn keyframe_reveal_releases_the_empty_row_on_the_next_collapse() {
+    let (_actor, mut c) = client();
+    add_reveal_key(&mut c, "c", "opacity", "new", 0.);
+    edit(
+        &mut c,
+        vec![
+            KeyframeCommand::Delete {
+                key_ids: vec!["new".into()],
+            }
+            .into(),
+        ],
+    );
+    assert!(has_property(&c, "c", "opacity"));
+    c.model.reveal.layers.get_mut("c").unwrap().collapsed = true;
+    c.model.rebuild_rows();
+    c.model.reveal.layers.get_mut("c").unwrap().collapsed = false;
+    c.model.rebuild_rows();
+    assert!(!has_property(&c, "c", "opacity"));
+}
+
+#[test]
+fn keyframe_reveal_runs_once_per_property_in_a_live_gesture() {
+    let (_actor, mut c) = client();
+    let ack = block_on(
+        c.call(
+            pm_kernel::GestureCall::Begin {
+                label: "Adjust opacity".into(),
+            }
+            .into(),
+        ),
+    )
+    .unwrap();
+    let Reply::Gesture(gesture) = ack.reply else {
+        panic!("gesture")
+    };
+    for (step, value) in [50., 60.].into_iter().enumerate() {
+        block_on(
+            c.call(
+                pm_kernel::GestureCall::Step {
+                    gesture,
+                    replace: false,
+                    body: WriteBody::Commands(vec![
+                        KeyframeCommand::Add {
+                            layer_id: "c".into(),
+                            channel: "opacity".into(),
+                            time: step as f64,
+                            key_id: format!("gesture-{step}"),
+                            value: Some(value.into()),
+                        }
+                        .into(),
+                    ]),
+                }
+                .into(),
+            ),
+        )
+        .unwrap();
+        if step == 0 {
+            assert!(has_property(&c, "c", "opacity"));
+            c.model.reveal.layers.get_mut("c").unwrap().collapsed = true;
+            c.model.rebuild_rows();
+        } else {
+            assert!(!has_property(&c, "c", "opacity"));
+        }
+    }
+    block_on(c.call(pm_kernel::GestureCall::Commit { gesture }.into())).unwrap();
+    add_reveal_key(&mut c, "c", "opacity", "later-gesture", 2.);
+    assert!(has_property(&c, "c", "opacity"));
+}

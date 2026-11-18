@@ -298,7 +298,7 @@ impl TimelineClient {
             return Ok(false);
         }
         self.adopted = Some(view);
-        self.model.restore_ui(&p.ui_state);
+        self.model.sync(&p);
         Ok(true)
     }
     /// [`publish_view`](Self::publish_view) when the view differs from the

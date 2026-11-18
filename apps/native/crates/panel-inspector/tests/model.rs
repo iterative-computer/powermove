@@ -1474,3 +1474,32 @@ fn imported_matching_source_applies_to_captured_layer_and_undo() {
             .is_none()
     );
 }
+
+#[test]
+fn effect_display_names_prefer_instance_names_and_fall_back_to_ids() {
+    let mut fixture = Fixture::new();
+    let mut glow = definition("blur");
+    glow.label = "Deep Glow".into();
+    fixture.model.register_effect(glow);
+    let named = parse(r#"{"type":"blur","name":"My Glow"}"#).unwrap();
+    assert_eq!(fixture.model.effect_display_name(&named), "My Glow");
+    let unrenamed = parse(r#"{"type":"blur"}"#).unwrap();
+    assert_eq!(fixture.model.effect_display_name(&unrenamed), "Deep Glow");
+    let unknown = parse(r#"{"type":"deep-glow-pop.effect","name":""}"#).unwrap();
+    assert_eq!(
+        fixture.model.effect_display_name(&unknown),
+        "deep-glow-pop.effect"
+    );
+}
+
+#[test]
+fn a_known_effect_keeps_its_display_name_when_the_saved_version_is_unavailable() {
+    let mut fixture = Fixture::new();
+    let definition: pm_fx_defs::Definition = serde_json::from_value(serde_json::json!({
+        "id":"blur", "label":"Deep Glow", "group":"Stylize", "version":2,
+        "params":[], "frag":"o = src(v_uv);"
+    })).unwrap();
+    fixture.model.install_effect_catalog(pm_fx_defs::catalog::EffectCatalog::new(vec![definition]).unwrap()).unwrap();
+    let effect = parse(r#"{"type":"blur","version":99}"#).unwrap();
+    assert_eq!(fixture.model.effect_display_name(&effect), "Deep Glow");
+}

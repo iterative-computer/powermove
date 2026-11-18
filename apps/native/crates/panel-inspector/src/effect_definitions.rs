@@ -58,6 +58,30 @@ impl Inspector {
         self.definition_generation = self.definition_generation.wrapping_add(1);
         Ok(())
     }
+    /// Instance names take precedence over the saved definition's display label.
+    pub fn effect_display_name(&self, effect: &Value) -> String {
+        effect
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                self.saved_effect_definition(effect)
+                    .map(|d| d.label)
+                    .filter(|s| !s.is_empty())
+            })
+            .or_else(|| {
+                let id = effect.get("type")?.as_str()?;
+                self.definitions.get(id).map(|d| d.label.clone()).filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| {
+                effect
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .into()
+            })
+    }
     pub(crate) fn saved_effect_definition(&self, effect: &Value) -> Option<EffectDefinition> {
         let id = effect.get("type")?.as_str()?;
         let Some(catalog) = &self.effect_catalog else {

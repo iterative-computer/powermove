@@ -30,6 +30,10 @@ struct Last {
 pub struct RevealState {
     pub layers: HashMap<String, Disclosure>,
     last: Option<Last>,
+    /// Rows kept after deleting their final key, until a collapse or refresh.
+    pub(crate) retained_empty: HashSet<(String, String)>,
+    pub(crate) entry: Option<u64>,
+    pub(crate) revealed_in_entry: HashSet<(String, String)>,
     /// Tracks mode: the lane each clip showed on (relative to its group, as
     /// a stored `track` is) and the time it spanned then. A clip whose time
     /// has not changed stays on it through any edit, from any source; only
@@ -239,6 +243,11 @@ impl TimelineModel {
     /// v1–3's `TimelineService.reveal` (timeline.ts:4452): open the layer and
     /// add `keys` to what it already shows (its animated channels by default).
     pub fn reveal_paths(&mut self, layer: &str, keys: &[String]) -> Result<(), ModelError> {
+        self.include_paths(layer, keys)?;
+        self.rebuild_rows();
+        Ok(())
+    }
+    pub(crate) fn include_paths(&mut self, layer: &str, keys: &[String]) -> Result<(), ModelError> {
         let l = self
             .index
             .layer(layer)
@@ -275,7 +284,25 @@ impl TimelineModel {
                 ..current
             },
         );
-        self.rebuild_rows();
+        let mut parent = l.group.clone();
+        let mut seen = HashSet::new();
+        while let Some(id) = parent {
+            if !seen.insert(id.clone()) {
+                break;
+            }
+            let base = self.index.layer(&id);
+            let d = self
+                .reveal
+                .layers
+                .entry(id.clone())
+                .or_insert_with(|| Disclosure {
+                    collapsed: base.map_or(true, |l| l.collapsed),
+                    group_collapsed: base.map_or(true, |l| l.group_collapsed),
+                    paths: None,
+                });
+            d.group_collapsed = false;
+            parent = base.and_then(|l| l.group.clone());
+        }
         Ok(())
     }
     /// Properties' Show in Graph Editor (v1's `showGraphEditor`): the layer
