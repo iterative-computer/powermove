@@ -324,6 +324,7 @@ pub mod native {
             let scroll = NSTextView::scrollableTextView(self.mtm);
             scroll.setDrawsBackground(false);
             scroll.setBorderType(NSBorderType::NoBorder);
+            scroll.setFocusRingType(NSFocusRingType::None);
             scroll.setHasVerticalScroller(true);
             scroll.setAutohidesScrollers(true);
             let Some(view) = scroll
@@ -332,6 +333,7 @@ pub mod native {
             else {
                 return;
             };
+            view.setFocusRingType(NSFocusRingType::None);
             let size = f64::from(t.typography.body);
             let font =
                 NSFont::monospacedSystemFontOfSize_weight(size, unsafe { NSFontWeightRegular });
@@ -403,6 +405,7 @@ pub mod native {
         /// A colour well as a swatch at the trailing edge.
         pub fn swatch(&mut self, id: &str, label: &str, well: Retained<NSColorWell>) {
             well.setColorWellStyle(NSColorWellStyle::Minimal);
+            well.setFocusRingType(NSFocusRingType::None);
             well.setAccessibilityLabel(Some(&NSString::from_str(label)));
             well.setIdentifier(Some(&NSString::from_str(id)));
             let size = NSSize::new(
@@ -416,6 +419,7 @@ pub mod native {
         }
         /// A radio or checkbox whose title is its own: one row of a card.
         pub fn option(&mut self, id: &str, control: Retained<NSControl>) {
+            control.setFocusRingType(NSFocusRingType::None);
             control.setIdentifier(Some(&NSString::from_str(id)));
             self.items.push(Item::Row(Row {
                 lead: control.clone().into_super(),
@@ -440,6 +444,7 @@ pub mod native {
             self.control(id, label, switch.into_super());
         }
         pub fn control(&mut self, id: &str, label: &str, control: Retained<NSControl>) {
+            control.setFocusRingType(NSFocusRingType::None);
             control.setAccessibilityLabel(Some(&NSString::from_str(label)));
             control.setIdentifier(Some(&NSString::from_str(id)));
             self.row(label, &control);
@@ -462,6 +467,7 @@ pub mod native {
                 )
             };
             button.setEnabled(enabled);
+            button.setFocusRingType(NSFocusRingType::None);
             button.setIdentifier(Some(&NSString::from_str(id)));
             button.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());
             button.setKeyEquivalent(&NSString::from_str(if cancel {

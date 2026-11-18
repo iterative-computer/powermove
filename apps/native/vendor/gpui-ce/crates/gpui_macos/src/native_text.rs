@@ -538,6 +538,7 @@ impl NativeTextSlot {
             return;
         };
         let stepper = NSStepper::initWithFrame(NSStepper::alloc(mtm), NSRect::ZERO);
+        stepper.setFocusRingType(NSFocusRingType::None);
         stepper.setControlSize(objc2_app_kit::NSControlSize::Regular);
         stepper.setMinValue(0.);
         stepper.setMaxValue(2.);
@@ -567,7 +568,7 @@ impl NativeTextSlot {
         number: bool,
         stepper: bool,
     ) -> Self {
-        use objc2_app_kit::{NSFocusRingType, NSLayoutConstraint};
+        use objc2_app_kit::NSLayoutConstraint;
         use objc2_foundation::NSArray;
         let kind = if number {
             TextKind::FormNumber
@@ -578,7 +579,6 @@ impl NativeTextSlot {
         slot.set_stepper(stepper);
         slot.set_escape_cancels(true);
         let field = slot.native_view();
-        field.setFocusRingType(NSFocusRingType::Default);
         field.setTranslatesAutoresizingMaskIntoConstraints(false);
         let wrapper = &slot.state.wrapper;
         let mut constraints = vec![
@@ -695,7 +695,6 @@ impl NativeTextSlot {
             v.setBordered(false);
             v.setDrawsBackground(false);
             v.setFont(Some(&NSFont::systemFontOfSize(13.)));
-            v.setFocusRingType(NSFocusRingType::None);
             if kind.form() {
                 // AppKit's own rounded field; no accent focus ring (owner
                 // rule), the field's caret shows it has the keyboard.
@@ -716,6 +715,7 @@ impl NativeTextSlot {
             }
             Editor::Field(v)
         };
+        editor.view().setFocusRingType(NSFocusRingType::None);
         editor.set(initial);
         editor
             .view()

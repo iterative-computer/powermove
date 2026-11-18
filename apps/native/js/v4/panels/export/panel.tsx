@@ -448,8 +448,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
               value={model.kind}
               options={kinds}
               disabled={busy}
-              // The destinations run the width of the cards under them.
-              style={{ flexGrow: 1 }}
+              data-pm-variant="glass"
               onChange={(kind) => {
                 model.chooseKind(kind as "video" | "images" | "project");
                 // The page changes on the click: the plan (a host round trip

@@ -61,6 +61,7 @@ impl SegmentedControl {
         control.setSegmentCount(count as isize);
         control.setTrackingMode(NSSegmentSwitchTracking::SelectOne);
         control.setControlSize(size);
+        control.setFocusRingType(NSFocusRingType::None);
         if control.respondsToSelector(sel!(setBorderShape:)) {
             control.setBorderShape(NSControlBorderShape::Capsule);
         }
@@ -962,11 +963,6 @@ fn make_control(
         Kind::Search => {
             let v = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), NSRect::ZERO);
             v.setPlaceholderString(Some(&NSString::from_str(label)));
-            // The caret and the clear button say where the keyboard is;
-            // no accent ring.
-            if !form {
-                v.setFocusRingType(NSFocusRingType::None);
-            }
             v.setFont(Some(&NSFont::systemFontOfSize(body_size)));
             v.setSendsSearchStringImmediately(true);
             v.setSendsWholeSearchString(false);
@@ -1009,6 +1005,7 @@ fn make_control(
     if form && let Some(view) = control.view().downcast_ref::<NSControl>() {
         view.setControlSize(NSControlSize::Regular);
     }
+    control.view().setFocusRingType(NSFocusRingType::None);
     control
         .view()
         .setAccessibilityLabel(Some(&NSString::from_str(label)));
@@ -1198,7 +1195,6 @@ impl NativeControl {
         if let Control::Search(field) = &control.control {
             let mtm = MainThreadMarker::new().expect("main thread");
             field.setControlSize(NSControlSize::Large);
-            field.setFocusRingType(NSFocusRingType::Default);
             field.sizeToFit();
             control.height = field.fittingSize().height as f32;
             add_search_hint(field, "⌘F", t.typography.body, f64::from(t.space.md), mtm);

@@ -2782,6 +2782,7 @@ impl ToolbarDelegate {
                         mtm,
                     );
                     home.setBordered(false);
+                    home.setFocusRingType(NSFocusRingType::None);
                     home.setButtonType(NSButtonType::MomentaryChange);
                     home.setTag(TOOLBAR.iter().position(|n| *n == "home").unwrap() as isize);
                     home.setToolTip(Some(&NSString::from_str("Projects")));
@@ -4611,6 +4612,7 @@ impl Host {
             };
             // The button is the whole cell and draws nothing: the cell
             // draws the fill, the label the title.
+            button.setFocusRingType(NSFocusRingType::None);
             button.setTransparent(true);
             button.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(width, height)));
             button.setTag(tab.window);
@@ -4677,6 +4679,7 @@ impl Host {
                     mtm,
                 )
             };
+            close.setFocusRingType(NSFocusRingType::None);
             close.setBordered(false);
             close.setTag(tab.window);
             close.setToolTip(Some(&NSString::from_str("Close Project")));
@@ -4719,6 +4722,7 @@ impl Host {
                     action: sel!(selectPage:)
                 ]
             };
+            button.setFocusRingType(NSFocusRingType::None);
             button.setTransparent(true);
             button.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(width, height)));
             button.setTag(page_tag(number, index, number == own));
@@ -4736,6 +4740,7 @@ impl Host {
                     mtm,
                 )
             };
+            close.setFocusRingType(NSFocusRingType::None);
             close.setBordered(false);
             close.setTag(page_tag(number, index, number == own));
             close.setToolTip(Some(&NSString::from_str(&format!("Close {title}"))));
@@ -4780,6 +4785,7 @@ impl Host {
         // they no longer fit), then a new one. Each is a quiet glyph in a
         // cell of its own, so the pointer finds the strip's fill under it.
         let tool = |button: &NSButton, x: f64| {
+            button.setFocusRingType(NSFocusRingType::None);
             button.setFrame(NSRect::new(NSPoint::ZERO, square));
             let cell = TabView::new(
                 mtm,

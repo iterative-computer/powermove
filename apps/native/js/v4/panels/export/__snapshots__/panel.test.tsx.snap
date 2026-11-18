@@ -220,6 +220,7 @@ exports[`wire snapshot: selected video 1`] = `
               ],
               "props": {
                 "data-pm-component": "segmented-control",
+                "data-pm-variant": "glass",
                 "disabled": false,
                 "id": "export.kind",
                 "label": "Export type",
@@ -239,7 +240,6 @@ exports[`wire snapshot: selected video 1`] = `
                   },
                   "display": "flex",
                   "flexDirection": "row",
-                  "flexGrow": 1,
                   "gap": {
                     "token": "metrics.pill_inset",
                   },
@@ -3631,6 +3631,7 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
               ],
               "props": {
                 "data-pm-component": "segmented-control",
+                "data-pm-variant": "glass",
                 "disabled": false,
                 "id": "export.kind",
                 "label": "Export type",
@@ -3650,7 +3651,6 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                   },
                   "display": "flex",
                   "flexDirection": "row",
-                  "flexGrow": 1,
                   "gap": {
                     "token": "metrics.pill_inset",
                   },
@@ -7045,6 +7045,7 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
               ],
               "props": {
                 "data-pm-component": "segmented-control",
+                "data-pm-variant": "glass",
                 "disabled": false,
                 "id": "export.kind",
                 "label": "Export type",
@@ -7064,7 +7065,6 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                   },
                   "display": "flex",
                   "flexDirection": "row",
-                  "flexGrow": 1,
                   "gap": {
                     "token": "metrics.pill_inset",
                   },
@@ -10456,6 +10456,7 @@ exports[`wire snapshot: ProRes alpha 1`] = `
               ],
               "props": {
                 "data-pm-component": "segmented-control",
+                "data-pm-variant": "glass",
                 "disabled": false,
                 "id": "export.kind",
                 "label": "Export type",
@@ -10475,7 +10476,6 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                   },
                   "display": "flex",
                   "flexDirection": "row",
-                  "flexGrow": 1,
                   "gap": {
                     "token": "metrics.pill_inset",
                   },
@@ -14240,6 +14240,7 @@ exports[`wire snapshot: PNG sequence 1`] = `
               ],
               "props": {
                 "data-pm-component": "segmented-control",
+                "data-pm-variant": "glass",
                 "disabled": false,
                 "id": "export.kind",
                 "label": "Export type",
@@ -14259,7 +14260,6 @@ exports[`wire snapshot: PNG sequence 1`] = `
                   },
                   "display": "flex",
                   "flexDirection": "row",
-                  "flexGrow": 1,
                   "gap": {
                     "token": "metrics.pill_inset",
                   },
@@ -17043,6 +17043,7 @@ exports[`wire snapshot: still 1`] = `
               ],
               "props": {
                 "data-pm-component": "segmented-control",
+                "data-pm-variant": "glass",
                 "disabled": false,
                 "id": "export.kind",
                 "label": "Export type",
@@ -17062,7 +17063,6 @@ exports[`wire snapshot: still 1`] = `
                   },
                   "display": "flex",
                   "flexDirection": "row",
-                  "flexGrow": 1,
                   "gap": {
                     "token": "metrics.pill_inset",
                   },
@@ -19248,6 +19248,7 @@ exports[`wire snapshot: project 1`] = `
               ],
               "props": {
                 "data-pm-component": "segmented-control",
+                "data-pm-variant": "glass",
                 "disabled": false,
                 "id": "export.kind",
                 "label": "Export type",
@@ -19267,7 +19268,6 @@ exports[`wire snapshot: project 1`] = `
                   },
                   "display": "flex",
                   "flexDirection": "row",
-                  "flexGrow": 1,
                   "gap": {
                     "token": "metrics.pill_inset",
                   },
@@ -19877,6 +19877,7 @@ exports[`wire snapshot: no captions 1`] = `
               ],
               "props": {
                 "data-pm-component": "segmented-control",
+                "data-pm-variant": "glass",
                 "disabled": false,
                 "id": "export.kind",
                 "label": "Export type",
@@ -19896,7 +19897,6 @@ exports[`wire snapshot: no captions 1`] = `
                   },
                   "display": "flex",
                   "flexDirection": "row",
-                  "flexGrow": 1,
                   "gap": {
                     "token": "metrics.pill_inset",
                   },
@@ -22890,6 +22890,7 @@ exports[`wire snapshot: multiple captions 1`] = `
               ],
               "props": {
                 "data-pm-component": "segmented-control",
+                "data-pm-variant": "glass",
                 "disabled": false,
                 "id": "export.kind",
                 "label": "Export type",
@@ -22909,7 +22910,6 @@ exports[`wire snapshot: multiple captions 1`] = `
                   },
                   "display": "flex",
                   "flexDirection": "row",
-                  "flexGrow": 1,
                   "gap": {
                     "token": "metrics.pill_inset",
                   },
@@ -26301,6 +26301,7 @@ exports[`wire snapshot: custom size 1`] = `
               ],
               "props": {
                 "data-pm-component": "segmented-control",
+                "data-pm-variant": "glass",
                 "disabled": false,
                 "id": "export.kind",
                 "label": "Export type",
@@ -26320,7 +26321,6 @@ exports[`wire snapshot: custom size 1`] = `
                   },
                   "display": "flex",
                   "flexDirection": "row",
-                  "flexGrow": 1,
                   "gap": {
                     "token": "metrics.pill_inset",
                   },
@@ -29996,6 +29996,7 @@ exports[`wire snapshot: inline invalid size 1`] = `
               ],
               "props": {
                 "data-pm-component": "segmented-control",
+                "data-pm-variant": "glass",
                 "disabled": false,
                 "id": "export.kind",
                 "label": "Export type",
@@ -30015,7 +30016,6 @@ exports[`wire snapshot: inline invalid size 1`] = `
                   },
                   "display": "flex",
                   "flexDirection": "row",
-                  "flexGrow": 1,
                   "gap": {
                     "token": "metrics.pill_inset",
                   },
@@ -33716,6 +33716,7 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
               ],
               "props": {
                 "data-pm-component": "segmented-control",
+                "data-pm-variant": "glass",
                 "disabled": true,
                 "id": "export.kind",
                 "label": "Export type",
@@ -33735,7 +33736,6 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                   },
                   "display": "flex",
                   "flexDirection": "row",
-                  "flexGrow": 1,
                   "gap": {
                     "token": "metrics.pill_inset",
                   },
@@ -38460,6 +38460,7 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
               ],
               "props": {
                 "data-pm-component": "segmented-control",
+                "data-pm-variant": "glass",
                 "disabled": false,
                 "id": "export.kind",
                 "label": "Export type",
@@ -38479,7 +38480,6 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                   },
                   "display": "flex",
                   "flexDirection": "row",
-                  "flexGrow": 1,
                   "gap": {
                     "token": "metrics.pill_inset",
                   },

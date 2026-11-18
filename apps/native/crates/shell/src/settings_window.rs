@@ -111,6 +111,21 @@ struct Row {
     item: Retained<NSNumber>,
 }
 
+define_class!(
+    #[unsafe(super(NSTableRowView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMSettingsSidebarRow"]
+    struct SidebarRow;
+
+    impl SidebarRow {
+        #[unsafe(method(setEmphasized:))]
+        fn set_emphasized(&self, _: bool) {
+            // Keep AppKit's unemphasized selection when the window becomes key.
+            unsafe { let _: () = msg_send![super(self), setEmphasized: false]; }
+        }
+    }
+);
+
 pub struct State {
     sender: async_channel::Sender<Event>,
     rows: RefCell<Vec<Row>>,
@@ -156,6 +171,14 @@ define_class!(
         #[unsafe(method(outlineView:shouldSelectItem:))]
         fn selectable(&self, _: &NSOutlineView, item: *mut AnyObject) -> bool {
             matches!(self.row_of(item), Some(Some(_)))
+        }
+        #[unsafe(method_id(outlineView:rowViewForItem:))]
+        fn row_view(&self, _: &NSOutlineView, _: *mut AnyObject) -> Retained<NSTableRowView> {
+            let row: Retained<SidebarRow> = unsafe {
+                msg_send![super(SidebarRow::alloc(MainThreadMarker::from(self)).set_ivars(())), initWithFrame: NSRect::ZERO]
+            };
+            row.setEmphasized(false);
+            Retained::into_super(row)
         }
         #[unsafe(method_id(outlineView:viewForTableColumn:item:))]
         fn cell(&self, _: &NSOutlineView, _: *mut AnyObject, item: *mut AnyObject) -> Option<Retained<NSView>> {
@@ -360,6 +383,7 @@ impl SettingsChrome {
         let sidebar = NSView::new(mtm);
         let search = NSSearchField::new(mtm);
         search.setControlSize(NSControlSize::Large);
+        search.setFocusRingType(NSFocusRingType::None);
         search.setPlaceholderString(Some(ns_string!("Search")));
         search.setSendsSearchStringImmediately(true);
         unsafe {
@@ -368,6 +392,7 @@ impl SettingsChrome {
         }
         search.setTranslatesAutoresizingMaskIntoConstraints(false);
         let outline = NSOutlineView::new(mtm);
+        outline.setFocusRingType(NSFocusRingType::None);
         let column =
             NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), ns_string!("section"));
         column.setResizingMask(NSTableColumnResizingOptions::AutoresizingMask);
