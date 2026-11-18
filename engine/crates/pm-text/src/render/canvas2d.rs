@@ -31,7 +31,7 @@ pub(crate) struct CanvasMasks {
     masks: HashMap<Key, Arc<GlyphMask>>,
     bytes: usize,
 }
-// SAFETY: immutable CTFont objects are thread-safe; contexts are created and
+// SAFETY: immutable CTFont/CGFont objects are thread-safe; contexts are created and
 // destroyed within one call. The cache moves with its owning render thread.
 unsafe impl Send for CanvasMasks {}
 impl CanvasMasks {
@@ -264,6 +264,94 @@ pub fn mask_table(rgb: [f64; 3]) -> &'static [u8; 256] {
 mod tests {
     use super::*;
     use kurbo::Shape;
+
+    /// Selection/seek repaints nested text at new device sizes while Properties
+    /// follows the selection. Exercise actual masks, not just empty font runs.
+    #[test]
+    fn painted_seek_cycles_bound_font_providers_and_clear_on_idle() {
+        use read_fonts::TableProvider;
+        let faces: Vec<_> = ["Arial", "Times New Roman", "Courier New"]
+            .map(|name| {
+                std::fs::read(format!("/System/Library/Fonts/Supplemental/{name}.ttf"))
+                    .expect("system fixture font")
+            })
+            .into_iter()
+            .collect();
+        let glyphs: Vec<_> = faces
+            .iter()
+            .map(|data| {
+                read_fonts::FontRef::new(data)
+                    .unwrap()
+                    .cmap()
+                    .unwrap()
+                    .map_codepoint('H' as u32)
+                    .unwrap()
+                    .to_u32() as u16
+            })
+            .collect();
+        let source_bytes: usize = faces.iter().map(Vec::len).sum();
+        let mut cache = CanvasMasks::default();
+        let mut first = None;
+        for cycle in 0..50 {
+            for (index, data) in faces.iter().enumerate() {
+                let mask = cache
+                    .get(
+                        FaceRef {
+                            data,
+                            index: 0,
+                            id: index as u64 + 1,
+                        },
+                        &[],
+                        glyphs[index],
+                        20. + cycle as f32 * 0.125,
+                        0,
+                        0.,
+                        kurbo::Rect::new(-8., -80., 80., 20.),
+                        None,
+                    )
+                    .expect("painted glyph");
+                assert!(mask.coverage.iter().any(|&v| v > 0));
+                if cycle == 0 && index == 0 {
+                    first = Some(mask.coverage.clone());
+                }
+            }
+            let (bytes, strikes) = cache.fonts.retained_for_test();
+            assert_eq!(bytes, source_bytes, "each provider is retained only once");
+            assert!(strikes <= 128, "native strikes must stay bounded");
+            assert!(
+                cache.bytes < 8 << 20,
+                "mask eviction must not hide font growth"
+            );
+        }
+        // This is the clear reached by TextContext::forget_glyphs on idle and
+        // Renderer::trim(0) under critical pressure.
+        cache.clear();
+        assert_eq!(cache.fonts.retained_for_test(), (0, 0));
+        assert!(cache.masks.is_empty());
+        assert_eq!(cache.bytes, 0);
+        let again = cache
+            .get(
+                FaceRef {
+                    data: &faces[0],
+                    index: 0,
+                    id: 1,
+                },
+                &[],
+                glyphs[0],
+                20.,
+                0,
+                0.,
+                kurbo::Rect::new(-8., -80., 80., 20.),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            Some(&again.coverage),
+            first.as_ref(),
+            "idle must preserve pixels"
+        );
+    }
+
     #[test]
     fn synthetic_bold_paths_have_area_coverage_without_font_dilation() {
         let rect = kurbo::Rect::new(0., 0., 2.25, 8.);

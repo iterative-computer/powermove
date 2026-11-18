@@ -1635,8 +1635,13 @@ impl Renderer {
     /// raster cache is kept apart from the pool and trims to `bytes` on its
     /// own (`text_gpu().cached_bytes()`).
     pub fn trim(&mut self, bytes: u64) {
-        self.material.trim(bytes.min(128*1024*1024));
-        let bytes=bytes.saturating_sub(self.material.stats.retained_bytes);
+        // Idle release and critical pressure return CPU glyph/font storage too.
+        // Ordinary GPU grant changes must keep the warm glyph caches.
+        if bytes == 0 {
+            self.text.forget_glyphs();
+        }
+        self.material.trim(bytes.min(128 * 1024 * 1024));
+        let bytes = bytes.saturating_sub(self.material.stats.retained_bytes);
         // Kept bind groups hold their views (and textures) alive.
         self.binds.clear();
         // An export's kept staging buffer, frame target and pixels (the
@@ -1653,11 +1658,12 @@ impl Renderer {
         self.text_gpu.trim(bytes);
     }
 
-    /// Frees every idle intermediate target and kept mip pyramid (a viewer
-    /// at rest), and returns the bytes freed. Targets in use, such as the
-    /// kept bottom of the last frame (`crate::frame_prefix`), and every
-    /// content cache stay; the next frame takes fresh targets from the device.
+    /// Frees idle intermediate targets, kept mip pyramids, and CPU glyph/font
+    /// caches (a viewer at rest). Returns the target/pyramid bytes freed.
+    /// Targets in use, such as the kept bottom of the last frame
+    /// (`crate::frame_prefix`), stay valid.
     pub fn release_idle_targets(&mut self) -> u64 {
+        self.text.forget_glyphs();
         self.media.retire_cold_sessions();
         let before = self.pool.bytes() + self.pyramids.bytes();
         self.pool.trim(0);

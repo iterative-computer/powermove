@@ -14,7 +14,7 @@ use objc2_core_foundation::{
     CGPoint,
 };
 use objc2_core_graphics::{
-    CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, CGImageByteOrderInfo,
+    CGBitmapContextCreate, CGColorSpace, CGContext, CGFont, CGImageAlphaInfo, CGImageByteOrderInfo,
     CGImageComponentInfo, kCGColorSpaceSRGB,
 };
 use objc2_core_text::{
@@ -45,14 +45,26 @@ enum Source {
 /// Font identity: source, face index, size bits, variation coordinates.
 type FontKey = (Source, u32, u32, Vec<(u32, u32)>);
 
+// Native strikes can retain a whole font data provider independently of
+// their tiny glyph masks. Share providers across sizes and bound both.
+const FONT_SOURCE_BYTES: usize = 32 << 20;
+const FONT_CACHE_ENTRIES: usize = 128;
+
 /// A CoreText reference renderer (keeps fonts across calls).
 #[derive(Default)]
 pub struct CoreTextReference {
     descriptors: HashMap<(Source, u32), CFRetained<CTFontDescriptor>>,
     fonts: HashMap<FontKey, CFRetained<CTFont>>,
+    graphics: HashMap<(Source, u32), CFRetained<CGFont>>,
+    source_bytes: usize,
 }
 
 impl CoreTextReference {
+    #[cfg(test)]
+    pub(super) fn retained_for_test(&self) -> (usize, usize) {
+        (self.source_bytes, self.fonts.len())
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -78,12 +90,25 @@ impl CoreTextReference {
         if let Some(f) = self.fonts.get(&key) {
             return Some(f.clone());
         }
+        let source = (id, run.index);
+        let new_source =
+            !self.descriptors.contains_key(&source) && !self.graphics.contains_key(&source);
+        if new_source
+            && (self.source_bytes.saturating_add(run.data.len()) > FONT_SOURCE_BYTES
+                || self.descriptors.len() + self.graphics.len() >= FONT_CACHE_ENTRIES)
+        {
+            *self = Self::default();
+        } else if self.fonts.len() >= FONT_CACHE_ENTRIES {
+            // Strike eviction must keep the shared providers warm: copying a
+            // multi-megabyte font again for every size causes allocation churn.
+            self.fonts.clear();
+        }
         // SkTypeface_Mac::MakeFromStream instances variable data through a
         // CTFont descriptor at its default size, then the scaler makes an
         // exact copy at the strike size. CGFontCreateCopyWithVariations is
         // a different instancing path and changes variable outlines.
         if let Some(font) = self.variable_font(id, run) {
-            self.fonts.insert(key, font.clone());
+            self.keep_font(key, font.clone(), run.data.len());
             return Some(font);
         }
         // Single fonts go through CGFont, so CoreText never looks the face
@@ -94,8 +119,8 @@ impl CoreTextReference {
             .map(|f| matches!(f, read_fonts::FileRef::Font(_)))
             .unwrap_or(false);
         if single {
-            let font = self.graphics_font(run)?;
-            self.fonts.insert(key, font.clone());
+            let font = self.graphics_font(id, run)?;
+            self.keep_font(key, font.clone(), run.data.len());
             return Some(font);
         }
         let desc = match self.descriptors.entry((id, run.index)) {
@@ -106,7 +131,14 @@ impl CoreTextReference {
                 // SAFETY: the function returns an array of font descriptors.
                 let arr: CFRetained<CFArray<CTFontDescriptor>> =
                     unsafe { CFRetained::cast_unchecked(arr) };
-                e.insert(arr.get(run.index as usize)?).clone()
+                {
+                    let desc = arr.get(run.index as usize)?;
+                    if run.data.len() <= FONT_SOURCE_BYTES {
+                        self.source_bytes += run.data.len();
+                        e.insert(desc.clone());
+                    }
+                    desc
+                }
             }
         };
         let mut font =
@@ -135,8 +167,15 @@ impl CoreTextReference {
                 font.copy_with_attributes(f64::from(run.size), std::ptr::null(), Some(&var_desc))
             };
         }
-        self.fonts.insert(key, font.clone());
+        self.keep_font(key, font.clone(), run.data.len());
         Some(font)
+    }
+
+    fn keep_font(&mut self, key: FontKey, font: CFRetained<CTFont>, source_bytes: usize) {
+        // Oversize sources still draw; no native object retains them here.
+        if source_bytes <= FONT_SOURCE_BYTES {
+            self.fonts.insert(key, font);
+        }
     }
 
     fn variable_font(&mut self, id: Source, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
@@ -158,7 +197,14 @@ impl CoreTextReference {
                 let arr = unsafe { CTFontManagerCreateFontDescriptorsFromData(&data) };
                 let arr: CFRetained<CFArray<CTFontDescriptor>> =
                     unsafe { CFRetained::cast_unchecked(arr) };
-                e.insert(arr.get(run.index as usize)?).clone()
+                {
+                    let desc = arr.get(run.index as usize)?;
+                    if run.data.len() <= FONT_SOURCE_BYTES {
+                        self.source_bytes += run.data.len();
+                        e.insert(desc.clone());
+                    }
+                    desc
+                }
             }
         };
         let mut font = unsafe { CTFont::with_font_descriptor(&desc, 0.0, std::ptr::null()) };
@@ -206,11 +252,21 @@ impl CoreTextReference {
         Some(unsafe { font.copy_with_attributes(run.size as f64, std::ptr::null(), Some(&desc)) })
     }
 
-    fn graphics_font(&self, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
-        use objc2_core_graphics::{CGDataProvider, CGFont};
-        let data = CFData::from_bytes(run.data);
-        let provider = CGDataProvider::with_cf_data(Some(&data))?;
-        let mut cg = CGFont::with_data_provider(&provider)?;
+    fn graphics_font(&mut self, id: Source, run: &RefRun<'_>) -> Option<CFRetained<CTFont>> {
+        use objc2_core_graphics::CGDataProvider;
+        let source = (id, run.index);
+        let mut cg = if let Some(cg) = self.graphics.get(&source) {
+            cg.clone()
+        } else {
+            let data = CFData::from_bytes(run.data);
+            let provider = CGDataProvider::with_cf_data(Some(&data))?;
+            let cg = CGFont::with_data_provider(&provider)?;
+            if run.data.len() <= FONT_SOURCE_BYTES {
+                self.source_bytes += run.data.len();
+                self.graphics.insert(source, cg.clone());
+            }
+            cg
+        };
         if !run.coords.is_empty() {
             use read_fonts::TableProvider;
             let font = read_fonts::FontRef::new(run.data).ok()?;
@@ -399,6 +455,79 @@ impl CoreTextReference {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Animated text in nested compositions asks for many exact strike sizes.
+    /// Small glyph masks must not hide whole font-file copies per strike.
+    #[test]
+    fn animated_strikes_bound_native_font_data() {
+        // Static CoreGraphics faces copy a provider per strike; variable
+        // descriptors share their provider but still retain native strikes.
+        let faces = [
+            std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf").expect("Arial"),
+            include_bytes!("../../tests/fixtures/Geist-Variable.ttf").to_vec(),
+        ];
+        for data in faces {
+            let mut cache = CoreTextReference::new();
+            for step in 0..600 {
+                let run = RefRun {
+                    data: &data,
+                    index: 0,
+                    size: 20.0 + step as f32 * 0.125,
+                    coords: &[],
+                    glyphs: vec![],
+                    color: [1.; 4],
+                };
+                assert!(cache.font_of(1, &run).is_some());
+                assert!(cache.fonts.len() <= 128);
+            }
+            assert_eq!(cache.source_bytes, data.len());
+            assert_eq!(cache.graphics.len() + cache.descriptors.len(), 1);
+        }
+    }
+
+    /// Oversize font files still render, but must never become cache residents.
+    #[test]
+    fn oversize_font_sources_render_without_retention() {
+        let mut data =
+            std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf").expect("Arial");
+        data.resize(FONT_SOURCE_BYTES + 1, 0);
+        let mut cache = CoreTextReference::new();
+        for size in [20., 40.] {
+            let run = RefRun {
+                data: &data,
+                index: 0,
+                size,
+                coords: &[],
+                glyphs: vec![],
+                color: [1.; 4],
+            };
+            assert!(cache.font_of(1, &run).is_some());
+            assert_eq!(cache.source_bytes, 0);
+            assert!(cache.fonts.is_empty());
+            assert!(cache.graphics.is_empty());
+            assert!(cache.descriptors.is_empty());
+        }
+    }
+
+    #[test]
+    fn changing_font_sources_stays_within_the_byte_budget() {
+        let data = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf").expect("Arial");
+        let mut cache = CoreTextReference::new();
+        for id in 0..600 {
+            let run = RefRun {
+                data: &data,
+                index: 0,
+                size: 40.,
+                coords: &[],
+                glyphs: vec![],
+                color: [1.; 4],
+            };
+            assert!(cache.font_of(id, &run).is_some());
+            assert!(cache.source_bytes <= FONT_SOURCE_BYTES);
+            assert!(cache.graphics.len() + cache.descriptors.len() <= FONT_CACHE_ENTRIES);
+            assert!(cache.fonts.len() <= FONT_CACHE_ENTRIES);
+        }
+    }
 
     /// Glyphs land where they are placed, and smoothing adds ink.
     #[test]
