@@ -393,3 +393,152 @@ fn capture_agent_states() {
         }
     }
 }
+
+// G4: snapshots of the real ColorPanel, before and after, painted headlessly.
+#[test]
+#[ignore = "writes PNGs; set PM_COLOUR_STATES and PM_PANEL_CAPTURE"]
+fn capture_colour_stack_states() {
+    let Ok(states) = std::env::var("PM_COLOUR_STATES") else {
+        return;
+    };
+    let dir = std::env::var("PM_PANEL_CAPTURE").unwrap_or_else(|_| "/tmp/pm-shots/panels".into());
+    std::fs::create_dir_all(&dir).unwrap();
+    let r = rig("agent", 1);
+    let mut files: Vec<_> = std::fs::read_dir(&states)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.sort();
+    for file in files {
+        let commits: Vec<pm_surface::Commit> =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let mut surface = pm_surface::Surface::default();
+        for commit in commits {
+            surface.apply(commit).unwrap();
+        }
+        let surface = Arc::new(surface);
+        let name = file.file_stem().unwrap().to_string_lossy().to_string();
+        for (height_name, h) in [("full", 1600.), ("bottom", 620.)] {
+            for (scheme_name, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
+                objc2::rc::autoreleasepool(|_| {
+                    let tokens = Tokens::new(scheme, Accessibility::default());
+                    let w = 360.;
+                    let first = pm_builtins::Publication {
+                        panel: "agent".into(),
+                        generation: 1,
+                        surface: surface.clone(),
+                    };
+                    let runtime = r.runtime.clone();
+                    let mut cx = HeadlessAppContext::with_platform(
+                        Arc::new(
+                            gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                                .with_automatic_optical_sizing(),
+                        ),
+                        Arc::new(()),
+                        || {
+                            Some(Box::new(
+                                gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                            ))
+                        },
+                    );
+                    let fill = tokens.colors.panel;
+                    let window = cx
+                        .open_window(size(px(w), px(h)), |window, cx| {
+                            let view = cx.new(|cx| {
+                                let mut view = SurfaceView::new(
+                                    runtime,
+                                    first,
+                                    tokens,
+                                    Natives::default(),
+                                    window,
+                                    cx,
+                                );
+                                view.grows = true;
+                                view
+                            });
+                            cx.new(|_| ColourCaptureFrame {
+                                view,
+                                fill,
+                                height: h,
+                                scroll: gpui::ScrollHandle::new(),
+                            })
+                        })
+                        .unwrap();
+                    for _ in 0..20 {
+                        cx.run_until_parked();
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    // Match the production side-panel body: it measures natural
+                    // content before scrolling. Settle layout/culling after moving.
+                    for _ in 0..4 {
+                        let _ = cx.capture_screenshot(window.into()).unwrap();
+                        window
+                            .update(&mut cx, |frame, window, cx| {
+                                if height_name == "bottom" {
+                                    frame.scroll.set_offset(gpui::point(
+                                        px(0.),
+                                        -frame.scroll.max_offset().y,
+                                    ));
+                                    frame
+                                        .view
+                                        .update(cx, |v, cx| v.review_scroll_to(f32::MAX, cx));
+                                }
+                                window.refresh();
+                                cx.notify();
+                            })
+                            .unwrap();
+                        cx.run_until_parked();
+                    }
+                    let image = cx.capture_screenshot(window.into()).unwrap();
+                    if name == "after" {
+                        let bounds = cx
+                            .debug_bounds(window.into(), "color:add-row")
+                            .unwrap()
+                            .expect("add row is laid out");
+                        assert!(
+                            bounds.origin.y >= px(0.) && bounds.bottom() <= px(h + 0.5),
+                            "add row outside {height_name} viewport: {bounds:?}"
+                        );
+                    }
+                    image
+                        .save(format!(
+                            "{dir}/colour-{name}-{height_name}-{scheme_name}.png"
+                        ))
+                        .unwrap();
+                });
+            }
+        }
+    }
+}
+
+/// The same grow-to-content wrapper used by a side panel in the dock. A
+/// bare fixed-height SurfaceView compresses/culls its children in captures.
+struct ColourCaptureFrame {
+    view: gpui::Entity<SurfaceView>,
+    fill: u32,
+    height: f32,
+    scroll: gpui::ScrollHandle,
+}
+impl gpui::Render for ColourCaptureFrame {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::prelude::*;
+        let content = self.view.read(cx).in_body(self.height);
+        gpui::div()
+            .size_full()
+            .bg(gpui::rgb(self.fill))
+            .font_family(pm_design::TEXT_FONT)
+            .child(
+                gpui::div()
+                    .id("colour-capture-body")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(self.view.clone().cached(content)),
+            )
+    }
+}

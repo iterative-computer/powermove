@@ -209,9 +209,6 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
           style={{ display: "flex", flexDirection: "column" }}
         >
           <Heading title={p.name} detail={p.typeLabel} locked={p.locked} />
-          {tools.length === 0 ? (
-            <AddRow empty editable={editable} onAdd={add} />
-          ) : null}
           {tools.map((g, i) => {
             const id = g.header.id;
             const title = titles[i];
@@ -292,11 +289,11 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
               </UI.DisclosureGroup>
             );
           })}
-          {/* The grade is a stack: after the last block, each kind adds
-              another of its own, which applies after the rest. */}
-          {tools.length > 0 ? (
-            <AddRow empty={false} editable={editable} onAdd={add} />
-          ) : null}
+          <AddGrade
+            editable={editable}
+            empty={tools.length === 0}
+            onAdd={add}
+          />
         </scroll>
       )}
     </div>
@@ -372,15 +369,14 @@ function Header({
   );
 }
 
-/** What can be added, as quiet actions: on a layer with no grade yet, and
- * after the last block of one that has some (each adds another block). */
-function AddRow({
-  empty,
+/** Always last: another grade can be added below the current stack. */
+function AddGrade({
   editable,
+  empty,
   onAdd,
 }: {
-  empty: boolean;
   editable: boolean;
+  empty: boolean;
   onAdd: (choice: string) => void;
 }) {
   return (
@@ -395,7 +391,8 @@ function AddRow({
         paddingLeft: t("metrics.inset"),
         paddingRight: t("metrics.inset"),
         paddingTop: t("metrics.gap"),
-        paddingBottom: t("metrics.gap"),
+        paddingBottom: t("metrics.inset"),
+        flexShrink: 0,
       }}
     >
       {empty ? (

@@ -254,3 +254,130 @@ fn wheels_curve_and_lut_on_one_clip_apply_in_their_order() {
     let moved = mean_abs(&stacked, &reversed);
     assert!(moved > 4. * apart.max(1e-3), "reordering moved the picture by {moved}");
 }
+
+/// PM-482: the same gamma reaches paused preview and export, including the
+/// right-hand clip after a split (source trim advances with the edit).
+#[test]
+fn wheels_gamma_on_video_and_its_split_right_half_reaches_preview_and_export() {
+    let clip = fixture("h264-709-limited.mp4");
+    let unused_lut = clip.with_extension("cube");
+    let gamma = effect("colorWheels", &json!({"gammaMaster": 0.3}));
+    let mut renderer = Renderer::headless().unwrap();
+    for split in [false, true] {
+        let make = |graded| {
+            let (mut doc, resolver) = document(
+                "video",
+                &clip,
+                if graded { vec![gamma.clone()] } else { vec![] },
+                &unused_lut,
+            );
+            if split {
+                let mut left = doc["layers"][0].clone();
+                left["id"] = json!("left");
+                left["dur"] = json!(0.5);
+                left["fx"] = json!([]);
+                let right = &mut doc["layers"][0];
+                right["id"] = json!("right");
+                right["from"] = json!(0.5);
+                right["dur"] = json!(1.5);
+                right["d"]["trim"] = json!(0.5);
+                doc["layers"].as_array_mut().unwrap().push(left);
+            }
+            (doc, resolver)
+        };
+        let mut outputs = Vec::new();
+        for export in [false, true] {
+            let plain = render_mode(&mut renderer, make(false), export);
+            let graded = render_mode(&mut renderer, make(true), export);
+            assert!(
+                mean_abs(&plain, &graded) > 0.01,
+                "split={split}, export={export}: gamma did nothing"
+            );
+            outputs.push(graded);
+        }
+        assert!(
+            mean_abs(&outputs[0], &outputs[1]) < 2e-3,
+            "split={split}: preview/export disagree"
+        );
+    }
+}
+
+fn render_mode(
+    renderer: &mut Renderer,
+    (doc, resolver): (Value, MapResolver),
+    export: bool,
+) -> Vec<f32> {
+    let mut doc = load(&doc);
+    doc.set_saving_app_version(Some("1.3.0".into()));
+    renderer.set_main_effects_for_document(&doc).unwrap();
+    let mut request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
+    request.export = export;
+    request.viewer = !export;
+    let frame = renderer
+        .render(&doc, "Ptest-root", ticks(AT), &request, &resolver)
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    renderer.read_rgba(&frame).unwrap()
+}
+
+/// PM-504: all three blocks apply in stack order. The oracle applies each
+/// grade to the previous result as a still; omitting any block or reversing
+/// the stack must give a different picture.
+#[test]
+fn wheels_curve_lut_on_one_clip_render_all_three_in_order() {
+    let clip = fixture("h264-709-limited.mp4");
+    let dir = tempfile::tempdir().unwrap();
+    let lut = dir.path().join("invert.cube");
+    std::fs::write(
+        &lut,
+        "LUT_3D_SIZE 2\n1 1 1\n0 1 1\n1 0 1\n0 0 1\n1 1 0\n0 1 0\n1 0 0\n0 0 0\n",
+    )
+    .unwrap();
+    let mut fx = vec![
+        effect("colorWheels", &json!({"gammaMaster": 0.3})),
+        effect(
+            "colorCurves",
+            &json!({"count": 3, "x1": 0.5, "y1": 0.7, "x2": 1.0, "y2": 1.0}),
+        ),
+        effect_with(
+            "applyColorLut",
+            &json!({"amount": 100}),
+            json!({"lut": {"kind": "asset", "assetId": "lut"}}),
+        ),
+    ];
+    for (i, effect) in fx.iter_mut().enumerate() {
+        effect["id"] = json!(format!("grade{i}"));
+    }
+    let mut renderer = Renderer::headless().unwrap();
+    let full = render(&mut renderer, document("video", &clip, fx.clone(), &lut));
+    for missing in 0..3 {
+        let subset = fx
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != missing)
+            .map(|(_, f)| f.clone())
+            .collect();
+        let pixels = render(&mut renderer, document("video", &clip, subset, &lut));
+        assert!(
+            mean_abs(&full, &pixels) > 0.005,
+            "grade {missing} did not contribute"
+        );
+    }
+    let mut sequential = render(&mut renderer, document("video", &clip, vec![], &lut));
+    for (i, effect) in fx.iter().enumerate() {
+        let still = dir.path().join(format!("step{i}.png"));
+        write_png(&still, &sequential);
+        sequential = render(
+            &mut renderer,
+            document("image", &still, vec![effect.clone()], &lut),
+        );
+    }
+    assert!(
+        mean_abs(&full, &sequential) < 2e-3,
+        "stack differs from sequential oracle: {}",
+        mean_abs(&full, &sequential)
+    );
+    fx.reverse();
+    let reverse = render(&mut renderer, document("video", &clip, fx, &lut));
+    assert!(mean_abs(&full, &reverse) > 0.01, "order is not observable");
+}

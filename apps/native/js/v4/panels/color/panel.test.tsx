@@ -342,3 +342,57 @@ test("the add row stays after the last grade, and each kind adds its own block",
   expect(order.at(-1)).toBe(`${PANEL_ID}:add-row`);
   await root.dispose();
 });
+// PM-504: adding the first grade must not remove the trailing add actions.
+test("stacked grades end with reachable add actions", async () => {
+  const { root, sent } = await mounted({
+    ...projection,
+    count: 3,
+    range: [0, 3],
+    rows: [
+      { ...wheels, ordinal: 0 },
+      { ...tool("c", "colorCurves", "Curve"), ordinal: 1 },
+      { ...tool("l", "applyColorLut", "LUT"), ordinal: 2 },
+    ],
+  });
+  const content = named(root, `${PANEL_ID}:content`);
+  const add = named(root, `${PANEL_ID}:add-row`);
+  expect(content.children.at(-1)?.id).toBe(add.id);
+  expect(add.props.style).toMatchObject({
+    paddingBottom: { token: "metrics.inset" },
+  });
+  const curve = named(root, `${PANEL_ID}:add:colorCurves`);
+  await event(root, curve.id, "click");
+  expect(sent).toContainEqual({
+    type: "add",
+    definition: "colorCurves",
+    slot: 3,
+    parameters: { channel: 0 },
+  });
+  await root.dispose();
+});
+
+test("the trailing add row offers every tool on an empty or locked clip", async () => {
+  for (const locked of [false, true]) {
+    const { root, sent, commands } = await mounted({
+      ...projection,
+      locked,
+      count: 0,
+      range: [0, 0],
+      rows: [],
+    });
+    const content = named(root, `${PANEL_ID}:content`);
+    expect(content.children.at(-1)?.props.id).toBe(`${PANEL_ID}:add-row`);
+    for (const choice of [
+      "colorWheels",
+      "colorCurves",
+      "colorSpaceTransform",
+      "lut",
+      "import-cdl",
+    ]) {
+      await event(root, named(root, `${PANEL_ID}:add:${choice}`).id, "click");
+    }
+    expect(sent.filter((i) => i.type === "add").length).toBe(locked ? 0 : 3);
+    expect(commands.length).toBe(locked ? 0 : 2);
+    await root.dispose();
+  }
+});
