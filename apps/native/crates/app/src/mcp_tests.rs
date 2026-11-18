@@ -1199,3 +1199,126 @@ async fn a_new_tabs_project_waits_for_the_fence_instead_of_being_dropped(
     drop(taken);
     assert!(!host.operation_in_progress());
 }
+
+#[test]
+fn agent_completion_bookkeeping_reuses_the_callers_operation_guard() {
+    let fixture = Fixture::new();
+    let guard = fixture.host.try_operation().unwrap();
+    super::completion_on(
+        &fixture.host,
+        &fixture.tools.automation,
+        "begin",
+        "test",
+        "run",
+        &json!({"threadId":"thread"}),
+    )
+    .unwrap();
+    super::completion_on(
+        &fixture.host,
+        &fixture.tools.automation,
+        "bindChild",
+        "test",
+        "child",
+        &json!({"rootRunId":"run"}),
+    )
+    .unwrap();
+    let report = super::completion_on(
+        &fixture.host,
+        &fixture.tools.automation,
+        "verify",
+        "test",
+        "run",
+        &json!({}),
+    )
+    .unwrap();
+    assert_eq!(report["changed"], false);
+    assert!(fixture.host.operation_in_progress());
+    let error = super::completion_on(
+        &fixture.host,
+        &fixture.tools.automation,
+        "undo",
+        "test",
+        "run",
+        &report,
+    )
+    .unwrap_err();
+    assert!(error.contains("project is changing"));
+    super::completion_on(
+        &fixture.host,
+        &fixture.tools.automation,
+        "keep",
+        "test",
+        "run",
+        &report,
+    )
+    .unwrap();
+    assert!(
+        fixture.host.operation_in_progress(),
+        "bookkeeping must not release the caller's lease"
+    );
+    drop(guard);
+    assert!(!fixture.host.operation_in_progress());
+}
+
+#[test]
+fn agent_native_plan_preserves_a_concurrent_editors_history_group() {
+    let fixture = Fixture::new();
+    super::completion_on(
+        &fixture.host,
+        &fixture.tools.automation,
+        "begin",
+        "test",
+        "run",
+        &json!({}),
+    )
+    .unwrap();
+    let editor = Caller::realm(42, 1, Origin::Agent);
+    fixture
+        .host
+        .kernel
+        .call_blocking(
+            "test",
+            Request::new(
+                editor,
+                HistoryCall::Begin {
+                    label: "Independent editor gesture".into(),
+                },
+            ),
+        )
+        .unwrap();
+    let revision = fixture.host.kernel.published("test").unwrap().revision();
+    let result=super::completion_on(&fixture.host,&fixture.tools.automation,"apply","test","run",&json!({"revision":revision,"commands":[{"type":"add_layer","id":"agent","layerType":"solid"}]})).unwrap();
+    assert_eq!(result["changed"], true);
+    assert!(
+        result["verificationError"]
+            .as_str()
+            .unwrap()
+            .contains("alongside other edits")
+    );
+    fixture
+        .host
+        .kernel
+        .call_blocking(
+            "test",
+            Request::new(editor, HistoryCall::Commit { label: None }),
+        )
+        .unwrap();
+    let before = document(&fixture.host.kernel.published("test").unwrap());
+    assert_eq!(before["layers"].as_array().unwrap().len(), 1);
+    assert!(
+        super::completion_on(
+            &fixture.host,
+            &fixture.tools.automation,
+            "undo",
+            "test",
+            "run",
+            &result
+        )
+        .unwrap_err()
+        .contains("Other edits")
+    );
+    assert_eq!(
+        document(&fixture.host.kernel.published("test").unwrap()),
+        before
+    );
+}

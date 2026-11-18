@@ -117,6 +117,14 @@ impl Window {
                 .map(|t| json!({"id":t.id,"title":t.title,"busy":t.busy,"updatedAt":t.updated_at}))
                 .collect::<Vec<_>>()
         );
+        value["plan"] = session.plan.clone().unwrap_or(Value::Null);
+        value["result"] = session.result.clone().unwrap_or(Value::Null);
+        let idle = session.run.is_none() && !session.applying && !session.archiving;
+        value["resultActions"] = json!({
+            "apply":idle && !matches!(panel.project(),""|"builtin-application"|"powermove-global") && session.phase == crate::model::Phase::Preview && session.plan.is_some(),
+            "keep":idle && session.phase == crate::model::Phase::Result && session.result.is_some(),
+            "undo":idle && session.phase == crate::model::Phase::Result && session.result.is_some(),
+        });
         value["elapsedMs"] = json!(session.elapsed_ms(now));
         // What the run is doing before its first step lands.
         value["activity"] = json!(session.activity);
@@ -453,6 +461,11 @@ pub fn dispatch(
             None
         }
         "undoResult" => Some(panel.undo_result(thread)?),
+        "applyPlan" => Some(panel.apply_plan(thread)?),
+        "dismissPlan" => {
+            panel.dismiss_plan(thread)?;
+            None
+        }
         // Try Again on a failed turn: the request before it, sent again
         // (with the files it carried); the composer's own draft stays.
         "retry" => {
@@ -1002,6 +1015,107 @@ mod tests {
         assert!(act(&mut p, json!({"type":"invented"})).is_err());
         assert_eq!(snapshot(&p), before);
     }
+    #[test]
+    fn completion_native_plan_actions_dispatch_and_preserve_failed_preview() {
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive(
+            "thread",
+            "run",
+            1,
+            Update::Plan(json!({"revision":0,"commands":[]})),
+            11,
+        )
+        .unwrap();
+        assert!(
+            p.apply_plan("thread").is_err(),
+            "active runs cannot apply a preview"
+        );
+        p.receive(
+            "thread",
+            "run",
+            2,
+            Update::Complete {
+                text: String::new(),
+                error: false,
+                cancelled: false,
+            },
+            12,
+        )
+        .unwrap();
+        let apply = act(&mut p, json!({"type":"applyPlan"})).unwrap().unwrap();
+        assert!(matches!(apply.kind, EffectKind::ApplyPlan(_)));
+        p.acknowledge(apply.id, false).unwrap();
+        assert!(p.session("thread").unwrap().plan.is_some());
+        act(&mut p, json!({"type":"dismissPlan"})).unwrap();
+        assert!(p.session("thread").unwrap().plan.is_none());
+    }
+    #[test]
+    fn completion_snapshot_actions_belong_only_to_the_current_settled_result() {
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.receive(
+            "thread",
+            "run",
+            1,
+            Update::Plan(json!({"revision":2,"commands":[]})),
+            11,
+        )
+        .unwrap();
+        assert_eq!(snapshot(&p)["resultActions"]["apply"], false);
+        p.receive(
+            "thread",
+            "run",
+            2,
+            Update::Complete {
+                text: "Plan".into(),
+                error: false,
+                cancelled: false,
+            },
+            12,
+        )
+        .unwrap();
+        assert_eq!(snapshot(&p)["plan"]["revision"], 2);
+        assert_eq!(snapshot(&p)["resultActions"]["apply"], true);
+        let effect = act(&mut p, json!({"type":"applyPlan"})).unwrap().unwrap();
+        assert_eq!(effect.target.run.as_deref(), Some("run"));
+        assert_eq!(snapshot(&p)["resultActions"]["apply"], false);
+        p.acknowledge(effect.id, true).unwrap();
+        p.host_result(
+            "thread",
+            "run",
+            json!({"runId":"run","summary":"Applied","changed":true}),
+        )
+        .unwrap();
+        assert_eq!(snapshot(&p)["result"]["runId"], "run");
+        assert_eq!(snapshot(&p)["resultActions"]["undo"], true);
+        let undo = act(&mut p, json!({"type":"undoResult"})).unwrap().unwrap();
+        assert_eq!(undo.target.run.as_deref(), Some("run"));
+        assert_eq!(snapshot(&p)["resultActions"]["keep"], false);
+        p.acknowledge(undo.id, false).unwrap();
+        assert_eq!(snapshot(&p)["resultActions"]["undo"], true);
+        act(&mut p, json!({"type":"keepResult"})).unwrap();
+        assert!(snapshot(&p)["result"].is_null());
+        assert_eq!(snapshot(&p)["resultActions"]["undo"], false);
+    }
+    #[test]
+    fn completion_result_actions_refuse_active_and_archiving_threads() {
+        let mut p = panel();
+        draft(&mut p);
+        act(&mut p, json!({"type":"submit"})).unwrap();
+        p.host_result("thread", "run", json!({"runId":"run","changed":true})).unwrap();
+        assert!(act(&mut p, json!({"type":"keepResult"})).is_err());
+        assert!(act(&mut p, json!({"type":"undoResult"})).is_err());
+        assert!(p.session("thread").unwrap().result.is_some());
+        p.receive("thread", "run", 1, Update::Complete { text: String::new(), error: false, cancelled: false }, 12).unwrap();
+        p.session_mut("thread").unwrap().archiving = true;
+        assert!(act(&mut p, json!({"type":"keepResult"})).is_err());
+        assert!(act(&mut p, json!({"type":"undoResult"})).is_err());
+        assert!(p.session("thread").unwrap().result.is_some());
+    }
+
 }
 
 #[cfg(test)]
@@ -1156,4 +1270,5 @@ mod scoped_tests {
             "synthetic-attachment-body"
         );
     }
+
 }

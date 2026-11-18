@@ -228,12 +228,23 @@ impl Session {
     }
     fn archive_result(&mut self) -> Result<()> {
         if let Some(result) = self.result.clone() {
+            let text = [
+                result["summary"].as_str().unwrap_or("Agent result"),
+                result["verificationError"].as_str().unwrap_or(""),
+            ]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
             if let Some(id) = &self.result_message {
-                self.conversation
-                    .update(id, |v| v["nativeResult"] = result)?;
+                self.conversation.update(id, |v| {
+                    v["nativeResult"] = result;
+                    v["text"] = json!(text);
+                })?;
             } else {
-                self.result_message =
-                    Some(self.append(json!({"role":"assistant","nativeResult":result}))?);
+                self.result_message = Some(
+                    self.append(json!({"role":"assistant","text":text,"nativeResult":result}))?,
+                );
             }
         }
         Ok(())
@@ -1369,11 +1380,14 @@ impl Panel {
                     Phase::Preview
                 };
             }
-            Pending::Undo(_) if accepted => {
-                s.archive_result()?;
-                s.result_message = None;
-                s.result = None;
-                s.phase = Phase::Prompt;
+            Pending::Undo(_) => {
+                s.applying = false;
+                if accepted {
+                    s.archive_result()?;
+                    s.result_message = None;
+                    s.result = None;
+                    s.phase = Phase::Prompt;
+                }
             }
             Pending::Import { path, .. } => {
                 if let Some(result) = &mut s.result
@@ -1512,8 +1526,15 @@ impl Panel {
     }
     pub fn apply_plan(&mut self, thread: &str) -> Result<Effect> {
         self.no_apply()?;
-        let target = self.target(thread)?;
+        let mut target = self.target(thread)?;
+        target.run = self.session(thread)?.last_run().map(str::to_owned);
         let s = self.sessions.get_mut(thread).expect("validated");
+        if s.run.is_some() || s.archiving {
+            return Err(Error::Busy);
+        }
+        if s.phase != Phase::Preview {
+            return Err(Error::Stale);
+        }
         let plan = s.plan.clone().ok_or(Error::Stale)?;
         s.applying = true;
         let effect = self.effect(target.clone(), EffectKind::ApplyPlan(plan));
@@ -1536,11 +1557,61 @@ impl Panel {
         };
         Ok(())
     }
+    /// Verification limits are readable even when no result receipt was available.
+    pub fn host_notice(&mut self, thread: &str, run: &str, text: &str) -> Result<()> {
+        let s = self.sessions.get_mut(thread).ok_or(Error::Stale)?;
+        if s.last_run.as_deref() != Some(run) {
+            return Err(Error::Stale);
+        }
+        s.append(json!({"role":"assistant","text":text}))?;
+        Ok(())
+    }
+    /// A native preview is bound to the originating run and document publication.
+    pub fn host_plan(&mut self, thread: &str, run: &str, plan: Value) -> Result<()> {
+        let s = self.sessions.get_mut(thread).ok_or(Error::Stale)?;
+        if s.run
+            .as_ref()
+            .map(|r| r.id.as_str())
+            .or(s.last_run.as_deref())
+            != Some(run)
+        {
+            return Err(Error::Stale);
+        }
+        s.plan = Some(plan);
+        s.phase = Phase::Preview;
+        Ok(())
+    }
+    /// A host receipt is bound to this thread's exact current or last run.
+    pub fn host_result(&mut self, thread: &str, run: &str, result: Value) -> Result<()> {
+        let s = self.sessions.get_mut(thread).ok_or(Error::Stale)?;
+        if s.run
+            .as_ref()
+            .map(|r| r.id.as_str())
+            .or(s.last_run.as_deref())
+            != Some(run)
+        {
+            return Err(Error::Stale);
+        }
+        s.archive_result()?;
+        s.result_message = None;
+        s.result = Some(result);
+        if s.run.is_none() {
+            s.phase = Phase::Result;
+        }
+        Ok(())
+    }
     pub fn keep_result(&mut self, thread: &str) -> Result<()> {
+        self.no_apply()?;
         let s = self
             .sessions
             .get_mut(thread)
             .ok_or_else(|| Error::UnknownId(thread.into()))?;
+        if s.run.is_some() || s.archiving {
+            return Err(Error::Busy);
+        }
+        if s.phase != Phase::Result || s.result.is_none() {
+            return Err(Error::Stale);
+        }
         s.archive_result()?;
         s.result = None;
         s.result_message = None;
@@ -1552,8 +1623,18 @@ impl Panel {
         Ok(())
     }
     pub fn undo_result(&mut self, thread: &str) -> Result<Effect> {
-        let target = self.target(thread)?;
-        let result = self.session(thread)?.result.clone().ok_or(Error::Stale)?;
+        self.no_apply()?;
+        let mut target = self.target(thread)?;
+        target.run = self.session(thread)?.last_run().map(str::to_owned);
+        let s = self.session(thread)?;
+        if s.run.is_some() || s.archiving {
+            return Err(Error::Busy);
+        }
+        if s.phase != Phase::Result {
+            return Err(Error::Stale);
+        }
+        let result = s.result.clone().ok_or(Error::Stale)?;
+        self.sessions.get_mut(thread).expect("validated").applying = true;
         let effect = self.effect(target.clone(), EffectKind::UndoResult(result));
         self.pending.insert(effect.id, Pending::Undo(target));
         Ok(effect)

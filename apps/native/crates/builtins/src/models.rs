@@ -1987,6 +1987,45 @@ impl Backend {
                         ));
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
+                    if action["type"] == "openResultPanel" {
+                        let extension = action["extensionId"]
+                            .as_str()
+                            .ok_or("Missing extension id")?;
+                        let panel = action["panelId"]
+                            .as_str()
+                            .ok_or("Missing contributed panel id")?;
+                        let published = session
+                            .result
+                            .iter()
+                            .chain(
+                                session
+                                    .conversation
+                                    .values()
+                                    .filter_map(|row| row.get("nativeResult")),
+                            )
+                            .flat_map(|result| {
+                                result["extensions"].as_array().into_iter().flatten()
+                            })
+                            .any(|row| {
+                                row["extensionId"] == extension
+                                    && row["panelId"] == panel
+                                    && row["status"] == "ready"
+                            });
+                        if !published {
+                            return Err(
+                                "This panel was not published by a result in this thread.".into()
+                            );
+                        }
+                        let project = state.panel.project().to_owned();
+                        let service = link
+                            .completion
+                            .shared()
+                            .clone()
+                            .ok_or("Completion service is unavailable")?;
+                        drop(state);
+                        service("openPanel", &project, "", action)?;
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
                     if action["type"] == "openVisual" {
                         // A saved reply is checked again before it's shown (main's
                         // readVisualReply); the window opens its own viewer.
@@ -2004,6 +2043,11 @@ impl Backend {
                         ));
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
+                    let kept_run = (action["type"] == "keepResult"
+                        && session.run.is_none()
+                        && session.result.is_some())
+                    .then(|| session.last_run().map(str::to_owned))
+                    .flatten();
                     crate::agent_host::admit(action, link.available(provider), live)?;
                     if crate::agent_host::sends(action) {
                         crate::agent_host::admit_send(&state, &thread)?;
@@ -2055,6 +2099,9 @@ impl Backend {
                             )
                             .map_err(|e| format!("{e:?}"))?;
                     }
+                    if let Some(run) = kept_run {
+                        crate::agent_completion::keep(&link, state.panel.project(), &run);
+                    }
                     effect
                 };
                 crate::agent_host::ensure_worker(&agent, &link, &self.kernel, self.application);
@@ -2077,6 +2124,16 @@ impl Backend {
                         | EffectKind::Answer { .. }
                         | EffectKind::StopTask { .. } => {
                             crate::agent_host::run_effect(
+                                &agent,
+                                &link,
+                                &self.kernel,
+                                self.application,
+                                &effect,
+                            )?;
+                            None
+                        }
+                        EffectKind::ApplyPlan(_) | EffectKind::UndoResult(_) => {
+                            crate::agent_completion::dispatch_action(
                                 &agent,
                                 &link,
                                 &self.kernel,

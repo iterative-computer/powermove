@@ -19,6 +19,9 @@ icu_collator = "2"
 async-channel = "2"
 sha2 = "0.10"
 
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 # Synthetic large projects for the scale bench (pm_kernel::synthetic).
 synthetic = ["pm-kernel/synthetic"]

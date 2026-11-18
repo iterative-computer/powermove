@@ -39,6 +39,7 @@ pub(crate) struct AgentLink {
     typed: Mutex<Option<(String, String)>>,
     /// The window's notification policy (S114), told on the delivery worker.
     notices: Mutex<Option<Arc<NoticeSink>>>,
+    pub completion: Mutex<Option<Arc<crate::agent_completion::Service>>>,
 }
 pub type NoticeSink = dyn Fn(pm_panel_agentpanel::runtime::Notice) + Send + Sync;
 impl Default for AgentLink {
@@ -51,6 +52,7 @@ impl Default for AgentLink {
             sequence: AtomicU64::new(1),
             typed: Mutex::default(),
             notices: Mutex::default(),
+            completion: Mutex::default(),
         }
     }
 }
@@ -308,6 +310,7 @@ pub(crate) struct AgentState {
     pub runs: ProviderRuns,
     /// Subagent tasks and run watches (`agent_tasks`).
     pub tasks: crate::agent_tasks::Tasks,
+    pub completion: crate::agent_completion::Coordinator,
     worker: bool,
 }
 impl AgentState {
@@ -316,6 +319,7 @@ impl AgentState {
             panel,
             runs: ProviderRuns::default(),
             tasks: Default::default(),
+            completion: Default::default(),
             worker: false,
         }
     }
@@ -344,7 +348,9 @@ pub const ROLLED_BACK: &str = "This run's changes were rolled back: it ended wit
 pub fn rolled_back(run: &str) {
     let agents: Vec<Registered> = AGENTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
     for (state, link, kernel, application) in agents {
-        let Some(state) = state.upgrade() else { continue };
+        let Some(state) = state.upgrade() else {
+            continue;
+        };
         let mut state = state.shared();
         if !matches!(state.panel.note_rolled_back(run, ROLLED_BACK), Ok(true)) {
             continue;
@@ -373,7 +379,7 @@ pub fn admit(action: &Value, connected: bool, live: bool) -> Result<(), String> 
         Some(
             "draft" | "focus" | "newThread" | "switchThread" | "deleteThread" | "disclose"
             | "removeAttachment" | "setProvider" | "setModel" | "chooseAnswer" | "typeAnswer"
-            | "keepResult" | "openSettings",
+            | "keepResult" | "undoResult" | "applyPlan" | "dismissPlan" | "openSettings",
         ) => true,
         Some("stop" | "stopTask") => true,
         Some("answer") => connected || live,
@@ -499,6 +505,13 @@ pub fn run_effect(
             launch_request(state, environment, effect, text, settings).and_then(
                 |(environment, request)| {
                     let kept = request.clone();
+                    state.runs.completion_gate();
+                    state.completion.begin(
+                        link,
+                        &effect.target.project,
+                        &effect.target.thread,
+                        &kept,
+                    );
                     state
                         .runs
                         .start(&mut state.panel, &mut store, effect, now(), || {
@@ -703,6 +716,7 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
             let polled = state.runs.poll(&mut state.panel, &mut store, now(), 64);
             link.tell(state.runs.take_notices());
             let tasks = crate::agent_tasks::Tasks::poll(state, &link, now());
+            crate::agent_completion::poll(state, &link, &mut store, now());
             let mut failed = polled.is_err();
             if state.runs.is_empty() && state.panel.unsaved() && closed.is_some() {
                 failed |= state.panel.save(&mut store, now()).is_err();
