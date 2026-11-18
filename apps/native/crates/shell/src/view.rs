@@ -54,6 +54,10 @@ pub struct Editor {
     dock_natural_heights: BTreeMap<String, f32>,
     dock_scroll_max: HashMap<String, f32>,
     last_scroll_focus: Option<FocusHandle>,
+    reveal_panel: Option<String>,
+    library_places: HashMap<String, DropTarget>,
+    reveal_motion: Option<(String, f32, f32, std::time::Instant)>,
+    header_wash: Option<(String, std::time::Instant)>,
     /// Panels sliding to a new place after a drop, a maximise or a
     /// workspace switch: each panel's offset from its new rect, springing to
     /// nothing (v1 moved panels the same way). Live resizes never slide.
@@ -165,6 +169,10 @@ impl Editor {
             dock_natural_heights: BTreeMap::new(),
             dock_scroll_max: HashMap::new(),
             last_scroll_focus: None,
+            reveal_panel: None,
+            library_places: HashMap::new(),
+            reveal_motion: None,
+            header_wash: None,
             slides: PanelSlides::default(),
             maximized_panel: None,
             parked: HashMap::new(),
@@ -374,11 +382,15 @@ impl Editor {
             .retain(|w| !matches!(w, workspace::Write::Active { .. }));
         self.persist_session();
     }
-    fn dock_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+    fn dock_wheel(&mut self, event: &ScrollWheelEvent, window: &Window, cx: &mut Context<Self>) {
         if event.modifiers.control || event.modifiers.platform || event.modifiers.shift {
             return;
         }
-        let by = -f32::from(event.delta.pixel_delta(px(16.)).y);
+        let by = -f32::from(
+            window
+                .scroll_delta_remaining(event.delta.pixel_delta(px(16.)))
+                .y,
+        );
         if by == 0. || !by.is_finite() {
             return;
         }
@@ -390,12 +402,41 @@ impl Editor {
             return;
         };
         let id = self.layout.docks[di].id.clone();
+        self.reveal_panel = None;
+        self.reveal_motion = None;
         let moved = self.scroll_dock(&id, by);
         // The gutter belongs to this column, even at its limit. Never pass a
         // wheel to the viewer beneath the divider's overlapping hit area.
         cx.stop_propagation();
         if moved {
             cx.notify();
+        }
+    }
+
+    pub fn show_library_panel(
+        &mut self,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<String, String> {
+        if !self.panels(cx).contains(id) {
+            return Err("This panel is no longer available.".into());
+        }
+        let closed = self.layout.find(id).is_none();
+        self.shell_command(&format!("panel:activate:{id}"), cx);
+        if closed && let Some(place) = self.library_places.get(id).cloned() {
+            let _ = self.layout.move_panel_to(id, place);
+        }
+        if let Some((di, gi, ti)) = self.layout.find(id) {
+            // Restoring its last slot may put it in a different folded stack.
+            self.layout.docks[di].collapsed = false;
+            self.layout.docks[di].groups[gi].collapsed = false;
+            self.layout.docks[di].groups[gi].active = ti;
+            let dock = self.layout.docks[di].id.clone();
+            self.maximized_panel = None;
+            self.save();
+            Ok(dock)
+        } else {
+            Err(self.status.clone())
         }
     }
 
@@ -821,6 +862,17 @@ impl Editor {
             cx.notify();
             return true;
         }
+        if kind == "panel"
+            && matches!(verb, "close" | "toggle")
+            && let Some((dock, group, index)) = self.layout.find(rest)
+        {
+            let place = if self.layout.docks[dock].groups[group].tabs.len() == 1 {
+                DropTarget::Split { dock, group }
+            } else {
+                DropTarget::Tab { dock, group, index }
+            };
+            self.library_places.insert(rest.into(), place);
+        }
         let result = match (kind, verb) {
             ("panel", "toggle") => {
                 if self.layout.open_panels().contains(&rest) && layout::closable(rest) {
@@ -830,11 +882,22 @@ impl Editor {
                 }
             }
             ("panel", "activate") => {
-                // Switching a tab preserves the maximized stack.
                 let result = self.layout.show_panel(rest, &panels);
                 if let Err(error) = result {
                     self.status = error.to_string();
                 } else {
+                    if let Some((place, _)) = self.parked.remove(rest) {
+                        let _ = self.layout.move_panel_to(rest, place);
+                    }
+                    if let Some((di, gi, ti)) = self.layout.find(rest) {
+                        self.layout.docks[di].collapsed = false;
+                        self.layout.docks[di].groups[gi].collapsed = false;
+                        self.layout.docks[di].groups[gi].active = ti;
+                    }
+                    self.reveal_motion = None;
+                    self.reveal_panel = Some(rest.into());
+                    self.header_wash = (!self.tokens.accessibility.reduce_motion)
+                        .then(|| (rest.into(), std::time::Instant::now()));
                     self.save();
                 }
                 cx.notify();
@@ -1757,6 +1820,15 @@ impl Editor {
             })
             .map(|p| p.rect)
     }
+    /// The header's window-space rect after column scrolling.
+    pub fn panel_header_rect(&self, id: &str) -> Option<Rect> {
+        let (dock, group, _) = self.layout.find(id)?;
+        self.geometry
+            .panels
+            .iter()
+            .find(|p| (p.dock, p.group) == (dock, group))
+            .map(|p| self.geometry.header_rect(p, &self.tokens))
+    }
     /// The live arrangement in the agents' digest shape (get_panel_layout).
     pub fn layout_digest(&self, cx: &App) -> serde_json::Value {
         let panels = self.panels(cx);
@@ -2100,13 +2172,14 @@ impl Editor {
     /// own double-click never runs; a double-click here does what the person
     /// chose in System Settings (Fill, Zoom or Minimize). Single presses fall
     /// through untouched: AppKit still moves the window from here.
-    fn titlebar_band(top: f32) -> Div {
+    fn titlebar_band(top: f32, fill: u32) -> Div {
         div()
             .absolute()
             .top_0()
             .left_0()
             .w_full()
             .h(px(top))
+            .bg(rgb(fill))
             .on_mouse_down(MouseButton::Left, |e: &MouseDownEvent, window, _| {
                 if e.click_count == 2 {
                     window.titlebar_double_click();
@@ -2143,7 +2216,7 @@ impl Editor {
             .aria_label("Powermove editor")
             .size_full()
             .relative()
-            .child(Self::titlebar_band(top))
+            .child(Self::titlebar_band(top, self.tokens.colors.window))
             .child(
                 canvas(
                     |_, _, _| (),
@@ -2268,6 +2341,39 @@ impl Render for Editor {
                 &self.dock_natural_heights,
             )
         };
+        if let Some(id) = self.reveal_panel.take()
+            && let Some((di, gi, _)) = self.layout.find(&id)
+            && let Some(bounds) = self.geometry.side_docks.get(&di)
+            && let Some(panel) = self
+                .geometry
+                .panels
+                .iter()
+                .find(|p| p.dock == di && p.group == gi)
+        {
+            let dock = self.layout.docks[di].id.clone();
+            let old = self.dock_scroll.get(&dock).copied().unwrap_or(0.);
+            let target = if panel.rect.y - old < bounds.y {
+                panel.rect.y - bounds.y
+            } else {
+                old.max(panel.rect.y + panel.rect.h.min(bounds.h) - bounds.y - bounds.h)
+            }
+            .max(0.);
+            if self.tokens.accessibility.reduce_motion {
+                self.dock_scroll.insert(dock, target);
+            } else if (target - old).abs() > 0.5 {
+                self.reveal_motion = Some((dock, old, target, std::time::Instant::now()));
+            }
+        }
+        if let Some((dock, from, to, start)) = self.reveal_motion.clone() {
+            let progress = (start.elapsed().as_secs_f32() / 0.2).min(1.);
+            let eased = 1. - (1. - progress).powi(3);
+            self.dock_scroll.insert(dock, from + (to - from) * eased);
+            if progress < 1. {
+                w.request_animation_frame();
+            } else {
+                self.reveal_motion = None;
+            }
+        }
         // Keep input/drop geometry in window coordinates, including the column offset.
         for (&di, bounds) in &self.geometry.side_docks {
             let id = &self.layout.docks[di].id;
@@ -2453,7 +2559,11 @@ impl Render for Editor {
         };
         let mut root = div()
             .id("editor")
-            .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.dock_wheel(e, cx)))
+            .on_scroll_wheel(
+                cx.listener(|this, e: &ScrollWheelEvent, window, cx| {
+                    this.dock_wheel(e, window, cx)
+                }),
+            )
             .role(Role::Group)
             .accessibility_id("shell.editor")
             .aria_label("Powermove editor")
@@ -2681,6 +2791,8 @@ impl Render for Editor {
                         + TAB_SPACING
                 })
                 .collect();
+            let header_rect = self.geometry.header_rect(&p, &t);
+            let header_offset = header_rect.y - p.rect.y;
             let mut panel = positioned(self.slides.shown(&id, p.rect))
                 .id(format!("group-{}-{}", p.dock, p.group))
                 .role(Role::Group)
@@ -2697,7 +2809,9 @@ impl Render for Editor {
                 // hairline, its corner continuous.
                 .corner(&t, m.panel_radius)
                 .elevated(&t, pm_design::Elevation::Panel)
-                .overflow_hidden();
+                // During push-off a header can extend into the dock gap.
+                // Its body clips separately; the dock still clips both.
+                .when(header_offset <= 0., |p| p.overflow_hidden());
             if body_native && !collapsed {
                 // A native body (an extension's web page) takes the pointer
                 // where it shows, so it stops short of the dividers' grab.
@@ -2788,9 +2902,10 @@ impl Render for Editor {
                 .pr(px(m.gap))
                 // The native viewer body has no panel fill, and the timeline paints
                 // its own ground: their headers carry the material.
-                .when((is_viewer && native) || own_ground, |h| {
-                    h.bg(tint(c.panel, t.translucency.panel))
-                })
+                .when(
+                    (is_viewer && native) || own_ground || header_offset > 0.,
+                    |h| h.bg(tint(c.panel, t.translucency.panel)),
+                )
                 .when(!is_viewer, |h| {
                     h.border_b(px(m.border))
                         .border_color(tint(line, line_alpha))
@@ -3084,7 +3199,32 @@ impl Render for Editor {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
                 );
             }
-            panel = panel.child(header);
+            if let Some((highlighted, start)) = &self.header_wash {
+                let progress = start.elapsed().as_secs_f32() / 1.2;
+                if highlighted == &id && progress < 1. && !t.accessibility.reduce_motion {
+                    header = header.bg(rgb(pm_design::color::mix(
+                        c.selected_fill,
+                        c.panel,
+                        progress,
+                    )));
+                    w.request_animation_frame();
+                }
+            }
+            // Keep the original interactive header and paint it over the body
+            // only while pinned. Unscrolled and folded groups keep normal flow.
+            let stuck_header = if header_offset > 0. {
+                panel = panel.child(div().h(px(m.header)).flex_none());
+                Some(
+                    header
+                        .absolute()
+                        .top(px(header_offset))
+                        .left(px(0.))
+                        .w_full(),
+                )
+            } else {
+                panel = panel.child(header);
+                None
+            };
             if collapsed {
                 if let Some(bounds) = self.geometry.side_docks.get(&p.dock) {
                     let mut local = self.slides.shown(&id, p.rect);
@@ -3106,7 +3246,16 @@ impl Render for Editor {
                 .as_ref()
                 .and_then(|i| i.panel(&id, p.rect, w, cx));
             if let Some(content) = content {
-                panel = panel.child(content);
+                panel = if header_offset > 0. {
+                    panel.child(
+                        div()
+                            .h(px((p.rect.h - m.header).max(0.)))
+                            .overflow_hidden()
+                            .child(content),
+                    )
+                } else {
+                    panel.child(content)
+                };
             } else {
                 let unknown = format!("No installed extension provides “{id}”.");
                 let coming =
@@ -3171,6 +3320,9 @@ impl Render for Editor {
                 }
                 panel = panel.child(empty);
             }
+            if let Some(header) = stuck_header {
+                panel = panel.child(header);
+            }
             if let Some(bounds) = self.geometry.side_docks.get(&p.dock) {
                 let mut local = self.slides.shown(&id, p.rect);
                 local.x -= bounds.x;
@@ -3198,7 +3350,15 @@ impl Render for Editor {
                         .layout
                         .find(id)
                         .and_then(|(di, _, _)| self.geometry.side_docks.get(&di))
-                        .map_or(*r, |bounds| r.intersection(*bounds));
+                        .map_or(*r, |bounds| {
+                            let mut clip = r.intersection(*bounds);
+                            if let Some(header) = self.panel_header_rect(id) {
+                                let bottom = clip.y + clip.h;
+                                clip.y = clip.y.max(header.y + header.h);
+                                clip.h = (bottom - clip.y).max(0.);
+                            }
+                            clip
+                        });
                     (id.clone(), clip)
                 })
                 .collect();
@@ -3277,7 +3437,9 @@ impl Render for Editor {
             };
             let mut splitter = positioned(hit)
                 .id(format!("splitter-{i}"))
-                .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.dock_wheel(e, cx)))
+                .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, window, cx| {
+                    this.dock_wheel(e, window, cx)
+                }))
                 .role(Role::Splitter)
                 .aria_label("Resize dock")
                 .tab_index(1000 + i as isize)
@@ -3509,7 +3671,7 @@ impl Render for Editor {
         } else {
             left
         };
-        root = root.child(Self::titlebar_band(top));
+        root = root.child(Self::titlebar_band(top, self.tokens.colors.window));
         root.child(
             positioned(Rect {
                 x: 0.,
@@ -3662,6 +3824,64 @@ mod keyboard_tests {
             name: name.into(),
             args: vec![],
             token: None,
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn library_reveal_respects_reduce_motion_and_reports_errors() {
+        for reduced in [false, true] {
+            let mut cx = app();
+            let window = cx
+                .open_window(size(px(1000.), px(600.)), |_, cx| {
+                    cx.new(|cx| {
+                        Editor::new(
+                            Tokens::new(
+                                pm_design::Scheme::Dark,
+                                pm_design::Accessibility {
+                                    reduce_motion: reduced,
+                                    ..Default::default()
+                                },
+                            ),
+                            None,
+                            cx,
+                        )
+                    })
+                })
+                .unwrap();
+            window
+                .update(&mut cx, |v, _, cx| {
+                    assert!(v.show_library_panel("notes", cx).is_ok());
+                    assert_eq!(v.reveal_panel.as_deref(), Some("notes"));
+                    assert_eq!(v.header_wash.is_none(), reduced);
+                    let place = v.layout.find("notes").unwrap();
+                    v.shell_command("panel:close:notes", cx);
+                    assert!(v.show_library_panel("notes", cx).is_ok());
+                    assert_eq!(v.layout.find("notes").unwrap(), place);
+                    let (dock, group, _) = v.layout.find("assets").unwrap();
+                    v.layout
+                        .move_panel_to(
+                            "notes",
+                            DropTarget::Tab {
+                                dock,
+                                group,
+                                index: 1,
+                            },
+                        )
+                        .unwrap();
+                    v.shell_command("panel:close:notes", cx);
+                    v.layout.docks[dock].collapsed = true;
+                    v.layout.docks[dock].groups[group].collapsed = true;
+                    assert!(v.show_library_panel("notes", cx).is_ok());
+                    let (di, gi, ti) = v.layout.find("notes").unwrap();
+                    assert_eq!((di, gi), (dock, group));
+                    assert!(!v.layout.docks[di].collapsed);
+                    assert!(!v.layout.docks[di].groups[gi].collapsed);
+                    assert_eq!(v.layout.docks[di].groups[gi].active, ti);
+                    let before = v.layout.clone();
+                    assert!(v.show_library_panel("missing-panel", cx).is_err());
+                    assert_eq!(v.layout, before);
+                })
+                .unwrap();
         }
     }
 
@@ -4942,5 +5162,128 @@ mod slide_tests {
         s.armed = true;
         s.place(&[("viewer".into(), r(8., 52.))], &t);
         assert_eq!(s.shown("viewer", r(8., 52.)), r(8., 52.));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod library_capture_tests {
+    use super::*;
+    use gpui::{AppContext, HeadlessAppContext, size};
+    use std::sync::Arc;
+
+    #[test]
+    #[ignore = "writes headless Library reveal proof; set PM_DOCK_CAPTURE_DIR"]
+    fn capture_library_reveal() {
+        let dir = std::env::var("PM_DOCK_CAPTURE_DIR").unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, scheme) in [
+            ("light", pm_design::Scheme::Light),
+            ("dark", pm_design::Scheme::Dark),
+        ] {
+            for reduced in [false, true] {
+                objc2::rc::autoreleasepool(|_| {
+                    let mut cx = HeadlessAppContext::with_platform(
+                        Arc::new(gpui_parley::ParleyTextSystem::new(
+                            gpui_parley::SystemFonts::Load,
+                        )),
+                        Arc::new(()),
+                        || {
+                            Some(Box::new(
+                                gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                            ))
+                        },
+                    );
+                    let tokens = Tokens::new(
+                        scheme,
+                        pm_design::Accessibility {
+                            reduce_motion: reduced,
+                            ..Default::default()
+                        },
+                    );
+                    let window = cx
+                        .open_window(size(px(1000.), px(600.)), |_, cx| {
+                            cx.new(|cx| {
+                                let mut v = Editor::new(tokens, None, cx);
+                                let right =
+                                    v.layout.docks.iter_mut().find(|d| d.id == "right").unwrap();
+                                right.groups = ["inspector", "easing", "fxbrowser"]
+                                    .into_iter()
+                                    .map(|id| layout::Group {
+                                        tabs: vec![id.into()],
+                                        active: 0,
+                                        size: Some(400.),
+                                        collapsed: false,
+                                    })
+                                    .collect();
+                                v
+                            })
+                        })
+                        .unwrap();
+                    cx.run_until_parked();
+                    let mode = if reduced { "reduced" } else { "motion" };
+                    cx.capture_screenshot(window.into())
+                        .unwrap()
+                        .save(format!("{dir}/{name}-library-{mode}-before.png"))
+                        .unwrap();
+                    window
+                        .update(&mut cx, |v, _, cx| {
+                            v.show_library_panel("fxbrowser", cx).unwrap();
+                        })
+                        .unwrap();
+                    cx.update_window(window.into(), |_, w, cx| {
+                        w.draw(cx).clear(cx);
+                    })
+                    .unwrap();
+                    window
+                        .update(&mut cx, |v, _, cx| {
+                            // Sample the animation clocks deterministically, without OS timers.
+                            if let Some((_, _, _, start)) = &mut v.reveal_motion {
+                                *start =
+                                    std::time::Instant::now() - std::time::Duration::from_secs(1);
+                            }
+                            if !reduced {
+                                v.header_wash =
+                                    Some(("fxbrowser".into(), std::time::Instant::now()));
+                            }
+                            cx.notify();
+                        })
+                        .unwrap();
+                    cx.update_window(window.into(), |_, w, cx| {
+                        w.draw(cx).clear(cx);
+                    })
+                    .unwrap();
+                    window
+                        .update(&mut cx, |v, _, _| {
+                            let r = v.panel_rect("fxbrowser").unwrap();
+                            assert!(r.y >= 0. && r.y + r.h <= 600., "revealed: {r:?}");
+                            assert_eq!(v.header_wash.is_none(), reduced);
+                        })
+                        .unwrap();
+                    cx.capture_screenshot(window.into())
+                        .unwrap()
+                        .save(format!("{dir}/{name}-library-{mode}-shown.png"))
+                        .unwrap();
+                    if !reduced {
+                        window
+                            .update(&mut cx, |v, _, cx| {
+                                v.header_wash = Some((
+                                    "fxbrowser".into(),
+                                    std::time::Instant::now() - std::time::Duration::from_secs(2),
+                                ));
+                                cx.notify();
+                            })
+                            .unwrap();
+                        cx.update_window(window.into(), |_, w, cx| {
+                            w.draw(cx).clear(cx);
+                        })
+                        .unwrap();
+                        cx.capture_screenshot(window.into())
+                            .unwrap()
+                            .save(format!("{dir}/{name}-library-settled.png"))
+                            .unwrap();
+                    }
+                });
+            }
+        }
     }
 }
