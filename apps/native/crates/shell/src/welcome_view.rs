@@ -571,7 +571,14 @@ impl Render for WelcomeView {
                     .debug_selector(|| "welcome-title".into())
                     .role(Role::Heading)
                     .aria_label(spoken.clone())
-                    .text_size(px(t.typography.display))
+                    .when_else(
+                        frame.sheet_title,
+                        |d| {
+                            d.text_size(px(t.typography.heading))
+                                .font_weight(FontWeight(t.typography.display_weight))
+                        },
+                        |d| d.text_size(px(t.typography.display)),
+                    )
                     .text_color(rgb(c.text))
                     .child(frame.title.clone()),
             )

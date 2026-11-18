@@ -56,6 +56,11 @@ const column = {
   paddingLeft: token("metrics.inset"),
   paddingRight: token("metrics.inset"),
 } as const;
+// The rows' own inset completes the alignment with the disclosure label.
+const extensionDetails = {
+  marginLeft: token("metrics.hit"),
+  paddingLeft: token("metrics.gap"),
+} as const;
 /** Between the title and the actions; the sheet's height follows it. */
 const body = { ...stack, gap: token("metrics.inset") } as const;
 /** Summary on the text column, actions at the trailing edge (a Mac sheet). */
@@ -535,6 +540,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                       label={extensionSummary}
                       open={extensionsExpanded}
                       onChange={setExtensionsExpanded}
+                      alwaysShowChevron
                       leading={
                         <UI.Checkbox
                           id="export.includeExtensions"
@@ -542,32 +548,42 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                           binding={s.bindings.includeExtensions}
                           value={checked}
                           disabled={busy}
+                          style={{
+                            ...line,
+                            width: token("metrics.hit"),
+                            height: token("metrics.row"),
+                            justifyContent: "end",
+                          }}
                           onChange={(event) =>
                             edit("includeExtensions", event.value as boolean)
                           }
                         />
                       }
                     >
-                      {included.map((entry) => (
-                        <div key={entry.id}>
-                          <UI.FormRow
-                            label={`${entry.name} ${entry.version}`}
-                            control={
-                              <text style={detail}>{sizeLabel(entry.bytes)}</text>
-                            }
-                          />
-                        </div>
-                      ))}
+                      <div style={extensionDetails}>
+                        {included.map((entry) => (
+                          <div key={entry.id}>
+                            <UI.FormRow
+                              label={`${entry.name} ${entry.version}`}
+                              control={
+                                <text style={detail}>{sizeLabel(entry.bytes)}</text>
+                              }
+                            />
+                          </div>
+                        ))}
+                      </div>
                     </UI.DisclosureGroup>
                   )}
                   {!extensionsExpanded && included.length > 0 && (
-                    <text
-                      style={{ ...detail, ...column, paddingBottom: token("metrics.gap") }}
-                    >
-                      {included
-                        .map((entry) => `${entry.name} ${entry.version}`)
-                        .join(", ")}
-                    </text>
+                    <div style={extensionDetails}>
+                      <text
+                        style={{ ...detail, ...column, paddingBottom: token("metrics.gap") }}
+                      >
+                        {included
+                          .map((entry) => `${entry.name} ${entry.version}`)
+                          .join(", ")}
+                      </text>
+                    </div>
                   )}
                   {omitted.map((entry) => (
                     <div

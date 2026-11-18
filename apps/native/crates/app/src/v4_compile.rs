@@ -146,7 +146,10 @@ pub enum Kit {
         symbol: Option<(SharedString, f32, u32)>,
     },
     Secure,
-    Disclosure(bool),
+    Disclosure {
+        open: bool,
+        always_show: bool,
+    },
     /// A colour wheel: its red, green and blue, where they are neutral, and
     /// the limits of one channel.
     Wheel {
@@ -1237,9 +1240,16 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
                 thumbnail: component == Component::EaseThumbnail,
             }
         }
-        Some(Component::DisclosureButton) => {
-            Kit::Disclosure(node.props.get("aria-expanded") == Some(&Value::Bool(true)))
-        }
+        Some(Component::DisclosureButton) => Kit::Disclosure {
+            open: node.props.get("aria-expanded") == Some(&Value::Bool(true)),
+            always_show: node
+                .props
+                .get("metadata")
+                .and_then(|metadata| metadata.get("pmKit"))
+                .and_then(|kit| kit.get("alwaysShowChevron"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
         _ => Kit::None,
     }
 }

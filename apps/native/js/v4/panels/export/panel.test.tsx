@@ -303,8 +303,10 @@ test("Project extensions start checked, show sizes, and can be left out", async 
       n.props.label === "Includes 1 extension needed to render" &&
       n.props["aria-expanded"] === false,
   )!;
+  expect(disclosure.props.metadata).toEqual({ pmKit: { alwaysShowChevron: true } });
   await event(f.root, disclosure.id, "click");
   await f.root.flush();
+  expect(f.root.host.nodes.get(disclosure.id)?.props["aria-expanded"]).toBe(true);
   expect(
     f.commits.some((commit) =>
       commit.ops.some((op) => op.op === "setText" && op.text === "6 KB"),

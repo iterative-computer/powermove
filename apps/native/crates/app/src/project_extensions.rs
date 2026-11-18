@@ -140,6 +140,7 @@ impl Open {
         Some(Frame {
             surface: "project-extensions".into(),
             title,
+            sheet_title: true,
             line: line.into(),
             rows,
             buttons,

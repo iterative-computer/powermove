@@ -3743,20 +3743,20 @@ impl SurfaceView {
             | Kit::Ease { .. }
             | Kit::Pad { .. }
             | Kit::Ramp { .. } => {}
-            Kit::Disclosure(published) => {
-                let open = &self
+            Kit::Disclosure { open, always_show } => {
+                let open = self
                     .disclosures
                     .get(&node.id)
                     .copied()
-                    .unwrap_or(*published);
+                    .unwrap_or(*open);
                 let group: SharedString = format!("disclosure-{}", node.id).into();
                 element = element.group(group.clone()).child(
                     div()
-                        .when(*open, |d| {
+                        .when(open && !always_show, |d| {
                             d.opacity(0.).group_hover_style(group, |s| s.opacity(1.))
                         })
                         .child(pm_shell::symbol::symbol(
-                            if *open {
+                            if open {
                                 "chevron.down"
                             } else {
                                 "chevron.right"
