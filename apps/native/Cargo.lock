@@ -5517,6 +5517,7 @@ dependencies = [
  "pm-text",
  "pm-time",
  "pm-vector",
+ "pm-wasm",
  "png",
  "pollster 0.4.0",
  "regex",

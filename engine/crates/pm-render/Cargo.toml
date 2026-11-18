@@ -16,6 +16,8 @@ pm-model = { path = "../pm-model" }
 pm-time = { path = "../pm-time" }
 pm-eval = { path = "../pm-eval" }
 pm-expr = { path = "../pm-expr" }
+# Share the kernel expression host (Comp::get, including canonical params).
+pm-wasm = { path = "../pm-wasm" }
 pm-color = { path = "../pm-color" }
 pm-geom3d = { path = "../pm-geom3d" }
 # Studio, the path-traced product renderer (scene3d/studio.rs).
@@ -50,8 +52,6 @@ pm-edit = { path = "../pm-edit" }
 # Proxies of an older project's clips select the frames their originals do.
 pm-proxy = { path = "../pm-proxy" }
 pm-text = { path = "../pm-text", features = ["system", "render", "coretext-reference"] }
-# The app's text box: the query engine the kernel measures with.
-pm-wasm = { path = "../pm-wasm" }
 read-fonts = "0.45"
 png = "0.18"
 resvg = { version = "=0.48.1", default-features = false, features = ["raster-images"] }

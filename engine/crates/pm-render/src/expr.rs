@@ -1,153 +1,149 @@
-//! The [`ExpressionEngine`] the renderer evaluates with: `pm-expr` (legacy
-//! dialect) reading the layer and composition through `pm_expr::JsonHost`
-//! over owned copies. It is the adapter `pm-eval`'s corpus comparison
-//! validates against the legacy evaluator (`tests/support/pm_expr_engine.rs`
-//! there); the production integration of `pm-expr` with the evaluator will
-//! replace both.
+//! The renderer uses the kernel's expression host so both read the same
+//! composition view, including project parameters on canonical open comps.
 
+use pm_eval::{CompiledExpression, ExpressionEngine};
+use pm_model::JsString;
 use std::sync::Arc;
 
-use pm_eval::node::Got;
-use pm_eval::{CompiledExpression, ExprContext, ExprDeps, ExprError, ExpressionEngine, JsValue};
-use pm_expr::{Context, Dialect, Expression, Host, JsStr, JsonHost, JsonRef, Shape, Value};
-use pm_model::JsString;
-
-/// `pm-expr` in the legacy dialect.
+/// Renderer entry point for the shared legacy expression evaluator.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PmExprEngine;
 
-struct Compiled(Expression);
-
 impl ExpressionEngine for PmExprEngine {
     fn compile(&self, source: &JsString) -> Option<Arc<dyn CompiledExpression>> {
-        let units: Vec<u16> = source.utf16_units().collect();
-        Expression::compile_utf16(&units, Dialect::Legacy)
-            .map(|e| Arc::new(Compiled(e)) as Arc<dyn CompiledExpression>)
+        pm_wasm::expr::PmExpressions.compile(source)
     }
 }
 
-/// [`JsonHost`] with the channel's context for `sample` and `motionPath`.
-struct RenderHost<'a> {
-    json: JsonHost<'a>,
-    cx: &'a ExprContext<'a>,
-}
+#[cfg(test)]
+mod parameter_tests {
+    use super::*;
+    use pm_eval::{Comp, Evaluator, JsValue, Scope};
+    use pm_model::Document;
+    use serde_json::json;
 
-impl<'a> Host for RenderHost<'a> {
-    type Obj = JsonRef<'a>;
-
-    fn shape(&self, obj: &JsonRef<'a>) -> Shape {
-        self.json.shape(obj)
-    }
-
-    fn element(&self, array: &JsonRef<'a>, index: usize) -> Value<JsonRef<'a>> {
-        self.json.element(array, index)
-    }
-
-    fn property(&self, object: &JsonRef<'a>, key: &JsStr) -> Option<Value<JsonRef<'a>>> {
-        self.json.property(object, key)
-    }
-
-    fn sample(
-        &self,
-        layer: &JsStr,
-        channel: &JsStr,
-        local_time: f64,
-    ) -> Option<Result<Value<JsonRef<'a>>, String>> {
-        let layer = JsString::from_utf16_units(layer.units());
-        let channel = JsString::from_utf16_units(channel.units());
-        Some(self.cx.sample(&layer, &channel, local_time).map(|got| {
-            // The layer and composition are owned copies here, so an object
-            // (a path, an array) cannot be handed over; numbers, strings,
-            // booleans, and null are.
-            let value = match got {
-                Got::Node(n) => pm_eval::node::js_value(n),
-                Got::Value(v) => v,
-                Got::Undefined => JsValue::Undefined,
-            };
-            match value {
-                JsValue::Null => Value::Null,
-                JsValue::Bool(b) => Value::Bool(b),
-                JsValue::Number(n) => Value::Number(n),
-                JsValue::String(s) => Value::String(js_str(&s)),
-                JsValue::Undefined | JsValue::Object(_) => Value::Undefined,
+    fn document(canonical: bool) -> Document {
+        let layer = json!({
+            "id":"layer", "type":"solid", "from":0, "dur":10,
+            "p":{
+                "rotation.y":{"v":0,"expr":"value + param('amount') * 40"},
+                "position.x":{"v":0,"expr":"param('amount') * 40"},
+                "scale.x":{"v":100}, "scale.y":{"v":100}
             }
-        }))
-    }
-
-    fn motion_path(
-        &self,
-        layer: &JsStr,
-        channel: &JsStr,
-        progress: f64,
-        start: f64,
-        end: f64,
-    ) -> Option<Result<f64, String>> {
-        let layer = JsString::from_utf16_units(layer.units());
-        let channel = JsString::from_utf16_units(channel.units());
-        Some(self.cx.motion_path(&layer, &channel, progress, start, end))
-    }
-}
-
-fn js_str(s: &JsString) -> JsStr {
-    JsStr::from_units(s.utf16_units().collect::<Vec<u16>>())
-}
-
-impl CompiledExpression for Compiled {
-    fn needs_idx(&self) -> bool {
-        self.0.needs_idx()
-    }
-
-    fn dependencies(&self) -> ExprDeps {
-        let reach = self.0.reach();
-        ExprDeps {
-            layer: reach.layer,
-            comp: reach.comp,
-            params: reach.params,
-            index: reach.index,
-            document: reach.document,
-        }
-    }
-
-    fn evaluate(&self, cx: &ExprContext<'_>) -> Result<JsValue, ExprError> {
-        let layer = cx.layer.map(|n| n.to_value());
-        let comp = cx.comp.node().to_value();
-        let boxed;
-        let value = match cx.value {
-            JsValue::Undefined => Value::Undefined,
-            JsValue::Null => Value::Null,
-            JsValue::Bool(b) => Value::Bool(*b),
-            JsValue::Number(n) => Value::Number(*n),
-            JsValue::String(s) => Value::String(js_str(s)),
-            JsValue::Object(v) => {
-                boxed = (**v).clone();
-                JsonHost::value(&boxed)
-            }
-        };
-        let ctx = Context {
-            t: cx.t,
-            time: cx.time,
-            fps: cx.fps.to_number(),
-            frame: cx.frame.map_or(f64::NAN, |f| f as f64),
-            value,
-            layer: layer.as_ref().map_or(Value::Undefined, JsonHost::value),
-            comp: JsonHost::value(&comp),
-            channel: js_str(cx.channel),
-            idx: cx.idx,
-        };
-        let host = RenderHost {
-            json: JsonHost::new(),
-            cx,
-        };
-        let out = self.0.evaluate(&host, &ctx);
-        match out.result {
-            Ok(Value::Number(n)) => Ok(JsValue::Number(n)),
-            Ok(Value::Bool(b)) => Ok(JsValue::Bool(b)),
-            Ok(Value::String(s)) => Ok(JsValue::String(JsString::from_utf16_units(s.units()))),
-            Ok(Value::Null) => Ok(JsValue::Null),
-            Ok(_) => Ok(JsValue::Undefined),
-            Err(e) => Err(ExprError {
-                message: Some(e.message()),
+        });
+        let mut stored = json!({
+            "id":"project", "compId":"outer", "fps":30,
+            "params":{"amount":{"value":1}}, "layers":[layer.clone()],
+            "comps":{"inner":{"id":"inner","fps":30,
+                "params":{"amount":{"value":3}},"layers":[layer]}}
+        });
+        // An actual precomp reference makes the ownership explicit.
+        stored["layers"].as_array_mut().unwrap().push(json!({
+            "id":"precomp", "type":"precomp", "from":0, "dur":10, "d":{"comp":"inner"}
+        }));
+        let value = pm_model::json::parse(&stored.to_string()).unwrap();
+        Document::new(
+            Some(if canonical {
+                pm_model::canonical::canonical_project(value)
+            } else {
+                value
             }),
+            1,
+        )
+    }
+
+    fn compare(
+        doc: &Document,
+        id: &str,
+        time: f64,
+        expected: f64,
+        render: &mut Evaluator,
+        kernel: &mut Evaluator,
+    ) {
+        let comp = Comp::resolve(doc, id).unwrap();
+        let layer = comp.node().get("layers").unwrap().at(0).unwrap();
+        let key = JsString::from("rotation.y");
+        let actual = render.ev(&comp, Some(layer), &key, time).unwrap();
+        assert_eq!(actual, kernel.ev(&comp, Some(layer), &key, time).unwrap());
+        assert_eq!(actual, JsValue::Number(expected), "{id} at {time}");
+        // This is the transform path consumed by the render planner.
+        let matrix = Scope::open(render, &comp)
+            .world_matrix(layer, time)
+            .unwrap();
+        assert_eq!(matrix[4], expected, "rendered translation for {id}");
+    }
+
+    fn evaluators() -> (Evaluator, Evaluator) {
+        (
+            Evaluator::new().with_expressions(Arc::new(PmExprEngine)),
+            Evaluator::new().with_expressions(Arc::new(pm_wasm::expr::PmExpressions)),
+        )
+    }
+
+    #[test]
+    fn root_nested_and_missing_parameters_match_v2_and_kernel() {
+        for canonical in [false, true] {
+            let mut doc = document(canonical);
+            let (mut render, mut kernel) = evaluators();
+            compare(&doc, "outer", 0.0, 40.0, &mut render, &mut kernel);
+            compare(&doc, "inner", 0.0, 120.0, &mut render, &mut kernel);
+            // V2 rootComp deliberately excludes project params.
+            compare(&doc, "@root:outer", 0.0, 0.0, &mut render, &mut kernel);
+            let patches = pm_model::patch::patches_from_value(
+                &pm_model::json::parse(
+                    r#"[{"exists":false,"path":["comps","inner","params","amount"]}]"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            doc.apply(&patches).unwrap();
+            // Missing inner params must not inherit the outer value.
+            compare(&doc, "inner", 0.0, 0.0, &mut render, &mut kernel);
+            let patches = pm_model::patch::patches_from_value(
+                &pm_model::json::parse(r#"[{"exists":false,"path":["params"]}]"#).unwrap(),
+            )
+            .unwrap();
+            doc.apply(&patches).unwrap();
+            compare(&doc, "outer", 0.0, 0.0, &mut render, &mut kernel);
         }
+    }
+
+    #[test]
+    fn changing_parameter_value_updates_rendered_transform() {
+        for canonical in [false, true] {
+            let mut doc = document(canonical);
+            let (mut render, mut kernel) = evaluators();
+            for (time, value) in [(0.0, 1.0), (1.0, 2.0), (2.0, 0.0)] {
+                let patches = pm_model::patch::patches_from_value(
+                    &pm_model::json::parse(
+                        &json!([{"exists":true,"path":["params","amount","value"],"value":value}])
+                            .to_string(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                doc.apply(&patches).unwrap();
+                render.open_channel_memo(&doc);
+                compare(&doc, "outer", time, value * 40.0, &mut render, &mut kernel);
+                render.close_channel_memo();
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_expression_safety_limits_are_preserved() {
+        for source in ["const x = 1; x", "(() => 1)()"] {
+            assert!(PmExprEngine.compile(&JsString::from(source)).is_none());
+        }
+        let too_many_nodes = std::iter::repeat_n("1", 100).collect::<Vec<_>>().join("+");
+        assert!(
+            PmExprEngine
+                .compile(&JsString::from(too_many_nodes.as_str()))
+                .is_none()
+        );
+        assert_eq!(pm_expr::MAX_SOURCE_CHARS, 2000);
+        assert_eq!(pm_expr::MAX_NODES, 160);
+        assert_eq!(pm_expr::MAX_DEPTH, 24);
+        assert_eq!(pm_expr::MAX_CALL_ARGS, 12);
     }
 }
