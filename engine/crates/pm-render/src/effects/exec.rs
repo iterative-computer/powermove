@@ -563,6 +563,8 @@ impl<'c> Gpu<'c> {
             ));
             calls.push(("u_sourceRes".into(), f(&[f64::from(w), f64::from(h)])));
             calls.push(("u_time".into(), f(&[time])));
+            calls.push(("u_fps".into(), f(&[step.fps])));
+            calls.push(("u_frame".into(), f(&[(time * step.fps + 1e-6).floor()])));
             calls.push(("u_pass".into(), Call::I(i32::from(pass))));
             if let Some(owner) = &step.owner {
                 calls.push((
@@ -869,11 +871,17 @@ impl<'c> Gpu<'c> {
                 calls.extend(effect_space(step, (w, h), (w, h), uv, origin, resolution));
                 calls.push(("u_sourceRes".into(), f(&[f64::from(w), f64::from(h)])));
                 calls.push(("u_time".into(), f(&[time])));
+                calls.push(("u_fps".into(), f(&[step.fps])));
+                calls.push(("u_frame".into(), f(&[(time * step.fps + 1e-6).floor()])));
                 calls.push(("u_pass".into(), Call::I(i32::from(pass))));
                 if let Some(owner) = &step.owner {
                     calls.push((
                         "u_ownerValid".into(),
                         f(&[if owner.valid { 1. } else { 0. }]),
+                    ));
+                    calls.push((
+                        "u_ownerFromUV".into(),
+                        Call::M3(super::resources::from_uv(owner)),
                     ));
                     calls.push(("u_layerUV".into(), Call::M3(owner.uv)));
                     calls.push(("u_layerRes".into(), f(&owner.size)));

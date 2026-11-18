@@ -22,6 +22,22 @@ const PACK: &[(&str, &str)] = &[
         "v4/builtin.ts",
         include_str!("../../../js/v4/src/builtin.ts"),
     ),
+    (
+        "v4/effect-definition.ts",
+        include_str!("../../../js/v4/src/effect-definition.ts"),
+    ),
+    (
+        "v3/samples/corner-pin-snap/manifest.json",
+        include_str!("../../../js/compat/api-pack/samples/corner-pin-snap/manifest.json"),
+    ),
+    (
+        "v3/samples/corner-pin-snap/index.ts",
+        include_str!("../../../js/compat/api-pack/samples/corner-pin-snap/index.ts"),
+    ),
+    (
+        "v3/samples/corner-pin-snap/README.md",
+        include_str!("../../../js/compat/api-pack/samples/corner-pin-snap/README.md"),
+    ),
     ("v4/ui.ts", include_str!("../../../js/v4/src/ui.ts")),
     ("v4/hooks.ts", include_str!("../../../js/v4/src/hooks.ts")),
     (

@@ -35,6 +35,8 @@ pub struct Param {
 /// One effect pass node: an effect instance's passes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectStep {
+    /// Owning composition rate for frame-based extension animation.
+    pub fps: f64,
     /// Electron extension shaders address the output raster in final output
     /// (exports and captures at any size). Viewer frames clear it, and
     /// built-ins never set it: their pixels are composition pixels.
@@ -219,6 +221,7 @@ pub fn effect_step(
         })
         .sum();
     EffectStep {
+        fps: 30.,
         raster_space: def.origin != pm_protocol::definitions::DefinitionOrigin::BuiltIn,
         owner: None,
         source_domain: None,
@@ -424,6 +427,7 @@ pub(crate) fn effect_steps_frame<'d>(
             values.push(value.filter(|v| !matches!(v, JsValue::Undefined | JsValue::Null)));
         }
         let mut step = effect_step(def, &fx_id, &values);
+        step.fps = crate::motion::level_fps(scope.comp);
         step.density = [scale.0.abs(), scale.1.abs()];
         if raster.is_some() && super::versions::main_definition(&step.definition).is_none() {
             refuse(Feature::Definition(
@@ -431,11 +435,9 @@ pub(crate) fn effect_steps_frame<'d>(
             ));
             continue;
         }
-        if effects.versioned_builtins
-            && def.glsl.as_ref().is_some_and(|g| {
-                g.source.contains("u_layerUV") || g.source.contains("u_temporalOwnerUV")
-            })
-        {
+        if def.glsl.as_ref().is_some_and(|g| {
+            g.source.contains("u_layerUV") || g.source.contains("u_temporalOwnerUV")
+        }) {
             match raster.map_or_else(
                 || match space {
                     Some(space) => owner_in_space(scope, layer, time, space),

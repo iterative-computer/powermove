@@ -16,3 +16,8 @@ export type {
   Anchor,
   Metadata,
 } from "./schemas";
+export type {
+  EffectDefinition,
+  EffectParameter,
+  Effects,
+} from "./effect-definition";

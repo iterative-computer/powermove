@@ -31,6 +31,8 @@ export interface BuiltinEnv {
   commands?: Commands;
   /** Extensions only: themes for the whole window (see `Themes`). */
   themes?: Themes;
+  /** Register GLSL effects in the native catalog. */
+  effects?: import("./effect-definition").Effects;
   /** Extensions only: context-menu items (see `Menus`). */
   menus?: Menus;
   /** Extensions only: drawing over the viewer (see `Overlays`). */
