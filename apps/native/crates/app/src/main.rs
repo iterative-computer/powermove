@@ -775,3 +775,6 @@ mod review_override_tests {
 
 #[cfg(all(test, target_os = "macos"))]
 mod utility_capture_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+mod transition_capture_tests;

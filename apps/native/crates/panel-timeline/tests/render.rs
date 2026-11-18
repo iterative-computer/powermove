@@ -1109,10 +1109,9 @@ fn electron_snap_guide_is_yellow_dashed_and_clipped() {
     assert_eq!(ops[1].bounds.height, 7.);
 }
 
-#[test]
 /// v1's transition wedges: inside the clip's ends, as long as each
-/// transition at this zoom; a selected one is stronger and carries a grip at
-/// its tip. A press inside a wedge takes the transition, its very edge still
+/// transition at this zoom. Selected wedges carry the same stroke as a
+/// paired capsule. A press inside a wedge takes it, and its very edge still
 /// trims, and below the wedge's slope the clip moves as before.
 #[test]
 fn transitions_draw_as_wedges_inside_the_clip_and_are_taken_by_a_press() {
@@ -1142,13 +1141,15 @@ fn transitions_draw_as_wedges_inside_the_clip_and_are_taken_by_a_press() {
     assert_eq!((wedge_in.shape, wedge_out.shape), ("wedge", "wedge"));
     assert!((wedge_in.bounds.width - 100.).abs() < 1e-6, "{:?}", wedge_in.bounds);
     assert!((wedge_out.bounds.width - 50.).abs() < 1e-6, "{:?}", wedge_out.bounds);
-    assert!(wedge_in.opacity > wedge_out.opacity, "the selected one is stronger");
+    assert_eq!(wedge_in.opacity, wedge_out.opacity);
     assert_eq!(wedge_in.detail["edge"], "in");
     assert_eq!(wedge_out.detail["edge"], "out");
-    let grip = op("transition-grip:a");
+    let ring = op("transition-selection:a:in");
     let strip = op("clip:a").bounds;
     let b = wedge_in.bounds;
-    assert!(grip.bounds.x + grip.bounds.width <= b.x + b.width + 1e-6);
+    assert_eq!(ring.bounds, b);
+    assert_eq!(ring.stroke, 2.);
+    assert_eq!(f.tooltip_at(b.x + 20., b.y + 2.).as_deref(), Some("Transition · 1.00 s"));
     let top = b.y + 2.;
     // Inside the In wedge near the top, past the trim zone: the transition.
     assert_eq!(f.hit_transition(b.x + 20., top), Some(("a".into(), Edge::In)));

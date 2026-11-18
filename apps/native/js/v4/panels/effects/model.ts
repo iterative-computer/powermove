@@ -35,7 +35,18 @@ export const workerSearch: Search = async ({ items, query }) => {
   const needle = query.trim().toLowerCase();
   return items
     .filter((item) =>
-      [item.label, item.id].some((text) => text.toLowerCase().includes(needle)),
+      [
+        item.label,
+        item.id,
+        ...(item.kind === "transition"
+          ? [
+              item.group,
+              ...(item.id.replace(/^transition:/, "") === "crossfade"
+                ? ["dissolve"]
+                : []),
+            ]
+          : []),
+      ].some((text) => text.toLowerCase().includes(needle)),
     )
     .map((item) => item.id);
 };

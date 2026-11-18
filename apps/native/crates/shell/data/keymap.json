@@ -3121,6 +3121,16 @@
     "loose": false
   },
   {
+    "id": "G2AddDefaultTransition",
+    "chord": "cmd+alt+d",
+    "command": "addDefaultTransition",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
+  },
+  {
     "id": "native.addDefaultTransition",
     "chord": "shift+d",
     "command": "addDefaultTransition",

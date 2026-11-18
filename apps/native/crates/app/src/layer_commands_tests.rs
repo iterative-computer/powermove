@@ -789,3 +789,448 @@ fn track_matte_rows_tell_layers_of_one_name_apart() {
     let labels: Vec<&str> = rows.iter().filter_map(|r| r["label"].as_str()).collect();
     assert_eq!(labels, ["None", "2. Rect", "3. Rect"]);
 }
+
+#[test]
+fn paired_crossfade_is_not_a_dip_and_preview_matches_export() {
+    let _guard = PIXELS.lock().unwrap();
+    // Reverse the stack deliberately: B must be above A only while rendering
+    // their paired overlap, regardless of stored document order.
+    let make = |id: &str, color: &str, start: f64| {
+        let mut clip: serde_json::Value =
+            serde_json::from_str(&layer(id, "solid", 0., 0., 0., color, "")).unwrap();
+        clip["from"] = serde_json::json!(start);
+        clip["dur"] = serde_json::json!(1.5);
+        clip["track"] = serde_json::json!(0);
+        clip.to_string()
+    };
+    let (_actor, kernel) = open(&[make("a", "#FF0000", 0.), make("b", "#0000FF", 1.5)]);
+    let published = select(&kernel, &["a"]);
+    let commands = pm_kernel::commands::transition_edges::plan(
+        published.snapshot.root().unwrap(),
+        "a",
+        pm_kernel::commands::effects::Edge::Out,
+        Some(pm_kernel::commands::effects::TransitionSpec {
+            definition: pm_kernel::commands::effects::TransitionDefinition {
+                transition_type: "crossfade".into(),
+                params: vec![],
+            },
+            duration: Some(0.5),
+            params: Default::default(),
+        }),
+        true,
+    )
+    .unwrap();
+    send(
+        &kernel,
+        Call::Transact {
+            label: Some("Add Transition".into()),
+            expected_revision: Some(published.revision()),
+            body: WriteBody::Commands(commands),
+        },
+    );
+    let mut renderer = pm_render::Renderer::headless().unwrap();
+    for (time, expected) in [
+        (1.25, [1., 0., 0., 1.]),
+        (1.5, [0.5, 0., 0.5, 1.]),
+        (1.75, [0., 0., 1., 1.]),
+    ] {
+        let rgba = frame(&kernel, &mut renderer, time);
+        let pixel = &rgba[(4 * W as usize + 4) * 4..][..4];
+        for (got, expected) in pixel.iter().zip(expected) {
+            assert!((got - expected).abs() < 0.01, "at {time}: {pixel:?}");
+        }
+        let publication = kernel.published("synthetic").unwrap();
+        let mut request = pm_render::RenderRequest::sized(Size::new(W, H), Precision::Float16);
+        request.export = false;
+        let preview = renderer
+            .render(
+                &publication.snapshot.document,
+                "root",
+                Ticks::new((time * 705_600_000.).round() as i64).unwrap(),
+                &request,
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        same(
+            &renderer.read_rgba(&preview).unwrap(),
+            &rgba,
+            "paired preview and export",
+        );
+    }
+    let saved = pm_model::json::to_canonical_string(
+        &kernel
+            .published("synthetic")
+            .unwrap()
+            .snapshot
+            .root()
+            .unwrap()
+            .to_value(),
+    );
+    assert!(kernel.close("synthetic").wait().unwrap());
+    kernel
+        .open(
+            "synthetic",
+            OpenSource::Untitled(pm_model::json::parse(&saved).unwrap()),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (time, expected) in [
+        (1.25, [1., 0., 0., 1.]),
+        (1.5, [0.5, 0., 0.5, 1.]),
+        (1.75, [0., 0., 1., 1.]),
+    ] {
+        let rgba = frame(&kernel, &mut renderer, time);
+        let pixel = &rgba[(4 * W as usize + 4) * 4..][..4];
+        for (got, want) in pixel.iter().zip(expected) {
+            assert!(
+                (got - want).abs() < 0.01,
+                "reopened pair at {time}: {pixel:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn paired_crossfade_handle_shortfalls_render_without_a_dip_or_held_frames() {
+    let _guard = PIXELS.lock().unwrap();
+    // Finite precomps exercise actual source-time evaluation without decoding
+    // a video fixture. Their visible content ends at the media boundary.
+    for (tail, head, duration, offset) in [
+        (0.1, 0.4, 0.2, -0.1),
+        (0., 0.4, 0.4, -0.4),
+        (0.4, 0., 0.4, 0.),
+    ] {
+        let (_actor, kernel) = cut_with_handles(tail, head);
+        let mut renderer = pm_render::Renderer::headless().unwrap();
+        for (progress, expected) in [
+            (0., [1., 0., 0., 1.]),
+            (0.5, [0.5, 0., 0.5, 1.]),
+            (1., [0., 0., 1., 1.]),
+        ] {
+            let time = 1.5 + offset + duration * progress;
+            let rgba = frame(&kernel, &mut renderer, time);
+            let pixel = &rgba[(4 * W as usize + 4) * 4..][..4];
+            for (got, expected) in pixel.iter().zip(expected) {
+                assert!(
+                    (got - expected).abs() < 0.01,
+                    "tail={tail} head={head} t={time}: {pixel:?}"
+                );
+            }
+        }
+    }
+}
+
+fn cut_with_handles(tail: f64, head: f64) -> (KernelActor, KernelHandle) {
+    let mut clips = Vec::new();
+    let mut comps = serde_json::Map::new();
+    for (id, color, from, trim, source_duration) in [
+        ("a", "#FF0000", 0., 0., 1.5 + tail),
+        ("b", "#0000FF", 1.5, head, 1.5 + head),
+    ] {
+        let mut content: serde_json::Value = serde_json::from_str(&layer(
+            &format!("{id}-content"),
+            "solid",
+            0.,
+            0.,
+            0.,
+            color,
+            "",
+        ))
+        .unwrap();
+        content["dur"] = serde_json::json!(source_duration);
+        comps.insert(
+            id.into(),
+            serde_json::json!({
+                "id":id,"w":W,"h":H,"fps":30,"dur":source_duration,
+                "backgroundFill":{"type":"none","angle":0,"stops":[]},"layers":[content]
+            }),
+        );
+        let mut clip: serde_json::Value =
+            serde_json::from_str(&layer(id, "precomp", 0., 0., 0., "", "")).unwrap();
+        clip["from"] = serde_json::json!(from);
+        clip["dur"] = serde_json::json!(1.5);
+        clip["track"] = serde_json::json!(0);
+        clip["d"] = serde_json::json!({"comp":id,"w":W,"h":H,"trim":trim});
+        clips.push(clip);
+    }
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    let project = serde_json::json!({
+        "id":"synthetic","name":"Handles","compId":"root","w":W,"h":H,"fps":30,"dur":3,
+        "colorDepth":16,"backgroundFill":{"type":"none","angle":0,"stops":[]},
+        "assets":{},"comps":comps,"layers":clips
+    });
+    kernel
+        .open(
+            "synthetic",
+            OpenSource::Untitled(pm_model::json::parse(&project.to_string()).unwrap()),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let published = kernel.published("synthetic").unwrap();
+    let commands = pm_kernel::commands::transition_edges::plan(
+        published.snapshot.root().unwrap(),
+        "a",
+        pm_kernel::commands::effects::Edge::Out,
+        pm_kernel::commands::transition_edges::builtin_spec("crossfade"),
+        true,
+    )
+    .unwrap();
+    send(
+        &kernel,
+        Call::Transact {
+            label: Some("Add Transition".into()),
+            expected_revision: Some(published.revision()),
+            body: WriteBody::Commands(commands),
+        },
+    );
+    (actor, kernel)
+}
+
+#[test]
+fn g2_transition_notice_distinguishes_shortening_from_a_real_shift() {
+    for (tail, head, expected) in [
+        (
+            0.1,
+            0.4,
+            Some("Transition shortened to fit available source media (0.20 s)"),
+        ),
+        (
+            0.,
+            0.4,
+            Some("Transition shortened and shifted to fit available source media (0.40 s)"),
+        ),
+        (
+            0.4,
+            0.,
+            Some("Transition shortened and shifted to fit available source media (0.40 s)"),
+        ),
+        (0.3, 0.3, None),
+    ] {
+        let (_actor, kernel) = cut_with_handles(tail, head);
+        let published = kernel.published("synthetic").unwrap();
+        assert_eq!(
+            crate::layer_commands::transition_notice(&published, &[("a".into(), 0.5)]).as_deref(),
+            expected,
+        );
+    }
+}
+
+#[test]
+fn paired_crossfade_roll_refits_render_and_capsule_and_undo_restores_intent() {
+    use pm_kernel::commands::timing::{TimeEdge, TimingCommand};
+    use pm_panel_timeline::render as paint;
+    struct Presenter;
+    impl paint::ModelPresenter for Presenter {
+        fn accessibility_label(&self, _: &pm_panel_timeline::RowId) -> String {
+            "Clip".into()
+        }
+        fn layer_label(&self, _: &pm_panel_timeline::Layer) -> paint::Label {
+            paint::Label::for_layer("precomp", None)
+        }
+        fn media(&self, _: &pm_panel_timeline::Layer) -> paint::Media {
+            paint::Media::Ready
+        }
+        fn interpolation(&self, _: &pm_panel_timeline::Key) -> paint::Interpolation {
+            paint::Interpolation::Linear
+        }
+        fn track_accessibility_label(
+            &self,
+            _: pm_panel_timeline::tracks::Area,
+            _: usize,
+        ) -> Option<String> {
+            Some("Video 1".into())
+        }
+    }
+    let _guard = PIXELS.lock().unwrap();
+    let (_actor, kernel) = cut_with_handles(0.3, 0.3);
+    let mut renderer = pm_render::Renderer::headless().unwrap();
+    let tokens = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
+    let check = |renderer: &mut pm_render::Renderer, cut: f64, effective: f64, shortened: bool| {
+        let p = kernel.published("synthetic").unwrap();
+        let root = p.snapshot.root().unwrap();
+        let a = pm_kernel::model::layer_at(root, &pm_kernel::model::find_layer(root, "a").unwrap())
+            .unwrap();
+        assert_eq!(
+            a.get("transitionOut")
+                .unwrap()
+                .get("dur")
+                .unwrap()
+                .to_value()
+                .as_f64(),
+            Some(0.5)
+        );
+        assert_eq!(
+            a.get("transitionOut")
+                .unwrap()
+                .get("offset")
+                .unwrap()
+                .to_value()
+                .as_f64(),
+            Some(-0.25)
+        );
+        let mut model = pm_panel_timeline::TimelineModel::default();
+        model.sync(&p);
+        model.mode = pm_panel_timeline::TimelineMode::Tracks;
+        model.rebuild_rows();
+        let view = paint::Viewport {
+            width: 1000.,
+            height: 250.,
+            scroll_y: 0.,
+            scroll_time: 0.,
+            pps: 200.,
+            layer_column: 200.,
+        };
+        let timeline = paint::Scene::from_model(&model, &Presenter, &tokens, cut)
+            .unwrap()
+            .prepare(view, &tokens)
+            .unwrap();
+        let capsule = timeline
+            .ops
+            .iter()
+            .find(|op| op.id == "transition:b:in")
+            .unwrap();
+        assert!((capsule.detail["effectiveDuration"].as_f64().unwrap() - effective).abs() < 1e-6);
+        let start = cut - effective / 2.;
+        if effective > 0. {
+            assert!((capsule.bounds.x - (200. + start * 200.)).abs() < 1e-6);
+        }
+        assert_eq!(capsule.detail["disabled"], effective == 0.);
+        assert_eq!(
+            timeline
+                .tooltip_at(capsule.bounds.x + 1., capsule.bounds.y + 1.)
+                .as_deref(),
+            if shortened {
+                Some("Shortened to fit media")
+            } else {
+                None
+            }
+        );
+        let samples = if effective > 0. {
+            vec![
+                (start, [1., 0., 0., 1.]),
+                (cut, [0.5, 0., 0.5, 1.]),
+                (cut + effective / 2. + 0.01, [0., 0., 1., 1.]),
+            ]
+        } else {
+            vec![
+                (cut - 0.01, [1., 0., 0., 1.]),
+                (cut + 0.01, [0., 0., 1., 1.]),
+            ]
+        };
+        for (time, expected) in samples {
+            let export = frame(&kernel, renderer, time);
+            let pixel = &export[(4 * W as usize + 4) * 4..][..4];
+            for (got, want) in pixel.iter().zip(expected) {
+                assert!(
+                    (got - want).abs() < 0.01,
+                    "cut={cut} effective={effective} t={time}: {pixel:?}"
+                );
+            }
+            let mut request = pm_render::RenderRequest::sized(Size::new(W, H), Precision::Float16);
+            request.export = false;
+            let preview = renderer
+                .render(
+                    &p.snapshot.document,
+                    "root",
+                    Ticks::new((time * 705_600_000.).round() as i64).unwrap(),
+                    &request,
+                    &pm_render::MapResolver::default(),
+                )
+                .unwrap();
+            same(
+                &renderer.read_rgba(&preview).unwrap(),
+                &export,
+                "refitted preview and export",
+            );
+        }
+    };
+    check(&mut renderer, 1.5, 0.5, false);
+    send(
+        &kernel,
+        Call::Transact {
+            label: Some("Roll Edit".into()),
+            expected_revision: None,
+            body: WriteBody::Commands(vec![
+                TimingCommand::Roll {
+                    layer_id: "a".into(),
+                    edge: TimeEdge::Out,
+                    time: 1.7,
+                }
+                .into(),
+            ]),
+        },
+    );
+    check(&mut renderer, 1.7, 0.2, true);
+    send(&kernel, HistoryCall::Undo.into());
+    check(&mut renderer, 1.5, 0.5, false);
+    send(
+        &kernel,
+        Call::Transact {
+            label: Some("Consume Source Handles".into()),
+            expected_revision: None,
+            body: WriteBody::Commands(vec![
+                TimingCommand::Roll {
+                    layer_id: "a".into(),
+                    edge: TimeEdge::Out,
+                    time: 1.8,
+                }
+                .into(),
+                pm_kernel::PropertyCommand::Set(pm_kernel::commands::properties::SetProperty::new(
+                    "b", "c.trim", 0., 1.8,
+                ))
+                .into(),
+            ]),
+        },
+    );
+    check(&mut renderer, 1.8, 0., true);
+    send(&kernel, HistoryCall::Undo.into());
+    check(&mut renderer, 1.5, 0.5, false);
+}
+
+#[test]
+fn paired_crossfade_short_clip_can_overlap_both_neighbours() {
+    let _guard = PIXELS.lock().unwrap();
+    let clip = |id: &str, color: &str, from: f64, duration: f64| {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&layer(id, "solid", 0., 0., 0., color, "")).unwrap();
+        value["from"] = serde_json::json!(from);
+        value["dur"] = serde_json::json!(duration);
+        value["track"] = serde_json::json!(0);
+        value.to_string()
+    };
+    let (_actor, kernel) = open(&[
+        clip("a", "#FF0000", 0., 1.5),
+        clip("c", "#0000FF", 1.6, 1.4),
+        clip("b", "#00FF00", 1.5, 0.1),
+    ]);
+    for (left, right) in [("a", "b"), ("b", "c")] {
+        send(
+            &kernel,
+            Call::Transact {
+                label: Some("Add Transition".into()),
+                expected_revision: None,
+                body: WriteBody::Commands(vec![
+                    pm_kernel::EffectCommand::SetPairedTransition {
+                        left: left.into(),
+                        right: right.into(),
+                        offset: None,
+                        transition: pm_kernel::commands::transition_edges::builtin_spec(
+                            "crossfade",
+                        )
+                        .map(Box::new),
+                    }
+                    .into(),
+                ]),
+            },
+        );
+    }
+    let mut renderer = pm_render::Renderer::headless().unwrap();
+    let rgba = frame(&kernel, &mut renderer, 1.55);
+    let pixel = &rgba[(4 * W as usize + 4) * 4..][..4];
+    for (got, want) in pixel.iter().zip([0.1875, 0.5625, 0.25, 1.]) {
+        assert!((got - want).abs() < 0.01, "overlapping cuts: {pixel:?}");
+    }
+}

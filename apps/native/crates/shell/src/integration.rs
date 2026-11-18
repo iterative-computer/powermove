@@ -49,6 +49,10 @@ pub trait Integration {
     fn disabled(&self, _cx: &App) -> std::collections::BTreeSet<String> {
         Default::default()
     }
+    /// Why the selected cut cannot accept the default transition, when refused.
+    fn transition_refusal(&self, _cx: &App) -> Option<String> {
+        None
+    }
     /// Toggle commands that are on now: their menu rows carry a checkmark.
     fn checked(&self, _cx: &App) -> std::collections::BTreeSet<String> {
         Default::default()

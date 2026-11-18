@@ -242,6 +242,19 @@ impl<'d> Scope<'_, 'd> {
             if !known(ty) {
                 return None;
             }
+            if node::truthy(t.get("paired")) {
+                let overlap =
+                    crate::cut_transition::overlap(self.comp.root(), layer, self.layers(), time)?;
+                return (edge_in && overlap.incoming).then_some(ActiveTransition {
+                    transition: t,
+                    edge_in: true,
+                    progress: clamp(
+                        (time - overlap.start) / (overlap.end - overlap.start),
+                        0.,
+                        1.,
+                    ),
+                });
+            }
             let raw = or0(node::to_number(node::member(Some(t), "dur")));
             let dur = js_min(length, js_max(0.02, if raw == 0.0 { 0.5 } else { raw }));
             if dur <= 0.0 {

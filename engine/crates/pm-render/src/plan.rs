@@ -826,6 +826,37 @@ pub(crate) fn comp_pass<'d>(
             return plan;
         }
     };
+    // The incoming side of a reciprocal pair renders over its outgoing
+    // side regardless of their document stack order. The timeline cut and
+    // stored layer order remain unchanged.
+    let mut pass = pass;
+    let pairs: Vec<_> = pass
+        .iter()
+        .filter_map(|&layer| {
+            let overlap =
+                pm_eval::cut_transition::overlap(scope.comp.root(), layer, scope.layers(), time)?;
+            overlap.incoming.then_some((layer, overlap.peer))
+        })
+        .collect();
+    // Very short clips can overlap both neighbouring cuts. Resolve their
+    // ordering as a chain, even when the stored stack interleaves the clips.
+    for _ in 0..pairs.len() {
+        let mut changed = false;
+        for &(layer, peer) in &pairs {
+            if let (Some(incoming), Some(outgoing)) = (
+                pass.iter().position(|p| std::ptr::eq(*p, layer)),
+                pass.iter().position(|p| std::ptr::eq(*p, peer)),
+            ) && incoming > outgoing
+            {
+                let incoming = pass.remove(incoming);
+                pass.insert(outgoing, incoming);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
     let solo = facts.solo;
     // Bottom (last) to top (first).
     for &layer in pass.iter().rev() {

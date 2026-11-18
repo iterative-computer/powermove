@@ -470,6 +470,8 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
             "Timeline",
             vec![
                 Item::command("Tools", "timelineTools", ""),
+                r("Add Default Transition", "addDefaultTransition"),
+                sep(),
                 r("Play/Pause", "play"),
                 r("Shuttle Reverse", "shuttleBackward"),
                 r("Shuttle Stop", "shuttleStop"),
@@ -923,5 +925,81 @@ mod chord_tests {
         assert_eq!(key, "d");
         assert_ne!(flags, 0);
         assert_eq!(super::chord_for("noSuchCommand"), None);
+    }
+}
+
+#[cfg(test)]
+mod transition_tests {
+    #[test]
+    fn add_default_transition_shortcut_never_falls_through_to_duplicate() {
+        use crate::keyboard::{Effect, Key, Resolver};
+        let key = |token, chord: &str| Key {
+            token,
+            chord: chord.into(),
+            field: false,
+            repeat: false,
+            up: false,
+            compat: false,
+        };
+        let mut resolver = Resolver::new();
+        assert!(matches!(
+            resolver.submit(key(1, "cmd+alt+d")).as_slice(),
+            [Effect::Dispatch { command, .. }] if command == "addDefaultTransition"
+        ));
+        assert!(resolver.busy(), "later input waits for the command result");
+        assert!(
+            matches!(resolver.resolve(1, false).as_slice(), [Effect::Consumed(1)]),
+            "a refused cut must never run the loose Cmd+D Duplicate binding"
+        );
+        assert!(matches!(
+            resolver.submit(key(2, "cmd+d")).as_slice(),
+            [Effect::Dispatch { command, .. }] if command == "duplicate"
+        ));
+    }
+
+    #[test]
+    fn default_transition_alias_dispatches_in_editor_and_replays_in_text() {
+        use crate::keyboard::{Effect, Key, Resolver};
+        for chord in ["cmd+alt+d", "shift+d"] {
+            for compat in [false, true] {
+                let key = |field| Key {
+                    token: 1, chord: chord.into(), field, repeat: false, up: false, compat,
+                };
+                assert!(matches!(
+                    Resolver::new().submit(key(false)).as_slice(),
+                    [Effect::Dispatch { command, .. }] if command == "addDefaultTransition"
+                ));
+                assert!(matches!(
+                    Resolver::new().submit(key(true)).as_slice(),
+                    [Effect::Replay(1)]
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn add_default_transition_has_one_free_key_and_timeline_menu_entry() {
+        let bindings = crate::keyboard::shipped();
+        let rows: Vec<_> = bindings.iter().filter(|b| b.chord == "cmd+alt+d").collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].command, "addDefaultTransition");
+        assert!(!rows[0].in_fields);
+        assert!(!rows[0].repeat);
+        assert_eq!(
+            super::chord_for("addDefaultTransition").as_deref(),
+            Some("cmd+alt+d")
+        );
+        let menus = super::menus();
+        let timeline = &menus
+            .iter()
+            .find(|(title, _)| *title == "Timeline")
+            .unwrap()
+            .1;
+        let item = timeline
+            .iter()
+            .find(|item| item.command == "addDefaultTransition")
+            .unwrap();
+        assert_eq!(item.label, "Add Default Transition");
+        assert_eq!(item.chord, "cmd+alt+d");
     }
 }

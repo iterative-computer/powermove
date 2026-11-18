@@ -413,36 +413,103 @@ impl Backend {
         let mut order = Vec::new();
         let mut items = BTreeMap::new();
         let mut groups: Vec<String> = Vec::new();
-        for entry in state.registries.get("effects").into_iter().flatten() {
-            let text = |key: &str| entry.definition.get(key).and_then(pm_model::Value::as_str);
-            let group = text("group").unwrap_or("").to_owned();
-            if !groups.contains(&group) {
-                groups.push(group.clone());
+        for (registry, kind) in [("effects", "effect"), ("transitions", "transition")] {
+            for entry in state.registries.get(registry).into_iter().flatten() {
+                let text = |key: &str| entry.definition.get(key).and_then(pm_model::Value::as_str);
+                let group = if kind == "transition" {
+                    "Transitions"
+                } else {
+                    text("group").unwrap_or("")
+                }
+                .to_owned();
+                if !groups.contains(&group) {
+                    groups.push(group.clone());
+                }
+                // Registry namespaces may contain the same id.
+                let key = format!("{kind}:{}", entry.id);
+                if !items.contains_key(&key) {
+                    order.push(key.clone());
+                }
+                items.insert(key, json!({"id":if kind == "transition" { format!("transition:{}", entry.id) } else { entry.id.clone() },"label":text("label").unwrap_or(&entry.id), "group":group, "kind":kind,"installed":true}));
             }
-            if !items.contains_key(&entry.id) {
-                order.push(entry.id.clone());
-            }
-            items.insert(entry.id.clone(), json!({"id":entry.id,"label":text("label").unwrap_or(&entry.id), "group":group, "kind":"effect","installed":true}));
-        }
-        // v1's Effects panel lists transitions too (transitions-basic): drop one
-        // on a clip's edge, or Add for the selection's In.
-        for entry in state.registries.get("transitions").into_iter().flatten() {
-            let text = |key: &str| entry.definition.get(key).and_then(pm_model::Value::as_str);
-            let group = "Transitions".to_owned();
-            if !groups.contains(&group) {
-                groups.push(group.clone());
-            }
-            let key = format!("transition:{}", entry.id);
-            if !items.contains_key(&key) {
-                order.push(key.clone());
-            }
-            items.insert(key, json!({"id":entry.id,"label":text("label").unwrap_or(&entry.id), "group":group, "kind":"transition","installed":true}));
         }
         let items = order
             .iter()
             .filter_map(|id| items.remove(id))
             .collect::<Vec<_>>();
         json!({"items":items,"groups":groups})
+    }
+    pub(crate) fn transition_commands(
+        &self,
+        definition: &str,
+        target: &str,
+        time: f64,
+        pair: bool,
+    ) -> Result<Vec<pm_kernel::Command>, String> {
+        let state = self.kernel.state();
+        let entry = state
+            .registries
+            .get("transitions")
+            .into_iter()
+            .flatten()
+            .rev()
+            .find(|entry| entry.id == definition)
+            .ok_or("Transition not found")?;
+        let def = wire(&entry.definition);
+        let params = def["params"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| {
+                Ok(pm_kernel::commands::effects::ParamDefinition {
+                    key: p["k"].as_str().ok_or("Transition parameter key")?.into(),
+                    kind: p["type"].as_str().unwrap_or("number").into(),
+                    default: model(&p["def"])?,
+                    min: p["min"].as_f64(),
+                    max: p["max"].as_f64(),
+                    reference: false,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let publication = self.published().ok_or("No open project")?;
+        let root = publication.snapshot.root().ok_or("No document")?;
+        let clip = self
+            .model
+            .as_ref()
+            .ok_or("No open project")?
+            .layer(target)
+            .map_err(|e| e.to_string())?;
+        let start = clip
+            .get("from")
+            .and_then(pm_model::Value::as_f64)
+            .unwrap_or(0.);
+        let end = start
+            + clip
+                .get("dur")
+                .and_then(pm_model::Value::as_f64)
+                .unwrap_or(0.);
+        let edge = if (time - start).abs() <= (time - end).abs() {
+            pm_kernel::commands::effects::Edge::In
+        } else {
+            pm_kernel::commands::effects::Edge::Out
+        };
+        let mut view = pm_panel_timeline::TimelineModel::default();
+        view.restore_ui(&publication.ui_state);
+        let pair = pair && view.mode == pm_panel_timeline::TimelineMode::Tracks;
+        return pm_kernel::commands::transition_edges::plan(
+            root,
+            target,
+            edge,
+            Some(pm_kernel::commands::effects::TransitionSpec {
+                definition: pm_kernel::commands::effects::TransitionDefinition {
+                    transition_type: definition.into(),
+                    params,
+                },
+                duration: Some(0.5),
+                params: Default::default(),
+            }),
+            pair,
+        );
     }
     pub fn target(&mut self) -> Result<Value, String> {
         self.sync()?;
@@ -834,31 +901,9 @@ impl KernelData for Data {
                             {
                                 all.extend(commands);
                             }
-        }
-                        // A transition from the browser: the selection's In
-                        // (v1's Add), or the edge it names.
-                        if command.command == "transition.set" {
-                            let target =
-                                command.args["target"].as_str().ok_or("transition target")?;
-                            if b.model.as_ref().ok_or("No open project")?.primary() != Some(target) {
-                                return Err("Transition target selection changed".into());
-                            }
-                            let id = command.args["definition"]
-                                .as_str()
-                                .ok_or("transition definition")?;
-                            let edge = match command.args["edge"].as_str() {
-                                Some("out") => pm_kernel::commands::effects::Edge::Out,
-                                _ => pm_kernel::commands::effects::Edge::In,
-                            };
-                            let state = b.kernel.state();
-                            let set = pm_kernel::commands::effects::add_transition(
-                                &state, target, edge, id, None,
-                            )
-                            .map_err(|e| e.to_string())?;
-                            all.push(set.into());
                             continue;
                         }
-                        if command.command != "effect.add" {
+                        if command.command != "effect.add" && command.command != "transition.add" {
                             return Err("Unregistered built-in edit".into());
                         }
                         let target = command.args["target"].as_str().ok_or("effect target")?;
@@ -870,6 +915,10 @@ impl KernelData for Data {
                             .ok_or("effect definition")?;
                         let caller = b.caller;
                         let time = b.native.facts["time"].as_f64().unwrap_or(0.);
+                        if command.command == "transition.add" {
+                            all.extend(b.transition_commands(definition, target, time, false)?);
+                            continue;
+                        }
                         let request = b
                             .model
                             .as_mut()

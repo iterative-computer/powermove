@@ -3114,6 +3114,7 @@ impl Render for GizmoSurface {
                             layer: None,
                             edge: None,
                             across: None,
+                            at: None,
                         },
                         cx,
                     );

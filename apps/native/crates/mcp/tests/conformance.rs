@@ -1239,3 +1239,99 @@ fn internal_editor_authority_cannot_be_forged_widened_or_used_after_revocation()
             .is_err()
     );
 }
+
+#[test]
+#[test]
+fn paired_cut_transition_add_and_remove_uses_v1_edge_objects() {
+    let f = Fixture::new();
+    let id = f.create();
+    let mut session = f.session();
+    start(&mut session);
+    value(session.call(
+        "apply_commands",
+        json!({"commands":[
+            {"type":"add_layer","id":"cut-a","layerType":"solid","from":0,"duration":2},
+            {"type":"add_layer","id":"cut-b","layerType":"solid","from":2,"duration":2}
+        ]}),
+    ));
+    let state = pm_kernel::state::StateSnapshot::seeded();
+    for (index, transition) in [
+        json!({"type":"crossfade","dur":0.5}),
+        Value::Null,
+        Value::Null,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut host = f.host.lock().unwrap();
+        let project = host.read_document(&id).unwrap();
+        let raw = json!({"type":"set_transition","layer":"cut-a","edge":"out","pairedWith":"cut-b","offset":-0.2,"transition":transition});
+        catalog::validate("apply_commands", &json!({"commands":[raw.clone()]})).unwrap();
+        let cleaned = pm_mcp::commands::clean_commands(&[raw]).unwrap();
+        assert_eq!(
+            cleaned[0]["pairedWith"], "cut-b",
+            "MCP must not silently turn a pair into a standalone fade"
+        );
+        assert_eq!(cleaned[0]["offset"], -0.2);
+        assert!(
+            !catalog::legacy_catalog()["commandFields"]["set_transition"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|field| field == "pairedWith")
+        );
+        let batch =
+            pm_mcp::commands::plan_with_definitions(&project, &[], &cleaned, 0., Some(&state))
+                .unwrap();
+        let revision = host.revision(&id).unwrap();
+        host.apply_commands(
+            &id,
+            batch.commands,
+            "Transition",
+            pm_kernel::Origin::Mcp,
+            revision,
+            986 + index as u32,
+        )
+        .unwrap();
+        if index == 2 {
+            assert_eq!(
+                host.revision(&id).unwrap(),
+                revision,
+                "repeated removal is a no-op"
+            );
+        }
+        let project = host.read_document(&id).unwrap();
+        let layers = project["layers"].as_array().unwrap();
+        assert_eq!(layers.len(), 2);
+        let a = layers.iter().find(|l| l["id"] == "cut-a").unwrap();
+        let b = layers.iter().find(|l| l["id"] == "cut-b").unwrap();
+        if index == 0 {
+            assert_eq!(a["transitionOut"]["paired"], "cut-b");
+            assert_eq!(b["transitionIn"]["paired"], "cut-a");
+            assert_eq!(a["transitionOut"]["offset"], -0.2);
+            assert_eq!(b["transitionIn"]["dur"], 0.5);
+            let revision = host.revision(&id).unwrap();
+            host.apply_commands(
+                &id,
+                vec![
+                    pm_kernel::LayerCommand::Set {
+                        layer_id: "cut-a".into(),
+                        patch: pm_kernel::commands::layers::LayerPatch {
+                            from: Some(0.5),
+                            ..Default::default()
+                        },
+                    }
+                    .into(),
+                ],
+                "Move Clip",
+                pm_kernel::Origin::Mcp,
+                revision,
+                990,
+            )
+            .unwrap();
+        } else {
+            assert!(a["transitionOut"].is_null());
+            assert!(b["transitionIn"].is_null());
+        }
+    }
+}

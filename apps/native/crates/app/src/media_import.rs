@@ -321,7 +321,14 @@ impl Controller {
             .runtime
             .as_ref()
             .ok_or_else(|| "The Effects panel closed.".to_owned())
-            .and_then(|r| r.effect_commands(&drop.panel, &layer, &drop.definition, self.time()));
+            .and_then(|r| {
+                r.effect_commands(
+                    &drop.panel,
+                    &layer,
+                    &drop.definition,
+                    drop.at.unwrap_or_else(|| self.time()),
+                )
+            });
         match commands {
             Ok(commands) => self.run_layer_plan(
                 crate::layer_commands::Plan {
@@ -477,6 +484,29 @@ impl Controller {
                 Edge::In => (other, layer),
                 Edge::Out => (layer, other),
             };
+            let is_audio = |id| {
+                let root = published.snapshot.root()?;
+                let at = pm_kernel::model::find_layer(root, id)?;
+                let node = pm_kernel::model::layer_at(root, &at)?;
+                Some(node.get("type")?.to_value().as_str()? == "audio")
+            };
+            if is_audio(outgoing) == Some(false) && is_audio(incoming) == Some(false) {
+                use pm_kernel::commands::effects::{EffectCommand, add_transition};
+                let EffectCommand::SetTransition { transition, .. } =
+                    add_transition(&state, layer, edge, id, None).map_err(|e| e.to_string())?
+                else {
+                    unreachable!("add_transition returns a single-edge transition");
+                };
+                return Ok(crate::transitions::Placed {
+                    commands: vec![EffectCommand::SetPairedTransition {
+                        left: outgoing.to_owned(),
+                        right: incoming.to_owned(),
+                        transition,
+                        offset: None,
+                    }.into()],
+                    notice: None,
+                });
+            }
             let wrap = |c| crate::layer_commands::in_tracks(&published, c);
             return crate::transitions::across_cut(
                 &state,

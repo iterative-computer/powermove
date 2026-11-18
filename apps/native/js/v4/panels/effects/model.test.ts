@@ -464,3 +464,20 @@ test("My Presets keeps its section and preset drag identity", () => {
     label: "Move",
   });
 });
+
+// G2: registry transitions remain discoverable alongside effects.
+test("transition search includes its section name", async () => {
+  const transition = {
+    id: "crossfade",
+    label: "Crossfade",
+    group: "Transitions",
+    kind: "transition" as const,
+    installed: true,
+  };
+  expect(
+    await workerSearch({ items: [transition], query: "transition" }),
+  ).toEqual(["crossfade"]);
+  expect(
+    await workerSearch({ items: [transition], query: "dissolve" }),
+  ).toEqual(["crossfade"]);
+});

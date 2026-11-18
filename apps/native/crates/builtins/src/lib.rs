@@ -1064,6 +1064,9 @@ impl Builtins {
             .map_err(|_| "The Effects panel closed.".to_owned())?;
         let mut backend = backend.shared();
         backend.sync()?;
+        if let Some(definition) = definition.strip_prefix("transition:") {
+            return backend.transition_commands(definition, layer, time, true);
+        }
         let caller = backend.caller;
         let request = if let Some(id) = definition.strip_prefix("preset:") {
             let saved = self

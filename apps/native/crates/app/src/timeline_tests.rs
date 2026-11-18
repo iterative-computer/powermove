@@ -21,6 +21,7 @@ pub(crate) struct Recorder {
     pub effects: RefCell<Vec<HostEffect>>,
     pub reports: RefCell<Vec<String>>,
     pub commands: RefCell<Vec<String>>,
+    pub runs: RefCell<Vec<(String, Vec<serde_json::Value>)>>,
     pub menus: RefCell<Vec<Vec<serde_json::Value>>>,
     pub choice: RefCell<Option<String>>,
     pub skims: RefCell<Vec<Option<f64>>>,
@@ -86,6 +87,10 @@ impl Delegate for Recording {
     }
     fn command(&self, name: &str, _: &mut App) {
         self.0.commands.borrow_mut().push(name.to_owned());
+    }
+    fn run(&self, name: &str, args: Vec<serde_json::Value>, cx: &mut App) {
+        self.0.runs.borrow_mut().push((name.into(), args));
+        self.command(name, cx);
     }
     fn layer_menu_rows(&self, layer: &str, _: &App) -> Vec<serde_json::Value> {
         match &*self.0.published.borrow() {
@@ -3257,6 +3262,7 @@ fn an_effect_dropped_on_a_layers_bar_goes_to_that_layer(cx: &mut TestAppContext)
         *s.recorder.effect_drops.borrow(),
         [crate::timeline_surface::EffectDrop {
             panel: crate::timeline_surface::EFFECTS_PANEL.into(),
+            at: None,
             definition: "gaussianBlur".into(),
             label: "Gaussian Blur".into(),
             layer: Some(layer),
@@ -4652,4 +4658,263 @@ fn g6_visible_tool_buttons_select_split_and_selection(cx: &mut TestAppContext) {
     s.vcx.simulate_click(at, Modifiers::none());
     s.idle(cx);
     assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Selection);
+}
+
+#[gpui::test]
+fn g2_transition_delete_removes_the_capsule_instead_of_the_clip(cx: &mut TestAppContext) {
+    let mut project: serde_json::Value =
+        serde_json::from_str(&crate::v4_view_tests::project_json(2)).unwrap();
+    project["layers"][1]["from"] = serde_json::json!(2.);
+    project["layers"][0]["transitionOut"] =
+        serde_json::json!({"type":"crossfade","dur":0.5,"paired":"l1","offset":-0.25,"p":{}});
+    project["layers"][1]["transitionIn"] =
+        serde_json::json!({"type":"crossfade","dur":0.5,"paired":"l0","offset":-0.25,"p":{}});
+    let mut s = stage_project(cx, project.to_string());
+    let at = s.at(1, 2.);
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.surface.update(&mut s.vcx, |surface, cx| {
+        surface.command("delete", 2., None, false, cx)
+    });
+    s.idle(cx);
+    assert_eq!(*s.recorder.commands.borrow(), ["removeTransition"]);
+    let published = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(
+        pm_kernel::model::list_layers(published.snapshot.root().unwrap(), None).len(),
+        2,
+        "capsule deletion must never delete its clip"
+    );
+    // A selection change from another surface retires capsule ownership.
+    s.recorder.commands.borrow_mut().clear();
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l0".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface
+        .update(&mut s.vcx, |surface, cx| surface.published(cx));
+    s.idle(cx);
+    s.surface.update(&mut s.vcx, |surface, cx| {
+        surface.command("delete", 2., None, false, cx)
+    });
+    s.idle(cx);
+    assert!(
+        !s.recorder
+            .commands
+            .borrow()
+            .iter()
+            .any(|name| name == "removeTransition"),
+        "Delete follows the current selection"
+    );
+}
+
+#[gpui::test]
+fn g2_transition_retiming_cut_disables_menu_and_drop_with_fade_fallback(cx: &mut TestAppContext) {
+    let reason = pm_kernel::commands::transition_edges::CUT_RETIMING_REASON;
+    let mut project: serde_json::Value =
+        serde_json::from_str(&crate::v4_view_tests::strips_json()).unwrap();
+    project["layers"][0]["d"]["timeRemap"] = serde_json::json!(true);
+    let mut s = stage_project(cx, project.to_string());
+    s.surface.update(&mut s.vcx, |surface, cx| {
+        surface.command("timeline.mode:tracks", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let at = s.at(0, 2.);
+    let refusal = s.surface.read_with(&s.vcx, |surface, _| {
+        surface.transition_drop_refusal("transition:crossfade", at)
+    });
+    assert_eq!(refusal.as_deref(), Some(reason));
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    let menus = s.recorder.menus.borrow();
+    let rows = menus.last().expect("cut menu");
+    let add = rows
+        .iter()
+        .find(|row| row["label"] == "Add Transition")
+        .unwrap();
+    assert_eq!(add["disabled"], true);
+    assert_eq!(add["tooltip"], reason);
+    assert!(
+        add["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["disabled"] == true && row["tooltip"] == reason)
+    );
+    let fade = rows
+        .iter()
+        .find(|row| row["id"] == "addEdgeFade")
+        .expect("single-edge fallback");
+    assert_ne!(fade["disabled"], true);
+    drop(menus);
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["b".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let published = s.rig.kernel.published(PROJECT).unwrap();
+    let layers = pm_kernel::model::list_layers(published.snapshot.root().unwrap(), None);
+    let mut menu = crate::layer_commands::TransitionMenuFacts::default();
+    assert_eq!(
+        menu.refusal(&published, &layers, 2.),
+        Some(reason),
+        "B's incoming cut includes the retimed A"
+    );
+    assert_eq!(
+        menu.refusal(&published, &layers, 4.),
+        None,
+        "B's outgoing cut remains available as the playhead moves"
+    );
+}
+
+#[gpui::test]
+fn g2_transition_resizing_uses_the_visible_shortened_span(cx: &mut TestAppContext) {
+    let mut project: serde_json::Value =
+        serde_json::from_str(&crate::v4_view_tests::strips_json()).unwrap();
+    project["assets"]["short"] = serde_json::json!({"id":"short","kind":"video","dur":2.1});
+    project["layers"][0]["d"] = serde_json::json!({"asset":"short","trim":0,"speed":1});
+    project["layers"][1]["d"]["trim"] = serde_json::json!(0.4);
+    project["layers"][0]["transitionOut"] =
+        serde_json::json!({"type":"crossfade","dur":0.5,"offset":-0.25,"paired":"b","p":{}});
+    project["layers"][1]["transitionIn"] =
+        serde_json::json!({"type":"crossfade","dur":0.5,"offset":-0.25,"paired":"a","p":{}});
+    let mut s = stage_project(cx, project.to_string());
+    s.surface.update(&mut s.vcx, |surface, cx| {
+        surface.set_view(Some(200.), Some(0.), Some(0.), cx);
+        surface.command("timeline.mode:tracks", 0., None, false, cx);
+    });
+    s.idle(cx);
+    let rect = s.surface.read_with(&s.vcx, |surface, _| {
+        surface
+            .frame()
+            .unwrap()
+            .ops
+            .iter()
+            .find(|op| op.id == "transition:b:in")
+            .unwrap()
+            .bounds
+    });
+    assert!((rect.width - 40.).abs() < 1e-6);
+    let at = s.origin()
+        + point(
+            px((rect.x + rect.width - 1.) as f32),
+            px((rect.y + rect.height / 2.) as f32),
+        );
+    s.vcx
+        .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    s.vcx
+        .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+    s.idle(cx);
+    assert!(
+        s.recorder.runs.borrow().is_empty(),
+        "a click preserves the larger stored intent"
+    );
+    s.drag(cx, at, at + point(px(-10.), px(0.)), Modifiers::none());
+    let runs = s.recorder.runs.borrow();
+    assert_eq!(runs.len(), 1, "one release action");
+    assert_eq!(runs[0].0, "editTransition");
+    assert!((runs[0].1[2].as_f64().unwrap() - 0.15).abs() < 1e-6);
+    assert!((runs[0].1[3].as_f64().unwrap() + 0.075).abs() < 1e-6);
+}
+
+
+#[gpui::test]
+fn g2_g6_split_tool_keeps_the_pair_on_the_pieces_adjacent_to_the_cut(cx: &mut TestAppContext) {
+    use pm_kernel::commands::{effects::Edge, transition_edges};
+
+    for (clip, time) in [("l0", 1.), ("l1", 3.)] {
+        let mut project: serde_json::Value =
+            serde_json::from_str(&crate::v4_view_tests::project_json(2)).unwrap();
+        project["layers"][1]["from"] = serde_json::json!(2.);
+        project["layers"][0]["transitionOut"] =
+            serde_json::json!({"type":"crossfade","dur":0.5,"paired":"l1","offset":-0.25,"p":{}});
+        project["layers"][1]["transitionIn"] =
+            serde_json::json!({"type":"crossfade","dur":0.5,"paired":"l0","offset":-0.25,"p":{}});
+        let mut s = stage_project(cx, project.to_string());
+        let pair = |s: &Stage| {
+            let p = s.rig.kernel.published(PROJECT).unwrap();
+            let root = p.snapshot.root().unwrap();
+            let peers = |field: &str| {
+                pm_kernel::model::list_layers(root, None)
+                    .into_iter()
+                    .filter_map(|clip| {
+                        let loc = pm_kernel::model::find_layer(root, &clip.id)?;
+                        let row = pm_kernel::model::layer_at(root, &loc)?;
+                        let peer = row.get(field)?.get("paired")?.to_value().as_str()?.to_owned();
+                        Some((clip.id, peer))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let (outs, ins) = (peers("transitionOut"), peers("transitionIn"));
+            assert_eq!(outs.len(), 1);
+            assert_eq!(ins.len(), 1);
+            assert_eq!((&outs[0].0, &outs[0].1), (&ins[0].1, &ins[0].0));
+            let left = pm_kernel::model::find_layer(root, &outs[0].0).unwrap();
+            let left = pm_kernel::model::layer_at(root, &left).unwrap();
+            let duration = transition_edges::fitted_edge(root, left, Edge::Out).unwrap().duration;
+            (outs[0].clone(), duration)
+        };
+        let before = pair(&s);
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.command("timeline.mode:tracks", 0., None, false, cx);
+            t.command("timeline.tool:split", 0., None, false, cx);
+        });
+        s.idle(cx);
+        let origin = s.origin();
+        let at = s.surface.read_with(&s.vcx, |t, _| {
+            let frame = t.frame().unwrap();
+            let op = frame.ops.iter().find(|o| o.id == format!("clip:{clip}")).unwrap();
+            origin + point(
+                px((frame.viewport.layer_column + (time - frame.viewport.scroll_time) * frame.viewport.pps) as f32),
+                px((op.bounds.y + op.bounds.height / 2.) as f32),
+            )
+        });
+        s.vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        s.vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        s.idle(cx);
+        assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.model().index.layers.len()), 3);
+        let after = pair(&s);
+        assert_eq!(after.0.1, "l1");
+        assert_eq!(after.0.0 == "l0", clip == "l1");
+        assert!(after.1 > 0.);
+        s.undo(cx);
+        assert_eq!(pair(&s), before);
+    }
 }

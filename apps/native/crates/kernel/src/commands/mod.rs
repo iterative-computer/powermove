@@ -108,6 +108,7 @@ pub mod shader;
 pub mod text;
 pub mod timing;
 pub mod transform;
+pub mod transition_edges;
 
 pub use captions::CaptionCommand;
 pub use comps::CompCommand;

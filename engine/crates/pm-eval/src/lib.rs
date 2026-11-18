@@ -42,6 +42,7 @@ pub mod bounds;
 pub mod captions;
 mod channel_memo;
 pub mod comp;
+pub mod cut_transition;
 pub mod easing;
 pub mod evaluator;
 pub mod expr;
@@ -66,6 +67,7 @@ pub mod text_level2;
 pub mod text_measure;
 pub mod track_cache;
 pub mod transform;
+pub mod transition_fit;
 
 pub use comp::{Comp, CompError};
 pub use evaluator::{

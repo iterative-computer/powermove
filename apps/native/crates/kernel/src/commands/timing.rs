@@ -726,6 +726,7 @@ fn split(
         .filter_map(|l| values::text(l, "id").map(str::to_owned))
         .collect();
     let mut changed = false;
+    let mut transition_tails = Vec::new();
     for root in &roots {
         let one: HashSet<&str> = [root.as_str()].into_iter().collect();
         let ids: HashSet<String> = layers::expand_groups(&layers, &one).into_iter().collect();
@@ -773,6 +774,7 @@ fn split(
             duplicate_precomp_source(cx, &source, &mut tail)?;
             layers.insert(index, tail);
             tail_by.push((id.clone(), tail_id.clone()));
+            transition_tails.push((id.clone(), tail_id.clone()));
             pairs.push((id, tail_id));
         }
         let tail_of = |id: Option<&str>| -> Option<String> {
@@ -858,11 +860,13 @@ fn split(
         preserve_source_time(cx, comp.as_deref(), &source, &mut tail, t)?;
         duplicate_precomp_source(cx, &source, &mut tail)?;
         layers.insert(index, tail);
+        transition_tails.push((id.clone(), tail_id));
         changed = true;
     }
     if !changed {
         return Ok(());
     }
+    super::transition_edges::after_split(&mut layers, &transition_tails)?;
     let next = layers::normalize_group_stack(layers);
     layers::write_layers(cx, comp.as_deref(), next)
 }

@@ -38,8 +38,8 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
         }
         if (item.kind !== "transition")
           return [{ command: "effect.add", args }];
-        args.edge = "in";
-        return [{ command: "transition.set", args }];
+        args.definition = item.id.replace(/^transition:/, "");
+        return [{ command: "transition.add", args }];
       },
       reveal: (_item, target) => ({
         command: "effect.reveal",
