@@ -106,7 +106,7 @@ fn project_extensions_keep_the_bundle_version_private_and_render_the_original_pi
         true,
     );
     let path = dir.path().join("Synthetic.pmv");
-    pm_builtins::delivery::portable(
+    pm_builtins::delivery::portable_with_extensions(
         snapshot,
         &BTreeMap::new(),
         &path,

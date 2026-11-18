@@ -380,6 +380,17 @@ pub fn portable(
     destination: &Path,
     replace: bool,
     cancel: &AtomicBool,
+) -> Result<PathBuf, String> {
+    portable_with_extensions(snapshot, originals, destination, replace, cancel, |_| Ok(()))
+}
+
+/// The portable media export with extension records added to its save plan.
+pub fn portable_with_extensions(
+    snapshot: &Snapshot,
+    originals: &BTreeMap<String, PathBuf>,
+    destination: &Path,
+    replace: bool,
+    cancel: &AtomicBool,
     add_extensions: impl FnOnce(&mut pm_kernel::SavePlan) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
     use pm_kernel::{

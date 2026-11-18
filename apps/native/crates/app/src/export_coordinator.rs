@@ -752,7 +752,7 @@ async fn execute_inner(
     };
     observe(runtime, json!({"phase":"preparing"})).await;
     if frozen.options.format == Format::Json {
-        let path = pm_builtins::delivery::portable(
+        let path = pm_builtins::delivery::portable_with_extensions(
             &frozen.publication.snapshot,
             &frozen.media.originals,
             &frozen.destination,
