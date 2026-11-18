@@ -601,6 +601,7 @@ struct Events {
     shared: Arc<Shared>,
     kernel: KernelHandle,
     writer: Writer,
+    project: String,
     inbox: Sender<Input>,
     /// The extension whose activation is on the stack, for failure attribution.
     activating: Mutex<Option<String>>,
