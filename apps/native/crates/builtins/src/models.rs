@@ -859,17 +859,17 @@ impl Backend {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                let source = match (e.installed, text("trust").as_deref()) {
-                    (false, _) => "Built in",
-                    (true, Some("local")) => "Custom",
+                let author = text("author");
+                let source = match (e.installed, author.as_deref(), text("trust").as_deref()) {
+                    (false, _, _) => "Built in",
+                    (true, Some("agent"), _) => "AI-created",
+                    (true, _, Some("local")) => "Custom",
                     _ => "Installed",
                 };
                 // Its folder can't be reached (an unmounted volume): kept, said so.
-                let about = if host
-                    .and_then(|h| h.get("unavailable"))
-                    .and_then(pm_model::Value::as_bool)
-                    == Some(true)
-                {
+                let attention = extension_attention(host);
+                let missing = attention == Some("missing");
+                let about = if missing {
                     "Unavailable: its folder can't be reached.".to_owned()
                 } else {
                     text("about").unwrap_or_default()
@@ -877,6 +877,7 @@ impl Backend {
                 json!({"id":e.id,"name":text("name").unwrap_or_else(|| e.id.clone()),"type":extension_kind(&includes),"source":source,
                     // A D11 Stop turns it off for this run, not in the saved choice.
                     "enabled":e.enabled && !e.stopped_this_run(),"about":about,"includes":includes,
+                    "attention":attention,"author":author.filter(|name| name != "agent"),
                     "shortcuts":[],"files":[],"variables":[],"canArchive":can_archive})
             })
             .collect::<Vec<_>>();
@@ -2560,6 +2561,18 @@ pub(crate) fn extension_kind(contributes: &[String]) -> &'static str {
         "Other"
     }
 }
+/// The health the extension host already publishes. Off is a separate choice.
+pub(crate) fn extension_attention(host: Option<&pm_model::Value>) -> Option<&'static str> {
+    let host = host?;
+    if host.get("unavailable").and_then(pm_model::Value::as_bool) == Some(true) {
+        return Some("missing");
+    }
+    match host.get("health")?.get("state")?.as_str()? {
+        "runtime-error" | "activation-error" | "build-error" | "manifest-error" => Some("error"),
+        _ => None,
+    }
+}
+
 /// Deleted from Settings: the folder is in the archive, its values are kept.
 fn archived(entry: &pm_kernel::state::ExtensionEntry) -> bool {
     entry

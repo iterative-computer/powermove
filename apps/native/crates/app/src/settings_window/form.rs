@@ -857,7 +857,7 @@ impl Render<'_, '_> {
                 Widget::Path(path)
             }
             _ if layout(node) == "poster" || node.r#type == "img" => Widget::Image {
-                view: poster(mtm, node),
+                view: settings_image(mtm, node),
                 resource: Rc::default(),
             },
             _ if node.r#type == "text"
@@ -1112,11 +1112,13 @@ fn text_label(mtm: objc2::MainThreadMarker, node: &Node) -> Retained<NSTextField
     field
 }
 
-fn poster(mtm: objc2::MainThreadMarker, node: &Node) -> Retained<NSImageView> {
+fn settings_image(mtm: objc2::MainThreadMarker, node: &Node) -> Retained<NSImageView> {
     let image_view = NSImageView::new(mtm);
     image_view.setTranslatesAutoresizingMaskIntoConstraints(false);
+    let glyph = layout(node) == "glyph";
+    let symbol = metadata(node)["symbol"].as_str().unwrap_or("film");
     let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        &NSString::from_str("film"),
+        &NSString::from_str(symbol),
         node.props
             .get("alt")
             .and_then(Value::as_str)
@@ -1126,8 +1128,8 @@ fn poster(mtm: objc2::MainThreadMarker, node: &Node) -> Retained<NSImageView> {
     image_view.setImage(image.as_deref());
     image_view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
     constraints(&[
-        image_view.widthAnchor().constraintEqualToConstant(100.),
-        image_view.heightAnchor().constraintEqualToConstant(56.),
+        image_view.widthAnchor().constraintEqualToConstant(if glyph { LABEL_SIZE } else { 100. }),
+        image_view.heightAnchor().constraintEqualToConstant(if glyph { LABEL_SIZE } else { 56. }),
     ]);
     image_view
 }

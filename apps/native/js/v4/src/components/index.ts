@@ -256,10 +256,12 @@ export function SegmentedControl(
   props: Omit<Common, "options" | "onChange"> & {
     options: SegmentOption[];
     value: string;
+    /** Let each segment take the space its label needs. */
+    fitContent?: boolean;
     onChange: (id: string) => void;
   },
 ) {
-  const { options, value, onChange, ...rest } = props;
+  const { options, value, fitContent, onChange, ...rest } = props;
   const group = useId();
   const [focusRequest, setFocusRequest] = useState<string>();
   const enabled = options.filter((o) => !o.disabled);
@@ -338,7 +340,7 @@ export function SegmentedControl(
             ...target,
             ...text,
             display: "flex",
-            flexGrow: 1,
+            ...(fitContent ? { flexShrink: 0 } : { flexGrow: 1 }),
             alignItems: "center",
             justifyContent: "center",
             paddingLeft: token("metrics.inset"),
@@ -890,7 +892,10 @@ export function EaseThumbnail(
     metadata: kitMetadata(props, {}),
   });
 }
-export function Switch(props: Bound<boolean>) {
+export function Switch(
+  props: Omit<Bound<boolean>, "binding"> &
+    ({ binding: string } | { binding?: undefined; disabled: true }),
+) {
   return field(
     "switch",
     "toggle",

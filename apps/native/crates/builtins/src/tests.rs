@@ -6728,3 +6728,52 @@ fn properties_key_intent_reveals_the_row_in_the_next_timeline_projection() {
     assert_eq!(row["animated"], true);
     assert_eq!(row["keyAtPlayhead"], true);
 }
+
+#[test]
+fn settings_extensions_use_host_health_and_only_reload_an_enabled_error() {
+    use pm_kernel::state::{ExtensionEntry, StateOp, StateTransaction};
+    let actor = actor();
+    let kernel = actor.handle();
+    let ops = [
+        ("broken", "activation-error", false, true),
+        ("away", "ok", true, true),
+        ("off", "disabled", false, false),
+    ]
+    .into_iter()
+    .map(|(id, health, unavailable, enabled)| {
+        StateOp::Extension(ExtensionEntry {
+            id: id.into(),
+            installed: true,
+            enabled,
+            version: "1.0.0".into(),
+            source: pm_model::json::parse(&json!({"hostRecord":{
+                "name":id, "author":"Synthetic Labs", "health":{"state":health},
+                "unavailable":unavailable
+            }}).to_string()).unwrap(),
+        })
+    })
+    .collect();
+    kernel.state_transaction(StateTransaction { expected_revision: None, ops })
+        .wait().unwrap().unwrap();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend = data::Backend::new(kernel, identity, "settings", false).unwrap();
+    let snapshot = backend.settings_snapshot().unwrap();
+    let extension = |id: &str| snapshot["extensions"].as_array().unwrap().iter()
+        .find(|extension| extension["id"] == id).unwrap();
+    assert_eq!(extension("broken")["attention"], "error");
+    assert_eq!(extension("broken")["author"], "Synthetic Labs");
+    assert_eq!(extension("away")["attention"], "missing");
+    assert!(extension("off")["attention"].is_null());
+
+    let reload = |id| json!({"revision":snapshot["revision"],"action":{"type":"extension.reload","id":id}});
+    assert!(backend.native_command("panel.settings", &reload("away")).is_err());
+    assert!(backend.native_command("panel.settings", &reload("off")).is_err());
+    assert!(backend.native_command("panel.settings", &reload("broken")).is_ok());
+    assert!(backend.native.platform.iter().any(|(op, request)| {
+        op == "command" && request["name"] == "extensionReload.broken"
+    }));
+}

@@ -174,7 +174,7 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
         extensions: Array.from({ length: 60_000 }, (_, i) => extension(i)),
       });
       model.select("extensions");
-      model.viewport(30_000, 20);
+      model.viewport("Effects", 30_000, 20);
     },
   ],
   [
@@ -398,7 +398,7 @@ test("extension row enters details, back returns without clearing search, Delete
   const f = fixture({ extensions: [extension()] });
   f.model.show();
   f.model.select("extensions");
-  f.model.viewport(0, 10);
+  f.model.viewport("Effects", 0, 10);
   const { root, commits } = recorder();
   const render = () =>
     root.render(<SettingsPanel model={f.model} bindings={bindings} />);
@@ -434,7 +434,7 @@ test("an extension's row turns it on or off with its own switch, without opening
   });
   f.model.show();
   f.model.select("extensions");
-  f.model.viewport(0, 10);
+  f.model.viewport("Effects", 0, 10);
   const { root } = recorder();
   await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
   const toggle = find(root, "Fixture 0", "switch");
@@ -444,6 +444,9 @@ test("an extension's row turns it on or off with its own switch, without opening
   expect(f.actions).toEqual([
     { type: "extension.enabled", id: "fixture-0", enabled: false },
   ]);
+  expect(f.model.extensionCounts).toEqual({ all: 1, enabled: 0, off: 1, attention: 0 });
+  await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
+  expect(find(root, "Fixture 0", "switch").props["aria-checked"]).toBe(false);
   expect(f.model.detailId).toBeUndefined();
   root.dispose();
   f.model.dispose();
@@ -563,7 +566,7 @@ test("AX help/count requirements remain declared for the native projection", asy
   });
   f.model.show();
   f.model.select("agents");
-  f.model.viewport(0, 1);
+  f.model.viewport("Effects", 0, 1);
   const { root, commits } = recorder();
   await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
   const { ax } = accessibility(commits);
@@ -696,7 +699,7 @@ test("the installed extensions take their rows' height (PM-386): every row up to
     await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
     const list = root
       .inspect()
-      .nodes.find((n) => n.props.id === "settings.extensions");
+      .nodes.find((n) => n.props.id === "settings.extensions.Effects");
     expect((list?.props.metadata as { rowFloor?: number })?.rowFloor).toBe(
       floor,
     );

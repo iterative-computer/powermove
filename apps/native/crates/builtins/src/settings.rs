@@ -936,6 +936,21 @@ impl Backend {
                     .map(NativeCommand::State)
                     .ok_or_else(|| "Unknown extension".into())
             }
+            Some("extension.reload") => {
+                let id = action["id"].as_str().ok_or("Extension id")?;
+                let state = self.kernel.state();
+                let entry = state.extensions.get(id).ok_or("Unknown extension")?;
+                if !entry.installed || !entry.enabled || entry.stopped_this_run()
+                    || crate::models::extension_attention(entry.source.get("hostRecord")) != Some("error")
+                {
+                    return Err("This extension cannot be reloaded here.".into());
+                }
+                self.native.platform.push((
+                    "command".into(),
+                    json!({"name": format!("extensionReload.{id}")}),
+                ));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             // Mods (S105): Show in Finder and Delete… are the app's (Finder,
             // a confirmation, then the archive), for what the row allows.
             Some(kind @ ("extension.finder" | "extension.archive")) => {

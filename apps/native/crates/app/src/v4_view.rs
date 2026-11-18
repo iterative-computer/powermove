@@ -891,6 +891,7 @@ impl SurfaceView {
         self.quote_selection = Default::default();
         self.disclosures.clear();
         self.sent_ranges.clear();
+        self.list_widths.clear();
         self.controls.clear();
         self.fields.clear();
         self.scrolls.clear();
@@ -921,6 +922,8 @@ impl SurfaceView {
         self.cull.retain(|id| live(id));
         self.row_sources.retain(|id, _| live(id));
         self.scrolls.retain(|id, _| live(id));
+        self.sent_ranges.retain(|id, _| live(id));
+        self.list_widths.retain(|id, _| live(id));
         self.subscriptions.retain(|id, _| live(id));
         self.fields.retain(|id, _| {
             if !live(id) {
@@ -3420,6 +3423,65 @@ impl SurfaceView {
         }
         self.element_close(id, element, children, window, cx)
     }
+    /// Draw the published search field and kit switch when no AppKit slot exists.
+    fn offscreen_control(
+        &self,
+        node: &NodeView,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.appkit
+            || !matches!(node.component, Some(Component::Switch | Component::TextField))
+        {
+            return None;
+        }
+        let t = &self.table.tokens;
+        let props = &self.publication.surface.node(node.id)?.props;
+        if node.component == Some(Component::Switch) {
+            let kit = pm_shell::kit::Kit::new(t, &self.motion, |v| &mut v.motion, window, cx);
+            let on = props.get("value").and_then(Value::as_bool) == Some(true);
+            return Some(
+                kit.switch(format!("v4-switch-{}", node.id), on)
+                    .into_any_element(),
+            );
+        }
+        if props.get("metadata").and_then(|m| m.get("search")) != Some(&Value::Bool(true)) {
+            return None;
+        }
+        let label = self.field_value_or_placeholder(node)?;
+        let has_value = props
+            .get("value")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        let ink = if has_value && !node.disabled {
+            t.colors.text
+        } else {
+            t.colors.muted
+        };
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(t.metrics.gap))
+                .w_full()
+                .child(pm_shell::symbol::symbol(
+                    "magnifyingglass",
+                    t.metrics.symbol_inline,
+                    pm_shell::symbol::Weight::Regular,
+                    t.colors.secondary,
+                    window,
+                ))
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .truncate()
+                        .text_color(rgb(ink))
+                        .child(label),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// A node's element up to its children, and the children that come
     /// before them; `Err` when the node is all there is (a control, a field,
     /// nothing).
@@ -3657,16 +3719,7 @@ impl SurfaceView {
             if node.scroll_y {
                 element = element.overflow_y_scroll();
             }
-            // A wheel step only moves the content, in the Project panel: the
-            // one long list the layer made faster (PM-311). Elsewhere it gained
-            // nothing measurable and held hover and AppKit controls a frame
-            // behind the content (PM-389, PM-390). A native view inside draws
-            // on its own and keeps the full redraw. Nor does one whose content
-            // fits it while it leaves rows out (`v4_cull`: a page in a body
-            // that scrolls around it): a step the layer replays carries its
-            // offset past its range until the next layout, showing rows that
-            // are not built. A scroller that scrolls keeps the layer: what it
-            // records past its edges (one viewport) is what the culling builds.
+            // Project replays wheel steps within a viewport of its layout.
             let fits = self
                 .scrolls
                 .get(&id)
@@ -3972,7 +4025,16 @@ impl SurfaceView {
                 );
             }
         }
-        let mut children: Vec<AnyElement> = vec![];
+        let offscreen_control = self.offscreen_control(node, window, cx);
+        let has_offscreen_control = offscreen_control.is_some();
+        if has_offscreen_control {
+            element = if node.component == Some(Component::TextField) {
+                element.flex_1().min_w(px(0.))
+            } else {
+                element.justify_center().items_end()
+            };
+        }
+        let mut children: Vec<AnyElement> = offscreen_control.into_iter().collect();
         // `data-pm-variant="plate"`: the grading material under a group (the
         // Colour panel's sections stand on what its wheels are made of).
         if crate::v4_compile::variant_of(&self.publication.surface, id) == Some("plate") {
@@ -3990,7 +4052,7 @@ impl SurfaceView {
             );
         }
         // A disabled field mounts no editor; it still shows its value, dimmed.
-        if let Some(text) = self.disabled_field_text(node) {
+        if let Some(text) = self.disabled_field_text(node).filter(|_| !has_offscreen_control) {
             let t = &self.table.tokens;
             children.push(
                 div()
@@ -4249,12 +4311,19 @@ impl SurfaceView {
         {
             return None;
         }
+        self.field_value_or_placeholder(node)
+    }
+
+    fn field_value_or_placeholder(&self, node: &NodeView) -> Option<String> {
         let props = &self.publication.surface.node(node.id)?.props;
-        let value = props.get("value").filter(|v| !v.is_null())?;
-        let text = match (node.number, value.as_f64()) {
-            (Some(number), Some(n)) => number.text(n),
-            _ => value_text(value),
-        };
+        let text = props
+            .get("value")
+            .filter(|v| !v.is_null())
+            .map(|value| match (node.number, value.as_f64()) {
+                (Some(number), Some(n)) => number.text(n),
+                _ => value_text(value),
+            })
+            .unwrap_or_default();
         // An empty one still says what it is for.
         if text.is_empty() {
             return props
@@ -5087,7 +5156,21 @@ impl SurfaceView {
             ));
         }
         if let Some(text) = &node.text {
-            element = element.child(self.plain_or_quote_text(node.id, text));
+            if node.component == Some(Component::PopUpButton) {
+                // The AppKit slot returns before decoration.
+                element = element
+                    .gap(px(t.metrics.gap))
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(text.clone()))
+                    .child(pm_shell::symbol::symbol(
+                        "chevron.up.chevron.down",
+                        t.metrics.symbol_inline,
+                        pm_shell::symbol::Weight::Regular,
+                        if node.disabled { t.colors.muted } else { t.colors.secondary },
+                        window,
+                    ));
+            } else {
+                element = element.child(self.plain_or_quote_text(node.id, text));
+            }
         }
         if let Some(rich) = &node.rich {
             element = element.child(self.quote_text(

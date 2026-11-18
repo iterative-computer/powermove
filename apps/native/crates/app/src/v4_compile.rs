@@ -477,6 +477,36 @@ fn native_panel_root(style: &mut serde_json::Map<String, Value>, root: bool) {
         }
     }
 }
+/// The native pop-up's published title for hosts without AppKit slots.
+fn popup_title(node: &Node) -> Option<SharedString> {
+    let display = node
+        .props
+        .get("metadata")
+        .and_then(|m| m.get("pmKit"))
+        .and_then(|k| k.get("display"))
+        .and_then(Value::as_str);
+    let value = node.props.get("value");
+    let selected = node
+        .props
+        .get("options")
+        .and_then(Value::as_array)
+        .and_then(|options| {
+            options.iter().find_map(|option| {
+                if Some(option) == value {
+                    option.as_str()
+                } else if value.is_some() && option.get("v") == value {
+                    option.get("label").and_then(Value::as_str)
+                } else {
+                    None
+                }
+            })
+        });
+    display
+        .or(selected)
+        .or_else(|| value.and_then(Value::as_str))
+        .map(|s| s.to_owned().into())
+}
+
 fn compile(
     surface: &Surface,
     node: &Node,
@@ -994,7 +1024,13 @@ fn compile(
             .and_then(|edge| table.color(&serde_json::json!({ "token": edge }))),
         scroll_x: compiled.scroll_x,
         semantic: header_id.map(|s| SharedString::from(s.to_owned())),
-        text: (!node.text.is_empty()).then(|| node.text.clone().into()),
+        text: if !node.text.is_empty() {
+            Some(node.text.clone().into())
+        } else if component == Some(Component::PopUpButton) {
+            popup_title(node)
+        } else {
+            None
+        },
         rich: Rich::of(node),
         symbol,
         symbol_size: compiled.symbol_size.unwrap_or(t.metrics.symbol_panel),
@@ -1609,6 +1645,33 @@ mod tests {
     }
     use super::*;
     use serde_json::json;
+
+    #[::core::prelude::v1::test]
+    fn settings_scroll_popup_title_matches_the_native_selection() {
+        let mut node = Node {
+            id: 1,
+            r#type: "button".into(),
+            parent: None,
+            children: vec![],
+            props: json!({
+                "value": "All Types",
+                "options": [{"v": "All Types", "label": "All extension types"}],
+                "metadata": {"pmKit": {"display": "All types"}}
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+            text: String::new(),
+            listeners: Default::default(),
+            input: None,
+        };
+        assert_eq!(popup_title(&node).as_deref(), Some("All types"));
+        node.props.remove("metadata");
+        assert_eq!(popup_title(&node).as_deref(), Some("All extension types"));
+        node.props.remove("options");
+        assert_eq!(popup_title(&node).as_deref(), Some("All Types"));
+    }
+
     #[::core::prelude::v1::test]
     fn number_fields_read_like_the_shipped_field() {
         let facts = |step: f64, precision: Option<u32>| NumberFacts {

@@ -332,7 +332,13 @@ fn capture_agent_states() {
         for (scheme_name, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
             objc2::rc::autoreleasepool(|_| {
                 let tokens = Tokens::new(scheme, Accessibility::default());
-                let (w, h) = if timeline {
+                let (w, h) = if panel == "settings" {
+                    (
+                        (pm_shell::settings_window::MIN_SIZE.0
+                            - pm_shell::settings_window::SIDEBAR_WIDTH) as f32,
+                        pm_shell::settings_window::MIN_SIZE.1 as f32,
+                    )
+                } else if timeline {
                     (900., 200.)
                 } else if panel == "layer-effects" {
                     (320., 200.)
@@ -359,7 +365,11 @@ fn capture_agent_states() {
                         ))
                     },
                 );
-                let fill = tokens.colors.floating;
+                let fill = if panel == "settings" {
+                    tokens.colors.panel_secondary
+                } else {
+                    tokens.colors.floating
+                };
                 let window = cx
                     .open_window(size(px(w), px(h)), |window, cx| {
                         let view = cx.new(|cx| {

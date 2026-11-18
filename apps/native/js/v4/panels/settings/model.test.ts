@@ -239,25 +239,25 @@ test("extension filters, in-place details and stale publications preserve identi
 test("60k extension virtual range is bounded; stable first-visible anchor survives prepend", () => {
   const extensions = Array.from({ length: 60_000 }, (_, i) => extension(i));
   const { model } = fixture({ extensions });
-  model.viewport(30_000, 20);
+  model.viewport("Effects", 30_000, 20);
   expect(model.extensions.length).toBe(60_000);
-  expect(model.visibleExtensions).toHaveLength(60);
-  expect(model.range).toEqual([29_980, 30_040]);
+  expect(model.extensionList("Effects").rows.slice(...model.extensionList("Effects").range)).toHaveLength(60);
+  expect(model.extensionList("Effects").range).toEqual([29_980, 30_040]);
   model.publish(
     publication({
       revision: 2,
       extensions: [extension(60_000), ...extensions],
     }),
   );
-  expect(model.range).toEqual([29_981, 30_041]);
-  expect(model.anchorId).toBe("fixture-30000");
+  expect(model.extensionList("Effects").range).toEqual([29_981, 30_041]);
+  expect(model.extensionList("Effects").anchorId).toBe("fixture-30000");
   for (const args of [
     [-1, 20],
     [NaN, 2],
     [0, Infinity],
     [0.1, 1],
   ])
-    expect(() => model.viewport(args[0], args[1])).toThrow();
+    expect(() => model.viewport("Effects", args[0], args[1])).toThrow();
 });
 test("model service actions acknowledge; archive never invokes a raw delete", async () => {
   const { model, actions } = fixture({
@@ -555,5 +555,40 @@ test("Shortcuts: found by command, menu or key, and its rows send their actions"
   expect(actions).toEqual([
     { type: "shortcut", op: "record", id: "rippleTrimIn" },
   ]);
+  model.dispose();
+});
+
+test("extension categories combine search, capability and status", async () => {
+  const { model } = fixture({
+    extensions: [
+      { ...extension(0), name: "Glow", includes: ["effects", "panels"] },
+      { ...extension(1), name: "Glow Tools", enabled: false, attention: "error" },
+      { ...extension(2), name: "Notes", type: "Panels", attention: "missing" },
+      { ...extension(3), source: "Built in" },
+    ],
+  });
+  model.show("extensions");
+  expect(model.extensionCounts).toEqual({ all: 3, enabled: 2, off: 1, attention: 2 });
+  model.filterExtensions("glow", "Panels");
+  expect(model.extensions.map((item) => item.name)).toEqual(["Glow"]);
+  expect(model.extensionCategory(model.extensions[0]!)).toBe("Panels");
+  model.filterExtensions("", "All Types");
+  model.setExtensionFilter("attention");
+  expect(model.extensions.map((item) => item.name)).toEqual(["Glow Tools", "Notes"]);
+  model.setExtensionFilter("off");
+  expect(model.extensions.map((item) => item.name)).toEqual(["Glow Tools"]);
+  await model.search("notes");
+  expect(model.extensions).toEqual([]);
+  model.dispose();
+});
+
+test.skip("extension disclosure persists across navigation (pending adapter)", () => {
+  const { model } = fixture({ extensions: [extension()] });
+  model.show("extensions");
+  expect(model.extensionGroupOpen("Effects")).toBe(false);
+  model.setExtensionGroupOpen("Effects", true);
+  model.select("general");
+  model.select("extensions");
+  expect(model.extensionGroupOpen("Effects")).toBe(true);
   model.dispose();
 });

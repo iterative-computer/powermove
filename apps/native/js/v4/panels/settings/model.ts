@@ -2,6 +2,7 @@ import { HostClient } from "../../src/host-api";
 import type { Json, EventDetail } from "../../src/protocol";
 import {
   accountRows,
+  extensionTypes,
   generalRows,
   projectRows,
   sections,
@@ -10,10 +11,44 @@ import {
   type ExtensionType,
 } from "./catalogue";
 
+export type ExtensionCategory = Exclude<ExtensionType, "All Types">;
+export type ExtensionFilter = "all" | "enabled" | "off" | "attention";
+
+const capabilities: Record<ExtensionCategory, string[]> = {
+  Effects: ["effects", "transitions"],
+  Panels: ["panels"],
+  Appearance: ["themes"],
+  "Layer Types": ["layers"],
+  Media: ["media"],
+  "Editor Tools": ["commands", "inspector", "keybindings", "palette", "menus", "status", "hooks"],
+  Other: [],
+};
+export const extensionFilterLabels: Record<ExtensionFilter, string> = {
+  all: "All",
+  enabled: "Enabled",
+  off: "Off",
+  attention: "Needs attention",
+};
+function provides(extension: Extension, category: ExtensionCategory) {
+  return extension.type === category ||
+    capabilities[category].some((kind) => extension.includes.includes(kind));
+}
+function extensionSearchText(extension: Extension) {
+  return [
+    extension.id, extension.name, extension.author, extension.type,
+    extension.source, extension.about,
+    extension.attention ? "Needs attention" : extension.enabled ? "Enabled" : "Off",
+    ...extension.includes, ...extension.shortcuts, ...extension.files,
+    ...extension.variables.map(searchable),
+  ].join(" ").toLocaleLowerCase();
+}
+
 export interface Extension {
   id: string;
   name: string;
-  type: Exclude<ExtensionType, "All Types">;
+  type: ExtensionCategory;
+  author?: string | null;
+  attention?: "error" | "missing" | null;
   source: "Built in" | "Installed" | "AI-created" | "Custom";
   enabled: boolean;
   about: string;
@@ -96,6 +131,7 @@ export type Action =
   | { type: "write"; id: string; value: Json }
   | { type: "extension.enabled"; id: string; enabled: boolean }
   | { type: "extension.archive"; id: string }
+  | { type: "extension.reload"; id: string }
   | { type: "extensions.retry" }
   | { type: "extension.finder"; id: string }
   | { type: "store.open" }
@@ -157,8 +193,11 @@ export class SettingsModel {
   reduceMotion = false;
   searching = false;
   matches = emptyMatches();
-  range: [number, number] = [0, 0];
-  anchorId?: string;
+  extensionFilter: ExtensionFilter = "all";
+  extensionTypeOptions: readonly ExtensionType[] = extensionTypes;
+  extensionCounts: Record<ExtensionFilter, number> = { all: 0, enabled: 0, off: 0, attention: 0 };
+  private readonly openExtensionGroups = new Set<ExtensionCategory>();
+  private readonly closedSearchGroups = new Set<ExtensionCategory>();
   readonly pending = new Set<string>();
   /** A row's latest choice while it is saving, shown in its place. */
   private readonly chosen = new Map<string, Json>();
@@ -171,10 +210,12 @@ export class SettingsModel {
   private epoch = 0;
   private searchEpoch = 0;
   private alive = true;
-  private viewportFirst = 0;
-  /** Rows shown before the host reports its first viewport (one screenful). */
-  private viewportCount = 40;
   private filtered: readonly Extension[] = [];
+  private extensionGroups = new Map<ExtensionCategory, Extension[]>();
+  private readonly viewports = new Map<
+    ExtensionCategory,
+    { count: number; anchorId?: string }
+  >();
   constructor(
     readonly host: HostClient,
     publication: Publication,
@@ -245,8 +286,49 @@ export class SettingsModel {
   get detail() {
     return this.publication.extensions.find((e) => e.id === this.detailId);
   }
-  get visibleExtensions() {
-    return this.filtered.slice(...this.range);
+  extensionCategory(extension: Extension): ExtensionCategory {
+    return this.extensionType === "All Types" ? extension.type : this.extensionType;
+  }
+  get searchingExtensions() {
+    return !!(this.query.trim() || this.extensionQuery.trim());
+  }
+  extensionGroupOpen(category: ExtensionCategory) {
+    return this.openExtensionGroups.has(category) ||
+      (this.searchingExtensions && !this.closedSearchGroups.has(category));
+  }
+  setExtensionGroupOpen(category: ExtensionCategory, open: boolean) {
+    if (open) {
+      this.openExtensionGroups.add(category);
+      this.closedSearchGroups.delete(category);
+    } else {
+      this.openExtensionGroups.delete(category);
+      this.closedSearchGroups.add(category);
+    }
+    this.changed();
+  }
+  setExtensionFilter(filter: ExtensionFilter) {
+    if (filter === this.extensionFilter) return;
+    this.extensionFilter = filter;
+    this.reindex();
+    this.changed();
+  }
+  get categories() {
+    return extensionTypes.filter(
+      (type): type is ExtensionCategory =>
+        type !== "All Types" && this.extensionGroups.has(type),
+    );
+  }
+  extensionList(category: ExtensionCategory) {
+    const rows = this.extensionGroups.get(category) ?? [];
+    const viewport = this.viewports.get(category);
+    const anchor = viewport?.anchorId && rows.findIndex((row) => row.id === viewport.anchorId);
+    const first = typeof anchor === "number" && anchor >= 0 ? anchor : 0;
+    const count = viewport?.count ?? 40;
+    const range: [number, number] = [
+      Math.max(0, first - count),
+      Math.min(rows.length, first + count * 2),
+    ];
+    return { rows, range, anchorId: viewport?.anchorId };
   }
   async hydrate() {
     if (!this.alive || !this.profileSettings) return;
@@ -361,6 +443,7 @@ export class SettingsModel {
     return true;
   }
   async search(query: string) {
+    if (query.trim() !== this.query.trim()) this.closedSearchGroups.clear();
     this.query = query;
     this.searching = true;
     const epoch = ++this.searchEpoch;
@@ -377,6 +460,8 @@ export class SettingsModel {
     this.changed();
   }
   filterExtensions(query: string, type: ExtensionType = this.extensionType) {
+    if (query === this.extensionQuery && type === this.extensionType) return;
+    if (query.trim() !== this.extensionQuery.trim()) this.closedSearchGroups.clear();
     this.extensionQuery = query;
     this.extensionType = type;
     this.reindex();
@@ -402,25 +487,44 @@ export class SettingsModel {
         matches.count++;
       }
     }
-    for (const extension of this.publication.extensions) {
-      const text = [
-        extension.name,
-        extension.type,
-        extension.source,
-        extension.about,
-        ...extension.includes,
-        ...extension.shortcuts,
-        ...extension.files,
-        ...extension.variables.map(searchable),
-      ]
-        .join(" ")
-        .toLocaleLowerCase();
-      if (!query || text.includes(query)) {
-        matches.extensions.add(extension.id);
-        matches.sections.add("extensions");
-        matches.count++;
-      }
+    const installed = this.publication.extensions.filter((item) => item.source !== "Built in");
+    this.extensionTypeOptions = extensionTypes.filter((type) =>
+      type === "All Types" || installed.some((extension) => provides(extension, type)),
+    );
+    if (!this.extensionTypeOptions.includes(this.extensionType)) this.extensionType = "All Types";
+    const extensionQuery = this.extensionQuery.trim().toLocaleLowerCase();
+    const filtered: Extension[] = [];
+    const counts = { all: installed.length, enabled: 0, off: 0, attention: 0 };
+    for (const extension of installed) {
+      counts[extension.enabled ? "enabled" : "off"]++;
+      if (extension.attention) counts.attention++;
+      const text = query || extensionQuery ? extensionSearchText(extension) : "";
+      if (query && !text.includes(query)) continue;
+      matches.extensions.add(extension.id);
+      matches.sections.add("extensions");
+      matches.count++;
+      if (extensionQuery && !text.includes(extensionQuery)) continue;
+      if (this.extensionType !== "All Types" && !provides(extension, this.extensionType)) continue;
+      const filter = this.extensionFilter;
+      if (
+        filter === "all" ||
+        (filter === "enabled" && extension.enabled) ||
+        (filter === "off" && !extension.enabled) ||
+        (filter === "attention" && extension.attention)
+      ) filtered.push(extension);
     }
+    this.filtered = filtered;
+    this.extensionGroups.clear();
+    for (const extension of filtered) {
+      const category = this.extensionCategory(extension);
+      let group = this.extensionGroups.get(category);
+      if (!group) {
+        group = [];
+        this.extensionGroups.set(category, group);
+      }
+      group.push(extension);
+    }
+    this.extensionCounts = counts;
     // A shortcut is found by its command, its menu, or its key written as
     // glyphs (⌥⇧S) or words (option shift s, opt-shift-s, alt+shift+s).
     const words = query.replace(/[+-]/g, " ");
@@ -463,40 +567,14 @@ export class SettingsModel {
       for (const section of this.availableSections)
         matches.sections.add(section);
     this.matches = matches;
-    const extensionQuery = this.extensionQuery.trim().toLocaleLowerCase();
-    this.filtered = this.publication.extensions.filter(
-      (e) =>
-        matches.extensions.has(e.id) &&
-        (this.extensionType === "All Types" || e.type === this.extensionType) &&
-        `${e.name} ${e.type} ${e.source} ${e.about}`
-          .toLocaleLowerCase()
-          .includes(extensionQuery),
-    );
-    if (this.anchorId) {
-      const at = this.filtered.findIndex((e) => e.id === this.anchorId);
-      if (at >= 0) this.viewportFirst = at;
-    }
-    this.range = [
-      Math.max(0, this.viewportFirst - this.viewportCount),
-      Math.min(
-        this.filtered.length,
-        this.viewportFirst + this.viewportCount * 2,
-      ),
-    ];
-    if (this.range[0] > this.range[1]) this.range[0] = this.range[1];
   }
-  /** Host supplies logical row indices: viewport plus one viewport above/below. */
-  viewport(first: number, count: number) {
+  /** Each native category list reports its own logical row indices. */
+  viewport(category: ExtensionCategory, first: number, count: number) {
     if (![first, count].every(Number.isSafeInteger) || first < 0 || count < 0)
       throw new RangeError("Invalid viewport");
-    const start = Math.min(first, this.filtered.length);
-    this.viewportFirst = start;
-    this.viewportCount = count;
-    this.anchorId = this.filtered[start]?.id;
-    this.range = [
-      Math.max(0, start - count),
-      Math.min(this.filtered.length, start + count * 2),
-    ];
+    const rows = this.extensionGroups.get(category) ?? [];
+    const anchorId = rows[Math.min(first, rows.length)]?.id;
+    this.viewports.set(category, { count, anchorId });
     this.changed();
   }
   inspect() {
@@ -507,7 +585,6 @@ export class SettingsModel {
       detailId: this.detailId,
       open: this.open,
       extensionCount: this.filtered.length,
-      range: [...this.range],
       pending: [...this.pending],
       failedIds: [...this.failures.keys()],
     };

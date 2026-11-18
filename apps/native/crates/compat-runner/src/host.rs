@@ -146,6 +146,13 @@ pub fn rescan_all() {
         .retain(|inbox| inbox.send(Input::Rescan).is_ok());
 }
 
+/// Settings uses the same per-extension recovery as the panel's Reload.
+pub fn reload_all(id: &str) {
+    HOSTS.lock().unwrap().retain(|inbox| {
+        inbox.send(Input::ReloadExtension(id.to_owned())).is_ok()
+    });
+}
+
 pub struct HostConfig {
     pub kernel: KernelHandle,
     pub project: String,
@@ -203,6 +210,7 @@ enum Input {
     StorePage(String, u64, Value),
     StoreDom(String),
     ReloadStore(String, Writer),
+    ReloadExtension(String),
     Dom,
     Canvases,
     Health(String, Value),
@@ -1596,14 +1604,9 @@ impl Owner {
             }
             Input::StoreDom(id) => self.drain_store_dom(&id),
             Input::ReloadStore(id, owner) => {
-                // A retired helper cannot restart a later helper of this id.
-                if let Some(index) = self.stores.iter().position(|s| s.extension.id == id && s.owner == owner) {
-                    let store = self.stores.remove(index);
-                    self.stop_store(store);
-                    self.sync_stores();
-                    self.publish_store();
-                }
+                self.reload_store(&id, Some(owner));
             }
+            Input::ReloadExtension(id) => self.reload_extension(&id),
             Input::Panel(id, open) => {
                 if open {
                     self.open.entry(id.clone()).or_default();
@@ -2200,7 +2203,7 @@ impl Owner {
                     // next launch's first publication.
                     let stopped = !FIRST_ENTRIES.load(Ordering::Acquire)
                         && previous.is_some_and(|e| e.stopped_this_run());
-                    let mut summary = json!({"name":record["manifest"]["name"],"about":record["manifest"]["description"],
+                    let mut summary = json!({"name":record["manifest"]["name"],"about":record["manifest"]["description"],"author":record["manifest"]["author"],
                     "health":record["health"],"trust":record["trust"],"contributes":record["manifest"]["contributes"]});
                     if stopped {
                         summary["stopped"] = json!(true);
@@ -2461,6 +2464,40 @@ impl Owner {
             .and_then(|r| r["manifest"]["name"].as_str())
             .unwrap_or(id)
             .to_owned()
+    }
+    fn reload_store(&mut self, id: &str, owner: Option<Writer>) {
+        let live = self.stores.iter().position(|store| {
+            store.extension.id == id && owner.is_none_or(|owner| store.owner == owner)
+        });
+        if let Some(index) = live {
+            let store = self.stores.remove(index);
+            self.stop_store(store);
+        } else if owner.is_some() {
+            // A retired helper cannot restart a later helper of this id.
+            return;
+        }
+        self.sync_stores();
+        self.publish_store();
+    }
+    fn reload_extension(&mut self, id: &str) {
+        let Some(record) = self.records.iter_mut().find(|record| record["id"] == id) else {
+            return;
+        };
+        if record["enabled"] != true {
+            return;
+        }
+        match record["health"]["state"].as_str() {
+            Some("build-error" | "manifest-error") => self.rescan(),
+            Some("activation-error" | "runtime-error") if record["confined"] == true => {
+                record["health"] = json!({"state":"ok"});
+                self.reload_store(id, None);
+                self.publish_records();
+            }
+            Some("activation-error" | "runtime-error") => {
+                self.eval(&format!("__compat.loader.reload({})", json!(id)));
+            }
+            _ => {}
+        }
     }
     fn start_store(&mut self, id: &str, hash: String) {
         let Some((found, graph)) = self.confined.get(id).cloned() else {

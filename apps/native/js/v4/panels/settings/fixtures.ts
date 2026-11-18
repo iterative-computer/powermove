@@ -78,6 +78,11 @@ export function fixture(patch: Partial<Publication> = {}) {
         actions.push(action);
         return {
           ...model.publication,
+          ...(action.type === "extension.enabled" ? {
+            extensions: model.publication.extensions.map((extension) =>
+              extension.id === action.id ? { ...extension, enabled: action.enabled } : extension,
+            ),
+          } : {}),
           revision: model.publication.revision + 1,
         };
       },

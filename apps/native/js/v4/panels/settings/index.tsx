@@ -3,12 +3,19 @@ import type { ComponentChildren } from "preact";
 import * as UI from "../../src/components";
 import type { Json, SurfaceEvent } from "../../src/protocol";
 import {
-  extensionTypes,
+  type ExtensionType,
   sectionCopy,
   type Row,
   type Section,
 } from "./catalogue";
-import { SettingsModel, type SpeechModel } from "./model";
+import {
+  extensionFilterLabels,
+  SettingsModel,
+  type Extension,
+  type ExtensionCategory,
+  type ExtensionFilter,
+  type SpeechModel,
+} from "./model";
 export { SettingsModel } from "./model";
 export type {
   SettingsServices,
@@ -233,23 +240,33 @@ function RowCopy({
 }
 function Group({
   title,
+  symbol,
   muted,
   children,
 }: {
   title: string;
+  symbol?: string;
   muted?: boolean;
   children: ComponentChildren;
   key?: string;
 }) {
+  const heading = (
+    <text
+      role="heading"
+      metadata={{ settingsLayout: muted ? "mutedHeading" : "heading" }}
+    >
+      {title}
+    </text>
+  );
   return (
     <div role="group" label={title} metadata={{ settingsLayout: "group" }}>
       <div metadata={{ settingsLayout: "headingLine" }}>
-        <text
-          role="heading"
-          metadata={{ settingsLayout: muted ? "mutedHeading" : "heading" }}
-        >
-          {title}
-        </text>
+        {symbol ? (
+          <div metadata={{ settingsLayout: "line" }}>
+            <img metadata={{ settingsLayout: "glyph", symbol }} alt="" />
+            {heading}
+          </div>
+        ) : heading}
       </div>
       <UI.FormGroup label={title}>{children}</UI.FormGroup>
     </div>
@@ -377,6 +394,95 @@ function SpeechRow({
     </div>
   );
 }
+const extensionSymbols: Record<ExtensionCategory, string> = {
+  Effects: "wand.and.stars",
+  Panels: "rectangle.split.2x1",
+  Appearance: "paintpalette",
+  "Layer Types": "square.3.layers.3d",
+  Media: "film",
+  "Editor Tools": "hammer",
+  Other: "puzzlepiece.extension",
+};
+const extensionFilters = Object.keys(extensionFilterLabels) as ExtensionFilter[];
+const attentionLabel = (item: Extension) =>
+  item.attention === "missing" ? "Missing files" : "Needs attention";
+
+function ExtensionRows({
+  category,
+  model,
+}: {
+  key?: ExtensionCategory;
+  category: ExtensionCategory;
+  model: SettingsModel;
+}) {
+  const { rows, range, anchorId } = model.extensionList(category);
+  return (
+    <Group title={`${category} · ${rows.length}`} symbol={extensionSymbols[category]}>
+      <virtual-list
+        id={`settings.extensions.${category}`}
+        role="list"
+        label={category}
+        count={rows.length}
+        range={range}
+        metadata={{
+          rowCount: rows.length,
+          rowFloor: Math.min(rows.length, 40),
+          rowHeightToken: "metrics.form_row",
+          anchorId: anchorId ?? "",
+        }}
+        onRangeChange={(event) => {
+          if (event.range)
+            model.viewport(category, event.range[0], event.range[1] - event.range[0]);
+        }}
+      >
+        {rows.slice(...range).map((item) => (
+          <div
+            key={item.id}
+            id={`settings.extension.${item.id}`}
+            role="listitem"
+            label={item.name}
+            metadata={{ settingsLayout: "row" }}
+          >
+            <UI.PushButton
+              tabIndex={-1}
+              label={item.name}
+              metadata={{ settingsLayout: "nameButton" }}
+              onClick={() => model.viewExtension(item.id)}
+            />
+            <div metadata={{ settingsLayout: "line" }}>
+              <Copy secondary>{[item.author, item.source].filter(Boolean).join(" · ")}</Copy>
+              {item.attention && (
+                <text role="status" metadata={{ settingsLayout: "error" }}>
+                  {attentionLabel(item)}
+                </text>
+              )}
+              <UI.Switch
+                {...(item.binding
+                  ? { binding: item.binding, disabled: !model.services || model.pending.has(item.id) }
+                  : { disabled: true as const })}
+                label={item.name}
+                value={item.enabled}
+                onChange={(event) => {
+                  if (typeof event.value === "boolean")
+                    void model.perform({
+                      type: "extension.enabled",
+                      id: item.id,
+                      enabled: event.value,
+                    });
+                }}
+              />
+              <Button
+                label="Details"
+                accessibilityLabel={`Details for ${item.name}`}
+                onClick={() => model.viewExtension(item.id)}
+              />
+            </div>
+          </div>
+        ))}
+      </virtual-list>
+    </Group>
+  );
+}
 function Extensions({ model, bindings }: SettingsPanelProps) {
   const detail = model.detail;
   // Its page as every Settings page: named groups, each a card of rows.
@@ -401,6 +507,20 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
           <div role="group" label="About" metadata={{ settingsLayout: "row" }}>
             <RowCopy title="About" detail={detail.about} />
           </div>
+          {detail.attention && (
+            <div role="group" label="Extension status" metadata={{ settingsLayout: "row" }}>
+              <RowCopy title="Extension status" detail={attentionLabel(detail)} />
+              {detail.enabled && detail.attention === "error" && (
+                <Button
+                  label="Reload"
+                  disabled={!model.services || model.pending.has(detail.id)}
+                  onClick={() => {
+                    void model.perform({ type: "extension.reload", id: detail.id });
+                  }}
+                />
+              )}
+            </div>
+          )}
           {detail.includes.length > 0 && (
             <div
               role="group"
@@ -474,153 +594,88 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
         )}
       </div>
     );
+  const counts = model.extensionCounts;
+  const state = model.publication.extensionsState;
   return (
     <>
-      {/* The filter stands on the page's text column, over the list's card. */}
+      <div metadata={{ settingsLayout: "copy" }}>
+        <text role="heading" metadata={{ settingsLayout: "heading" }}>Extensions</text>
+        <Copy secondary>{sectionCopy.extensions.description}</Copy>
+      </div>
       <div metadata={{ settingsLayout: "line" }}>
         <UI.TextField
-          label="Filter extensions"
+          label="Search extensions"
           binding={bindings.extensionSearch}
           value={model.extensionQuery}
           metadata={{
-            placeholder: "Filter",
+            placeholder: "Search extensions",
             search: true,
             settingsLayout: "filterField",
           }}
-          onInput={(e) => {
-            if (typeof e.value === "string") model.filterExtensions(e.value);
+          onInput={(event) => {
+            if (typeof event.value === "string") model.filterExtensions(event.value);
           }}
         />
         <UI.PopUpButton
           label="Extension Type"
           binding={bindings.extensionType}
           value={model.extensionType}
-          options={[...extensionTypes]}
-          onChange={(e) => {
-            if (
-              extensionTypes.includes(
-                e.value as (typeof extensionTypes)[number],
-              )
-            )
-              model.filterExtensions(
-                model.extensionQuery,
-                e.value as (typeof extensionTypes)[number],
-              );
+          options={model.extensionTypeOptions.map((type) => ({
+            v: type,
+            label: type === "All Types" ? "All types" : type,
+          }))}
+          onChange={(event) => {
+            const type = event.value as ExtensionType;
+            if (model.extensionTypeOptions.includes(type))
+              model.filterExtensions(model.extensionQuery, type);
           }}
         />
       </div>
-      <Group title="Installed">
-        <div metadata={{ settingsLayout: "column" }}>
-          {model.publication.extensionsState === "loading" ? (
-            <UI.ProgressRow label="Loading extensions…" />
-          ) : model.publication.extensionsState === "error" ? (
-            <UI.EmptyState
-              label="Extensions couldn’t be loaded."
-              explanation=""
-              action={
-                <Button
-                  label="Try Again"
-                  disabled={!model.services}
-                  onClick={() => {
-                    void model.perform({ type: "extensions.retry" });
-                  }}
-                />
-              }
+      <div metadata={{ settingsLayout: "line" }}>
+        <UI.SegmentedControl
+          label="Extension status"
+          value={model.extensionFilter}
+          fitContent
+          options={extensionFilters.map((filter) => ({
+            id: filter,
+            label: `${extensionFilterLabels[filter]} ${counts[filter]}`,
+          }))}
+          onChange={(id) => model.setExtensionFilter(id as ExtensionFilter)}
+        />
+      </div>
+      {state === "loading" ? (
+        <UI.ProgressRow label="Loading extensions…" />
+      ) : state === "error" ? (
+        <UI.EmptyState
+          label="Extensions couldn’t be loaded."
+          explanation=""
+          action={
+            <Button
+              label="Try Again"
+              disabled={!model.services}
+              onClick={() => { void model.perform({ type: "extensions.retry" }); }}
             />
-          ) : model.publication.extensionsState === "unavailable" ? (
-            <UI.EmptyState
-              label="Extensions are unavailable in this session."
-              explanation=""
-              action={null}
-            />
-          ) : model.extensions.length === 0 &&
-            (model.extensionQuery.trim() ||
-              model.extensionType !== "All Types") ? (
-            <UI.EmptyState
-              label="No Results"
-              explanation="No extensions match this filter."
-              action={null}
-            />
-          ) : model.extensions.length === 0 ? (
-            <UI.EmptyState
-              label="No Extensions"
-              explanation="Extensions you install appear here."
-              action={null}
-            />
+          }
+        />
+      ) : state === "unavailable" ? (
+        <UI.EmptyState label="Extensions are unavailable in this session." explanation="" action={null} />
+      ) : (
+        <>
+          {model.categories.length > 0 ? (
+            model.categories.map((category) => <ExtensionRows key={category} category={category} model={model} />)
           ) : (
-            // API GAP: structural virtual-list is the existing wire primitive; the kit
-            // has no VirtualList/source-list component or AXRowCount projection yet.
-            <virtual-list
-              id="settings.extensions"
-              role="list"
-              label="Extensions"
-              count={model.extensions.length}
-              range={model.range}
-              metadata={{
-                rowCount: model.extensions.length,
-                // Its height (PM-386): every row up to forty, in the page
-                // that scrolls them; past that a forty-row list scrolls
-                // itself and shows only what is in view.
-                rowFloor: Math.min(model.extensions.length, 40),
-                rowHeightToken: "metrics.form_row",
-                anchorId: model.anchorId ?? "",
-              }}
-              onRangeChange={(event) => {
-                if (event.range)
-                  model.viewport(
-                    event.range[0],
-                    event.range[1] - event.range[0],
-                  );
-              }}
-            >
-              {model.visibleExtensions.map((extension) => (
-                <div
-                  key={extension.id}
-                  id={`settings.extension.${extension.id}`}
-                  role="listitem"
-                  label={extension.name}
-                  metadata={{ settingsLayout: "row" }}
-                >
-                  <UI.PushButton
-                    tabIndex={-1}
-                    label={extension.name}
-                    metadata={{ settingsLayout: "nameButton" }}
-                    onClick={() => model.viewExtension(extension.id)}
-                  />
-                  <div metadata={{ settingsLayout: "line" }}>
-                    <Copy
-                      secondary
-                    >{`${extension.type} · ${extension.source}`}</Copy>
-                    {extension.binding && (
-                      <UI.Switch
-                        label={extension.name}
-                        binding={extension.binding}
-                        value={extension.enabled}
-                        disabled={
-                          !model.services || model.pending.has(extension.id)
-                        }
-                        onChange={(e) => {
-                          if (typeof e.value === "boolean")
-                            void model.perform({
-                              type: "extension.enabled",
-                              id: extension.id,
-                              enabled: e.value,
-                            });
-                        }}
-                      />
-                    )}
-                    <Button
-                      label="Details"
-                      accessibilityLabel={`Details for ${extension.name}`}
-                      onClick={() => model.viewExtension(extension.id)}
-                    />
-                  </div>
-                </div>
-              ))}
-            </virtual-list>
+            <UI.EmptyState
+              label={counts.all > 0 ? "No Results" : "No Extensions"}
+              explanation={counts.all > 0 ? "No extensions match this filter." : "Extensions you install appear here."}
+              action={null}
+            />
           )}
-        </div>
-      </Group>
+          <div metadata={{ settingsLayout: "line" }}>
+            <Copy secondary>{`${counts.all} installed`}</Copy>
+            <Copy secondary>{`${counts.enabled} enabled · ${counts.off} off`}</Copy>
+          </div>
+        </>
+      )}
       <Group title="Store">
         <div
           role="group"
@@ -1077,7 +1132,7 @@ function SectionContent({
     >
       {/* The toolbar names the section; a search lists several, each
           under its name. */}
-      {model.query.trim() ? <text role="heading">{copy.title}</text> : null}
+      {searching && section !== "extensions" ? <text role="heading">{copy.title}</text> : null}
       {section === "project" && !model.query.trim() ? (
         <ProjectHeader model={model} bindings={bindings} window={window} />
       ) : null}
