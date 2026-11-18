@@ -948,7 +948,7 @@ impl SurfaceView {
         if let Some(control) = self.controls.get(&id) {
             control.update(cx, |v, _| {
                 v.display(display.as_deref());
-                v.set_tab_index(view.tab_index.unwrap_or(0) as isize);
+                v.set_tab_index(view.tab_index.unwrap_or(0));
             });
             if matches!(kind, crate::v4_control::Kind::Push)
                 && let Some(label) = node.props.get("label").and_then(Value::as_str)
@@ -1042,7 +1042,7 @@ impl SurfaceView {
                 window,
                 cx,
             );
-            control.set_tab_index(view.tab_index.unwrap_or(0) as isize);
+            control.set_tab_index(view.tab_index.unwrap_or(0));
             control
         });
         let generation = self.publication.generation;
