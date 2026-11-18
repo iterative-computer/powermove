@@ -725,7 +725,15 @@ impl SurfaceView {
                 self.option_sets.insert(id, options);
             }
             if view.scroll_y || view.scroll_x {
-                self.scrolls.entry(id).or_default();
+                self.scrolls.entry(id).or_insert_with(|| {
+                    let scroll = ScrollHandle::new();
+                    if self.publication.panel == "settings"
+                        && view.semantic.as_deref() == Some("settings.detail")
+                    {
+                        scroll.preserve_bottom_on_layout();
+                    }
+                    scroll
+                });
             }
             let kind = self
                 .appkit

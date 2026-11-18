@@ -3233,7 +3233,10 @@ impl Interactivity {
                 .map(|handle| handle.0.borrow_mut());
             if let Some(mut scroll_handle_state) = tracked_scroll_handle.as_deref_mut() {
                 scroll_handle_state.overflow = style.overflow;
-                scroll_to_bottom = mem::take(&mut scroll_handle_state.scroll_to_bottom);
+                scroll_to_bottom = mem::take(&mut scroll_handle_state.scroll_to_bottom)
+                    || (scroll_handle_state.preserve_bottom_on_layout
+                        && scroll_handle_state.max_offset.y > px(0.)
+                        && scroll_offset.borrow().y <= -scroll_handle_state.max_offset.y);
             }
 
             let scroll_max = self.effective_scroll_max(bounds.size, style, window);
@@ -5151,6 +5154,7 @@ struct ScrollHandleState {
     max_offset: Point<Pixels>,
     child_bounds: Vec<Bounds<Pixels>>,
     scroll_to_bottom: bool,
+    preserve_bottom_on_layout: bool,
     overflow: Point<Overflow>,
     active_item: Option<ScrollActiveItem>,
 }
@@ -5318,6 +5322,12 @@ impl ScrollHandle {
     pub fn scroll_to_bottom(&self) {
         let mut state = self.0.borrow_mut();
         state.scroll_to_bottom = true;
+    }
+
+    /// Keep the viewport at the bottom when layout changes the scroll range
+    /// while it is already at the end of scrollable content.
+    pub fn preserve_bottom_on_layout(&self) {
+        self.0.borrow_mut().preserve_bottom_on_layout = true;
     }
 
     /// The cell holding the offset (a scroll layer's key).
