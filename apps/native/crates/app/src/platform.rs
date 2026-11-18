@@ -782,25 +782,8 @@ thread_local! {
     /// Where this session last exported to.
     static LAST_EXPORT_FOLDER: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
-/// The folder an export's panel starts in (PM-491): the project file's own
-/// folder, else where this session last exported, else Movies; never the
-/// folder the last import came from.
-pub fn export_start(project_file: Option<&std::path::Path>) -> Option<PathBuf> {
-    let last = LAST_EXPORT_FOLDER.with(|l| l.borrow().clone());
-    let movies = std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Movies"));
-    export_start_from(project_file, last, movies)
-}
-fn export_start_from(
-    project_file: Option<&std::path::Path>,
-    last: Option<PathBuf>,
-    movies: Option<PathBuf>,
-) -> Option<PathBuf> {
-    project_file
-        .and_then(std::path::Path::parent)
-        .map(std::path::Path::to_path_buf)
-        .or(last)
-        .or(movies)
-        .filter(|folder| folder.is_dir())
+pub fn last_export_folder() -> Option<PathBuf> {
+    LAST_EXPORT_FOLDER.with(|last| last.borrow().clone())
 }
 /// Remembers where an export went, for the next one's panel.
 pub fn exported_to(destination: &std::path::Path) {
@@ -814,15 +797,6 @@ fn start_in(panel: &NSSavePanel, folder: Option<&std::path::Path>) {
         panel.setDirectoryURL(Some(&url));
     }
 }
-pub fn export_destination(
-    window: &NSWindow,
-    folder: bool,
-    name: &str,
-    start: Option<PathBuf>,
-) -> async_channel::Receiver<Option<PathBuf>> {
-    export_destination_in(window, folder, name, start.as_deref())
-}
-
 pub fn export_destination_in(
     window: &NSWindow,
     folder: bool,
@@ -1071,10 +1045,10 @@ mod export_start_tests {
         }
         let file = project.join("Paper.pmv");
         let start = |file: Option<&std::path::Path>, last: Option<std::path::PathBuf>| {
-            super::export_start_from(file, last, Some(movies.clone()))
+            crate::document_paths::export_directory(root.path(), file, None, last.as_deref())
         };
-        assert_eq!(start(Some(&file), Some(last.clone())), Some(project.clone()));
-        assert_eq!(start(None, Some(last.clone())), Some(last.clone()));
-        assert_eq!(start(None, None), Some(movies.clone()));
+        assert_eq!(start(Some(&file), Some(last.clone())), project.clone());
+        assert_eq!(start(None, Some(last.clone())), last.clone());
+        assert_eq!(start(None, None), movies.clone());
     }
 }

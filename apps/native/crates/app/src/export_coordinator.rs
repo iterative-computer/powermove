@@ -154,10 +154,22 @@ impl Controller {
         let document = p.snapshot.doc_id;
         let filename = format!("{}.{}", p.snapshot.root().and_then(|r| r.get("name"))
             .and_then(crate::node_string).unwrap_or("Untitled"), typed.format.extension());
-        let picker = crate::platform::export_destination(&self.host.borrow().window,
-            typed.format == Format::Png, &filename, crate::platform::export_start(self.path.as_deref()));
+        let profile = self.profile.clone();
+        let project_path = self.path.clone();
+        let project = p.project.clone();
+        let last_export = crate::platform::last_export_folder();
         cx.spawn(async move |this, cx| {
-            let path = picker.recv().await.ok().flatten();
+            let folder = cx.background_executor().spawn(async move {
+                let key = crate::document_paths::export_key(&project, project_path.as_deref());
+                crate::document_paths::export_folder(&profile, &key, project_path.as_deref(), last_export.as_deref())
+            }).await;
+            let picker = this.update(cx, |v, _| crate::platform::export_destination_in(
+                &v.host.borrow().window, typed.format == Format::Png, &filename, Some(&folder),
+            ));
+            let path = match picker {
+                Ok(picker) => picker.recv().await.ok().flatten(),
+                Err(_) => return,
+            };
             let _ = this.update(cx, |v, cx| {
                 if !v.published.as_ref().is_some_and(|p| p.snapshot.doc_id == document)
                     || !v.builtins.runtime.as_ref().is_some_and(|r| Arc::ptr_eq(r, &runtime)) { return; }
@@ -259,6 +271,7 @@ impl Controller {
             typed.format != Format::Png && !crate::platform::reviewing_saves(), |d| d.1);
         let profile = self.profile.clone();
         let project_path = self.path.clone();
+        let last_export = crate::platform::last_export_folder();
         let job = Arc::new(Run {
             handle: Mutex::new(None),
             cancel: AtomicBool::new(false),
@@ -278,6 +291,7 @@ impl Controller {
                         &folder_profile,
                         &key,
                         project_path.as_deref(),
+                        last_export.as_deref(),
                     );
                     (folder, key)
                 })

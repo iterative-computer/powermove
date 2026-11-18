@@ -8,8 +8,30 @@ pub fn project_directory(home: &Path, last: Option<&Path>) -> PathBuf {
     last.map(Path::to_path_buf)
         .unwrap_or_else(|| home.join("Movies/Powermove"))
 }
-pub fn export_directory(home: &Path, project: Option<&Path>, last: Option<&Path>) -> PathBuf {
-    last.or_else(|| project.and_then(Path::parent))
+fn writable_directory(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    path.is_dir()
+        && std::ffi::CString::new(path.as_os_str().as_bytes()).is_ok_and(|path| {
+            // The C string stays alive through the POSIX access check.
+            unsafe { libc::access(path.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
+        })
+}
+
+pub fn export_directory(
+    home: &Path,
+    project: Option<&Path>,
+    remembered: Option<&Path>,
+    session_last: Option<&Path>,
+) -> PathBuf {
+    remembered
+        .filter(|folder| writable_directory(folder))
+        .or_else(|| {
+            project
+                .and_then(Path::parent)
+                .filter(|folder| folder.is_dir())
+        })
+        .or_else(|| session_last.filter(|folder| folder.is_dir()))
         .map(Path::to_path_buf)
         .unwrap_or_else(|| home.join("Movies"))
 }
@@ -77,8 +99,18 @@ fn prepare_save_folder(profile: &Path, home: &Path) -> PathBuf {
         home.to_path_buf()
     }
 }
-pub fn export_folder(profile: &Path, id: &str, project: Option<&Path>) -> PathBuf {
-    export_directory(&home(), project, remembered(profile, Some(id)).as_deref())
+pub fn export_folder(
+    profile: &Path,
+    id: &str,
+    project: Option<&Path>,
+    session_last: Option<&Path>,
+) -> PathBuf {
+    export_directory(
+        &home(),
+        project,
+        remembered(profile, Some(id)).as_deref(),
+        session_last,
+    )
 }
 /// Preference failure never changes the durable save/export result.
 pub fn remember(profile: &Path, project: Option<&str>, destination: &Path) {
@@ -122,21 +154,28 @@ mod tests {
         );
     }
     #[test]
-    fn export_prefers_per_project_history_then_project_then_movies() {
-        let home = Path::new("/editor");
-        assert_eq!(export_directory(home, None, None), home.join("Movies"));
+    fn export_prefers_per_project_history_then_project_then_session_then_movies() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let project = home.join("projects");
+        let remembered = home.join("deliveries");
+        let last = home.join("last-export");
+        for folder in [&project, &remembered, &last] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        let file = project.join("cut.pmv");
+        let start = |file: Option<&Path>, remembered: Option<&Path>, last: Option<&Path>| {
+            export_directory(home, file, remembered, last)
+        };
         assert_eq!(
-            export_directory(home, Some(Path::new("/projects/cut.pmv")), None),
-            PathBuf::from("/projects")
+            start(Some(&file), Some(&remembered), Some(&last)),
+            remembered
         );
-        assert_eq!(
-            export_directory(
-                home,
-                Some(Path::new("/projects/cut.pmv")),
-                Some(Path::new("/deliveries"))
-            ),
-            PathBuf::from("/deliveries")
-        );
+        assert_eq!(start(Some(&file), None, Some(&last)), project);
+        assert_eq!(start(None, None, Some(&last)), last);
+        assert_eq!(start(None, None, None), home.join("Movies"));
+        std::fs::remove_dir(&remembered).unwrap();
+        assert_eq!(start(Some(&file), Some(&remembered), Some(&last)), project);
     }
     #[test]
     fn first_save_and_save_as_ask_saved_saves_do_not() {

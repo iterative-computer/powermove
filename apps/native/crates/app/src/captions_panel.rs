@@ -814,6 +814,7 @@ impl Controller {
         .replace(['/', '\\', ':'], "-");
         let profile = self.profile.clone();
         let project_path = self.path.clone();
+        let last_export = crate::platform::last_export_folder();
         let Some(id) = self.published.as_ref().map(|p| p.project.clone()) else {
             return;
         };
@@ -829,6 +830,7 @@ impl Controller {
                         &folder_profile,
                         &key,
                         project_path.as_deref(),
+                        last_export.as_deref(),
                     );
                     (folder, key)
                 })
@@ -845,6 +847,7 @@ impl Controller {
             let Ok(Some(path)) = rx.recv().await else {
                 return;
             };
+            crate::platform::exported_to(&path);
             let written = cx
                 .background_executor()
                 .spawn(async move {
