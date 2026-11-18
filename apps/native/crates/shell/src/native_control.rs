@@ -18,6 +18,144 @@ use objc2_app_kit::*;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use serde_json::{Value, json};
 use std::rc::Rc;
+define_class!(
+    #[unsafe(super(NSSegmentedControl))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMSegmentedControl"]
+    pub(crate) struct SegmentedControl;
+
+    impl SegmentedControl {
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            let secondary = event.modifierFlags().contains(NSEventModifierFlags::Control);
+            if !self.open_variant_menu(event, secondary) {
+                // AppKit handles ordinary selection and press-and-hold
+                // on any segment with an attached menu.
+                unsafe { let _: () = msg_send![super(self), mouseDown: event]; }
+            }
+        }
+
+        #[unsafe(method(rightMouseDown:))]
+        fn right_mouse_down(&self, event: &NSEvent) {
+            if !self.open_variant_menu(event, true) {
+                unsafe { let _: () = msg_send![super(self), rightMouseDown: event]; }
+            }
+        }
+    }
+);
+
+impl SegmentedControl {
+    /// AppKit supplies the bezel, selection and tracking in every context.
+    pub(crate) fn new(mtm: MainThreadMarker, size: NSControlSize, count: usize) -> Retained<Self> {
+        let control: Retained<Self> = unsafe {
+            msg_send![super(Self::alloc(mtm).set_ivars(())), initWithFrame: NSRect::ZERO]
+        };
+        control.setSegmentCount(count as isize);
+        control.setTrackingMode(NSSegmentSwitchTracking::SelectOne);
+        control.setControlSize(size);
+        if control.respondsToSelector(sel!(setBorderShape:)) {
+            control.setBorderShape(NSControlBorderShape::Capsule);
+        }
+        control
+    }
+
+    /// Adds a native hold menu and chevron to a fixed-width toolbar segment.
+    pub(crate) fn set_variants(&self, index: isize, menu: &NSMenu) {
+        self.setMenu_forSegment(Some(menu), index);
+        self.setShowsMenuIndicator_forSegment(true, index);
+    }
+
+    fn open_variant_menu(&self, event: &NSEvent, secondary: bool) -> bool {
+        if !self.isEnabled() {
+            return false;
+        }
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        let bounds = self.bounds();
+        if !self.mouse_inRect(at, bounds) {
+            return false;
+        }
+        let mut start = bounds.origin.x;
+        for index in 0..self.segmentCount() {
+            let width = self.widthForSegment(index);
+            if let Some(menu) = self.menuForSegment(index)
+                && self.isEnabledForSegment(index)
+                && opens_variant_menu(
+                    at.x - start,
+                    width,
+                    self.selectedSegment() == index,
+                    self.showsMenuIndicatorForSegment(index),
+                    secondary,
+                )
+            {
+                let below = if self.isFlipped() {
+                    bounds.size.height + 2.
+                } else {
+                    -2.
+                };
+                menu.popUpMenuPositioningItem_atLocation_inView(
+                    None,
+                    NSPoint::new(start, below),
+                    Some(self),
+                );
+                return true;
+            }
+            start += width;
+        }
+        false
+    }
+
+    pub(crate) fn set_segment_image(&self, index: isize, image: &NSImage, title: &str) {
+        image.setTemplate(true);
+        image.setAccessibilityDescription(Some(&NSString::from_str(title)));
+        self.setImage_forSegment(Some(image), index);
+    }
+}
+
+/// Leave room for the indicator beside a full-size toolbar glyph. The
+/// segment has this same width reserved for its indicator hit target.
+pub(crate) const SEGMENT_MENU_INDICATOR: f64 = 12.;
+
+fn opens_variant_menu(
+    x: f64,
+    width: f64,
+    selected: bool,
+    indicator: bool,
+    secondary: bool,
+) -> bool {
+    (0. ..width).contains(&x)
+        && (secondary || selected || (indicator && x >= width - SEGMENT_MENU_INDICATOR))
+}
+
+#[cfg(test)]
+mod variant_click_tests {
+    use super::opens_variant_menu;
+
+    #[test]
+    fn primary_click_selects_an_inactive_tool_and_keeps_appkit_hold_tracking() {
+        assert!(!opens_variant_menu(16., 46., false, true, false));
+    }
+
+    #[test]
+    fn primary_click_reopens_the_active_tools_variants() {
+        assert!(opens_variant_menu(16., 46., true, true, false));
+    }
+
+    #[test]
+    fn secondary_click_opens_variants_with_either_selection() {
+        for selected in [false, true] {
+            assert!(opens_variant_menu(16., 46., selected, true, true));
+        }
+    }
+
+    #[test]
+    fn indicator_opens_variants_and_does_not_extend_into_the_next_tool() {
+        assert!(opens_variant_menu(40., 46., false, true, false));
+        assert!(!opens_variant_menu(40., 46., false, false, false));
+        assert!(!opens_variant_menu(46., 46., true, true, true));
+        assert!(!opens_variant_menu(-1., 46., true, true, true));
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum Kind {
     Popup,
@@ -198,7 +336,7 @@ enum Control {
     Popup(Retained<NSPopUpButton>),
     Button(Retained<NSButton>),
     Switch(Retained<NSSwitch>),
-    Segmented(Retained<NSSegmentedControl>),
+    Segmented(Retained<SegmentedControl>),
     Slider(Retained<NSSlider>),
     Search(Retained<NSSearchField>),
     Well(Retained<NSColorWell>),
@@ -209,7 +347,7 @@ impl Control {
             Self::Popup(v) => v.as_ref(),
             Self::Button(v) => v.as_ref(),
             Self::Switch(v) => v.as_ref(),
-            Self::Segmented(v) => v.as_ref(),
+            Self::Segmented(v) => v,
             Self::Slider(v) => v.as_ref(),
             Self::Search(v) => v.as_ref(),
             Self::Well(v) => v.as_ref(),
@@ -270,7 +408,10 @@ impl Control {
                 NSControlStateValueOff
             }),
             Self::Segmented(v) => {
-                v.setSelectedSegment(value.as_i64().map_or(-1, |i| i as isize));
+                let selected = value.as_i64().map_or(-1, |i| i as isize);
+                if v.selectedSegment() != selected {
+                    v.setSelectedSegment(selected);
+                }
             }
             Self::Well(v) => {
                 if let Some(colour) = value.as_str().and_then(hex_colour) {
@@ -324,6 +465,9 @@ pub struct NativeControl {
     stretch: bool,
     /// The keyboard was asked for before the control was in its window.
     focus: Rc<std::cell::Cell<bool>>,
+    /// Tab is ordered by GPUI, then AppKit takes the segmented control's keys.
+    tab_focus: Option<FocusHandle>,
+    tab_subscription: Option<Subscription>,
     /// The last text the view's host set (`host_text`).
     host_revision: Option<u64>,
     /// A search field's last value from its view. The view's value can lag
@@ -518,22 +662,23 @@ impl NativeControl {
                 Control::Popup(v)
             }
             Kind::Segmented => {
-                let v =
-                    NSSegmentedControl::initWithFrame(NSSegmentedControl::alloc(mtm), NSRect::ZERO);
-                v.setSegmentCount(options.len() as isize);
-                v.setTrackingMode(NSSegmentSwitchTracking::SelectOne);
-                let font = v
-                    .font()
-                    .unwrap_or_else(|| NSFont::systemFontOfSize(NSFont::systemFontSize()));
+                let size = if well {
+                    NSControlSize::Small
+                } else if glass {
+                    NSControlSize::Large
+                } else {
+                    NSControlSize::Regular
+                };
+                let v = SegmentedControl::new(mtm, size, options.len());
                 for (i, option) in options.iter().enumerate() {
                     let title = option
                         .get("label")
                         .and_then(Value::as_str)
                         .or_else(|| option.as_str())
                         .unwrap_or("");
-                    // A glyph segment: the panel's symbol size in a segment a
-                    // row high wide, never scaled to fit; a vendored glyph
-                    // where one stands for the symbol (`crate::icons`).
+                    // A glyph segment: a template symbol the system tints,
+                    // its name as the tip; a vendored glyph where one stands
+                    // for the symbol (`crate::icons`).
                     let glyph = option.get("symbol").and_then(Value::as_str).and_then(|name| {
                         if let Some(image) = crate::icons::glyph(name).and_then(|g| {
                             crate::native::glyph_image(g, t.metrics.symbol_panel as f64, title)
@@ -550,37 +695,22 @@ impl NativeControl {
                         );
                         Some(image.imageWithSymbolConfiguration(&config).unwrap_or(image))
                     });
-                    let width = if glyph.is_some() {
-                        v.setToolTip_forSegment(Some(&NSString::from_str(title)), i as isize);
-                        (t.metrics.row + t.space.xs) as f64
+                    let index = i as isize;
+                    if let Some(image) = glyph {
+                        v.set_segment_image(index, &image, title);
                     } else {
-                        0.
-                    };
-                    let face = segment_face(title, glyph, &font);
-                    let width = if width > 0. {
-                        width
-                    } else {
-                        face.size().width + 2. * t.space.lg as f64
-                    };
-                    v.setImage_forSegment(Some(&face), i as isize);
-                    v.setImageScaling_forSegment(NSImageScaling::ScaleNone, i as isize);
-                    v.setWidth_forSegment(width, i as isize);
+                        v.setLabel_forSegment(&NSString::from_str(title), index);
+                    }
+                    let tip = option.get("tip").and_then(Value::as_str).unwrap_or(title);
+                    v.setToolTip_forSegment(Some(&NSString::from_str(tip)), index);
+                    v.setEnabled_forSegment(
+                        option.get("disabled") != Some(&Value::Bool(true)),
+                        index,
+                    );
                 }
                 unsafe {
                     v.setTarget(Some(&target));
                     v.setAction(Some(sel!(act:)));
-                }
-                v.setSelectedSegmentBezelColor(Some(&crate::native::selected_color()));
-                // Every segmented control is the system's capsule (macOS 26's
-                // liquid glass control), selection still the neutral pill (the
-                // system's own lights it in the accent); `glass` at the large
-                // size (a header's mode switch), a well's at the small one.
-                v.setBorderShape(NSControlBorderShape::Capsule);
-                if glass {
-                    v.setControlSize(NSControlSize::Large);
-                }
-                if well {
-                    v.setControlSize(NSControlSize::Small);
                 }
                 v.sizeToFit();
                 Control::Segmented(v)
@@ -796,6 +926,8 @@ impl NativeControl {
             fill: matches!(kind, Kind::Search),
             stretch: well && matches!(kind, Kind::Popup),
             focus: Rc::default(),
+            tab_focus: matches!(kind, Kind::Segmented).then(|| cx.focus_handle().tab_stop(true)),
+            tab_subscription: None,
             host_revision: None,
             search_value: None,
             layer: Rc::default(),
@@ -826,6 +958,25 @@ impl NativeControl {
             None => self.focus.set(true),
         }
     }
+    /// Joins the AppKit key view when Tab lands on the GPUI slot.
+    fn focus_segmented(&self) {
+        if let Control::Segmented(control) = &self.control
+            && !control.isHiddenOrHasHiddenAncestor()
+            && let Some(window) = control.window()
+        {
+            window.makeFirstResponder(Some(control));
+        }
+    }
+
+    /// The surrounding surface can tune its traversal order.
+    pub fn set_tab_index(&mut self, index: isize) {
+        if let Some(focus) = &self.tab_focus
+            && (focus.tab_index, focus.tab_stop) != (index.max(0), index >= 0)
+        {
+            self.tab_focus = Some(focus.clone().tab_stop(index >= 0).tab_index(index.max(0)));
+        }
+    }
+
     /// A text the view's host set (a filter applied from outside) replaces
     /// a search field's text even while it is typed in, once per revision.
     pub fn host_text(&mut self, text: &str, revision: u64) {
@@ -864,12 +1015,20 @@ impl NativeControl {
         v.setSegmentDistribution(NSSegmentDistribution::FillEqually);
         self.stretch = true;
     }
-    /// Whether the keyboard is in this control (a search field's editor).
+    /// Whether this control or its field editor has the keyboard.
     pub fn focused(&self) -> bool {
-        let Control::Search(v) = &self.control else {
-            return false;
-        };
-        v.currentEditor().is_some()
+        match &self.control {
+            Control::Search(v) => v.currentEditor().is_some(),
+            Control::Segmented(v) => {
+                v.window()
+                    .and_then(|w| w.firstResponder())
+                    .is_some_and(|responder| {
+                        let control: &NSResponder = v;
+                        std::ptr::eq(&*responder, control)
+                    })
+            }
+            _ => false,
+        }
     }
     /// Stages the slot again on a frame whose cached paint did not run: as
     /// last painted, or shifted with the scroll layer it is in.
@@ -908,6 +1067,29 @@ impl NativeControl {
             }
             Control::Switch(v) if key == "space" => {
                 press(v.as_ref());
+                true
+            }
+            // GPUI owns Tab traversal in the hosted surface; route its
+            // horizontal arrows through the AppKit control's action.
+            Control::Segmented(v) if matches!(key, "left" | "right") => {
+                let count = v.segmentCount();
+                let current = v.selectedSegment();
+                let next = if key == "right" {
+                    (current + 1..count).find(|&i| v.isEnabledForSegment(i))
+                } else {
+                    (0..if current < 0 { count } else { current })
+                        .rev()
+                        .find(|&i| v.isEnabledForSegment(i))
+                };
+                if v.isEnabled()
+                    && let Some(next) = next
+                {
+                    v.setSelectedSegment(next);
+                    unsafe {
+                        let _: bool =
+                            msg_send![&**v, sendAction: v.action(), to: v.target().as_deref()];
+                    }
+                }
                 true
             }
             Control::Slider(v) if matches!(key, "left" | "right" | "up" | "down") => {
@@ -1014,7 +1196,14 @@ impl NativeControl {
     }
 }
 impl Render for NativeControl {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.tab_subscription.is_none()
+            && let Some(focus) = &self.tab_focus
+        {
+            self.tab_subscription = Some(cx.on_focus(focus, window, |control, _, _| {
+                control.focus_segmented();
+            }));
+        }
         let slot = self.slot.clone();
         let focus = self.focus.clone();
         let layer = self.layer.clone();
@@ -1037,7 +1226,22 @@ impl Render for NativeControl {
         } else {
             div().w(px(self.width))
         };
-        root.relative()
+        let segmented = matches!(&self.control, Control::Segmented(v) if v.isEnabled());
+        root.id("native-control")
+            .when_some(
+                self.tab_focus.as_ref().filter(|_| segmented),
+                |root, focus| {
+                    root.track_focus(focus).on_key_down(cx.listener(
+                        |control, event: &KeyDownEvent, _, cx| {
+                            let modifiers = &event.keystroke.modifiers;
+                            if !modifiers.modified() && control.key(&event.keystroke.key) {
+                                cx.stop_propagation();
+                            }
+                        },
+                    ))
+                },
+            )
+            .relative()
             .h(px(self.height))
             .on_mouse_down(MouseButton::Left, pressed)
             .child(
@@ -1064,50 +1268,6 @@ impl Render for NativeControl {
             .inset_0(),
         )
     }
-}
-/// A segment's content, drawn by us in the label ink. AppKit paints a title
-/// or a template glyph white on a custom selected bezel, which only reads on
-/// a dark bezel: a heavy pill in the light appearance. A face is an image
-/// that is not a template, so the selected segment is the same pale raised
-/// neutral as a selected tab, with the content's own ink on it.
-fn segment_face(title: &str, glyph: Option<Retained<NSImage>>, font: &NSFont) -> Retained<NSImage> {
-    let text = NSString::from_str(title);
-    let attributes = objc2_foundation::NSDictionary::<NSString, AnyObject>::from_slices(
-        &[unsafe { NSFontAttributeName }, unsafe {
-            NSForegroundColorAttributeName
-        }],
-        &[font as &AnyObject, &*NSColor::labelColor() as &AnyObject],
-    );
-    let size = match &glyph {
-        Some(image) => image.size(),
-        None => {
-            let size: NSSize = unsafe { msg_send![&*text, sizeWithAttributes: &*attributes] };
-            NSSize::new(size.width.ceil(), size.height.ceil())
-        }
-    };
-    let draw = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
-        match &glyph {
-            Some(image) => {
-                image.drawInRect(rect);
-                // The label ink of the appearance being drawn in.
-                NSColor::labelColor().set();
-                NSRectFillUsingOperation(rect, NSCompositingOperation::SourceAtop);
-            }
-            None => unsafe {
-                let _: () = msg_send![
-                    &*text,
-                    drawAtPoint: rect.origin,
-                    withAttributes: &*attributes
-                ];
-            },
-        }
-        objc2::runtime::Bool::YES
-    });
-    let face = NSImage::imageWithSize_flipped_drawingHandler(size, false, &draw);
-    // Drawn afresh each time, so the ink follows the appearance.
-    face.setCacheMode(NSImageCacheMode::Never);
-    face.setAccessibilityDescription(Some(&NSString::from_str(title)));
-    face
 }
 /// The value a row stands for (a plain string row is its own value).
 fn row_value(option: &Value) -> &Value {
