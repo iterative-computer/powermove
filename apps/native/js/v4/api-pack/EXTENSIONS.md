@@ -155,3 +155,9 @@ new built-in). Then publish it as `updated`.
 
 Prefer, in order: a new extension; a change to an existing user extension; a
 fork of a built-in.
+
+Effects may declare `convexQuad: ['tlX','tlY','trX','trY','brX','brY','blX','blY']`
+when those eight numeric parameters are percentage corner offsets. The compositor
+checks their evaluated values each frame. Concave, crossing, singular or mirrored
+manual quadrilaterals report an effect definition error. Viewer frames bypass
+that instance; deliveries refuse invalid pins.

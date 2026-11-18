@@ -1979,3 +1979,177 @@ fn legacy_gradient_tint_extension_matches_v2_formula() {
         );
     }
 }
+
+/// Inspect the actual shader's vertices, not a CPU copy of its generator.
+#[test]
+fn corner_pin_generated_quads_are_readable_for_1000_seeds_and_frames() {
+    let _gpu = gpu();
+    let mut definitions: Vec<DefinitionSnapshot> =
+        serde_json::from_str(include_str!("fixtures/extension-effects.json")).unwrap();
+    let mut probe = definitions.remove(0);
+    probe.id = "test.pin-probe".into();
+    let glsl = probe.glsl.as_mut().unwrap();
+    glsl.source
+        .truncate(glsl.source.rfind("void main() {").unwrap());
+    glsl.source.push_str(
+        r#"
+void main() {
+  uint seed=uint(floor(gl_FragCoord.x/2.0));
+  int row=int(floor(gl_FragCoord.y));
+  float frames[16]=float[16](0.,1.,10.,11.,12.,13.,14.,23.,24.,25.,26.,35.,36.,37.,47.,100003.);
+  vec2 sizes[3]=vec2[3](vec2(420,80),vec2(80,420),vec2(100));
+  vec2 size=sizes[(row/64)%3];
+  Quad q=generatedQuad(seed,frames[row%16],12.0,(row%2==0)?1.0:0.0,float((row/16)%4)/3.0,1.0,size);
+  o=(int(gl_FragCoord.x)%2==0) ? vec4(q.a,q.b) : vec4(q.c,q.d);
+}
+"#,
+    );
+    let mut renderer = Renderer::headless().unwrap();
+    assert!(
+        renderer
+            .set_definitions(&DefinitionSetSnapshot {
+                generation: Seq::new(1).unwrap(),
+                definitions: vec![probe],
+                missing: vec![]
+            })
+            .unwrap()
+            .is_empty()
+    );
+    let mut plate = layer(
+        "probe",
+        "solid",
+        json!({"w":2000,"h":192,"color":"#FFFFFF"}),
+        0.,
+        0.,
+        2.,
+    );
+    plate["fx"] = json!([fx("probe", "test.pin-probe", json!({}))]);
+    let doc = load(&project(2000, 192, 2., no_fill(), vec![plate]));
+    let pixels = render(
+        &mut renderer,
+        &doc,
+        &MapResolver::default(),
+        0.,
+        &RenderRequest::sized(Size::new(2000, 192), Precision::Float32),
+    )
+    .unwrap();
+    for y in 0..192usize {
+        let row = 191 - y;
+        let size = [[420., 80.], [80., 420.], [100., 100.]][row / 64];
+        for seed in 0..1000usize {
+            let at = (y * 2000 + seed * 2) * 4;
+            let values = &pixels[at..at + 8];
+            let points: Vec<_> = values
+                .chunks_exact(2)
+                .map(|p| [p[0] as f64 * size[0], p[1] as f64 * size[1]])
+                .collect();
+            let edges: Vec<_> = (0..4)
+                .map(|i| {
+                    [
+                        points[(i + 1) % 4][0] - points[i][0],
+                        points[(i + 1) % 4][1] - points[i][1],
+                    ]
+                })
+                .collect();
+            for i in 0..4 {
+                let e = edges[i];
+                let n = edges[(i + 1) % 4];
+                let length = e[0].hypot(e[1]);
+                let next = n[0].hypot(n[1]);
+                let ratio = length / size[i % 2];
+                let angle = ((-e[0] * n[0] - e[1] * n[1]) / (length * next))
+                    .clamp(-1., 1.)
+                    .acos()
+                    .to_degrees();
+                assert!(
+                    e[0] * n[1] - e[1] * n[0] > 0.,
+                    "crossing/mirror: seed {seed}, row {row}, {points:?}"
+                );
+                assert!(
+                    (0.45 - 1e-5..=1.8 + 1e-5).contains(&ratio),
+                    "edge: seed {seed}, row {row}, {ratio}"
+                );
+                assert!(
+                    (35. - 0.001..=145. + 0.001).contains(&angle),
+                    "angle: seed {seed}, row {row}, {angle}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn corner_pin_invalid_manual_quad_reports_error_and_bypasses() {
+    let _gpu = gpu();
+    let definitions: Vec<DefinitionSnapshot> =
+        serde_json::from_str(include_str!("fixtures/extension-effects.json")).unwrap();
+    let mut r = Renderer::headless().unwrap();
+    assert!(
+        r.set_definitions(&DefinitionSetSnapshot {
+            generation: Seq::new(1).unwrap(),
+            definitions,
+            missing: vec![]
+        })
+        .unwrap()
+        .is_empty()
+    );
+    let mut plate = layer(
+        "plate",
+        "solid",
+        json!({"w":80,"h":40,"color":"#FFFFFF"}),
+        80.,
+        60.,
+        2.,
+    );
+    plate["fx"] = json!([fx(
+        "pin",
+        "corner-pin-snap.fx",
+        json!({"trY":ch(json!(100)),"brY":ch(json!(-100))})
+    )]);
+    let doc = load(&project(
+        W,
+        H,
+        2.,
+        solid_fill("#FF0000"),
+        vec![plate.clone()],
+    ));
+    assert!(
+        matches!(
+            r.render(
+                &doc,
+                "Ptest-root",
+                ticks(0.),
+                &request(),
+                &MapResolver::default()
+            ),
+            Err(RenderError::Unsupported(_))
+        ),
+        "deliveries refuse invalid pins"
+    );
+    // The viewer selects effect bypass while retaining its error state.
+    r.set_bypass_missing_effects(true);
+    let frame = r
+        .render(
+            &doc,
+            "Ptest-root",
+            ticks(0.),
+            &request(),
+            &MapResolver::default(),
+        )
+        .unwrap();
+    assert!(
+        frame
+            .failures
+            .iter()
+            .any(|f| format!("{f:?}").contains("convex, non-mirrored")),
+        "{:?}",
+        frame.failures
+    );
+    let bypassed = r.read_rgba(&frame).unwrap();
+    plate["fx"] = json!([]);
+    let plain = load(&project(W, H, 2., solid_fill("#FF0000"), vec![plate]));
+    assert_eq!(
+        bypassed,
+        render(&mut r, &plain, &MapResolver::default(), 0., &request()).unwrap()
+    );
+}

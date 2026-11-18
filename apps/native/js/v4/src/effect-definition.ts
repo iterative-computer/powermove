@@ -23,6 +23,8 @@ export interface EffectDefinition {
   rawShader?: boolean;
   viewportSafe?: boolean;
   viewportPadding?: string[];
+  /** Eight percentage-offset keys (TL/TR/BR/BL x,y); invalid quads report an effect error. */
+  convexQuad?: string[];
   ui?: (
     | {
         kind: "point";

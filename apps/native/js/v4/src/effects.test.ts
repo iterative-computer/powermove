@@ -72,3 +72,11 @@ test("provider tokens survive unrelated additions and reveal shadowed registrati
   first();
   expect(published.map((p) => p.registration)).toEqual([token + 1]);
 });
+
+test("convex-quad constraints survive the extension snapshot wrapper", () => {
+  let published: any[] = [];
+  const keys = ["tlX", "tlY", "trX", "trY", "brX", "brY", "blX", "blY"];
+  const api = effectsAPI(values => { published = values; });
+  api.register({ ...definition, params: keys.map(k => ({k, label:k, def:0, min:-100, max:100})), convexQuad:keys });
+  expect(published[0].snapshot.flags.convexQuad).toEqual(keys);
+});

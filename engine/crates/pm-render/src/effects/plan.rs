@@ -426,6 +426,28 @@ pub(crate) fn effect_steps_frame<'d>(
             values.push(value.filter(|v| !matches!(v, JsValue::Undefined | JsValue::Null)));
         }
         let mut step = effect_step(def, &fx_id, &values);
+        if let Some(keys) = &def.flags.convex_quad {
+            let mut points = [[0., 0.], [1., 0.], [1., 1.], [0., 1.]];
+            for (i, key) in keys.iter().enumerate() {
+                if let Some(param) = step.params.iter().find(|p| &p.key == key)
+                    && let Binding::Float(value) = param.value
+                {
+                    points[i / 2][i % 2] += value / 100.;
+                }
+            }
+            if !(0..4).all(|i| {
+                let a = points[i];
+                let b = points[(i + 1) % 4];
+                let c = points[(i + 2) % 4];
+                let cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+                cross.is_finite() && cross > 1e-8
+            }) {
+                refuse(Feature::Definition(format!(
+                    "effect {ty}: Corner pins must form a convex, non-mirrored quadrilateral"
+                )));
+                continue;
+            }
+        }
         step.fps = crate::motion::level_fps(scope.comp);
         step.density = [scale.0.abs(), scale.1.abs()];
         if raster.is_some() && super::versions::main_definition(&step.definition).is_none() {
