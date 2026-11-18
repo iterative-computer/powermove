@@ -9,7 +9,7 @@ use crate::{
     compile::{self, ModuleGraph},
     discovery::{self, Discovered},
     recorder::{CanvasText, NativeHost, RealmEvents, SyncLayout},
-    store_kernel::update_state,
+    store_kernel::{StoreAuthority, update_state},
     transport::{Transport, TransportOwner},
 };
 use crate::{store_host::StoreExtension, store_runtime::StoreViews};
