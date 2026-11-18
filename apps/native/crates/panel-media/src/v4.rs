@@ -124,7 +124,14 @@ impl ProjectBridge {
         r: &dyn MediaRuntime,
         request: Request,
     ) -> Result<Reply, Error> {
-        if request.owner != c.stamp {
+        // A page is a read of the latest catalog. Ordinary document edits
+        // may advance its revision while the request is queued. Other
+        // actions still require the exact state they were made against.
+        let current_page = matches!(&request.action, Action::Page { .. })
+            && request.owner.project == c.stamp.project
+            && request.owner.document == c.stamp.document
+            && request.owner.revision <= c.stamp.revision;
+        if request.owner != c.stamp && !current_page {
             return Err(Error::Stale);
         }
         let mut outcome = None;
@@ -155,5 +162,95 @@ impl ProjectBridge {
             outcome,
             menu,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::UnknownRuntime;
+
+    fn setup() -> (Catalog, ProjectBridge) {
+        let project = pm_model::json::parse(
+            r#"{"compId":"C","compName":"Main","w":64,"h":64,"dur":10,"fps":30,"layers":[],"assets":{},"comps":{}}"#,
+        ).unwrap();
+        let catalog = Catalog::new(
+            "P".into(),
+            pm_kernel::DocumentStore::new_untitled(project).snapshot(),
+        )
+        .unwrap();
+        let mut bridge = ProjectBridge::default();
+        bridge.refresh(&catalog, &UnknownRuntime);
+        (catalog, bridge)
+    }
+
+    #[test]
+    fn trim_revision_does_not_fail_a_read_only_project_page() {
+        let (mut c, mut b) = setup();
+        let owner = c.stamp.clone();
+        c.stamp.revision += 1;
+        b.refresh(&c, &UnknownRuntime);
+        let reply = b
+            .request(
+                &c,
+                &UnknownRuntime,
+                Request {
+                    owner: owner.clone(),
+                    action: Action::Page {
+                        offset: 0,
+                        limit: 96,
+                    },
+                },
+            )
+            .expect("ordinary document edits must not fail a media page read");
+        assert_eq!(reply.view.page.stamp, c.stamp);
+        assert!(
+            matches!(
+                b.request(
+                    &c,
+                    &UnknownRuntime,
+                    Request {
+                        owner,
+                        action: Action::Input(Input::FilesEnter),
+                    }
+                ),
+                Err(Error::Stale)
+            ),
+            "edits still require their exact owner"
+        );
+    }
+
+    #[test]
+    fn page_reads_still_refuse_other_documents_projects_and_future_revisions() {
+        let (c, mut bridge) = setup();
+        for owner in [
+            Stamp {
+                document: c.stamp.document + 1,
+                ..c.stamp.clone()
+            },
+            Stamp {
+                project: "other".into(),
+                ..c.stamp.clone()
+            },
+            Stamp {
+                revision: c.stamp.revision + 1,
+                ..c.stamp.clone()
+            },
+        ] {
+            assert!(matches!(
+                bridge.request(
+                    &c,
+                    &UnknownRuntime,
+                    Request {
+                        owner,
+                        action: Action::Page {
+                            offset: 0,
+                            limit: 96
+                        },
+                    }
+                ),
+                Err(Error::Stale)
+            ));
+        }
     }
 }

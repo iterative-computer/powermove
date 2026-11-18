@@ -3,7 +3,7 @@ import { HostClient, type HostRequest, type Json } from "../../../src";
 import { decodeReply, ProjectService } from "../service";
 import { asset, owner, projection } from "./fixtures";
 import type { Input, Stamp } from "../contract";
-function fixture() {
+function fixture(readOnlyPages = false) {
   const requests: HostRequest[] = [];
   const announcements: { message: string; sequence: number }[] = [];
   let stamp = { ...owner };
@@ -34,8 +34,17 @@ function fixture() {
             accepted: false,
             error: "Synthetic failure",
           };
-        const next = { ...capturedStamp, revision: capturedStamp.revision + 1 };
-        if (stamp.document === capturedStamp.document) stamp = next;
+        const page = "Page" in (request.operation.args as any).action;
+        const next =
+          readOnlyPages && page
+            ? capturedStamp
+            : { ...capturedStamp, revision: capturedStamp.revision + 1 };
+        // An in-flight reply cannot move the simulated server backwards.
+        if (
+          stamp.document === capturedStamp.document &&
+          stamp.revision === capturedStamp.revision
+        )
+          stamp = next;
         const view = projection([asset()]);
         view.page.stamp = next;
         return {
@@ -161,13 +170,15 @@ test("a new document in the window shows only its own media, from the top", asyn
   expect(f.service.view).toBeNull();
   await f.service.idle();
   const pages = f.requests
-    .filter((r) => r.operation.type === "command")
-    .map(
-      (r) =>
-        r.operation.args as unknown as {
-          owner: Stamp;
-          action: { Page?: { offset: number } };
-        },
+    .flatMap((r) =>
+      r.operation.type === "command"
+        ? [
+            r.operation.args as unknown as {
+              owner: Stamp;
+              action: { Page?: { offset: number } };
+            },
+          ]
+        : [],
     )
     .filter((a) => a.action.Page && a.owner.document === stamp.document);
   expect(pages.length).toBeGreaterThan(0);
@@ -342,5 +353,38 @@ test("transport failure fences card input and announces once until accepted publ
     { message: "Project media isn’t updating right now.", sequence: 1 },
     { message: "Project media isn’t updating right now.", sequence: 2 },
   ]);
+  await f.service.dispose();
+});
+
+test("edit bursts coalesce Project refreshes to the latest document state", async () => {
+  const f = fixture(true);
+  await f.service.start();
+  let release!: () => void;
+  f.setDelay(new Promise<void>((resolve) => (release = resolve)));
+  const count = () =>
+    f.requests.filter((r) => r.operation.type === "command").length;
+  const before = count();
+  const publish = (revision: number) => {
+    const stamp = { ...owner, revision };
+    f.replace(stamp);
+    f.host.publish({
+      ...f.host.identity,
+      version: 1,
+      subscription: "fixture.project",
+      revision,
+      sequence: revision,
+      value: { stamp } as unknown as Json,
+    });
+  };
+  publish(2);
+  for (let i = 0; i < 30 && count() === before; i++) await Promise.resolve();
+  expect(count()).toBe(before + 1);
+  for (let revision = 3; revision <= 40; revision++) publish(revision);
+  release();
+  await f.service.idle();
+  expect(f.service.error).toBeNull();
+  expect(f.service.view?.page.stamp.revision).toBe(40);
+  expect(count() - before).toBeLessThanOrEqual(2);
+  expect(f.announcements).toEqual([]);
   await f.service.dispose();
 });

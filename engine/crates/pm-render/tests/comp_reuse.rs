@@ -138,3 +138,43 @@ fn shared_targets_last_one_frame() {
         assert!(same(&pl, &pf), "frame {k}");
     }
 }
+
+/// A trim replaces only the parent layer's timing nodes. Its nested content
+/// must still draw as a new renderer draws it, including after reversals.
+#[test]
+fn trim_revisions_keep_the_native_precomp_picture() {
+    use pm_model::{Op, Patch, PathPart, Value};
+    let mut doc = document("N", "#F0C030");
+    let mut reused = Renderer::headless().expect("a Metal device");
+    reused.set_draw_reuse(true);
+    reused.set_scrub(true);
+    let request = RenderRequest::at_scale(Size::new(640, 360), 0.5, Precision::Float16);
+    // Every in-point stays before the paused playhead; an intentionally
+    // trimmed-out layer is not a missing picture.
+    for (step, from) in [0., 0.2, 1.2, 0.4, 1., 0., 0.8].into_iter().enumerate() {
+        let revision = step as u64 + 2;
+        let changes = [("from", from), ("dur", 10. - from)].map(|(field, value)| {
+            Op::Leaf(Patch::set(
+                vec![
+                    "comps".into(),
+                    "C".into(),
+                    "layers".into(),
+                    PathPart::Index(0.),
+                    field.into(),
+                ],
+                Value::Number(value),
+            ))
+        });
+        doc.apply_ops_at(&changes, revision).unwrap();
+        let fresh_doc = Document::new(doc.to_value(), revision);
+        let mut fresh = Renderer::headless().expect("a Metal device");
+        fresh.set_draw_reuse(true);
+        fresh.set_scrub(true);
+        let (actual, _) = frame(&mut reused, &doc, 1.5, &request);
+        let (expected, _) = frame(&mut fresh, &fresh_doc, 1.5, &request);
+        assert!(
+            same(&actual, &expected),
+            "trim step {step}, in-point {from}"
+        );
+    }
+}

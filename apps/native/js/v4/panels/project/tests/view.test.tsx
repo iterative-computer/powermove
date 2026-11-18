@@ -149,7 +149,10 @@ for (const [state, view, extra] of cases)
       expect(
         Object.values(report.nodes).some(
           // The quiet line says it (no glyph: lists are quiet text).
-          (node: any) => node.text === "Syncing…" || node.props?.text === "Syncing…" || node.props?.label === "Syncing…",
+          (node: any) =>
+            node.text === "Syncing…" ||
+            node.props?.text === "Syncing…" ||
+            node.props?.label === "Syncing…",
         ),
       ).toBe(true);
     }
@@ -745,7 +748,7 @@ test("scrolling inside the rows loaded asks for no new page", async () => {
     [101, 107],
     [94, 100],
     [106, 112],
-  ])
+  ] as [number, number][])
     await event(root, list().id, "rangechange", { range });
   expect(pages).toEqual([[188, 36]]);
   await event(root, list().id, "rangechange", { range: [110, 116] });

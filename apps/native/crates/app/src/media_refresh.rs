@@ -376,6 +376,55 @@ mod tests {
         assert!(refresh.plan(reopened).job.is_none());
     }
     #[test]
+    fn trimming_a_precomp_does_not_restart_media_resolution() {
+        use pm_kernel::{DocumentStore, Origin, Snapshot, TimingCommand};
+        let project = pm_model::json::parse(
+            r#"{
+            "id":"P", "compId":"C", "compName":"Main", "w":64, "h":64, "fps":30, "dur":10,
+            "layers":[{"id":"pre", "type":"precomp", "name":"Nested", "on":true,
+                "from":0, "dur":10, "d":{"comp":"N", "w":64, "h":64}}],
+            "comps":{"N":{"id":"N", "name":"Nested", "w":64, "h":64,
+                "fps":30, "dur":10, "layers":[]}},
+            "assets":{"a":{"id":"a", "name":"Fixture", "kind":"image", "originalVersion":"v1"}}
+        }"#,
+        )
+        .unwrap();
+        let mut store = DocumentStore::new_untitled(project);
+        let media = MediaTable::default();
+        let make_inputs = |snapshot: &Snapshot| Inputs {
+            document: snapshot.doc_id,
+            assets: snapshot.root().and_then(|root| root.get("assets")).cloned(),
+            media: media.clone(),
+        };
+        let original = make_inputs(&store.snapshot());
+        let mut refresh = Refresh::default();
+        refresh.adopt(original.clone());
+        let gesture = store.begin_gesture("Trim", Origin::Interface).unwrap();
+        for time in [0.2, 0.8, 0.4, 0.] {
+            store
+                .update_gesture_from_start(
+                    gesture,
+                    &[TimingCommand::TrimIn {
+                        layer_ids: vec!["pre".into()],
+                        time,
+                    }
+                    .into()],
+                )
+                .unwrap();
+            let next = make_inputs(&store.snapshot());
+            assert!(original.same(&next), "a trim changes no media inputs");
+            let plan = refresh.plan(next);
+            assert_eq!(plan.retire, Some(BTreeSet::new()));
+            assert!(
+                plan.job.is_none(),
+                "a trim must not schedule media resolution"
+            );
+        }
+        store.commit_gesture(gesture).unwrap();
+        assert!(refresh.plan(make_inputs(&store.snapshot())).job.is_none());
+    }
+
+    #[test]
     fn same_assets_and_storage_do_not_recopy_on_selection_or_composition_edits() {
         let a = inputs(1, "a");
         let mut refresh = Refresh::default();

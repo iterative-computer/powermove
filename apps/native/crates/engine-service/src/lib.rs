@@ -4396,6 +4396,120 @@ mod worker_tests {
     fn shapes_viewer(service: &EngineService, layer: Option<metal::MetalLayer>) -> Viewer {
         service.viewer(shapes_config(layer)).unwrap()
     }
+    #[test]
+    fn trim_precomp_keeps_full_quality_then_settles_without_idle_draws() {
+        let mut config = shapes_config(None);
+        let mut project: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/shapes.json")).unwrap();
+        let child = serde_json::json!({
+            "id": "nested", "name": "Nested", "w": project["w"], "h": project["h"],
+            "fps": project["fps"], "dur": project["dur"], "layers": project["layers"],
+        });
+        let channel = |v: f64| serde_json::json!({"v":v,"kf":[],"expr":null});
+        let layer = serde_json::json!({
+            "id":"pre", "type":"precomp", "name":"Nested", "on":true,
+            "from":0., "dur":3., "fx":[], "masks":[],
+            "p": {
+                "position.x":channel(0.), "position.y":channel(0.),
+                "anchor.x":channel(0.), "anchor.y":channel(0.),
+                "scale.x":channel(100.), "scale.y":channel(100.),
+                "rotation":channel(0.), "opacity":channel(100.), "skew":channel(0.),
+            },
+            "d":{"comp":"nested", "w":project["w"], "h":project["h"], "trim":0.},
+        });
+        project["comps"] = serde_json::json!({"nested":child});
+        project["layers"] = serde_json::json!([layer]);
+        let document = |project: &serde_json::Value, revision| {
+            Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(&project.to_string()).unwrap(),
+                )),
+                revision,
+            ))
+        };
+        config.snapshot.document = document(&project, config.snapshot.revision);
+        let snapshot = config.snapshot.clone();
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("precomp-trim-quality").unwrap()).unwrap();
+        let v = service.viewer(config).unwrap();
+        v.adapt_drags(true).unwrap();
+        service
+            .shared
+            .slow_frames
+            .store(true, std::sync::atomic::Ordering::Release);
+        v.command(TransportCommand::Seek {
+            time: seconds(1.),
+            mode: pm_protocol::clock::SeekMode::Exact,
+        })
+        .unwrap();
+        wait_for(&v, "the initial settled precomp", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.settled && f.time == seconds(1.))
+        });
+        v.editing(true).unwrap();
+        let mut drag = None;
+        for revision in snapshot.revision + 1..snapshot.revision + 60 {
+            let from = if revision % 2 == 0 { 0.2 } else { 0.4 };
+            project["layers"][0]["from"] = from.into();
+            project["layers"][0]["dur"] = (3. - from).into();
+            v.snapshot(Snapshot {
+                revision,
+                document: document(&project, revision),
+                ..snapshot.clone()
+            })
+            .unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            if let Some(frame) = v
+                .status()
+                .frame
+                .filter(|f| f.gpu_ok && f.moment == Moment::Scrub)
+            {
+                drag = Some(frame);
+                break;
+            }
+        }
+        let drag = drag.expect("a frame of the precomp trim");
+        let released = std::time::Instant::now();
+        v.editing(false).unwrap();
+        let revision = v.stamp().unwrap().revision;
+        let settled = wait_for(&v, "the released trim's full-quality picture", |s| {
+            s.frame.as_ref().is_some_and(|f| {
+                f.stamp.revision == revision
+                    && f.time == seconds(1.)
+                    && f.gpu_ok
+                    && f.settled
+                    && !f.stand_ins
+            })
+        });
+        println!(
+            "PRECOMP_TRIM release_ms={} drag_scale={} settled_scale={}",
+            released.elapsed().as_millis(),
+            drag.scale,
+            settled.frame.as_ref().unwrap().scale,
+        );
+        assert!(
+            settled.layer_failures.is_empty(),
+            "{:?}",
+            settled.layer_failures
+        );
+        assert!(
+            settled.frame.as_ref().unwrap().scale > 1.,
+            "settle at composition density"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            v.status().presented,
+            settled.presented,
+            "a settled trim draws nothing while idle"
+        );
+        v.retire();
+        assert!(
+            drag.scale >= 1.,
+            "a precomp trim must not draw a draft raster: {drag:?}"
+        );
+    }
+
     fn shapes_config(layer: Option<metal::MetalLayer>) -> ViewerConfig {
         let project = pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap();
         #[cfg(feature = "kernel")]

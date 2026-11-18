@@ -201,6 +201,8 @@ export class ProjectService {
   private listeners = new Set<() => void>();
   private window = { offset: 0, limit: 0 };
   private queue: Promise<unknown> = Promise.resolve();
+  private refreshing = false;
+  private refreshAgain = false;
   private pending = new Set<Promise<unknown>>();
   constructor(
     readonly host: HostClient,
@@ -222,6 +224,23 @@ export class ProjectService {
       throw new RangeError("Invalid media page window");
     this.window = { offset, limit };
     return this.send({ Page: this.window }, expected);
+  }
+  /** Publications can outpace a page read during a drag. Keep one read
+   * in flight and one request for the latest state, rather than a backlog. */
+  private refreshPage() {
+    if (this.refreshing) {
+      this.refreshAgain = true;
+      return;
+    }
+    this.refreshing = true;
+    this.refreshAgain = false;
+    this.run(
+      this.send({ Page: this.window }).finally(() => {
+        this.refreshing = false;
+        if (this.refreshAgain && !this.stopped && this.owner)
+          this.refreshPage();
+      }),
+    );
   }
   async start() {
     if (this.started || this.stopped)
@@ -254,7 +273,7 @@ export class ProjectService {
           this.window.offset = 0;
           this.changed();
         }
-        if (owner) this.run(this.send({ Page: this.window }));
+        if (owner) this.refreshPage();
       },
     );
     if (this.stopped) await stop();

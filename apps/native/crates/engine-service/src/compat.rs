@@ -317,8 +317,8 @@ struct Answers {
     /// step is a new revision, so its frames draw a late layer from the
     /// answers of the gesture's earlier revisions (`earlier`), never waiting.
     editing_since: Option<u64>,
-    /// The answers of the gesture's latest earlier revision, by layer and
-    /// frame: one revision's worth, replaced as the gesture goes on.
+    /// Each layer's newest answered revision during the gesture, by frame:
+    /// one revision per layer, replaced as that layer answers again.
     earlier: HashMap<(String, String), BTreeMap<i64, (NeedKey, CompatAnswer)>>,
     /// The last frame the look-ahead asked for, and the scale it asked at:
     /// answers at another scale cover nothing (a windowed raster stands in
@@ -626,19 +626,24 @@ impl CompatStore {
     }
     /// Whether an override is registered, the generation of wrappers
     /// answering, and the document revision frames are drawn at. A new
-    /// revision or generation forgets every answer.
+    /// generation forgets every answer; during a dragged edit, a new revision
+    /// keeps each layer's last good answer as a temporary stand-in.
     pub fn set_state(&self, producing: bool, revision: u64, epoch: u64) {
         let mut answers = self.answers.lock().unwrap();
         if answers.revision != revision || answers.epoch != epoch {
-            // An edit or new wrappers: no earlier answer stands in, so a
-            // frame never shows content the edit changed.
+            // Exact answers belong to one revision and wrapper generation.
+            // Drag stand-ins are retained separately until release.
             let mut old = std::mem::take(&mut *answers);
-            // While an edit is dragged the last revision's answers stand in
-            // for the next (one revision's worth); new wrappers keep none.
+            // During a drag keep each layer's newest answered revision.
+            // A partial rebuild must not discard other layers' stand-ins;
+            // new wrappers keep none.
             let editing = old.editing_since.filter(|_| old.epoch == epoch);
             let earlier = match editing {
-                Some(_) if !old.map.is_empty() => by_layer(std::mem::take(&mut old.map)),
-                Some(_) => std::mem::take(&mut old.earlier),
+                Some(_) => {
+                    let mut earlier = std::mem::take(&mut old.earlier);
+                    earlier.extend(by_layer(std::mem::take(&mut old.map)));
+                    earlier
+                }
                 None => HashMap::new(),
             };
             *answers = Answers {
@@ -1635,6 +1640,59 @@ mod tests {
         store.answer_all(9, 1, vec![(at("x", 1.), draw(30))]);
         store.begin_frame(Moment::Scrub);
         assert!(matches!(answer_at(&store, "x", 1.), CompatAnswer::Native));
+        store.end_frame();
+    }
+    #[test]
+    fn trim_steps_keep_last_good_answers_for_layers_not_yet_rebuilt() {
+        use crate::policy::Moment;
+        let store = CompatStore::default();
+        store.set_state(true, 7, 1);
+        store.answer_all(
+            7,
+            1,
+            vec![(at("nested", 1.), draw(10)), (at("other", 1.), draw(20))],
+        );
+        store.set_editing(true);
+        store.set_state(true, 8, 1);
+        // Only another layer finishes before the next pointer sample.
+        store.answer_all(8, 1, vec![(at("other", 1.), draw(30))]);
+        store.set_state(true, 9, 1);
+        store.begin_frame(Moment::Scrub);
+        assert_eq!(
+            byte_of(answer_at(&store, "nested", 1.)),
+            Some(10),
+            "keep the nested layer's last good raster until its replacement is ready"
+        );
+        assert_eq!(byte_of(answer_at(&store, "other", 1.)), Some(30));
+        store.end_frame();
+        store.set_editing(false);
+        store.begin_frame(Moment::Paused);
+        assert!(
+            matches!(answer_at(&store, "nested", 1.), CompatAnswer::Missing),
+            "settling requires an exact current answer"
+        );
+        store.end_frame();
+    }
+    #[test]
+    fn trim_stand_ins_are_replaced_per_layer_and_cleared_by_new_wrappers() {
+        use crate::policy::Moment;
+        let store = CompatStore::default();
+        store.set_state(true, 7, 1);
+        store.answer_all(7, 1, vec![(at("nested", 1.), draw(10))]);
+        store.set_editing(true);
+        store.set_state(true, 8, 1);
+        store.answer_all(8, 1, vec![(at("nested", 1.), draw(30))]);
+        store.set_state(true, 9, 1);
+        store.set_state(true, 10, 1);
+        store.begin_frame(Moment::Scrub);
+        assert_eq!(byte_of(answer_at(&store, "nested", 1.)), Some(30));
+        store.end_frame();
+        store.set_state(true, 10, 2);
+        store.begin_frame(Moment::Scrub);
+        assert!(matches!(
+            answer_at(&store, "nested", 1.),
+            CompatAnswer::Native
+        ));
         store.end_frame();
     }
     #[test]
