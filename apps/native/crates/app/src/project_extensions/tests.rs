@@ -60,9 +60,11 @@ fn render(snapshot: &Snapshot, host: &ExtensionHost) -> Vec<f32> {
         .wait_contributions(Duration::from_secs(30), &|| false)
         .unwrap();
     let mut renderer = pm_render::Renderer::headless().unwrap();
-    renderer
+    renderer.set_isolate_layers(true);
+    let refused = renderer
         .set_document_effects(&snapshot.document, &crate::extensions::definitions(&value))
         .unwrap();
+    assert!(refused.is_empty(), "{refused:?}");
     let frame = renderer
         .render(
             &snapshot.document,
