@@ -556,7 +556,7 @@ impl SettingsChrome {
         {
             state.quiet.set(true);
             outline.selectRowIndexes_byExtendingSelection(
-                &NSIndexSet::indexSetWithIndex(row as usize),
+                &NSIndexSet::indexSetWithIndex(row),
                 false,
             );
             state.quiet.set(false);
