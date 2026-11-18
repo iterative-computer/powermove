@@ -142,23 +142,22 @@ fn dock_render_follows_wheel_and_momentum() {
         .enumerate()
         {
             probes.borrow_mut().clear();
-            window
-                .update(&mut cx, |_, w, cx| {
-                    if delta != 0. {
-                        w.dispatch_event(
-                            ScrollWheelEvent {
-                                position: point(px(start.x + 80.), px(180.)),
-                                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(delta))),
-                                modifiers: Default::default(),
-                                touch_phase,
-                            }
-                            .to_platform_input(),
-                            cx,
-                        );
-                    }
-                    w.refresh();
-                })
-                .unwrap();
+            cx.update_window(window.into(), |_, w, cx| {
+                if delta != 0. {
+                    w.dispatch_event(
+                        ScrollWheelEvent {
+                            position: point(px(start.x + 80.), px(180.)),
+                            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(delta))),
+                            modifiers: Default::default(),
+                            touch_phase,
+                        }
+                        .to_platform_input(),
+                        cx,
+                    );
+                }
+                w.refresh();
+            })
+            .unwrap();
             cx.run_until_parked();
             let image = cx.capture_screenshot(window.into()).unwrap();
             let rects = window
