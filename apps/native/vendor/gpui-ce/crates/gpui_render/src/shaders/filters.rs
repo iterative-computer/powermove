@@ -151,25 +151,34 @@ pub mod blur {
             for k in 0..4 {
                 let pitch = 16.0 / pow(2.0, k as f32);
                 let idx = floor(local / pitch + vec2f(0.5, 0.5));
-                if k > 0 && fract(idx.x / 2.0) == 0.0 && fract(idx.y / 2.0) == 0.0 { continue; }
+                if k > 0 && fract(idx.x / 2.0) == 0.0 && fract(idx.y / 2.0) == 0.0 {
+                    continue;
+                }
                 let gp = idx * pitch;
                 let stagger = fract(sin(dot(gp, vec2f(12.9898, 78.233))) * 43758.5453);
                 let vis = clamp((params.x - k as f32 - stagger * 0.85) / 0.15, 0.0, 1.0);
-                if vis <= 0.0 { continue; }
+                if vis <= 0.0 {
+                    continue;
+                }
                 let mut sample = vec4f(0.0, 0.0, 0.0, 0.0);
                 for y in 0..3 {
                     for x in 0..3 {
                         let offset = vec2f(x as f32 - 1.0, y as f32 - 1.0) * pitch * 0.33;
-                        let uv = (get!(BLUR_LOCALS).bounds.origin + (gp + offset) * scale) / get!(BLUR_LOCALS).target_size;
-                        sample = sample + texture_sample_level(BLUR_TEXTURE, BLUR_SAMPLER, uv, 0.0) / 9.0;
+                        let uv = (get!(BLUR_LOCALS).bounds.origin + (gp + offset) * scale)
+                            / get!(BLUR_LOCALS).target_size;
+                        sample = sample
+                            + texture_sample_level(BLUR_TEXTURE, BLUR_SAMPLER, uv, 0.0) / 9.0;
                     }
                 }
                 let cov = clamp(sample.w, 0.0, 1.0);
-                let a = clamp(1.35 - length(local - gp) + 0.5 / scale, 0.0, 1.0) * vis * smoothstep(0.04, 0.35, cov);
+                let a = clamp(1.35 - length(local - gp) + 0.5 / scale, 0.0, 1.0)
+                    * vis
+                    * smoothstep(0.04, 0.35, cov);
                 if a > best.w {
                     let base = sample.xyz() / max(cov, 0.001);
                     let heat = 0.18 + 0.1 * cov;
-                    let hot = get!(BLUR_LOCALS).dot_accent.xyz() * (1.0 - heat) + vec3f(1.0, 1.0, 1.0) * heat;
+                    let hot = get!(BLUR_LOCALS).dot_accent.xyz() * (1.0 - heat)
+                        + vec3f(1.0, 1.0, 1.0) * heat;
                     let color = min((base * 0.2 + hot * 0.8) * 1.12, vec3f(1.0, 1.0, 1.0));
                     best = vec4f(color.x * a, color.y * a, color.z * a, a);
                 }

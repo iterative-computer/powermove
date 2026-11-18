@@ -611,7 +611,10 @@ impl Editor {
         // else the last used (PM-449).
         let prefer: Vec<&str> = [
             workspace::record_id(&self.record),
-            self.workspaces.project.as_ref().and_then(workspace::record_id),
+            self.workspaces
+                .project
+                .as_ref()
+                .and_then(workspace::record_id),
             self.workspaces.current.as_deref(),
         ]
         .into_iter()
@@ -3512,7 +3515,9 @@ impl Render for Editor {
             };
             let mut splitter = positioned(hit)
                 .id(format!("splitter-{i}"))
-                .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.dock_wheel(e, cx)))
+                .on_scroll_wheel(
+                    cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.dock_wheel(e, cx)),
+                )
                 .role(Role::Splitter)
                 .aria_label("Resize dock")
                 .tab_index(1000 + i as isize)

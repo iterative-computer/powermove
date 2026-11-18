@@ -562,6 +562,33 @@ pub struct BuildSnapshot {
     /// A row filters its label and snapshot together; standalone controls filter here.
     pub filter: Option<Filter>,
 }
+/// Shared boundary for live GPUI content, build snapshots and scroll pictures.
+/// Row-owned filters remain on the ancestor when `filter` is None.
+pub(crate) fn reveal_paint(build: Option<BuildSnapshot>) -> (Vec<Filter>, f32) {
+    let filters = build
+        .and_then(|b| b.filter)
+        .filter(|f| !f.is_identity())
+        .into_iter()
+        .collect();
+    let alpha = if build.is_some_and(|b| b.revision.is_none() && b.ready.is_none()) {
+        0.
+    } else {
+        1.
+    };
+    (filters, alpha)
+}
+fn capture_key(bounds: Bounds<Pixels>, revision: u64) -> (u64, [u32; 4]) {
+    (
+        revision,
+        [
+            0,
+            0,
+            f32::from(bounds.size.width).to_bits(),
+            f32::from(bounds.size.height).to_bits(),
+        ],
+    )
+}
+
 #[derive(Default)]
 pub(crate) struct BuildPixels {
     key: Option<(u64, [u32; 4])>,
@@ -585,13 +612,7 @@ impl BuildPixels {
         bounds: Bounds<Pixels>,
         revision: u64,
     ) -> bool {
-        let frame = [
-            f32::from(bounds.origin.x).to_bits(),
-            f32::from(bounds.origin.y).to_bits(),
-            f32::from(bounds.size.width).to_bits(),
-            f32::from(bounds.size.height).to_bits(),
-        ];
-        let key = (revision, frame);
+        let key = capture_key(bounds, revision);
         if self.key == Some(key) {
             return false;
         }
@@ -1575,13 +1596,6 @@ impl Render for NativeControl {
         let build = self.build;
         let pixels = self.build_pixels.clone();
         let owner = cx.entity().downgrade();
-        let snapshot = build.and_then(|b| b.revision).and_then(|revision| {
-            let cached = pixels.borrow();
-            cached
-                .key
-                .filter(|(r, _)| *r == revision)
-                .and(cached.image.clone())
-        });
         let slot = self.slot.clone();
         let focus = self.focus.clone();
         let layer = self.layer.clone();
@@ -1589,6 +1603,11 @@ impl Render for NativeControl {
         // The keyboard is in a search field: it stays the real one.
         let pictures = !self.focused();
         let pressed = cx.listener(|this, _: &MouseDownEvent, window, cx| {
+            // Replaying a picture's press must not activate an AppKit editor
+            // outside the reveal boundary before the panel is ready.
+            if this.build.is_some() {
+                return;
+            }
             if this.picture.press(window) {
                 cx.stop_propagation();
                 cx.notify();
@@ -1621,23 +1640,23 @@ impl Render for NativeControl {
             )
             .relative()
             .h(px(self.height))
-            .filter(build.and_then(|b| b.filter).into_iter().collect::<Vec<_>>())
-            .opacity(
-                if build.is_some_and(|b| b.revision.is_none() && b.ready.is_none()) {
-                    0.
-                } else {
-                    1.
-                },
-            )
             .on_mouse_down(MouseButton::Left, pressed)
+            .filter(reveal_paint(build).0)
+            .opacity(reveal_paint(build).1)
             .child(
                 canvas(
                     |_, _, _| (),
                     move |painted, _, window, cx| {
                         let (bounds, clip) =
                             layer.painted(painted, window.content_mask().bounds, window);
-                        let size = ns_rect(bounds).size;
-                        if build.is_none() && pictures && picture.paint(painted, || slot.picture(size), window) {
+                        // The picture is painted inside the same filter/opacity boundary
+                        // as the build snapshot. Restore normal alpha before its early return.
+                        if build.is_none() {
+                            slot.stage_alpha(1.);
+                        }
+                        if pictures
+                            && picture.paint(painted, || slot.picture(ns_rect(bounds).size), window)
+                        {
                             slot.hide();
                             return;
                         }
@@ -1655,7 +1674,22 @@ impl Render for NativeControl {
                         } else {
                             slot.stage_alpha(1.);
                         }
-                        if build.is_none() && focus.get()
+                        // Capture may have completed in this paint (including
+                        // the first frame after a picture hold ends).
+                        let snapshot = pixels.borrow().texture(build.and_then(|b| b.revision));
+                        if let Some(image) = snapshot {
+                            let _ = window.paint_image(
+                                painted,
+                                painted,
+                                Corners::default(),
+                                0.,
+                                image,
+                                0,
+                                false,
+                            );
+                        }
+                        if build.is_none()
+                            && focus.get()
                             && let Some(window) = native.window()
                         {
                             focus.set(false);
@@ -1665,9 +1699,6 @@ impl Render for NativeControl {
                 )
                 .absolute()
                 .inset_0(),
-            )
-            .children(
-                snapshot.map(|image| div().absolute().inset_0().child(img(image).size_full())),
             )
     }
 }
@@ -1948,7 +1979,7 @@ fn colour_hex(colour: &NSColor) -> String {
 mod snapshot_bridge_tests {
     use super::{NSBitmapImageRep, NSImage, snapshot_bitmap, snapshot_image};
     use objc2::AnyThread;
-    #[test]
+    #[::core::prelude::v1::test]
     fn cocoa_snapshots_upload_straight_bgra_with_alpha() {
         objc2::rc::autoreleasepool(|_| {
             let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([40, 80, 120, 160]));
@@ -1968,5 +1999,63 @@ mod snapshot_bridge_tests {
                 assert!(actual.abs_diff(expected) <= 2);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod scroll_reveal_tests {
+    use super::*;
+    #[::core::prelude::v1::test]
+    fn scroll_picture_uses_reveal_filter_and_alpha_until_ready() {
+        let filter = Filter::DotMatrix {
+            detail: 2.2,
+            resolve: 0.,
+            accent: 0xff8800,
+        };
+        let mut build = BuildSnapshot {
+            revision: None,
+            ready: None,
+            filter: Some(filter),
+        };
+        assert_eq!(reveal_paint(Some(build)), (vec![filter], 0.));
+        build.revision = Some(7);
+        // The same boundary wraps picture.paint and the snapshot fallback;
+        // starting/stopping a hold cannot change its generation or alpha.
+        assert_eq!(reveal_paint(Some(build)), (vec![filter], 1.));
+        assert_eq!(
+            pm_design::dots::snapshot_visibility(true, build.ready).1,
+            0.
+        );
+    }
+    #[::core::prelude::v1::test]
+    fn scroll_preserves_capture_and_moves_the_content_grid() {
+        let before = Bounds::new(point(px(20.), px(100.)), size(px(160.), px(24.)));
+        let after = Bounds::new(point(px(20.), px(63.)), before.size);
+        assert_eq!(capture_key(before, 7), capture_key(after, 7));
+        // Shader sampling is relative to the translated filter boundary, so
+        // identical content coordinates keep their dot generation/stagger.
+        let dot = point(px(16.), px(8.));
+        let first = before.origin + dot;
+        let scrolled = after.origin + dot;
+        assert_eq!(scrolled - first, after.origin - before.origin);
+        assert_eq!(first - before.origin, scrolled - after.origin);
+        let wider = Bounds::new(after.origin, size(px(180.), px(24.)));
+        assert_ne!(capture_key(after, 7), capture_key(wider, 7));
+    }
+    #[::core::prelude::v1::test]
+    fn resolved_picture_has_integration_paint_policy() {
+        assert_eq!(reveal_paint(None), (vec![], 1.));
+        assert_eq!(
+            reveal_paint(Some(BuildSnapshot {
+                revision: Some(7),
+                ready: Some(1.),
+                filter: Some(Filter::DotMatrix {
+                    detail: 4.,
+                    resolve: 1.,
+                    accent: 0xff8800
+                })
+            })),
+            (vec![], 1.)
+        );
     }
 }

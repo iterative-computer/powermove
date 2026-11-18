@@ -16,7 +16,7 @@ struct State {
     /// that follows that paint, and by no later one.
     geometry: Cell<Option<(u64, NSRect, NSRect)>>,
     staged: Cell<Option<(NSRect, NSRect)>>,
-    alpha: Cell<Option<(u64,f64)>>,
+    alpha: Cell<Option<(u64, f64)>>,
     staged_alpha: Cell<f64>,
 }
 impl State {
@@ -122,10 +122,10 @@ impl NativeControlSlot {
         self.state.stage(Some((bounds, clip)));
         self.state.staged.set(Some((bounds, clip)));
     }
-    pub fn stage_alpha(&self, alpha:f64) {
-        let alpha=alpha.clamp(0.,1.);
-        let paint=crate::composition::open_paint(self.state.key());
-        self.state.alpha.set(Some((paint,alpha)));
+    pub fn stage_alpha(&self, alpha: f64) {
+        let alpha = alpha.clamp(0., 1.);
+        let paint = crate::composition::open_paint(self.state.key());
+        self.state.alpha.set(Some((paint, alpha)));
         self.state.staged_alpha.set(alpha);
     }
     /// A cached GPUI view reuses its paint, so its slot keeps the last geometry.
@@ -282,7 +282,10 @@ pub(crate) fn pending(key: usize) -> bool {
                 state.wrapper.frame() != frame
                     || state.control.frame() != local
                     || state.wrapper.isHidden() != hidden
-                    || state.alpha.get().is_some_and(|(paint,alpha)| Some(paint)==crate::composition::last_paint(key) && state.control.alphaValue()!=alpha)
+                    || state.alpha.get().is_some_and(|(paint, alpha)| {
+                        Some(paint) == crate::composition::last_paint(key)
+                            && state.control.alphaValue() != alpha
+                    })
             }
         })
 }
@@ -310,9 +313,12 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
             state.control.setFrame(local);
             moved |= !unseen;
         }
-        if let Some((paint,alpha))=state.alpha.get() {
-            if Some(paint)==crate::composition::last_paint(key) && state.control.alphaValue()!=alpha {
-                state.control.setAlphaValue(alpha);moved=true;
+        if let Some((paint, alpha)) = state.alpha.get() {
+            if Some(paint) == crate::composition::last_paint(key)
+                && state.control.alphaValue() != alpha
+            {
+                state.control.setAlphaValue(alpha);
+                moved = true;
             }
         }
         if !hidden && unsafe { state.wrapper.superview() }.is_none() {

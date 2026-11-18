@@ -281,14 +281,8 @@ impl TextField {
         let _ = window;
         div()
             .id("native-text")
-            .filter(build.and_then(|b| b.filter).into_iter().collect::<Vec<_>>())
-            .opacity(
-                if build.is_some_and(|b| b.revision.is_none() && b.ready.is_none()) {
-                    0.
-                } else {
-                    1.
-                },
-            )
+            .filter(crate::native_control::reveal_paint(build).0)
+            .opacity(crate::native_control::reveal_paint(build).1)
             .w_full()
             .flex()
             .items_center()
@@ -511,7 +505,6 @@ impl Render for TextField {
         }
         let build = self.build;
         let pixels = self.build_pixels.clone();
-        let snapshot = pixels.borrow().texture(build.and_then(|b| b.revision));
         let slot = self.slot.clone();
         let layer = self.layer.clone();
         let multiline = (self.kind == TextKind::Multiline && !self.fill && !self.bare)
@@ -540,14 +533,8 @@ impl Render for TextField {
         };
         div()
             .id("native-text")
-            .filter(build.and_then(|b| b.filter).into_iter().collect::<Vec<_>>())
-            .opacity(
-                if build.is_some_and(|b| b.revision.is_none() && b.ready.is_none()) {
-                    0.
-                } else {
-                    1.
-                },
-            )
+            .filter(crate::native_control::reveal_paint(build).0)
+            .opacity(crate::native_control::reveal_paint(build).1)
             .relative()
             .w_full()
             .when(self.fill, |d| d.h_full())
@@ -607,6 +594,9 @@ impl Render for TextField {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
+                    if this.build.is_some() {
+                        return;
+                    }
                     // A press on its picture goes to the editor once shown.
                     // One while it already has the keyboard (a double-click's
                     // second press) leaves it: taking it again ended the edit,
@@ -695,6 +685,9 @@ impl Render for TextField {
                         let painted = bounds;
                         let (bounds, mask) = layer.painted(bounds, mask, window);
                         let size = rect(bounds).size;
+                        if build.is_none() {
+                            slot.stage_build_alpha(1.);
+                        }
                         if picture.paint(painted, || slot.picture(size), window) {
                             slot.hide();
                             return;
@@ -720,13 +713,23 @@ impl Render for TextField {
                         } else {
                             slot.stage_build_alpha(1.);
                         }
+                        // Use a capture completed in this paint at scroll rest.
+                        let snapshot = pixels.borrow().texture(build.and_then(|b| b.revision));
+                        if let Some(image) = snapshot {
+                            let _ = window.paint_image(
+                                painted,
+                                painted,
+                                Corners::default(),
+                                0.,
+                                image,
+                                0,
+                                false,
+                            );
+                        }
                     },
                 )
                 .absolute()
                 .inset_0(),
-            )
-            .children(
-                snapshot.map(|image| div().absolute().inset_0().child(img(image).size_full())),
             )
             .into_any_element()
     }

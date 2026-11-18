@@ -1314,8 +1314,10 @@ impl SurfaceView {
                     // Bar pop-ups are borderless titles; the rest keep the
                     // bezel. `quiet` is the borderless title in the
                     // secondary ink, for an option bar under a composer.
-                    inline: matches!(crate::v4_compile::variant(node), Some("inline" | "quiet" | "pulldown"))
-                        && matches!(kind, crate::v4_control::Kind::Popup),
+                    inline: matches!(
+                        crate::v4_compile::variant(node),
+                        Some("inline" | "quiet" | "pulldown")
+                    ) && matches!(kind, crate::v4_control::Kind::Popup),
                     well: view.well,
                     quiet: crate::v4_compile::variant(node) == Some("quiet"),
                     pull: crate::v4_compile::variant(node) == Some("pulldown"),
@@ -2105,7 +2107,10 @@ impl SurfaceView {
             return;
         };
         let ready = self.controls.get(id).is_some_and(|c| c.read(cx).focused())
-            || self.fields.get(id).is_some_and(|f| f.read(cx).has_keyboard());
+            || self
+                .fields
+                .get(id)
+                .is_some_and(|f| f.read(cx).has_keyboard());
         if ready {
             pm_shell::typing::field_ready();
         }
@@ -4996,17 +5001,13 @@ impl SurfaceView {
             .as_ref()
             .and_then(|key| crate::media_thumbs::resolve(key))
         {
-            element = element.child(
-                img(path)
-                    .absolute()
-                    .inset_0()
-                    .size_full()
-                    .object_fit(if node.contain {
-                        ObjectFit::Contain
-                    } else {
-                        ObjectFit::Cover
-                    }),
-            );
+            element = element.child(img(path).absolute().inset_0().size_full().object_fit(
+                if node.contain {
+                    ObjectFit::Contain
+                } else {
+                    ObjectFit::Cover
+                },
+            ));
         }
         if let Some(text) = &node.text {
             element = element.child(self.plain_or_quote_text(node.id, text));

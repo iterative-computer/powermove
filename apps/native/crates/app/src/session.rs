@@ -794,10 +794,13 @@ impl pm_shell::integration::Integration for Bridge {
             return String::new();
         }
         let presented = c.viewer.as_ref().map_or(0, |v| v.status().presented);
-        let playback = c
-            .frame_facts
-            .playback_state(c.playing(), presented, std::time::Instant::now());
-        format!("{playback} · {}", panels::format_facts(c.dimensions, c.rate.to_f64()))
+        let playback =
+            c.frame_facts
+                .playback_state(c.playing(), presented, std::time::Instant::now());
+        format!(
+            "{playback} · {}",
+            panels::format_facts(c.dimensions, c.rate.to_f64())
+        )
     }
     fn status_alert(&self, cx: &App) -> String {
         let c = self.0.read(cx);

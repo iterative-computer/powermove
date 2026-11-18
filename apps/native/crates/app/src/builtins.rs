@@ -2426,11 +2426,10 @@ impl Controller {
                         .into_iter()
                         .find(|h| {
                             h.update(cx, |_, w, _| {
-                                crate::platform::ns_window(w)
-                                    .is_some_and(|n| {
-                                        objc2::rc::Retained::as_ptr(&n)
-                                            == objc2::rc::Retained::as_ptr(&editor)
-                                    })
+                                crate::platform::ns_window(w).is_some_and(|n| {
+                                    objc2::rc::Retained::as_ptr(&n)
+                                        == objc2::rc::Retained::as_ptr(&editor)
+                                })
                             })
                             .unwrap_or(false)
                         })

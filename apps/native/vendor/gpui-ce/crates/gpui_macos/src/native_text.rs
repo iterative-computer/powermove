@@ -122,7 +122,7 @@ struct State {
     /// that follows that paint, and by no later one.
     geometry: Cell<Option<(u64, NSRect, NSRect)>>,
     staged: Cell<Option<(NSRect, NSRect)>>,
-    build_alpha: Cell<Option<(u64,f64)>>,
+    build_alpha: Cell<Option<(u64, f64)>>,
     kept_alpha: Cell<f64>,
     /// Canvas: the system insertion point, in its own pointer-transparent host.
     caret: Option<(Retained<NSView>, Retained<NSTextInsertionIndicator>)>,
@@ -891,7 +891,9 @@ impl NativeTextSlot {
     pub fn is_editing(&self) -> bool {
         self.state.editing.get()
     }
-    pub fn snapshot_visible(&self)->bool {!self.state.wrapper.isHidden()}
+    pub fn snapshot_visible(&self) -> bool {
+        !self.state.wrapper.isHidden()
+    }
     /// Whether the field has the keyboard now (AppKit's first responder is
     /// it or its field editor), not only asked to take it.
     pub fn has_keyboard(&self) -> bool {
@@ -918,9 +920,11 @@ impl NativeTextSlot {
         self.state.stage(Some((bounds, clip)));
         self.state.staged.set(Some((bounds, clip)));
     }
-    pub fn stage_build_alpha(&self,alpha:f64) {
-        let paint=crate::composition::open_paint(Retained::as_ptr(&self.state.gpui) as usize);
-        let alpha=alpha.clamp(0.,1.);self.state.build_alpha.set(Some((paint,alpha)));self.state.kept_alpha.set(alpha);
+    pub fn stage_build_alpha(&self, alpha: f64) {
+        let paint = crate::composition::open_paint(Retained::as_ptr(&self.state.gpui) as usize);
+        let alpha = alpha.clamp(0., 1.);
+        self.state.build_alpha.set(Some((paint, alpha)));
+        self.state.kept_alpha.set(alpha);
     }
     /// A cached GPUI view reuses its paint, so its slot keeps the last geometry.
     pub fn keep(&self) {
@@ -1225,9 +1229,12 @@ fn place(key: usize, apply: bool) -> bool {
             }
             continue;
         };
-        if let Some((paint,alpha))=state.build_alpha.get() {
-            if Some(paint)==last && state.wrapper.alphaValue()!=alpha {
-                moved=true;if apply{state.wrapper.setAlphaValue(alpha);}
+        if let Some((paint, alpha)) = state.build_alpha.get() {
+            if Some(paint) == last && state.wrapper.alphaValue() != alpha {
+                moved = true;
+                if apply {
+                    state.wrapper.setAlphaValue(alpha);
+                }
             }
         }
         // From GPUI's frame in its parent (P-EMBED).

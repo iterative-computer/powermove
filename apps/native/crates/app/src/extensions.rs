@@ -1142,7 +1142,10 @@ impl Controller {
                     }
                     .checked(row["checked"] == true);
                     entry.enabled &= row["disabled"] != true;
-                    entry.shortcut = row["id"].as_str().filter(|c| !c.is_empty()).and_then(pm_shell::menu::chord_for);
+                    entry.shortcut = row["id"]
+                        .as_str()
+                        .filter(|c| !c.is_empty())
+                        .and_then(pm_shell::menu::chord_for);
                     entry
                 })
                 .collect()
@@ -2245,7 +2248,11 @@ impl Controller {
                 .then(|| {
                     mine.iter()
                         .map(|(id, r)| {
-                            let mask = if host.panel_layout_applied(id, *r) { *r } else { Rect::new(0., 0., 0., 0.) };
+                            let mask = if host.panel_layout_applied(id, *r) {
+                                *r
+                            } else {
+                                sent.mask(id, *r)
+                            };
                             let clip = clipped(id, *r);
                             Rect::new(
                                 mask.x.max(clip.x),
@@ -2995,7 +3002,10 @@ fn titles_file(profile: &std::path::Path) -> std::path::PathBuf {
 thread_local! {
     static TITLES: RefCell<Option<BTreeMap<String, String>>> = const { RefCell::new(None) };
 }
-fn with_titles<R>(profile: &std::path::Path, f: impl FnOnce(&mut BTreeMap<String, String>) -> R) -> R {
+fn with_titles<R>(
+    profile: &std::path::Path,
+    f: impl FnOnce(&mut BTreeMap<String, String>) -> R,
+) -> R {
     TITLES.with(|t| {
         let mut t = t.borrow_mut();
         let titles = t.get_or_insert_with(|| {
@@ -3008,7 +3018,9 @@ fn with_titles<R>(profile: &std::path::Path, f: impl FnOnce(&mut BTreeMap<String
     })
 }
 pub(crate) fn remembered_titles(profile: &std::path::Path) -> Vec<(String, String)> {
-    with_titles(profile, |t| t.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+    with_titles(profile, |t| {
+        t.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    })
 }
 fn remember_titles(profile: &std::path::Path, panels: &[(String, String)]) {
     let changed = with_titles(profile, |t| {
