@@ -61,6 +61,7 @@ fn register_effect(kernel: &pm_kernel::KernelHandle, id: &str) {
             ops: vec![pm_kernel::state::StateOp::Register {
                 registry: "effects".into(),
                 entry: pm_kernel::state::Registration {
+                    project: None,
                     token: format!("test-effect-{id}"),
                     owner: Caller::native().writer,
                     id: id.into(),

@@ -532,33 +532,19 @@ pub(crate) fn definitions(value: &Value) -> Vec<pm_protocol::definitions::Defini
 /// V4 providers carry the same wrapped snapshot as compat providers. Read
 /// winning registrations so an override never mixes source and controls.
 pub(crate) fn native_effect_definitions(
-    kernel: &pm_kernel::KernelHandle,
+    runtime: Option<&pm_builtins::Builtins>,
     mut definitions: Vec<pm_protocol::definitions::DefinitionSnapshot>,
 ) -> Vec<pm_protocol::definitions::DefinitionSnapshot> {
-    let state = kernel.state();
-    let ids: BTreeSet<_> = state
-        .registries
-        .get("effects")
+    for (_, snapshot) in runtime
         .into_iter()
-        .flatten()
-        .map(|entry| entry.id.clone())
-        .collect();
-    for id in ids {
-        let Some(provider) = state.provider("effects", &id) else {
-            continue;
-        };
-        let Some(snapshot) = provider.definition.get("nativeSnapshot") else {
-            continue;
-        };
-        if let Ok(snapshot) = serde_json::from_str::<pm_protocol::definitions::DefinitionSnapshot>(
-            &pm_model::json::to_canonical_string(snapshot),
-        ) {
-            definitions.retain(|d| d.id.as_str() != id);
-            definitions.push(snapshot);
-        }
+        .flat_map(pm_builtins::Builtins::extension_effects)
+    {
+        definitions.retain(|d| d.kind != snapshot.kind || d.id != snapshot.id);
+        definitions.push(snapshot);
     }
     definitions
 }
+
 /// The app's one effect clipboard: Effect Controls in every window and v1–3
 /// extensions' inspector service copy and paste through it.
 pub(crate) fn effect_clipboard() -> pm_builtins::EffectClipboard {
@@ -635,6 +621,7 @@ impl Controller {
             shell.native_present = None;
             shell.native_accessibility = vec![];
             drop(shell);
+            self.project_extension_scope = None;
             self.reset_extensions();
             return;
         };
@@ -678,21 +665,35 @@ impl Controller {
             crate::mcp_services::Capture::ExtensionSnapshot,
         )
         .ok();
-        let host = ExtensionHost::start(HostConfig {
-            kernel: self.kernel.clone(),
-            frames,
-            rasters: Some(rasters.hooks()),
-            project,
-            roots: roots(&self.profile),
-            cache: self.profile.join("extensions-build"),
-            owner: Some(Arc::new(Clock(clock_tx))),
-            text: self.font_broker.clone().map(canvas_text),
-            wake: Arc::new(move || {
-                let _ = wake_tx.try_send(());
-            }),
-            vars: Some(vars_source(&self.profile)),
-            clipboard: Some(crate::platform::text_clipboard()),
-        });
+        let scope = self
+            .project_extension_scope
+            .as_ref()
+            .filter(|(document, _)| Some(*document) == doc_id)
+            .map(|(_, scope)| scope.clone())
+            .unwrap_or_else(|| pm_compat_runner::host::ProjectScope {
+                excluded: doc_id
+                    .map(|id| self.mcp.extension_exclusions(id))
+                    .unwrap_or_default(),
+                ..Default::default()
+            });
+        let host = ExtensionHost::start_scoped(
+            HostConfig {
+                kernel: self.kernel.clone(),
+                frames,
+                rasters: Some(rasters.hooks()),
+                project,
+                roots: roots(&self.profile),
+                cache: self.profile.join("extensions-build"),
+                owner: Some(Arc::new(Clock(clock_tx))),
+                text: self.font_broker.clone().map(canvas_text),
+                wake: Arc::new(move || {
+                    let _ = wake_tx.try_send(());
+                }),
+                vars: Some(vars_source(&self.profile)),
+                clipboard: Some(crate::platform::text_clipboard()),
+            },
+            scope,
+        );
         rasters.connect(host.raster_inbox());
         self.extensions.doc_id = doc_id;
         if let Some(doc_id) = doc_id {
@@ -1604,7 +1605,10 @@ impl Controller {
         publication.settled &= self.extensions.native_loading == 0;
         if let Some(value) = publication.contributions.as_deref() {
             let mut value = value.clone();
-            value["definitions"] = json!(native_effect_definitions(&self.kernel, definitions(&value)));
+            value["definitions"] = json!(native_effect_definitions(
+                self.builtins.runtime.as_deref(),
+                definitions(&value)
+            ));
             publication.contributions = Some(Arc::new(value));
         }
         let current = &self.extensions.resources;

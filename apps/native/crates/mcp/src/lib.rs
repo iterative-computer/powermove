@@ -18,6 +18,7 @@ pub mod memory;
 pub mod memory_admission;
 pub mod panel_lease;
 pub mod pro_edit;
+pub mod project_extensions;
 mod recovery;
 pub mod registration;
 pub mod registration_cli;

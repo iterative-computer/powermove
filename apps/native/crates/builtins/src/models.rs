@@ -69,6 +69,7 @@ pub(crate) struct Models {
     /// an older one is judged against what that person saw.
     pub settings_targets: std::collections::VecDeque<(u64, Value)>,
     pub export: Value,
+    pub export_extensions: Value,
     pub project_reply: Option<Value>,
     pub media_runtime: ObservedRuntime,
     /// Moves with every new observation, so the Project panel asks for rows
@@ -151,6 +152,7 @@ impl Models {
             settings_sequence: 1,
             settings_targets: Default::default(),
             export: Value::Null,
+            export_extensions: Value::Null,
             timeline_job: None,
             timeline_effect_pending: 0,
             timeline_effect_result: None,
@@ -787,11 +789,13 @@ impl Backend {
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                let source = match (e.installed, text("trust").as_deref()) {
-                    (false, _) => "Built in",
-                    (true, Some("local")) => "Custom",
-                    _ => "Installed",
-                };
+                let source = text("provenance").unwrap_or_else(|| {
+                    match (e.installed, text("trust").as_deref()) {
+                        (false, _) => "Built in",
+                        (true, Some("local")) => "Custom",
+                        _ => "Installed",
+                    }.to_owned()
+                });
                 // Its folder can't be reached (an unmounted volume): kept, said so.
                 let about = if host
                     .and_then(|h| h.get("unavailable"))
@@ -1377,7 +1381,8 @@ impl Backend {
                 "audioCoding",
                 "dolbyVision",
                 "preset",
-                "presetName"
+                "presetName",
+                "includeExtensions"
             ]))?;
             let fresh =
                 serde_json::to_value(pm_promedia::export_panel::Options::new(width, height, fps))
@@ -1420,6 +1425,7 @@ impl Backend {
             }
             self.native.export = json!({"version":1,"sequence":1,"project":null,"options":options,"bindings":fields,"presets":[],"capabilities":{},"run":{"phase":"idle"}});
         }
+        self.native.export["extensions"] = self.native.export_extensions.clone();
         let options: pm_promedia::export_panel::Options =
             crate::delivery::options(&self.native.export["options"])?;
         // Settings saved before a field existed show its default in the sheet.
@@ -2235,6 +2241,10 @@ impl Backend {
                 typed.validate()?;
                 self.native.export["options"] = options.clone();
                 self.keep_chosen_export_rate(typed.fps);
+                let mut options = options;
+                if let Some(fields) = options.as_object_mut() {
+                    fields.remove("includeExtensions");
+                }
                 return Ok(NativeCommand::State(state::StateTransaction {
                     expected_revision: Some(self.kernel.state().revision),
                     ops: vec![state::StateOp::Setting {

@@ -1483,6 +1483,7 @@ fn register_synthetic_effect(kernel: &pm_kernel::KernelHandle) {
     kernel.state_transaction(pm_kernel::state::StateTransaction {
         expected_revision: None,
         ops: vec![pm_kernel::state::StateOp::Register { registry:"effects".into(), entry: pm_kernel::state::Registration {
+            project: None,
             token:"synthetic-effect-token".into(), owner:Caller::native().writer,
             id:"synthetic.glow".into(), definition: data::model(&json!({"label":"Synthetic Glow","version":1,"params":[{"k":"amount","label":"Amount","type":"number","def":5,"step":0.25},{"k":"tint","label":"Tint","type":"color","def":"#FF0000"},{"k":"enabled","label":"Enabled","type":"toggle","def":true},{"k":"mode","label":"Mode","type":"select","def":"a","options":[{"v":"a","label":"A"},{"v":"b","label":"B"}]},{"k":"label","label":"Label","type":"text","def":"Authored"}]})).unwrap(),
         }}],
@@ -3821,6 +3822,7 @@ fn a_contributed_layer_types_parameters_are_properties_rows() {
     kernel.state_transaction(pm_kernel::state::StateTransaction {
         expected_revision: None,
         ops: vec![pm_kernel::state::StateOp::Register { registry:"layerTypes".into(), entry: pm_kernel::state::Registration {
+            project: None,
             token:"synthetic-layer-token".into(), owner:Caller::native().writer,
             id:"synthetic.cursor".into(), definition: data::model(&json!({"id":"synthetic.cursor","label":"Synthetic Cursor","version":1,"width":128,"height":128,
                 "params":[{"k":"size","label":"Cursor size","def":1,"min":0.1,"max":4,"step":0.01},{"k":"fill","label":"Fill","def":"#ffffff","type":"color"},{"k":"swap","label":"Swap fill / outline","def":false,"type":"toggle"},
@@ -4940,6 +4942,7 @@ fn the_color_panel_lists_the_grade_and_writes_through_its_controls() {
     kernel.state_transaction(pm_kernel::state::StateTransaction {
         expected_revision: None,
         ops: vec![pm_kernel::state::StateOp::Register { registry:"effects".into(), entry: pm_kernel::state::Registration {
+            project: None,
             token:"synthetic-look-token".into(), owner:Caller::native().writer,
             id:"synthetic.look".into(), definition: data::model(&json!({"id":"synthetic.look","label":"Synthetic Look","version":1,"grade":true,
                 "frag":"void main(){fragColor=texture(u_tex,v_st);}",

@@ -380,6 +380,7 @@ pub fn portable(
     destination: &Path,
     replace: bool,
     cancel: &AtomicBool,
+    add_extensions: impl FnOnce(&mut pm_kernel::SavePlan) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
     use pm_kernel::{
         DocumentStore,
@@ -425,7 +426,7 @@ pub fn portable(
             });
         }
     }
-    let plan = store
+    let mut plan = store
         .prepare_save(
             SaveTarget::SaveAs {
                 path: destination.into(),
@@ -434,6 +435,7 @@ pub fn portable(
             SaveOptions::default(),
         )
         .map_err(|e| e.to_string())?;
+    add_extensions(&mut plan)?;
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }

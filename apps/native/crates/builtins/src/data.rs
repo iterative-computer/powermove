@@ -261,6 +261,7 @@ impl Backend {
             .get("layerTypes")
             .into_iter()
             .flatten()
+            .filter(|registration| registration.visible_to(&self.identity.project))
             .map(|registration| {
                 let d = wire(&registration.definition);
                 let params = d["params"]
@@ -277,7 +278,13 @@ impl Backend {
             .ok_or("No open project")?
             .set_layer_types(layer_types);
         let mut latest = BTreeMap::new();
-        for registration in state.registries.get("effects").into_iter().flatten() {
+        for registration in state
+            .registries
+            .get("effects")
+            .into_iter()
+            .flatten()
+            .filter(|registration| registration.visible_to(&self.identity.project))
+        {
             latest.insert(registration.id.clone(), wire(&registration.definition));
         }
         if self.last_effects == latest {
@@ -407,7 +414,13 @@ impl Backend {
         let mut order = Vec::new();
         let mut items = BTreeMap::new();
         let mut groups: Vec<String> = Vec::new();
-        for entry in state.registries.get("effects").into_iter().flatten() {
+        for entry in state
+            .registries
+            .get("effects")
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry.visible_to(&self.identity.project))
+        {
             let text = |key: &str| entry.definition.get(key).and_then(pm_model::Value::as_str);
             let group = text("group").unwrap_or("").to_owned();
             if !groups.contains(&group) {
@@ -420,7 +433,13 @@ impl Backend {
         }
         // v1's Effects panel lists transitions too (transitions-basic): drop one
         // on a clip's edge, or Add for the selection's In.
-        for entry in state.registries.get("transitions").into_iter().flatten() {
+        for entry in state
+            .registries
+            .get("transitions")
+            .into_iter()
+            .flatten()
+            .filter(|entry| entry.visible_to(&self.identity.project))
+        {
             let text = |key: &str| entry.definition.get(key).and_then(pm_model::Value::as_str);
             let group = "Transitions".to_owned();
             if !groups.contains(&group) {

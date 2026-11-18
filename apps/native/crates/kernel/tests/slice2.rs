@@ -6745,6 +6745,7 @@ fn registry_stacks_support_buried_disposal_top_reveal_and_owner_generation() {
         generation: 1,
     };
     let entry = |token: &str| Registration {
+        project: None,
         token: token.into(),
         owner,
         id: "select".into(),

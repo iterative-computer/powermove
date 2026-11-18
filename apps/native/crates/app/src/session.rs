@@ -29,6 +29,7 @@ thread_local! {
 pub struct Controller {
     pub builtins: crate::builtins::Host,
     pub extensions: crate::extensions::Extensions,
+    pub(crate) project_extension_scope: Option<(u64, pm_compat_runner::host::ProjectScope)>,
     pub font_broker: Option<pm_text::host::FontBroker>,
     /// Per-composition navigation view, scoped to the live document identity.
     composition_views: std::collections::BTreeMap<(u64, String), CompositionView>,
@@ -1109,6 +1110,7 @@ impl Controller {
         Self {
             builtins,
             extensions,
+            project_extension_scope: None,
             font_broker: None,
             composition_views: Default::default(),
             kernel,
@@ -2375,7 +2377,7 @@ impl Controller {
         // The extensions start now, while the project opens: their realm and
         // bundle take seconds that need no project, and the first picture
         // waits for the extensions the project draws with (PM-384).
-        if !matches!(source, SessionSource::New(_)) {
+        if matches!(source, SessionSource::Library { .. }) {
             self.start_extensions_for(open_id.clone(), cx);
         }
         let call = ShellCall::PrepareOpen {
@@ -2613,6 +2615,51 @@ impl Controller {
                     }
                 }
             }
+            let mut extension_scope = None;
+            let mut extension_failures = vec![];
+            if let Some(Ok(ShellReply::Opened { session, info, .. })) = &result
+                && !info.extension_bundle.is_empty()
+                && let Some(document) = kernel
+                    .published(&session.project)
+                    .map(|p| p.snapshot.doc_id)
+                && let Ok(profile) = this.update(cx, |v, _| v.profile.clone())
+            {
+                let extra = info.extension_bundle.clone();
+                let scan_profile = profile.clone();
+                let prepared = cx
+                    .background_executor()
+                    .spawn(async move {
+                        crate::project_extensions::Open::prepare(&extra, &scan_profile)
+                    })
+                    .await;
+                let decision = if let Some(frame) = prepared.frame() {
+                    let window = this
+                        .update(cx, |v, _| {
+                            v.recovery_pending = true;
+                            v.mcp.awaiting_recovery(Some(name.clone()));
+                            (v.close_window, v.host.borrow().tokens.clone())
+                        })
+                        .ok();
+                    let rx = window.and_then(|(parent, tokens)| {
+                        crate::project_extensions::sheet(frame, tokens, parent?, cx)
+                    });
+                    let choice = match rx {
+                        Some(rx) => rx.recv().await.ok(),
+                        None => None,
+                    };
+                    let _ = this.update(cx, |v, _| v.mcp.awaiting_recovery(None));
+                    choice.unwrap_or(crate::project_extensions::Choice::Without)
+                } else {
+                    crate::project_extensions::Choice::Without
+                };
+                let project = name.clone();
+                let (scope, failures) = cx
+                    .background_executor()
+                    .spawn(async move { prepared.install(decision, &profile, &project) })
+                    .await;
+                extension_scope = Some((document, scope));
+                extension_failures = failures;
+            }
             let _ = this.update(cx, |v, cx| {
                 v.opening = false;
                 v.recovery_pending = false;
@@ -2644,6 +2691,18 @@ impl Controller {
                     })) => {
                         v.open_timer.mark("opened", serde_json::json!({}));
                         v.restoring = false;
+                        if let Some((document, scope)) = &extension_scope {
+                            v.reset_extensions();
+                            v.mcp.set_project_extensions(
+                                *document,
+                                pm_mcp::app_host::ProjectExtensions {
+                                    root: scope.root.as_ref().map(|root| root.path().to_owned()),
+                                    excluded: scope.excluded.clone(),
+                                    report: serde_json::Value::Null,
+                                },
+                            );
+                        }
+                        v.project_extension_scope = extension_scope;
                         // Media resolves on a worker after the project shows.
                         let in_place = decision == pm_kernel::locks::OpenDecision::Writable;
                         v.adopt(session, decision, info.history_rejected, cx);
@@ -2651,6 +2710,10 @@ impl Controller {
                         v.load_recent(cx);
                         v.offer_stranded_copies(cx);
                         v.tell_kept_beside(cx);
+                        if !extension_failures.is_empty() {
+                            v.message = extension_failures.join(" ");
+                            v.errors.borrow_mut().push("Project extensions", &v.message);
+                        }
                         // No lock reaches another computer through a sync
                         // client: say what does guard the file.
                         if in_place && v.path.as_deref().is_some_and(pm_kernel::locks::is_synced) {

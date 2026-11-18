@@ -78,6 +78,7 @@ mod panel_bridge;
 mod panel_capture_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod project_capture_tests;
+mod project_extensions;
 mod panel_library;
 mod ghost;
 mod panels;

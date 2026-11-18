@@ -265,6 +265,7 @@ fn a_malformed_registered_definition_fails_every_sync() {
             ops: vec![pm_kernel::state::StateOp::Register {
                 registry: "effects".into(),
                 entry: pm_kernel::state::Registration {
+                    project: None,
                     token: "synthetic-malformed".into(),
                     owner: Caller::native().writer,
                     id: "synthetic.malformed".into(),

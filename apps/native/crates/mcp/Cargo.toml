@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 pm-scene3d = { path = "../scene3d" }
 pm-panel-studio3d = { path = "../panel-studio3d" }
+pm-fx-defs = { path = "../../../../engine/crates/pm-fx-defs" }
 pm-kernel = { path = "../kernel" }
 pm-model = { path = "../../../../engine/crates/pm-model" }
 serde = { version = "1", features = ["derive"] }
@@ -18,6 +19,7 @@ libc = "0.2"
 icu_collator = "2"
 async-channel = "2"
 sha2 = "0.10"
+base64 = "0.22"
 
 [features]
 # Synthetic large projects for the scale bench (pm_kernel::synthetic).

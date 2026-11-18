@@ -811,6 +811,7 @@ impl McpSession {
                 )
             }
             "save_project" => host.save_project(&id),
+            "export_project" => host.export_project(&id),
             "apply_commands" | "edit_layer_strips" | "edit_video" | "edit_3d" => {
                 let expected = session
                     .transaction
@@ -888,7 +889,7 @@ impl McpSession {
                         &selection,
                         cleaned_commands.as_deref().unwrap(),
                         host.playhead(&id),
-                        Some(&host.state()),
+                        Some(&host.state().for_project(&id)),
                     )?)
                 } else {
                     None

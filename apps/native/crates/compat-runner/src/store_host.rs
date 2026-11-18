@@ -88,10 +88,11 @@ fn adopt(
         .filter(|id| !id.is_empty())
         .unwrap_or(&graph.hash)
         .to_owned();
+    let from_project = crate::discovery::project_origin(&found.directory).is_some();
     let permissions: BTreeMap<_, _> = manifest
         .permissions
         .iter()
-        .filter(|p| **p != Permission::FullAccess)
+        .filter(|p| **p != Permission::FullAccess && !from_project)
         .map(|permission| {
             (
                 *permission,
@@ -172,7 +173,8 @@ impl StoreExtension {
         let id = ExtensionId::new(found.id.clone()).map_err(|_| Error::Invalid("Store id"))?;
         let session = StoreSession::admit(&KernelStoreAdapter::new(&*kernel), &id)
             .map_err(|e| Error::Host(format!("{e:?}")))?;
-        let dispatch = Arc::new(KernelStoreDispatch::new(owner, session.clone())?);
+        let dispatch =
+            Arc::new(KernelStoreDispatch::new(owner, session.clone())?.for_project(project));
         let host = Arc::new(
             StoreRuntimeHost::new(
                 kernel,

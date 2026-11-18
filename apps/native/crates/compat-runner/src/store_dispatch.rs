@@ -12,6 +12,7 @@ use std::sync::Mutex;
 
 pub struct KernelStoreDispatch {
     owner: Writer,
+    project: Option<String>,
     session: StoreSession,
     failures: Mutex<Vec<String>>,
 }
@@ -24,9 +25,14 @@ impl KernelStoreDispatch {
         }
         Ok(Self {
             owner,
+            project: None,
             session,
             failures: Mutex::new(Vec::new()),
         })
+    }
+    pub(crate) fn for_project(mut self, project: &str) -> Self {
+        self.project = Some(project.to_owned());
+        self
     }
     pub fn failures(&self) -> Vec<String> {
         self.failures.lock().unwrap().clone()
@@ -164,9 +170,18 @@ impl StoreDispatch for KernelStoreDispatch {
                 }
                 // The kernel is app-wide and each window runs its own helper, so
                 // this extension's other helpers may hold the id; no one else may.
-                if state.provider(registry, &id).is_some_and(|entry| {
-                    entry.owner != self.owner && !entry.token.starts_with(&self.prefix())
-                }) {
+                let scoped = self
+                    .project
+                    .as_deref()
+                    .map(|project| state.for_project(project));
+                if scoped
+                    .as_ref()
+                    .unwrap_or(&state)
+                    .provider(registry, &id)
+                    .is_some_and(|entry| {
+                        entry.owner != self.owner && !entry.token.starts_with(&self.prefix())
+                    })
+                {
                     return Err(Error::Invalid("Store registration collision"));
                 }
                 self.apply(
@@ -174,6 +189,7 @@ impl StoreDispatch for KernelStoreDispatch {
                     vec![StateOp::Register {
                         registry: registry.into(),
                         entry: Registration {
+                            project: self.project.clone(),
                             token,
                             owner: self.owner,
                             id,

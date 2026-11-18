@@ -563,7 +563,7 @@ fn extensions_used(root: &pm_model::Node) -> std::collections::HashSet<String> {
 
 /// Native surfaces read these registries: Effects, Properties, MCP and the kernel's
 /// layer commands see a contribution exactly as they see a built-in.
-fn registrations(value: &Value, owner: Writer) -> Vec<StateOp> {
+fn registrations(value: &Value, owner: Writer, project: &str) -> Vec<StateOp> {
     let mut ops = vec![StateOp::DisposeOwner { owner }];
     for (kind, registry) in [
         ("effects", "effects"),
@@ -585,6 +585,7 @@ fn registrations(value: &Value, owner: Writer) -> Vec<StateOp> {
             ops.push(StateOp::Register {
                 registry: registry.into(),
                 entry: Registration {
+                    project: Some(project.into()),
                     token: format!("{}.{}.{registry}.{id}", owner.realm, owner.generation),
                     owner,
                     id: id.into(),
@@ -666,7 +667,7 @@ impl RealmEvents for Arc<Events> {
     fn contributions(&self, mut value: Value) {
         drop(self.kernel.state_transaction(StateTransaction {
             expected_revision: None,
-            ops: registrations(&value, self.writer),
+            ops: registrations(&value, self.writer, &self.project),
         }));
         merge_store(&mut value, &self.shared.store.lock().unwrap());
         self.shared
@@ -955,8 +956,44 @@ pub struct ExtensionHost {
     presented: Arc<Mutex<Option<Value>>>,
     worker: Option<thread::JoinHandle<()>>,
 }
+/// Extra roots are private to one document and live only as long as its
+/// extension hosts. An excluded id cannot fall back to a Library version.
+#[derive(Clone, Default)]
+pub struct ProjectScope {
+    pub root: Option<Arc<tempfile::TempDir>>,
+    pub installed: BTreeSet<String>,
+    pub excluded: BTreeSet<String>,
+}
+impl ProjectScope {
+    pub fn roots(&self, library: &[PathBuf]) -> Vec<PathBuf> {
+        library
+            .iter()
+            .cloned()
+            .chain(self.root.iter().map(|root| root.path().to_owned()))
+            .collect()
+    }
+    fn scan(&self, library: &[PathBuf]) -> Vec<Discovered> {
+        discovery::scan(&self.roots(library))
+            .into_iter()
+            .filter(|found| !self.excluded.contains(&found.id))
+            .collect()
+    }
+}
 impl ExtensionHost {
     pub fn start(config: HostConfig) -> Self {
+        Self::start_scoped(config, ProjectScope::default())
+    }
+    pub fn start_scoped(mut config: HostConfig, scope: ProjectScope) -> Self {
+        if let Some(vars) = config.vars.take() {
+            let installed = scope.installed.clone();
+            config.vars = Some(Arc::new(move |id, keys| {
+                if installed.contains(id) {
+                    Default::default()
+                } else {
+                    vars(id, keys)
+                }
+            }));
+        }
         let (inbox, input) = mpsc::channel();
         let shared = Arc::new(Shared {
             published: Mutex::default(),
@@ -1020,6 +1057,7 @@ impl ExtensionHost {
             store_revision: None,
             closing: Arc::default(),
             config,
+            scope,
         };
         let worker = thread::Builder::new()
             .name("pm-compat-host".into())
@@ -1344,6 +1382,7 @@ struct StoreLive {
     hash: String,
     extension: StoreExtension,
     views: Arc<ViewEvents>,
+    authority: Arc<dyn StoreAuthority>,
 }
 /// A notice the realm hears on every frame (the clock moved, a frame was
 /// presented). The next goes only once the realm has run the last: a realm
@@ -1391,6 +1430,7 @@ struct Owner {
     viewport: Option<(f32, f32, f32)>,
     window_hidden: bool,
     config: HostConfig,
+    scope: ProjectScope,
     shared: Arc<Shared>,
     inbox: Sender<Input>,
     transport: Arc<Mutex<Option<Arc<NativeHost>>>>,
@@ -1800,11 +1840,28 @@ impl Owner {
     /// is if it is not the realm. Other windows' helpers hold their own entries.
     fn provider(&self, registry: &str, id: &str) -> Option<(Option<usize>, Registration)> {
         let state = self.config.kernel.state();
-        let store = |owner: Writer| self.stores.iter().position(|s| s.owner == owner);
-        let entry = state.registries.get(registry)?.iter().rev().find(|entry| {
-            entry.id == id && (entry.owner == self.writer || store(entry.owner).is_some())
-        })?;
-        Some((store(entry.owner), entry.clone()))
+        let native = |entry: &&Registration| entry.id == id && entry.owner == self.writer;
+        for (index, store) in self.stores.iter().enumerate().rev() {
+            let scoped = store.authority.state();
+            if let Some(entry) = scoped
+                .registries
+                .get(registry)
+                .into_iter()
+                .flatten()
+                .rev()
+                .find(|entry| entry.id == id && entry.owner == store.owner)
+            {
+                return Some((Some(index), entry.clone()));
+            }
+        }
+        state
+            .registries
+            .get(registry)?
+            .iter()
+            .rev()
+            .find(native)
+            .cloned()
+            .map(|entry| (None, entry))
     }
     fn store_of(&self, panel: &str) -> Option<&StoreExtension> {
         let (store, _) = self.provider("panels", panel)?;
@@ -1879,10 +1936,10 @@ impl Owner {
     }
     /// Publishes what a helper registered through the same path the realm uses.
     fn publish_store(&self) {
-        let state = self.config.kernel.state();
         let mut store = json!({});
         let mut definitions = vec![];
         for store_entry in &self.stores {
+            let state = store_entry.authority.state();
             let (owner, extension) = (&store_entry.owner, &store_entry.extension);
             let mut own = json!({"effects":[],"transitions":[],"layers":[]});
             for (kind, registry) in [
@@ -2127,6 +2184,9 @@ impl Owner {
     }
     /// The saved preference; turning an extension on also ends a D11 stop.
     fn persist_enabled(&self, id: &str, enabled: bool) {
+        if self.scope.installed.contains(id) {
+            return;
+        }
         let _ = update_state::<String>(&self.config.kernel, |state| {
             Ok(state
                 .extensions
@@ -2179,6 +2239,9 @@ impl Owner {
     /// D11 Stop: off for this run (every window), not in the saved
     /// preference; Settings shows it off and turning it on clears this.
     fn stop_for_this_run(&self, id: &str) {
+        if self.scope.installed.contains(id) {
+            return;
+        }
         let _ = update_state::<String>(&self.config.kernel, |state| {
             Ok(state
                 .extensions
@@ -2231,6 +2294,9 @@ impl Owner {
                 .iter()
                 .filter_map(|record| {
                     let id = record["id"].as_str()?;
+                    if self.scope.installed.contains(id) {
+                        return None;
+                    }
                     let previous = state.extensions.get(id);
                     let mut source = previous
                         .and_then(|entry| entry.source.as_object())
@@ -2247,6 +2313,9 @@ impl Owner {
                     }
                     if let Some(folder) = self.folders.get(id) {
                         summary["folder"] = json!(folder.to_string_lossy());
+                        if let Some(project) = discovery::project_origin(folder) {
+                            summary["provenance"] = json!(format!("From project {project}"));
+                        }
                     }
                     // What it provides: its live registrations, else what it
                     // provided when it last ran (it is off, or failing).
@@ -2279,7 +2348,11 @@ impl Owner {
         let mut changed = false;
         for record in &mut self.records {
             let id = record["id"].as_str().unwrap_or_default().to_owned();
-            let next = kept.get(&id).map(|ids| json!(ids)).unwrap_or(Value::Null);
+            let next = kept
+                .get(&id)
+                .or_else(|| provided.get(&id))
+                .map(|ids| json!(ids))
+                .unwrap_or(Value::Null);
             if record["provides"] != next {
                 record["provides"] = next;
                 changed = true;
@@ -2375,6 +2448,9 @@ impl Owner {
             .iter()
             .filter_map(|record| {
                 let id = record["id"].as_str()?;
+                if self.scope.installed.contains(id) {
+                    return None;
+                }
                 let entry = state.extensions.get(id)?;
                 let enabled = entry.enabled && !entry.stopped_this_run();
                 (record["enabled"] != enabled).then(|| (id.to_owned(), enabled))
@@ -2385,7 +2461,7 @@ impl Owner {
         }
     }
     fn stamp(&self) -> u64 {
-        discovery::stamp(&self.config.roots)
+        discovery::stamp(&self.scope.roots(&self.config.roots))
     }
     /// Every found extension's record, compiled in the live realm's pool. The
     /// compiler starts only for one missing from the compile cache.
@@ -2410,7 +2486,7 @@ impl Owner {
     }
     /// The record alone. Whether a Store extension's helper runs is `sync_stores`.
     fn compile(&mut self, compiler: &compile::LazySvelte, found: &Discovered) -> Value {
-        let enabled = self.enabled(&found.id);
+        let enabled = self.scope.installed.contains(&found.id) || self.enabled(&found.id);
         let graph = match &found.manifest {
             Ok(manifest) => compile::compile(
                 &found.directory,
@@ -2427,6 +2503,9 @@ impl Owner {
             graph.as_ref().map(|g| g.to_json()).map_err(Clone::clone),
         );
         let surface = record["manifest"]["apiVersion"].as_u64() >= Some(4);
+        if self.scope.installed.contains(&found.id) && found.store.is_some() {
+            record["trust"] = json!("store");
+        }
         if record["trust"] != "store" {
             // Surface extensions get their own realm from the panel host.
             if surface {
@@ -2523,10 +2602,23 @@ impl Owner {
             .as_ref()
             .map(declared_keys)
             .unwrap_or_default();
-        let values = vars_of(self.config.vars.as_ref(), id, &keys);
+        let from_project = discovery::project_origin(&found.directory).is_some();
+        let values = if from_project {
+            json!({})
+        } else {
+            vars_of(self.config.vars.as_ref(), id, &keys)
+        };
         self.shared.handed(&json!({ id: values.clone() }));
+        let authority: Arc<dyn StoreAuthority> =
+            if self.scope.installed.contains(id) || from_project {
+                Arc::new(crate::store_kernel::ProjectStore::new(
+                    self.config.kernel.clone(),
+                ))
+            } else {
+                Arc::new(self.config.kernel.clone())
+            };
         let started = StoreExtension::start(
-            Arc::new(self.config.kernel.clone()),
+            authority.clone(),
             &self.config.project,
             "native",
             &found,
@@ -2547,6 +2639,7 @@ impl Owner {
                     hash,
                     extension,
                     views,
+                    authority,
                 });
                 self.reopen_panels(Some(owner));
             }
@@ -2612,6 +2705,7 @@ impl Owner {
             shared: self.shared.clone(),
             kernel: self.config.kernel.clone(),
             writer: self.writer,
+            project: self.config.project.clone(),
             inbox: self.inbox.clone(),
             activating: Mutex::default(),
             measuring: Mutex::default(),
@@ -2679,7 +2773,7 @@ impl Owner {
     }
     fn boot(&mut self) {
         trace(json!({"extensions": "boot"}));
-        let found = discovery::scan(&self.config.roots);
+        let found = self.scope.scan(&self.config.roots);
         self.folders = found
             .iter()
             .map(|f| (f.id.clone(), f.directory.clone()))
@@ -2775,7 +2869,7 @@ impl Owner {
             self.boot();
             return;
         }
-        let found = discovery::scan(&self.config.roots);
+        let found = self.scope.scan(&self.config.roots);
         self.folders = found
             .iter()
             .map(|f| (f.id.clone(), f.directory.clone()))

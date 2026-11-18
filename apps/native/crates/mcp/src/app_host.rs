@@ -25,7 +25,15 @@ pub struct Host {
     deciding: Mutex<Option<String>>,
     pending_opens: Mutex<crate::recovery::PendingOpens>,
     pub closing: AtomicBool,
+    extension_state: Mutex<std::collections::BTreeMap<u64, ProjectExtensions>>,
 }
+#[derive(Clone, Default)]
+pub struct ProjectExtensions {
+    pub root: Option<PathBuf>,
+    pub excluded: std::collections::BTreeSet<String>,
+    pub report: Value,
+}
+
 /// Slot 0 is a windowless host's (the headless MCP server): its only project.
 const WINDOWLESS: u64 = 0;
 #[derive(Default)]
@@ -100,6 +108,7 @@ impl Host {
             deciding: Mutex::new(None),
             pending_opens: Mutex::default(),
             closing: AtomicBool::new(false),
+            extension_state: Mutex::default(),
         })
     }
     /// An editor window opened. The receiver wakes when MCP changes its project.
@@ -247,7 +256,10 @@ impl Host {
         if let Some(window) = self.window_of(&id) {
             self.activate_window(window);
             let p = self.kernel.published(&id).ok_or_else(stopped)?;
-            return Ok(identity(&p));
+            return Ok(with_extensions(
+                identity(&p),
+                &self.project_extensions(p.snapshot.doc_id).report,
+            ));
         }
         let reply = self.shell(ShellCall::PrepareOpen {
             id: id.clone(),
@@ -271,11 +283,26 @@ impl Host {
         let ShellReply::Opened {
             session,
             decision: pm_kernel::locks::OpenDecision::Writable,
+            info,
             ..
         } = reply
         else {
             return Err(Error::kernel(reply));
         };
+        let (report, excluded) =
+            crate::project_extensions::open_report(&info.extension_bundle, &self.profile);
+        if report.as_object().is_some_and(|report| !report.is_empty())
+            && let Some(published) = self.kernel.published(&session.project)
+        {
+            self.set_project_extensions(
+                published.snapshot.doc_id,
+                ProjectExtensions {
+                    root: None,
+                    excluded,
+                    report: report.clone(),
+                },
+            );
+        }
         let (target, old) = self.place(session.clone());
         // A window closes the project it showed once it shows the new one; MCP
         // closes only what no window shows (see `place`).
@@ -303,7 +330,24 @@ impl Host {
             .kernel
             .published(&session.project)
             .ok_or_else(stopped)?;
-        Ok(identity(&p))
+        Ok(with_extensions(identity(&p), &report))
+    }
+    pub fn project_extensions(&self, document: u64) -> ProjectExtensions {
+        self.extension_state
+            .lock()
+            .unwrap()
+            .get(&document)
+            .cloned()
+            .unwrap_or_default()
+    }
+    pub fn set_project_extensions(&self, document: u64, extensions: ProjectExtensions) {
+        self.extension_state
+            .lock()
+            .unwrap()
+            .insert(document, extensions);
+    }
+    pub fn extension_exclusions(&self, document: u64) -> std::collections::BTreeSet<String> {
+        self.project_extensions(document).excluded
     }
     /// EOF from a headless owner closes library projects durably. Unsaved
     /// named files keep their journal, like a deferred close in the app.
@@ -401,6 +445,13 @@ pub(crate) fn stopped() -> Error {
         backing: Some("pm-kernel".into()),
     }
 }
+fn with_extensions(mut identity: Value, report: &Value) -> Value {
+    if let Some(fields) = report.as_object() {
+        identity.as_object_mut().unwrap().extend(fields.clone());
+    }
+    identity
+}
+
 fn identity(p: &Published) -> Value {
     let name = p
         .snapshot

@@ -1,5 +1,5 @@
 import type { ComponentChildren } from "preact";
-import { useLayoutEffect, useReducer } from "preact/hooks";
+import { useLayoutEffect, useReducer, useState } from "preact/hooks";
 import type { SurfaceEvent } from "../../src";
 import * as UI from "../../src/components";
 import { ExportModel, isProgress, progress, type Options } from "./model";
@@ -146,8 +146,28 @@ export function workAreaLabel(p: {
   return `Work area · ${s(a)}–${s(b)} s`;
 }
 
+function ProjectOptionsScroll({
+  extensions,
+  children,
+}: {
+  extensions: boolean;
+  children: ComponentChildren;
+}) {
+  return extensions ? (
+    <scroll
+      id="export.projectOptions"
+      style={{ ...stack, flexGrow: 1, minHeight: 0 }}
+    >
+      {children}
+    </scroll>
+  ) : (
+    <>{children}</>
+  );
+}
+
 export function ExportSheet({ model, anchor }: ExportSheetProps) {
   const [, update] = useReducer((n) => n + 1, 0);
+  const [extensionsExpanded, setExtensionsExpanded] = useState(false);
   useLayoutEffect(() => model.subscribe(() => update(null)), [model]);
   const s = model.state;
   const p = s.project;
@@ -160,6 +180,15 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
     return null;
   const o = model.options;
   const busy = model.locked;
+  const extensions = s.extensions ?? [];
+  const included = extensions.filter((entry) => entry.status === "included");
+  const omitted = extensions.filter((entry) => entry.status !== "included");
+  const checked = o.includeExtensions !== false;
+  const extensionSummary = `${checked ? "Includes" : "Can include"} ${included.length} ${included.length === 1 ? "extension" : "extensions"} needed to render`;
+  const sizeLabel = (bytes: number) =>
+    bytes >= 1024 * 1024
+      ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+      : `${Math.max(1, Math.ceil(bytes / 1024))} KB`;
   const watch = (job: Promise<unknown>) => {
     void job.catch((error) => {
       // A command that failed is said (an ambiguous host acknowledgement
@@ -468,38 +497,92 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
               {descriptions[model.kind]}
             </text>
             {model.kind === "project" ? (
-              <UI.FormGroup label="Keep Every Layer Editable">
-                <div
-                  role="group"
-                  label="Keep Every Layer Editable"
-                  style={{
-                    ...stack,
-                    gap: token("metrics.border"),
-                    padding: token("metrics.inset"),
-                  }}
-                >
-                  <text
-                    style={{ ...text, fontSize: token("typography.title") }}
-                  >
-                    Keep every layer editable
-                  </text>
-                  <text
-                    style={{ ...detail, fontSize: token("typography.label") }}
-                  >
-                    Save a portable Powermove project with its media, effects,
-                    keyframes and composition settings.
-                  </text>
-                  <text
+              <ProjectOptionsScroll extensions={extensions.length > 0}>
+                <UI.FormGroup label="Keep Every Layer Editable">
+                  <div
+                    role="group"
+                    label="Keep Every Layer Editable"
                     style={{
-                      color: token("colors.secondary"),
-                      fontSize: token("typography.label"),
-                      marginTop: token("metrics.gap"),
+                      ...stack,
+                      gap: token("metrics.border"),
+                      padding: token("metrics.inset"),
                     }}
                   >
-                    Editable layers · Original media · Animation & effects
-                  </text>
-                </div>
-              </UI.FormGroup>
+                    <text
+                      style={{ ...text, fontSize: token("typography.title") }}
+                    >
+                      Keep every layer editable
+                    </text>
+                    <text
+                      style={{ ...detail, fontSize: token("typography.label") }}
+                    >
+                      Save a portable Powermove project with its media, effects,
+                      keyframes and composition settings.
+                    </text>
+                    <text
+                      style={{
+                        color: token("colors.secondary"),
+                        fontSize: token("typography.label"),
+                        marginTop: token("metrics.gap"),
+                      }}
+                    >
+                      Editable layers · Original media · Animation & effects
+                    </text>
+                  </div>
+                  {included.length > 0 && (
+                    <UI.DisclosureGroup
+                      id="export.projectExtensions"
+                      label={extensionSummary}
+                      open={extensionsExpanded}
+                      onChange={setExtensionsExpanded}
+                      leading={
+                        <UI.Checkbox
+                          id="export.includeExtensions"
+                          label="Include render-required extensions"
+                          binding={s.bindings.includeExtensions}
+                          value={checked}
+                          disabled={busy}
+                          onChange={(event) =>
+                            edit("includeExtensions", event.value as boolean)
+                          }
+                        />
+                      }
+                    >
+                      {included.map((entry) => (
+                        <div key={entry.id} style={{ ...line, ...column }}>
+                          <text style={text}>
+                            {entry.name} {entry.version}
+                          </text>
+                          <text style={detail}>{sizeLabel(entry.bytes)}</text>
+                        </div>
+                      ))}
+                    </UI.DisclosureGroup>
+                  )}
+                  {!extensionsExpanded && included.length > 0 && (
+                    <text style={{ ...detail, ...column }}>
+                      {included
+                        .map((entry) => `${entry.name} ${entry.version}`)
+                        .join(", ")}
+                    </text>
+                  )}
+                  {omitted.map((entry) => (
+                    <div
+                      key={entry.id}
+                      style={{
+                        ...stack,
+                        ...column,
+                        paddingTop: token("metrics.gap"),
+                      }}
+                    >
+                      <text style={detail}>
+                        {entry.status === "storeOnly"
+                          ? `${entry.name} is needed to render, not included — recipients install it from the Store (${entry.storeId ?? entry.id}).`
+                          : `This project uses ${entry.name}, which isn't installed. Its effects won't render for the recipient.`}
+                      </text>
+                    </div>
+                  ))}
+                </UI.FormGroup>
+              </ProjectOptionsScroll>
             ) : (
               <scroll
                 id="export.options"

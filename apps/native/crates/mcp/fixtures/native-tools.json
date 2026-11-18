@@ -1,5 +1,10 @@
 [
   {
+    "name": "export_project",
+    "description": "Export a portable .pmv copy of the active project with its original media and render-required extensions. Returns the exported path and extension requirements.",
+    "inputSchema": {"type": "object", "additionalProperties": false, "properties": {}}
+  },
+  {
     "name": "list_commands",
     "description": "List every command a person can run in this window: the menu bar's, the command palette's and the keyboard's, each with its id, arguments, label, menu, current keys, and whether it can run now (\"enabled\") and is switched on (\"checked\", for toggles such as Loop Playback, Snapping, the viewer's channels and overlays, and the timeline's edit tool). Filter by text in the label, menu or id with \"query\". Run one with run_command.",
     "inputSchema": {

@@ -408,7 +408,15 @@ impl Automation {
                 pm_model::NodeKind::String(text) => text.as_str(),
                 _ => None,
             });
-        Ok(json!({"projectId": id, "name": name}))
+        let mut identity = json!({"projectId": id, "name": name});
+        if let Some(extensions) = self
+            .app()
+            .map(|host| host.project_extensions(view.document))
+            && let Some(report) = extensions.report.as_object()
+        {
+            identity.as_object_mut().unwrap().extend(report.clone());
+        }
+        Ok(identity)
     }
     pub fn project_memory(
         &mut self,
@@ -445,7 +453,13 @@ impl Automation {
     pub fn workspace_state(&self, project: Option<&str>) -> Result<Value> {
         let state = self.state();
         let mut effects = Vec::<Value>::new();
-        for entry in state.registries.get("effects").into_iter().flatten() {
+        for entry in state
+            .registries
+            .get("effects")
+            .into_iter()
+            .flatten()
+            .filter(|entry| project.map_or(entry.project.is_none(), |id| entry.visible_to(id)))
+        {
             let effect = json_value(&entry.definition);
             let row = json!({"id":effect["id"],"label":effect["label"],"group":effect["group"],
                 "parameters":effect["params"].as_array().map(|params| params.iter().map(|p| p["k"].clone()).collect::<Vec<_>>()).unwrap_or_default()});
@@ -762,7 +776,10 @@ impl Automation {
         // first-registration ordering just like object property replacement.
         let mut panels = Vec::<Value>::new();
         if let Some(registrations) = registrations {
-            for entry in registrations {
+            for entry in registrations
+                .iter()
+                .filter(|entry| project.map_or(entry.project.is_none(), |id| entry.visible_to(id)))
+            {
                 let definition = json_value(&entry.definition);
                 let id = definition["id"].as_str().unwrap_or(&entry.id);
                 if id.is_empty() {
@@ -914,8 +931,18 @@ impl Automation {
         if let ShellReply::RecoveryRequired { ticket, recovery } = reply {
             return Ok(self.pending_opens.required(id, ticket, recovery));
         }
+        let report = if let ShellReply::Opened { info, .. } = &reply {
+            crate::project_extensions::open_report(&info.extension_bundle, &self.profile).0
+        } else {
+            json!({})
+        };
         let project = self.adopt(reply)?;
-        self.project_identity(&project)
+        let mut identity = self.project_identity(&project)?;
+        identity
+            .as_object_mut()
+            .unwrap()
+            .extend(report.as_object().unwrap().clone());
+        Ok(identity)
     }
     /// Explicit host ingress for a caller-selected working file. This uses the
     /// same kernel session/locks, recovery decisions and resident media table
@@ -924,6 +951,9 @@ impl Automation {
     pub fn open_file(&mut self, id: &str, path: PathBuf) -> Result<Value> {
         if !path.is_absolute() {
             return Err(Error::invalid("Use an absolute project working-file path"));
+        }
+        if let Some(host) = self.app() {
+            return host.open(id.into(), SessionSource::File(path));
         }
         let reply = self.shell(ShellCall::PrepareOpen {
             id: id.into(),
@@ -994,6 +1024,11 @@ impl Automation {
             self.emit(id, "saved");
             return Ok(json!({"path":path,"projectId":id}));
         }
+        self.export_project(id)
+    }
+
+    pub fn export_project(&mut self, id: &str) -> Result<Value> {
+        let view = self.original_view(id)?;
         std::fs::create_dir_all(&self.exports)?;
         let identity = self.project_identity(id)?;
         let name = identity["name"]
@@ -1015,7 +1050,7 @@ impl Automation {
             .exports
             .join(format!("{}-{}.pmv", name, pm_kernel::new_id("export")));
         let session = self.session(id)?;
-        let plan = match &self.backend {
+        let mut plan = match &self.backend {
             Backend::Owned(kernel) => {
                 kernel.prepare_session_export(session, view.document, path.clone())
             }
@@ -1026,13 +1061,32 @@ impl Automation {
                 .ok_or_else(crate::app_host::stopped)?,
         }
         .map_err(Error::kernel)?;
+        let scope = self
+            .app()
+            .map(|host| host.project_extensions(plan.doc_id))
+            .unwrap_or_default();
+        let bundle = plan
+            .root()
+            .map(|root| {
+                crate::project_extensions::collect_from_library(
+                    root,
+                    &self.state().for_project(id),
+                    &self.profile,
+                    &scope,
+                )
+            })
+            .unwrap_or_default();
+        bundle.add_to(&mut plan).map_err(Error::invalid)?;
         let receipt = plan.run().map_err(Error::kernel)?;
         if !receipt.unavailable_links.is_empty() {
             return Err(Error::unavailable(
                 "original media unavailable for complete portable project export",
             ));
         }
-        let result = json!({"path":path,"projectId":id});
+        let mut result = json!({"path":path,"projectId":id});
+        if !bundle.entries.is_empty() {
+            result["requiredExtensions"] = json!(bundle.entries);
+        }
         self.emit(id, "saved");
         Ok(result)
     }
@@ -1044,6 +1098,83 @@ impl Automation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_extensions_mcp_portable_export_lists_extensions_and_open_never_installs() {
+        use crate::project_extensions::{Bundle, STORE_MARKER, Status};
+        use std::{fs, path::PathBuf};
+        let model_value = |v: Value| pm_model::json::parse(&v.to_string());
+        let root = std::env::temp_dir().join(pm_kernel::new_id("pmv-bundle-test"));
+        fs::create_dir(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let source = root.join("source");
+        let recipient = root.join("recipient");
+        let exports = root.join("exports");
+        for id in ["toy", "unused", "store-demo"] {
+            let path = source.join("extensions").join(id);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(
+                path.join("manifest.json"),
+                json!({"id":id,"version":"1.0.0","name":id}).to_string(),
+            )
+            .unwrap();
+            fs::write(path.join("index.ts"), "export default function () {}").unwrap();
+            if id == "store-demo" {
+                fs::write(
+                    path.join(STORE_MARKER),
+                    r#"{"repoId":"synthetic-store-id","redistributable":false}"#,
+                )
+                .unwrap();
+            }
+        }
+        let mut writer = crate::Automation::new(source, exports.clone()).unwrap();
+        let reply = writer
+            .library_action(pm_kernel::session::ShellCall::PrepareOpen {
+                id: "demo".into(),
+                source: pm_kernel::session::SessionSource::New(
+                    model_value(json!({
+                        "name":"Synthetic", "id":"demo", "compId":"root",
+                        "w":32,"h":32,"dur":1,"fps":30,"layers":[
+                            {"id":"solid","type":"solid","fx":[
+                                {"id":"one","type":"toy.tint","on":true,"p":{}},
+                                {"id":"two","type":"store-demo.tint","on":true,"p":{}},
+                                {"id":"three","type":"blur","on":true,"p":{}}
+                            ]}
+                        ]
+                    }))
+                    .unwrap(),
+                ),
+                electron_profile: None,
+            })
+            .unwrap();
+        writer.adopt(reply).unwrap();
+        let exported = writer.export_project("demo").unwrap();
+        let path = PathBuf::from(exported["path"].as_str().unwrap());
+        let project = pm_kernel::project_io::open_project(&path, Default::default()).unwrap();
+        let bundle = Bundle::read(&project.file.envelope.extra).unwrap();
+        assert_eq!(bundle.entries.len(), 2);
+        assert_eq!(bundle.entries[0].status, Status::StoreOnly);
+        assert_eq!(
+            bundle.entries[0].store_id.as_deref(),
+            Some("synthetic-store-id")
+        );
+        assert!(bundle.files("store-demo").is_none());
+        assert!(bundle.files("toy").unwrap().contains_key("index.ts"));
+
+        let mut reader = crate::Automation::new(recipient.clone(), exports).unwrap();
+        let opened = reader.open_file("received", path).unwrap();
+        assert_eq!(opened["extensionConsentRequired"], true);
+        assert_eq!(opened["missingExtensions"].as_array().unwrap().len(), 2);
+        assert!(!recipient.join("extensions").exists());
+        let document = reader.read_document("received").unwrap();
+        assert_eq!(document["layers"][0]["fx"][0]["type"], "toy.tint");
+    }
 
     #[test]
     fn open_foreign_entry_prevents_snapshot_restore_and_squash() {

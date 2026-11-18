@@ -78,6 +78,7 @@ fn saved_panel_layout_matches_tag_on_corpus_copy_and_app_context() {
             ops.push(StateOp::Register {
                 registry: "panels".into(),
                 entry: Registration {
+                    project: None,
                     token: format!("panel-{i}"),
                     owner: pm_kernel::tx::Writer {
                         realm: 4,
@@ -173,6 +174,7 @@ fn layout_empty_and_contribution_override_disposal_match_tag() {
                     ops: vec![StateOp::Register {
                         registry: "panels".into(),
                         entry: Registration {
+                            project: None,
                             token: token.into(),
                             owner: pm_kernel::tx::Writer {
                                 realm: 7,
