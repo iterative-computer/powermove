@@ -318,7 +318,14 @@ impl Controller {
             .runtime
             .as_ref()
             .ok_or_else(|| "The Effects panel closed.".to_owned())
-            .and_then(|r| r.effect_commands(&drop.panel, &layer, &drop.definition, self.time()));
+            .and_then(|r| {
+                r.effect_commands(
+                    &drop.panel,
+                    &layer,
+                    &drop.definition,
+                    drop.at.unwrap_or_else(|| self.time()),
+                )
+            });
         match commands {
             Ok(commands) => self.run_layer_plan(
                 crate::layer_commands::Plan {

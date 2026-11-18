@@ -692,7 +692,12 @@ pub fn layer_menu_choice(
     ))
 }
 /// Commands [`command_plan`] answers.
-pub const PLANNED: [&str; 54] = [
+pub const PLANNED: [&str; 59] = [
+    "addEdgeFade",
+    "editTransition",
+    "addTransition",
+    "removeTransition",
+    "addDefaultTransition",
     "rippleDelete",
     "nudgeLayerTime",
     "rippleTrimIn",
@@ -1102,6 +1107,113 @@ pub fn command_plan(
         })
     };
     match name {
+        "editTransition" => {
+            use pm_kernel::commands::{
+                effects::{Edge, EffectCommand},
+                transition_edges,
+            };
+            let target = args.first()?.as_str()?;
+            let side = args.get(1)?.as_str()?;
+            let clip = layer(published, target)?;
+            let edge = if side == "in" {
+                Edge::In
+            } else if side == "out" {
+                Edge::Out
+            } else {
+                return None;
+            };
+            let field = if edge == Edge::In {
+                "transitionIn"
+            } else {
+                "transitionOut"
+            };
+            let transition = clip.get(field)?;
+            let mut spec = transition_edges::builtin_spec(transition.get("type")?.as_str()?)?;
+            spec.duration = Some(args.get(2)?.as_f64()?);
+            let command = if let Some(peer) = transition.get("paired").and_then(Value::as_str) {
+                let (left, right) = if edge == Edge::In {
+                    (peer.into(), target.into())
+                } else {
+                    (target.into(), peer.into())
+                };
+                EffectCommand::SetPairedTransition {
+                    left,
+                    right,
+                    transition: Some(Box::new(spec)),
+                    offset: args.get(3).and_then(serde_json::Value::as_f64),
+                }
+            } else {
+                EffectCommand::SetTransition {
+                    layer_id: target.into(),
+                    edge,
+                    transition: Some(Box::new(spec)),
+                }
+            };
+            Some(plain("Edit Transition", vec![command.into()]))
+        }
+        "addTransition" | "removeTransition" | "addEdgeFade" => {
+            use pm_kernel::commands::{effects::Edge, transition_edges};
+            let kind = args.first()?.as_str()?;
+            let target = args.get(1)?.as_str()?;
+            let edge = match args.get(2)?.as_str()? {
+                "in" => Edge::In,
+                "out" => Edge::Out,
+                _ => return None,
+            };
+            let spec = if name == "removeTransition" {
+                None
+            } else {
+                Some(transition_edges::builtin_spec(kind)?)
+            };
+            let mut view = pm_panel_timeline::TimelineModel::default();
+            view.restore_ui(&published.ui_state);
+            let commands = transition_edges::plan(
+                published.snapshot.root()?,
+                target,
+                edge,
+                spec,
+                view.mode == pm_panel_timeline::TimelineMode::Tracks && name != "addEdgeFade",
+            )
+            .ok()?;
+            Some(plain(
+                if name == "removeTransition" {
+                    "Remove Transition"
+                } else {
+                    "Add Transition"
+                },
+                commands,
+            ))
+        }
+        "addDefaultTransition" => {
+            use pm_kernel::commands::effects::{Edge, TransitionDefinition, TransitionSpec};
+            let clip = layers.iter().find(|clip| {
+                selected.contains(&clip.id) && clip.kind != "audio" && !clip.effectively_locked
+            })?;
+            let edge = if (time - clip.in_time).abs() <= (time - clip.out_time).abs() {
+                Edge::In
+            } else {
+                Edge::Out
+            };
+            let mut view = pm_panel_timeline::TimelineModel::default();
+            view.restore_ui(&published.ui_state);
+            let commands = pm_kernel::commands::transition_edges::plan(
+                published.snapshot.root()?,
+                &clip.id,
+                edge,
+                Some(TransitionSpec {
+                    definition: TransitionDefinition {
+                        transition_type: "crossfade".into(),
+                        params: vec![],
+                    },
+                    duration: Some(0.5),
+                    params: Map::new(),
+                }),
+                view.mode == pm_panel_timeline::TimelineMode::Tracks,
+            )
+            .ok()?;
+            Some(plain("Add Default Transition", commands))
+        }
+
         "newCamera" => command_plan("new3d", &[serde_json::json!("camera")], published, time),
         "new3d" => {
             // Layer ▸ Add 3D Layer: one Undo step named for what it adds, then the
@@ -1790,6 +1902,12 @@ pub fn disabled(
         }
     };
     set(
+        "addDefaultTransition",
+        selected
+            .iter()
+            .any(|clip| clip.kind != "audio" && !clip.effectively_locked),
+    );
+    set(
         "studio.view",
         layers
             .iter()
@@ -2102,4 +2220,115 @@ pub fn palette_effect_plan(
         commands.extend(add(id)?);
     }
     Ok(Some(plain(&format!("Add {label}"), commands)))
+}
+
+/// Source-handle adjustments are reported after the actor accepts the edit.
+pub fn transition_requests(plan: &Plan) -> Vec<(String, f64)> {
+    plan.commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::Effect(pm_kernel::EffectCommand::SetPairedTransition {
+                left,
+                transition: Some(spec),
+                ..
+            }) => Some((left.clone(), spec.duration.unwrap_or(0.5))),
+            _ => None,
+        })
+        .collect()
+}
+pub fn transition_notice(published: &Published, requests: &[(String, f64)]) -> Option<String> {
+    for (id, requested) in requests {
+        let clip = layer(published, id)?;
+        let transition = clip.get("transitionOut")?;
+        let root = published.snapshot.root()?;
+        let loc = pm_kernel::model::find_layer(root, id)?;
+        let node = pm_kernel::model::layer_at(root, &loc)?;
+        let fitted = pm_kernel::commands::transition_edges::fitted_edge(
+            root,
+            node,
+            pm_kernel::commands::effects::Edge::Out,
+        )?;
+        let duration = fitted.duration;
+        let offset = fitted.offset;
+        // Shortening scales both span and offset. Only a change in cut
+        // alignment (such as a zero handle forcing the span to one side)
+        // is a shift; a zero-width plain cut has no alignment to report.
+        let intended_duration = transition.get("dur")?.as_f64()?;
+        let intended_offset = transition.get("offset")?.as_f64()?;
+        let shifted =
+            duration > 0. && (offset / duration - intended_offset / intended_duration).abs() > 1e-6;
+        let shortened = duration < *requested - 1e-6;
+        if shifted || shortened {
+            return Some(format!(
+                "Transition {}{} to fit available source media ({duration:.2} s)",
+                if shortened { "shortened" } else { "" },
+                if shifted {
+                    if shortened { " and shifted" } else { "shifted" }
+                } else {
+                    ""
+                }
+            ));
+        }
+    }
+    None
+}
+
+/// Cached cut admission for the Timeline menu. Only the chosen edge changes
+/// with the playhead; project walks happen on a document/selection change.
+#[derive(Default)]
+pub struct TransitionMenuFacts {
+    stamp: Option<(u64, u64)>,
+    composition: Option<String>,
+    selected: Vec<String>,
+    span: Option<(f64, f64)>,
+    reasons: [Option<&'static str>; 2],
+}
+impl TransitionMenuFacts {
+    pub fn refusal(
+        &mut self,
+        published: &Published,
+        layers: &[LayerInfo],
+        time: f64,
+    ) -> Option<&'static str> {
+        use pm_kernel::commands::{effects::Edge, transition_edges};
+        if published
+            .ui_state
+            .timeline
+            .get("mode")
+            .and_then(Value::as_str)
+            != Some("tracks")
+        {
+            return None;
+        }
+        let root = published.snapshot.root()?;
+        let composition = pm_kernel::model::open_comp_id(root);
+        let stamp = (published.snapshot.doc_id, published.revision());
+        let selected = published.selection.layers();
+        if self.stamp != Some(stamp) || self.composition != composition || self.selected != selected
+        {
+            self.stamp = Some(stamp);
+            self.composition = composition;
+            self.selected = selected.to_vec();
+            self.span = None;
+            self.reasons = [None, None];
+            if let Some(clip) = layers.iter().find(|clip| {
+                selected.contains(&clip.id) && clip.kind != "audio" && !clip.effectively_locked
+            }) {
+                self.span = Some((clip.in_time, clip.out_time));
+                for (i, edge) in [Edge::In, Edge::Out].into_iter().enumerate() {
+                    if let Ok(commands) = transition_edges::plan(
+                        root,
+                        &clip.id,
+                        edge,
+                        transition_edges::builtin_spec("crossfade"),
+                        true,
+                    ) {
+                        self.reasons[i] = transition_edges::refusal_for_commands(root, &commands);
+                    }
+                }
+            }
+        }
+        let (start, end) = self.span?;
+        self.reasons[usize::from((time - start).abs() > (time - end).abs())]
+    }
 }

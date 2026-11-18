@@ -139,6 +139,8 @@ pub struct MenuState {
     pub tool: String,
     /// Commands that cannot run now: menu rows dim, the palette omits them.
     pub disabled: std::collections::BTreeSet<String>,
+    /// Why Add Default Transition is disabled at the current cut.
+    pub transition_refusal: Option<String>,
     /// Toggles that are on: their menu rows carry a checkmark.
     pub checked: std::collections::BTreeSet<String>,
     /// Recent projects (library id, name), newest first: the project
@@ -923,6 +925,10 @@ define_class!(
             let tag = item.tag() as usize;
             let fixed = item.representedObject().is_none();
             if let Some((name, _)) = self.ivars().commands.get(tag).filter(|_| fixed) {
+                if name == "addDefaultTransition" {
+                    let tooltip = state.transition_refusal.as_deref().map(NSString::from_str);
+                    item.setToolTip(tooltip.as_deref());
+                }
                 // HIG: toggles read as the action they perform.
                 match name.as_str() {
                     "toggleSidebar" => item.setTitle(&NSString::from_str(

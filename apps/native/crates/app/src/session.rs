@@ -252,6 +252,7 @@ pub struct Controller {
     pub clipboard: crate::layer_commands::Clipboard,
     /// Commands that cannot run now; menus and the palette show them off.
     pub disabled: std::collections::BTreeSet<String>,
+    transition_menu: std::cell::RefCell<crate::layer_commands::TransitionMenuFacts>,
     pub save_pending: bool,
     pub close_after_save: Option<crate::lifecycle::Intent>,
     /// Queued batches and the cancel flag of the running one.
@@ -482,6 +483,9 @@ impl pm_shell::integration::Integration for Bridge {
     }
     fn disabled(&self, cx: &App) -> std::collections::BTreeSet<String> {
         self.0.read(cx).unavailable_commands()
+    }
+    fn transition_refusal(&self, cx: &App) -> Option<String> {
+        self.0.read(cx).transition_refusal().map(str::to_owned)
     }
     fn natural_panel_height(&self, id: &str, cx: &App) -> Option<f32> {
         let controller = self.0.read(cx);
@@ -822,9 +826,22 @@ impl Controller {
         on
     }
     /// Commands that cannot run now: dimmed menu rows, refused agent runs.
+    fn transition_refusal(&self) -> Option<&'static str> {
+        if self.opening || self.settling.is_some() || self.home_visible {
+            return None;
+        }
+        self.transition_menu.borrow_mut().refusal(
+            self.published.as_deref()?,
+            self.layers(),
+            self.time(),
+        )
+    }
     pub(crate) fn unavailable_commands(&self) -> std::collections::BTreeSet<String> {
         let v = self;
         let mut off = v.disabled.clone();
+        if v.transition_refusal().is_some() {
+            off.insert("addDefaultTransition".into());
+        }
         // While a project arrives its commands stay available: they wait for
         // it (`Controller::command`) instead of being refused.
         if v.opening || v.settling.is_some() {
@@ -1207,6 +1224,7 @@ impl Controller {
             view_write: None,
             clipboard: Default::default(),
             disabled: crate::layer_commands::disabled(None, &[], &Default::default()),
+            transition_menu: Default::default(),
             save_pending: false,
             close_after_save: None,
             imports: Default::default(),
@@ -2147,6 +2165,7 @@ impl Controller {
             }
             return;
         };
+        let transitions = crate::layer_commands::transition_requests(&plan);
         let select = plan.select;
         let Some(session) = &self.session else { return };
         let counted = plan
@@ -2164,6 +2183,12 @@ impl Controller {
                     if let Reply::Throw(e) = ack.reply {
                         v.message = e.to_string();
                         return;
+                    }
+                    if let Some(published) = v.kernel.published(&project)
+                        && let Some(message) =
+                            crate::layer_commands::transition_notice(&published, &transitions)
+                    {
+                        v.note(message, cx);
                     }
                     // Simplify Keyframes says what it did, as the shipped app.
                     if let Some((before, ids)) = counted

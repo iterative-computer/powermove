@@ -192,6 +192,11 @@ impl Default for TimelineIndex {
     }
 }
 impl TimelineIndex {
+    /// Read-only source for edits that need media-handle metadata.
+    pub fn root(&self) -> Option<&Node> {
+        self.source.as_ref()?.root()
+    }
+
     /// The native painter and panel outline read the same immutable index.
     /// Weak entries never keep a closed document or an old edit alive.
     pub(crate) fn shared(snapshot: &Snapshot, previous: &Self) -> Arc<Self> {

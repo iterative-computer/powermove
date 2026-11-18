@@ -735,6 +735,10 @@ impl Editor {
                 .as_ref()
                 .map(|i| i.disabled(cx))
                 .unwrap_or_default(),
+            transition_refusal: self
+                .integration
+                .as_ref()
+                .and_then(|i| i.transition_refusal(cx)),
             checked: self
                 .integration
                 .as_ref()
@@ -1077,6 +1081,14 @@ impl Editor {
         cx.notify();
         true
     }
+    fn note_transition_refusal(&self, command: &str, cx: &mut App) {
+        if command == "addDefaultTransition"
+            && let Some(integration) = &self.integration
+            && let Some(reason) = integration.transition_refusal(cx)
+        {
+            integration.note(&reason, cx);
+        }
+    }
     pub fn command(&mut self, cmd: Command, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = cmd.name.strip_prefix("dockContent:") {
             if self.layout.find(id).is_some()
@@ -1313,6 +1325,7 @@ impl Editor {
             .as_ref()
             .is_some_and(|i| i.disabled(cx).contains(&cmd.name))
         {
+            self.note_transition_refusal(&cmd.name, cx);
             if let (Some(token), Some(host)) = (cmd.token, &self.host) {
                 host.borrow_mut().resolve(token, false);
             }

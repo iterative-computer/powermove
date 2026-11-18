@@ -51,6 +51,7 @@ pub fn catalog() -> &'static Value {
                 });
             }
         }
+        transition_fields(&mut value);
         // Native build tools extend the app subset beside the pinned contract.
         value["app"].as_array_mut().unwrap().extend([
             Value::String("panel_begin".into()),
@@ -58,6 +59,18 @@ pub fn catalog() -> &'static Value {
         ]);
         value
     })
+}
+/// Keep the pinned v1 contract intact; the native cleaner accepts these
+/// optional fields for reciprocal edge pairs and stored offset intent.
+fn transition_fields(value: &mut Value) {
+    let fields = value["commandFields"]["set_transition"]
+        .as_array_mut()
+        .unwrap();
+    for key in ["pairedWith", "offset"] {
+        if !fields.iter().any(|field| field == key) {
+            fields.push(Value::String(key.into()));
+        }
+    }
 }
 pub fn legacy_catalog() -> &'static Value {
     static LEGACY: OnceLock<Value> = OnceLock::new();

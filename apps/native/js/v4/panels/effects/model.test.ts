@@ -155,7 +155,7 @@ test("search failure leaves previous rows inspectable, reports failure and stops
   expect(model.searching).toBe(false);
   expect(errors).toHaveLength(1);
   expect(model.error).toBe("Couldn’t search effects. Try again.");
-  expect(model.announcement.text).toBe(model.error);
+  expect(model.announcement.text).toBe(model.error!);
 });
 test("applying without target announces exact copy; rows remain draggable", async () => {
   const { model, applied } = fixture();
@@ -442,4 +442,21 @@ test("published row indices are immutable and late target/settings failure canno
   await model.settingsSettled();
   expect(model.target).toBeNull();
   expect(errors).toEqual([]);
+});
+
+// G2: registry transitions remain discoverable alongside effects.
+test("transition search includes its section name", async () => {
+  const transition = {
+    id: "crossfade",
+    label: "Crossfade",
+    group: "Transitions",
+    kind: "transition" as const,
+    installed: true,
+  };
+  expect(
+    await workerSearch({ items: [transition], query: "transition" }),
+  ).toEqual(["crossfade"]);
+  expect(
+    await workerSearch({ items: [transition], query: "dissolve" }),
+  ).toEqual(["crossfade"]);
 });

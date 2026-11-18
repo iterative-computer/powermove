@@ -26,8 +26,14 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
       target: () => native("effects.target") as Target | null,
       add: (item, target) => [
         {
-          command: "effect.add",
-          args: { definition: item.id, target: target.id },
+          command: item.kind === "transition" ? "transition.add" : "effect.add",
+          args: {
+            definition:
+              item.kind === "transition"
+                ? item.id.replace(/^transition:/, "")
+                : item.id,
+            target: target.id,
+          },
         },
       ],
       reveal: (_item, target) => ({

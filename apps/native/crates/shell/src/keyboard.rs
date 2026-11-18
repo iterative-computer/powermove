@@ -36,6 +36,10 @@ pub fn class(command: &str) -> Class {
         Class::MayDecline
     }
 }
+/// An explicit transition refusal must not become the loose Duplicate chord.
+fn transition_refusal_is_consumed(binding: Option<&Binding>) -> bool {
+    binding.is_some_and(|binding| binding.command == "addDefaultTransition")
+}
 /// The chord of a press (and the rest of its gesture) queued behind keys
 /// still waiting: no binding has it, so it replays in its turn.
 pub const POINTER: &str = "pointer";
@@ -233,12 +237,15 @@ impl Resolver {
             }
             return effects;
         }
-        let Some((key, _, index)) = self.pending.as_mut() else {
+        let Some((key, bindings, index)) = self.pending.as_mut() else {
             return vec![];
         };
         if key.token != token {
             return vec![];
         }
+        // Wait for the transition result, preserving input order, but never
+        // turn its refusal into the older loose Cmd+D Duplicate binding.
+        let handled = handled || transition_refusal_is_consumed(bindings.get(*index));
         let mut out = vec![];
         if handled {
             self.pending = None;

@@ -1211,6 +1211,11 @@ impl Evaluator {
         if node::is_str(node::member(layer, "type"), "group") {
             return Ok(true);
         }
+        if let Some(layer) = layer
+            && crate::cut_transition::overlap(cx.root(), layer, cx.layers(), time).is_some()
+        {
+            return Ok(true);
+        }
         let end = start + duration;
         if time < start - 1e-6 {
             return Ok(false);

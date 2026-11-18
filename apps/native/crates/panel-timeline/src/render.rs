@@ -327,6 +327,16 @@ pub struct LayerRowAt {
     pub end: f64,
 }
 #[derive(Clone, Debug)]
+struct TransitionCapsule {
+    selected: bool,
+    edge: &'static str,
+    from: f64,
+    duration: f64,
+    label: String,
+    shortened: bool,
+    disabled: bool,
+}
+#[derive(Clone, Debug)]
 pub struct Scene {
     rows: Vec<PaintRow>,
     tops: Vec<f64>,
@@ -339,6 +349,8 @@ pub struct Scene {
     pub markers: Vec<Marker>,
     pub bars: Vec<Bar>,
     stagger: HashMap<String, Vec<crate::stagger::Band>>,
+    transitions: HashMap<String, Vec<TransitionCapsule>>,
+    clip_selection: std::collections::HashSet<String>,
     /// The timeline holds the keyboard: selected rows take the accent tint
     /// then, the neutral selection fill otherwise (the Mac convention, PM-367).
     pub focused: bool,
@@ -569,6 +581,98 @@ impl Scene {
                 (!bands.is_empty()).then_some((l.id.clone(), bands))
             })
             .collect();
+        // Only the incoming half paints a paired capsule. The cut stays at
+        // the original clip edge, even though rendering uses source handles.
+        if let Some(snapshot) = &model.index.source
+            && let Some(root) = snapshot.root()
+        {
+            let layers = pm_kernel::model::comp_node(root, model.index.comp_id.as_deref())
+                .and_then(|comp| comp.get("layers"));
+            let by_id: HashMap<_, _> = match layers.map(pm_model::Node::kind) {
+                Some(pm_model::NodeKind::Array(layers)) => layers
+                    .iter()
+                    .filter_map(|layer| {
+                        let value = layer.get("id")?.to_value();
+                        Some((value.as_str()?.to_owned(), layer))
+                    })
+                    .collect(),
+                _ => HashMap::new(),
+            };
+            for clip in &model.index.layers {
+                let Some(layer) = by_id.get(&clip.id) else {
+                    continue;
+                };
+                for (field, edge) in [("transitionIn", "in"), ("transitionOut", "out")] {
+                    let Some(transition) = layer.get(field) else {
+                        continue;
+                    };
+                    let value = transition.to_value();
+                    let Some(kind) = value.get("type").and_then(pm_model::Value::as_str) else {
+                        continue;
+                    };
+                    let paired = value
+                        .get("paired")
+                        .and_then(pm_model::Value::as_str)
+                        .is_some();
+                    if paired && edge == "out" {
+                        continue;
+                    }
+                    let duration = value
+                        .get("dur")
+                        .and_then(pm_model::Value::as_f64)
+                        .unwrap_or(0.5);
+                    if !duration.is_finite() || duration <= 0. {
+                        continue;
+                    }
+                    let intended_duration = duration;
+                    let fitted = if paired {
+                        value
+                            .get("paired")
+                            .and_then(pm_model::Value::as_str)
+                            .and_then(|id| by_id.get(id))
+                            .and_then(|peer| {
+                                pm_kernel::commands::transition_edges::fitted_pair(
+                                    root, layer, peer, true,
+                                )
+                            })
+                    } else {
+                        None
+                    };
+                    let duration = if paired {
+                        fitted.map_or(0., |f| f.duration)
+                    } else {
+                        duration.min(clip.duration)
+                    };
+                    let from = if paired {
+                        clip.from + fitted.map_or(0., |f| f.offset)
+                    } else if edge == "in" {
+                        clip.from
+                    } else {
+                        clip.from + clip.duration - duration.min(clip.duration)
+                    };
+                    let label = match kind {
+                        "crossfade" => "Crossfade",
+                        "wipe" => "Wipe",
+                        "slide" => "Slide",
+                        "zoom" => "Zoom",
+                        other => other,
+                    };
+                    scene
+                        .transitions
+                        .entry(clip.id.clone())
+                        .or_default()
+                        .push(TransitionCapsule {
+                            selected: false,
+                            edge,
+                            from,
+                            duration,
+                            label: label.into(),
+                            shortened: paired && duration < intended_duration - 1e-6,
+                            disabled: paired && duration <= 0.,
+                        });
+                }
+            }
+        }
         scene.work_area = (model.index.work[0], model.index.work[1]);
         scene.markers = model
             .index
@@ -660,6 +764,25 @@ impl Scene {
                 _ => None,
             })
             .collect();
+        let mut clip_selection = std::collections::HashSet::new();
+        for row in &rows {
+            match &row.content {
+                RowContent::Layer {
+                    clip: Some(clip), ..
+                } if clip.selected => {
+                    clip_selection.insert(clip.id.clone());
+                }
+                RowContent::Track { clips } => {
+                    clip_selection.extend(
+                        clips
+                            .iter()
+                            .filter(|clip| clip.selected)
+                            .map(|clip| clip.id.clone()),
+                    );
+                }
+                _ => {}
+            }
+        }
         Ok(Self {
             rows,
             tops,
@@ -672,6 +795,8 @@ impl Scene {
             markers: vec![],
             bars: vec![],
             stagger: HashMap::new(),
+            transitions: HashMap::new(),
+            clip_selection,
             focused: true,
         })
     }
@@ -936,6 +1061,7 @@ impl Scene {
             self.row_ops(i, v, t, &mut ops, Some(&mut controls), seen);
             for op in &mut ops[op_start..] {
                 let track = op.id.starts_with("clip")
+                    || op.id.starts_with("transition")
                     || op.id.starts_with("lane:")
                     || op.id.starts_with("key:")
                     || op.id.starts_with("key-focus:")
@@ -1014,6 +1140,12 @@ impl Scene {
         );
         o.opacity = edge_alpha as f64;
         ops.push(o);
+        // Capsules are the top layer at a cut, after every clip's body,
+        // edge, selected ring, keys and work-area veil.
+        let (capsules, mut below): (Vec<_>, Vec<_>) = ops.into_iter()
+            .partition(|op| op.id.starts_with("transition"));
+        below.extend(capsules);
+        let ops = below;
         Ok(Frame {
             viewport: v,
             fixed,
@@ -1058,6 +1190,138 @@ impl Scene {
         covered
     }
     /// v1 textStagger.draw: each animator's cascade in the clip's foot.
+    pub fn select_transition(&mut self, target: Option<(&str, &str)>) {
+        // Restore the model's explicit selection when leaving a capsule.
+        let scope = target.filter(|(owner, _)| {
+            self.clip_selection.len() == 1 && self.clip_selection.contains(*owner)
+        });
+        for row in &mut self.rows {
+            let selected = |clip: &Clip| {
+                self.clip_selection.contains(&clip.id)
+                    && !scope.is_some_and(|(owner, _)| owner == clip.id)
+            };
+            match &mut row.content {
+                RowContent::Layer {
+                    clip: Some(clip), ..
+                } => clip.selected = selected(clip),
+                RowContent::Track { clips } => {
+                    for clip in clips {
+                        clip.selected = selected(clip);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (layer, capsules) in &mut self.transitions {
+            for capsule in capsules {
+                capsule.selected =
+                    target.is_some_and(|(id, edge)| id == layer && edge == capsule.edge);
+            }
+        }
+    }
+    pub fn preview_transition(&mut self, layer: &str, edge: &str, start: f64, duration: f64) {
+        if let Some(capsules) = self.transitions.get_mut(layer) {
+            for capsule in capsules.iter_mut().filter(|c| c.edge == edge) {
+                capsule.from = start;
+                capsule.duration = duration;
+                capsule.disabled = duration <= 0.;
+                capsule.selected = true;
+            }
+        }
+    }
+    fn paint_transitions(
+        &self,
+        clip: &Clip,
+        strip: Rect,
+        v: Viewport,
+        t: &Tokens,
+        ops: &mut Vec<Op>,
+    ) {
+        for capsule in self.transitions.get(&clip.id).into_iter().flatten() {
+            let width = if capsule.disabled {
+                18.
+            } else {
+                (capsule.duration * v.pps).max(4.)
+            };
+            let bounds = Rect::new(
+                v.x(capsule.from) - if capsule.disabled { width / 2. } else { 0. },
+                strip.y + 2.,
+                width,
+                (strip.height - 4.).min(18.).max(6.),
+            );
+            // Keep the clip names outside the capsule, including the
+            // outgoing clip's name when a pair straddles the cut.
+            for name in ops.iter_mut().filter(|op| {
+                op.id.starts_with("clip-content:")
+                    && op.shape == "text"
+                    && op.bounds.y < bounds.y + bounds.height
+                    && op.bounds.y + op.bounds.height > bounds.y
+                    && op.bounds.x < bounds.x + bounds.width
+                    && op.bounds.x + op.bounds.width > bounds.x
+            }) {
+                if name.bounds.x < bounds.x {
+                    name.bounds.width = name
+                        .bounds
+                        .width
+                        .min((bounds.x - 4. - name.bounds.x).max(0.));
+                } else {
+                    let right = name.bounds.x + name.bounds.width;
+                    name.bounds.x = bounds.x + bounds.width + 4.;
+                    name.bounds.width = (right - name.bounds.x).max(0.);
+                }
+            }
+            let material = t.strip(clip.label.color(t), strip_state(clip));
+            // The tint remains translucent, over an opaque capsule ground.
+            // Clip edges and selection rings must never cross its label.
+            let mut ground = Op::new(
+                format!("transition-ground:{}:{}", clip.id, capsule.edge),
+                "rect",
+                bounds,
+                material.under_label,
+            );
+            ground.radius = bounds.height / 2.;
+            ops.push(ground);
+            let mut op = Op::new(
+                format!("transition:{}:{}", clip.id, capsule.edge),
+                "rect",
+                bounds,
+                material.primary,
+            );
+            op.radius = bounds.height / 2.;
+            op.opacity = if capsule.disabled { 0.16 } else { 0.35 };
+            op.detail = json!({"layer":clip.id,"edge":capsule.edge,"disabled":capsule.disabled,
+                "effectiveDuration":capsule.duration,"effectiveFrom":capsule.from,
+                "tooltip":if capsule.shortened {Some(pm_kernel::commands::transition_edges::SHORTENED_REASON)} else {None}});
+            ops.push(op);
+            if capsule.selected {
+                let mut outline = Op::new(
+                    format!("transition-selection:{}:{}", clip.id, capsule.edge),
+                    "ring",
+                    bounds,
+                    t.strip(clip.label.color(t), pm_design::StripState::Selected)
+                        .ring
+                        .0,
+                );
+                outline.radius = bounds.height / 2.;
+                outline.stroke = t
+                    .strip(clip.label.color(t), pm_design::StripState::Selected)
+                    .ring_width as f64;
+                ops.push(outline);
+            }
+            if width >= 66. {
+                let mut label = Op::new(
+                    format!("transition-name:{}:{}", clip.id, capsule.edge),
+                    "text",
+                    bounds,
+                    material.foreground,
+                );
+                label.text = Some(capsule.label.clone());
+                label.font_size = 10.;
+                label.detail = json!({"align":"center"});
+                ops.push(label);
+            }
+        }
+    }
     fn paint_stagger(&self, clip: &Clip, strip: Rect, v: Viewport, t: &Tokens, ops: &mut Vec<Op>) {
         let Some(bands) = self.stagger.get(&clip.id) else {
             return;
@@ -1138,6 +1402,7 @@ impl Scene {
                     .and_then(|clip| paint_clip(clip, y, h, v, self.label_step(v).0, seen, t, ops));
                 if let (Some(clip), Some(strip)) = (clip, strip) {
                     self.paint_stagger(clip, strip, v, t, ops);
+                    self.paint_transitions(clip, strip, v, t, ops);
                 }
                 // Summary marks only while the layer is collapsed (open, its
                 // property rows show the keys themselves), and only inside
@@ -1176,6 +1441,7 @@ impl Scene {
                 for clip in &clips[first.min(last)..last] {
                     if let Some(strip) = paint_clip(clip, y, h, v, grid, seen, t, ops) {
                         self.paint_stagger(clip, strip, v, t, ops);
+                        self.paint_transitions(clip, strip, v, t, ops);
                     }
                 }
             }
@@ -2145,6 +2411,7 @@ impl Frame {
     /// The tooltip of the op under the point (a clip's Missing effect badge).
     pub fn tooltip_at(&self, x: f64, y: f64) -> Option<String> {
         self.hit_op("clip-missing-effect:", x, y, 0.)
+            .or_else(|| self.hit_op("transition:", x, y, 0.))
             .and_then(|o| o.detail["tooltip"].as_str())
             .map(str::to_owned)
     }
@@ -2172,7 +2439,12 @@ impl Frame {
     /// from `x`, in the row under `y` (`row` high). Further off, a press on
     /// the row starts a marquee and moves no key.
     pub fn hit_key_across(&self, x: f64, y: f64, reach: f64, row: f64) -> Option<(String, String)> {
-        let centre = |o: &Op| (o.bounds.x + o.bounds.width / 2., o.bounds.y + o.bounds.height / 2.);
+        let centre = |o: &Op| {
+            (
+                o.bounds.x + o.bounds.width / 2.,
+                o.bounds.y + o.bounds.height / 2.,
+            )
+        };
         let op = self
             .ops
             .iter()

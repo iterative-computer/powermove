@@ -906,10 +906,28 @@ fn plan_on(
                     }))
                 };
                 data = json!({"id":id,"edge":c["edge"],"transition":c["transition"]["type"]});
-                EffectCommand::SetTransition {
-                    layer_id: id,
-                    edge,
-                    transition,
+                if let Some(peer) = c.get("pairedWith").filter(|v| !v.is_null()) {
+                    let peer = resolve(peer, &p, &batch.selection)?;
+                    let (left, right) = if edge == pm_kernel::commands::effects::Edge::Out {
+                        (id, peer)
+                    } else {
+                        (peer, id)
+                    };
+                    EffectCommand::SetPairedTransition {
+                        left,
+                        right,
+                        offset: c
+                            .get("offset")
+                            .map(|_| number(&c, "offset", 0.))
+                            .transpose()?,
+                        transition,
+                    }
+                } else {
+                    EffectCommand::SetTransition {
+                        layer_id: id,
+                        edge,
+                        transition,
+                    }
                 }
                 .into()
             }

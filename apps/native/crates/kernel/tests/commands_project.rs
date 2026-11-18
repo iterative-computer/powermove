@@ -1161,3 +1161,568 @@ fn asset_folder_move_matches_main_and_undo_keeps_unknown_fields() {
         &Value::Bool(true)
     );
 }
+
+#[test]
+fn paired_transition_edges_are_one_undo_step_and_removal_restores_both() {
+    let mut project = parse(PROJECT).unwrap();
+    let layers = project
+        .as_object_mut()
+        .unwrap()
+        .get_mut("layers")
+        .unwrap()
+        .as_array_mut()
+        .unwrap();
+    for id in ["box", "title"] {
+        let clip = layers
+            .iter_mut()
+            .find(|l| l.get("id").and_then(Value::as_str) == Some(id))
+            .unwrap();
+        let c = clip.as_object_mut().unwrap();
+        c.insert("track", Value::Number(0.0));
+        if id == "box" {
+            c.insert("group", Value::Null);
+        }
+        c.insert("from", Value::Number(if id == "box" { 0.0 } else { 5.0 }));
+        c.insert("dur", Value::Number(5.0));
+    }
+    let mut s = DocumentStore::new_untitled(project);
+    let before = root(&s);
+    let spec = TransitionSpec {
+        definition: TransitionDefinition {
+            transition_type: "crossfade".into(),
+            params: vec![],
+        },
+        duration: Some(0.5),
+        params: Map::new(),
+    };
+    let commands = pm_kernel::commands::transition_edges::plan(
+        s.root().unwrap(),
+        "box",
+        Edge::Out,
+        Some(spec),
+        true,
+    )
+    .unwrap();
+    assert_eq!(commands.len(), 1);
+    s.transact("Add Transition", Origin::Interface, &commands)
+        .unwrap();
+    assert_eq!(num(&layer(&s, "box"), &["transitionOut", "dur"]), 0.5);
+    assert_eq!(num(&layer(&s, "title"), &["transitionIn", "dur"]), 0.5);
+    let paired = root(&s);
+    let saved = pm_model::json::to_canonical_string(&paired);
+    let reopened = DocumentStore::new_untitled(parse(&saved).unwrap());
+    for (id, edge, peer) in [
+        ("box", "transitionOut", "title"),
+        ("title", "transitionIn", "box"),
+    ] {
+        assert_eq!(
+            get(&layer(&reopened, id), &[edge, "paired"]).as_str(),
+            Some(peer)
+        );
+        assert_eq!(num(&layer(&reopened, id), &[edge, "dur"]), 0.5);
+        assert_eq!(num(&layer(&reopened, id), &[edge, "offset"]), -0.25);
+    }
+    let remove = pm_kernel::commands::transition_edges::plan(
+        s.root().unwrap(),
+        "box",
+        Edge::Out,
+        None,
+        true,
+    )
+    .unwrap();
+    s.transact("Remove Transition", Origin::Interface, &remove)
+        .unwrap();
+    assert!(get(&layer(&s, "box"), &["transitionOut"]).is_null());
+    assert!(get(&layer(&s, "title"), &["transitionIn"]).is_null());
+    s.undo().unwrap();
+    assert_eq!(root(&s), paired);
+    s.undo().unwrap();
+    assert_eq!(root(&s), before);
+}
+
+#[test]
+fn paired_transition_shortens_or_offsets_without_holding_source_frames() {
+    for (tail, head, expected_duration, expected_offset) in [
+        (0.1, 0.4, 0.2, -0.1),
+        (0.0, 0.4, 0.4, -0.4),
+        (0.4, 0.0, 0.4, 0.0),
+        (0.0, 0.0, 0.0, 0.0),
+    ] {
+        let mut project: serde_json::Value = serde_json::from_str(PROJECT).unwrap();
+        project["layers"] = serde_json::json!([
+            {"id":"a","type":"video","from":0,"dur":2,"track":0,"d":{"asset":"a1","trim":0,"speed":2}},
+            {"id":"b","type":"video","from":2,"dur":2,"track":0,"d":{"asset":"a2","trim":{"v":head*2.,"kf":[],"expr":null},"speed":2}}
+        ]);
+        project["assets"]["a1"]["dur"] = serde_json::json!(4. + tail * 2.);
+        project["assets"]["a2"]["dur"] = serde_json::json!(10.);
+        let mut store = DocumentStore::new_untitled(parse(&project.to_string()).unwrap());
+        let command = EffectCommand::SetPairedTransition {
+            left: "a".into(),
+            right: "b".into(),
+            offset: None,
+            transition: Some(Box::new(TransitionSpec {
+                definition: TransitionDefinition {
+                    transition_type: "crossfade".into(),
+                    params: vec![],
+                },
+                duration: Some(0.5),
+                params: Map::new(),
+            })),
+        };
+        if expected_duration == 0. {
+            let before = root(&store);
+            let error = refused(&mut store, command);
+            assert!(error.to_string().contains("Not enough source media"));
+            assert_eq!(root(&store), before);
+            continue;
+        }
+        run(&mut store, command);
+        for (id, edge) in [("a", "transitionOut"), ("b", "transitionIn")] {
+            let clip = layer(&store, id);
+            assert_eq!(num(&clip, &[edge, "dur"]), 0.5, "stored intent is retained");
+            assert_eq!(num(&clip, &[edge, "offset"]), -0.25);
+            let loc = pm_kernel::model::find_layer(store.root().unwrap(), id).unwrap();
+            let node = pm_kernel::model::layer_at(store.root().unwrap(), &loc).unwrap();
+            let fitted = pm_kernel::commands::transition_edges::fitted_edge(
+                store.root().unwrap(),
+                node,
+                if edge == "transitionIn" {
+                    Edge::In
+                } else {
+                    Edge::Out
+                },
+            )
+            .unwrap();
+            assert!((fitted.duration - expected_duration).abs() < 1e-6);
+            assert!((fitted.offset - expected_offset).abs() < 1e-6);
+        }
+        assert_eq!(num(&layer(&store, "a"), &["dur"]), 2.);
+        assert_eq!(num(&layer(&store, "b"), &["from"]), 2.);
+    }
+}
+
+#[test]
+fn paired_transition_offset_cannot_leave_the_cut_and_create_a_pop() {
+    let store = store();
+    let a = layer(&store, "box");
+    let b = layer(&store, "title");
+    for (requested, expected) in [(-10., -0.5), (-0.25, -0.25), (10., 0.)] {
+        let (duration, offset) = pm_kernel::commands::transition_edges::fit_overlap(
+            store.root().unwrap(),
+            &a,
+            &b,
+            0.5,
+            Some(requested),
+        )
+        .unwrap();
+        assert_eq!(duration, 0.5);
+        assert_eq!(offset, expected);
+        assert!(
+            offset <= 0. && offset + duration >= 0.,
+            "the original cut must stay inside the overlap"
+        );
+    }
+}
+
+#[test]
+fn paired_transition_retiming_refuses_with_fade_guidance_but_single_edges_work() {
+    use pm_kernel::commands::transition_edges::{CUT_RETIMING_REASON, builtin_spec};
+    for field in ["timeRemap", "speed"] {
+        let mut project: serde_json::Value = serde_json::from_str(PROJECT).unwrap();
+        project["layers"] = serde_json::json!([
+            {"id":"a","type":"video","from":0,"dur":2,"track":0,"d":{"asset":"a1","trim":1,"speed":1}},
+            {"id":"b","type":"video","from":2,"dur":2,"track":0,"d":{"asset":"a1","trim":3,"speed":1}}
+        ]);
+        project["layers"][0]["d"][field] = if field == "timeRemap" {
+            serde_json::json!(true)
+        } else {
+            serde_json::json!({"v":1,"kf":[{"t":0,"v":1,"i":"speed-key"}],"expr":null})
+        };
+        let mut store = DocumentStore::new_untitled(parse(&project.to_string()).unwrap());
+        let spec = builtin_spec("crossfade").unwrap();
+        let error = refused(
+            &mut store,
+            EffectCommand::SetPairedTransition {
+                left: "a".into(),
+                right: "b".into(),
+                offset: None,
+                transition: Some(Box::new(spec.clone())),
+            },
+        );
+        assert_eq!(error.to_string(), CUT_RETIMING_REASON);
+        run(
+            &mut store,
+            EffectCommand::SetTransition {
+                layer_id: "a".into(),
+                edge: Edge::Out,
+                transition: Some(Box::new(spec)),
+            },
+        );
+        assert_eq!(
+            get(&layer(&store, "a"), &["transitionOut", "type"]).as_str(),
+            Some("crossfade")
+        );
+        assert!(
+            get(&layer(&store, "a"), &["transitionOut"])
+                .get("paired")
+                .is_none(),
+            "fallback is an unchanged v1 fade"
+        );
+    }
+}
+
+#[test]
+fn paired_transition_refuses_an_existing_clip_past_its_known_media_range() {
+    for invalid in ["a", "b"] {
+        let mut project: serde_json::Value = serde_json::from_str(PROJECT).unwrap();
+        project["layers"] = serde_json::json!([
+            {"id":"a","type":"video","from":0,"dur":2,"track":0,"d":{"asset":"a1","trim":0,"speed":2}},
+            {"id":"b","type":"video","from":2,"dur":2,"track":0,"d":{"asset":"a2","trim":1,"speed":2}}
+        ]);
+        project["assets"]["a1"]["dur"] = serde_json::json!(if invalid == "a" { 3.9 } else { 10. });
+        project["assets"]["a2"] =
+            serde_json::json!({"id":"a2","kind":"video","dur":if invalid == "b" {4.9} else {10.}});
+        let mut store = DocumentStore::new_untitled(parse(&project.to_string()).unwrap());
+        let before = root(&store);
+        let error = refused(
+            &mut store,
+            EffectCommand::SetPairedTransition {
+                left: "a".into(),
+                right: "b".into(),
+                offset: None,
+                transition: pm_kernel::commands::transition_edges::builtin_spec("crossfade")
+                    .map(Box::new),
+            },
+        );
+        assert_eq!(
+            error.to_string(),
+            "Clip exceeds its source media. Trim it before adding a transition."
+        );
+        assert_eq!(root(&store), before);
+    }
+}
+
+#[test]
+fn paired_transition_removal_follows_the_stored_peer_after_a_clip_moves() {
+    let mut project: serde_json::Value = serde_json::from_str(PROJECT).unwrap();
+    project["layers"] = serde_json::json!([
+        {"id":"a","type":"solid","from":0,"dur":2,"track":1,"d":{},"transitionOut":{"type":"crossfade","dur":0.5,"offset":-0.25,"paired":"b","p":{}}},
+        {"id":"b","type":"solid","from":4,"dur":2,"track":0,"d":{},"transitionIn":{"type":"crossfade","dur":0.5,"offset":-0.25,"paired":"a","p":{}}},
+        {"id":"c","type":"solid","from":2,"dur":2,"track":0,"d":{},"transitionOut":{"type":"wipe","dur":0.5,"p":{}}}
+    ]);
+    let mut store = DocumentStore::new_untitled(parse(&project.to_string()).unwrap());
+    let before = root(&store);
+    let commands = pm_kernel::commands::transition_edges::plan(
+        store.root().unwrap(),
+        "b",
+        Edge::In,
+        None,
+        true,
+    )
+    .unwrap();
+    store
+        .transact("Remove Transition", Origin::Interface, &commands)
+        .unwrap();
+    assert!(get(&layer(&store, "a"), &["transitionOut"]).is_null());
+    assert!(get(&layer(&store, "b"), &["transitionIn"]).is_null());
+    assert_eq!(
+        get(&layer(&store, "c"), &["transitionOut", "type"]).as_str(),
+        Some("wipe")
+    );
+    store.undo().unwrap();
+    assert_eq!(root(&store), before);
+}
+
+fn split_transition_project() -> Value {
+    let mut project: serde_json::Value = serde_json::from_str(PROJECT).unwrap();
+    project["layers"] = serde_json::json!([
+        {"id":"a","type":"solid","from":0,"dur":2,"track":0,"d":{},"transitionOut":{"type":"crossfade","dur":0.5,"offset":-0.25,"paired":"b","p":{}}},
+        {"id":"b","type":"solid","from":2,"dur":2,"track":0,"d":{},"transitionIn":{"type":"crossfade","dur":0.5,"offset":-0.25,"paired":"a","p":{}}}
+    ]);
+    parse(&project.to_string()).unwrap()
+}
+
+fn split_transition_store() -> DocumentStore {
+    DocumentStore::new_untitled(split_transition_project())
+}
+
+fn assert_transition_peers_resolve(store: &DocumentStore) {
+    let root = store.root().unwrap();
+    let comp = pm_kernel::model::open_comp_id(root);
+    let clips = pm_kernel::model::comp_node(root, comp.as_deref())
+        .unwrap()
+        .get("layers")
+        .unwrap()
+        .to_value();
+    for clip in clips.as_array().unwrap() {
+        for (field, other) in [
+            ("transitionIn", "transitionOut"),
+            ("transitionOut", "transitionIn"),
+        ] {
+            if let Some(peer) = clip
+                .get(field)
+                .and_then(|t| t.get("paired"))
+                .and_then(Value::as_str)
+            {
+                let loc = pm_kernel::model::find_layer(root, peer).expect("paired peer exists");
+                let peer = pm_kernel::model::layer_at(root, &loc).unwrap().to_value();
+                assert_eq!(
+                    peer.get(other).and_then(|t| t.get("paired")),
+                    clip.get("id")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn paired_transition_split_a_tail_follows_the_piece_adjacent_to_the_cut() {
+    use pm_kernel::commands::{timing::TimingCommand, transition_edges};
+    let mut store = split_transition_store();
+    let before = root(&store);
+    run(
+        &mut store,
+        TimingCommand::Split {
+            layer_ids: vec!["a".into()],
+            time: 1.9,
+            new_ids: vec!["a-tail".into()],
+        },
+    );
+    assert!(get(&layer(&store, "a"), &["transitionOut"]).is_null());
+    assert!(get(&layer(&store, "a-tail"), &["transitionIn"]).is_null());
+    assert_eq!(
+        get(&layer(&store, "b"), &["transitionIn", "paired"]).as_str(),
+        Some("a-tail")
+    );
+    assert_transition_peers_resolve(&store);
+    let document = store.root().unwrap();
+    let loc = pm_kernel::model::find_layer(document, "a-tail").unwrap();
+    let fitted = transition_edges::fitted_edge(
+        document,
+        pm_kernel::model::layer_at(document, &loc).unwrap(),
+        Edge::Out,
+    )
+    .unwrap();
+    assert!((fitted.duration - 0.2).abs() < 1e-6);
+    assert_eq!(
+        num(&layer(&store, "a-tail"), &["transitionOut", "dur"]),
+        0.5
+    );
+    store.undo().unwrap();
+    assert_eq!(root(&store), before);
+}
+
+#[test]
+fn paired_transition_split_b_head_stays_with_the_piece_adjacent_to_the_cut() {
+    use pm_kernel::commands::{timing::TimingCommand, transition_edges};
+    let mut store = split_transition_store();
+    let before = root(&store);
+    run(
+        &mut store,
+        TimingCommand::Split {
+            layer_ids: vec!["b".into()],
+            time: 2.1,
+            new_ids: vec!["b-tail".into()],
+        },
+    );
+    assert!(get(&layer(&store, "b"), &["transitionOut"]).is_null());
+    assert!(get(&layer(&store, "b-tail"), &["transitionIn"]).is_null());
+    assert_eq!(
+        get(&layer(&store, "a"), &["transitionOut", "paired"]).as_str(),
+        Some("b")
+    );
+    assert_transition_peers_resolve(&store);
+    let document = store.root().unwrap();
+    let loc = pm_kernel::model::find_layer(document, "b").unwrap();
+    let fitted = transition_edges::fitted_edge(
+        document,
+        pm_kernel::model::layer_at(document, &loc).unwrap(),
+        Edge::In,
+    )
+    .unwrap();
+    assert!((fitted.duration - 0.2).abs() < 1e-6);
+    store.undo().unwrap();
+    assert_eq!(root(&store), before);
+}
+
+#[test]
+fn paired_transition_split_cleans_missing_peers_and_invalid_geometry_stays_a_cut() {
+    use pm_kernel::commands::{timing::TimingCommand, transition_edges};
+    for split_a in [true, false] {
+        let mut project = split_transition_project();
+        let clips = project
+            .as_object_mut()
+            .unwrap()
+            .get_mut("layers")
+            .unwrap()
+            .as_array_mut()
+            .unwrap();
+        if split_a {
+            clips.pop();
+        } else {
+            clips.remove(0);
+        }
+        let mut store = DocumentStore::new_untitled(project);
+        let id = if split_a { "a" } else { "b" };
+        run(
+            &mut store,
+            TimingCommand::Split {
+                layer_ids: vec![id.into()],
+                time: if split_a { 1.9 } else { 2.1 },
+                new_ids: vec!["tail".into()],
+            },
+        );
+        assert_transition_peers_resolve(&store);
+        assert!(
+            layer(&store, if split_a { "tail" } else { "b" })
+                .get(if split_a {
+                    "transitionOut"
+                } else {
+                    "transitionIn"
+                })
+                .unwrap()
+                .is_null()
+        );
+    }
+    let mut project = split_transition_project();
+    project
+        .as_object_mut()
+        .unwrap()
+        .get_mut("layers")
+        .unwrap()
+        .as_array_mut()
+        .unwrap()[1]
+        .as_object_mut()
+        .unwrap()
+        .insert("from", Value::Number(3.));
+    let mut store = DocumentStore::new_untitled(project);
+    run(
+        &mut store,
+        TimingCommand::Split {
+            layer_ids: vec!["a".into()],
+            time: 1.9,
+            new_ids: vec!["tail".into()],
+        },
+    );
+    assert_transition_peers_resolve(&store);
+    let root = store.root().unwrap();
+    let loc = pm_kernel::model::find_layer(root, "tail").unwrap();
+    assert!(
+        transition_edges::fitted_edge(
+            root,
+            pm_kernel::model::layer_at(root, &loc).unwrap(),
+            Edge::Out
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn paired_transition_split_refuses_a_locked_peer_without_changing_the_document() {
+    use pm_kernel::commands::timing::TimingCommand;
+    let mut project = split_transition_project();
+    project
+        .as_object_mut()
+        .unwrap()
+        .get_mut("layers")
+        .unwrap()
+        .as_array_mut()
+        .unwrap()[1]
+        .as_object_mut()
+        .unwrap()
+        .insert("lock", Value::Bool(true));
+    let mut store = DocumentStore::new_untitled(project);
+    let before = root(&store);
+    let error = refused(
+        &mut store,
+        TimingCommand::Split {
+            layer_ids: vec!["a".into()],
+            time: 1.9,
+            new_ids: vec!["tail".into()],
+        },
+    );
+    assert!(format!("{error}").contains("Unlock the other transition clip"));
+    assert_eq!(root(&store), before);
+}
+
+#[test]
+fn transition_split_keeps_v1_single_edge_fades_unpaired() {
+    use pm_kernel::commands::timing::TimingCommand;
+    let mut project = split_transition_project();
+    for (index, field) in [(0, "transitionOut"), (1, "transitionIn")] {
+        let edge = project
+            .as_object_mut()
+            .unwrap()
+            .get_mut("layers")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()[index]
+            .as_object_mut()
+            .unwrap()
+            .get_mut(field)
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        edge.remove("paired");
+        edge.remove("offset");
+    }
+    let mut store = DocumentStore::new_untitled(project);
+    let b_before = layer(&store, "b");
+    let a_fade = layer(&store, "a").get("transitionOut").unwrap().clone();
+    run(
+        &mut store,
+        TimingCommand::Split {
+            layer_ids: vec!["a".into()],
+            time: 1.9,
+            new_ids: vec!["tail".into()],
+        },
+    );
+    assert!(get(&layer(&store, "a"), &["transitionOut"]).is_null());
+    assert!(get(&layer(&store, "tail"), &["transitionIn"]).is_null());
+    assert_eq!(get(&layer(&store, "tail"), &["transitionOut"]), &a_fade);
+    assert_eq!(layer(&store, "b"), b_before);
+}
+
+#[test]
+fn paired_transition_peers_in_different_compositions_stay_plain_cuts() {
+    use pm_kernel::commands::transition_edges;
+    let mut project = split_transition_project();
+    let a = project
+        .as_object_mut()
+        .unwrap()
+        .get_mut("layers")
+        .unwrap()
+        .as_array_mut()
+        .unwrap()
+        .remove(0);
+    *project
+        .as_object_mut()
+        .unwrap()
+        .get_mut("comps")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .get_mut("C2")
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .get_mut("layers")
+        .unwrap() = Value::Array(vec![a]);
+    let store = DocumentStore::new_untitled(project);
+    let document = store.root().unwrap();
+    for (id, edge) in [("a", Edge::Out), ("b", Edge::In)] {
+        let loc = pm_kernel::model::find_layer(document, id).unwrap();
+        assert!(
+            transition_edges::fitted_edge(
+                document,
+                pm_kernel::model::layer_at(document, &loc).unwrap(),
+                edge
+            )
+            .is_none()
+        );
+    }
+    assert_eq!(
+        get(&layer(&store, "b"), &["transitionIn", "paired"]).as_str(),
+        Some("a")
+    );
+}

@@ -115,6 +115,13 @@ pub struct TransitionSpec {
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum EffectCommand {
+    /// A render-only overlap, persisted as reciprocal v1 edge objects.
+    SetPairedTransition {
+        left: String,
+        right: String,
+        offset: Option<f64>,
+        transition: Option<Box<TransitionSpec>>,
+    },
     /// `add_effect` (`addEffect`). Label "Add Effect".
     Add(Box<AddEffect>),
     /// `remove_effect` (`removeEffect`): by id, or every effect of a type.
@@ -146,6 +153,13 @@ pub enum EffectCommand {
 impl EffectCommand {
     pub fn label(&self) -> String {
         match self {
+            EffectCommand::SetPairedTransition { transition, .. } => {
+                if transition.is_some() {
+                    "Set Transition"
+                } else {
+                    "Remove Transition"
+                }
+            }
             EffectCommand::Add(_) => "Add Effect",
             EffectCommand::Remove { .. } => "Remove Effect",
             EffectCommand::Set { patch, .. } => match patch {
@@ -177,6 +191,14 @@ impl EffectCommand {
 
     pub(super) fn plan(&self, cx: &mut Cx<'_>) -> Result<(), CommandError> {
         match self {
+            EffectCommand::SetPairedTransition {
+                left,
+                right,
+                offset,
+                transition,
+            } => {
+                super::transition_edges::apply_pair(cx, left, right, transition.as_deref(), *offset)
+            }
             EffectCommand::Add(c) => add_effect(cx, c),
             EffectCommand::Remove { layer_id, effect } => remove_effect(cx, layer_id, effect),
             EffectCommand::Set {
@@ -193,7 +215,10 @@ impl EffectCommand {
                 layer_id,
                 edge,
                 transition,
-            } => set_transition(cx, layer_id, *edge, transition.as_deref()),
+            } => {
+                unlink_transition_peer(cx, layer_id, *edge, None)?;
+                set_transition(cx, layer_id, *edge, transition.as_deref())
+            }
         }
     }
 }
@@ -622,7 +647,45 @@ fn is_hex_color(v: &Value) -> bool {
 }
 
 /// `setTransition(command)`.
-fn set_transition(
+pub(super) fn unlink_transition_peer(
+    cx: &mut Cx<'_>,
+    id: &str,
+    edge: Edge,
+    keep: Option<&str>,
+) -> Result<(), CommandError> {
+    let (_, clip) = cx.layer_mut_checked(id)?;
+    let (field, other) = if edge == Edge::In {
+        ("transitionIn", "transitionOut")
+    } else {
+        ("transitionOut", "transitionIn")
+    };
+    let Some(peer) = clip
+        .get(field)
+        .and_then(|t| t.get("paired"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    if keep == Some(peer) {
+        return Ok(());
+    }
+    if crate::model::find_layer(cx.root(), peer).is_none() {
+        return Ok(());
+    }
+    let (loc, mut layer) = cx.layer_mut_checked(peer)?;
+    if layer
+        .get(other)
+        .and_then(|t| t.get("paired"))
+        .and_then(Value::as_str)
+        == Some(id)
+    {
+        values::obj(&mut layer).insert(other, Value::Null);
+        cx.put_layer(&loc, layer)?;
+    }
+    Ok(())
+}
+
+pub(super) fn set_transition(
     cx: &mut Cx<'_>,
     layer_id: &str,
     edge: Edge,
@@ -637,6 +700,11 @@ fn set_transition(
         values::obj(&mut layer).insert(field, Value::Null);
         return cx.put_layer(&loc, layer);
     };
+    if values::text(&layer, "type") == Some("audio") {
+        return Err(CommandError::Invalid(
+            "Audio layers do not support visual transitions".into(),
+        ));
+    }
     let def = &spec.definition;
     if def.transition_type.is_empty() {
         return Err(CommandError::Invalid("Transition type is required".into()));
