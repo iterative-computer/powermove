@@ -116,6 +116,44 @@ try {
     console.log(
       `HEADLESS KEYBOARD PASS ${scheme}: Tab moves focus, exactly one native neutral ring, recipe width and offset`,
     );
+    await call("Page.setDocumentContent", {
+      frameId: frameTree.frame.id,
+      html: `<!doctype html><html data-pm-scheme="${scheme}" style="color-scheme:${scheme}"><head><style>${css}</style></head><body>
+        <label><input id="toggle" type="checkbox">Visible</label>
+        <input id="disabled" type="checkbox" checked disabled>
+        <input id="mixed" type="checkbox">
+        <div data-pm-style="tokens-only"><input id="system" type="checkbox"></div>
+        <i id="accent" style="color:var(--pm-accent)"></i>
+        </body></html>`,
+    });
+    const checkbox = await evaluate(`(() => {
+      const toggle = document.querySelector('#toggle');
+      const idle = getComputedStyle(toggle).boxShadow;
+      toggle.closest('label').click();
+      const checked = getComputedStyle(toggle);
+      const mixed = document.querySelector('#mixed');
+      mixed.indeterminate = true;
+      return {
+        idle, checked: toggle.checked, size: toggle.getBoundingClientRect().width,
+        fill: checked.backgroundColor, mark: checked.backgroundImage,
+        accent: getComputedStyle(document.querySelector('#accent')).color,
+        disabled: getComputedStyle(document.querySelector('#disabled')).opacity,
+        mixed: getComputedStyle(mixed).backgroundImage,
+        optOut: getComputedStyle(document.querySelector('#system')).appearance,
+      };
+    })()`);
+    assert.notEqual(checkbox.idle, "none");
+    assert.equal(checkbox.checked, true);
+    assert.equal(checkbox.size, 16);
+    assert.equal(checkbox.fill, checkbox.accent);
+    assert.notEqual(checkbox.mark, "none");
+    assert.notEqual(checkbox.mixed, "none");
+    assert.notEqual(checkbox.mixed, checkbox.mark);
+    assert.equal(checkbox.disabled, "0.45");
+    assert.equal(checkbox.optOut, "auto");
+    console.log(
+      `HEADLESS CHECKBOX PASS ${scheme}: label toggle, accent, bezel, mixed, disabled and opt-out`,
+    );
   }
 } finally {
   socket?.close();

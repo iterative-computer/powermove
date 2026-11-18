@@ -50,6 +50,7 @@ pub fn stylesheet(light: &Tokens, dark: &Tokens) -> String {
         write!(css, "--pm-fs-title:{}px;", t.typography.title).unwrap();
         write!(css, "--pm-fs-heading:{}px;", t.typography.heading).unwrap();
         write!(css, "--pm-r-control:{}px;", t.metrics.control_radius).unwrap();
+        write!(css, "--pm-r-check:{}px;", t.radius.xs).unwrap();
         write!(css, "--pm-r-card:{}px;", t.radius.md).unwrap();
         write!(css, "--pm-r-capsule:{}px;", t.metrics.capsule_radius).unwrap();
         write!(css, "--pm-row-h:{}px;", t.metrics.row).unwrap();
