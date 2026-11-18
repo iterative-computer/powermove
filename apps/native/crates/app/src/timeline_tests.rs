@@ -601,7 +601,9 @@ fn the_timeline_shows_v1s_pointers(cx: &mut TestAppContext) {
     let key = op_center(&mut s, "key:");
     // The owner's rule: no pointing hand; a key keeps the arrow.
     assert_eq!(cursor(&mut s, key, cx), gpui::CursorStyle::Arrow);
-    let body = s.at(1, 1.5);
+    // Keying l0 reveals its property row; locate l1's clip by identity.
+    let (top, height) = layer_row(&s, "l1");
+    let body = point(s.at(0, 1.5).x, s.origin().y + px(top + height / 2.));
     assert_eq!(cursor(&mut s, body, cx), gpui::CursorStyle::OpenHand);
 }
 /// Layer ids in stacking order (top first), and each layer's group.
@@ -1881,6 +1883,19 @@ fn a_marquee_dragged_past_the_panel_selects_the_rows_it_covers_off_screen(cx: &m
         .unwrap();
     s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
     s.idle(cx);
+    // Bulk keying now reveals its last edited row. This marquee begins at
+    // the top of the timeline and reaches layers below the viewport.
+    let origin = s.origin();
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: origin + point(px(column + 50.), px(tokens().metrics.ruler + 20.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(100_000.))),
+        ..Default::default()
+    });
+    s.vcx.executor().advance_clock(Duration::from_millis(400));
+    s.vcx.run_until_parked();
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), 0.);
     // Down past the panel's bottom edge to just above layer l61's row: the
     // frame holds only the rows on screen, and l60 is far below them.
     let (frame, scene) = s
@@ -3908,7 +3923,14 @@ fn a_clips_menu_names_its_layer_and_offers_the_creation_items(cx: &mut TestAppCo
 /// The first key on a property row (opacity revealed), in window space.
 fn property_key(s: &mut Stage, cx: &mut TestAppContext) -> Point<Pixels> {
     s.surface.update(&mut s.vcx, |t, cx| {
-        t.command("timeline.revealProperty:t", 0., None, false, cx)
+        // Keying already reveals opacity. The shortcut toggles it, so use
+        // it only when the fixture has not revealed the row yet.
+        let revealed = t.model().rows().iter().any(|row| matches!(&row.id,
+            pm_panel_timeline::RowId::Property { layer_id, channel }
+                if layer_id == "l0" && channel == "opacity"));
+        if !revealed {
+            t.command("timeline.revealProperty:t", 0., None, false, cx);
+        }
     });
     s.idle(cx);
     let origin = s.origin();
@@ -4057,4 +4079,60 @@ fn a_press_moves_the_playhead_to_the_skimmer_only_in_tracks_mode(cx: &mut TestAp
     s.idle(cx);
     press(&mut s, cx);
     assert_eq!(s.recorder.seeks.borrow().len(), 1, "Tracks: the press seeks");
+}
+
+#[gpui::test]
+fn keyframe_reveal_scrolls_an_offscreen_row_without_moving_time(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 80);
+    let before = s
+        .surface
+        .read_with(&s.vcx, |t, _| (t.scroll_time(), t.scroll_y()));
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: None,
+                    expected_revision: None,
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::KeyframeCommand::Add {
+                            layer_id: "l79".into(),
+                            channel: "opacity".into(),
+                            time: 1.,
+                            key_id: "reveal-key".into(),
+                            value: None,
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    s.surface.read_with(&s.vcx, |t, _| {
+        assert!(t.scroll_y() > before.1);
+        assert_eq!(t.scroll_time(), before.0);
+        let top = t
+            .scene()
+            .unwrap()
+            .scroll_for(&pm_panel_timeline::v4::row_id(
+                &pm_panel_timeline::RowId::Property {
+                    layer_id: "l79".into(),
+                    channel: "opacity".into(),
+                },
+            ))
+            .unwrap();
+        assert!(top >= t.scroll_y());
+        assert!(top < t.scroll_y() + 600.);
+    });
+    assert!(s.recorder.seeks.borrow().is_empty());
+    let scrolled = s.surface.read_with(&s.vcx, |t, _| t.scroll_y());
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), scrolled);
 }

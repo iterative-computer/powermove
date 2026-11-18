@@ -514,7 +514,7 @@ PM.allProps = (L: any) => {
     if (canAnimateContent(L, key) && isProperty(prop)) out.push({ key: 'c.' + key, prop, label: contentLabel(key), group: 'Content' });
   }
   for (const key of ['blend', 'mblur', 'matteMode']) if (isProperty(L[key])) out.push({ key: 'l.' + key, prop: L[key], label: key === 'blend' ? 'Blend mode' : 'Motion blur', group: 'Layer' });
-  (L.fx || []).forEach((fx: any) => { if (isProperty(fx.on)) out.push({ key: fx.id + '.$enabled', prop: fx.on, label: 'Enabled', group: fx.type }); for (const k in fx.p || {}) out.push({ key: fx.id + '.' + k, prop: fx.p[k], label: k, group: fx.type }); });
+  (L.fx || []).forEach((fx: any) => { const group = fx.name || PM.effectDef?.(fx)?.label || PM.FX?.[fx.type]?.label || PM.Kernel?.effects?.get?.(fx.type)?.label || fx.type; if (isProperty(fx.on)) out.push({ key: fx.id + '.$enabled', prop: fx.on, label: 'Enabled', group }); for (const k in fx.p || {}) out.push({ key: fx.id + '.' + k, prop: fx.p[k], label: k, group }); });
   (L.masks || []).forEach((m: any, i: any) => {
     for (const key of ['shape', 'mode', 'on']) if (isProperty(m[key])) out.push({ key: `m.${m.id}.${key}`, prop: m[key], label: key, group: 'Mask ' + (i + 1) });
     for (const k in m.p) out.push({ key: 'm.' + m.id + '.' + k, prop: m.p[k], label: k, group: 'Mask ' + (i + 1) });

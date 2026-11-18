@@ -123,6 +123,9 @@ pub struct TimelineModel {
     rows: Vec<Row>,
     row_positions: HashMap<RowId, usize>,
     pub rebuilds: u64,
+    /// Monotonic request, consumed once by the native scroll host.
+    pub reveal_serial: u64,
+    pub reveal_target: Option<(String, String)>,
     /// The published timeline UI last restored. The native tracks and the
     /// outline each hold a model; a disclosure one publishes reaches the other.
     ui_seen: Option<pm_model::json::Value>,
@@ -147,6 +150,12 @@ impl TimelineModel {
         self.history_applied = published.history.applied;
         self.history_entries = published.history.entries;
         self.selection = published.selection.clone();
+        let previous = (changed && !new_document).then(|| self.index.clone());
+        let entry = published.entry.as_ref().map(|e| e.id);
+        if entry != self.reveal.entry || entry.is_none() {
+            self.reveal.entry = entry;
+            self.reveal.revealed_in_entry.clear();
+        }
         if changed {
             // Tracks mode: the lanes shown now hold through whatever changed
             // the document (the timeline, a menu, Properties, an agent).
@@ -179,6 +188,73 @@ impl TimelineModel {
         if selection_step || (keys_changed && (!changed || !self.selection.keys().is_empty())) {
             self.key_selection_active = !self.selection.keys().is_empty();
         }
+        if let Some(previous) = previous {
+            let mut added = Vec::new();
+            let mut removed = Vec::new();
+            for layer in &self.index.layers {
+                if previous
+                    .layer(&layer.id)
+                    .is_some_and(|old| std::ptr::eq(old, layer.as_ref()))
+                {
+                    continue;
+                }
+                for channel in &layer.channels {
+                    let old = previous.channel(&layer.id, &channel.path);
+                    let old_keys: HashMap<_, _> = old
+                        .into_iter()
+                        .flat_map(|c| &c.keys)
+                        .map(|k| (k.id.as_str(), &k.stored))
+                        .collect();
+                    if channel.keys.iter().any(|key| {
+                        old_keys
+                            .get(key.id.as_str())
+                            .is_none_or(|stored| **stored != key.stored)
+                    }) {
+                        added.push((layer.id.clone(), channel.path.clone()));
+                    } else if channel.keys.is_empty() && old.is_some_and(|c| !c.keys.is_empty()) {
+                        removed.push((layer.id.clone(), channel.path.clone()));
+                    }
+                }
+            }
+            let disclosure_changed = !added.is_empty() || !removed.is_empty();
+            // Keep the final diamond's row under the pointer without opening
+            // anything on deletion. A later animated-only refresh replaces it.
+            for (layer, path) in removed {
+                self.reveal.retained_empty.insert((layer.clone(), path.clone()));
+                let l = self.index.layer(&layer).unwrap();
+                let d = self
+                    .reveal
+                    .layers
+                    .entry(layer)
+                    .or_insert_with(|| Disclosure {
+                        collapsed: l.collapsed,
+                        group_collapsed: l.group_collapsed,
+                        paths: None,
+                    });
+                let paths = d.paths.get_or_insert_with(|| {
+                    l.channels
+                        .iter()
+                        .filter(|c| !c.keys.is_empty())
+                        .map(|c| c.path.clone())
+                        .collect()
+                });
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+            for (layer, path) in added {
+                self.reveal.retained_empty.remove(&(layer.clone(), path.clone()));
+                if entry.is_some() && !self.reveal.revealed_in_entry.insert((layer.clone(), path.clone())) {
+                    continue;
+                }
+                let _ = self.include_paths(&layer, &[path.clone()]);
+                self.reveal_serial += 1;
+                self.reveal_target = Some((layer, path));
+            }
+            if disclosure_changed {
+                self.rebuild_rows();
+            }
+        }
         if selection_changed {
             let mut seen = HashSet::new();
             let mut opened = false;
@@ -210,6 +286,16 @@ impl TimelineModel {
     }
 
     pub fn rebuild_rows(&mut self) {
+        self.reveal.retained_empty.retain(|(layer, path)| {
+            let collapsed = self.reveal.layers.get(layer).map(|d| d.collapsed)
+                .unwrap_or_else(|| self.index.layer(layer).is_none_or(|l| l.collapsed));
+            if collapsed {
+                if let Some(paths) = self.reveal.layers.get_mut(layer).and_then(|d| d.paths.as_mut()) {
+                    paths.retain(|p| p != path);
+                }
+            }
+            !collapsed
+        });
         self.rows.clear();
         // Index parent links once; avoid an O(depth * layers) ancestor walk.
         let children = self.index.children();

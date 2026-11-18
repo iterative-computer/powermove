@@ -644,13 +644,7 @@ impl EffectsPanel {
                 .focus
                 .as_ref()
                 .and_then(|id| fx.iter().find(|f| text(f, "id") == id))
-                .map(|f| {
-                    model
-                        .definitions
-                        .get(text(f, "type"))
-                        .map(|d| d.label.clone())
-                        .unwrap_or_else(|| text(f, "type").into())
-                })
+                .map(|f| model.effect_display_name(f))
         } else {
             None
         };
@@ -660,10 +654,7 @@ impl EffectsPanel {
             let effect = &fx[entry.effect];
             let id = text(effect, "id");
             let definition = model.saved_effect_definition(effect);
-            let label = definition
-                .as_ref()
-                .map(|d| d.label.clone())
-                .unwrap_or_else(|| text(effect, "type").into());
+            let label = model.effect_display_name(effect);
             let enabled = enabled(model, &layer, effect, time)?;
             if let Some(action) = &entry.action {
                 rows.push(object([

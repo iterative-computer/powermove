@@ -544,3 +544,141 @@ impl gpui::Render for ColourCaptureFrame {
             )
     }
 }
+
+#[test]
+#[ignore = "writes synthetic before/after PNGs; set PM_PANEL_CAPTURE"]
+fn capture_keyframe_reveal_from_properties() {
+    use crate::timeline_surface::TimelineSurface;
+    use crate::timeline_tests::{Recorder, Recording};
+    use std::rc::Rc;
+    let dir = std::env::var("PM_PANEL_CAPTURE").expect("capture destination");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut r = rig("inspector", 4);
+    r.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l0".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mount = Arc::get_mut(&mut r.runtime)
+        .unwrap()
+        .mount("timeline")
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while mount.try_take().is_none() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    for (_, ticket) in r.runtime.publish() {
+        let ticket = ticket.unwrap();
+        while ticket.try_take().is_none() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    let first = r
+        .runtime
+        .take_publications()
+        .into_iter()
+        .find(|p| p.panel == "timeline");
+    // Take the timeline's current accepted publication even when a later
+    // Properties publication was emitted in the same batch.
+    let first = first.expect("timeline publication");
+    let scheme_name = std::env::var("PM_NATIVE_APPEARANCE").unwrap_or_else(|_| "dark".into());
+    let scheme = if scheme_name == "light" { Scheme::Light } else { Scheme::Dark };
+    let tokens = Tokens::new(scheme, Accessibility::default());
+    let mut cx = HeadlessAppContext::with_platform(
+        Arc::new(gpui_parley::ParleyTextSystem::new(
+            gpui_parley::SystemFonts::Load,
+        )),
+        Arc::new(()),
+        || {
+            Some(Box::new(
+                gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+            ))
+        },
+    );
+    let natives = Natives::default();
+    let surface = cx.new(|cx| {
+        TimelineSurface::new(
+            r.kernel.clone(),
+            PROJECT.into(),
+            tokens.clone(),
+            Rc::new(Recording(Rc::new(Recorder::default()))),
+            natives.outline.clone(),
+            Default::default(),
+            cx,
+        )
+    });
+    natives
+        .views
+        .borrow_mut()
+        .insert("timeline".into(), surface.clone().into());
+    let outline = natives.outline.clone();
+    let window = cx
+        .open_window(size(px(1100.), px(360.)), |window, cx| {
+            cx.new(|cx| SurfaceView::new(r.runtime.clone(), first, tokens, natives, window, cx))
+        })
+        .unwrap();
+    let view = window.entity(&cx).unwrap();
+    outline.bind(view.downgrade());
+    for phase in ["before", "after"] {
+        if phase == "after" {
+            let ticket = r
+                .runtime
+                .panel_command(
+                    "inspector",
+                    "panel.inspector",
+                    &serde_json::json!({"type":"key","row":"opacity"}),
+                )
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                for request in r.runtime.take_platform_requests() {
+                    assert_eq!(request.operation, "command");
+                    assert_eq!(request.input["name"], "timeline.focusGraph");
+                    surface.update(&mut cx, |t, cx| t.focus_graph("l0".into(), "opacity".into(), cx));
+                    r.runtime.platform_reply(request.id, Ok(serde_json::Value::Null));
+                }
+                if let Some(result) = ticket.try_take() { result.unwrap(); break; }
+                cx.run_until_parked();
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            surface.update(&mut cx, |t, cx| t.published(cx));
+        }
+        for (_, ticket) in r.runtime.publish() {
+            let ticket = ticket.unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while ticket.try_take().is_none() {
+                cx.run_until_parked();
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        for p in r.runtime.take_publications() {
+            if p.panel == "timeline" {
+                view.update(&mut cx, |v, cx| v.publish(p, cx));
+            }
+        }
+        for _ in 0..30 {
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let has_row = surface.read_with(&cx, |s, _| s.model().rows().iter().any(|r| matches!(&r.id,
+            pm_panel_timeline::RowId::Property { layer_id, channel } if layer_id == "l0" && channel == "opacity")));
+        assert_eq!(has_row, phase == "after");
+        cx.capture_screenshot(window.into())
+            .unwrap()
+            .save(format!("{dir}/keyframe-{phase}-{scheme_name}.png"))
+            .unwrap();
+    }
+}
