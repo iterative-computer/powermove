@@ -423,8 +423,18 @@ After Powermove loads new extensions, use set_panel_layout with sourceApp: "afte
 Read only After Effects workspace configuration and discovered extension source through the inspection tools. Do not modify After Effects, open projects, change composition content, publish extensions, or inspect unrelated files. Return commands: [] and no timeline imports."#;
 /// Built-in requests are shown by their one-line label and sent in full.
 pub(crate) fn expand_request(text: &str) -> std::borrow::Cow<'_, str> {
-    if text == WORKSPACE_IMPORT_LABEL {
-        format!("{WORKSPACE_IMPORT_LABEL}\n{WORKSPACE_IMPORT_STEPS}").into()
+    expand_attached_request(text, &[])
+}
+fn expand_attached_request<'a>(text: &'a str, attached: &[Value]) -> std::borrow::Cow<'a, str> {
+    if attached.is_empty() && text != WORKSPACE_IMPORT_LABEL {
+        return text.into();
+    }
+    let marked =
+        pm_panel_agentpanel::composer::Draft::from_legacy(WORKSPACE_IMPORT_LABEL, attached)
+            .ok()
+            .map(|draft| draft.request_text());
+    if marked.as_deref() == Some(text) {
+        format!("{text}\n{WORKSPACE_IMPORT_STEPS}").into()
     } else {
         text.into()
     }
@@ -508,8 +518,11 @@ pub fn run_effect(
                     // Built-in workflow labels expand before launch. Retain
                     // those same instructions when a later direction restarts it.
                     let mut original = effect.clone();
-                    if let EffectKind::Send { text, .. } = &mut original.kind {
-                        *text = expand_request(text).into_owned();
+                    if let EffectKind::Send {
+                        text, attachments, ..
+                    } = &mut original.kind
+                    {
+                        *text = expand_attached_request(text, attachments).into_owned();
                     }
                     state
                         .runs
@@ -724,7 +737,11 @@ fn launch_request(
     .map_err(|e| Error::Host(format!("An attachment could not be prepared: {e}")))?;
     let request = Request {
         run: effect.target.run.clone().ok_or(Error::Stale)?,
-        prompt: prompt(&state.panel, thread, text)?,
+        prompt: prompt(
+            &state.panel,
+            thread,
+            &expand_attached_request(text, attached),
+        )?,
         provider: settings.provider,
         model: Some(settings.model.clone()).filter(|m| !m.is_empty()),
         // The effort the picker shows is the one that runs: with none saved,

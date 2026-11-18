@@ -2264,7 +2264,11 @@ fn choosing_another_listed_model_sends_it() {
 #[test]
 fn steering_a_held_parent_retains_the_direction_after_child_results() {
     for original_brief in ["Original brief", agent_host::WORKSPACE_IMPORT_LABEL] {
-        let expected_original = agent_host::expand_request(original_brief).into_owned();
+        let markers = (0..6)
+            .map(|index| format!("[Attachment: original-{index}.png]"))
+            .collect::<String>();
+        let expected_original = format!("{markers}{}", agent_host::expand_request(original_brief));
+        let expected_direction = "[Attachment: latest.png]Make it blue";
         let root = tempfile::tempdir().unwrap();
         let actor = actor();
         let requests = root.path().join("requests.jsonl");
@@ -2325,16 +2329,23 @@ fn steering_a_held_parent_retains_the_direction_after_child_results() {
                 record["cwd"] == workspace
                     && record["request"]["params"]["input"][0]["text"]
                         .as_str()
-                        .is_some_and(|text| text.contains("NEW DIRECTION\nMake it blue"))
+                        .is_some_and(|text| {
+                            text.contains(&format!("NEW DIRECTION\n{expected_direction}"))
+                        })
             })
         });
-        panel
-        .panels
-        .agent_orchestrate(
-            "task_cancel",
-            &json!({"agentRunId":run,"taskId":task["taskId"],"reason":"Finish synthetic child"}),
-        )
-        .unwrap();
+        // The person's Stop task delivers the outcome to its parent. The
+        // agent's task_cancel acknowledges it, so it intentionally does not.
+        agent
+            .lock()
+            .unwrap()
+            .tasks
+            .stop_task(
+                &panel.panels.broker.agent,
+                &run,
+                task["taskId"].as_str().unwrap(),
+            )
+            .unwrap();
         panel.wait(|state| {
             state.panel.session(&thread).unwrap().run.is_none() && state.tasks.idle()
         });
@@ -2355,7 +2366,10 @@ fn steering_a_held_parent_retains_the_direction_after_child_results() {
                 text.contains(&format!("ORIGINAL REQUEST\n{expected_original}")),
                 "{text}"
             );
-            assert!(text.contains("NEW DIRECTION\nMake it blue"), "{text}");
+            assert!(
+                text.contains(&format!("NEW DIRECTION\n{expected_direction}")),
+                "{text}"
+            );
             assert!(text.contains("original-0"), "{text}");
             assert!(text.contains("original-5"), "{text}");
             assert!(text.contains("new-target"), "{text}");
