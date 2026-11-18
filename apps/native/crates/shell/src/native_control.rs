@@ -21,6 +21,8 @@ use std::rc::Rc;
 #[derive(Clone, Copy)]
 pub enum Kind {
     Popup,
+    /// A kit pop-up bezel whose searchable menu is supplied by its panel.
+    PopupTrigger,
     Checkbox,
     /// One radio button; its group is the caller's.
     Radio,
@@ -85,9 +87,8 @@ impl Range {
         let sign = if up { 1. } else { -1. };
         if self.log {
             let span = (self.max.ln() - self.min.ln()) / 20.;
-            return self.value(
-                (self.position(value) + sign * span).clamp(self.min.ln(), self.max.ln()),
-            );
+            return self
+                .value((self.position(value) + sign * span).clamp(self.min.ln(), self.max.ln()));
         }
         let step = if self.step > 0. {
             self.step
@@ -141,7 +142,7 @@ define_class!(
                 Kind::Checkbox|Kind::Radio|Kind::Switch=>{let state:isize=unsafe{msg_send![sender,state]};json!(state!=0)},
                 Kind::Segmented=>{let index:isize=unsafe{msg_send![sender,selectedSegment]};json!(index)},
                 Kind::Slider=>{let position:f64=unsafe{msg_send![sender,doubleValue]};json!(Range::of(&self.ivars().options.borrow()).value(position))},
-                Kind::Push=>Value::Null,
+                Kind::Push|Kind::PopupTrigger=>Value::Null,
                 Kind::Well=>sender.downcast_ref::<NSColorWell>().map_or(Value::Null,|w|json!(colour_hex(&w.color()))),
                 Kind::Search=>{let text:Retained<NSString>=unsafe{msg_send![sender,stringValue]};let text=text.to_string();if let Some(field)=sender.downcast_ref::<NSView>(){search_hint(field,text.is_empty());}json!(text)},
             };
@@ -194,6 +195,42 @@ define_class!(
         }
     }
 );
+define_class!(
+    #[unsafe(super(NSPopUpButton, NSButton, NSControl, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMSearchablePopupTrigger"]
+    #[ivars = ()]
+    struct SearchablePopupTrigger;
+    unsafe impl NSObjectProtocol for SearchablePopupTrigger {}
+    impl SearchablePopupTrigger {
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _: &NSEvent) { self.fire(); }
+        #[unsafe(method(performClick:))]
+        fn perform_click(&self, _: Option<&AnyObject>) { self.fire(); }
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            if matches!(event.keyCode(), 0x31 | 0x24 | 0x4c | 0x7d | 0x7e) {
+                self.fire();
+            } else {
+                unsafe { let _: () = msg_send![super(self), keyDown: event]; }
+            }
+        }
+    }
+);
+impl SearchablePopupTrigger {
+    fn fire(&self) {
+        if !self.isEnabled() {
+            return;
+        }
+        let target: *mut AnyObject = unsafe { msg_send![self, target] };
+        if !target.is_null() {
+            unsafe {
+                let _: () = msg_send![target, act: self];
+            }
+        }
+    }
+}
+
 enum Control {
     Popup(Retained<NSPopUpButton>),
     Button(Retained<NSButton>),
@@ -323,6 +360,7 @@ pub struct NativeControl {
     focus: Rc<std::cell::Cell<bool>>,
     /// The last text the view's host set (`host_text`).
     host_revision: Option<u64>,
+    menu_open: bool,
     /// A search field's last value from its view. The view's value can lag
     /// what is typed (an echo of the typing commits nothing), so only a new
     /// value replaces the field's text; an unchanged one is left alone
@@ -468,12 +506,19 @@ impl NativeControl {
             ]
         };
         let control = match kind {
-            Kind::Popup => {
-                let v = NSPopUpButton::initWithFrame_pullsDown(
-                    NSPopUpButton::alloc(mtm),
-                    NSRect::ZERO,
-                    pull,
-                );
+            Kind::Popup | Kind::PopupTrigger => {
+                let v = if matches!(kind, Kind::PopupTrigger) {
+                    let trigger: Retained<SearchablePopupTrigger> = unsafe {
+                        msg_send![super(SearchablePopupTrigger::alloc(mtm).set_ivars(())), initWithFrame: NSRect::ZERO, pullsDown: pull]
+                    };
+                    Retained::into_super(trigger)
+                } else {
+                    NSPopUpButton::initWithFrame_pullsDown(
+                        NSPopUpButton::alloc(mtm),
+                        NSRect::ZERO,
+                        pull,
+                    )
+                };
                 add_items(&v, &options);
                 unsafe {
                     v.setTarget(Some(&target));
@@ -743,12 +788,12 @@ impl NativeControl {
                 sized.setFrameSize(frame);
                 fitting
             }
-            None if well && matches!(kind, Kind::Popup) => {
+            None if well && matches!(kind, Kind::Popup | Kind::PopupTrigger) => {
                 NSSize::new(t.metrics.value_column as f64, t.metrics.field as f64)
             }
             None => control.view().fittingSize(),
         };
-        let width = if matches!(kind, Kind::Popup) && !inline {
+        let width = if matches!(kind, Kind::Popup | Kind::PopupTrigger) && !inline {
             t.metrics.value_column.max(intrinsic.width as f32)
         } else if matches!(kind, Kind::Slider | Kind::Search) {
             t.metrics.value_column
@@ -780,9 +825,10 @@ impl NativeControl {
             inline,
             // A search field is as wide as the place it is given.
             fill: matches!(kind, Kind::Search),
-            stretch: well && matches!(kind, Kind::Popup),
+            stretch: well && matches!(kind, Kind::Popup | Kind::PopupTrigger),
             focus: Rc::default(),
             host_revision: None,
+            menu_open: false,
             search_value: None,
             layer: Rc::default(),
             picture: Default::default(),
@@ -924,6 +970,24 @@ impl NativeControl {
     }
     /// A pop-up's own title, shown instead of its selected row; the row
     /// keeps its checkmark. `None` shows the selected row.
+    /// The panel keeps a custom searchable menu's trigger pressed until it closes.
+    pub fn popup_width(&mut self, width: Option<f32>, minimum: Option<f32>) {
+        if let Control::Popup(v) = &self.control {
+            self.width = width
+                .unwrap_or(v.fittingSize().width as f32)
+                .max(minimum.unwrap_or(0.))
+                .max(self.height);
+        }
+    }
+    pub fn menu_open(&mut self, open: bool) {
+        if self.menu_open != open {
+            self.menu_open = open;
+            self.picture.go_live();
+            if let Control::Popup(v) = &self.control {
+                v.highlight(open);
+            }
+        }
+    }
     pub fn display(&mut self, title: Option<&str>) {
         let Control::Popup(v) = &self.control else {
             return;
@@ -1020,28 +1084,28 @@ impl Render for NativeControl {
             .h(px(self.height))
             .on_mouse_down(MouseButton::Left, pressed)
             .child(
-            canvas(
-                |_, _, _| (),
-                move |painted, _, window, _| {
-                    let (bounds, clip) =
-                        layer.painted(painted, window.content_mask().bounds, window);
-                    let size = ns_rect(bounds).size;
-                    if pictures && picture.paint(painted, || slot.picture(size), window) {
-                        slot.hide();
-                        return;
-                    }
-                    slot.stage(ns_rect(bounds), ns_rect(clip));
-                    if focus.get()
-                        && let Some(window) = native.window()
-                    {
-                        focus.set(false);
-                        window.makeFirstResponder(Some(&native));
-                    }
-                },
+                canvas(
+                    |_, _, _| (),
+                    move |painted, _, window, _| {
+                        let (bounds, clip) =
+                            layer.painted(painted, window.content_mask().bounds, window);
+                        let size = ns_rect(bounds).size;
+                        if pictures && picture.paint(painted, || slot.picture(size), window) {
+                            slot.hide();
+                            return;
+                        }
+                        slot.stage(ns_rect(bounds), ns_rect(clip));
+                        if focus.get()
+                            && let Some(window) = native.window()
+                        {
+                            focus.set(false);
+                            window.makeFirstResponder(Some(&native));
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
             )
-            .absolute()
-            .inset_0(),
-        )
     }
 }
 /// A segment's content, drawn by us in the label ink. AppKit paints a title
@@ -1340,7 +1404,12 @@ pub(crate) fn ns_rect(b: Bounds<Pixels>) -> NSRect {
 fn hex_colour(hex: &str) -> Option<Retained<NSColor>> {
     let v = u32::from_str_radix(hex.trim_start_matches('#').get(..6)?, 16).ok()?;
     let c = |shift: u32| f64::from((v >> shift) & 0xff) / 255.;
-    Some(NSColor::colorWithSRGBRed_green_blue_alpha(c(16), c(8), c(0), 1.))
+    Some(NSColor::colorWithSRGBRed_green_blue_alpha(
+        c(16),
+        c(8),
+        c(0),
+        1.,
+    ))
 }
 /// A colour as `#rrggbb` in sRGB.
 fn colour_hex(colour: &NSColor) -> String {

@@ -160,7 +160,9 @@ fn sheet_up() -> bool {
     let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
     app.keyWindow()
         .is_some_and(|k| k.isSheet() || k.attachedSheet().is_some())
-        || app.mainWindow().is_some_and(|m| m.attachedSheet().is_some())
+        || app
+            .mainWindow()
+            .is_some_and(|m| m.attachedSheet().is_some())
         || editor_window_number()
             .and_then(|n| app.windowWithWindowNumber(n))
             .is_some_and(|w| w.attachedSheet().is_some())
@@ -954,9 +956,9 @@ fn add_tab(into: &NSWindow, window: &NSWindow) {
         .map(|t| t.windowNumber())
         .filter(|n| *n != window.windowNumber())
         .collect();
-    let last = tab_windows(into).pop().unwrap_or_else(|| unsafe {
-        Retained::retain(into as *const _ as *mut NSWindow).unwrap()
-    });
+    let last = tab_windows(into)
+        .pop()
+        .unwrap_or_else(|| unsafe { Retained::retain(into as *const _ as *mut NSWindow).unwrap() });
     last.addTabbedWindow_ordered(window, NSWindowOrderingMode::Above);
     hide_system_tab_bar(window);
     hide_system_tab_bar(into);
@@ -1080,7 +1082,10 @@ fn select_in_background(window: &NSWindow) {
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
-    let tabs: Vec<isize> = tab_windows(window).iter().map(|w| w.windowNumber()).collect();
+    let tabs: Vec<isize> = tab_windows(window)
+        .iter()
+        .map(|w| w.windowNumber())
+        .collect();
     // Only the app's editor windows count: a pop-up or helper window can
     // stand above other apps' windows, and going above it would too.
     let front = app.orderedWindows().to_vec().into_iter().find(|w| {
@@ -2111,7 +2116,11 @@ fn foreign_page(tag: isize) -> Option<(isize, usize)> {
 fn route(number: isize, name: String) {
     ROUTES.with(|r| {
         if let Some(tx) = r.borrow().get(&number) {
-            let _ = tx.try_send(Command { name, args: vec![], token: None });
+            let _ = tx.try_send(Command {
+                name,
+                args: vec![],
+                token: None,
+            });
         }
     });
 }
@@ -2221,7 +2230,13 @@ fn tab_label(tab: &Tab, tabs: &[Tab]) -> (String, bool) {
             .map(|s| s.to_string_lossy().into_owned())
     };
     let hint = match stem(tab) {
-        Some(own) if twins.iter().all(|t| stem(t).as_deref() != Some(own.as_str())) => Some(own),
+        Some(own)
+            if twins
+                .iter()
+                .all(|t| stem(t).as_deref() != Some(own.as_str())) =>
+        {
+            Some(own)
+        }
         _ => folder(tab).filter(|own| {
             twins
                 .iter()
@@ -2269,7 +2284,13 @@ fn distinct_title(title: &str, tabs: &[Tab]) -> Option<String> {
     let shared = tabs
         .iter()
         .filter(|t| t.title != title && alike_ends(&t.title, tabs))
-        .map(|t| chars.iter().zip(t.title.chars()).take_while(|(a, b)| **a == *b).count())
+        .map(|t| {
+            chars
+                .iter()
+                .zip(t.title.chars())
+                .take_while(|(a, b)| **a == *b)
+                .count()
+        })
         .max()?;
     // Back to the start of the word where they part.
     let start = chars[..shared.min(chars.len())]
@@ -2418,7 +2439,9 @@ fn toolbar_ids() -> Retained<NSArray<NSString>> {
     let v: Vec<_> = TOOLBAR_ORDER
         .iter()
         .map(|s| match *s {
-            FLEXIBLE => NSString::from_str(&unsafe { NSToolbarFlexibleSpaceItemIdentifier }.to_string()),
+            FLEXIBLE => {
+                NSString::from_str(&unsafe { NSToolbarFlexibleSpaceItemIdentifier }.to_string())
+            }
             SPACE => NSString::from_str(&unsafe { NSToolbarSpaceItemIdentifier }.to_string()),
             name => NSString::from_str(name),
         })
@@ -2620,9 +2643,7 @@ impl ToolbarDelegate {
         // image and title for Export): the system draws its glass, spaces
         // it and sizes it. Export is the bar's one prominent item, tinted
         // with the accent.
-        let &(_, sym, label) = TOOLBAR_BUTTONS
-            .iter()
-            .find(|(n, ..)| *n == name.as_str())?;
+        let &(_, sym, label) = TOOLBAR_BUTTONS.iter().find(|(n, ..)| *n == name.as_str())?;
         item.setImage(Some(&toolbar_symbol(sym, label, t)));
         unsafe {
             item.setTarget(Some(target));
@@ -2910,7 +2931,11 @@ impl Host {
             row.setEnabled(false);
             row
         };
-        menu.addItem(&line(if shown.finished { "Done" } else { shown.title.as_str() }));
+        menu.addItem(&line(if shown.finished {
+            "Done"
+        } else {
+            shown.title.as_str()
+        }));
         if !shown.detail.is_empty() && !shown.finished {
             menu.addItem(&line(&shown.detail));
         }
@@ -2920,9 +2945,8 @@ impl Host {
             unsafe { row.setTarget(Some(&self._target)) };
             menu.addItem(&row);
         }
-        let turning = !shown.finished
-            && shown.progress.is_none()
-            && !tokens.accessibility.reduce_motion;
+        let turning =
+            !shown.finished && shown.progress.is_none() && !tokens.accessibility.reduce_motion;
         if !turning {
             if let Some(timer) = self.task_timer.take() {
                 timer.invalidate();
@@ -3594,7 +3618,9 @@ impl Host {
                         crate::typing::drop_expired();
                         let flags = e.modifierFlags();
                         let text = crate::typing::is_text(
-                            &e.charactersIgnoringModifiers().map(|c| c.to_string()).unwrap_or_default(),
+                            &e.charactersIgnoringModifiers()
+                                .map(|c| c.to_string())
+                                .unwrap_or_default(),
                             flags.intersects(
                                 NSEventModifierFlags::Command | NSEventModifierFlags::Control,
                             ),
@@ -5167,7 +5193,10 @@ impl Host {
             // panel's less that.
             let m = &self.tokens.metrics;
             let radius = f64::from((m.panel_radius - m.border).max(0.));
-            let corners = self.viewer_corners.get().map(|on| if on { radius } else { 0. });
+            let corners = self
+                .viewer_corners
+                .get()
+                .map(|on| if on { radius } else { 0. });
             SlotGeometry {
                 frame: rect(r, h),
                 layer,
@@ -5280,7 +5309,12 @@ impl Host {
     /// window is a non-leading tab.
     /// The pages open in this window's strip, by id.
     pub fn page_ids(&self) -> Vec<String> {
-        self.pages.borrow().0.iter().map(|(id, _)| id.clone()).collect()
+        self.pages
+            .borrow()
+            .0
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect()
     }
     /// This window's place in its tab group's strip (0 when alone).
     pub fn tab_index(&self) -> usize {
@@ -6816,9 +6850,15 @@ impl Popup {
                     y += shape.heading as f64;
                 }
             }
+            let item_h = row_h
+                + if c.detail.is_empty() {
+                    0.
+                } else {
+                    caption as f64 + t.space.xs as f64
+                };
             let rect = NSRect::new(
                 NSPoint::new(inset, y),
-                NSSize::new(width - inset * 2., row_h),
+                NSSize::new(width - inset * 2., item_h),
             );
             let mut trailing = rect.origin.x + rect.size.width - t.space.md as f64;
             if let Some(glyphs) = self.shortcuts.get(&c.command) {
@@ -6860,6 +6900,19 @@ impl Popup {
                 title.setFont(Some(&face));
             }
             centred(&title, lead, y, row_h, (trailing - lead).max(0.));
+            if !c.detail.is_empty() {
+                let detail = popup_label(&c.detail, caption, t.colors.secondary, mtm);
+                centred(
+                    &detail,
+                    lead,
+                    y + row_h - t.space.xs as f64,
+                    item_h - row_h,
+                    (trailing - lead).max(0.),
+                );
+                self.list.addSubview(&detail);
+                self.parts
+                    .push(Retained::into_super(Retained::into_super(detail)));
+            }
             self.list.addSubview(&title);
             self.parts
                 .push(Retained::into_super(Retained::into_super(title)));
@@ -6889,7 +6942,7 @@ impl Popup {
                 rect,
                 button,
             });
-            y += row_h;
+            y += item_h;
         }
         if let Some(rest) = more_rows {
             let note = popup_label(
@@ -7285,7 +7338,9 @@ impl Popup {
         if let Some(name) = self.model.navigate(key) {
             // A row that stays leaves the menu open (`navigate` kept it so).
             self.picked = !self.model.open;
-            if self.anchor.is_none() { save_palette_recent(&mut self.model.recents, &name); }
+            if self.anchor.is_none() {
+                save_palette_recent(&mut self.model.recents, &name);
+            }
             let (command, args) = menu::split_palette_command(&name);
             let _ = self.sender.try_send(Command {
                 name: command.to_owned(),
@@ -8061,14 +8116,24 @@ mod tab_layout_tests {
         let (first, shown, _) = tab_layout_kept(&natural, Some(5), room, None);
         assert!(first > 0 && shown.len() > 1);
         for selected in first..first + shown.len() {
-            assert_eq!(tab_layout_kept(&natural, Some(selected), room, Some(first)).0, first);
+            assert_eq!(
+                tab_layout_kept(&natural, Some(selected), room, Some(first)).0,
+                first
+            );
         }
-        assert_eq!(tab_layout_kept(&natural, Some(first - 1), room, Some(first)).0, first - 1);
+        assert_eq!(
+            tab_layout_kept(&natural, Some(first - 1), room, Some(first)).0,
+            first - 1
+        );
         // Home or a page in the window (no tab lit): the run stays.
         assert_eq!(tab_layout_kept(&natural, None, room, Some(first)).0, first);
         let next = first + shown.len();
         let (start, widths, _) = tab_layout_kept(&natural, Some(next), room, Some(first));
-        assert_eq!(start + widths.len() - 1, next, "slides to hold the next tab");
+        assert_eq!(
+            start + widths.len() - 1,
+            next,
+            "slides to hold the next tab"
+        );
         assert_eq!(start, first + 1, "by one tab");
     }
 
@@ -8106,7 +8171,10 @@ mod tab_layout_tests {
             distinct_title("Accept — Recovered — Native", &tabs).as_deref(),
             Some("…Recovered — Native")
         );
-        assert_eq!(distinct_title("Accept — Native", &tabs).as_deref(), Some("…Native"));
+        assert_eq!(
+            distinct_title("Accept — Native", &tabs).as_deref(),
+            Some("…Native")
+        );
         assert_eq!(distinct_title("Paper", &tabs), None);
         // The same name twice: each leads with its file's name, or its
         // folder's when the file names match too; the tooltip says where.
@@ -8323,7 +8391,11 @@ mod sidebar_rect_tests {
 }
 
 fn toolbar_click_command(command: &str, double_click: bool) -> &str {
-    if command == "toolAnchor" && double_click { "centerAnchor" } else { command }
+    if command == "toolAnchor" && double_click {
+        "centerAnchor"
+    } else {
+        command
+    }
 }
 
 #[cfg(test)]
@@ -8342,24 +8414,36 @@ mod anchor_toolbar_tests {
 
 fn load_palette_recents() -> Vec<String> {
     let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
-    defaults.stringForKey(&NSString::from_str("PowermovePaletteRecents"))
+    defaults
+        .stringForKey(&NSString::from_str("PowermovePaletteRecents"))
         .and_then(|value| serde_json::from_str::<Vec<String>>(&value.to_string()).ok())
-        .map(|mut ids| { ids.truncate(8); ids }).unwrap_or_default()
+        .map(|mut ids| {
+            ids.truncate(8);
+            ids
+        })
+        .unwrap_or_default()
 }
 fn save_palette_recent(recents: &mut Vec<String>, command: &str) {
     crate::transient::remember_command(recents, command);
     let value = NSString::from_str(&serde_json::to_string(recents).unwrap_or_default());
     // NSString is a property-list value accepted by NSUserDefaults.
-    unsafe { objc2_foundation::NSUserDefaults::standardUserDefaults()
-        .setObject_forKey(Some(&value), &NSString::from_str("PowermovePaletteRecents")); }
+    unsafe {
+        objc2_foundation::NSUserDefaults::standardUserDefaults()
+            .setObject_forKey(Some(&value), &NSString::from_str("PowermovePaletteRecents"));
+    }
 }
 
 /// Viewer preferences share the shell's native application settings store.
 pub fn viewer_preference(key: &str, default: bool) -> bool {
     let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
     let key = NSString::from_str(key);
-    if defaults.objectForKey(&key).is_none() { default } else { defaults.boolForKey(&key) }
+    if defaults.objectForKey(&key).is_none() {
+        default
+    } else {
+        defaults.boolForKey(&key)
+    }
 }
 pub fn set_viewer_preference(key: &str, value: bool) {
-    objc2_foundation::NSUserDefaults::standardUserDefaults().setBool_forKey(value, &NSString::from_str(key));
+    objc2_foundation::NSUserDefaults::standardUserDefaults()
+        .setBool_forKey(value, &NSString::from_str(key));
 }

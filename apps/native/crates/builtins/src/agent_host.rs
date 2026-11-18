@@ -380,7 +380,12 @@ pub fn admit_send(state: &AgentState, thread: &str) -> Result<(), String> {
     if !session.draft.sendable() {
         return Ok(());
     }
-    if session.run.is_some() && session.draft.attachments().next().is_some() {
+    if session
+        .run
+        .as_ref()
+        .is_some_and(|r| !state.tasks.owns_live_run(&r.id))
+        && session.draft.attachments().next().is_some()
+    {
         return Err(
             "Attachments can't join a running turn yet. Send them with your next message.".into(),
         );
@@ -389,7 +394,11 @@ pub fn admit_send(state: &AgentState, thread: &str) -> Result<(), String> {
         None if state.runs.active() >= 8 => {
             Err("Eight agents are already running. Wait for one to finish.".into())
         }
-        Some(run) if !state.runs.steerable(&run.id) && !session.needs_answer() => {
+        Some(run)
+            if !state.runs.steerable(&run.id)
+                && !state.tasks.owns_live_run(&run.id)
+                && !session.needs_answer() =>
+        {
             Err("This run can't take new messages. Stop it first.".into())
         }
         _ => Ok(()),
@@ -451,6 +460,20 @@ pub fn run_effect(
     let mut store = KernelStore::new(kernel.clone(), application);
     let mut guard = shared.shared();
     let state = &mut *guard;
+    let child_result = state
+        .tasks
+        .panel_effect(&mut state.runs, &mut state.panel, link, effect);
+    if let Some(result) = child_result {
+        state
+            .panel
+            .save(&mut store, now())
+            .map_err(|e| format!("{e:?}"))?;
+        drop(guard);
+        link.touch();
+        link.publish_now();
+        ensure_worker(shared, link, kernel, application);
+        return result;
+    }
     let result = match &effect.kind {
         EffectKind::Send {
             text,
@@ -562,7 +585,7 @@ fn safe(name: &str) -> String {
 }
 /// Main's attachment layout: images become files in the run's workspace for
 /// the provider to look at; other files travel in the prompt (ATTACHED FILES).
-fn lay_out(
+pub(crate) fn lay_out(
     directory: &std::path::Path,
     attached: &[Value],
 ) -> std::io::Result<(Vec<String>, Vec<Value>)> {
@@ -590,6 +613,9 @@ fn lay_out(
                 let file = directory.join(format!("reference-{index}.{extension}"));
                 std::fs::write(&file, bytes)?;
                 images.push(file.to_string_lossy().into_owned());
+                if record.get("promptNote").is_some() || record.get("targetContext").is_some() {
+                    files.push(serde_json::json!({"name":name,"path":file,"promptNote":record["promptNote"],"targetContext":record["targetContext"]}));
+                }
             }
             _ => {
                 let content = record["content"].as_str().map(str::to_owned).or_else(|| {
@@ -597,7 +623,15 @@ fn lay_out(
                         .and_then(decode_base64)
                         .and_then(|bytes| String::from_utf8(bytes).ok())
                 });
-                files.push(serde_json::json!({"name":name,"type":mime,"content":content}));
+                let path = if let Some(bytes) = encoded.and_then(decode_base64) {
+                    std::fs::create_dir_all(directory)?;
+                    let file = directory.join(format!("attachment-{index}-{}", safe(name)));
+                    std::fs::write(&file, bytes)?;
+                    Some(file)
+                } else {
+                    None
+                };
+                files.push(serde_json::json!({"name":name,"type":mime,"content":content,"path":path,"promptNote":record["promptNote"],"targetContext":record["targetContext"]}));
             }
         }
     }
@@ -696,6 +730,20 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn binary_attachments_and_pick_notes_reach_the_run_without_losing_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (images, files) = super::lay_out(dir.path(), &[
+            json!({"name":"Sound.wav","type":"audio/wav","dataBase64":"AP8="}),
+            json!({"name":"Frame.png","type":"image/png","dataUrl":"data:image/png;base64,AP8=","promptNote":"Viewer · 0:02.23"})
+        ]).unwrap();
+        assert_eq!(
+            std::fs::read(files[0]["path"].as_str().unwrap()).unwrap(),
+            [0, 255]
+        );
+        assert_eq!(std::fs::read(&images[0]).unwrap(), [0, 255]);
+        assert_eq!(files[1]["promptNote"], "Viewer · 0:02.23");
+    }
     #[test]
     fn typing_is_fenced_by_the_draft_not_by_unrelated_republishes() {
         let link = AgentLink::default();

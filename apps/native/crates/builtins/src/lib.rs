@@ -892,6 +892,22 @@ impl Builtins {
     /// (`{id, name, type, size, dataUrl | content | dataBase64}`), into the
     /// visible thread's message. At most six per message, as on main.
     pub fn agent_attach(&self, records: Vec<Value>) -> std::result::Result<(), String> {
+        self.agent_attach_guarded(records, None)
+    }
+    /// Async clipboard/drop reads retain the project and thread that accepted them.
+    pub fn agent_attach_for(
+        &self,
+        project: &str,
+        thread: &str,
+        records: Vec<Value>,
+    ) -> std::result::Result<(), String> {
+        self.agent_attach_guarded(records, Some((project, thread)))
+    }
+    fn agent_attach_guarded(
+        &self,
+        records: Vec<Value>,
+        target: Option<(&str, &str)>,
+    ) -> std::result::Result<(), String> {
         let (agent, link) = {
             let backend = self
                 .backend("agent")
@@ -913,7 +929,11 @@ impl Builtins {
             .map_err(|e| format!("{e:?}"))?;
         {
             let mut state = agent.shared();
-            let thread = state.panel.active_id().to_owned();
+            let thread = match target {
+                Some((project, thread)) if state.panel.project() == project => thread.to_owned(),
+                Some(_) => return Err("The attachment's project is no longer open.".into()),
+                None => state.panel.active_id().to_owned(),
+            };
             state
                 .panel
                 .add_attachments(&thread, files, agent_host::now_ms())
@@ -1041,14 +1061,24 @@ impl Builtins {
     pub fn agent_delete_thread(&self, thread: &str) -> std::result::Result<(), String> {
         let (agent, link) = self.agent_state()?;
         let now = agent_host::now_ms();
-        let stop = {
+        let stops = {
             let mut state = agent.shared();
-            let stop = state
+            let ids = state
                 .panel
-                .archive_thread(thread, &format!("thread{now:x}"), true, now)
+                .thread_subtree(thread)
                 .map_err(|e| format!("{e:?}"))?;
-            state
-                .panel
+            let mut candidate = state.panel.clone();
+            let mut stops = vec![];
+            // Children settle/archive first; final receipts retain their own owner.
+            for id in ids.iter().rev() {
+                if let Some(stop) = candidate
+                    .archive_thread(id, &pm_kernel::new_id("thread"), true, now)
+                    .map_err(|e| format!("{e:?}"))?
+                {
+                    stops.push(stop);
+                }
+            }
+            candidate
                 .save(
                     &mut models::KernelStore::new(
                         self.broker.kernel.clone(),
@@ -1057,20 +1087,24 @@ impl Builtins {
                     now,
                 )
                 .map_err(|e| format!("{e:?}"))?;
-            stop
+            state.panel = candidate;
+            stops
         };
-        if let Some(stop) = stop {
-            agent_host::run_effect(
+        let mut failure = None;
+        for stop in stops {
+            if let Err(error) = agent_host::run_effect(
                 &agent,
                 &link,
                 &self.broker.kernel,
                 self.broker.application,
                 &stop,
-            )?;
+            ) {
+                failure.get_or_insert(error);
+            }
         }
         link.touch();
         link.publish_now();
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
     /// The window's Full Access alert answered (`accepted`: Allow).
     pub fn agent_consent(&self, effect: u64, accepted: bool) -> std::result::Result<(), String> {
@@ -1807,6 +1841,15 @@ impl Builtins {
         let entry = self.broker.entry(panel).ok_or(Error::Closed)?;
         let mut entry = entry.shared();
         let entry = &mut *entry;
+        // Resolve semantic activation against the exact surface used to plan
+        // the event. A publication between two separate lock holds must not
+        // discard a valid press on the same control (notably Agent Stop).
+        let semantic = semantic.filter(|id| {
+            entry.surface.node(target)
+                .and_then(|n| n.props.get("id"))
+                .and_then(Value::as_str) == Some(id.as_str())
+        });
+        let revision = if semantic.is_some() { entry.surface.revision() } else { revision };
         let mut event = entry
             .interaction
             .drive(
@@ -1837,23 +1880,10 @@ impl Builtins {
         event: &str,
         detail: EventDetail,
     ) -> Result<Ticket<Evaluation>> {
-        let (revision, semantic) = {
-            let entry = self.broker.entry(panel).ok_or(Error::Closed)?;
-            let entry = entry.shared();
-            let surface = &entry.surface;
-            let same = semantic.filter(|id| {
-                surface
-                    .node(target)
-                    .and_then(|n| n.props.get("id"))
-                    .and_then(Value::as_str)
-                    == Some(*id)
-            });
-            match same {
-                Some(id) => (surface.revision(), Some(id.to_owned())),
-                None => (revision, None),
-            }
-        };
-        self.dispatch(panel, generation, revision, target, event, detail, semantic)
+        self.dispatch(
+            panel, generation, revision, target, event, detail,
+            semantic.map(str::to_owned),
+        )
     }
     /// Pointer stream events address the current tree. A publication landing
     /// mid-gesture must not drop a release.
@@ -2627,7 +2657,9 @@ impl Builtins {
                 for f in all.values() {
                     for root in &roots {
                         if f.path.starts_with(&all[root].path) {
-                            if let Some(state) = folders.get(root).cloned() { folders.insert(f.id.clone(), state); }
+                            if let Some(state) = folders.get(root).cloned() {
+                                folders.insert(f.id.clone(), state);
+                            }
                         }
                     }
                 }

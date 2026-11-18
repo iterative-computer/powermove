@@ -10,6 +10,7 @@ import { fixture } from "./fixtures";
 
 let executable: string;
 function wire() {
+  if (process.env.PM_AGENT_MODEL_WIRE) return process.env.PM_AGENT_MODEL_WIRE;
   if (!executable) {
     const manifest = fileURLToPath(
       new URL("../../../../Cargo.toml", import.meta.url),

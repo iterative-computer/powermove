@@ -1048,12 +1048,18 @@ fn full_access_runs_once_the_person_consents_and_asks_again_otherwise() {
         let state = agent.lock().unwrap();
         let s = state.panel.session(state.panel.active_id()).unwrap();
         assert_eq!(s.settings.access, pm_agents::Access::Computer);
-        assert!(s.computer_consent, "the card's answer is kept for the thread");
+        assert!(
+            s.computer_consent,
+            "the card's answer is kept for the thread"
+        );
     }
     panel.send("Hi");
     panel.wait(idle);
     let text = panel.text();
-    assert!(text.contains("Saw: Hi"), "the run reached the provider: {text}");
+    assert!(
+        text.contains("Saw: Hi"),
+        "the run reached the provider: {text}"
+    );
     assert!(
         !text.contains("fresh approval"),
         "no dead-end refusal: {text}"
@@ -1362,7 +1368,10 @@ fn select_part_of_the_screen_asks_the_window_for_a_pick() {
     panel.click("agent-pick-region");
     let requests = panel.panels.take_platform_requests();
     assert_eq!(
-        requests.iter().filter(|r| r.operation == "agent.pickRegion").count(),
+        requests
+            .iter()
+            .filter(|r| r.operation == "agent.pickRegion")
+            .count(),
         1,
         "{:?}",
         requests.iter().map(|r| &r.operation).collect::<Vec<_>>()
@@ -2249,5 +2258,142 @@ fn choosing_another_listed_model_sends_it() {
     panel.wait(idle);
     assert!(panel.text().contains("Saw: Hello there"));
     assert_eq!(model.requests()[0]["body"]["model"], "other-model");
+    panel.panels.close();
+}
+
+#[test]
+fn async_attachments_keep_the_accepting_thread_and_reject_another_project() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let agent = panel.agent();
+    let (project, original) = {
+        let mut state = agent.lock().unwrap();
+        let target = (
+            state.panel.project().to_owned(),
+            state.panel.active_id().to_owned(),
+        );
+        // New reuses an empty thread by design; retain a real draft so this
+        // exercises a switch to a distinct thread while attachment I/O finishes.
+        state
+            .panel
+            .draft_mut(&target.1)
+            .unwrap()
+            .insert_text("Original draft", 1, false);
+        let other = state
+            .panel
+            .new_thread("other-attachment-thread", 2)
+            .unwrap();
+        assert_eq!(other, "other-attachment-thread");
+        assert_eq!(state.panel.active_id(), other);
+        target
+    };
+    panel.panels.agent_attach_for(&project, &original, vec![json!({"id":"delayed-file", "name":"Note.txt", "type":"text/plain", "content":"hello"})]).unwrap();
+    {
+        let state = agent.lock().unwrap();
+        assert_eq!(
+            state.panel.inspect(&original).unwrap()["attachments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            state.panel.inspect("other-attachment-thread").unwrap()["attachments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+    assert!(
+        panel
+            .panels
+            .agent_attach_for("foreign-project", &original, vec![])
+            .is_err()
+    );
+    panel.panels.close();
+}
+
+#[test]
+fn child_composer_directions_and_attachments_route_to_the_task_owned_run() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "hold"));
+    panel.connected(Provider::Chatgpt);
+    panel.send("Hold the parent");
+    let agent = panel.agent();
+    let parent_thread = thread_id(&agent);
+    let parent_run = live_run(&agent, &parent_thread);
+    let task = panel
+        .panels
+        .agent_orchestrate(
+            "delegate_task",
+            &json!({"agentRunId":parent_run,"task":"Hold the child","title":"Layout"}),
+        )
+        .unwrap();
+    let child_thread = task["childThreadId"].as_str().unwrap().to_owned();
+    let child_run = task["childRunId"].as_str().unwrap().to_owned();
+    {
+        let mut state = agent.lock().unwrap();
+        assert!(state.tasks.owns_live_run(&child_run));
+        assert!(
+            !state.runs.steerable(&child_run),
+            "ProviderRuns does not own task children"
+        );
+        assert_eq!(state.panel.active_id(), parent_thread);
+        state.panel.switch(&child_thread).unwrap();
+    }
+    panel.panels.broker.agent.touch();
+    panel.text();
+    panel.panels.agent_attach(vec![json!({"id":"child-note","name":"Direction.txt","type":"text/plain","content":"Keep the heading","size":16})]).unwrap();
+    panel.send("Move it left");
+    panel.wait(|state| {
+        state
+            .tasks
+            .child_request(&child_run)
+            .is_some_and(|r| r.prompt.contains("Move it left"))
+    });
+    {
+        let state = agent.lock().unwrap();
+        let request = state.tasks.child_request(&child_run).unwrap();
+        assert!(request.prompt.contains("NEW DIRECTION"));
+        assert_eq!(request.files.last().unwrap()["name"], "Direction.txt");
+        assert_eq!(
+            state
+                .panel
+                .session(&child_thread)
+                .unwrap()
+                .run
+                .as_ref()
+                .unwrap()
+                .id,
+            child_run
+        );
+        assert_eq!(
+            state
+                .panel
+                .session(&parent_thread)
+                .unwrap()
+                .run
+                .as_ref()
+                .unwrap()
+                .id,
+            parent_run
+        );
+    }
+    panel.panels.agent_delete_thread(&parent_thread).unwrap();
+    panel.wait(|state| {
+        state.panel.session(&parent_thread).is_err() && state.panel.session(&child_thread).is_err()
+    });
+    {
+        let state = agent.lock().unwrap();
+        let archived = state.panel.raw_archive()["archivedThreads"]
+            .as_array()
+            .unwrap();
+        assert!(archived.iter().any(|r| r["id"] == parent_thread));
+        assert!(archived.iter().any(|r| r["id"] == child_thread));
+    }
     panel.panels.close();
 }

@@ -11,8 +11,34 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 const ROLES: &[(&str, &str)] = &[
-    ("colors.timeline_selected", "Accent tint for selected timeline layer rows"),
-    ("colors.timeline_selected_hover", "Stronger accent tint for hovered selected timeline layer rows"),
+    (
+        "metrics.agent_remove_offset",
+        "Remove control outset at an attachment corner",
+    ),
+    (
+        "metrics.agent_attachment",
+        "Square draft attachment thumbnail edge",
+    ),
+    (
+        "metrics.agent_attachment_sent",
+        "Square sent attachment thumbnail edge",
+    ),
+    (
+        "metrics.agent_model_min",
+        "Minimum composer model pop-up width",
+    ),
+    (
+        "metrics.agent_effort_width",
+        "Fixed composer effort pop-up width",
+    ),
+    (
+        "colors.timeline_selected",
+        "Accent tint for selected timeline layer rows",
+    ),
+    (
+        "colors.timeline_selected_hover",
+        "Stronger accent tint for hovered selected timeline layer rows",
+    ),
     (
         "colors.window",
         "Window ground behind panels, toolbar band and status bar",
@@ -173,19 +199,46 @@ const ROLES: &[(&str, &str)] = &[
         "Separator thickness (Increase Contrast doubles it)",
     ),
     ("metrics.min_panel", "Smallest panel extent"),
-    ("metrics.panel_drag_threshold", "Travel before a panel header or tab drags"),
+    (
+        "metrics.panel_drag_threshold",
+        "Travel before a panel header or tab drags",
+    ),
     ("metrics.panel_least", "Least height of a docked panel"),
     ("metrics.column_least", "Narrowest side column"),
     ("metrics.column_most", "Widest side column"),
     ("metrics.band_least", "Least height of the timeline's dock"),
-    ("metrics.band_room", "Height the timeline's dock leaves above it"),
-    ("metrics.edge_strip", "Width of a side drop strip where no dock stands"),
-    ("metrics.edge_strip_bottom", "Height of the bottom drop strip where no dock stands"),
-    ("metrics.dock_reach", "How far outside a dock a dragged panel still drops into it"),
-    ("metrics.splitter_dead_zone", "Travel before a splitter between panels resizes"),
-    ("metrics.splitter_glow", "Length of the glow that follows the pointer along a splitter"),
-    ("metrics.splitter_glow_width", "Thickness of the splitter glow"),
-    ("metrics.splitter_reach", "How far a dock divider's grab reaches into the panels beside its gap"),
+    (
+        "metrics.band_room",
+        "Height the timeline's dock leaves above it",
+    ),
+    (
+        "metrics.edge_strip",
+        "Width of a side drop strip where no dock stands",
+    ),
+    (
+        "metrics.edge_strip_bottom",
+        "Height of the bottom drop strip where no dock stands",
+    ),
+    (
+        "metrics.dock_reach",
+        "How far outside a dock a dragged panel still drops into it",
+    ),
+    (
+        "metrics.splitter_dead_zone",
+        "Travel before a splitter between panels resizes",
+    ),
+    (
+        "metrics.splitter_glow",
+        "Length of the glow that follows the pointer along a splitter",
+    ),
+    (
+        "metrics.splitter_glow_width",
+        "Thickness of the splitter glow",
+    ),
+    (
+        "metrics.splitter_reach",
+        "How far a dock divider's grab reaches into the panels beside its gap",
+    ),
     ("metrics.min_center", "Smallest viewer extent"),
     ("metrics.keyboard_step", "Splitter arrow-key step"),
     (
@@ -224,12 +277,30 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.settings_width", "Settings window width"),
     ("metrics.settings_height", "Settings window height"),
     ("metrics.settings_sidebar", "Settings sidebar width"),
-    ("metrics.settings_column", "Settings form column's greatest width, insets included"),
-    ("metrics.settings_poster_width", "Settings project header poster width"),
-    ("metrics.settings_poster_height", "Settings project header poster height"),
-    ("metrics.settings_text_field", "Settings row text field width"),
-    ("metrics.settings_number_field", "Settings row number field width, its unit included"),
-    ("metrics.store_column", "Store content column's greatest width"),
+    (
+        "metrics.settings_column",
+        "Settings form column's greatest width, insets included",
+    ),
+    (
+        "metrics.settings_poster_width",
+        "Settings project header poster width",
+    ),
+    (
+        "metrics.settings_poster_height",
+        "Settings project header poster height",
+    ),
+    (
+        "metrics.settings_text_field",
+        "Settings row text field width",
+    ),
+    (
+        "metrics.settings_number_field",
+        "Settings row number field width, its unit included",
+    ),
+    (
+        "metrics.store_column",
+        "Store content column's greatest width",
+    ),
     ("metrics.menu_inset", "Menu and palette row inset"),
     ("metrics.menu_row", "Palette row height"),
     ("metrics.track_row", "Timeline layer row"),
@@ -237,13 +308,34 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.ruler", "Timeline ruler height"),
     ("metrics.viewer_ruler", "The viewer's ruler bands"),
     ("metrics.grade_wheel", "A colour wheel's least diameter"),
-    ("metrics.grade_wheel_max", "A colour wheel's greatest diameter in a wide panel"),
-    ("metrics.grade_pair", "Least width of two colour wheels side by side on their plates"),
-    ("metrics.grade_pair_max", "Most width of two colour wheel plates side by side"),
-    ("metrics.grade_field", "Room for a colour wheel master's number beside its strip"),
-    ("metrics.curve_editor", "The curve editor's least graph height"),
-    ("metrics.curve_editor_max", "The curve editor's greatest graph height in a wide panel"),
-    ("metrics.curve_editor_wide", "The curve editor's greatest width in a wide panel"),
+    (
+        "metrics.grade_wheel_max",
+        "A colour wheel's greatest diameter in a wide panel",
+    ),
+    (
+        "metrics.grade_pair",
+        "Least width of two colour wheels side by side on their plates",
+    ),
+    (
+        "metrics.grade_pair_max",
+        "Most width of two colour wheel plates side by side",
+    ),
+    (
+        "metrics.grade_field",
+        "Room for a colour wheel master's number beside its strip",
+    ),
+    (
+        "metrics.curve_editor",
+        "The curve editor's least graph height",
+    ),
+    (
+        "metrics.curve_editor_max",
+        "The curve editor's greatest graph height in a wide panel",
+    ),
+    (
+        "metrics.curve_editor_wide",
+        "The curve editor's greatest width in a wide panel",
+    ),
     ("metrics.layer_column", "Timeline layer list column width"),
     ("metrics.clip_radius", "Timeline clip bar corner radius"),
     ("metrics.playhead", "Playhead line width"),
@@ -271,7 +363,10 @@ const ROLES: &[(&str, &str)] = &[
         "Space between turns in the Agent conversation",
     ),
     ("metrics.tree_indent", "Indent per outline level"),
-    ("metrics.timeline_indent", "Timeline layer nesting indent per depth, capped at four levels"),
+    (
+        "metrics.timeline_indent",
+        "Timeline layer nesting indent per depth, capped at four levels",
+    ),
     (
         "metrics.kind_badge",
         "Layer-kind badge square in the timeline and Project list",
@@ -352,7 +447,10 @@ const ROLES: &[(&str, &str)] = &[
         "metrics.media_glyph",
         "Media kind glyph on a Project tile without a picture",
     ),
-    ("metrics.media_folder_glyph", "Folder glyph on a Project folder tile"),
+    (
+        "metrics.media_folder_glyph",
+        "Folder glyph on a Project folder tile",
+    ),
     (
         "metrics.media_row_thumb_width",
         "Width of a Project list row's leading thumbnail",
@@ -432,7 +530,10 @@ const ROLES: &[(&str, &str)] = &[
     ("motion.enter", "Spring response for appearing surfaces (s)"),
     ("motion.bounce", "Spring bounce for appearing surfaces"),
     ("motion.exit", "Fade-out for dismissed surfaces (s)"),
-    ("motion.menu_fade", "Palette and pop-up menu fade in and out (s)"),
+    (
+        "motion.menu_fade",
+        "Palette and pop-up menu fade in and out (s)",
+    ),
     ("motion.reduced", "Cross-fade used under Reduce Motion (s)"),
     (
         "motion.start_scale",

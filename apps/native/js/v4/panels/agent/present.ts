@@ -5,7 +5,7 @@
  * slash-commands.ts and the conversation's copy).
  */
 import type { Json } from "../../src/protocol";
-import type { Row, Snapshot } from "./contract";
+import type { Row, Snapshot, ThreadSummary } from "./contract";
 
 type Obj = Record<string, Json>;
 const obj = (v: unknown): Obj =>
@@ -789,6 +789,7 @@ export function presentError(raw: string): ErrorPresentation {
 // ── Markdown, as native text ─────────────────────────────────────────────
 
 export interface Run {
+  href?: string;
   t: string;
   b?: true;
   i?: true;
@@ -801,7 +802,8 @@ export type Block =
   | { kind: "li"; marker: string; depth: number; runs: Run[] }
   | { kind: "quote"; runs: Run[] }
   | { kind: "code"; text: string }
-  | { kind: "rule" };
+  | { kind: "rule" }
+  | { kind: "table"; headers: Run[][]; rows: Run[][][] };
 
 /** Inline emphasis, code and links as styled runs; no markup is executed. */
 export function inline(text: string): Run[] {
@@ -814,7 +816,8 @@ export function inline(text: string): Run[] {
       !!last.b === !!run.b &&
       !!last.i === !!run.i &&
       !!last.c === !!run.c &&
-      !!last.a === !!run.a
+      !!last.a === !!run.a &&
+      last.href === run.href
     )
       last.t += run.t;
     else runs.push(run);
@@ -829,8 +832,8 @@ export function inline(text: string): Run[] {
       for (const r of inline(m[3] ?? m[4]!)) push({ ...r, b: true });
     else if (m[5] !== undefined || m[6] !== undefined)
       for (const r of inline(m[5] ?? m[6]!)) push({ ...r, i: true });
-    else if (m[7] !== undefined) push({ t: m[7], a: true });
-    else if (m[9] !== undefined) push({ t: m[9], a: true });
+    else if (m[7] !== undefined) push({ t: m[7], a: true, href: m[8] });
+    else if (m[9] !== undefined) push({ t: m[9], a: true, href: m[9] });
     at = m.index! + m[0].length;
   }
   push({ t: text.slice(at) });
@@ -858,6 +861,34 @@ export function markdown(source: string): Block[] {
     if (!line.trim()) {
       flush();
       continue;
+    }
+    const cells = (line: string) =>
+      line
+        .trim()
+        .replace(/^\||\|$/g, "")
+        .split(/(?<!\\)\|/)
+        .map((s) => s.trim().replace(/\\\|/g, "|"));
+    if (
+      line.includes("|") &&
+      i + 1 < lines.length &&
+      cells(lines[i + 1]!).every((c) => /^:?-{3,}:?$/.test(c))
+    ) {
+      const headers = cells(line).map(inline);
+      if (cells(lines[i + 1]!).length === headers.length) {
+        flush();
+        i++;
+        const rows: Run[][][] = [];
+        while (
+          i + 1 < lines.length &&
+          lines[i + 1]!.includes("|") &&
+          lines[i + 1]!.trim()
+        ) {
+          const row = cells(lines[++i]!);
+          rows.push(headers.map((_, c) => inline(row[c] || "")));
+        }
+        blocks.push({ kind: "table", headers, rows });
+        continue;
+      }
     }
     const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/);
     if (heading) {
@@ -916,6 +947,49 @@ export function plain(text: string): string {
     .join("")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/** Native thread rows keep v1's parent order; corrupt cycles never recurse. */
+export function nestedThreads(threads: ThreadSummary[]) {
+  const byId = new Map(threads.map((t) => [t.id, t]));
+  const seen = new Set<string>();
+  const rows: { thread: ThreadSummary; depth: number }[] = [];
+  const visit = (thread: ThreadSummary, depth: number) => {
+    if (seen.has(thread.id)) return;
+    seen.add(thread.id);
+    rows.push({ thread, depth: Math.min(3, depth) });
+    for (const child of threads.filter((t) => t.parentId === thread.id))
+      visit(child, depth + 1);
+  };
+  for (const thread of threads.filter(
+    (t) => !t.parentId || !byId.has(t.parentId),
+  ))
+    visit(thread, 0);
+  for (const thread of threads) visit(thread, 0);
+  return rows;
+}
+export function threadPath(threads: ThreadSummary[], id: string) {
+  const byId = new Map(threads.map((t) => [t.id, t]));
+  const path: ThreadSummary[] = [];
+  const seen = new Set<string>();
+  for (
+    let thread = byId.get(id);
+    thread && !seen.has(thread.id);
+    thread = thread.parentId ? byId.get(thread.parentId) : undefined
+  ) {
+    seen.add(thread.id);
+    path.unshift(thread);
+  }
+  return path;
+}
+
+/** File locations belong to attachment tiles, never thread titles. */
+export function threadName(title: string) {
+  // A path can contain spaces and older generated titles may truncate it.
+  // Keep the request's words before it; never show a leftover path segment.
+  return (
+    title.replace(/(?:^|\s)(?:\/|~\/|file:\/\/).*$/i, "").trim() || "New thread"
+  );
 }
 
 // ── Copy shared with the original app ────────────────────────────────────

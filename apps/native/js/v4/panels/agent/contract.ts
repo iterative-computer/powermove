@@ -13,13 +13,35 @@ export interface Row {
   trace?: { id: string; durationMs: number | null; steering: boolean };
 }
 export interface ThreadSummary {
+  parentId?: string | null;
+  kind?: string | null;
   id: string;
   title: string;
   busy: boolean;
   updatedAt: number;
 }
 export type Access = "editor" | "supervised" | "auto" | "full";
+export interface ExtensionResult {
+  extensionId: string;
+  panelId: string | null;
+  name: string;
+  action: "created" | "updated" | "removed";
+  status: "ready" | "error" | "removed";
+}
+export interface NativeResult {
+  runId: string;
+  summary: string;
+  changed: boolean;
+  revision?: number;
+  errors?: Json[];
+  extensionChangeSets?: string[];
+  verificationError?: string;
+  extensions?: ExtensionResult[];
+}
 export interface Snapshot {
+  plan?: Json;
+  result?: NativeResult | null;
+  resultActions?: { apply: boolean; keep: boolean; undo: boolean };
   projectId: string;
   threadId: string;
   threadTitle?: string;
@@ -43,6 +65,10 @@ export interface Snapshot {
     name: string;
     type: Json;
     payloadAvailable: boolean;
+    thumbnail?: string | null;
+    duration?: string | null;
+    screenPick?: boolean | null;
+    caption?: string | null;
   }[];
   settings: {
     provider: string;
@@ -89,6 +115,8 @@ export interface NativeFacts {
   bindings: { access: string; model: string };
 }
 export type Action =
+  | { type: "openResultPanel"; extensionId: string; panelId: string }
+  | { type: "attachInput"; paths: string[] }
   | {
       type: "draft";
       text: string;
@@ -106,6 +134,7 @@ export type Action =
         | "stop"
         | "newThread"
         | "openSettings"
+        | "applyPlan"
         | "keepResult"
         | "undoResult"
         | "connect";

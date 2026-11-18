@@ -114,7 +114,10 @@ impl Window {
         value["threads"] = json!(
             threads
                 .iter()
-                .map(|t| json!({"id":t.id,"title":t.title,"busy":t.busy,"updatedAt":t.updated_at}))
+                .map(|t| {
+                    let record = panel.raw_archive()["threads"].as_array().into_iter().flatten().find(|r| r["id"] == t.id);
+                    json!({"id":t.id,"title":t.title,"busy":t.busy,"updatedAt":t.updated_at,"parentId":record.map(|r|r["parentId"].clone()),"kind":record.map(|r|r["kind"].clone())})
+                })
                 .collect::<Vec<_>>()
         );
         value["elapsedMs"] = json!(session.elapsed_ms(now));

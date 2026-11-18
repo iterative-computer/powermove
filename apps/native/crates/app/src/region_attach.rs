@@ -34,7 +34,12 @@ pub(crate) fn composition_region(
 }
 
 /// `rgba`'s pixels (`width` wide) inside `x, y, w, h`, clamped to the image.
-pub(crate) fn crop(rgba: &[u8], width: u32, height: u32, (x, y, w, h): (u32, u32, u32, u32)) -> (u32, u32, Vec<u8>) {
+pub(crate) fn crop(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    (x, y, w, h): (u32, u32, u32, u32),
+) -> (u32, u32, Vec<u8>) {
     let (x, y) = (x.min(width), y.min(height));
     let (w, h) = (w.min(width - x), h.min(height - y));
     let mut out = Vec::with_capacity((w * h * 4) as usize);
@@ -45,7 +50,7 @@ pub(crate) fn crop(rgba: &[u8], width: u32, height: u32, (x, y, w, h): (u32, u32
     (w, h, out)
 }
 
-fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     let mut bytes = vec![];
     let mut encoder = png::Encoder::new(&mut bytes, w, h);
     encoder.set_color(png::ColorType::Rgba);
@@ -56,7 +61,7 @@ fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+pub(crate) fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
     let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
@@ -125,6 +130,11 @@ impl Controller {
                 f.size,
             )
         });
+        let caption = if region.is_some() {
+            format!("Viewer · {}", clock(self.time()))
+        } else {
+            "Powermove".into()
+        };
         let folder = self.profile.join("caches").join("agent-picks");
         let runtime = self.builtins.runtime.clone();
         let job: Box<dyn FnOnce() -> Result<(String, Vec<u8>), String> + Send> = match region {
@@ -147,7 +157,17 @@ impl Controller {
                     let k = w as f64 / size[0];
                     let at = |v: u32| (v as f64 * k).round() as u32;
                     let whole = region == (0, 0, size[0].round() as u32, size[1].round() as u32);
-                    let (cw, ch, cut) = crop(&rgba, w, h, (at(region.0), at(region.1), at(region.2).max(1), at(region.3).max(1)));
+                    let (cw, ch, cut) = crop(
+                        &rgba,
+                        w,
+                        h,
+                        (
+                            at(region.0),
+                            at(region.1),
+                            at(region.2).max(1),
+                            at(region.3).max(1),
+                        ),
+                    );
                     let name = if whole {
                         format!("Frame {}.png", clock(time))
                     } else {
@@ -186,7 +206,16 @@ impl Controller {
                     std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
                     let path = folder.join(&name);
                     std::fs::write(&path, png).map_err(|e| e.to_string())?;
-                    let records = crate::media::attachment_records(&[path])?;
+                    let mut records = crate::media::attachment_records(&[path])?;
+                    for record in &mut records {
+                        record["screenPick"] = true.into();
+                        record["caption"] = caption.clone().into();
+                        record["promptNote"] = format!(
+                            "Screen selection: {}",
+                            record["caption"].as_str().unwrap_or(&name)
+                        )
+                        .into();
+                    }
                     match runtime {
                         Some(runtime) => runtime.agent_attach(records),
                         None => Err("The Agent panel closed.".into()),
@@ -226,12 +255,21 @@ mod tests {
     }
     #[test]
     fn a_box_off_the_picture_is_the_window() {
-        assert_eq!(composition_region((0., 0., 90., 40.), ORIGIN, 0.5, SIZE), None);
+        assert_eq!(
+            composition_region((0., 0., 90., 40.), ORIGIN, 0.5, SIZE),
+            None
+        );
     }
     #[test]
     fn a_click_on_the_picture_is_the_whole_frame_and_off_it_the_window() {
-        assert_eq!(composition_region((200., 100., 0., 0.), ORIGIN, 0.5, SIZE), Some((0, 0, 1920, 1080)));
-        assert_eq!(composition_region((20., 20., 0., 0.), ORIGIN, 0.5, SIZE), None);
+        assert_eq!(
+            composition_region((200., 100., 0., 0.), ORIGIN, 0.5, SIZE),
+            Some((0, 0, 1920, 1080))
+        );
+        assert_eq!(
+            composition_region((20., 20., 0., 0.), ORIGIN, 0.5, SIZE),
+            None
+        );
     }
     #[test]
     fn a_crop_keeps_its_pixels_and_stays_inside_the_image() {
@@ -239,7 +277,10 @@ mod tests {
         let rgba: Vec<u8> = (0..8u8).flat_map(|i| [i, i, i, 255]).collect();
         let (w, h, cut) = crop(&rgba, 4, 2, (1, 0, 2, 2));
         assert_eq!((w, h), (2, 2));
-        assert_eq!(cut.chunks(4).map(|p| p[0]).collect::<Vec<_>>(), vec![1, 2, 5, 6]);
+        assert_eq!(
+            cut.chunks(4).map(|p| p[0]).collect::<Vec<_>>(),
+            vec![1, 2, 5, 6]
+        );
         let (w, h, _) = crop(&rgba, 4, 2, (3, 1, 9, 9));
         assert_eq!((w, h), (1, 1));
     }

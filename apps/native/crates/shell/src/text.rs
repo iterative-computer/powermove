@@ -236,7 +236,10 @@ impl TextField {
         let rect = |b: Bounds<Pixels>| {
             NSRect::new(
                 NSPoint::new(f32::from(b.origin.x) as f64, f32::from(b.origin.y) as f64),
-                NSSize::new(f32::from(b.size.width) as f64, f32::from(b.size.height) as f64),
+                NSSize::new(
+                    f32::from(b.size.width) as f64,
+                    f32::from(b.size.height) as f64,
+                ),
             )
         };
         let _ = window;
@@ -249,18 +252,23 @@ impl TextField {
             .text_size(px(t.typography.body))
             .font_family(pm_design::TEXT_FONT)
             .child(
-                div().relative().flex_1().min_w(px(0.)).h(px(t.metrics.field)).child(
-                    canvas(
-                        |_, _, _| (),
-                        move |bounds, _, window, _| {
-                            let mask = window.content_mask().bounds;
-                            let (bounds, mask) = layer.painted(bounds, mask, window);
-                            slot.stage(rect(bounds), rect(mask));
-                        },
-                    )
-                    .absolute()
-                    .inset_0(),
-                ),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .h(px(t.metrics.field))
+                    .child(
+                        canvas(
+                            |_, _, _| (),
+                            move |bounds, _, window, _| {
+                                let mask = window.content_mask().bounds;
+                                let (bounds, mask) = layer.painted(bounds, mask, window);
+                                slot.stage(rect(bounds), rect(mask));
+                            },
+                        )
+                        .absolute()
+                        .inset_0(),
+                    ),
             )
             .children(self.unit.clone().map(|unit| {
                 div()
@@ -279,6 +287,9 @@ impl TextField {
     pub fn hold_changed(&mut self, cx: &mut Context<Self>) {
         self.picture.hold_changed();
         cx.notify();
+    }
+    pub fn set_paste_handler(&mut self, handler: Rc<dyn Fn() -> bool>) {
+        self.slot.set_paste_handler(handler);
     }
     pub fn set_placeholder(&mut self, text: &str) {
         if self.placeholder != text {

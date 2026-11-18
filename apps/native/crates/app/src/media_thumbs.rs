@@ -27,6 +27,120 @@ fn registry() -> &'static Mutex<HashMap<String, PathBuf>> {
     KEYS.get_or_init(Default::default)
 }
 
+fn agent_cache_root() -> &'static Mutex<Option<PathBuf>> {
+    static ROOT: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    ROOT.get_or_init(Default::default)
+}
+/// Configured by the controller without touching disk; writes happen on the file worker.
+pub fn set_agent_cache(path: PathBuf) {
+    if let Ok(mut root) = agent_cache_root().lock() {
+        *root = Some(path);
+    }
+}
+pub fn agent_cache() -> Option<PathBuf> {
+    if let Some(root) = agent_cache_root().lock().ok()?.clone() {
+        return Some(root);
+    }
+    // Headless/unit tests have no controller or user profile.
+    static TEMP: OnceLock<Option<tempfile::TempDir>> = OnceLock::new();
+    Some(
+        TEMP.get_or_init(|| tempfile::tempdir().ok())
+            .as_ref()?
+            .path()
+            .to_owned(),
+    )
+}
+fn agent_cached_file(root: &Path, key: &str) -> Option<PathBuf> {
+    let digest = key.strip_prefix("agent-thumb/")?;
+    (digest.len() == 32 && digest.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| root.join(format!("{digest}.png")))
+}
+/// Square, aspect-fill attachment pictures. Project tiles keep their own 16:9 recipe.
+pub fn make_attachment(
+    path: &Path,
+    video: bool,
+    ffmpeg: Option<&Path>,
+) -> Option<(String, PathBuf)> {
+    const EDGE: usize = 112; // 56pt at 2x.
+    let meta = std::fs::metadata(path).ok()?;
+    let mut hash = blake3::Hasher::new_derive_key("powermove attachment thumbnail 1");
+    hash.update(path.as_os_str().as_encoded_bytes());
+    hash.update(&meta.len().to_le_bytes());
+    hash.update(
+        &meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos()
+            .to_le_bytes(),
+    );
+    let digest = hash.finalize().to_hex()[..32].to_owned();
+    let key = format!("agent-thumb/{digest}");
+    let root = agent_cache()?;
+    let file = agent_cached_file(&root, &key)?;
+    if file.is_file() {
+        return Some((key, file));
+    }
+    let rgba = if video {
+        let out = std::process::Command::new(ffmpeg?)
+            .args(["-v", "error", "-i"])
+            .arg(path)
+            .args([
+                "-frames:v",
+                "1",
+                "-vf",
+                &format!(
+                    "scale={EDGE}:{EDGE}:force_original_aspect_ratio=increase,crop={EDGE}:{EDGE}"
+                ),
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgba",
+                "pipe:1",
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() || out.stdout.len() != EDGE * EDGE * 4 {
+            return None;
+        }
+        out.stdout
+    } else {
+        let pool = pm_media::pool::FramePool::new(0);
+        let still = pm_media::image::imageio::read_preview(path, &pool, (EDGE * 4) as u32).ok()?;
+        let (w, h) = (still.frame.format.width, still.frame.format.height);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let unit = pm_media::image::imageio::rgba_unit(&still.frame).ok()?;
+        let side = w.min(h);
+        let (ox, oy) = ((w - side) / 2, (h - side) / 2);
+        let mut rgba = Vec::with_capacity(EDGE * EDGE * 4);
+        for y in 0..EDGE {
+            for x in 0..EDGE {
+                let at = ((oy + y * side / EDGE) * w + ox + x * side / EDGE) * 4;
+                rgba.extend(
+                    unit[at..at + 4]
+                        .iter()
+                        .map(|v| (v.clamp(0., 1.) * 255.).round() as u8),
+                );
+            }
+        }
+        rgba
+    };
+    std::fs::create_dir_all(&root).ok()?;
+    let staged = tempfile::NamedTempFile::new_in(&root).ok()?;
+    let writer = std::io::BufWriter::new(staged.reopen().ok()?);
+    let mut encoder = png::Encoder::new(writer, EDGE as u32, EDGE as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().ok()?;
+    writer.write_image_data(&rgba).ok()?;
+    writer.finish().ok()?;
+    staged.persist(&file).ok()?;
+    Some((key, file))
+}
+
 /// The cached picture behind a key the panel drew (`thumb/<digest>`).
 /// A picture the host made elsewhere (Settings' project poster) under `key`.
 pub fn register(key: &str, path: PathBuf) {
@@ -35,7 +149,10 @@ pub fn register(key: &str, path: PathBuf) {
     }
 }
 pub fn resolve(key: &str) -> Option<PathBuf> {
-    registry().lock().ok()?.get(key).cloned()
+    registry().lock().ok()?.get(key).cloned().or_else(|| {
+        let root = agent_cache_root().lock().ok()?.clone()?;
+        agent_cached_file(&root, key)
+    })
 }
 /// Drops a key [`register`] made (its picture is gone).
 pub fn forget(key: &str) {
@@ -577,5 +694,21 @@ impl crate::session::Controller {
             })
             .detach();
         }
+    }
+}
+
+#[test]
+fn persisted_attachment_keys_are_confined_to_the_thumbnail_cache() {
+    let root = std::path::Path::new("/synthetic/cache");
+    assert_eq!(
+        agent_cached_file(root, "agent-thumb/0123456789abcdef0123456789abcdef"),
+        Some(root.join("0123456789abcdef0123456789abcdef.png"))
+    );
+    for key in [
+        "agent-thumb/../../private/file",
+        "thumb/0123",
+        "agent-thumb/",
+    ] {
+        assert!(agent_cached_file(root, key).is_none());
     }
 }

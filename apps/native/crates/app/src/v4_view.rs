@@ -109,8 +109,7 @@ impl Outline {
         window: &mut Window,
         cx: &mut App,
     ) -> bool {
-        let stepped =
-            window.step_scroll_layer(&self.handle, point(px(0.), px(-scroll_y)), cx);
+        let stepped = window.step_scroll_layer(&self.handle, point(px(0.), px(-scroll_y)), cx);
         if stepped {
             self.scroll_y.set(scroll_y);
             // Rows past JS's window are asked for as before; they arrive as
@@ -904,8 +903,17 @@ impl SurfaceView {
             .and_then(|m| m.get("display"))
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let authored_style = node.props.get("style").unwrap_or(&Value::Null);
+        let popup_width = self.table.number(&authored_style["width"]);
+        let popup_minimum = self.table.number(&authored_style["minWidth"]);
         if let Some(control) = self.controls.get(&id) {
-            control.update(cx, |v, _| v.display(display.as_deref()));
+            control.update(cx, |v, _| {
+                v.display(display.as_deref());
+                if matches!(kind, crate::v4_control::Kind::PopupTrigger) {
+                    v.menu_open(node.props.get("open") == Some(&Value::Bool(true)));
+                    v.popup_width(popup_width, popup_minimum);
+                }
+            });
             if matches!(kind, crate::v4_control::Kind::Push)
                 && let Some(label) = node.props.get("label").and_then(Value::as_str)
             {
@@ -982,8 +990,10 @@ impl SurfaceView {
                     // Bar pop-ups are borderless titles; the rest keep the
                     // bezel. `quiet` is the borderless title in the
                     // secondary ink, for an option bar under a composer.
-                    inline: matches!(crate::v4_compile::variant(node), Some("inline" | "quiet" | "pulldown"))
-                        && matches!(kind, crate::v4_control::Kind::Popup),
+                    inline: matches!(
+                        crate::v4_compile::variant(node),
+                        Some("inline" | "quiet" | "pulldown")
+                    ) && matches!(kind, crate::v4_control::Kind::Popup),
                     well: view.well,
                     quiet: crate::v4_compile::variant(node) == Some("quiet"),
                     pull: crate::v4_compile::variant(node) == Some("pulldown"),
@@ -1006,7 +1016,10 @@ impl SurfaceView {
                 if v.publication.generation != generation || v.leases.get(&id) != Some(&lease) {
                     return;
                 }
-                if matches!(kind, crate::v4_control::Kind::Push) {
+                if matches!(
+                    kind,
+                    crate::v4_control::Kind::Push | crate::v4_control::Kind::PopupTrigger
+                ) {
                     v.send(id, "click", EventDetail::default(), cx);
                 } else if matches!(kind, crate::v4_control::Kind::Segmented) {
                     // Choosing a segment is a press on that segment's node.
@@ -1048,7 +1061,13 @@ impl SurfaceView {
                 }
             },
         ));
-        control.update(cx, |v, _| v.display(display.as_deref()));
+        control.update(cx, |v, _| {
+            v.display(display.as_deref());
+            if matches!(kind, crate::v4_control::Kind::PopupTrigger) {
+                v.menu_open(node.props.get("open") == Some(&Value::Bool(true)));
+                v.popup_width(popup_width, popup_minimum);
+            }
+        });
         // A search field starts with its node's text at the host's revision
         // of it, so only a newer host value replaces what is typed: a first
         // update that came after the first keystroke emptied the field.
@@ -1169,6 +1188,53 @@ impl SurfaceView {
             field.set_stepper(stepper);
             field
         });
+        if kind == TextKind::Composer
+            && node.props.get("id").and_then(Value::as_str) == Some("agent-composer-text")
+        {
+            let project = meta
+                .and_then(|m| m.get("attachmentProject"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let thread = meta
+                .and_then(|m| m.get("attachmentThread"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let (tx, rx) = async_channel::unbounded();
+            field.update(cx, |f, _| {
+                f.set_paste_handler(std::rc::Rc::new(move || {
+                    let Some(media) = crate::platform::agent_pasteboard() else {
+                        return false;
+                    };
+                    tx.try_send(media).is_ok()
+                }))
+            });
+            let runtime = self.runtime.clone();
+            cx.spawn(async move |this, cx| {
+                while let Ok(media) = rx.recv().await {
+                    let runtime = runtime.clone();
+                    let (project, thread) = (project.clone(), thread.clone());
+                    let outcome = cx
+                        .background_executor()
+                        .spawn(async move {
+                            runtime.agent_attach_for(
+                                &project,
+                                &thread,
+                                crate::media::agent_pasted_records(media)?,
+                            )
+                        })
+                        .await;
+                    if let Err(error) = outcome {
+                        let _ = this.update(cx, |v, cx| {
+                            v.error = Some(error);
+                            cx.notify();
+                        });
+                    }
+                }
+            })
+            .detach();
+        }
         self.subscriptions
             .entry(id)
             .or_default()
@@ -1250,7 +1316,7 @@ impl SurfaceView {
                         }
                         // Escape in a composer reaches its panel as the key
                         // (the Agent's shortcuts menu, then its popover).
-                        TextEvent::Key("escape") => {
+                        TextEvent::Key(key @ ("escape" | "backspace")) => {
                             if this
                                 .publication
                                 .surface
@@ -1258,7 +1324,7 @@ impl SurfaceView {
                                 .is_some_and(|n| n.listeners.contains_key("keydown"))
                             {
                                 let detail = EventDetail {
-                                    key: Some("Escape".into()),
+                                    key: Some(if *key == "escape" { "Escape" } else { key }.into()),
                                     ..Default::default()
                                 };
                                 this.send(id, "keydown", detail, cx);
@@ -1702,7 +1768,10 @@ impl SurfaceView {
             return;
         };
         let ready = self.controls.get(id).is_some_and(|c| c.read(cx).focused())
-            || self.fields.get(id).is_some_and(|f| f.read(cx).has_keyboard());
+            || self
+                .fields
+                .get(id)
+                .is_some_and(|f| f.read(cx).has_keyboard());
         if ready {
             pm_shell::typing::field_ready();
         }
@@ -2025,6 +2094,12 @@ impl SurfaceView {
                 ),
                 cx,
             ),
+            Some(Component::PopUpButton)
+                if node.props.get("metadata").and_then(|m| m.get("manualMenu"))
+                    == Some(&Value::Bool(true)) =>
+            {
+                self.send(id, "click", detail, cx);
+            }
             Some(Component::PopUpButton) if self.appkit => {
                 let options = self
                     .offered_rows(id)
@@ -2509,6 +2584,14 @@ impl SurfaceView {
                 div().flex_none()
             };
             let mut slot = slot.id(("v4-control", id));
+            if self.publication.surface.node(id).is_some_and(|n| {
+                n.props
+                    .get("metadata")
+                    .is_some_and(|m| m["manualMenu"] == true)
+            }) {
+                slot.style().size.width = node.style.size.width.clone();
+                slot.style().min_size.width = node.style.min_size.width.clone();
+            }
             if let Some(focus) = self.focus.get(&id) {
                 // No focus ring on a control's slot (owner decision,
                 // 2026-11-14): a field keeps its own caret and selection.
@@ -2744,10 +2827,7 @@ impl SurfaceView {
             element = element.child(
                 canvas(
                     move |bounds, _, cx| {
-                        let size = (
-                            f32::from(bounds.size.width),
-                            f32::from(bounds.size.height),
-                        );
+                        let size = (f32::from(bounds.size.width), f32::from(bounds.size.height));
                         if size.0 > 0. && size.1 > 0. && known != Some(size) {
                             let view = view.clone();
                             cx.defer(move |cx| {
@@ -2773,7 +2853,11 @@ impl SurfaceView {
             && amount < 1.
         {
             let t = &self.table.tokens;
-            let rise = (1. - amount) * (1. - t.motion.start_scale as f32) * 160.;
+            let rise = if node.resource.is_some() {
+                0.
+            } else {
+                (1. - amount) * (1. - t.motion.start_scale as f32) * 160.
+            };
             element = element.opacity(amount).mt(px(rise));
         }
         element = self.accessible(element, node);
@@ -2785,9 +2869,7 @@ impl SurfaceView {
             // order, as on the web (a segmented control's other segments).
             let tab = node.tab_index.unwrap_or(0);
             let focus = &focus.clone().tab_stop(tab >= 0).tab_index(tab.max(0));
-            element = element
-                .track_focus(focus)
-                .tab_index(tab.max(0));
+            element = element.track_focus(focus).tab_index(tab.max(0));
         }
         element = self.interactive(element, node, cx);
         element = self.decorate(element, node, window);
@@ -3512,7 +3594,8 @@ impl SurfaceView {
             let (source, id) = (cx.entity().downgrade(), node.id);
             element = element.tooltip(move |_, cx| {
                 let (title, tokens, source) = (title.clone(), tokens.clone(), source.clone());
-                cx.new(|_| Tooltip::following(source, id, title, tokens)).into()
+                cx.new(|_| Tooltip::following(source, id, title, tokens))
+                    .into()
             });
         }
         element
@@ -3774,23 +3857,46 @@ impl SurfaceView {
             .as_ref()
             .and_then(|key| crate::media_thumbs::resolve(key))
         {
-            element = element.child(
-                img(path)
-                    .absolute()
-                    .inset_0()
-                    .size_full()
-                    .object_fit(if node.contain {
-                        ObjectFit::Contain
-                    } else {
-                        ObjectFit::Cover
-                    }),
-            );
+            element = element.child(img(path).absolute().inset_0().size_full().object_fit(
+                if node.contain {
+                    ObjectFit::Contain
+                } else {
+                    ObjectFit::Cover
+                },
+            ));
         }
         if let Some(text) = &node.text {
-            element = element.child(text.clone());
+            if node.component == Some(Component::PopUpButton) {
+                // Native slots return before decoration. This is the kit's
+                // real non-AppKit rendering, using the same published title.
+                element = element
+                    .gap(px(t.metrics.gap))
+                    .child(div().flex_1().min_w(px(0.)).truncate().child(text.clone()))
+                    .child(pm_shell::symbol::symbol(
+                        "chevron.up.chevron.down", t.metrics.symbol_inline,
+                        pm_shell::symbol::Weight::Regular,
+                        if node.disabled { t.colors.muted } else { t.colors.secondary }, window,
+                    ));
+            } else {
+                element = element.child(text.clone());
+            }
         }
         if let Some(rich) = &node.rich {
-            element = element.child(rich_text(rich, t));
+            let links = rich.links.clone();
+            if links.is_empty() {
+                element = element.child(rich_text(rich, t));
+            } else {
+                element = element.child(
+                    InteractiveText::new(("prose-link", node.id), rich_text(rich, t)).on_click(
+                        links.iter().map(|(range, _)| range.clone()).collect(),
+                        move |index, _, _| {
+                            if let Some((_, href)) = links.get(index) {
+                                crate::platform::open_url(href);
+                            }
+                        },
+                    ),
+                );
+            }
         }
         if let Some(number) = node.number.filter(|_| self.draws_number(node)) {
             let shown = self
@@ -4257,6 +4363,12 @@ fn control_options(kind: crate::v4_control::Kind, node: &pm_surface::Node) -> Ve
 fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_control::Kind> {
     use crate::v4_control::Kind;
     match Component::of(node) {
+        Some(Component::PopUpButton)
+            if node.props.get("metadata").and_then(|m| m.get("manualMenu"))
+                == Some(&Value::Bool(true)) =>
+        {
+            Some(Kind::PopupTrigger)
+        }
         Some(Component::PopUpButton) => Some(Kind::Popup),
         Some(Component::Checkbox | Component::Toggle) => Some(Kind::Checkbox),
         Some(Component::Switch) => Some(Kind::Switch),

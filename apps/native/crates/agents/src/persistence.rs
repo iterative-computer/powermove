@@ -109,6 +109,20 @@ impl Threads {
         self.select(id);
         Ok(self.thread(id).unwrap())
     }
+    /// Background children are distinct conversations; never reuse a person's blank draft.
+    pub fn create_child(&mut self, id: &str, parent: &str, now: u64) -> io::Result<&Value> {
+        if !valid_id(id, 120) || self.thread(parent).is_none() || self.thread(id).is_some() {
+            return Err(error("Invalid child thread"));
+        }
+        let mut record = new_thread(id, now);
+        record["parentId"] = json!(parent);
+        record["kind"] = json!("subagent");
+        self.archive["threads"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, record);
+        Ok(self.thread(id).unwrap())
+    }
     /// N4: the shipped remove operation becomes an archive operation. Its entire
     /// opaque record (including attachments/resume handles) remains reachable.
     pub fn archive_thread(&mut self, id: &str, replacement: &str, now: u64) -> io::Result<bool> {

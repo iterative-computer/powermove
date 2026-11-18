@@ -2,6 +2,8 @@
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Choice {
     pub label: String,
+    /// Optional explanatory line below a searchable menu row.
+    pub detail: String,
     pub command: String,
     /// The section it is listed under; empty for none.
     pub category: String,
@@ -49,6 +51,10 @@ impl Choice {
     }
     pub fn on_search(mut self) -> Self {
         self.search_only = true;
+        self
+    }
+    pub fn detail(mut self, text: impl Into<String>) -> Self {
+        self.detail = text.into();
         self
     }
     pub fn within(mut self, category: impl Into<String>) -> Self {

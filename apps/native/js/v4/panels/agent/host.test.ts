@@ -217,3 +217,45 @@ test("malformed native publications notify mounted subscribers of the failure", 
   expect(failures).toBe(1);
   m.dispose();
 });
+
+test("settled L2 actions use the current live target, never the result's old run", async () => {
+  const f = setup();
+  const model = await HostAgentModel.connect(f.client, f.registration);
+  const p = fixture();
+  p.sequence = 2;
+  p.snapshot.phase = "result";
+  p.snapshot.result = {
+    runId: "settled-old-run",
+    summary: "Added a title",
+    changed: true,
+  };
+  p.snapshot.resultActions = { apply: false, keep: true, undo: true };
+  f.publish(p);
+  await model.dispatch({ type: "undoResult" });
+  expect(f.requests.at(-1)?.operation).toEqual({
+    type: "command",
+    command: "registered.dispatch",
+    args: {
+      sequence: 2,
+      target: { project: "synthetic-project", thread: "thread", run: null },
+      action: { type: "undoResult" },
+    },
+  });
+  await model.dispatch({
+    type: "openResultPanel",
+    extensionId: "extension",
+    panelId: "actual-panel",
+  });
+  const operation = f.requests.at(-1)!.operation;
+  expect(operation).toMatchObject({
+    type: "command",
+    args: {
+      action: {
+        type: "openResultPanel",
+        extensionId: "extension",
+        panelId: "actual-panel",
+      },
+    },
+  });
+  model.dispose();
+});

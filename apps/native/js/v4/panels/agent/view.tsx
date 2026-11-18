@@ -31,6 +31,9 @@ import {
   slashCopy,
   str,
   suggestions,
+  threadName,
+  nestedThreads,
+  threadPath,
   type Activity,
   type Block,
   type Entry,
@@ -48,6 +51,11 @@ const Field = UI.TextField as (
     binding?: string;
   },
 ) => ReturnType<typeof UI.TextField>;
+const PopUp = UI.PopUpButton as (
+  props: Omit<Parameters<typeof UI.PopUpButton>[0], "binding"> & {
+    binding?: string;
+  },
+) => ReturnType<typeof UI.PopUpButton>;
 type Send = (action: Action) => void;
 type Style = Record<string, string | number | null | { token: string }>;
 type Obj = Record<string, Json>;
@@ -108,7 +116,7 @@ const chipText: Style = {
   textOverflow: "middle",
   ...shrink,
 };
-function Chip({ children }: { children: string }) {
+function Chip({ children }: { children: string; key?: string }) {
   return (
     <div style={chipBox}>
       <text data-pm-variant="code" style={chipText}>
@@ -117,43 +125,203 @@ function Chip({ children }: { children: string }) {
     </div>
   );
 }
-/** A file a message carried, as the composer showed it before it was
- * sent: its document symbol and name in the text face (a code chip's
- * fixed-width face is for code). */
-function FileChip({ name }: { name: string }) {
+export function attachmentKind(a: Record<string, unknown>) {
+  const name = String(a.name ?? "").toLowerCase();
+  const type = String(a.type ?? "");
+  if (a.screenPick || /^Frame .*selection\.png$/i.test(name)) return "pick";
+  if (type.startsWith("image/") || /\.(png|jpe?g|heic|webp|gif)$/.test(name))
+    return "image";
+  if (type.startsWith("video/") || /\.(mov|mp4|webm|m4v)$/.test(name))
+    return "video";
+  if (type.startsWith("audio/") || /\.(mp3|wav|m4a|aiff|flac)$/.test(name))
+    return "audio";
+  return "document";
+}
+export function AttachmentTile({
+  a,
+  armed = false,
+  small = false,
+  send,
+}: {
+  key?: string | number;
+  a: Record<string, any>;
+  armed?: boolean;
+  small?: boolean;
+  send: Send;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const focusEpoch = useRef(0);
+  const focus = () => {
+    focusEpoch.current++;
+    setFocused(true);
+  };
+  const blur = () => {
+    const epoch = ++focusEpoch.current;
+    // Let focus move from the tile to its remove control before hiding it.
+    setTimeout(() => {
+      if (focusEpoch.current === epoch) setFocused(false);
+    }, 0);
+  };
+  const kind = attachmentKind(a);
+  const visual = ["image", "video", "pick"].includes(kind);
+  const side = t(
+    small ? "metrics.agent_attachment_sent" : "metrics.agent_attachment",
+  );
+  const symbol =
+    kind === "pick"
+      ? "rectangle.dashed"
+      : kind === "image"
+        ? "photo"
+        : kind === "video"
+          ? "film"
+          : kind === "audio"
+            ? "waveform"
+            : /\.(js|ts|tsx|py|rs|json|html|css)$/i.test(a.name)
+              ? "chevron.left.forwardslash.chevron.right"
+              : /\.(csv|xlsx?)$/i.test(a.name)
+                ? "tablecells"
+                : /\.(pdf|rtf|docx?)$/i.test(a.name)
+                  ? "doc.richtext"
+                  : "doc.text";
   return (
     <div
       role="group"
-      label={`${name}, attachment`}
-      style={{
-        ...row,
-        ...shrink,
-        gap: t("metrics.gap"),
-        height: t("metrics.hit"),
-        paddingLeft: t("metrics.gap"),
-        paddingRight: t("metrics.gap"),
-        background: t("colors.fill"),
-        borderRadius: t("metrics.inner_radius"),
-      }}
+      label={`${a.name}, attachment`}
+      metadata={{ armed, kind }}
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => setHovered(false)}
+      style={{ ...column, gap: t("metrics.gap"), position: "relative" }}
     >
-      <div
-        metadata={{ symbol: "doc" }}
+      <UI.ToolbarItem
+        role="button"
+        label={`Open ${a.name}`}
+        title={a.name}
+        tabIndex={0}
+        onClick={() => send({ type: "openAttachment", id: a.id })}
+        onFocus={focus}
+        onBlur={blur}
         style={{
-          color: t("colors.muted"),
-          symbolSize: t("metrics.symbol_inline"),
-          flexShrink: 0,
-        }}
-      />
-      <text
-        style={{
-          ...quiet,
-          ...shrink,
-          whiteSpace: "nowrap",
-          textOverflow: "ellipsis",
+          ...row,
+          ...target,
+          gap: t("metrics.gap"),
+          width: visual ? side : t("metrics.thumbnail_min"),
+          height: side,
+          background: t(armed ? "colors.selected_fill" : "colors.fill"),
+          borderRadius: t("metrics.inner_radius"),
+          position: "relative",
+          overflow: "hidden",
+          padding: visual ? null : t("metrics.gap"),
         }}
       >
-        {name}
-      </text>
+        <div
+          metadata={{ symbol }}
+          style={{
+            ...row,
+            justifyContent: "center",
+            width: visual ? side : t("metrics.hit"),
+            height: visual ? side : t("metrics.hit"),
+            flexShrink: 0,
+            color: t("colors.secondary"),
+            symbolSize: t("metrics.symbol_panel"),
+            position: "relative",
+            overflow: "hidden",
+          }}
+        >
+          {a.thumbnail && (
+            <img
+              resource={a.thumbnail}
+              alt={a.name}
+              metadata={{ pmKit: { presence: true } }}
+              style={{
+                position: "absolute",
+                inset: "fill",
+              }}
+            />
+          )}
+          {a.thumbnail && armed && (
+            <div
+              style={{
+                position: "absolute",
+                inset: "fill",
+                background: t("colors.selected_fill"),
+                opacity: t("metrics.drag_opacity"),
+              }}
+            />
+          )}
+        </div>
+        {!visual && (
+          <div style={{ ...column, ...shrink }}>
+            <text
+              style={{
+                ...quiet,
+                color: t("colors.text"),
+                whiteSpace: "nowrap",
+                textOverflow: "middle",
+                ...shrink,
+              }}
+            >
+              {a.name}
+            </text>
+            <text style={faint}>
+              {a.duration ||
+                (kind === "audio"
+                  ? "Audio"
+                  : String(a.name).split(".").at(-1)?.toUpperCase() || "File")}
+            </text>
+          </div>
+        )}
+        {kind === "pick" && (
+          <div
+            metadata={{ symbol: "rectangle.dashed" }}
+            style={{
+              position: "absolute",
+              right: t("metrics.pill_inset"),
+              bottom: t("metrics.pill_inset"),
+              color: t("colors.text"),
+              background: t("colors.floating"),
+              symbolSize: t("metrics.symbol_inline"),
+              width: t("metrics.symbol_inline"),
+              height: t("metrics.symbol_inline"),
+            }}
+          />
+        )}
+        {kind === "video" && (
+          <text
+            style={{
+              ...faint,
+              fontSize: t("typography.minimum"),
+              position: "absolute",
+              bottom: t("metrics.pill_inset"),
+              right: t("metrics.pill_inset"),
+              background: t("colors.floating"),
+            }}
+          >
+            {a.duration || "Video"}
+          </text>
+        )}
+      </UI.ToolbarItem>
+      {kind === "pick" && !small && (
+        <text style={{ ...faint, maxWidth: t("metrics.thumbnail_min") }}>
+          {a.caption || a.name}
+        </text>
+      )}
+      {!small && (hovered || focused || armed) && (
+        <UI.ToolbarItem
+          label={`Remove ${a.name}`}
+          title={`Remove ${a.name}`}
+          onFocus={focus}
+          onBlur={blur}
+          metadata={{ symbol: "xmark.circle.fill" }}
+          style={{
+            position: "absolute",
+            right: t("metrics.agent_remove_offset"),
+            top: t("metrics.agent_remove_offset"),
+            symbolSize: t("metrics.symbol_inline"),
+          }}
+          onClick={() => send({ type: "removeAttachment", id: a.id })}
+        />
+      )}
     </div>
   );
 }
@@ -295,6 +463,45 @@ function ProseBlock({
           </text>
         </div>
       );
+    case "table":
+      return (
+        <div
+          role="table"
+          label="Table"
+          style={{ ...column, overflow: "scroll" }}
+        >
+          {[b.headers, ...b.rows].map((cells, index) => (
+            <div
+              key={index}
+              role="row"
+              style={{ ...row, alignItems: "start", gap: t("metrics.gap") }}
+            >
+              {cells.map((runs, col) => (
+                <div
+                  key={col}
+                  role={index === 0 ? "columnheader" : "cell"}
+                  style={{
+                    ...shrink,
+                    flexGrow: 1,
+                    minWidth: t("metrics.value_column"),
+                    padding: t("metrics.gap"),
+                  }}
+                >
+                  <Para
+                    runs={runs}
+                    style={{
+                      ...style,
+                      ...(index === 0
+                        ? { fontWeight: t("typography.semibold_weight") }
+                        : {}),
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      );
     case "rule":
       return <div style={hairline} />;
   }
@@ -307,6 +514,7 @@ export interface MenuOption {
   label: string;
   value: string;
   checked?: boolean;
+  detail?: string;
   /** The section it is listed under. */
   category?: string;
   /** Choosing it keeps the menu open (a provider: its models follow). */
@@ -382,6 +590,54 @@ function Trigger({
     </UI.ToolbarItem>
   );
 }
+function Picker({
+  id,
+  label,
+  text,
+  disabled,
+  opened,
+  fixed,
+  open,
+}: {
+  id: string;
+  label: string;
+  text: string;
+  disabled: boolean;
+  opened: boolean;
+  fixed?: boolean;
+  open: (anchor: number) => void;
+}) {
+  return (
+    <PopUp
+      id={id}
+      role="button"
+      tabIndex={0}
+      label={label}
+      display={text}
+      value={text}
+      options={[{ v: text, label: text }]}
+      disabled={disabled}
+      open={opened}
+      aria-haspopup="menu"
+      aria-expanded={opened}
+      metadata={{ manualMenu: true }}
+      onClick={(e) => {
+        if (!disabled) open(Number(e.currentTarget));
+      }}
+      style={{
+        ...target,
+        height: t("metrics.control"),
+        ...(id === "agent-model"
+          ? { ...shrink, minWidth: t("metrics.agent_model_min") }
+          : { flexShrink: 0 }),
+        ...(fixed ? { width: t("metrics.agent_effort_width") } : {}),
+        background: t(opened ? "colors.selected_fill" : "colors.fill"),
+        borderRadius: t("metrics.control_radius"),
+        color: t("colors.text"),
+      }}
+    />
+  );
+}
 function Header({
   s,
   n,
@@ -394,7 +650,7 @@ function Header({
   menu?: Menu;
 }) {
   const popover = n.presentation === "popover";
-  const title = s.threadTitle || "New thread";
+  const title = threadName(s.threadTitle || "");
   // Switching while a change is applied would leave it half done.
   const blocked = s.composerDisabled;
   return (
@@ -424,7 +680,7 @@ function Header({
         // Docked, the trigger names the list and the tab keeps its name.
         text={popover ? title : "Threads"}
         tone="colors.text"
-        disabled={!menu}
+        disabled={!menu || blocked}
         open={(anchor) => {
           const threads = s.threads ?? [];
           const current = threads.find((t) => t.id === s.threadId);
@@ -433,10 +689,8 @@ function Header({
             placeholder: "Search threads…",
             options: [
               ...(blocked ? [] : [{ label: "New Thread", value: "new" }]),
-              ...threads.map((t) => ({
-                label: t.busy
-                  ? `${t.title || "New thread"} · Working…`
-                  : t.title || "New thread",
+              ...nestedThreads(threads).map(({ thread: t, depth }) => ({
+                label: `${"  ".repeat(depth)}${depth ? "↳ " : ""}${threadName(t.title)}${t.busy ? " · Working…" : ""}`,
                 value: `thread:${t.id}`,
                 checked: t.id === s.threadId,
                 category: "Threads",
@@ -486,6 +740,49 @@ function Header({
           onClick={() => send({ type: "shell", action: "pin" })}
         />
       )}
+    </div>
+  );
+}
+
+function SubthreadBar({ s, send }: { s: Snapshot; send: Send }) {
+  const path = threadPath(s.threads ?? [], s.threadId);
+  if (path.length < 2) return null;
+  const active = path.at(-1)!;
+  return (
+    <div
+      id="agent-subthread"
+      role="group"
+      label="Thread path"
+      style={{
+        ...column,
+        gap: t("metrics.gap"),
+        background: t("colors.fill"),
+        borderRadius: t("metrics.inner_radius"),
+        marginLeft: t("metrics.text_padding"),
+        marginRight: t("metrics.text_padding"),
+        padding: t("metrics.gap"),
+      }}
+    >
+      <div style={{ ...row, flexWrap: "wrap", gap: t("metrics.gap") }}>
+        {path.slice(0, -1).map((thread) => (
+          <UI.ToolbarItem
+            key={thread.id}
+            label={`Back to ${threadName(thread.title)}`}
+            onClick={() => send({ type: "switchThread", id: thread.id })}
+            disabled={s.composerDisabled}
+          >
+            <text style={quiet}>{threadName(thread.title)} ›</text>
+          </UI.ToolbarItem>
+        ))}
+        <text style={quiet}>{threadName(active.title)}</text>
+      </div>
+      <text style={faint}>
+        {active.kind === "subagent"
+          ? active.busy
+            ? "A subagent is working here. Your messages go to it."
+            : "A subagent worked here. Send a message to start a new turn."
+          : "The agent started this thread."}
+      </text>
     </div>
   );
 }
@@ -816,10 +1113,12 @@ interface Local {
 function UserMessage({
   m,
   answering,
+  send,
 }: {
   key?: string | number;
   m: Message;
   answering: boolean;
+  send: Send;
 }) {
   const text = str(m.value.text);
   const files = Array.isArray(m.value.attachments) ? m.value.attachments : [];
@@ -861,9 +1160,16 @@ function UserMessage({
         }}
       >
         {files.length > 0 && (
-          <div style={{ ...row, flexWrap: "wrap", gap: t("metrics.gap") }}>
+          <div
+            style={{
+              ...row,
+              justifyContent: "end",
+              flexWrap: "wrap",
+              gap: t("metrics.gap"),
+            }}
+          >
             {files.map((f, i) => (
-              <FileChip key={i} name={str(obj(f).name) || "File"} />
+              <AttachmentTile key={i} a={obj(f)} small send={send} />
             ))}
           </div>
         )}
@@ -931,7 +1237,9 @@ function AssistantMessage({
       </div>
     );
   if (v.nativeResult || v.kind === "result")
-    return <Result s={s} send={send} text={text} />;
+    return (
+      <Result s={s} send={send} text={text} result={obj(v.nativeResult)} />
+    );
   return (
     <div
       role="listitem"
@@ -1047,18 +1355,108 @@ function ReplyCards({
     </>
   );
 }
-function Result({ s, send, text }: { s: Snapshot; send: Send; text: string }) {
-  const ready = s.phase === "result";
+function PlanPreview({ s, send }: { s: Snapshot; send: Send }) {
+  const plan = obj(s.plan);
+  if (!s.plan) return null;
+  const typed =
+    typeof plan.revision === "number" &&
+    Number.isFinite(plan.revision) &&
+    Array.isArray(plan.commands) &&
+    !plan.sceneEdit &&
+    (!plan.kind || plan.kind === "native");
+  const allowed =
+    typed &&
+    s.phase === "preview" &&
+    s.runId === null &&
+    !s.composerDisabled &&
+    s.resultActions?.apply === true;
+  return (
+    <div
+      role="group"
+      label="Proposed change"
+      style={{ ...card, margin: t("metrics.text_padding") }}
+    >
+      <text style={strong}>Proposed change</text>
+      <Prose
+        text={
+          str(plan.summary) ||
+          str(plan.text) ||
+          str(plan.title) ||
+          str(obj(plan.sceneEdit).label) ||
+          str(s.plan) ||
+          "Review the proposed change."
+        }
+      />
+      {allowed && (
+        <UI.PushButton
+          label="Apply change"
+          onClick={() => send({ type: "applyPlan" })}
+        />
+      )}
+    </div>
+  );
+}
+function Result({
+  s,
+  send,
+  text,
+  result,
+}: {
+  s: Snapshot;
+  send: Send;
+  text: string;
+  result: Obj;
+}) {
+  const current = !!s.result && str(result.runId) === s.result.runId;
+  const ready =
+    current && s.phase === "result" && s.runId === null && !s.composerDisabled;
+  const extensions = Array.isArray(result.extensions) ? result.extensions : [];
   return (
     <div role="listitem" label="Rendered result" style={card}>
       <text style={{ ...faint, fontWeight: t("typography.semibold_weight") }}>
         Rendered result
       </text>
       <text style={strong}>Review the actual result</text>
-      <Prose text={text || "The rendered change is ready."} />
-      <text style={faint}>
-        Powermove source changes from this run are one Command-Z Undo step.
-      </text>
+      <Prose
+        text={text || str(result.summary) || "The rendered change is ready."}
+      />
+      {str(result.verificationError) && (
+        <text role="status" style={quiet}>
+          {str(result.verificationError)}
+        </text>
+      )}
+      {extensions.map((entry, index) => {
+        const e = obj(entry);
+        const canOpen =
+          e.status === "ready" &&
+          e.action !== "removed" &&
+          !!str(e.extensionId) &&
+          !!str(e.panelId);
+        return (
+          <div key={index} style={{ ...row, gap: t("metrics.gap") }}>
+            <text style={{ ...quiet, ...shrink, flexGrow: 1 }}>
+              {str(e.name)}
+              {e.action === "removed"
+                ? " · Removed"
+                : e.action === "created"
+                  ? " · Created"
+                  : " · Updated"}
+            </text>
+            {canOpen && (
+              <UI.PushButton
+                label={`Open panel, ${str(e.name)}`}
+                onClick={() =>
+                  send({
+                    type: "openResultPanel",
+                    extensionId: str(e.extensionId),
+                    panelId: str(e.panelId),
+                  })
+                }
+              />
+            )}
+          </div>
+        );
+      })}
       {ready && (
         <div
           style={{
@@ -1067,22 +1465,23 @@ function Result({ s, send, text }: { s: Snapshot; send: Send; text: string }) {
             gap: t("metrics.text_padding"),
           }}
         >
-          <UI.PushButton
-            label="Undo Change"
-            onClick={() => send({ type: "undoResult" })}
-          />
-          <UI.PushButton
-            role="default"
-            label="Keep Change"
-            onClick={() => send({ type: "keepResult" })}
-          />
+          {s.resultActions?.undo === true && (
+            <UI.PushButton
+              label="Undo Change"
+              onClick={() => send({ type: "undoResult" })}
+            />
+          )}
+          {s.resultActions?.keep === true && (
+            <UI.PushButton
+              label="Keep Change"
+              onClick={() => send({ type: "keepResult" })}
+            />
+          )}
         </div>
       )}
     </div>
   );
 }
-
-/** One turn's trail: prose, reasoning, questions and tool groups. */
 function Trail({
   m,
   s,
@@ -1782,7 +2181,12 @@ function Conversation({
   };
   const item = (m: Message) =>
     m.role === "user" ? (
-      <UserMessage key={m.key} m={m} answering={m.key === answering} />
+      <UserMessage
+        key={m.key}
+        m={m}
+        answering={m.key === answering}
+        send={send}
+      />
     ) : m.role === "assistant" ? (
       <AssistantMessage key={m.key} m={m} s={s} send={send} />
     ) : (
@@ -1822,9 +2226,12 @@ function Composer({
   /** Counts the panel's showings (each change of presentation). */
   shown: number;
 }) {
+  const [dragging, setDragging] = useState(false);
   const working = s.runId !== null;
   const available = n.connection === "connected";
   const disabled = !available || s.composerDisabled;
+  const acceptsFiles = !disabled && s.attachments.length < 6;
+  const dropTarget = acceptsFiles && (dragging || n.dropTarget);
   const placeholder = !available
     ? "Connect an agent to start"
     : working
@@ -1840,13 +2247,19 @@ function Composer({
   // model with no effort levels lists none, and the picker is not shown.
   const efforts = s.catalog.efforts.filter((e) => e && e !== "default");
   const effortName = s.settings.effort ? effortLabel(s.settings.effort) : "";
-  const choicesLocked = !menu || working || s.composerDisabled;
+  const choicesLocked = working || s.composerDisabled;
+  const [openPicker, setOpenPicker] = useState<string | null>(null);
+  const menuEpoch = useRef(0);
   // Provider and model share one menu. A provider row keeps it open: the
   // Model section follows that provider, its default ticked, in the same
   // menu; it closes on a model, Escape or a click outside.
   const latest = useRef(s);
   latest.current = s;
-  const awaiting = useRef<{ anchor: number; provider: string } | null>(null);
+  const awaiting = useRef<{
+    anchor: number;
+    provider: string;
+    epoch: number;
+  } | null>(null);
   const modelRows = (s: Snapshot): MenuOption[] => [
     ...pairs(s.catalog.providers, s.settings.provider).map(({ v, label }) => ({
       label,
@@ -1856,45 +2269,66 @@ function Composer({
       stays: true,
     })),
     ...pairs(s.catalog.models, s.settings.model).map(({ v, label }) => ({
-      label,
+      label: label.replace(/\s*\([^)]*context[^)]*\)/i, ""),
+      detail: label.match(/\(([^)]*context[^)]*)\)/i)?.[1],
       value: `model:${v}`,
       checked: v === s.settings.model,
       category: "Model",
     })),
   ];
-  const modelMenu = (anchor: number, update: boolean) =>
+  const modelMenu = (
+    anchor: number,
+    update: boolean,
+    epoch = menuEpoch.current,
+  ) =>
     void menu?.({
       anchor,
       placeholder: "Search models",
       options: modelRows(latest.current),
       ...(update ? { update } : {}),
     }).then((choice) => {
-      if (typeof choice !== "string") return;
+      if (menuEpoch.current !== epoch) return;
+      if (typeof choice !== "string") {
+        setOpenPicker(null);
+        return;
+      }
       const at = choice.indexOf(":");
       const [kind, value] = [choice.slice(0, at), choice.slice(at + 1)];
       const now = latest.current;
       if (kind === "provider") {
         if (value === now.settings.provider) return modelMenu(anchor, true);
-        awaiting.current = { anchor, provider: value };
+        awaiting.current = { anchor, provider: value, epoch };
         send({ type: "setProvider", provider: value });
         // A switch the model refused: the open menu keeps working.
         setTimeout(() => {
           const pending = awaiting.current;
-          if (pending?.provider !== value) return;
+          if (
+            pending?.provider !== value ||
+            pending.epoch !== epoch ||
+            menuEpoch.current !== epoch
+          )
+            return;
           awaiting.current = null;
           modelMenu(pending.anchor, true);
         }, 1000);
       }
       // The effort shown goes along: the new model keeps it when it
       // takes it, else runs at its own default.
-      else if (kind === "model")
+      else if (kind === "model") {
+        setOpenPicker(null);
         send({
           type: "setModel",
           model: value,
           effort: now.settings.effort,
         });
+      }
     });
-  const openModels = (anchor: number) => modelMenu(anchor, false);
+  const openModels = (anchor: number) => {
+    menuEpoch.current++;
+    awaiting.current = null;
+    setOpenPicker("model");
+    modelMenu(anchor, false);
+  };
   useLayoutEffect(() => {
     const pending = awaiting.current;
     if (!pending || s.settings.provider !== pending.provider) return;
@@ -1934,7 +2368,20 @@ function Composer({
       id="agent-composer"
       role="group"
       label="Message composer"
-      state={{ dropTarget: n.dropTarget }}
+      state={{ dropTarget }}
+      data-pm-drop="files"
+      onDragOver={() => {
+        if (acceptsFiles) setDragging(true);
+      }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={(e) => {
+        setDragging(false);
+        if (acceptsFiles)
+          send({
+            type: "attachInput",
+            paths: (e.drag?.data["public.file-url"] ?? []) as string[],
+          });
+      }}
       // v1's two surfaces: a tray holding the run options, and inset in it
       // the field with the draft and its actions.
       style={{
@@ -1955,13 +2402,14 @@ function Composer({
         style={{
           ...column,
           gap: t("metrics.gap"),
-          background: t("colors.floating"),
+          background: t(
+            dropTarget ? "colors.selected_fill" : "colors.floating",
+          ),
           borderRadius: t("metrics.panel_radius"),
           // A quiet hairline edge (v1's, its composer having the keyboard
-          // whenever the panel opens); a drop over the composer rings it in
-          // the accent.
+          // whenever the panel opens). Drops add only the selected-fill wash.
           borderWidth: t("metrics.border"),
-          borderColor: t(n.dropTarget ? "colors.accent" : "colors.hairline"),
+          borderColor: t("colors.hairline"),
           paddingTop: t("metrics.gap"),
           paddingBottom: t("metrics.gap"),
           paddingLeft: t("metrics.gap"),
@@ -1972,6 +2420,7 @@ function Composer({
           <div
             style={{
               ...row,
+              alignItems: "start",
               flexWrap: "wrap",
               gap: t("metrics.gap"),
               paddingLeft: t("metrics.gap"),
@@ -1979,72 +2428,16 @@ function Composer({
             }}
           >
             {s.attachments.map((a) => (
-              <div
+              <AttachmentTile
                 key={a.id}
-                role="group"
-                label={`${a.name}, attachment`}
-                metadata={{ armed: s.draft.armed === a.id }}
-                style={{
-                  ...row,
-                  ...shrink,
-                  gap: t("metrics.pill_inset"),
-                  height: t("metrics.hit"),
-                  paddingLeft: t("metrics.gap"),
-                  background: t(
-                    s.draft.armed === a.id
-                      ? "colors.selected_fill"
-                      : "colors.fill",
-                  ),
-                  borderRadius: t("metrics.inner_radius"),
-                }}
-              >
-                <button
-                  role="button"
-                  label={`${a.name}, attachment`}
-                  title={a.name}
-                  tabIndex={0}
-                  onClick={() => send({ type: "openAttachment", id: a.id })}
-                  style={{
-                    ...target,
-                    ...row,
-                    ...shrink,
-                    gap: t("metrics.gap"),
-                  }}
-                >
-                  <div
-                    metadata={{ symbol: "doc" }}
-                    style={{
-                      color: t("colors.muted"),
-                      symbolSize: t("metrics.symbol_inline"),
-                      flexShrink: 0,
-                    }}
-                  />
-                  <text
-                    style={{
-                      ...quiet,
-                      ...shrink,
-                      whiteSpace: "nowrap",
-                      textOverflow: "ellipsis",
-                    }}
-                  >
-                    {a.name}
-                  </text>
-                </button>
-                <UI.ToolbarItem
-                  label={`Remove ${a.name}`}
-                  title={`Remove ${a.name}`}
-                  metadata={{ symbol: "xmark" }}
-                  style={{
-                    symbolSize: t("metrics.symbol_inline"),
-                    flexShrink: 0,
-                  }}
-                  onClick={() => send({ type: "removeAttachment", id: a.id })}
-                />
-              </div>
+                a={a}
+                armed={s.draft.armed === a.id}
+                send={send}
+              />
             ))}
           </div>
         )}
-        {n.dropTarget ? (
+        {dropTarget ? (
           <text
             style={{
               ...quiet,
@@ -2059,14 +2452,19 @@ function Composer({
             // A fresh editor each time the panel is shown somewhere new, so
             // it starts from the draft as it is now (typed text lives in the
             // editor, not in the value the host last saw).
-            key={`composer-${shown}`}
+            key={`${s.threadId}:composer-${shown}`}
             multiline
             id="agent-composer-text"
             label="Message Powermove agent"
             title="Return to send · Shift-Return for a new line · / for shortcuts"
             value={s.draft.text}
             disabled={disabled}
-            metadata={{ placeholder, submitOnReturn: true }}
+            metadata={{
+              placeholder,
+              submitOnReturn: true,
+              attachmentProject: s.projectId,
+              attachmentThread: s.threadId,
+            }}
             state={{ keyboardFocus: n.keyboardFocus === "composer" }}
             tabIndex={0}
             onInput={(event) => {
@@ -2119,7 +2517,11 @@ function Composer({
           <UI.ToolbarItem
             id="agent-attach"
             label="Add attachments"
-            title="Add images, video, audio or documents"
+            title={
+              s.attachments.length >= 6
+                ? "A message can carry six attachments"
+                : "Add images, video, audio or documents"
+            }
             metadata={{ symbol: "plus" }}
             disabled={disabled || s.attachments.length >= 6}
             style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
@@ -2130,7 +2532,11 @@ function Composer({
           <UI.ToolbarItem
             id="agent-pick-region"
             label="Select part of the screen"
-            title="Select part of the screen for the agent"
+            title={
+              s.attachments.length >= 6
+                ? "A message can carry six attachments"
+                : "Select part of the screen for the agent"
+            }
             metadata={{ symbol: "rectangle.dashed" }}
             disabled={disabled || s.attachments.length >= 6}
             style={{ flexShrink: 0, symbolSize: t("metrics.symbol_panel") }}
@@ -2212,68 +2618,76 @@ function Composer({
             trigger for the window's searchable menu. */}
         {/* Provider and model in one menu, the model's reasoning effort in
             its own beside it: two siblings, each naming what runs. */}
-        <Trigger
+        <Picker
           id="agent-model"
           label={`Model, ${modelName}`}
-          text={modelName}
-          disabled={choicesLocked}
+          text={modelName.replace(/\s*\([^)]*context[^)]*\)/i, "")}
+          disabled={!menu || choicesLocked}
+          opened={openPicker === "model"}
           open={openModels}
         />
         {efforts.length > 0 && (
-          <Trigger
+          <Picker
             id="agent-effort"
             label={`Reasoning effort, ${effortName}`}
             text={effortName}
-            // A qualifier of the model beside it: the quieter step (v1's).
-            tone="colors.muted"
             fixed
-            disabled={choicesLocked}
-            open={(anchor) =>
+            disabled={!menu || choicesLocked}
+            opened={openPicker === "effort"}
+            open={(anchor) => {
+              awaiting.current = null;
+              const epoch = ++menuEpoch.current;
+              setOpenPicker("effort");
               void menu?.({
                 anchor,
                 placeholder: "Search",
-                options: efforts.map((v) => ({
-                  label: effortLabel(v),
-                  value: v,
-                  checked: v === s.settings.effort,
+                options: efforts.map((value) => ({
+                  label: effortLabel(value),
+                  value,
+                  checked: value === s.settings.effort,
                   category: "Reasoning Effort",
                 })),
               }).then((choice) => {
+                if (menuEpoch.current !== epoch) return;
+                setOpenPicker(null);
                 if (typeof choice === "string" && choice !== s.settings.effort)
                   send({
                     type: "setModel",
                     model: s.settings.model,
                     effort: choice,
                   });
-              })
-            }
+              });
+            }}
           />
         )}
         <div style={{ flexGrow: 1 }} />
-        <Trigger
+        <Picker
           id="agent-access"
           label={`Agent access, ${ACCESS[s.settings.access].label}`}
           text={ACCESS[s.settings.access].label}
-          tone={
-            s.settings.access === "full" ? "colors.warning" : "colors.secondary"
-          }
           disabled={!menu || working || s.composerDisabled}
-          open={(anchor) =>
+          opened={openPicker === "access"}
+          open={(anchor) => {
+            awaiting.current = null;
+            const epoch = ++menuEpoch.current;
+            setOpenPicker("access");
             void menu?.({
               anchor,
               placeholder: "Search",
-              // Full access asks for consent first (the window's alert).
-              options: (Object.keys(ACCESS) as Access[]).map((v) => ({
-                label: ACCESS[v].label,
-                value: v,
-                checked: v === s.settings.access,
+              options: (Object.keys(ACCESS) as Access[]).map((value) => ({
+                label: ACCESS[value].label,
+                detail: ACCESS[value].detail,
+                value,
+                checked: value === s.settings.access,
                 category: "How should agent actions be approved?",
               })),
             }).then((choice) => {
+              if (menuEpoch.current !== epoch) return;
+              setOpenPicker(null);
               if (typeof choice === "string" && choice !== s.settings.access)
                 send({ type: "setAccess", access: choice as Access });
-            })
-          }
+            });
+          }}
         />
       </div>
     </div>
@@ -2334,6 +2748,7 @@ export function AgentView({
       }}
     >
       <Header s={s} n={n} send={send} menu={menu} />
+      <SubthreadBar s={s} send={send} />
       {s.saveError && (
         <div
           role="status"
@@ -2447,6 +2862,7 @@ export function AgentView({
           />
         </div>
       )}
+      {!setup && <PlanPreview s={s} send={send} />}
       {!setup && (
         <Composer
           s={s}

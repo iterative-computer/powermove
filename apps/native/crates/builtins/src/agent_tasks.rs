@@ -45,6 +45,7 @@ struct Root {
     waiting_note: Option<String>,
 }
 struct Child {
+    thread: String,
     run: String,
     root: String,
     request: Request,
@@ -539,6 +540,7 @@ impl Tasks {
         };
         let handle = launch::launch(&environment, child.clone())?;
         self.children.push(Child {
+            thread: thread.into(),
             run,
             root: root.into(),
             request: child,
@@ -833,7 +835,9 @@ impl Tasks {
     }
     /// One delivery-worker step: child events, finished turns, barriers.
     pub fn poll(state: &mut AgentState, link: &AgentLink, now: u64) -> bool {
-        let AgentState { tasks, runs, .. } = state;
+        let AgentState {
+            tasks, runs, panel, ..
+        } = state;
         tasks.environment = link.environment();
         let Some(profile) = tasks.environment.as_ref().map(|e| e.profile.clone()) else {
             return false;
@@ -879,7 +883,7 @@ impl Tasks {
             }
             tasks.dirty = true;
         }
-        changed |= tasks.poll_children(runs, &mut disk, now);
+        changed |= tasks.poll_children(runs, panel, &mut disk, now);
         // Saves that failed are tried again once a second.
         if now >= tasks.retry_at {
             tasks.retry_at = now + 1_000;
@@ -938,6 +942,36 @@ impl Tasks {
                 runs.release(run);
             }
         }
+        for child in tasks.children.iter().filter(|c| c.finished) {
+            if panel
+                .session(&child.thread)
+                .ok()
+                .and_then(|s| s.run.as_ref())
+                .is_some_and(|r| r.id == child.run)
+            {
+                let task = tasks
+                    .roots
+                    .get(&child.root)
+                    .and_then(|r| r.scope.task_of(&child.run));
+                let text = task
+                    .and_then(|t| t["summary"].as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let status = task
+                    .and_then(|t| t["status"].as_str())
+                    .unwrap_or("completed");
+                let _ = panel.observe_subthread(
+                    &child.thread,
+                    &child.run,
+                    pm_panel_agentpanel::model::Update::Complete {
+                        text,
+                        error: status != "completed",
+                        cancelled: status == "cancelled",
+                    },
+                    now,
+                );
+            }
+        }
         // A settled root's scope goes when its tasks have.
         let done: Vec<String> = tasks
             .roots
@@ -970,6 +1004,7 @@ impl Tasks {
     fn poll_children(
         &mut self,
         runs: &mut pm_panel_agentpanel::runtime::ProviderRuns,
+        panel: &mut pm_panel_agentpanel::model::Panel,
         disk: &mut Disk,
         now: u64,
     ) -> bool {
@@ -986,6 +1021,18 @@ impl Tasks {
                     }
                 };
                 changed = true;
+                let update = match &event {
+                    Event::Trace { value, .. } => {
+                        Some(pm_panel_agentpanel::model::Update::Trace(value.clone()))
+                    }
+                    Event::Progress { text, .. } => {
+                        Some(pm_panel_agentpanel::model::Update::Progress(text.clone()))
+                    }
+                    _ => None,
+                };
+                if let Some(update) = update {
+                    let _ = panel.observe_subthread(&child.thread, &child.run, update, now);
+                }
                 match event {
                     Event::Progress { text, .. } => self.progress(runs, index, &text, now),
                     Event::Trace { value, .. } => self.trace(runs, index, value, now),
@@ -1170,6 +1217,12 @@ impl Tasks {
 }
 
 const GONE: &str = "This agent run is no longer active.";
+fn child_thread(task: &Value) -> String {
+    task["childThreadId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
+}
 fn timeout(args: &Value) -> Duration {
     Duration::from_millis(args["timeoutMs"].as_u64().unwrap_or(90_000).min(90_000))
 }
@@ -1258,6 +1311,29 @@ pub(crate) fn call(
                 let thread = request["threadId"].as_str().unwrap_or_default().to_owned();
                 match tasks.launch_child(&root, request, role) {
                     Ok(()) => {
+                        let child_request = &tasks.children.last().expect("started child").request;
+                        let parent = task["parentThreadId"].as_str().unwrap_or_default();
+                        let mut settings = panel
+                            .session(parent)
+                            .map_err(|e| format!("{e:?}"))?
+                            .settings
+                            .clone();
+                        settings.provider = child_request.provider;
+                        settings.model = child_request.model.clone().unwrap_or_default();
+                        settings.effort = child_request.effort.clone().unwrap_or_default();
+                        settings.access = child_request.access;
+                        settings.approval = child_request.approval;
+                        panel
+                            .start_subthread(
+                                &thread,
+                                parent,
+                                task["title"].as_str().unwrap_or("Subagent"),
+                                &child_request.prompt,
+                                settings,
+                                &child,
+                                now,
+                            )
+                            .map_err(|e| format!("{e:?}"))?;
                         let project = tasks.roots[&root].project.clone();
                         let _ = tasks.monitor.begin(
                             ThreadRun {
@@ -1574,6 +1650,18 @@ impl Tasks {
         run: &str,
         args: &Value,
     ) -> Result<Value, String> {
+        self.send_staged(runs, disk, root, run, args, &[], &[])
+    }
+    fn send_staged(
+        &mut self,
+        runs: &mut pm_panel_agentpanel::runtime::ProviderRuns,
+        disk: &mut Disk,
+        root: &str,
+        run: &str,
+        args: &Value,
+        images: &[String],
+        files: &[Value],
+    ) -> Result<Value, String> {
         reject_unknown(args, &["taskId", "message", "target", "clientRequestId"])?;
         let id = args["taskId"].as_str().unwrap_or_default();
         let message = args["message"]
@@ -1675,11 +1763,12 @@ impl Tasks {
                     );
                 }
             } else if handle.supports_steering()
+                && (base.provider != Provider::Chatgpt || base.access == Access::Editor)
                 && handle
                     .send(Action::Steer {
                         run: child_run.clone(),
                         prompt: message.into(),
-                        images: vec![],
+                        images: images.to_vec(),
                     })
                     .is_ok()
             {
@@ -1687,6 +1776,8 @@ impl Tasks {
             }
         }
         let mut next = base;
+        next.images.extend_from_slice(images);
+        next.files.extend_from_slice(files);
         next.provider = selection.provider;
         next.model = selection.model.clone();
         next.effort = selection.reasoning_effort.clone();
@@ -1720,6 +1811,8 @@ impl Tasks {
         let scope = &mut self.roots.get_mut(root).ok_or(GONE)?.scope;
         if let Some(mut request) = scope.request(&child_run).cloned() {
             request["prompt"] = json!(next.prompt);
+            request["images"] = json!(next.images);
+            request["attachments"] = json!(next.files);
             request["provider"] = json!(selection.provider);
             request["model"] = json!(selection.model);
             request["reasoningEffort"] = json!(selection.reasoning_effort);
@@ -1737,6 +1830,105 @@ impl Tasks {
         Self::emit(runs, root, task.clone());
         task["delivery"] = json!(delivery);
         Ok(task)
+    }
+    pub(crate) fn owns_live_run(&self, run: &str) -> bool {
+        self.children
+            .iter()
+            .any(|c| c.run == run && !c.finished && !c.stopping)
+    }
+    pub(crate) fn panel_effect(
+        &mut self,
+        runs: &mut pm_panel_agentpanel::runtime::ProviderRuns,
+        panel: &mut pm_panel_agentpanel::model::Panel,
+        link: &AgentLink,
+        effect: &pm_panel_agentpanel::model::Effect,
+    ) -> Option<Result<(), String>> {
+        use pm_panel_agentpanel::model::EffectKind;
+        let run = effect.target.run.as_deref()?;
+        let child = self.children.iter().find(|c| c.run == run && !c.finished)?;
+        if child.thread != effect.target.thread {
+            return Some(Err("This task belongs to another thread.".into()));
+        }
+        let root = child.root.clone();
+        let task = self.roots.get(&root)?.scope.task_of(run)?.clone();
+        match &effect.kind {
+            EffectKind::Send {
+                text,
+                attachments,
+                steer: true,
+                ..
+            } => {
+                let environment = self.environment.as_ref()?;
+                let profile = environment.profile.clone();
+                let directory = child
+                    .request
+                    .workspace
+                    .join("attachments")
+                    .join(pm_kernel::new_id("direction"));
+                let staged =
+                    crate::agent_host::lay_out(&directory, attachments).map_err(|e| e.to_string());
+                let result = staged.and_then(|(images, files)| {
+                    let owner = task["parentTaskId"]
+                        .as_str()
+                        .and_then(|id| {
+                            self.roots[&root].scope.raw()["records"]
+                                .as_array()?
+                                .iter()
+                                .find(|r| r["task"]["taskId"] == id)?
+                                .get("task")?
+                                .get("childRunId")?
+                                .as_str()
+                        })
+                        .unwrap_or(&root)
+                        .to_owned();
+                    let message = if files.is_empty() {
+                        text.clone()
+                    } else {
+                        format!("{text}\n\nATTACHED FILES\n{}", json!(files))
+                    };
+                    let mut disk = Disk {
+                        profile: &profile,
+                        link,
+                    };
+                    self.send_staged(
+                        runs,
+                        &mut disk,
+                        &root,
+                        &owner,
+                        &json!({"taskId":task["taskId"],"message":message}),
+                        &images,
+                        &files,
+                    )
+                    .map(|_| ())
+                });
+                if let Err(error) = &result {
+                    let _ = panel.observe_subthread(&child_thread(&task),run,pm_panel_agentpanel::model::Update::Trace(json!({"kind":"answer","text":format!("Your direction could not be delivered: {error}. Please send it again.")})),now_ms());
+                }
+                // Delivery refusals are ordinary quiet transcript notices, as
+                // for ProviderRuns steering; do not also open an error surface.
+                Some(Ok(()))
+            }
+            EffectKind::Stop => {
+                let outcome =
+                    self.stop_task(link, &root, task["taskId"].as_str().unwrap_or_default());
+                let ack = panel
+                    .acknowledge(effect.id, outcome.is_ok())
+                    .map_err(|e| format!("{e:?}"));
+                Some(outcome.and(ack))
+            }
+            EffectKind::Answer {
+                question, answers, ..
+            } => {
+                let shown = child.questions.get(question).cloned();
+                let accepted = shown.is_some_and(|id| self.answer(&id, answers.0.clone()));
+                Some(
+                    panel
+                        .acknowledge(effect.id, accepted)
+                        .map_err(|e| format!("{e:?}")),
+                )
+            }
+            _ => None,
+        }
     }
     /// The person pressed Stop on a task row (main's `cancelTask`).
     pub fn stop_task(&mut self, link: &AgentLink, root: &str, task: &str) -> Result<(), String> {

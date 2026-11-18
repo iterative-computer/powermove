@@ -9,6 +9,9 @@ import {
   presentError,
   slashCopy,
   workDuration,
+  threadName,
+  nestedThreads,
+  threadPath,
 } from "./present";
 import { withRows } from "./fixtures";
 import type { Row } from "./contract";
@@ -125,7 +128,7 @@ test("Markdown becomes native blocks and styled runs, never markup", () => {
   ]);
   expect(inline("see [docs](https://x.y) and `a_b` in *it*")).toEqual([
     { t: "see " },
-    { t: "docs", a: true },
+    { t: "docs", a: true, href: "https://x.y" },
     { t: " and " },
     { t: "a_b", c: true },
     { t: " in " },
@@ -160,4 +163,46 @@ test("long unbroken tokens get break points; ordinary words do not", () => {
       "",
     ),
   ).toBe("/Users/someone/Movies/project/final.mov");
+});
+
+test("Markdown tables keep headers, inline emphasis, escaped pipes and missing cells", () => {
+  const blocks = markdown(
+    "| Name | Notes |\n| --- | --- |\n| **Clip** | a\\|b |\n| Audio | |",
+  );
+  expect(blocks[0]?.kind).toBe("table");
+  if (blocks[0]?.kind !== "table") throw new Error("table missing");
+  expect(blocks[0].headers[0]).toEqual([{ t: "Name" }]);
+  expect(blocks[0].rows[0]?.[0]).toEqual([{ t: "Clip", b: true }]);
+  expect(blocks[0].rows[0]?.[1]).toEqual([{ t: "a|b" }]);
+  expect(markdown("not a table | text\nplain text")[0]?.kind).toBe("p");
+});
+test("adjacent Markdown links retain distinct destinations", () => {
+  expect(
+    inline("[One](https://example.com/one)[Two](https://example.com/two)"),
+  ).toEqual([
+    { t: "One", a: true, href: "https://example.com/one" },
+    { t: "Two", a: true, href: "https://example.com/two" },
+  ]);
+});
+
+test("thread titles omit absolute file paths and file URLs", () => {
+  expect(threadName("Review /synthetic/clipboard/image.png")).toBe("Review");
+  expect(threadName("file:///synthetic/image.png")).toBe("New thread");
+  expect(threadName("Review /synthetic/My folder/image.png")).toBe("Review");
+  expect(threadName("Improve the headline")).toBe("Improve the headline");
+});
+
+test("thread nesting is stable for missing parents and cycles", () => {
+  const base = { title: "Thread", busy: false, updatedAt: 1 };
+  const threads = [
+    { ...base, id: "a", parentId: "b" },
+    { ...base, id: "b", parentId: "a" },
+    { ...base, id: "orphan", parentId: "gone" },
+  ];
+  expect(nestedThreads(threads).map((r) => r.thread.id)).toEqual([
+    "orphan",
+    "a",
+    "b",
+  ]);
+  expect(threadPath(threads, "a").map((t) => t.id)).toEqual(["b", "a"]);
 });
