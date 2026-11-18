@@ -573,7 +573,7 @@ impl Automation {
             (Some(_), WriteBody::Commands(commands)) => {
                 let snapshot = self.view(id)?.snapshot;
                 let mut scratch = pm_kernel::DocumentStore::scratch(&snapshot);
-                scratch.set_runtime_state((*self.state()).clone(), None);
+                scratch.set_runtime_state(self.state().for_project(id), None);
                 scratch
                     .transact(label, origin, &commands)
                     .map_err(Error::kernel)?;

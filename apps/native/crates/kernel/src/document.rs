@@ -482,6 +482,15 @@ impl DocumentStore {
     /// Contribution facts for worker-side planning. Never authored or persisted.
     pub fn set_runtime_state(
         &mut self,
+        state: crate::state::StateSnapshot,
+        text: Option<crate::text_host::SharedTextHost>,
+    ) {
+        self.runtime_state = Some(state);
+        self.text_host = text;
+    }
+
+    pub(crate) fn set_project_runtime_state(
+        &mut self,
         state: &crate::state::StateSnapshot,
         project: &str,
         text: Option<crate::text_host::SharedTextHost>,
@@ -491,9 +500,10 @@ impl DocumentStore {
             .as_ref()
             .is_none_or(|current| current.revision != state.revision)
         {
-            self.runtime_state = Some(state.for_project(project));
+            self.set_runtime_state(state.for_project(project), text);
+        } else {
+            self.text_host = text;
         }
-        self.text_host = text;
     }
 
     pub fn doc_id(&self) -> u64 {
