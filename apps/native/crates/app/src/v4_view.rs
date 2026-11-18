@@ -1933,6 +1933,10 @@ impl SurfaceView {
             }
         }
     }
+    /// Whether a native view draws anywhere in the panel.
+    pub(crate) fn has_native(&self) -> bool {
+        self.prepared.nodes.values().any(|n| n.native.is_some())
+    }
     /// Whether a native view (the timeline, the viewer's gizmos) draws
     /// inside this node: its content is not drawn by the panel's scene.
     fn holds_native(&self, id: Id) -> bool {

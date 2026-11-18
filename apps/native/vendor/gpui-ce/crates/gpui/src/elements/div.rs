@@ -2799,7 +2799,7 @@ impl Interactivity {
     /// The offset cell of a div that is a scroll layer (read before its
     /// prepaint and paint, which borrow it).
     fn scroll_layer_cell(&self) -> Option<Rc<RefCell<Point<Pixels>>>> {
-        (self.scroll_layer && self.scroll_edge_fade_y == px(0.) && crate::scroll_layer::enabled())
+        (self.scroll_layer && crate::scroll_layer::enabled())
             .then(|| self.scroll_offset.clone())
             .flatten()
     }
@@ -2884,7 +2884,7 @@ pub struct Interactivity {
     pub(crate) disabled: bool,
     pub(crate) tracked_focus_handle: Option<FocusHandle>,
     pub(crate) tracked_scroll_handle: Option<ScrollHandle>,
-    scroll_edge_fade_y: Pixels,
+    pub(crate) scroll_edge_fade_y: Pixels,
     pub(crate) scroll_anchor: Option<ScrollAnchor>,
     /// Powermove P-SCROLL-LAYER: the content's drawing doesn't depend on the
     /// offset, so a step that only moves it replays the recorded content
@@ -3224,6 +3224,10 @@ impl Interactivity {
             || window.is_inspector_picking(cx)
     }
 
+    fn vertical_scroll_edges(offset: Pixels, maximum: Pixels) -> (bool, bool) {
+        (maximum > px(1.) && -offset > px(1.), maximum > px(1.) && maximum + offset > px(1.))
+    }
+
     fn scroll_content_mask(
         &self,
         style: &Style,
@@ -3234,15 +3238,12 @@ impl Interactivity {
         if self.scroll_edge_fade_y > px(0.)
             && let Some(scroll) = &self.tracked_scroll_handle
         {
-            let offset = -scroll.offset().y;
-            let maximum = scroll.max_offset().y;
-            if maximum > px(1.) {
-                if offset > px(1.) {
-                    mask.fade_out.top = self.scroll_edge_fade_y;
-                }
-                if maximum - offset > px(1.) {
-                    mask.fade_out.bottom = self.scroll_edge_fade_y;
-                }
+            let (top, bottom) = Self::vertical_scroll_edges(scroll.offset().y, scroll.max_offset().y);
+            if top {
+                mask.fade_out.top = self.scroll_edge_fade_y;
+            }
+            if bottom {
+                mask.fade_out.bottom = self.scroll_edge_fade_y;
             }
         }
         Some(mask)
@@ -4233,6 +4234,7 @@ impl Interactivity {
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
             let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
             let line_height = window.line_height();
+            let fades_at_edges = self.scroll_edge_fade_y > px(0.);
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
             let layer = (self.scroll_layer && crate::scroll_layer::enabled())
@@ -4296,8 +4298,11 @@ impl Interactivity {
                         if remaining.x.is_zero() && remaining.y.is_zero() {
                             cx.stop_propagation();
                         }
+                        let new_edges = fades_at_edges
+                            && Self::vertical_scroll_edges(old_scroll_offset.y, scroll_max.y)
+                                != Self::vertical_scroll_edges(scroll_offset.y, scroll_max.y);
                         drop(scroll_offset);
-                        let moved = layer.is_some_and(|key| {
+                        let moved = !new_edges && layer.is_some_and(|key| {
                             window.scroll_layer_step(key, current_view, cx)
                         });
                         if !moved {

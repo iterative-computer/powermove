@@ -3950,13 +3950,17 @@ pub(crate) struct PanelBody {
     height: f32,
 }
 impl Render for PanelBody {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The Project body replays its drawing between edge-mask changes.
+        // Native surfaces retain their own frame callbacks.
+        let native = self.view.read(cx).has_native();
         div()
             .id(self.id.clone())
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.handle)
             .scroll_edge_fade_y(px(pm_design::DOCK_SCROLL_FADE))
+            .when(!native, |d| d.scroll_layer())
             .child(
                 self.view
                     .clone()
