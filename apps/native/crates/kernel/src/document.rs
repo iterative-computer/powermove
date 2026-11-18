@@ -289,6 +289,7 @@ type ArchiveJudgment = (crate::history::CompactJson, Option<String>, bool);
 /// threading model.
 pub struct DocumentStore {
     runtime_state: Option<crate::state::StateSnapshot>,
+    runtime_project: Option<String>,
     text_host: Option<crate::text_host::SharedTextHost>,
     doc_id: u64,
     current: Arc<Document>,
@@ -441,6 +442,7 @@ impl DocumentStore {
         DocumentStore {
             open_trail,
             runtime_state: None,
+            runtime_project: None,
             text_host: None,
             doc_id: new_doc_id(),
             current,
@@ -487,6 +489,18 @@ impl DocumentStore {
     ) {
         self.runtime_state = Some(state);
         self.text_host = text;
+    }
+
+    /// The kernel slot id can differ from the project's authored id. Keep
+    /// its UI mode available without changing the scratch planner API.
+    pub fn set_runtime_state_for_project(
+        &mut self,
+        project: &str,
+        state: crate::state::StateSnapshot,
+        text: Option<crate::text_host::SharedTextHost>,
+    ) {
+        self.set_runtime_state(state, text);
+        self.runtime_project = Some(project.to_owned());
     }
 
     pub fn doc_id(&self) -> u64 {
@@ -1201,11 +1215,14 @@ impl DocumentStore {
                     c,
                     &mut presets,
                     &self.selection,
+                    self.runtime_state.as_ref(),
+                    self.runtime_project.as_deref(),
                 )?,
                 (Some(c), None) => c.plan_with_state(
                     tree,
                     origin,
                     self.runtime_state.as_ref(),
+                    self.runtime_project.as_deref(),
                     self.text_host.as_ref(),
                 )?,
                 (None, None) => Vec::new(),

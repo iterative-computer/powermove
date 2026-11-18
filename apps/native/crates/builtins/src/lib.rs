@@ -283,6 +283,7 @@ struct Broker {
     platform: Mutex<Vec<PlatformRequest>>,
     errors: Mutex<Vec<String>>,
     facts: Mutex<Value>,
+    timeline_view: Arc<Mutex<Option<Arc<pm_panel_timeline::TimelineModel>>>>,
     platform_replies: Mutex<BTreeMap<u64, Value>>,
     timeline_requests: Mutex<BTreeMap<u64, (String, u64)>>,
     platform_ids: std::sync::atomic::AtomicU64,
@@ -1310,6 +1311,7 @@ impl Builtins {
             platform: Default::default(),
             errors: Default::default(),
             facts: Mutex::new(json!({})),
+            timeline_view: Default::default(),
             platform_replies: Default::default(),
             timeline_requests: Default::default(),
             platform_ids: std::sync::atomic::AtomicU64::new(1),
@@ -1714,6 +1716,24 @@ impl Builtins {
             .into_values()
             .collect()
     }
+    /// Read-only native view state. Sharing the Arc adds no projection work
+    /// or project writes to painting; speed edits consume it on the worker.
+    pub fn update_timeline_view(&self, view: Arc<pm_panel_timeline::TimelineModel>) {
+        *self.broker.timeline_view.shared() = Some(view);
+    }
+    fn prepare_timeline_request(
+        &self,
+        mut request: pm_kernel::Request,
+    ) -> std::result::Result<pm_kernel::Request, String> {
+        let published = self
+            .broker
+            .kernel
+            .published(&self.broker.project)
+            .ok_or("No open project")?;
+        let view = self.broker.timeline_view.shared().clone();
+        models::pin_speed_request(view, &published, &mut request)?;
+        Ok(request)
+    }
     pub fn update_facts(&self, facts: Value) {
         *self.broker.facts.shared() = facts.clone();
         for entry in self.broker.all_entries() {
@@ -2098,17 +2118,17 @@ impl Builtins {
         let pm_kernel::Call::Transact { body, .. } = request.call else {
             return Err(Error::Invalid("binding is not a scrubbable edit"));
         };
-        Ok(self.broker.kernel.call(
-            &self.broker.project,
-            pm_kernel::Request::new(
+        let request = self
+            .prepare_timeline_request(pm_kernel::Request::new(
                 caller,
                 pm_kernel::GestureCall::Step {
                     gesture,
                     body,
                     replace: true,
                 },
-            ),
-        ))
+            ))
+            .map_err(Error::Host)?;
+        Ok(self.broker.kernel.call(&self.broker.project, request))
     }
     pub fn scrub_finish(
         &self,
@@ -2259,6 +2279,7 @@ impl EngineProxy for Broker {
                 .map_err(Error::Host)?,
             ));
             backend.shared().native.agent_link = self.agent.clone();
+            backend.shared().native.timeline_view = self.timeline_view.clone();
             if let Some(model) = backend.shared().model.as_mut() {
                 model.clipboard = self.effect_clipboard.shared().clone();
             }

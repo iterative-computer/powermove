@@ -148,7 +148,9 @@ fn set_content(
         }
     }
     if patch.contains_key("speed") {
+        let old_duration = values::num(&layer, "dur").unwrap_or(0.);
         properties::resize_video_for_speed(&mut layer, speed_before, fps);
+        super::timing::speed_ripple(cx, &layer, old_duration)?;
     }
     if layer_type == "shader" && patch.contains_key("code") {
         super::shader::sync(&mut layer);

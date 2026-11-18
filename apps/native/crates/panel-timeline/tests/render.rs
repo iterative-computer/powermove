@@ -1185,3 +1185,26 @@ fn transitions_draw_as_wedges_inside_the_clip_and_are_taken_by_a_press() {
     .unwrap();
     assert!(!plain.ops.iter().any(|o| o.id.starts_with("transition")));
 }
+
+#[test]
+fn g3_negative_layer_start_has_a_subtle_marker() {
+    for scheme in [Scheme::Light, Scheme::Dark] {
+        let t = Tokens::new(scheme, Accessibility::default());
+        let mut c = clip("early");
+        c.from = -2.5;
+        let mut v = viewport(&t);
+        v.scroll_time = 0.;
+        let layer = Scene::new(vec![row("early", RowContent::Layer { clip: Some(c.clone()), summary: vec![].into() })], 10., 30., &t).unwrap();
+        let frame = layer.prepare(v, &t).unwrap();
+        let marker = frame.ops.iter().find(|o| o.id == "clip-negative:early").expect("negative-start marker");
+        let label = frame.ops.iter().find(|o| o.id == "clip-content:early").unwrap();
+        assert_eq!(marker.text.as_deref(), Some("‹"));
+        assert_eq!(marker.bounds.x, v.layer_column + 6.);
+        assert_eq!(marker.opacity, 0.7);
+        assert_eq!(marker.color, label.color);
+        assert!(label.bounds.x >= marker.bounds.x + marker.bounds.width + 4.);
+        assert_eq!(frame.tooltip_at(marker.bounds.x + 4., marker.bounds.y + marker.bounds.height / 2.).as_deref(), Some("Starts before 0:00 (−2.5 s)"));
+        let tracks = Scene::new(vec![row("V1", RowContent::Track { clips: vec![c].into() })], 10., 30., &t).unwrap().prepare(v, &t).unwrap();
+        assert!(!tracks.ops.iter().any(|o| o.id.starts_with("clip-negative:")), "the marker belongs only to Layers mode");
+    }
+}

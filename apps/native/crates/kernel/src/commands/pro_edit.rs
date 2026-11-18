@@ -232,7 +232,23 @@ impl ProEditCommand {
                 let delta = number(*delta)?;
                 let left = targets(cx, std::slice::from_ref(left_id), *linked)?;
                 let right = targets(cx, std::slice::from_ref(right_id), *linked)?;
-                for (mut a, mut b) in adjacent_pairs(cx, &left, &right)? {
+                let pairs = adjacent_pairs(cx, &left, &right)?;
+                let mut lo = f64::NEG_INFINITY;
+                let mut hi = f64::INFINITY;
+                for (a, b) in &pairs {
+                    let frame = 1. / cx.fps(a.comp.as_deref());
+                    lo = lo.max(frame - a.dur).max(if b.remap {
+                        f64::NEG_INFINITY
+                    } else {
+                        -b.trim / b.rate
+                    });
+                    hi = hi.min(b.dur - frame).min(a.out_handle(cx));
+                }
+                if lo > hi {
+                    return Err(invalid("No source handles remain at this edit."));
+                }
+                let delta = delta.clamp(lo, hi);
+                for (mut a, mut b) in pairs {
                     a.dur += delta;
                     b.trim_in(delta)?;
                     a.write(cx, true)?;

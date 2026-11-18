@@ -941,6 +941,12 @@ impl KernelData for Data {
             Ok(Value::Null)
         })();
         if let Some(mut next) = kernel {
+            if let Some(published) = b.published() {
+                let view = b.native.timeline_view.shared().clone();
+                if let Err(error) = super::models::pin_speed_request(view, &published, &mut next) {
+                    return b.reply(request, reply, Err(error));
+                }
+            }
             next.txid = Some(request.request_id);
             if let Call::Transact {
                 expected_revision, ..

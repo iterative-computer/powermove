@@ -251,6 +251,24 @@ impl TimelineModel {
             return self.key_property(property, time);
         }
         let duration = self.index.duration;
+        if matches!(id, "trimIn" | "trimOut")
+            && layers
+                .iter()
+                .filter_map(|id| self.index.layer(id))
+                .any(|l| {
+                    !l.effectively_locked
+                        && l.kind != "group"
+                        && if id == "trimIn" {
+                            time > l.from + l.duration - 1. / self.index.fps
+                        } else {
+                            time < l.from + 1. / self.index.fps
+                        }
+                })
+        {
+            return Err(ModelError::KernelPlan(
+                "Trim refused: the playhead must leave at least one frame in the clip.".into(),
+            ));
+        }
         Ok(match id {
             "timeline.addKeyframe" => self.add_keyframes(time)?,
             "play" => Plan {
@@ -1693,12 +1711,27 @@ impl Drag {
             }
 
             DragKind::Layers { ids } => {
+                let earliest = ids
+                    .iter()
+                    .filter_map(|id| self.start.layer(id))
+                    .filter(|l| l.kind != "group")
+                    .map(|l| l.from)
+                    .reduce(f64::min)
+                    .unwrap_or(0.);
+                let clamp = |d: f64| {
+                    if self.track_snap.is_some() {
+                        d.max(-earliest)
+                    } else {
+                        d
+                    }
+                };
                 for id in ids {
                     let l = self.start.layer(id).unwrap();
                     let from = if self.snap.lock.is_some() {
-                        l.from + delta
+                        l.from + clamp(delta)
                     } else {
-                        frame(l.from + sample.time_delta, self.start.fps)
+                        let rounded = frame(l.from + sample.time_delta, self.start.fps);
+                        if self.track_snap.is_some() { l.from + clamp(rounded - l.from) } else { rounded }
                     };
                     out.push(
                         LayerCommand::Set {
@@ -1721,6 +1754,10 @@ impl Drag {
                 } else {
                     frame(first.from + sample.time_delta, self.start.fps) - first.from
                 };
+                let step = if self.track_snap.is_some() {
+                    let earliest = self.start.expanded_ids(ids).iter().filter_map(|id| self.start.layer(id)).filter(|l| l.kind != "group").map(|l| l.from).reduce(f64::min).unwrap_or(0.);
+                    step.max(-earliest)
+                } else { step };
                 out.push(
                     LayerCommand::Duplicate {
                         layer_ids: ids.clone(),
@@ -1746,12 +1783,15 @@ impl Drag {
                         if matches!(self.kind, DragKind::TrimIn { .. }) {
                             TimingCommand::TrimIn {
                                 layer_ids: vec![id.clone()],
-                                time: l.from + delta,
+                                time: (l.from + delta)
+                                    .min(l.from + l.duration - 1. / self.start.fps)
+                                    .max(if self.track_snap.is_some() { 0. } else { f64::NEG_INFINITY }),
                             }
                         } else {
                             TimingCommand::TrimOut {
                                 layer_ids: vec![id.clone()],
-                                time: l.from + l.duration + delta,
+                                time: (l.from + l.duration + delta)
+                                    .max(l.from + 1. / self.start.fps),
                             }
                         }
                         .into(),
@@ -2353,7 +2393,11 @@ impl TimelineModel {
                 row("keys.hold", hold.into(), editable, false);
                 row(MenuItem::SEPARATOR, String::new(), false, false);
                 let counted = |verb: &str| {
-                    if many { format!("{verb} {count} Keyframes") } else { format!("{verb} Keyframe") }
+                    if many {
+                        format!("{verb} {count} Keyframes")
+                    } else {
+                        format!("{verb} Keyframe")
+                    }
                 };
                 row("keys.copy", counted("Copy"), !keys.is_empty(), false);
                 row("keys.delete", counted("Delete"), editable, false);

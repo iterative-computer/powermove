@@ -1237,7 +1237,7 @@ fn add_text(
         comp: None,
         name: Some("Text".into()),
         from: None,
-        duration: None,
+        duration: crate::layer_commands::text_layer_duration(published, time),
         content,
         properties,
         color: None,
@@ -1606,6 +1606,27 @@ pub fn native_input(initial: &str, window: &Window) -> Option<Rc<dyn TextInput>>
 mod tests {
     // Not a glob: gpui's own `test` attribute would shadow the standard one.
     use super::{Align, Layout, Line, first_line, paragraph_range, word_range};
+    #[test]
+    fn g3_text_default_is_per_mode_and_clamped_to_comp_end() {
+        fn duration(p: &pm_kernel::Published, commands: &[pm_kernel::Command]) -> f64 {
+            let pm_kernel::Command::Layer(pm_kernel::LayerCommand::Add(add)) = &commands[0] else { panic!("text add"); };
+            let mut store = pm_kernel::DocumentStore::new_untitled(p.snapshot.root().unwrap().to_value());
+            store.transact("Text", pm_kernel::Origin::Interface, commands).unwrap();
+            let root = store.root().unwrap();
+            let loc = pm_kernel::model::find_layer(root, &add.id).unwrap();
+            pm_kernel::model::layer_at(root, &loc).unwrap().get("dur").unwrap().to_value().as_f64().unwrap()
+        }
+        let rig = crate::v4_view_tests::rig("timeline", 0);
+        let mut p = (*rig.kernel.published(crate::v4_view_tests::PROJECT).unwrap()).clone();
+        for (mode, time, expected) in [("layers", 2., 8.), ("tracks", 2., 5.), ("tracks", 8., 2.), ("layers", 10. - 1. / 30., 1. / 30.)] {
+            p.ui_state.timeline = pm_model::json::parse(&format!(r#"{{"mode":"{mode}"}}"#)).unwrap();
+            let commands = super::add_text(&p, "title", [0., 0.], None, time);
+            assert!((duration(&p, &commands) - expected).abs() < 1e-8);
+            let plan = crate::layer_commands::command_plan("newText", &[], &p, time).unwrap();
+            let menu_expected = if mode == "layers" { expected.max(1.) } else { expected };
+            assert!((duration(&p, &plan.commands) - menu_expected).abs() < 1e-8);
+        }
+    }
     fn layout() -> Layout {
         // Two lines: "ab" at y 0 and "cd" at y 20; 10 px per character.
         let line = |start: usize, y: f64| Line {

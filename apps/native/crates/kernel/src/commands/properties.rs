@@ -262,8 +262,8 @@ fn numeric_channel(prop: &Value) -> bool {
     }
 }
 
-/// `constantVideoSpeed(layer)`.
-fn constant_video_speed(layer: &Value) -> Option<f64> {
+/// The static video rate, or None for an authored remap/animated rate.
+pub fn constant_video_speed(layer: &Value) -> Option<f64> {
     if values::text(layer, "type") != Some("video") {
         return None;
     }
@@ -376,8 +376,12 @@ pub(crate) fn plan_set(
     c: &SetProperty,
     presets: &mut Presets,
     selection: &crate::selection::Selection,
+    state: Option<&crate::state::StateSnapshot>,
+    project: Option<&str>,
 ) -> Result<Vec<pm_model::Op>, CommandError> {
     let mut cx = Cx::new(root, origin);
+    cx.state = state;
+    cx.project = project;
     cx.selection = Some(selection);
     set_property_inner(&mut cx, c, Some(presets), true)?;
     Ok(cx.finish())
@@ -501,7 +505,9 @@ fn set_property_inner(
         let prop = channels::get_mut(&mut layer, &path).expect("resolved");
         values::obj(prop).insert("v", value);
         if channel == "c.speed" {
+            let old_duration = values::num(&layer, "dur").unwrap_or(0.);
             resize_video_for_speed(&mut layer, speed_before, fps);
+            super::timing::speed_ripple(cx, &layer, old_duration)?;
         }
     }
     if c.mark_intent {

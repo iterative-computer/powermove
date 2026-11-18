@@ -4214,3 +4214,78 @@ fn keyframe_reveal_runs_once_per_property_in_a_live_gesture() {
     add_reveal_key(&mut c, "c", "opacity", "later-gesture", 2.);
     assert!(has_property(&c, "c", "opacity"));
 }
+
+#[test]
+#[test]
+fn g3_roll_tool_preserves_rotation_and_work_area_shortcuts() {
+    for (key, expected) in [("r", "timeline.revealProperty:r"), ("n", "workOut")] {
+        let resolved = resolve_key(&KeyInput {
+            key,
+            modifiers: mods(),
+            repeat: false,
+            in_field: false,
+        }).unwrap();
+        assert_eq!(resolved.command, expected);
+    }
+    let (_a, mut c) = client();
+    command(&mut c, "timeline.tool:roll", 0.);
+    assert_eq!(c.model.edit_tool, EditTool::Roll);
+    command(&mut c, "timeline.tool:selection", 0.);
+    assert_eq!(c.model.edit_tool, EditTool::Selection);
+}
+#[test]
+fn g3_tracks_drag_stops_at_zero_but_layers_keep_negative_starts() {
+    for (mode, expected) in [(TimelineMode::Tracks, 0.), (TimelineMode::Layers, -8.)] {
+        let (_a, mut c) = client();
+        c.model.mode = mode;
+        block_on(c.begin_drag(DragKind::Layers {
+            ids: strings(&["a", "b"]),
+        }))
+        .unwrap();
+        block_on(c.drag(sample(-9.))).unwrap();
+        assert_eq!(c.model.index.layer("a").unwrap().from, expected);
+        assert_eq!(c.model.index.layer("b").unwrap().from, expected + 4.);
+        block_on(c.finish_drag(true)).unwrap();
+    }
+}
+
+#[test]
+fn g3_tracks_duplicate_drag_also_stops_at_zero() {
+    let (_a, mut c) = client();
+    c.model.mode = TimelineMode::Tracks;
+    block_on(c.begin_drag(DragKind::DuplicateLayers { ids: strings(&["a"]), new_ids: strings(&["copy-a"]) })).unwrap();
+    block_on(c.drag(sample(-9.))).unwrap();
+    assert_eq!(c.model.index.layer("copy-a").unwrap().from, 0.);
+    assert_eq!(c.model.index.layer("a").unwrap().from, 1.);
+    block_on(c.finish_drag(true)).unwrap();
+}
+
+#[test]
+fn g3_layer_moves_keep_existing_absolute_frame_rounding() {
+    for mode in [TimelineMode::Layers, TimelineMode::Tracks] {
+        let mut value = fixture();
+        layer_mut(&mut value, 0).insert("from", Value::from(0.125));
+        let (_a, mut c) = client_with(value);
+        c.model.mode = mode;
+        c.model.track_snap_disabled = true;
+        block_on(c.begin_drag(DragKind::Layers { ids: strings(&["a"]) })).unwrap();
+        block_on(c.drag(sample(0.01))).unwrap();
+        assert!((c.model.index.layer("a").unwrap().from - 4. / 30.).abs() < 1e-9);
+        block_on(c.finish_drag(true)).unwrap();
+    }
+}
+
+#[test]
+fn g3_tracks_group_clamp_uses_member_span_not_container_metadata() {
+    let mut value = fixture();
+    layer_mut(&mut value, 0).insert("type", Value::from("group"));
+    layer_mut(&mut value, 0).insert("from", Value::from(0.));
+    layer_mut(&mut value, 1).insert("group", Value::from("a"));
+    let (_a, mut c) = client_with(value);
+    c.model.mode = TimelineMode::Tracks;
+    c.model.track_snap_disabled = true;
+    block_on(c.begin_drag(DragKind::Layers { ids: strings(&["a"]) })).unwrap();
+    block_on(c.drag(sample(-9.))).unwrap();
+    assert_eq!(c.model.index.layer("b").unwrap().from, 0.);
+    block_on(c.finish_drag(true)).unwrap();
+}

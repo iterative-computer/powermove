@@ -673,7 +673,7 @@ impl Kernel {
             .ok_or_else(|| KernelFailure::NoProject(id.to_owned()))?;
         slot.project
             .store_mut()
-            .set_runtime_state(self.state.clone(), self.config.text.clone());
+            .set_runtime_state_for_project(id, self.state.clone(), self.config.text.clone());
         let metadata_write = matches!(&request.call, Call::Memory(_) | Call::AdmitMedia(_));
         if metadata_write && (slot.journal.is_none() || self.durability.is_none()) {
             return Err(KernelFailure::Storage(

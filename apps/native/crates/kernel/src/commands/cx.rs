@@ -54,6 +54,7 @@ pub fn new_id(prefix: &str) -> String {
 pub struct Cx<'a> {
     base: &'a Node,
     pub(super) selection: Option<&'a crate::selection::Selection>,
+    pub(super) project: Option<&'a str>,
     pub(super) state: Option<&'a crate::state::StateSnapshot>,
     pub(super) text: Option<&'a crate::text_host::SharedTextHost>,
     origin: Origin,
@@ -67,6 +68,7 @@ impl<'a> Cx<'a> {
         Cx {
             base: root,
             selection: None,
+            project: None,
             state: None,
             text: None,
             origin,

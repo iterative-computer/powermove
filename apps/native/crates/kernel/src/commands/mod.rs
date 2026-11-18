@@ -275,7 +275,7 @@ impl Command {
     /// Validates against `root` (the scratch project tree) and returns the
     /// operations; empty when the document already says so.
     pub fn plan(&self, root: &Node, origin: Origin) -> Result<Vec<Op>, CommandError> {
-        self.plan_with_state(root, origin, None, None)
+        self.plan_with_state(root, origin, None, None, None)
     }
 
     pub(crate) fn plan_with_state(
@@ -283,6 +283,7 @@ impl Command {
         root: &Node,
         origin: Origin,
         state: Option<&crate::state::StateSnapshot>,
+        project: Option<&str>,
         text: Option<&crate::text_host::SharedTextHost>,
     ) -> Result<Vec<Op>, CommandError> {
         // Bar moves only change a scalar. Avoid materializing the layer and
@@ -301,6 +302,7 @@ impl Command {
         }
         let mut cx = Cx::new(root, origin);
         cx.state = state;
+        cx.project = project;
         cx.text = text;
         match self {
             Command::SetStaticOpacity { .. }

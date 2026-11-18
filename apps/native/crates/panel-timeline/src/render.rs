@@ -1271,7 +1271,7 @@ impl Scene {
             RowContent::Layer { clip, summary } => {
                 let strip = clip
                     .as_ref()
-                    .and_then(|clip| paint_clip(clip, y, h, v, self.label_step(v).0, seen, t, ops));
+                    .and_then(|clip| paint_clip(clip, y, h, v, self.label_step(v).0, seen, true, t, ops));
                 if let (Some(clip), Some(strip)) = (clip, strip) {
                     self.paint_stagger(clip, strip, v, t, ops);
                 }
@@ -1310,7 +1310,7 @@ impl Scene {
                 });
                 let grid = self.label_step(v).0;
                 for clip in &clips[first.min(last)..last] {
-                    if let Some(strip) = paint_clip(clip, y, h, v, grid, seen, t, ops) {
+                    if let Some(strip) = paint_clip(clip, y, h, v, grid, seen, false, t, ops) {
                         self.paint_stagger(clip, strip, v, t, ops);
                     }
                 }
@@ -1723,6 +1723,7 @@ fn paint_clip(
     v: Viewport,
     grid: f64,
     seen: Seen,
+    layers: bool,
     t: &Tokens,
     ops: &mut Vec<Op>,
 ) -> Option<Rect> {
@@ -1859,7 +1860,22 @@ fn paint_clip(
     // The name starts clear of the trim grip that stands inside a hovered
     // strip's edge.
     let grip = t.trim_grip();
-    let lead = (grip.inset + grip.width + t.space.xs) as f64;
+    let negative_start = layers && c.from < 0. && n.width > 20.;
+    if negative_start {
+        let mut marker = Op::new(
+            format!("clip-negative:{}", c.id), "text",
+            Rect::new(n.x + 6., n.y, 8., n.height), material.foreground,
+        );
+        marker.text = Some("‹".into());
+        marker.font_size = t.typography.minimum as f64;
+        marker.opacity = 0.7;
+        let seconds = format!("{:.3}", c.from.abs());
+        let seconds = seconds.trim_end_matches('0').trim_end_matches('.');
+        marker.detail = json!({"tooltip":format!("Starts before 0:00 (−{seconds} s)")});
+        ops.push(marker);
+    }
+    let lead = (grip.inset + grip.width + t.space.xs) as f64
+        + if negative_start { 12. } else { 0. };
     let offline_w = if offline {
         let w = t.typography.minimum as f64 * OFFLINE_ADVANCE;
         let mut o = Op::new(
@@ -2384,9 +2400,10 @@ impl Frame {
         ])
     }
     /// Topmost op of a family under the point. Native hit testing follows paint order.
-    /// The tooltip of the op under the point (a clip's Missing effect badge).
+    /// The tooltip of a clip badge under the point.
     pub fn tooltip_at(&self, x: f64, y: f64) -> Option<String> {
-        self.hit_op("clip-missing-effect:", x, y, 0.)
+        self.hit_op("clip-negative:", x, y, 0.)
+            .or_else(|| self.hit_op("clip-missing-effect:", x, y, 0.))
             .and_then(|o| o.detail["tooltip"].as_str())
             .map(str::to_owned)
     }

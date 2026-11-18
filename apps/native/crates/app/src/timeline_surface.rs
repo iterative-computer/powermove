@@ -79,6 +79,9 @@ pub trait Delegate: 'static {
     /// Latest output-mix peaks, media tick and playback flag. The timeline
     /// expires paused scrub taps from their media tick.
     fn audio_peaks(&self, _cx: &App) -> Option<([f64; 2], i64, bool)> { None }
+    /// The immutable model behind the displayed lanes, for native edits
+    /// made outside the timeline (notably speed in Properties).
+    fn tracks_view(&self, _view: Arc<TimelineModel>, _cx: &mut App) {}
     fn time(&self, cx: &App) -> f64;
     /// Media dropped on the timeline (Finder files, Project items).
     fn drop_media(&self, _drop: MediaDrop, _cx: &mut App) {}
@@ -1422,6 +1425,9 @@ impl TimelineSurface {
             }
         }
         self.model = built.model;
+        let delegate = self.delegate.clone();
+        let view = self.model.clone();
+        cx.defer(move |cx| delegate.tracks_view(view, cx));
         self.scene = Some(self.with_focus(built.scene.clone()));
         self.graph = steady_graph(&self.gesture, self.graph.as_deref(), built.graph.clone());
         // A range the wheel panned to stays for its view.
@@ -2309,10 +2315,10 @@ impl TimelineSurface {
                         pm_panel_timeline::render::Edge::In => Edge::In,
                         pm_panel_timeline::render::Edge::Out => Edge::Out,
                     };
-                    if tool == EditTool::Ripple || tracks && mods.alt {
-                        Spec::Ripple(edge)
-                    } else if tool == EditTool::Roll || tracks && mods.control {
+                    if tool == EditTool::Roll || mods.alt {
                         Spec::Roll(edge)
+                    } else if tool == EditTool::Ripple || tracks && mods.control {
+                        Spec::Ripple(edge)
                     } else {
                         Spec::Trim(edge)
                     }

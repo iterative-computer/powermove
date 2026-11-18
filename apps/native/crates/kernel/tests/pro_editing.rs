@@ -182,8 +182,8 @@ fn locked_downstream_refuses_entire_ripple_and_locked_neighbor_refuses_roll() {
     reject(&mut s, roll(1.));
 }
 #[test]
-fn exhausted_handles_minimum_duration_nan_and_nonadjacency_refuse() {
-    for d in [-20., 4., f64::NAN, f64::INFINITY] {
+fn roll_clamps_finite_limits_but_nan_and_nonadjacency_refuse() {
+    for d in [f64::NAN, f64::INFINITY] {
         let mut s = abc();
         reject(&mut s, roll(d));
     }
@@ -192,7 +192,17 @@ fn exhausted_handles_minimum_duration_nan_and_nonadjacency_refuse() {
     let mut a = clip("a", 0., 4., 0);
     a["d"]["trim"]["v"] = json!(96.);
     let mut s = store(vec![a, clip("b", 4., 4., 0)]);
-    reject(&mut s, roll(1.));
+    let before = root(&s);
+    run(&mut s, roll(1.));
+    assert_eq!(root(&s), before, "an exhausted handle stays at its limit");
+    for delta in [-20., 4.] {
+        let mut s = abc();
+        run(&mut s, roll(delta));
+        let a = n(&layer(&s, "a"), &["dur"]);
+        let b = n(&layer(&s, "b"), &["dur"]);
+        assert!(a + 1e-8 >= 1. / 30. && b + 1e-8 >= 1. / 30.);
+        assert!((a + b - 8.).abs() < 1e-8);
+    }
 }
 #[test]
 fn locked_ancestor_and_animated_timing_are_atomic() {
@@ -728,4 +738,15 @@ fn a_remapped_clip_extends_its_in_point() {
     let b = layer(&s, "b");
     assert_eq!(n(&b, &["from"]), 3.);
     assert_eq!(n(&b, &["d", "sourceTime", "kf", "0", "t"]), 1.);
+}
+
+#[test]
+fn g3_roll_clamps_both_media_handles_in_one_undo() {
+    let mut a = clip("a", 0., 4., 0);
+    a["d"]["trim"]["v"] = json!(94.);
+    let mut s = store(vec![a, clip("b", 4., 4., 0)]);
+    roundtrip(&mut s, roll(20.));
+    assert_eq!(n(&layer(&s, "a"), &["dur"]), 6.);
+    assert_eq!(n(&layer(&s, "b"), &["from"]), 6.);
+    assert_eq!(n(&layer(&s, "b"), &["dur"]), 2.);
 }

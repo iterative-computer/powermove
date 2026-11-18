@@ -503,6 +503,11 @@ fn trim(cx: &mut Cx<'_>, layer_ids: &[String], time: f64, start: bool) -> Result
         let fps = cx.fps(loc.comp_id.as_deref());
         let from = values::num(&layer, "from").unwrap_or(0.0);
         let dur = values::num(&layer, "dur").unwrap_or(0.0);
+        if (start && time >= from + dur) || (!start && time <= from) {
+            return Err(CommandError::Invalid(
+                "Trim refused: the playhead must leave at least one frame in the clip.".into(),
+            ));
+        }
         let mut next = layer.clone();
         if start {
             let mut nf = time.min(from + dur - 1.0 / fps);
@@ -1251,7 +1256,7 @@ fn roll(cx: &mut Cx<'_>, id: &str, edge: TimeEdge, time: f64) -> Result<(), Comm
                 from + media_limit(cx, &layer).unwrap_or(f64::INFINITY),
             );
             if let Some(next) = &next {
-                hi = ends(next).1 - frame;
+                hi = hi.min(ends(next).1 - frame);
                 lo = lo.max(first_start(next));
             }
             let t = time.clamp(lo, hi.max(lo));
@@ -1564,4 +1569,48 @@ fn source_times(
         })
     })?;
     Ok(times)
+}
+
+/// Static speed changes keep the in-point and ripple only the current track.
+/// The caller writes the resized target in the same transaction/undo step.
+pub(super) fn speed_ripple(
+    cx: &mut Cx<'_>,
+    layer: &Value,
+    old_duration: f64,
+) -> Result<(), CommandError> {
+    let project = cx.project.unwrap_or_default();
+    let tracks = cx
+        .state
+        .and_then(|s| s.ui.get(project))
+        .is_some_and(|ui| ui.timeline.get("mode").and_then(Value::as_str) == Some("tracks"));
+    if !tracks {
+        return Ok(());
+    }
+    let id = values::text(layer, "id").unwrap_or_default();
+    let loc = cx.find(id)?;
+    let from = values::num(layer, "from").unwrap_or(0.);
+    let delta = values::num(layer, "dur").unwrap_or(old_duration) - old_duration;
+    if delta.abs() < EDGE_EPS {
+        return Ok(());
+    }
+    let track = track_of(layer);
+    for other in cx.layers(loc.comp_id.as_deref()) {
+        if values::text(&other, "id") == Some(id)
+            || track_of(&other) != track
+            || values::text(&other, "type") == Some("group")
+        {
+            continue;
+        }
+        let start = values::num(&other, "from").unwrap_or(0.);
+        if start < from + old_duration - EDGE_EPS {
+            continue;
+        }
+        let other_id = values::text(&other, "id").unwrap_or_default();
+        let other_loc = cx.find(other_id)?;
+        cx.check_lock(&other_loc, other_id)?;
+        let mut moved = other;
+        values::obj(&mut moved).insert("from", Value::Number(start + delta));
+        cx.put_layer(&other_loc, moved)?;
+    }
+    Ok(())
 }

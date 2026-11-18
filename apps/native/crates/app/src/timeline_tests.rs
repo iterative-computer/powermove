@@ -14,6 +14,7 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 #[derive(Default)]
 pub(crate) struct Recorder {
     pub audio: RefCell<Option<([f64; 2], i64, bool)>>,
+    pub runtime: RefCell<Option<std::sync::Arc<pm_builtins::Builtins>>>,
     pub time: RefCell<f64>,
     pub timing_previews: RefCell<Vec<Option<pm_kernel::Snapshot>>>,
     pub seeks: RefCell<Vec<f64>>,
@@ -43,6 +44,13 @@ impl Delegate for Recording {
         self.0.timing_previews.borrow_mut().push(snapshot);
     }
     fn audio_peaks(&self, _: &App) -> Option<([f64; 2], i64, bool)> { *self.0.audio.borrow() }
+    // G3_VIEW_SNAPSHOT_BEGIN
+    fn tracks_view(&self, view: std::sync::Arc<pm_panel_timeline::TimelineModel>, _: &mut App) {
+        if let Some(runtime) = self.0.runtime.borrow().as_ref() {
+            runtime.update_timeline_view(view);
+        }
+    }
+    // G3_VIEW_SNAPSHOT_END
     fn time(&self, _: &App) -> f64 {
         *self.0.time.borrow()
     }
@@ -154,6 +162,7 @@ fn stage_with(cx: &mut TestAppContext, project: String, docked: bool) -> Stage {
     let first = publication(&rig);
     let natives = Natives::default();
     let recorder = Rc::new(Recorder::default());
+    *recorder.runtime.borrow_mut() = Some(rig.runtime.clone());
     *recorder.published.borrow_mut() = Some(rig.kernel.clone());
     let delegate = Rc::new(Recording(recorder.clone()));
     let (kernel, outline) = (rig.kernel.clone(), natives.outline.clone());
@@ -1654,10 +1663,10 @@ fn tracks_mode_ripple_roll_and_slide_edit_through_the_kernel(cx: &mut TestAppCon
         control: true,
         ..Default::default()
     };
-    // Ripple: Option-drag A's out edge shifts B and C with it.
+    // Ripple: Control-drag A's out edge shifts B and C with it.
     let (a_out, b_in) = (s.out_of("a"), s.start_of("b"));
     let from = s.at(0, a_out) - point(px(2.), px(0.));
-    s.drag(cx, from, from - point(px(30.), px(0.)), alt);
+    s.drag(cx, from, from - point(px(30.), px(0.)), control);
     assert!(
         s.recorder.reports.borrow().is_empty(),
         "{:?}",
@@ -1668,10 +1677,10 @@ fn tracks_mode_ripple_roll_and_slide_edit_through_the_kernel(cx: &mut TestAppCon
     assert!((a_out - s.out_of("a") - shifted).abs() < 1e-9);
     s.undo(cx);
     assert_eq!(s.start_of("b"), b_in);
-    // Roll: Control-drag the A/B cut moves both edges and neither outer bound.
+    // Roll: Option-drag the A/B cut moves both edges and neither outer bound.
     let (b_in, b_out) = (s.start_of("b"), s.out_of("b"));
     let from = s.at(0, s.out_of("a")) - point(px(2.), px(0.));
-    s.drag(cx, from, from - point(px(30.), px(0.)), control);
+    s.drag(cx, from, from - point(px(30.), px(0.)), alt);
     assert!(
         s.recorder.reports.borrow().is_empty(),
         "{:?}",
@@ -4137,4 +4146,297 @@ fn keyframe_reveal_scrolls_an_offscreen_row_without_moving_time(cx: &mut TestApp
     s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
     s.idle(cx);
     assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_y()), scrolled);
+}
+
+#[gpui::test]
+fn g3_ruler_click_seeks_without_horizontal_scroll(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let before = s.surface.read_with(&s.vcx, |t, _| t.scroll_time());
+    let at = s.at(0, 3.);
+    let origin = s.origin();
+    let at = point(at.x, origin.y + px(20.));
+    s.recorder.seeks.borrow_mut().clear();
+    s.vcx.simulate_event(MouseDownEvent { button: MouseButton::Left, position: at, ..Default::default() });
+    s.vcx.simulate_event(MouseUpEvent { button: MouseButton::Left, position: at, ..Default::default() });
+    s.idle(cx);
+    assert!((s.recorder.seeks.borrow().last().copied().expect("ruler seek") - 3.).abs() <= 1. / 30.);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.scroll_time()), before);
+}
+
+/// Synthetic review crops use GPUI's TestPlatform, with show(false) and
+/// focus(false) supplied by HeadlessAppContext. No native profile or window.
+#[::core::prelude::v1::test]
+#[ignore = "writes headless G3 review crops"]
+fn g3_capture_trim_review() {
+    use gpui::{HeadlessAppContext, size};
+    use std::sync::Arc;
+    let Ok(dir) = std::env::var("PM_G3_CAPTURE") else { return };
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, scheme) in [("light", pm_design::Scheme::Light), ("dark", pm_design::Scheme::Dark)] {
+        let fixture = crate::v4_view_tests::strips_json().replace("\"dur\":100", "\"dur\":12");
+        let rig = crate::v4_view_tests::rig_project("timeline", &fixture);
+        let first = publication(&rig);
+        let tokens = pm_design::Tokens::new(scheme, Default::default());
+        let tooltip_delay = tokens.motion.tooltip_delay;
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load).with_automatic_optical_sizing()),
+            Arc::new(()),
+            || Some(Box::new(gpui_apple::metal_renderer::MetalHeadlessRenderer::new())),
+        );
+        cx.allow_parking();
+        let natives = Natives::default();
+        let recorder = Rc::new(Recorder::default());
+        let surface = cx.update(|cx| cx.new(|cx| TimelineSurface::new(
+            rig.kernel.clone(), PROJECT.into(), tokens.clone(), Rc::new(Recording(recorder)), natives.outline.clone(), Default::default(), cx,
+        )));
+        natives.views.borrow_mut().insert("timeline".into(), surface.clone().into());
+        let outline = natives.outline.clone();
+        let runtime = rig.runtime.clone();
+        let window = cx.open_window(size(px(1000.), px(320.)), |window, cx| {
+            cx.new(|cx| SurfaceView::new(runtime, first, tokens, natives, window, cx))
+        }).unwrap();
+        cx.update(|cx| outline.bind(window.root(cx).unwrap().downgrade()));
+        let pump = |cx: &mut HeadlessAppContext| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                cx.run_until_parked();
+                let idle = cx.update(|cx| surface.read(cx).idle());
+                if idle {
+                    for (_, ticket) in rig.runtime.publish() {
+                        let ticket = ticket.unwrap();
+                        while ticket.try_take().is_none() {
+                            assert!(std::time::Instant::now() < deadline, "outline capture timed out");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    let publications = rig.runtime.take_publications();
+                    cx.update(|cx| {
+                        let view = window.root(cx).unwrap();
+                        for p in publications { view.update(cx, |v, cx| v.publish(p, cx)); }
+                    });
+                    cx.run_until_parked();
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "timeline capture timed out");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            cx.run_until_parked();
+        };
+        pump(&mut cx);
+        cx.update(|cx| surface.update(cx, |s, cx| s.command("timeline.mode:tracks", 0., None, false, cx)));
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/roll-before-{name}.png")).unwrap();
+        cx.update(|cx| surface.update(cx, |s, cx| s.command("timeline.tool:roll", 0., None, false, cx)));
+        pump(&mut cx);
+        let origin = cx.debug_bounds(window.into(), "timeline:surface").unwrap().unwrap().origin;
+        let position = cx.update(|cx| {
+            let s = surface.read(cx);
+            let f = s.frame().unwrap();
+            let v = f.viewport;
+            let clip = f.ops.iter().find(|o| o.id == "clip:a").unwrap();
+            origin + point(px((v.layer_column + (2. - v.scroll_time) * v.pps - 2.) as f32), px((clip.bounds.y + clip.bounds.height / 2.) as f32))
+        });
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, ..Default::default() }), cx);
+        }).unwrap();
+        pump(&mut cx);
+        let cursor = cx.update(|cx| surface.read(cx).cursor_style());
+        assert_eq!(cursor, gpui::CursorStyle::ResizeLeftRight);
+        std::fs::write(format!("{dir}/roll-cursor-{name}.txt"), format!("{cursor:?}\n")).unwrap();
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/roll-cursor-{name}.png")).unwrap();
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(gpui::PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Left, position, ..Default::default() }), cx);
+            w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position: position + point(px(35.), px(0.)), pressed_button: Some(MouseButton::Left), ..Default::default() }), cx);
+        }).unwrap();
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/roll-progress-{name}.png")).unwrap();
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(gpui::PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position: position + point(px(35.), px(0.)), ..Default::default() }), cx);
+        }).unwrap();
+        pump(&mut cx);
+        // Isolate the source-clamped edge after the roll comparison.
+        // A media-clamped out edge: 12 s source, trim 2 s, rate 2.
+        rig.kernel.call(PROJECT, Request::new(Caller::native(), Call::Transact {
+            body: pm_kernel::WriteBody::Commands(vec![pm_kernel::LayerCommand::Delete { layer_ids: vec!["b".into(), "c".into()] }.into(), pm_kernel::ContentCommand::Set { layer_id: "a".into(), patch: [("speed".into(), pm_model::Value::from(2.))].into_iter().collect(), time: 0. }.into(), pm_kernel::TimingCommand::TrimOut { layer_ids: vec!["a".into()], time: 200. }.into()]),
+            label: None, expected_revision: None,
+        })).wait().unwrap().unwrap();
+        cx.update(|cx| surface.update(cx, |s, cx| { s.published(cx); s.fit_time(cx); }));
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/trim-clamped-{name}.png")).unwrap();
+        cx.update(|cx| surface.update(cx, |s, cx| s.command("timeline.mode:layers", 0., None, false, cx)));
+        pump(&mut cx);
+        rig.kernel.call(PROJECT, Request::new(Caller::native(), Call::Transact {
+            label: None, expected_revision: None,
+            body: pm_kernel::WriteBody::Commands(vec![pm_kernel::LayerCommand::Set { layer_id: "a".into(), patch: pm_kernel::commands::layers::LayerPatch { from: Some(-1.), ..Default::default() } }.into()]),
+        })).wait().unwrap().unwrap();
+        cx.update(|cx| surface.update(cx, |s, cx| s.published(cx)));
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/negative-start-{name}.png")).unwrap();
+        let marker = cx.update(|cx| surface.read(cx).frame().unwrap().ops.iter().find(|o| o.id == "clip-negative:a").unwrap().bounds);
+        let position = origin + point(px((marker.x + 4.) as f32), px((marker.y + marker.height / 2.) as f32));
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, ..Default::default() }), cx);
+        }).unwrap();
+        pump(&mut cx);
+        cx.advance_clock(Duration::from_secs_f64(tooltip_delay + 0.1));
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/negative-hover-{name}.png")).unwrap();
+    }
+}
+
+#[gpui::test]
+fn g3_speed_keeps_automatically_packed_track_and_ripples_only_its_suffix(cx: &mut TestAppContext) {
+    let project = serde_json::json!({"id":"packed","compId":"c","name":"Packed tracks","w":640,"h":360,"fps":30,"dur":12,"assets":{"src":{"id":"src","kind":"video","dur":20}},"layers":[
+        {"id":"a","type":"video","name":"A","from":0,"dur":4,"d":{"asset":"src","trim":0,"speed":1},"p":{}},
+        {"id":"b","type":"video","name":"B","from":0,"dur":4,"d":{"asset":"src","trim":0,"speed":1},"p":{}},
+        {"id":"c","type":"video","name":"C","from":4,"dur":2,"track":1,"d":{"asset":"src","trim":4,"speed":1},"p":{}}
+    ]});
+    let mut s = stage_project(cx, project.to_string());
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.mode:tracks", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let lane = |s: &Stage| {
+        s.surface.read_with(&s.vcx, |t, _| {
+            let m = t.model();
+            pm_panel_timeline::tracks::layout(&m.index, &m.reveal)
+                .item("a")
+                .unwrap()
+                .lane
+        })
+    };
+    assert_eq!(lane(&s), 1);
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: None,
+                    expected_revision: None,
+                    body: pm_kernel::WriteBody::Commands(vec![
+                        pm_kernel::LayerCommand::Set {
+                            layer_id: "b".into(),
+                            patch: pm_kernel::commands::layers::LayerPatch {
+                                from: Some(5.),
+                                ..Default::default()
+                            },
+                        }
+                        .into(),
+                    ]),
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    assert_eq!(
+        lane(&s),
+        1,
+        "the displayed lane is held even though a fresh pack could compact it"
+    );
+    let before = s
+        .rig
+        .kernel
+        .published(PROJECT)
+        .unwrap()
+        .snapshot
+        .root()
+        .unwrap()
+        .to_value();
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["a".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut inspector = pm_builtins::Builtins::new(s.rig.kernel.clone(), PROJECT, || {}).unwrap();
+    // G3_VIEW_SNAPSHOT_BEGIN
+    inspector.update_timeline_view(s.surface.read_with(&s.vcx, |t, _| t.model()));
+    // G3_VIEW_SNAPSHOT_END
+    let mounted = inspector.mount("inspector").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(result) = mounted.try_take() {
+            result.unwrap();
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Properties mount timed out"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let binding = inspector
+        .take_publications()
+        .into_iter()
+        .rev()
+        .find_map(|p| {
+            p.surface.nodes().values().find_map(|n| {
+                (n.props.get("id").and_then(serde_json::Value::as_str)
+                    == Some("value:content.speed:0"))
+                .then(|| n.props["binding"].as_str().unwrap().to_owned())
+            })
+        })
+        .expect("native Speed field");
+    let begin = inspector
+        .scrub_begin("inspector", Some("Speed"))
+        .unwrap()
+        .wait()
+        .unwrap()
+        .unwrap();
+    let pm_kernel::Reply::Gesture(gesture) = begin.reply else {
+        panic!("speed gesture did not open")
+    };
+    // A Properties slider replays from the gesture's start. Repeating a value
+    // must pin the shown lanes again, even when the current speed already matches.
+    for _ in 0..2 {
+        inspector
+            .scrub_step("inspector", &binding, gesture, serde_json::json!(2.))
+            .unwrap()
+            .wait()
+            .unwrap()
+            .unwrap();
+        s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+        s.idle(cx);
+        assert_eq!(lane(&s), 1);
+        assert_eq!(s.start_of("a"), 0.);
+        assert_eq!(s.out_of("a"), 2.);
+        assert_eq!(s.start_of("c"), 2.);
+        assert_eq!(
+            s.start_of("b"),
+            5.,
+            "another displayed track stays in place"
+        );
+    }
+    inspector
+        .scrub_finish("inspector", gesture, true)
+        .unwrap()
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.undo(cx);
+    assert_eq!(
+        s.rig
+            .kernel
+            .published(PROJECT)
+            .unwrap()
+            .snapshot
+            .root()
+            .unwrap()
+            .to_value(),
+        before
+    );
 }

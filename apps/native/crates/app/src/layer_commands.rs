@@ -792,6 +792,14 @@ fn comp_number(published: &Published, key: &str) -> Option<f64> {
         .to_value()
         .as_f64()
 }
+/// The Text tool follows v1 in Layers; Tracks titles use five seconds.
+/// New Text also uses this in Tracks, keeping its v1 menu rule in Layers.
+pub(crate) fn text_layer_duration(published: &Published, time: f64) -> Option<f64> {
+    let fps = comp_number(published, "fps").unwrap_or(30.).max(1.);
+    let from = (time * fps).round() / fps;
+    let remaining = (comp_number(published, "dur")? - from).max(1. / fps);
+    Some(if published.ui_state.timeline.get("mode").and_then(Value::as_str) == Some("tracks") { remaining.min(5.) } else { remaining })
+}
 fn new_layer(published: &Published, kind: &str, name: &str, centred: bool, time: f64) -> Plan {
     let label = match kind {
         "null" => "New Null Object".to_owned(),
@@ -815,6 +823,7 @@ fn new_layer(published: &Published, kind: &str, name: &str, centred: bool, time:
             (Some(from), Some((dur - from).max(1.)))
         })
         .unwrap_or((None, None));
+    let duration = if kind == "text" && published.ui_state.timeline.get("mode").and_then(Value::as_str) == Some("tracks") { text_layer_duration(published, time).or(duration) } else { duration };
     let add = AddLayer {
         id: id.clone(),
         layer_type: kind.into(),
