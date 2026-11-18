@@ -305,9 +305,11 @@ test("Project extensions start checked, show sizes, and can be left out", async 
   )!;
   await event(f.root, disclosure.id, "click");
   await f.root.flush();
-  expect([...f.root.host.nodes.values()].some((n) => n.text === "6 KB")).toBe(
-    true,
-  );
+  expect(
+    f.commits.some((commit) =>
+      commit.ops.some((op) => op.op === "setText" && op.text === "6 KB"),
+    ),
+  ).toBe(true);
   await event(f.root, checkbox.id, "change", { value: false });
   await f.root.flush();
   expect(f.model.options.includeExtensions).toBe(false);

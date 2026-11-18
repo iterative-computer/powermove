@@ -27,7 +27,7 @@ const renamed: Record<string, string> = {
   studioReducedSize: "studioRenderScale",
 };
 /** Sheet options no video export has. */
-const notVideo = new Set(["depth"]);
+const notVideo = new Set(["includeExtensions", "depth"]);
 
 /** Every option a person sets in the sheet: each row's `select`, `toggle`
  * and `edit`, the format, and a custom size. A new row lands here by
