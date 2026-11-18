@@ -476,17 +476,19 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
     <>
       {/* The filter stands on the page's text column, over the list's card. */}
       <div metadata={{ settingsLayout: "line" }}>
-        <div metadata={{ settingsLayout: "line" }}>
-          <UI.TextField
-            label="Filter extensions"
-            binding={bindings.extensionSearch}
-            value={model.extensionQuery}
-            metadata={{ placeholder: "Filter", search: true }}
-            onInput={(e) => {
-              if (typeof e.value === "string") model.filterExtensions(e.value);
-            }}
-          />
-        </div>
+        <UI.TextField
+          label="Filter extensions"
+          binding={bindings.extensionSearch}
+          value={model.extensionQuery}
+          metadata={{
+            placeholder: "Filter",
+            search: true,
+            settingsLayout: "filterField",
+          }}
+          onInput={(e) => {
+            if (typeof e.value === "string") model.filterExtensions(e.value);
+          }}
+        />
         <UI.PopUpButton
           label="Extension Type"
           binding={bindings.extensionType}
@@ -577,7 +579,12 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
                   label={extension.name}
                   metadata={{ settingsLayout: "row" }}
                 >
-                  <RowCopy title={extension.name} />
+                  <UI.PushButton
+                    tabIndex={-1}
+                    label={extension.name}
+                    metadata={{ settingsLayout: "nameButton" }}
+                    onClick={() => model.viewExtension(extension.id)}
+                  />
                   <div metadata={{ settingsLayout: "line" }}>
                     <Copy
                       secondary

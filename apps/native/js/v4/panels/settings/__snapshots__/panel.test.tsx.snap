@@ -910,8 +910,7 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
     scroll group settings.detail label="Extensions"
       div group settings.section.extensions label="Extensions"
         div
-          div
-            input text-field label="Filter extensions" value=""
+          input text-field label="Filter extensions" value=""
           button pop-up-button label="Extension Type" value="All Types"
         div group label="Installed"
           text heading
@@ -921,540 +920,480 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
               div
                 virtual-list list settings.extensions label="Extensions" count=60000 range=29980,30040
                   div listitem settings.extension.fixture-29980 label="Fixture 29980"
-                    div
-                      text
-                        text "Fixture 29980"
+                    button push-button label="Fixture 29980"
+                      text "Fixture 29980"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29980"
                         text "Details"
                   div listitem settings.extension.fixture-29981 label="Fixture 29981"
-                    div
-                      text
-                        text "Fixture 29981"
+                    button push-button label="Fixture 29981"
+                      text "Fixture 29981"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29981"
                         text "Details"
                   div listitem settings.extension.fixture-29982 label="Fixture 29982"
-                    div
-                      text
-                        text "Fixture 29982"
+                    button push-button label="Fixture 29982"
+                      text "Fixture 29982"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29982"
                         text "Details"
                   div listitem settings.extension.fixture-29983 label="Fixture 29983"
-                    div
-                      text
-                        text "Fixture 29983"
+                    button push-button label="Fixture 29983"
+                      text "Fixture 29983"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29983"
                         text "Details"
                   div listitem settings.extension.fixture-29984 label="Fixture 29984"
-                    div
-                      text
-                        text "Fixture 29984"
+                    button push-button label="Fixture 29984"
+                      text "Fixture 29984"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29984"
                         text "Details"
                   div listitem settings.extension.fixture-29985 label="Fixture 29985"
-                    div
-                      text
-                        text "Fixture 29985"
+                    button push-button label="Fixture 29985"
+                      text "Fixture 29985"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29985"
                         text "Details"
                   div listitem settings.extension.fixture-29986 label="Fixture 29986"
-                    div
-                      text
-                        text "Fixture 29986"
+                    button push-button label="Fixture 29986"
+                      text "Fixture 29986"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29986"
                         text "Details"
                   div listitem settings.extension.fixture-29987 label="Fixture 29987"
-                    div
-                      text
-                        text "Fixture 29987"
+                    button push-button label="Fixture 29987"
+                      text "Fixture 29987"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29987"
                         text "Details"
                   div listitem settings.extension.fixture-29988 label="Fixture 29988"
-                    div
-                      text
-                        text "Fixture 29988"
+                    button push-button label="Fixture 29988"
+                      text "Fixture 29988"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29988"
                         text "Details"
                   div listitem settings.extension.fixture-29989 label="Fixture 29989"
-                    div
-                      text
-                        text "Fixture 29989"
+                    button push-button label="Fixture 29989"
+                      text "Fixture 29989"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29989"
                         text "Details"
                   div listitem settings.extension.fixture-29990 label="Fixture 29990"
-                    div
-                      text
-                        text "Fixture 29990"
+                    button push-button label="Fixture 29990"
+                      text "Fixture 29990"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29990"
                         text "Details"
                   div listitem settings.extension.fixture-29991 label="Fixture 29991"
-                    div
-                      text
-                        text "Fixture 29991"
+                    button push-button label="Fixture 29991"
+                      text "Fixture 29991"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29991"
                         text "Details"
                   div listitem settings.extension.fixture-29992 label="Fixture 29992"
-                    div
-                      text
-                        text "Fixture 29992"
+                    button push-button label="Fixture 29992"
+                      text "Fixture 29992"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29992"
                         text "Details"
                   div listitem settings.extension.fixture-29993 label="Fixture 29993"
-                    div
-                      text
-                        text "Fixture 29993"
+                    button push-button label="Fixture 29993"
+                      text "Fixture 29993"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29993"
                         text "Details"
                   div listitem settings.extension.fixture-29994 label="Fixture 29994"
-                    div
-                      text
-                        text "Fixture 29994"
+                    button push-button label="Fixture 29994"
+                      text "Fixture 29994"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29994"
                         text "Details"
                   div listitem settings.extension.fixture-29995 label="Fixture 29995"
-                    div
-                      text
-                        text "Fixture 29995"
+                    button push-button label="Fixture 29995"
+                      text "Fixture 29995"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29995"
                         text "Details"
                   div listitem settings.extension.fixture-29996 label="Fixture 29996"
-                    div
-                      text
-                        text "Fixture 29996"
+                    button push-button label="Fixture 29996"
+                      text "Fixture 29996"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29996"
                         text "Details"
                   div listitem settings.extension.fixture-29997 label="Fixture 29997"
-                    div
-                      text
-                        text "Fixture 29997"
+                    button push-button label="Fixture 29997"
+                      text "Fixture 29997"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29997"
                         text "Details"
                   div listitem settings.extension.fixture-29998 label="Fixture 29998"
-                    div
-                      text
-                        text "Fixture 29998"
+                    button push-button label="Fixture 29998"
+                      text "Fixture 29998"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29998"
                         text "Details"
                   div listitem settings.extension.fixture-29999 label="Fixture 29999"
-                    div
-                      text
-                        text "Fixture 29999"
+                    button push-button label="Fixture 29999"
+                      text "Fixture 29999"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 29999"
                         text "Details"
                   div listitem settings.extension.fixture-30000 label="Fixture 30000"
-                    div
-                      text
-                        text "Fixture 30000"
+                    button push-button label="Fixture 30000"
+                      text "Fixture 30000"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30000"
                         text "Details"
                   div listitem settings.extension.fixture-30001 label="Fixture 30001"
-                    div
-                      text
-                        text "Fixture 30001"
+                    button push-button label="Fixture 30001"
+                      text "Fixture 30001"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30001"
                         text "Details"
                   div listitem settings.extension.fixture-30002 label="Fixture 30002"
-                    div
-                      text
-                        text "Fixture 30002"
+                    button push-button label="Fixture 30002"
+                      text "Fixture 30002"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30002"
                         text "Details"
                   div listitem settings.extension.fixture-30003 label="Fixture 30003"
-                    div
-                      text
-                        text "Fixture 30003"
+                    button push-button label="Fixture 30003"
+                      text "Fixture 30003"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30003"
                         text "Details"
                   div listitem settings.extension.fixture-30004 label="Fixture 30004"
-                    div
-                      text
-                        text "Fixture 30004"
+                    button push-button label="Fixture 30004"
+                      text "Fixture 30004"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30004"
                         text "Details"
                   div listitem settings.extension.fixture-30005 label="Fixture 30005"
-                    div
-                      text
-                        text "Fixture 30005"
+                    button push-button label="Fixture 30005"
+                      text "Fixture 30005"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30005"
                         text "Details"
                   div listitem settings.extension.fixture-30006 label="Fixture 30006"
-                    div
-                      text
-                        text "Fixture 30006"
+                    button push-button label="Fixture 30006"
+                      text "Fixture 30006"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30006"
                         text "Details"
                   div listitem settings.extension.fixture-30007 label="Fixture 30007"
-                    div
-                      text
-                        text "Fixture 30007"
+                    button push-button label="Fixture 30007"
+                      text "Fixture 30007"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30007"
                         text "Details"
                   div listitem settings.extension.fixture-30008 label="Fixture 30008"
-                    div
-                      text
-                        text "Fixture 30008"
+                    button push-button label="Fixture 30008"
+                      text "Fixture 30008"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30008"
                         text "Details"
                   div listitem settings.extension.fixture-30009 label="Fixture 30009"
-                    div
-                      text
-                        text "Fixture 30009"
+                    button push-button label="Fixture 30009"
+                      text "Fixture 30009"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30009"
                         text "Details"
                   div listitem settings.extension.fixture-30010 label="Fixture 30010"
-                    div
-                      text
-                        text "Fixture 30010"
+                    button push-button label="Fixture 30010"
+                      text "Fixture 30010"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30010"
                         text "Details"
                   div listitem settings.extension.fixture-30011 label="Fixture 30011"
-                    div
-                      text
-                        text "Fixture 30011"
+                    button push-button label="Fixture 30011"
+                      text "Fixture 30011"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30011"
                         text "Details"
                   div listitem settings.extension.fixture-30012 label="Fixture 30012"
-                    div
-                      text
-                        text "Fixture 30012"
+                    button push-button label="Fixture 30012"
+                      text "Fixture 30012"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30012"
                         text "Details"
                   div listitem settings.extension.fixture-30013 label="Fixture 30013"
-                    div
-                      text
-                        text "Fixture 30013"
+                    button push-button label="Fixture 30013"
+                      text "Fixture 30013"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30013"
                         text "Details"
                   div listitem settings.extension.fixture-30014 label="Fixture 30014"
-                    div
-                      text
-                        text "Fixture 30014"
+                    button push-button label="Fixture 30014"
+                      text "Fixture 30014"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30014"
                         text "Details"
                   div listitem settings.extension.fixture-30015 label="Fixture 30015"
-                    div
-                      text
-                        text "Fixture 30015"
+                    button push-button label="Fixture 30015"
+                      text "Fixture 30015"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30015"
                         text "Details"
                   div listitem settings.extension.fixture-30016 label="Fixture 30016"
-                    div
-                      text
-                        text "Fixture 30016"
+                    button push-button label="Fixture 30016"
+                      text "Fixture 30016"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30016"
                         text "Details"
                   div listitem settings.extension.fixture-30017 label="Fixture 30017"
-                    div
-                      text
-                        text "Fixture 30017"
+                    button push-button label="Fixture 30017"
+                      text "Fixture 30017"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30017"
                         text "Details"
                   div listitem settings.extension.fixture-30018 label="Fixture 30018"
-                    div
-                      text
-                        text "Fixture 30018"
+                    button push-button label="Fixture 30018"
+                      text "Fixture 30018"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30018"
                         text "Details"
                   div listitem settings.extension.fixture-30019 label="Fixture 30019"
-                    div
-                      text
-                        text "Fixture 30019"
+                    button push-button label="Fixture 30019"
+                      text "Fixture 30019"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30019"
                         text "Details"
                   div listitem settings.extension.fixture-30020 label="Fixture 30020"
-                    div
-                      text
-                        text "Fixture 30020"
+                    button push-button label="Fixture 30020"
+                      text "Fixture 30020"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30020"
                         text "Details"
                   div listitem settings.extension.fixture-30021 label="Fixture 30021"
-                    div
-                      text
-                        text "Fixture 30021"
+                    button push-button label="Fixture 30021"
+                      text "Fixture 30021"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30021"
                         text "Details"
                   div listitem settings.extension.fixture-30022 label="Fixture 30022"
-                    div
-                      text
-                        text "Fixture 30022"
+                    button push-button label="Fixture 30022"
+                      text "Fixture 30022"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30022"
                         text "Details"
                   div listitem settings.extension.fixture-30023 label="Fixture 30023"
-                    div
-                      text
-                        text "Fixture 30023"
+                    button push-button label="Fixture 30023"
+                      text "Fixture 30023"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30023"
                         text "Details"
                   div listitem settings.extension.fixture-30024 label="Fixture 30024"
-                    div
-                      text
-                        text "Fixture 30024"
+                    button push-button label="Fixture 30024"
+                      text "Fixture 30024"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30024"
                         text "Details"
                   div listitem settings.extension.fixture-30025 label="Fixture 30025"
-                    div
-                      text
-                        text "Fixture 30025"
+                    button push-button label="Fixture 30025"
+                      text "Fixture 30025"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30025"
                         text "Details"
                   div listitem settings.extension.fixture-30026 label="Fixture 30026"
-                    div
-                      text
-                        text "Fixture 30026"
+                    button push-button label="Fixture 30026"
+                      text "Fixture 30026"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30026"
                         text "Details"
                   div listitem settings.extension.fixture-30027 label="Fixture 30027"
-                    div
-                      text
-                        text "Fixture 30027"
+                    button push-button label="Fixture 30027"
+                      text "Fixture 30027"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30027"
                         text "Details"
                   div listitem settings.extension.fixture-30028 label="Fixture 30028"
-                    div
-                      text
-                        text "Fixture 30028"
+                    button push-button label="Fixture 30028"
+                      text "Fixture 30028"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30028"
                         text "Details"
                   div listitem settings.extension.fixture-30029 label="Fixture 30029"
-                    div
-                      text
-                        text "Fixture 30029"
+                    button push-button label="Fixture 30029"
+                      text "Fixture 30029"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30029"
                         text "Details"
                   div listitem settings.extension.fixture-30030 label="Fixture 30030"
-                    div
-                      text
-                        text "Fixture 30030"
+                    button push-button label="Fixture 30030"
+                      text "Fixture 30030"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30030"
                         text "Details"
                   div listitem settings.extension.fixture-30031 label="Fixture 30031"
-                    div
-                      text
-                        text "Fixture 30031"
+                    button push-button label="Fixture 30031"
+                      text "Fixture 30031"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30031"
                         text "Details"
                   div listitem settings.extension.fixture-30032 label="Fixture 30032"
-                    div
-                      text
-                        text "Fixture 30032"
+                    button push-button label="Fixture 30032"
+                      text "Fixture 30032"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30032"
                         text "Details"
                   div listitem settings.extension.fixture-30033 label="Fixture 30033"
-                    div
-                      text
-                        text "Fixture 30033"
+                    button push-button label="Fixture 30033"
+                      text "Fixture 30033"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30033"
                         text "Details"
                   div listitem settings.extension.fixture-30034 label="Fixture 30034"
-                    div
-                      text
-                        text "Fixture 30034"
+                    button push-button label="Fixture 30034"
+                      text "Fixture 30034"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30034"
                         text "Details"
                   div listitem settings.extension.fixture-30035 label="Fixture 30035"
-                    div
-                      text
-                        text "Fixture 30035"
+                    button push-button label="Fixture 30035"
+                      text "Fixture 30035"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30035"
                         text "Details"
                   div listitem settings.extension.fixture-30036 label="Fixture 30036"
-                    div
-                      text
-                        text "Fixture 30036"
+                    button push-button label="Fixture 30036"
+                      text "Fixture 30036"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30036"
                         text "Details"
                   div listitem settings.extension.fixture-30037 label="Fixture 30037"
-                    div
-                      text
-                        text "Fixture 30037"
+                    button push-button label="Fixture 30037"
+                      text "Fixture 30037"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30037"
                         text "Details"
                   div listitem settings.extension.fixture-30038 label="Fixture 30038"
-                    div
-                      text
-                        text "Fixture 30038"
+                    button push-button label="Fixture 30038"
+                      text "Fixture 30038"
                     div
                       text
                         text "Effects · Installed"
                       button push-button label="Details for Fixture 30038"
                         text "Details"
                   div listitem settings.extension.fixture-30039 label="Fixture 30039"
-                    div
-                      text
-                        text "Fixture 30039"
+                    button push-button label="Fixture 30039"
+                      text "Fixture 30039"
                     div
                       text
                         text "Effects · Installed"
@@ -1700,98 +1639,4 @@ exports[`shortcuts-asked: six-op tree snapshot passes the real Rust wire and kit
               div status label="Shortcut in use"
                 text "Q is used by Ripple Trim In Point to Playhead. Press it again to move it here, or Esc to cancel."
 Focus: ["Search Commands","Change the shortcut for Ripple Trim In Point to Playhead","Type a shortcut. Escape cancels."]"
-`;
-
-exports[`transcription available wire/AX state 1`] = `
-"root
-  div group settings label="Settings"
-    scroll group settings.detail label="Transcription"
-      div group settings.section.transcription label="Transcription"
-        div group label="Models"
-          text heading
-            text "Models"
-          div group label="Models"
-            div form-group group label="Models"
-              div group label="Fixture speech"
-                div
-                  text
-                    text "Fixture speech"
-                  text
-                    text "Fixture size"
-                div
-                  button push-button label="Download"
-                    text "Download"
-Focus: ["Download"]"
-`;
-
-exports[`transcription downloading wire/AX state 1`] = `
-"root
-  div group settings label="Settings"
-    scroll group settings.detail label="Transcription"
-      div group settings.section.transcription label="Transcription"
-        div group label="Models"
-          text heading
-            text "Models"
-          div group label="Models"
-            div form-group group label="Models"
-              div group label="Fixture speech"
-                div
-                  text
-                    text "Fixture speech"
-                  text
-                    text "Fixture size"
-                div
-                  div progress-row progressbar label="Fixture speech" value=0.25
-                    text "Fixture speech"
-                  button push-button label="Cancel"
-                    text "Cancel"
-Focus: ["Cancel"]"
-`;
-
-exports[`transcription installed wire/AX state 1`] = `
-"root
-  div group settings label="Settings"
-    scroll group settings.detail label="Transcription"
-      div group settings.section.transcription label="Transcription"
-        div group label="Models"
-          text heading
-            text "Models"
-          div group label="Models"
-            div form-group group label="Models"
-              div group label="Fixture speech"
-                div
-                  text
-                    text "Fixture speech"
-                  text
-                    text "Fixture size"
-                div
-                  button push-button label="Use"
-                    text "Use"
-                  button push-button label="Delete…"
-                    text "Delete…"
-Focus: ["Use","Delete…"]"
-`;
-
-exports[`transcription error wire/AX state 1`] = `
-"root
-  div group settings label="Settings"
-    scroll group settings.detail label="Transcription"
-      div group settings.section.transcription label="Transcription"
-        div group label="Models"
-          text heading
-            text "Models"
-          div group label="Models"
-            div form-group group label="Models"
-              div group label="Fixture speech"
-                div
-                  text
-                    text "Fixture speech"
-                  text
-                    text "Fixture size"
-                div
-                  div status label="Fixture service error"
-                    text "Fixture service error"
-                  button push-button label="Retry"
-                    text "Retry"
-Focus: ["Retry"]"
 `;

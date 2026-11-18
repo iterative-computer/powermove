@@ -832,7 +832,15 @@ impl Render<'_, '_> {
             button.setAlignment(NSTextAlignment::Left);
             button.setRefusesFirstResponder(true);
         }
-        if matches!(kind, Kind::Search | Kind::Slider) {
+        if layout(node) == "filterField" {
+            view.widthAnchor()
+                .constraintGreaterThanOrEqualToConstant(175.)
+                .setActive(true);
+            view.setContentHuggingPriority_forOrientation(
+                NSLayoutPriorityDefaultLow - 1.,
+                NSLayoutConstraintOrientation::Horizontal,
+            );
+        } else if matches!(kind, Kind::Search | Kind::Slider) {
             view.widthAnchor()
                 .constraintEqualToConstant(175.)
                 .setActive(true);
