@@ -58,6 +58,7 @@ const flags = (def: Data) => ({
   viewportSafe: !!def.viewportSafe,
   viewportPadding: (def.viewportPadding ?? []).map(String),
   clamp: !!def.clamp,
+  ...(def.convexQuad ? { convexQuad: def.convexQuad } : {}),
 });
 const FORK_OF = (kernel: Data, owner: string) =>
   kernel.ownerOrigin?.(owner) ?? "local";

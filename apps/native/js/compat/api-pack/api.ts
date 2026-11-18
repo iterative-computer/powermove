@@ -239,6 +239,8 @@ export interface EffectDefinition {
   viewportSafe?: boolean;
   /** Numeric parameter keys whose values are sampled outside the viewport. */
   viewportPadding?: string[];
+  /** Eight percentage-offset keys (TL/TR/BR/BL x,y); invalid quads report an effect error. */
+  convexQuad?: string[];
 }
 
 /**

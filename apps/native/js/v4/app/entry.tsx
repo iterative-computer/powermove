@@ -1,6 +1,7 @@
 /** Production V8 worker entry. Every built-in owns a separate extension isolate. */
 import * as preact from "preact";
 import { chunkedSurfaceTransport } from "./surface-transfer";
+import { effectsAPI } from "../src/effects";
 import * as preactHooks from "preact/hooks";
 import * as runtimeModule from "../src";
 import { createRoot } from "../src";
@@ -152,6 +153,7 @@ const publishCommands = () =>
       key: c.key ?? null,
     })),
   );
+const effectApi = effectsAPI(effects => { native("effects.set", effects); });
 const commandApi: Commands = {
   register({ id, title, key }, run) {
     if (typeof id !== "string" || !id || typeof title !== "string" || !title)
@@ -344,6 +346,7 @@ async function mountExtension(
     hot: api,
     commands: commandApi,
     themes: themeApi,
+    effects: effectApi,
     menus: menuApi,
   };
   (env as any).overlays = overlaysFor(env as any);
@@ -395,6 +398,7 @@ async function mountExtension(
     hot: api,
     commands: commandApi,
     themes: themeApi,
+    effects: effectApi,
     menus: menuApi,
     overlays: (env as any).overlays,
     timeline: timelineApi,

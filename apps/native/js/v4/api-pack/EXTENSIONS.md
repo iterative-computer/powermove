@@ -54,9 +54,12 @@ when available, and say honestly what you could not check.
   extension API, documented in `v3/EXTENSIONS.md` with its types in `v3/`
   (Svelte panels, effects, transitions, layer types, commands, keybindings,
   menus, themes, status items). They load and publish the same way. Use them
-  for effects: v4 has no registration API for those yet. Effect definitions can
-  declare `viewerHandles` for points, lines, angles, radii and rectangles; see
-  **Viewer handles** in `v3/EXTENSIONS.md` for bindings and shader-layer examples.
+  for legacy effects, or register the same EffectDefinition with
+  `effects.register(definition)` in v4 `mount({ effects })`. Registration
+  returns a disposer and parameters use the native keyframe controls.
+  Effect definitions can declare `viewerHandles` for points, lines, angles,
+  radii and rectangles. See **Viewer handles** in `v3/EXTENSIONS.md` for
+  bindings and shader-layer examples.
 - `replaces`: built-in ids this extension draws in place of (forks).
 - Credentials never go in source: declare `vars` and read them at runtime.
 
@@ -157,3 +160,9 @@ new built-in). Then publish it as `updated`.
 
 Prefer, in order: a new extension; a change to an existing user extension; a
 fork of a built-in.
+
+Effects may declare `convexQuad: ['tlX','tlY','trX','trY','brX','brY','blX','blY']`
+when those eight numeric parameters are percentage corner offsets. The compositor
+checks their evaluated values each frame. Concave, crossing, singular or mirrored
+manual quadrilaterals report an effect definition error. Viewer frames bypass
+that instance; deliveries refuse invalid pins.

@@ -269,21 +269,57 @@ pub(crate) struct Ready {
 }
 pub(crate) fn from_uv(owner: &super::plan::Owner) -> [f32; 9] {
     let m = owner.uv.map(f64::from);
-    // A normalized UV matrix can have a very small valid determinant for
-    // large sources. The document transform's absolute threshold is not a
-    // valid singularity test in these units.
-    let det = m[0] * m[4] - m[1] * m[3];
+    // Owners can be perspective planes. Invert all nine coefficients, not
+    // just the affine basis. Normalized UV matrices legitimately have tiny
+    // determinants; the caller checks finite results rather than applying a
+    // world-space absolute singularity threshold to these units.
+    let a = m[8] * m[4] - m[5] * m[7];
+    let b = m[5] * m[6] - m[8] * m[3];
+    let c = m[7] * m[3] - m[4] * m[6];
+    let det = m[0] * a + m[1] * b + m[2] * c;
     [
-        (m[4] / det) as f32,
-        (-m[1] / det) as f32,
-        0.,
-        (-m[3] / det) as f32,
-        (m[0] / det) as f32,
-        0.,
-        ((m[3] * m[7] - m[4] * m[6]) / det) as f32,
-        ((m[1] * m[6] - m[0] * m[7]) / det) as f32,
-        1.,
+        a,
+        m[2] * m[7] - m[8] * m[1],
+        m[5] * m[1] - m[2] * m[4],
+        b,
+        m[8] * m[0] - m[2] * m[6],
+        m[2] * m[3] - m[5] * m[0],
+        c,
+        m[1] * m[6] - m[7] * m[0],
+        m[4] * m[0] - m[1] * m[3],
     ]
+    .map(|v| (v / det) as f32)
+}
+
+#[cfg(test)]
+mod owner_inverse_tests {
+    #[test]
+    fn perspective_owner_round_trips_between_pixels_and_uv() {
+        let owner = crate::effects::plan::Owner {
+            valid: true,
+            uv: [0.01, 0.002, 0.001, -0.003, 0.02, 0.0005, -1., -0.5, 1.],
+            size: [100., 50.],
+            bounds: [0., 0., 100., 50.],
+            pixel_scale: [1., 1.],
+        };
+        let inverse = super::from_uv(&owner);
+        let project = |m: [f32; 9], p: [f32; 2]| {
+            let w = m[2] * p[0] + m[5] * p[1] + m[8];
+            [
+                (m[0] * p[0] + m[3] * p[1] + m[6]) / w,
+                (m[1] * p[0] + m[4] * p[1] + m[7]) / w,
+            ]
+        };
+        for p in [[0., 0.], [100., 50.], [150., 75.]] {
+            let round = project(inverse, project(owner.uv, p));
+            assert!(
+                round
+                    .into_iter()
+                    .zip(p)
+                    .all(|(a, b)| (a - b).abs() < 0.0001)
+            );
+        }
+    }
 }
 
 impl Asset {

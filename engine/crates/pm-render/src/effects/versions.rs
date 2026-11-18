@@ -72,6 +72,7 @@ fn snapshot(def: &Definition, source: &str, id: &str) -> DefinitionSnapshot {
                 })
                 .unwrap_or_default(),
             clamp: flag("clamp"),
+            convex_quad: None,
         },
     }
 }

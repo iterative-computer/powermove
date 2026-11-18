@@ -231,6 +231,9 @@ pub struct Extensions {
     v4_themes_seen: u64,
     /// Mounted v4 surface extensions by title, with the source they run.
     pub(crate) surfaces: BTreeMap<String, (String, String)>,
+    native_loading: usize,
+    native_epoch: Arc<()>,
+    native_seen: bool,
     /// Forks drawing a built-in panel in its place: id to (panel, source).
     forks: BTreeMap<String, (String, String)>,
     /// Surface ids this window has mounted, and whether the first scan is done:
@@ -327,6 +330,9 @@ impl Default for Extensions {
             page_faces: Vec::new(),
             page_rebuilds: Vec::new(),
             surfaces: BTreeMap::new(),
+            native_loading: 0,
+            native_epoch: Arc::new(()),
+            native_seen: false,
             forks: BTreeMap::new(),
             mounted_once: BTreeSet::new(),
             booted: false,
@@ -533,6 +539,36 @@ pub(crate) fn definitions(value: &Value) -> Vec<pm_protocol::definitions::Defini
         .flatten()
         .filter_map(|d| serde_json::from_value(d.clone()).ok())
         .collect()
+}
+/// V4 providers carry the same wrapped snapshot as compat providers. Read
+/// winning registrations so an override never mixes source and controls.
+pub(crate) fn native_effect_definitions(
+    kernel: &pm_kernel::KernelHandle,
+    mut definitions: Vec<pm_protocol::definitions::DefinitionSnapshot>,
+) -> Vec<pm_protocol::definitions::DefinitionSnapshot> {
+    let state = kernel.state();
+    let ids: BTreeSet<_> = state
+        .registries
+        .get("effects")
+        .into_iter()
+        .flatten()
+        .map(|entry| entry.id.clone())
+        .collect();
+    for id in ids {
+        let Some(provider) = state.provider("effects", &id) else {
+            continue;
+        };
+        let Some(snapshot) = provider.definition.get("nativeSnapshot") else {
+            continue;
+        };
+        if let Ok(snapshot) = serde_json::from_str::<pm_protocol::definitions::DefinitionSnapshot>(
+            &pm_model::json::to_canonical_string(snapshot),
+        ) {
+            definitions.retain(|d| d.id.as_str() != id);
+            definitions.push(snapshot);
+        }
+    }
+    definitions
 }
 /// The app's one effect clipboard: Effect Controls in every window and v1–3
 /// extensions' inspector service copy and paste through it.
@@ -759,6 +795,9 @@ impl Controller {
         // it. Install the catalog first so the shell never sees Unknown panel.
         for request in requests {
             self.extension_request(request, cx);
+        }
+        if self.extensions.native_seen && let Some(document) = self.extensions.doc_id {
+            crate::mcp_services::admit_native(document, publication.revision);
         }
         self.present_page(cx);
     }
@@ -1200,6 +1239,7 @@ impl Controller {
             return;
         };
         let wanted = host.surfaces();
+        self.extensions.native_seen |= !wanted.is_empty();
         let ready = host.is_ready();
         let source = |surface: &Value| surface["graph"]["hash"].as_str().map(str::to_owned);
         let still = |id: &str, hash: &str| {
@@ -1330,12 +1370,20 @@ impl Controller {
         cx: &mut Context<Self>,
     ) {
         self.panel_builds.entry(panel.clone()).or_default();
+        let document = self.extensions.doc_id;
+        let epoch = self.extensions.native_epoch.clone();
+        self.extensions.native_loading += 1;
+        let native_load = document.map(crate::mcp_services::begin_native_load);
+        self.refresh_native_effects();
         cx.spawn(async move |this, cx| {
             let mounted = match ticket.await {
                 Ok(ticket) => ticket.await.map(|e| e.generation.number),
                 Err(error) => Err(error),
             };
             let _ = this.update(cx, |v, cx| {
+                if Arc::ptr_eq(&v.extensions.native_epoch, &epoch) {
+                    v.extensions.native_loading = v.extensions.native_loading.saturating_sub(1);
+                }
                 match mounted {
                     Ok(generation) => {
                         if let Some(build) = v.panel_builds.get_mut(&panel) {
@@ -1351,6 +1399,7 @@ impl Controller {
                 v.drain_builtins(cx);
                 cx.notify();
             });
+            drop(native_load);
         })
         .detach();
     }
@@ -1572,8 +1621,15 @@ impl Controller {
     /// the project uses may yet arrive: `ResourceSnapshot::pending`), all from
     /// one publication of the host.
     fn pin_definitions(&mut self, publication: &pm_compat_runner::host::Publication) {
+        let mut publication = publication.clone();
+        publication.settled &= self.extensions.native_loading == 0;
+        if let Some(value) = publication.contributions.as_deref() {
+            let mut value = value.clone();
+            value["definitions"] = json!(native_effect_definitions(&self.kernel, definitions(&value)));
+            publication.contributions = Some(Arc::new(value));
+        }
         let current = &self.extensions.resources;
-        let Some(next) = pinned(current, publication) else {
+        let Some(next) = pinned(current, &publication) else {
             return;
         };
         if current.pending && !next.pending {
@@ -1588,6 +1644,12 @@ impl Controller {
         self.apply_extension_resources();
         if let Some(project) = self.extensions.settle_after.take() {
             self.settled(&project);
+        }
+    }
+    pub(crate) fn refresh_native_effects(&mut self) {
+        if let Some(host) = &self.extensions.host {
+            let publication = host.publication();
+            self.pin_definitions(&publication);
         }
     }
     /// An open waiting for effects its extensions load waits [`OPEN_WAIT`] at
@@ -2689,6 +2751,7 @@ mod tests {
             definition
         };
         let early = Publication {
+            native_surfaces: false,
             revision: 3,
             contributions: Some(Arc::new(json!({"definitions": [effect("fast.tint")]}))),
             settled: false,
@@ -2698,6 +2761,7 @@ mod tests {
         };
         // The host settles (with the late effect) before the window pins.
         let late = Publication {
+            native_surfaces: false,
             revision: 4,
             contributions: Some(Arc::new(
                 json!({"definitions": [effect("fast.tint"), effect("slow.tint")]}),

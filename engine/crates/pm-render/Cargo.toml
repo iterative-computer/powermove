@@ -115,3 +115,8 @@ pm-text = { path = "../pm-text", default-features = false, features = ["canvas2d
 # Offscreen only; CoreText must remain on the main thread.
 name = "glow_capture"
 harness = false
+
+[[test]]
+# CoreText registry on main; headless GPU only, no windows.
+name = "extension_effect_proof"
+harness = false

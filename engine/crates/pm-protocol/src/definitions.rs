@@ -142,6 +142,9 @@ pub struct DefinitionFlags {
     pub viewport_padding: Vec<String>,
     /// Values above 1.0 pass through unless an effect declares `clamp: true`.
     pub clamp: bool,
+    /// Percentage-offset parameter keys: TL/TR/BR/BL x,y. Evaluated per frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub convex_quad: Option<[String; 8]>,
 }
 
 impl Default for DefinitionFlags {
@@ -154,6 +157,7 @@ impl Default for DefinitionFlags {
             viewport_safe: false,
             viewport_padding: vec![],
             clamp: false,
+            convex_quad: None,
         }
     }
 }
@@ -207,6 +211,17 @@ impl Validate for DefinitionSnapshot {
             format!("definition id {:?} must be 1 to 128 bytes", self.id)
         })?;
         ensure_unique(self.params.iter().map(ParamSpec::key), C, "parameter key")?;
+        if let Some(keys) = &self.flags.convex_quad {
+            for key in keys {
+                ensure(
+                    self.params
+                        .iter()
+                        .any(|p| matches!(p, ParamSpec::Number { key: k, .. } if k == key)),
+                    C,
+                    || format!("quad constraint requires numeric parameter {key}"),
+                )?;
+            }
+        }
         for param in &self.params {
             ensure(valid_param_key(param.key()), C, || {
                 format!(

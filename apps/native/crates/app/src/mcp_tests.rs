@@ -777,7 +777,10 @@ fn only_agent_stills_draw_offline_cards() {
     assert!(Capture::AgentStill.draws_offline_cards());
     assert!(!Capture::ExtensionSnapshot.draws_offline_cards());
     assert!(!Capture::Sheet.draws_offline_cards());
-    assert!(!Capture::Poster.draws_offline_cards(), "a poster draws offline media as nothing");
+    assert!(
+        !Capture::Poster.draws_offline_cards(),
+        "a poster draws offline media as nothing"
+    );
 }
 
 /// Each editor window owns its project. MCP acts in the key window, a project a
@@ -1055,6 +1058,8 @@ fn unwindowed_jobs_pin_enabled_local_and_store_effects() {
     );
     let window = Arc::new(pm_engine_service::resources::ResourceSnapshot {
         generation: 99,
+        definitions: first.definitions.clone(),
+        unavailable: first.unavailable.clone(),
         ..Default::default()
     });
     crate::mcp_services::set_resources(published.snapshot.doc_id, Some(window.clone()));
@@ -1232,4 +1237,288 @@ fn first_save_mcp_never_requires_a_window_or_panel() {
             .is_none()
     );
     assert!(!fixture.host.profile.join("document-folders").exists());
+}
+
+/// Publication's throwaway activation is not the live project registry. This
+/// starts with no extension host and immediately applies the published effect.
+#[test]
+fn headless_publication_loads_effect_before_first_add_effect() {
+    let f = Fixture::new();
+    let jobs =
+        crate::mcp_services::connect_engine(&f.tools, Default::default(), Default::default())
+            .unwrap();
+    let mut connection = f.connection();
+    let started = connection
+        .dispatch("start_session", &json!({"prompt":"Synthetic effect proof"}))
+        .unwrap();
+    connection.dispatch("apply_commands", &json!({"commands":[{
+        "type":"add_layer", "id":"plate", "layerType":"solid", "content":{"color":"#FF0000","w":320,"h":180}, "name":"Probe plate"
+    }]})).unwrap();
+    let stage = std::path::PathBuf::from(started["stagingDirectory"].as_str().unwrap());
+    let folder = stage.join("cps-probe");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("manifest.json"), json!({"id":"cps-probe","name":"Probe","version":"1.0.0","apiVersion":3,"entry":"index.ts","contributes":["effects"]}).to_string()).unwrap();
+    std::fs::write(folder.join("index.ts"), "export default function(api){api.effects.register({id:'cps-probe.fx',label:'Probe',group:'Test',params:[{k:'amount',label:'Amount',min:0,max:1,def:0.5}],frag:'o=src(v_uv)*u_amount;'})}").unwrap();
+    connection
+        .dispatch(
+            "publish_extensions",
+            &json!({"extensions":[{"id":"cps-probe","action":"created","summary":"Synthetic effect regression"}]}),
+        )
+        .unwrap();
+    assert!(
+        f.host
+            .kernel
+            .state()
+            .provider("effects", "cps-probe.fx")
+            .is_none(),
+        "publication alone creates no persistent realm"
+    );
+    connection
+        .dispatch(
+            "apply_commands",
+            &json!({"commands":[{"type":"add_effect","target":"plate","effect":"cps-probe.fx"}]}),
+        )
+        .unwrap();
+    assert!(
+        f.host
+            .kernel
+            .state()
+            .provider("effects", "cps-probe.fx")
+            .is_some()
+    );
+    let saved = document(&f.host.kernel.published("test").unwrap());
+    assert_eq!(saved["layers"][0]["fx"][0]["type"], "cps-probe.fx");
+    assert_eq!(saved["layers"][0]["fx"][0]["p"]["amount"]["v"], 0.5);
+    let exported = connection.dispatch("save_project", &json!({})).unwrap();
+    connection
+        .dispatch("finish_session", &json!({"commit":true}))
+        .unwrap();
+    let proof = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        exported["path"].as_str().unwrap(),
+        proof.path().join("saved.pmv"),
+    )
+    .unwrap();
+    let live = f.host.profile.join("extensions/cps-probe");
+    for name in ["manifest.json", "index.ts"] {
+        std::fs::copy(live.join(name), proof.path().join(name)).unwrap();
+    }
+    // A new test process has no loaded realm, GPU programs, or live registry.
+    for mode in [
+        "windowless",
+        "windowed-handoff",
+        "windowed-pending",
+        "removed",
+    ] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "mcp::tests::extension_effect_reopen_child",
+                "--nocapture",
+            ])
+            .env("PM_EXTENSION_REOPEN_PROOF", proof.path())
+            .env("PM_EXTENSION_REOPEN_MODE", mode)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    drop(connection);
+    drop(jobs);
+}
+
+#[test]
+fn extension_effect_reopen_child() {
+    let Some(root) = std::env::var_os("PM_EXTENSION_REOPEN_PROOF") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let mode = std::env::var("PM_EXTENSION_REOPEN_MODE").unwrap();
+    let f = Fixture::new();
+    if mode != "removed" {
+        let folder = f.host.profile.join("extensions/cps-probe");
+        std::fs::create_dir_all(&folder).unwrap();
+        for name in ["manifest.json", "index.ts"] {
+            std::fs::copy(root.join(name), folder.join(name)).unwrap();
+        }
+    }
+    f.host
+        .open(
+            "restored".into(),
+            SessionSource::File(root.join("saved.pmv")),
+        )
+        .unwrap();
+    let published = f.host.kernel.published("restored").unwrap();
+    let before = document(&published)["layers"][0]["fx"].clone();
+    assert_eq!(before[0]["type"], "cps-probe.fx");
+    let jobs =
+        crate::mcp_services::connect_engine(&f.tools, Default::default(), Default::default())
+            .unwrap();
+    let mut window_host = None;
+    if mode.starts_with("windowed-") {
+        // A window's owner starts before the UI publishes its next resource
+        // pin. Deliberately leave an old ready pin to guard that exact race.
+        window_host = Some(pm_compat_runner::host::ExtensionHost::start(
+            pm_compat_runner::host::HostConfig {
+                kernel: f.host.kernel.clone(),
+                project: "restored".into(),
+                roots: crate::extensions::roots(&f.host.profile),
+                cache: f.host.profile.join("window-extension-cache"),
+                owner: None,
+                text: None,
+                frames: None,
+                rasters: None,
+                clipboard: None,
+                vars: None,
+                wake: Arc::new(|| {}),
+            },
+        ));
+        crate::mcp_services::set_resources(
+            published.snapshot.doc_id,
+            Some(Arc::new(pm_engine_service::resources::ResourceSnapshot {
+                generation: 1,
+                pending: mode == "windowed-pending",
+                ..Default::default()
+            })),
+        );
+    }
+    // This is the first render's resource request, with no prior effect edit.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let resources = jobs
+        .resources(&published, true, &|| std::time::Instant::now() >= deadline)
+        .unwrap();
+    if mode.starts_with("windowed-") {
+        assert!(
+            resources
+                .definitions
+                .iter()
+                .any(|d| d.id.as_str() == "cps-probe.fx")
+        );
+        assert!(
+            resources.generation > 1,
+            "the stale ready pin was refreshed"
+        );
+    }
+    let mut renderer = pm_render::Renderer::headless().unwrap();
+    renderer.set_bypass_missing_effects(true);
+    assert!(
+        renderer
+            .set_document_effects(&published.snapshot.document, &resources.definitions)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        renderer
+            .missing_effects()
+            .iter()
+            .any(|e| e.effect == "cps-probe.fx"),
+        mode == "removed"
+    );
+    let request = pm_render::RenderRequest::sized(
+        pm_protocol::common::Size::new(32, 18),
+        pm_protocol::color::Precision::Float16,
+    );
+    let frame = renderer
+        .render(
+            &published.snapshot.document,
+            "c",
+            pm_protocol::common::Ticks::new(0).unwrap(),
+            &request,
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let effected = renderer.read_rgba(&frame).unwrap();
+    let mut plain = document(&published);
+    plain["layers"][0]["fx"] = json!([]);
+    let plain = pm_model::Document::new(Some(model(&plain)), 1);
+    let frame = renderer
+        .render(
+            &plain,
+            "c",
+            pm_protocol::common::Ticks::new(0).unwrap(),
+            &request,
+            &pm_render::MapResolver::default(),
+        )
+        .unwrap();
+    let plain = renderer.read_rgba(&frame).unwrap();
+    let difference = effected
+        .iter()
+        .zip(&plain)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    if mode == "removed" {
+        assert!(
+            difference < 0.002,
+            "missing effect must bypass: {difference}"
+        );
+    } else {
+        assert!(
+            difference > 0.05,
+            "first frame must apply saved effect: {difference}"
+        );
+    }
+    assert_eq!(
+        before,
+        document(&f.host.kernel.published("restored").unwrap())["layers"][0]["fx"]
+    );
+    crate::mcp_services::set_resources(published.snapshot.doc_id, None);
+    drop(window_host);
+    drop(jobs);
+}
+
+#[test]
+fn headless_v4_publication_registers_effects_in_the_live_catalog() {
+    let f = Fixture::new();
+    let jobs =
+        crate::mcp_services::connect_engine(&f.tools, Default::default(), Default::default())
+            .unwrap();
+    let mut connection = f.connection();
+    let started = connection
+        .dispatch(
+            "start_session",
+            &json!({"prompt":"Synthetic native effect"}),
+        )
+        .unwrap();
+    add(&mut connection, "plate");
+    let folder = std::path::PathBuf::from(started["stagingDirectory"].as_str().unwrap())
+        .join("native-probe");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("manifest.json"), json!({"id":"native-probe","name":"Native Probe","version":"1.0.0","apiVersion":4,"entry":"index.ts","contributes":["effects"]}).to_string()).unwrap();
+    std::fs::write(folder.join("index.ts"), "export async function mount(env){ env.effects.register({id:'native-probe.fx',label:'Native Probe',group:'Test',params:[{k:'amount',label:'Amount',min:0,max:1,def:0.5}],frag:'o=src(v_uv)*u_amount;'}); const root=env.root(); await root.render(null); return {root,dispose:()=>root.dispose()}; }").unwrap();
+    connection
+        .dispatch(
+            "publish_extensions",
+            &json!({"extensions":[{"id":"native-probe","action":"created","summary":"Synthetic native effect regression"}]}),
+        )
+        .unwrap();
+    connection.dispatch("apply_commands", &json!({"commands":[{"type":"add_effect","target":"plate","effect":"native-probe.fx"}]})).unwrap();
+    let published = f.host.kernel.published("test").unwrap();
+    let resources = jobs.resources(&published, true, &|| false).unwrap();
+    assert!(
+        resources
+            .definitions
+            .iter()
+            .any(|d| d.id.as_str() == "native-probe.fx")
+    );
+    let mut renderer = pm_render::Renderer::headless().unwrap();
+    assert!(
+        renderer
+            .set_document_effects(&published.snapshot.document, &resources.definitions)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        document(&published)["layers"][0]["fx"][0]["type"],
+        "native-probe.fx"
+    );
+    connection
+        .dispatch("finish_session", &json!({"commit":true}))
+        .unwrap();
+    drop(connection);
+    drop(jobs);
 }

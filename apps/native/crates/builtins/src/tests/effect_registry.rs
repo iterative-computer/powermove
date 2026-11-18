@@ -30,8 +30,23 @@ fn setup(fx: Value) -> KernelActor {
     actor
 }
 fn pixel(kernel: &pm_kernel::KernelHandle, renderer: &mut pm_render::Renderer) -> [f32; 4] {
+    pixel_with_extensions(kernel, renderer, &[])
+}
+fn pixel_with_extensions(
+    kernel: &pm_kernel::KernelHandle,
+    renderer: &mut pm_render::Renderer,
+    definitions: &[pm_protocol::definitions::DefinitionSnapshot],
+) -> [f32; 4] {
     let p = kernel.published("synthetic").unwrap();
     let _turn = install_main_effects(renderer, &p.snapshot.document);
+    if !definitions.is_empty() {
+        assert!(
+            renderer
+                .set_document_effects(&p.snapshot.document, definitions)
+                .unwrap()
+                .is_empty()
+        );
+    }
     let mut request = pm_render::RenderRequest::sized(
         pm_protocol::common::Size::new(8, 8),
         pm_protocol::color::Precision::Float16,
@@ -657,4 +672,137 @@ fn transition_properties_duration_uses_a_real_selection_fenced_lease() {
             .is_err(),
         "a stale Wipe angle control must not create a channel on Crossfade"
     );
+}
+
+#[test]
+fn v4_effect_registration_enters_the_kernel_and_disposal_removes_it() {
+    let actor = setup(json!([{ "id":"f1", "type":"v4-probe.fx", "on":true,"p":{} }]));
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "export async function mount(env) { env.effects.register({id:'v4-probe.fx',label:'Probe',group:'Test',params:[{k:'amount',label:'Amount',min:0,max:1,def:0.5}],frag:'o=src(v_uv)*u_amount;',passes:2,keepOrig:true}); const root=env.root(); await root.render(null); return {root,dispose:()=>root.dispose()}; }"
+        },
+        "edges": { "powermove:bundle": {"./index.tsx":"index.tsx"}, "index.tsx": {} }
+    });
+    finish(panels.mount_extension("v4-probe", &graph, None).unwrap());
+    let state = actor.handle().state();
+    let provider = state.provider("effects", "v4-probe.fx").unwrap();
+    let definition = data::wire(&provider.definition);
+    assert_eq!(definition["params"][0]["def"], 0.5);
+    let snapshot: pm_protocol::definitions::DefinitionSnapshot =
+        serde_json::from_value(definition["nativeSnapshot"].clone()).unwrap();
+    assert_eq!(snapshot.flags.passes, 2);
+    assert!(snapshot.flags.keep_orig);
+    assert!(
+        snapshot
+            .glsl
+            .as_ref()
+            .unwrap()
+            .source
+            .contains("uniform float u_amount;")
+    );
+    let mut renderer = pm_render::Renderer::headless().unwrap();
+    let effected = pixel_with_extensions(&actor.handle(), &mut renderer, &[snapshot]);
+    assert!(effected[0] < 0.6 && effected[3] < 0.6, "{effected:?}");
+    panels.unmount_extension("v4-probe");
+    assert!(
+        actor
+            .handle()
+            .state()
+            .provider("effects", "v4-probe.fx")
+            .is_none()
+    );
+    renderer.set_bypass_missing_effects(true);
+    assert_eq!(pixel(&actor.handle(), &mut renderer), [1., 0., 0., 1.]);
+    assert_eq!(effects(&actor.handle())[0]["type"], "v4-probe.fx");
+    panels.close();
+    actor.shutdown();
+}
+
+#[test]
+fn unavailable_extension_keeps_channels_and_draws_the_layer() {
+    let saved = json!([{"id":"saved-pin","type":"removed.fx","on":true,"open":true,
+        "p":{"amount":{"v":0.75,"kf":[{"t":1,"v":0.25,"i":"key"}]}}}]);
+    let actor = setup(saved.clone());
+    let kernel = actor.handle();
+    let mut panels = Builtins::new(kernel.clone(), "synthetic", || {}).unwrap();
+    finish(panels.mount("layer-effects").unwrap());
+    let shown = texts(&panels.take_publications().pop().unwrap().surface);
+    assert!(
+        shown.iter().any(|text| text == "Not installed"),
+        "{shown:?}"
+    );
+    let mut renderer = pm_render::Renderer::headless().unwrap();
+    renderer.set_bypass_missing_effects(true);
+    assert_eq!(pixel(&kernel, &mut renderer), [1., 0., 0., 1.]);
+    assert_eq!(effects(&kernel), saved.as_array().unwrap().clone());
+    assert!(panels.take_errors().is_empty());
+    panels.close();
+    actor.shutdown();
+}
+
+#[test]
+fn v4_provider_order_survives_unrelated_registration_and_override_disposal() {
+    let actor = setup(json!([]));
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = |label: &str| {
+        json!({"sources":{
+        "powermove:bundle":"export * from './index.tsx';",
+        "index.tsx":format!("export async function mount(env){{globalThis.__effects=env.effects;env.effects.register({{id:'shared.fx',label:'{label}',group:'Test',params:[],frag:'o=src(v_uv);'}});const root=env.root();await root.render(null);return {{root,dispose:()=>root.dispose()}};}}")
+    },"edges":{"powermove:bundle":{"./index.tsx":"index.tsx"},"index.tsx":{}}})
+    };
+    finish(
+        panels
+            .mount_extension("provider-a", &graph("A"), None)
+            .unwrap(),
+    );
+    finish(
+        panels
+            .mount_extension("provider-b", &graph("B"), None)
+            .unwrap(),
+    );
+    let label = || {
+        let state = actor.handle().state();
+        state.provider("effects", "shared.fx").map(|entry| {
+            entry
+                .definition
+                .get("label")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+    };
+    assert_eq!(label().as_deref(), Some("B"));
+    finish(panels.realm_of("provider-a").unwrap().eval(
+        "__effects.register({id:'unrelated.fx',label:'Other',group:'Test',params:[],frag:'o=src(v_uv);'});true"
+    ).unwrap());
+    assert_eq!(
+        label().as_deref(),
+        Some("B"),
+        "adding another effect must not reclaim a shadowed id"
+    );
+    finish(panels.realm_of("provider-a").unwrap().eval(
+        "globalThis.__top=__effects.register({id:'shared.fx',label:'A2',group:'Test',params:[],frag:'o=src(v_uv);'});true"
+    ).unwrap());
+    assert_eq!(label().as_deref(), Some("A2"));
+    finish(
+        panels
+            .realm_of("provider-a")
+            .unwrap()
+            .eval("__top();true")
+            .unwrap(),
+    );
+    assert_eq!(
+        label().as_deref(),
+        Some("B"),
+        "dispose reveals the original global stack order"
+    );
+    panels.unmount_extension("provider-b");
+    assert_eq!(label().as_deref(), Some("A"));
+    panels.unmount_extension("provider-a");
+    assert!(label().is_none());
+    panels.close();
+    actor.shutdown();
 }

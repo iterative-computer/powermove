@@ -50,6 +50,82 @@ pub(crate) fn set_resources(doc_id: u64, resources: Option<Resources>) {
         None => all.remove(&doc_id),
     };
     SETTLED.notify_all();
+    if !all.contains_key(&doc_id) {
+        NATIVE_ADMISSION.lock().unwrap().remove(&doc_id);
+        NATIVE_CHANGED.notify_all();
+    }
+}
+#[derive(Default)]
+struct NativeProgress {
+    identity: Arc<()>,
+    revision: u64,
+    loads: usize,
+}
+static NATIVE_ADMISSION: Mutex<std::collections::BTreeMap<u64, NativeProgress>> =
+    Mutex::new(std::collections::BTreeMap::new());
+static NATIVE_CHANGED: std::sync::Condvar = std::sync::Condvar::new();
+pub(crate) struct NativeLoad {
+    document: u64,
+    identity: Arc<()>,
+}
+impl Drop for NativeLoad {
+    fn drop(&mut self) {
+        if let Some(progress) = NATIVE_ADMISSION.lock().unwrap().get_mut(&self.document)
+            && Arc::ptr_eq(&progress.identity, &self.identity)
+        {
+            progress.loads = progress.loads.saturating_sub(1);
+        }
+        NATIVE_CHANGED.notify_all();
+    }
+}
+pub(crate) fn begin_native_load(document: u64) -> NativeLoad {
+    let mut all = NATIVE_ADMISSION.lock().unwrap();
+    let progress = all.entry(document).or_default();
+    progress.loads += 1;
+    NativeLoad {
+        document,
+        identity: progress.identity.clone(),
+    }
+}
+pub(crate) fn admit_native(document: u64, revision: u64) {
+    NATIVE_ADMISSION
+        .lock()
+        .unwrap()
+        .entry(document)
+        .or_default()
+        .revision = revision;
+    NATIVE_CHANGED.notify_all();
+}
+fn native_ready(
+    document: u64,
+    revision: u64,
+    wanted: bool,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> AnyResult<()> {
+    let deadline = Instant::now() + EXTENSIONS_WAIT;
+    let mut all = NATIVE_ADMISSION.lock().unwrap();
+    if !wanted && !all.contains_key(&document) {
+        return Ok(());
+    }
+    loop {
+        if stop() {
+            return Err(anyhow::anyhow!(CAPTURE_STOPPED));
+        }
+        if all
+            .get(&document)
+            .is_some_and(|p| p.revision >= revision && p.loads == 0)
+        {
+            return Ok(());
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(anyhow::anyhow!("Native extensions did not finish loading"));
+        }
+        all = NATIVE_CHANGED
+            .wait_timeout(all, left.min(STOP_POLL))
+            .unwrap()
+            .0;
+    }
 }
 /// The definitions some open window's extensions have settled on: the
 /// profile's installed extensions, as any project open nowhere would load.
@@ -230,10 +306,19 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
     })
 }
 struct ProjectExtensions {
+    v4: Option<Arc<pm_builtins::Builtins>>,
+    surfaces: HashMap<String, String>,
     project: String,
     host: Arc<pm_compat_runner::host::ExtensionHost>,
     /// Answers the raster overrides of this project's jobs, as a window's do.
     overrides: crate::raster_overrides::Overrides,
+}
+impl Drop for ProjectExtensions {
+    fn drop(&mut self) {
+        if let Some(runtime) = &self.v4 {
+            runtime.close();
+        }
+    }
 }
 /// Starts engine child jobs from the running executable. `activity` lets the
 /// viewer keep precedence over export bands, as it does for panel exports.
@@ -280,7 +365,26 @@ impl EngineJobs {
         wait: bool,
         stop: &(dyn Fn() -> bool + Sync),
     ) -> AnyResult<Resources> {
-        let window = resources_of(published.snapshot.doc_id, wait, stop)
+        let settled = if wait {
+            pm_compat_runner::host::settle_document(
+                published.snapshot.doc_id,
+                EXTENSIONS_WAIT,
+                &|| stop(),
+            )
+            .map_err(|error| match error {
+                pm_runtime_v8::Error::Host(message)
+                    if message == pm_compat_runner::host::WAIT_STOPPED =>
+                {
+                    anyhow::anyhow!(CAPTURE_STOPPED)
+                }
+                error => anyhow::anyhow!("Extension definitions: {error}"),
+            })?
+        } else {
+            None
+        };
+        // A settled owner is authoritative even if the UI has not replaced
+        // an older pending pin yet. Do not wait on the UI a second time.
+        let window = resources_of(published.snapshot.doc_id, wait && settled.is_none(), stop)
             .map_err(|Stopped| anyhow::anyhow!(CAPTURE_STOPPED))?;
         // A project open nowhere (Home's poster of its stored version): no
         // realm can load its extensions, as the kernel does not hold it, so
@@ -290,12 +394,48 @@ impl EngineJobs {
         if window.is_none() && self.kernel.published(&published.project).is_none() {
             return Ok(settled_resources().unwrap_or_default());
         }
-        if let Some(resources) = window {
+        if let Some(mut resources) = window {
+            if let Some(publication) = &settled {
+                native_ready(
+                    published.snapshot.doc_id,
+                    publication.revision,
+                    publication.native_surfaces,
+                    stop,
+                )?;
+                resources = resources_of(published.snapshot.doc_id, false, stop)
+                    .map_err(|Stopped| anyhow::anyhow!(CAPTURE_STOPPED))?
+                    .ok_or_else(|| anyhow::anyhow!("The extension window closed"))?;
+            }
             // Retire a worker host once the window owns this document again.
             self.extensions
                 .lock()
                 .unwrap()
                 .remove(&published.snapshot.doc_id);
+            if let Some(publication) = settled {
+                // The owner can finish before the UI publishes its next pin.
+                // Take definitions and availability from that single moment.
+                let definitions = crate::extensions::native_effect_definitions(
+                    &self.kernel,
+                    publication
+                        .contributions
+                        .as_deref()
+                        .map(crate::extensions::definitions)
+                        .unwrap_or_default(),
+                );
+                let unavailable = crate::extensions::unavailable(&publication);
+                if resources.definitions != definitions
+                    || resources.unavailable != unavailable
+                    || resources.pending
+                {
+                    let mut next = (*resources).clone();
+                    next.generation += 1;
+                    next.definitions = definitions;
+                    next.unavailable = unavailable;
+                    next.pending = !publication.settled;
+                    next.loading = publication.loading;
+                    return Ok(Arc::new(next));
+                }
+            }
             return Ok(resources);
         }
         let host = {
@@ -334,6 +474,8 @@ impl EngineJobs {
                 overrides.connect(host.raster_inbox());
                 crate::mcp_extensions::watch(&host);
                 ProjectExtensions {
+                    v4: None,
+                    surfaces: HashMap::new(),
                     project: published.project.clone(),
                     host,
                     overrides,
@@ -356,9 +498,75 @@ impl EngineJobs {
                 pm_runtime_v8::Error::Host(message) => anyhow::anyhow!(message),
                 error => anyhow::anyhow!(error),
             })?;
+        // Native v4 extensions have their own isolate. Windowless MCP needs
+        // those isolates too: validation's temporary mounts are not providers.
+        let wanted = host.surfaces();
+        let (runtime, mounts) = {
+            let mut hosts = self.extensions.lock().unwrap();
+            let entry = hosts
+                .get_mut(&published.snapshot.doc_id)
+                .ok_or_else(|| anyhow::anyhow!("Extension project closed"))?;
+            if entry.v4.is_none() && !wanted.is_empty() {
+                entry.v4 = Some(Arc::new(pm_builtins::Builtins::new(
+                    self.kernel.clone(),
+                    &published.project,
+                    || {},
+                )?));
+            }
+            let runtime = entry.v4.clone();
+            let gone: Vec<_> = entry
+                .surfaces
+                .keys()
+                .filter(|id| !wanted.iter().any(|surface| surface["id"] == id.as_str()))
+                .cloned()
+                .collect();
+            for id in gone {
+                if let Some(runtime) = &runtime {
+                    runtime.unmount_extension(&id);
+                }
+                entry.surfaces.remove(&id);
+            }
+            let mounts: Vec<_> = wanted
+                .into_iter()
+                .filter(|surface| {
+                    let id = surface["id"].as_str().unwrap_or_default();
+                    let hash = surface["graph"]["hash"].as_str().unwrap_or_default();
+                    entry.surfaces.get(id).is_none_or(|old| old != hash)
+                })
+                .collect();
+            (runtime, mounts)
+        };
+        if let Some(runtime) = runtime {
+            for surface in mounts {
+                let id = surface["id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("v4 extension id"))?;
+                runtime.unmount_extension(id);
+                let ticket = runtime.mount_extension(id, &surface["graph"], None)?;
+                crate::ticket::answer(ticket, Instant::now() + Duration::from_secs(10))
+                    .ok_or_else(|| anyhow::anyhow!("v4 effect activation timed out"))??;
+                if let Some(error) = runtime.take_errors().first() {
+                    return Err(anyhow::anyhow!("{id}: {error}"));
+                }
+                if let Some(entry) = self
+                    .extensions
+                    .lock()
+                    .unwrap()
+                    .get_mut(&published.snapshot.doc_id)
+                {
+                    entry.surfaces.insert(
+                        id.into(),
+                        surface["graph"]["hash"].as_str().unwrap_or_default().into(),
+                    );
+                }
+            }
+        }
         Ok(Arc::new(pm_engine_service::resources::ResourceSnapshot {
             generation,
-            definitions: crate::extensions::definitions(&value),
+            definitions: crate::extensions::native_effect_definitions(
+                &self.kernel,
+                crate::extensions::definitions(&value),
+            ),
             unavailable: crate::extensions::unavailable(&host.publication()),
             ..Default::default()
         }))
@@ -746,18 +954,24 @@ fn cached_frames(
         };
         let doc_id = published.snapshot.doc_id;
         let resources = pin(&published, request)?;
-        let key = (!resources.pending).then(|| {
-            format!(
+        let key = if resources.pending {
+            None
+        } else {
+            // A windowless v4 provider can change independently of the compat
+            // publication number. A refreshed stale window pin can reuse that
+            // number too: cache the actual pinned definitions, not just it.
+            let pins = serde_json::to_vec(resources.as_ref()).map_err(|e| e.to_string())?;
+            Some(format!(
                 "{doc_id}:{}:{:?}:{}:{}:{}x{}:{}",
                 published.revision(),
                 epoch(doc_id),
-                resources.generation,
+                blake3::hash(&pins).to_hex(),
                 request.time.to_bits(),
                 request.width,
                 request.height,
                 request.motion_blur
-            )
-        });
+            ))
+        };
         if let Some(key) = &key
             && let Some((_, png)) = cache.lock().unwrap().iter().find(|(k, _)| k == key)
         {
@@ -1493,6 +1707,17 @@ impl MediaRegistry for EngineJobs {
     }
 }
 impl EngineHook for EngineJobs {
+    fn prepare_definitions(&self, project: &str, document: u64, revision: u64) -> Result<()> {
+        let published = self
+            .kernel
+            .published(project)
+            .filter(|p| p.snapshot.doc_id == document && p.revision() == revision)
+            .ok_or_else(|| Error::conflict("The project changed while loading its effects"))?;
+        self.resources(&published, true, &|| false)
+            .map(|_| ())
+            .map_err(|error| Error::invalid(error.to_string()))
+    }
+
     fn capture(&self, _: &CaptureRequest) -> Result<Value> {
         Err(Error::invalid("Frame capture needs a frozen project"))
     }
@@ -1863,6 +2088,35 @@ mod tests {
     /// Every Export sheet option an agent gives reaches the export as the
     /// sheet sets it; absent ones keep today's defaults.
     #[test]
+    fn native_readiness_waits_for_admission_and_mount_completion() {
+        let document = u64::MAX - 810;
+        let load = begin_native_load(document);
+        admit_native(document, 7);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            tx.send(native_ready(document, 8, true, &|| false).is_ok())
+                .unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(10)).is_err());
+        admit_native(document, 8);
+        assert!(rx.recv_timeout(Duration::from_millis(10)).is_err());
+        drop(load);
+        assert!(rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        waiter.join().unwrap();
+        set_resources(document, None);
+    }
+    #[test]
+    fn native_readiness_old_generation_cannot_release_a_new_mount() {
+        let document = u64::MAX - 811;
+        let old = begin_native_load(document);
+        set_resources(document, None);
+        let new = begin_native_load(document);
+        drop(old);
+        assert_eq!(NATIVE_ADMISSION.lock().unwrap()[&document].loads, 1);
+        drop(new);
+        set_resources(document, None);
+    }
+    #[test]
     fn an_agents_export_options_are_the_sheets() {
         use pm_promedia::export_panel::{
             AudioCoding, Codec, ColorTag, DynamicRange, Profile, Scale,
@@ -2032,7 +2286,11 @@ mod tests {
                 if resources.pending {
                     return Err("still loading".into());
                 }
-                Ok(resources.generation.to_le_bytes().to_vec())
+                let mut pixels = resources.generation.to_le_bytes().to_vec();
+                if let Some(source) = resources.definitions.first().and_then(|d| d.glsl.as_ref()) {
+                    pixels.extend_from_slice(source.source.as_bytes());
+                }
+                Ok(pixels)
             },
         );
         let ask = || {
@@ -2061,6 +2319,38 @@ mod tests {
         assert_eq!(ask(), drawn(3));
         assert_eq!(ask(), drawn(3));
         assert_eq!(renders.load(Ordering::Relaxed), 4);
+        // A native provider changes while the compat host and document stay
+        // unchanged. The first new pin must replace the kept frame anyway.
+        let mut definition = pm_render::all_builtin_definitions()
+            .definitions
+            .into_iter()
+            .find(|d| d.glsl.is_some())
+            .unwrap();
+        for round in ["first native registration", "native source reload"] {
+            definition
+                .glsl
+                .as_mut()
+                .unwrap()
+                .source
+                .push_str(&format!("\n// {round}"));
+            let mut expected = 3u64.to_le_bytes().to_vec();
+            expected.extend_from_slice(definition.glsl.as_ref().unwrap().source.as_bytes());
+            set_resources(
+                doc,
+                Some(Arc::new(ResourceSnapshot {
+                    generation: 3,
+                    definitions: vec![definition.clone()],
+                    ..Default::default()
+                })),
+            );
+            assert_eq!(ask(), Ok(expected.clone()));
+            assert_eq!(ask(), Ok(expected));
+        }
+        assert_eq!(
+            renders.load(Ordering::Relaxed),
+            6,
+            "each native source gets one fresh frame"
+        );
         set_resources(doc, None);
         actor.shutdown();
     }
