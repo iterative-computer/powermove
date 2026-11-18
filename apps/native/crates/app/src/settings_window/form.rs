@@ -797,6 +797,7 @@ impl Render<'_, '_> {
             Some(Component::SecureField) => {
                 let field = NSSecureTextField::new(mtm);
                 field.setControlSize(NSControlSize::Regular);
+                field.setFocusRingType(NSFocusRingType::None);
                 field.setFont(Some(&NSFont::systemFontOfSize(LABEL_SIZE)));
                 field.setAccessibilityLabel(Some(&NSString::from_str(label(node))));
                 field.setTranslatesAutoresizingMaskIntoConstraints(false);
@@ -844,6 +845,7 @@ impl Render<'_, '_> {
             "note" => Widget::Pile(Pile::new(mtm, false, 3., ROW_INSET, 8.)),
             "path" => {
                 let path = NSPathControl::new(mtm);
+                path.setFocusRingType(NSFocusRingType::None);
                 path.setTranslatesAutoresizingMaskIntoConstraints(false);
                 path.setPathStyle(NSPathStyle::PopUp);
                 path.setEditable(false);
