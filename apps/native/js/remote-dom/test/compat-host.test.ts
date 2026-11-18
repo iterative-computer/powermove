@@ -53,6 +53,9 @@ test('compat host envelope runs the production applier and returns real node eve
     });
   try {
     window.eval(
+      readFileSync(new URL('../../../crates/compat-host/src/panel-layout.js', import.meta.url), 'utf8')
+    );
+    window.eval(
       readFileSync(
         new URL('../../../crates/compat-host/src/remote-dom.js', import.meta.url),
         'utf8'

@@ -92,6 +92,33 @@ describe('remote DOM mirror and real-document applier', () => {
     expect(h.errors).toEqual([]);
     h.close();
   });
+  test('updates to an existing inline style reach the page without another mutation', async () => {
+    const h = harness();
+    try {
+      const fill = h.shim.document.createElement('div');
+      const style = fill.style;
+      style.width = '0%';
+      style.setProperty('left', '0%');
+      h.shim.document.body.append(fill);
+      await h.settle();
+      const painted = h.applier.node(h.shim.id(fill)) as HTMLElement;
+
+      style.width = '55%';
+      await h.settle();
+      expect(painted.style.width).toBe('55%');
+
+      style.setProperty('left', '72%');
+      await h.settle();
+      expect(painted.style.left).toBe('72%');
+
+      style.removeProperty('width');
+      await h.settle();
+      expect(painted.style.width).toBe('');
+      expect(painted.style.left).toBe('72%');
+    } finally {
+      h.close();
+    }
+  });
   test('capture → target → bubble, this/currentTarget, once/passive and removal during dispatch', async () => {
     const h = harness(),
       d = h.shim.document,

@@ -78,8 +78,9 @@ impl Group {
 }
 /// Content-width tab titles. Tabs that do not fit fold into the trailing More
 /// Panels menu, whose hit square is always reserved; the active tab always
-/// stays shown. A title truncates only when the active tab alone is wider than
-/// the room left beside More Panels (`active_limit`).
+/// stays shown beside the leading tabs that fit. A title truncates only when
+/// the active tab alone is wider than the room left beside More Panels
+/// (`active_limit`).
 /// The caller reserves space for header tools before asking for this track.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabTrack {
@@ -93,32 +94,38 @@ impl Group {
     pub fn tab_track(&self, available: f32, widths: &[f32], tokens: &Tokens) -> TabTrack {
         let n = self.tabs.len();
         let width = |i: usize| widths.get(i).copied().unwrap_or(tokens.metrics.hit * 3.);
-        let total = |set: &[usize]| set.iter().map(|&i| width(i)).sum::<f32>();
-        let all: Vec<_> = (0..n).collect();
-        if total(&all) <= available {
+        if n == 0 || (0..n).map(width).sum::<f32>() <= available {
             return TabTrack {
-                visible: all,
+                visible: (0..n).collect(),
                 overflow: vec![],
                 active_limit: None,
             };
         }
         // The More Panels chevron takes one hit square.
         let room = (available - tokens.metrics.hit).max(0.);
-        let active = self.active.min(n.saturating_sub(1));
-        let mut visible = vec![active];
-        for i in (0..n).filter(|&i| i != active) {
-            let mut next = visible.clone();
-            next.push(i);
-            if total(&next) <= room {
-                visible = next;
+        let active = self.active.min(n - 1);
+        let active_width = width(active);
+        let mut remaining = room - active_width;
+        let mut first_hidden = 0;
+        for i in 0..n {
+            if i != active {
+                let tab_width = width(i);
+                if tab_width > remaining {
+                    break;
+                }
+                remaining -= tab_width;
             }
+            first_hidden = i + 1;
         }
-        visible.sort_unstable();
-        let overflow = (0..n).filter(|i| !visible.contains(i)).collect();
+        let mut visible: Vec<_> = (0..first_hidden).collect();
+        if active >= first_hidden {
+            visible.push(active);
+        }
+        let overflow = (first_hidden..n).filter(|&i| i != active).collect();
         TabTrack {
             visible,
             overflow,
-            active_limit: (width(active) > room).then_some(room),
+            active_limit: (active_width > room).then_some(room),
         }
     }
 }
@@ -2483,5 +2490,49 @@ fn rekey_basis(bases: &mut BTreeMap<String, f32>, first: &str, group: &Group) {
         && let Some(next) = group.tabs.first()
     {
         bases.insert(next.clone(), basis);
+    }
+}
+
+#[cfg(test)]
+mod tab_track_tests {
+    use super::*;
+    use pm_design::{Accessibility, Scheme};
+
+    #[test]
+    fn dock_tab_resize_keeps_the_leading_run_and_the_active_tab() {
+        let group = Group {
+            tabs: ["Properties", "Anchor Point", "Pexels", "Pong", "Voiceover"]
+                .map(str::to_owned)
+                .into(),
+            active: 4,
+            size: None,
+            collapsed: false,
+        };
+        let t = Tokens::new(Scheme::Dark, Accessibility::default());
+        let widths = [76., 100., 60., 46., 80.];
+        let mut previous_count = 0;
+        for available in 30..=450 {
+            let available = available as f32;
+            let track = group.tab_track(available, &widths, &t);
+            assert!(track.visible.len() >= previous_count, "{available}px");
+            previous_count = track.visible.len();
+            let leading = [180., 280., 340.]
+                .iter()
+                .take_while(|&&threshold| available >= threshold)
+                .count();
+            let expected: Vec<_> = if available >= 362. {
+                (0..5).collect()
+            } else {
+                (0..leading).chain([4]).collect()
+            };
+            let overflow: Vec<_> = (0..5).filter(|i| !expected.contains(i)).collect();
+            assert_eq!(track.visible, expected, "{available}px");
+            assert_eq!(track.overflow, overflow, "{available}px");
+            assert_eq!(
+                track.active_limit,
+                (available < 104.).then_some((available - 24.).max(0.)),
+                "{available}px",
+            );
+        }
     }
 }

@@ -129,6 +129,10 @@ fn every_token_matches_each_resolved_scheme() {
             "metrics.control_radius"
         );
         assert!(
+            sheet.contains(&format!("--pm-r-check:{}px;", t.radius.xs)),
+            "radius.xs"
+        );
+        assert!(
             sheet.contains(&format!("--pm-r-card:{}px;", t.radius.md)),
             "radius.md"
         );
@@ -288,7 +292,7 @@ fn opt_out_reset_has_only_valid_unique_custom_properties() {
         assert_eq!(value, "initial");
         assert!(names.insert(name));
     }
-    assert_eq!(names.len(), 72);
+    assert_eq!(names.len(), 73);
 }
 
 #[test]
@@ -323,8 +327,7 @@ fn native_backing_matches_panel_over_window_over_every_backdrop() {
     }
 }
 
-/// The field look (fill, height, padding) is for text fields: a checkbox
-/// in an extension panel stays the system checkbox, not a filled box.
+/// The field look (fill, height, padding) is reserved for text fields.
 #[test]
 fn system_toggles_and_sliders_never_take_the_field_look() {
     let l = Tokens::new(Scheme::Light, Accessibility::default());

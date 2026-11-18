@@ -32,6 +32,7 @@ export type ApplierOptions = {
   document: Document;
   session: Session;
   send: (message: PageMessage) => void;
+  inlineStyleChanged?: (node: HTMLElement) => void;
   maxOperations?: number;
   maxNodes?: number;
 };
@@ -325,6 +326,8 @@ export class PageApplier {
               else node.removeAttribute(op.name);
             } else if (op.namespace) node.setAttributeNS(op.namespace, op.name, op.value);
             else node.setAttribute(op.name, op.value);
+            if (!op.namespace && op.name.toLowerCase() === 'style')
+              this.options.inlineStyleChanged?.(node);
             break;
           case 'text':
             node.nodeValue = op.value;
