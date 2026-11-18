@@ -2,6 +2,8 @@
 //! the kernel on a worker; JS keeps the outline and hears about it by publication.
 //! Layer-header reorders share the native pointer gesture lifecycle.
 //! No sample waits on V8, and the main thread never waits on the kernel.
+#[path = "timeline_audio.rs"]
+mod audio;
 use crate::v4_view::Outline;
 use gpui::{prelude::*, *};
 use pm_design::Tokens;
@@ -74,6 +76,9 @@ pub struct EffectDrop {
 }
 pub trait Delegate: 'static {
     fn timing_preview(&self, _snapshot: Option<pm_kernel::Snapshot>, _cx: &mut App) {}
+    /// Latest output-mix peaks, media tick and playback flag. The timeline
+    /// expires paused scrub taps from their media tick.
+    fn audio_peaks(&self, _cx: &App) -> Option<([f64; 2], i64, bool)> { None }
     fn time(&self, cx: &App) -> f64;
     /// Media dropped on the timeline (Finder files, Project items).
     fn drop_media(&self, _drop: MediaDrop, _cx: &mut App) {}
@@ -184,13 +189,6 @@ enum Spec {
     TextStagger {
         band: pm_panel_timeline::stagger::Band,
         end: bool,
-    },
-    /// An audio clip's level line: its gain's place on the fader law when
-    /// pressed, and the height (points) the law spans.
-    Gain {
-        layer: String,
-        start: f64,
-        room: f64,
     },
     /// A transition's wedge: its duration.
     Transition {
@@ -368,8 +366,6 @@ enum Gesture {
         quick_limits: Vec<(f64, f64)>,
         /// A handle drag: its key's layer start, for layer-local handle times.
         handle: Option<f64>,
-        /// A level-line drag: the height the fader law spans.
-        gain_room: Option<f64>,
     },
     /// A ruler scrub and the frame time it last sought.
     Scrub(Scrub, f64),
@@ -442,6 +438,7 @@ pub struct TimelineSurface {
     sources: Sources,
     /// Waveform files being read for this timeline.
     reading: BTreeSet<crate::waveforms::Key>,
+    audio: audio::AudioState,
     model: Arc<TimelineModel>,
     scene: Option<Arc<Scene>>,
     /// The timeline panel holds the keyboard (the shell says, as it lays
@@ -597,6 +594,7 @@ impl TimelineSurface {
             offline: Arc::new(offline),
             sources: Default::default(),
             reading: Default::default(),
+            audio: Default::default(),
             model: Default::default(),
             scene: None,
             snap_guide: None,
@@ -903,6 +901,7 @@ impl TimelineSurface {
     /// Escape: cancel the active gesture. Foreign edits survive in the kernel.
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
         self.row_scroll = None;
+        if self.audio_cancel(cx) { return true; }
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
             Gesture::Idle => return false,
             Gesture::Dragging { .. } => {
@@ -1553,6 +1552,7 @@ impl TimelineSurface {
                 );
             }
         }
+        self.update_audio(frame.clone(), cx);
         Some(frame)
     }
     /// v1–3's `timeline` service: `pps`, `scrollT`, `scrollY`, `graph`,
@@ -1583,12 +1583,13 @@ impl TimelineSurface {
         } else {
             0.
         };
-        let rows = self
+        let mut rows = self
             .scene
             .as_ref()?
             .prepare_wide(v, &self.tokens, reach, reach_x)
-            .ok()
-            .map(Arc::new)?;
+            .ok()?;
+        self.audio_rows(&mut rows);
+        let rows = Arc::new(rows);
         self.ask_painters(&rows, cx);
         // What the layers record shows this time at their left edge.
         self.drawn.1 = v.scroll_time;
@@ -2052,6 +2053,7 @@ impl TimelineSurface {
         }
     }
     fn on_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        if self.audio_down(event, cx) { return; }
         self.pointer = Some(event.position);
         self.sideways = false;
         let (x, y) = self.local(event.position);
@@ -2268,24 +2270,6 @@ impl TimelineSurface {
             self.gesture = Gesture::Pressed(Press {
                 origin: event.position,
                 spec: (!locked).then_some(Spec::Transition { layer, edge }),
-                release: None,
-            });
-            self.pump(cx);
-            return;
-        }
-        // The level line of an audio clip: a press on it drags the gain.
-        if let Some((layer, start, room)) = level_line_at(&frame, x, y)
-            && !self
-                .model
-                .index
-                .layer(&layer)
-                .is_some_and(|l| l.effectively_locked)
-        {
-            self.queue
-                .push_back(Job::SelectLayer(layer.clone(), Mods::default()));
-            self.gesture = Gesture::Pressed(Press {
-                origin: event.position,
-                spec: Some(Spec::Gain { layer, start, room }),
                 release: None,
             });
             self.pump(cx);
@@ -2806,6 +2790,7 @@ impl TimelineSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.audio_move(event, cx) { return true; }
         if let Gesture::ParentPick { ids, origin, .. } = &self.gesture {
             let target = self.parent_target(ids, event.position);
             let delta = event.position - *origin;
@@ -2977,10 +2962,6 @@ impl TimelineSurface {
                         .map(|(l, _, _)| l.from),
                     _ => None,
                 };
-                let gain_room = match &spec {
-                    Spec::Gain { room, .. } => Some(*room),
-                    _ => None,
-                };
                 let time = self.delegate.time(cx);
                 // v1: a clip being moved is held (grabbing).
                 if matches!(spec, Spec::Layers | Spec::Duplicate) {
@@ -3017,7 +2998,6 @@ impl TimelineSurface {
                     quick,
                     quick_limits,
                     handle,
-                    gain_room,
                 };
             }
             _ => {}
@@ -3032,9 +3012,7 @@ impl TimelineSurface {
                 quick,
                 quick_limits,
                 handle,
-                gain_room,
             } => {
-                let gain_room = *gain_room;
                 if let Some((at, total, _)) = quick {
                     *at = event.position;
                     *total = f32::from(event.position.x - origin.x) as f64 / self.view.pps;
@@ -3056,9 +3034,6 @@ impl TimelineSurface {
                 }
                 (sample.acquire_tolerance, sample.release_tolerance) =
                     pm_panel_timeline::snap::tolerances(keys, self.view.pps);
-                if let Some(room) = gain_room.filter(|r| *r > 0.) {
-                    sample.value_delta = -(f32::from(event.position.y - origin.y) as f64) / room;
-                }
                 if let (Some(layer_from), Some(area), Some(graph)) =
                     (handle, self.graph_area(), self.graph.as_ref())
                 {
@@ -3255,6 +3230,7 @@ impl TimelineSurface {
     }
     fn on_up(&mut self, cx: &mut Context<Self>) -> bool {
         self.row_scroll = None;
+        if self.audio_up(cx) { return true; }
         self.transform = None;
         self.readout = None;
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
@@ -3678,6 +3654,7 @@ impl TimelineSurface {
     }
     fn set_skimmer(&mut self, at: Option<f64>, cx: &mut Context<Self>) {
         if at.is_none() && self.hover_clip.take().is_some() {
+            self.invalidate_audio();
             cx.notify();
         }
         if at != self.skimmer {
@@ -3810,16 +3787,10 @@ impl TimelineSurface {
                 (id.clone(), mid.is_some_and(|mid| *x < mid))
             })
         };
-        // Over an audio clip the level line's handle follows the pointer.
-        let level_moves = hovered.as_ref().is_some_and(|(id, x)| {
-            let level = format!("level:{id}");
-            self.hover_clip.as_ref().is_none_or(|(_, seen)| (seen - x).abs() >= 0.5)
-                && self
-                    .frame
-                    .as_ref()
-                    .is_some_and(|f| f.ops.iter().any(|o| o.id == level))
-        });
-        if side(&hovered) != side(&self.hover_clip) || level_moves {
+        if side(&hovered) != side(&self.hover_clip) {
+            if hovered.as_ref().map(|(id, _)| id) != self.hover_clip.as_ref().map(|(id, _)| id) {
+                self.invalidate_audio();
+            }
             cx.notify();
         }
         self.hover_clip = hovered;
@@ -3840,7 +3811,7 @@ impl TimelineSurface {
             CursorStyle::OpenHand
         } else if x >= self.view.layer_column && (0. ..m.ruler as f64).contains(&y) {
             CursorStyle::ResizeLeftRight
-        } else if self.frame.as_ref().is_some_and(|f| level_line_at(f, x, y).is_some()) {
+        } else if self.audio_hit(x, y).is_some_and(|op| op.id.starts_with("audio-level:")) {
             // The level line moves up and down.
             CursorStyle::ResizeUpDown
         } else if self.frame.as_ref().is_some_and(|f| f.hit_layer_key_across(x, y, KEY_REACH, m.row as f64).is_some()) {
@@ -4450,7 +4421,6 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
                 time,
             }
         }
-        Spec::Gain { layer, start, .. } => DragKind::Gain { layer, start },
         Spec::WorkIn => DragKind::WorkIn,
         Spec::WorkOut => DragKind::WorkOut,
         Spec::WorkMove => DragKind::WorkMove,
@@ -4557,11 +4527,14 @@ impl ModelPresenter for Presenter {
             .snapshot
             .root()
             .and_then(|root| root.get("assets")?.get(asset));
+        let trim = self.published.snapshot.root()
+            .and_then(|root| crate::waveforms::layer_timing(root, &layer.id))
+            .map_or(layer.trim, |(trim, _)| trim);
         let key = crate::waveforms::Key::of(path.clone(), record);
         Some(match crate::waveforms::lookup(&key)? {
             Some(levels) => Some(pm_panel_timeline::render::Waveform {
                 levels,
-                trim: layer.trim,
+                trim,
                 map: time_map(&self.published, &layer.id, layer.from, layer.duration),
             }),
             None => {
@@ -5298,10 +5271,6 @@ impl Render for TimelineSurface {
                                         }),
                                         |w| {
                                             strip_hover(op, *x + reach, origin, &tracks_tokens, w);
-                                            let level = format!("level:{id}");
-                                            if let Some(line) = frame.ops.iter().find(|o| o.id == level) {
-                                                level_hover(line, *x + reach, origin, w);
-                                            }
                                         },
                                     );
                                 }
@@ -5504,6 +5473,7 @@ impl Render for TimelineSurface {
             .children(effect_row)
             .children(tip)
             .children(self.graph_readout_element())
+            .child(self.audio_overlay(cx))
     }
 }
 impl TimelineSurface {
@@ -5876,49 +5846,6 @@ fn strip_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, t: &Tokens, windo
 /// The level line of the audio clip under the pointer: a 1 pt hairline in
 /// the clip's light tone and, under the pointer, a short rounded pill on
 /// it (the trim grip's language) to show it can be dragged.
-fn level_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, window: &mut Window) {
-    let Some(points) = op.detail["points"].as_array() else {
-        return;
-    };
-    let points: Vec<(f64, f64)> = points
-        .iter()
-        .filter_map(|p| Some((p[0].as_f64()?, p[1].as_f64()?)))
-        .collect();
-    if points.len() < 2 {
-        return;
-    }
-    let at = |x: f64, y: f64| origin + point(px(x as f32), px(y as f32));
-    let color = shade(op.color, op.opacity);
-    let mut path = PathBuilder::stroke(px(1.));
-    path.move_to(at(points[0].0, points[0].1));
-    for (x, y) in &points[1..] {
-        path.line_to(at(*x, *y));
-    }
-    if let Ok(path) = path.build() {
-        window.paint_path(path, color);
-    }
-    // The handle sits on the flat part, under the pointer.
-    let (from, to) = (
-        op.detail["from"].as_f64().unwrap_or(f64::MIN),
-        op.detail["to"].as_f64().unwrap_or(f64::MAX),
-    );
-    let Some(y) = op.detail["y"].as_f64() else {
-        return;
-    };
-    const PILL: (f64, f64) = (14., 4.);
-    if to - from < PILL.0 {
-        return;
-    }
-    let x = pointer_x.clamp(from + PILL.0 / 2., to - PILL.0 / 2.);
-    window.paint_quad(
-        PaintQuad::new(Bounds::new(
-            at(x - PILL.0 / 2., y - PILL.1 / 2.),
-            size(px(PILL.0 as f32), px(PILL.1 as f32)),
-        ))
-        .background(shade(op.color, 1.))
-        .corner_radii(px((PILL.1 / 2.) as f32)),
-    );
-}
 fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &mut App) {
     let at = |x: f64, y: f64| origin + point(px(x as f32), px(y as f32));
     let b = op.bounds;
@@ -6300,6 +6227,43 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
         // its rounded corners, with a thin haze along the whole floor so a
         // silent stretch never reads as empty. While the levels are read a
         // hairline marks the middle (v1).
+        #[cfg(test)]
+        "waveform-baseline" => {
+            let bars = op.detail["bars"].as_array();
+            let inset = op.detail["inset"].as_f64().unwrap_or(2.) as f32;
+            let min_bar = op.detail["minBar"].as_f64().unwrap_or(1.) as f32;
+            let (x0, top) = (f32::from(area.origin.x), f32::from(area.origin.y));
+            let (w, h) = (f32::from(area.size.width), f32::from(area.size.height));
+            let room = (h - 2. * inset).max(0.);
+            match bars.filter(|b| !b.is_empty()) {
+                None => window.paint_quad(
+                    PaintQuad::new(Bounds::new(
+                        point(px(x0), px(top + (h / 2.).floor())),
+                        size(px(w), px(1.)),
+                    ))
+                    .background(color),
+                ),
+                Some(bars) => {
+                    let floor = top + h - inset;
+                    let mut path = PathBuilder::fill();
+                    path.move_to(point(px(x0), px(floor)));
+                    // Silence draws nothing: a bar shorter than `minBar`
+                    // would run along the foot as an underline.
+                    for (i, peak) in bars.iter().enumerate() {
+                        let bar = peak.as_f64().unwrap_or(0.) as f32 * room;
+                        let bar = if bar < min_bar { 0. } else { bar };
+                        let x = x0 + i as f32;
+                        path.line_to(point(px(x), px(floor - bar)));
+                        path.line_to(point(px(x + 1.), px(floor - bar)));
+                    }
+                    path.line_to(point(px(x0 + bars.len() as f32), px(floor)));
+                    path.close();
+                    if let Ok(path) = path.build() {
+                        window.paint_path(path, color);
+                    }
+                }
+            }
+        }
         "waveform" => {
             use pm_panel_timeline::waveform::{LOUDEST, decode, soften};
             let d = &op.detail;
@@ -6378,32 +6342,6 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                         ),
                     );
                 }
-            }
-        }
-        // An audio clip's level line: a hairline in its pale tint.
-        // Drawn here only on a selected clip; under the pointer the hover
-        // paints it with its handle (`level_hover`). At rest: nothing.
-        "levelline" => {
-            if op.detail["shown"] != true {
-                return;
-            }
-            let Some(points) = op.detail["points"].as_array() else {
-                return;
-            };
-            let mut path = PathBuilder::stroke(px(1.));
-            for (i, p) in points.iter().enumerate() {
-                let (Some(x), Some(y)) = (p[0].as_f64(), p[1].as_f64()) else {
-                    continue;
-                };
-                let at = at(x, y);
-                if i == 0 {
-                    path.move_to(at);
-                } else {
-                    path.line_to(at);
-                }
-            }
-            if let Ok(path) = path.build() {
-                window.paint_path(path, color);
             }
         }
         "text" => {
@@ -6880,24 +6818,4 @@ fn monotone_tangents(xs: &[f32], ys: &[f32]) -> Vec<f32> {
         }
     }
     m
-}
-
-/// The audio clip whose level line (its flat part) is under `x, y`: its
-/// layer, its gain's place on the fader law and the law's height.
-fn level_line_at(frame: &pm_panel_timeline::render::Frame, x: f64, y: f64) -> Option<(String, f64, f64)> {
-    const REACH: f64 = 4.;
-    frame.ops.iter().rev().find_map(|op| {
-        if op.shape != "levelline" {
-            return None;
-        }
-        let d = &op.detail;
-        let (line, from, to) = (d["y"].as_f64()?, d["from"].as_f64()?, d["to"].as_f64()?);
-        if (y - line).abs() > REACH || x < from || x > to {
-            return None;
-        }
-        let start = pm_panel_timeline::level::fader_position(pm_panel_timeline::level::gain_db(
-            d["gain"].as_f64()?,
-        ));
-        Some((op.id.strip_prefix("level:")?.to_owned(), start, d["room"].as_f64()?))
-    })
 }

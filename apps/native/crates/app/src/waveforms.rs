@@ -87,7 +87,11 @@ pub fn read(key: &Key) -> async_channel::Receiver<()> {
 /// The peak and RMS of the heard streams per ~1/`RATE` s of clip time, as
 /// a pyramid for every zoom.
 fn levels(key: &Key) -> Option<Levels> {
-    let l = pm_audio::waveform::clip_levels(&key.path, &key.streams, key.timing, RATE).ok()?;
+    levels_at(key, RATE)
+}
+
+fn levels_at(key: &Key, rate: f64) -> Option<Levels> {
+    let l = pm_audio::waveform::clip_levels(&key.path, &key.streams, key.timing, rate).ok()?;
     Some(Arc::new(pm_panel_timeline::waveform::Levels::new(
         l.rate, l.channels, &l.peak, &l.rms,
     )))
@@ -149,6 +153,81 @@ mod tests {
                 .unwrap()
                 .0;
             assert_eq!(loudest, at, "{text}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod pcm_tests {
+    use super::*;
+    #[test]
+    fn peak_summary_matches_known_pcm_and_pyramid_preserves_extrema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known.wav");
+        let samples: Vec<i16> = (0..960)
+            .map(|i| if i < 480 { 8192 } else { -24576 })
+            .collect();
+        let bytes = (samples.len() * 2) as u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&48000u32.to_le_bytes());
+        wav.extend_from_slice(&96000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&bytes.to_le_bytes());
+        for sample in samples {
+            wav.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(&path, wav).unwrap();
+        let levels = levels_at(&Key::of(path, None), 100.).unwrap();
+        let peaks = &levels.combined.peak[0];
+        assert_eq!(levels.rate, 100.);
+        assert_eq!(peaks.len(), 2);
+        assert!((peaks[0] - 0.25).abs() < 0.0001);
+        assert!((peaks[1] - 0.75).abs() < 0.0001);
+        assert_eq!(&levels.combined.peak[1], &[0.75]);
+    }
+}
+
+/// Static source timing for waveform drawing, without changing the shared timeline index.
+pub fn layer_timing(root: &pm_model::Node, id: &str) -> Option<(f64, f64)> {
+    let at = pm_kernel::model::find_layer(root, id)?;
+    let comp = pm_kernel::model::comp_node(root, at.comp_id.as_deref())?;
+    let layer = pm_kernel::model::layers_of(comp).nth(at.index)?;
+    let number = |key: &str, default: f64| {
+        layer
+            .get("d")
+            .and_then(|d| d.get(key))
+            .and_then(|n| n.get("v").unwrap_or(n).to_value().as_f64())
+            .filter(|v| v.is_finite())
+            .unwrap_or(default)
+    };
+    Some((number("trim", 0.).max(0.), number("speed", 1.)))
+}
+#[cfg(test)]
+mod timing_tests {
+    use super::*;
+    #[test]
+    fn waveform_timing_reads_numeric_and_channel_values() {
+        for content in [
+            r#"{"trim":2,"speed":2}"#,
+            r#"{"trim":{"v":2,"kf":[]},"speed":{"v":2,"kf":[]}}"#,
+        ] {
+            let layers = format!(r#"[{{"id":"a","type":"audio","d":{content}}}]"#);
+            for project in [
+                format!(r#"{{"layers":{layers}}}"#),
+                format!(r#"{{"compId":"c","comps":{{"c":{{"layers":{layers}}}}}}}"#),
+            ] {
+                let doc =
+                    pm_model::Document::new(Some(pm_model::json::parse(&project).unwrap()), 1);
+                assert_eq!(layer_timing(doc.root().unwrap(), "a"), Some((2., 2.)));
+            }
         }
     }
 }

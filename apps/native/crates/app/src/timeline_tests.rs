@@ -13,6 +13,7 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 
 #[derive(Default)]
 pub(crate) struct Recorder {
+    pub audio: RefCell<Option<([f64; 2], i64, bool)>>,
     pub time: RefCell<f64>,
     pub timing_previews: RefCell<Vec<Option<pm_kernel::Snapshot>>>,
     pub seeks: RefCell<Vec<f64>>,
@@ -41,6 +42,7 @@ impl Delegate for Recording {
     fn timing_preview(&self, snapshot: Option<pm_kernel::Snapshot>, _: &mut App) {
         self.0.timing_previews.borrow_mut().push(snapshot);
     }
+    fn audio_peaks(&self, _: &App) -> Option<([f64; 2], i64, bool)> { *self.0.audio.borrow() }
     fn time(&self, _: &App) -> f64 {
         *self.0.time.borrow()
     }

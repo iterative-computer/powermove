@@ -3044,3 +3044,40 @@ fn level_line(c: &Clip, level: Level, r: Rect, v: Viewport, inset: f64, light: (
     });
     o
 }
+
+#[cfg(test)]
+mod audio_source_range_tests {
+    use super::*;
+
+    fn sample(wave: &Waveform, rate: f64, a: f64, b: f64) -> f32 {
+        crate::waveform::column(&wave.levels.combined, rate, a, b).0
+    }
+
+    #[test]
+    fn waveform_source_range_respects_trim_and_speed() {
+        let w = Waveform::from_peaks(&[0.1, 0.2, 0.3, 0.4], 1., 1.);
+        let map = std::sync::Arc::from([1., 5.]);
+        let source = crate::waveform::mapped(&map, 2.);
+        let peak = |at| sample(&w, 1., source(at), source(at + 0.5));
+        assert_eq!(peak(0.), 0.2);
+        assert_eq!(peak(0.5), 0.3);
+        assert_eq!(peak(2.), 0.);
+    }
+
+    #[test]
+    fn zoomed_out_summary_excludes_trimmed_away_loud_peaks() {
+        let w = Waveform::from_peaks(&[1., 0.2, 0.3, 0.4, 0.5, 1.], 1., 1.);
+        let peak = |at, width| sample(&w, 1., w.trim + at, w.trim + at + width);
+        assert_eq!(peak(0., 4.), 0.5);
+        assert_eq!(peak(0., 1.), 0.2);
+        assert_eq!(peak(1., 2.), 0.4);
+    }
+
+    #[test]
+    fn reverse_sampling_is_silent_before_source_start() {
+        let w = Waveform::from_peaks(&[0.75, 0.5], 1., 0.);
+        let map = std::sync::Arc::from([0., -2.]);
+        let source = crate::waveform::mapped(&map, 2.);
+        assert_eq!(sample(&w, 1., source(1.), source(1.5)), 0.);
+    }
+}
