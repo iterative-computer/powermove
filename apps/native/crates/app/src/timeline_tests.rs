@@ -3430,6 +3430,7 @@ fn g3_capture_trim_review() {
         let rig = crate::v4_view_tests::rig_project("timeline", &fixture);
         let first = publication(&rig);
         let tokens = pm_design::Tokens::new(scheme, Default::default());
+        let tooltip_delay = tokens.motion.tooltip_delay;
         let mut cx = HeadlessAppContext::with_platform(
             Arc::new(gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load).with_automatic_optical_sizing()),
             Arc::new(()),
@@ -3524,6 +3525,15 @@ fn g3_capture_trim_review() {
         cx.update(|cx| surface.update(cx, |s, cx| s.published(cx)));
         pump(&mut cx);
         cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/negative-start-{name}.png")).unwrap();
+        let marker = cx.update(|cx| surface.read(cx).frame().unwrap().ops.iter().find(|o| o.id == "clip-negative:a").unwrap().bounds);
+        let position = origin + point(px((marker.x + 4.) as f32), px((marker.y + marker.height / 2.) as f32));
+        cx.update_window(window.into(), |_, w, cx| {
+            w.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position, ..Default::default() }), cx);
+        }).unwrap();
+        pump(&mut cx);
+        cx.advance_clock(Duration::from_secs_f64(tooltip_delay + 0.1));
+        pump(&mut cx);
+        cx.capture_screenshot(window.into()).unwrap().save(format!("{dir}/negative-hover-{name}.png")).unwrap();
     }
 }
 
