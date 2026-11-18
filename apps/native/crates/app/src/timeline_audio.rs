@@ -494,19 +494,21 @@ impl TimelineSurface {
             }
         }
         self.audio_controls(frame);
-        // Fixed-width, deliberately omitted in narrow timelines.
-        if frame.viewport.width - frame.viewport.layer_column > 420. {
-            let x = frame.viewport.width - 88.;
+        // The last 32 pt of the layer header belong to its routing button.
+        // Keep every meter pixel in this header, clear of the ruler/track area.
+        if frame.viewport.layer_column >= 200. {
+            let x = frame.viewport.layer_column - 120.;
+            let top = (self.tokens.metrics.ruler as f64 - 8.) / 2.;
             frame.ops.push(op(
                 "audio-meter-panel".into(),
-                Rect::new(x - 4., 2., 92., 22.),
+                Rect::new(x - 4., top - 3., 92., 14.),
                 self.tokens.colors.panel,
             ));
             for (i, meter) in self.audio.meters.iter().enumerate() {
-                let y = 5. + i as f64 * 8.;
+                let y = top + i as f64 * 5.;
                 frame.ops.push(op(
                     "audio-meter-bg".into(),
-                    Rect::new(x, y, 72., 5.),
+                    Rect::new(x, y, 72., 3.),
                     0x242424,
                 ));
                 for (lo, hi, color) in [
@@ -517,18 +519,18 @@ impl TimelineSurface {
                     let end = meter.peak_db.clamp(lo, hi);
                     frame.ops.push(op(
                         "audio-meter".into(),
-                        Rect::new(x + (lo + 60.) * 1.2, y, (end - lo) * 1.2, 5.),
+                        Rect::new(x + (lo + 60.) * 1.2, y, (end - lo) * 1.2, 3.),
                         color,
                     ));
                 }
                 frame.ops.push(op(
                     "audio-hold".into(),
-                    Rect::new(x + (meter.hold_db.clamp(-60., 0.) + 60.) * 1.2, y, 1., 5.),
+                    Rect::new(x + (meter.hold_db.clamp(-60., 0.) + 60.) * 1.2, y, 1., 3.),
                     0xffffff,
                 ));
                 frame.ops.push(op(
                     "audio-clip-latch".into(),
-                    Rect::new(x + 76., y, 5., 5.),
+                    Rect::new(x + 76., y, 5., 3.),
                     if meter.clipped { 0xdf625c } else { 0x454545 },
                 ));
             }
@@ -969,6 +971,31 @@ mod captures {
                             .iter()
                             .any(|o| o.id == "audio-meter" && o.bounds.width > 0.)
                     );
+                    // Meters cannot obscure ruler labels, work-area handles or clips.
+                    let column = s.frame.as_ref().unwrap().viewport.layer_column;
+                    for o in s.audio.ops.iter().filter(|o| {
+                        o.id.starts_with("audio-meter")
+                            || matches!(o.id.as_str(), "audio-hold" | "audio-clip-latch")
+                    }) {
+                        assert!(o.bounds.x >= 32. && o.bounds.x + o.bounds.width <= column - 32.);
+                        assert!(
+                            o.bounds.y >= 0.
+                                && o.bounds.y + o.bounds.height <= tokens.metrics.ruler as f64
+                        );
+                    }
+                    let rails: Vec<_> = s
+                        .audio
+                        .ops
+                        .iter()
+                        .filter(|o| o.id == "audio-meter-bg")
+                        .collect();
+                    assert_eq!(rails.len(), 2);
+                    assert!(
+                        rails
+                            .iter()
+                            .all(|o| o.bounds.width == 72. && o.bounds.height == 3.)
+                    );
+                    assert_eq!(rails[1].bounds.y - rails[0].bounds.y, 5.);
                 });
                 cx.capture_screenshot(window.into())
                     .unwrap()
@@ -1111,6 +1138,56 @@ mod gesture_tests {
         project["layers"][0]["dur"] = serde_json::json!(8);
         project["layers"][0]["d"] = serde_json::json!({"gain":1,"fadeIn":0,"fadeOut":0});
         crate::timeline_tests::stage_project(cx, project.to_string())
+    }
+    #[gpui::test]
+    fn meters_fit_the_layer_header_hide_when_narrow_and_clear_on_click(cx: &mut TestAppContext) {
+        let mut s = stage_audio(cx);
+        let origin = s.origin();
+        s.surface.update(&mut s.vcx, |surface, cx| {
+            for column in [199., 200., 320.] {
+                let mut frame = AudioFrame {
+                    viewport: surface.frame.as_ref().unwrap().viewport,
+                    ops: Vec::new(),
+                };
+                frame.viewport.layer_column = column;
+                surface.audio_frame(&mut frame, cx);
+                let rails: Vec<_> = frame
+                    .ops
+                    .iter()
+                    .filter(|o| o.id == "audio-meter-bg")
+                    .collect();
+                if column < 200. {
+                    assert!(rails.is_empty());
+                    continue;
+                }
+                assert_eq!(rails.len(), 2);
+                assert!(frame.ops.iter().all(|o| o.bounds.x >= 32.
+                    && o.bounds.x + o.bounds.width <= column - 32.
+                    && o.bounds.y + o.bounds.height <= surface.tokens.metrics.ruler as f64));
+                let latch = frame
+                    .ops
+                    .iter()
+                    .find(|o| o.id == "audio-clip-latch")
+                    .unwrap()
+                    .bounds;
+                surface.audio.ops = frame.ops;
+                for meter in &mut surface.audio.meters {
+                    meter.clipped = true;
+                }
+                assert!(surface.audio_down(
+                    &MouseDownEvent {
+                        position: origin
+                            + point(px((latch.x + 2.) as f32), px((latch.y + 1.) as f32)),
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                        click_count: 1,
+                        first_mouse: false,
+                    },
+                    cx
+                ));
+                assert!(surface.audio.meters.iter().all(|m| !m.clipped));
+            }
+        });
     }
     fn gain_value(s: &crate::timeline_tests::Stage, path: &str) -> f64 {
         let p = s
