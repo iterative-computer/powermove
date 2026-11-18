@@ -178,6 +178,10 @@ impl Controller {
                 let window = self.account_window(cx);
                 crate::agent_clients::request(id.into(), verb == "agentClientAdd", window, cx)
             }
+            command if command.starts_with("extensionReload.") => {
+                let id = &command["extensionReload.".len()..];
+                pm_compat_runner::host::reload_all(id);
+            }
             command if command.starts_with("extensionReveal.") => {
                 let id = command["extensionReveal.".len()..].to_owned();
                 self.reveal_extension(id, cx)

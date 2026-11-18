@@ -256,10 +256,12 @@ export function SegmentedControl(
   props: Omit<Common, "options" | "onChange"> & {
     options: SegmentOption[];
     value: string;
+    /** Let each segment take the space its label needs. */
+    fitContent?: boolean;
     onChange: (id: string) => void;
   },
 ) {
-  const { options, value, onChange, ...rest } = props;
+  const { options, value, fitContent, onChange, ...rest } = props;
   const group = useId();
   const [focusRequest, setFocusRequest] = useState<string>();
   const enabled = options.filter((o) => !o.disabled);
@@ -338,7 +340,7 @@ export function SegmentedControl(
             ...target,
             ...text,
             display: "flex",
-            flexGrow: 1,
+            ...(fitContent ? { flexShrink: 0 } : { flexGrow: 1 }),
             alignItems: "center",
             justifyContent: "center",
             paddingLeft: token("metrics.inset"),
@@ -375,9 +377,11 @@ export function DisclosureGroup(
     /** What stands before the title, on the row-label inset (a grade's
      * enable checkbox, as Final Cut's inspector leads an effect with it). */
     leading?: ComponentChildren;
+    /** An inline label with its own icon or badge; the chevron leads it. */
+    inlineHeading?: ComponentChildren;
   },
 ) {
-  const { children, open, onChange, accessory, leading, ...rest } = props;
+  const { children, open, onChange, accessory, leading, inlineHeading, ...rest } = props;
   const id = useId();
   // A section heading is a label, a step under its panel's title, on a row
   // of its own.
@@ -392,7 +396,8 @@ export function DisclosureGroup(
       onClick: () => {
         if (!props.disabled) onChange(!open);
       },
-      children: props.label,
+      metadata: inlineHeading ? { inlineDisclosure: true } : undefined,
+      children: inlineHeading ?? props.label,
     },
     {
       ...target,
@@ -885,7 +890,10 @@ export function EaseThumbnail(
     metadata: kitMetadata(props, {}),
   });
 }
-export function Switch(props: Bound<boolean>) {
+export function Switch(
+  props: Omit<Bound<boolean>, "binding"> &
+    ({ binding: string } | { binding?: undefined; disabled: true }),
+) {
   return field(
     "switch",
     "toggle",

@@ -3,12 +3,18 @@ import type { ComponentChildren } from "preact";
 import * as UI from "../../src/components";
 import type { Json, SurfaceEvent } from "../../src/protocol";
 import {
-  extensionTypes,
   sectionCopy,
   type Row,
   type Section,
 } from "./catalogue";
-import { SettingsModel, type SpeechModel } from "./model";
+import {
+  SettingsModel,
+  extensionFilterLabels,
+  type Extension,
+  type ExtensionCategory,
+  type ExtensionFilter,
+  type SpeechModel,
+} from "./model";
 export { SettingsModel } from "./model";
 export type {
   SettingsServices,
@@ -470,6 +476,20 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
           </UI.ToolbarItem>
         </div>
         <Group title={detail.name}>
+          {detail.attention && (
+            <div role="group" label="Extension status" style={describedRow}>
+              <RowCopy
+                title={detail.attention === "missing" ? "Missing files" : "Needs attention"}
+                detail={detail.attention === "missing" ? "Powermove can't reach this extension's folder." : "This extension had a problem loading or running."}
+              />
+              {detail.attention === "error" && detail.enabled && (
+                <div style={trailing}>
+                  <Button label="Reload" disabled={!model.services || model.pending.has(detail.id)}
+                    onClick={() => { void model.perform({ type: "extension.reload", id: detail.id }); }} />
+                </div>
+              )}
+            </div>
+          )}
           <div role="group" label="About" style={describedRow}>
             <RowCopy title="About" detail={detail.about} />
           </div>
@@ -534,235 +554,259 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
         )}
       </div>
     );
-  const listed =
-    !["loading", "error", "unavailable"].includes(
-      model.publication.extensionsState ?? "",
-    ) && model.extensions.length > 0;
+  return <ExtensionInventory model={model} bindings={bindings} />;
+}
+
+const categoryIcons: Record<ExtensionCategory, string> = {
+  Effects: "wand.and.stars",
+  Panels: "square.grid.2x2",
+  Appearance: "sun.max",
+  "Layer Types": "square.3.layers.3d",
+  Media: "photo",
+  "Editor Tools": "slider.horizontal.3",
+  Other: "puzzlepiece.extension",
+};
+const categoryLabels: Record<ExtensionCategory, string> = {
+  Effects: "Effects",
+  Panels: "Panels",
+  Appearance: "Appearance",
+  "Layer Types": "Layer types",
+  Media: "Media",
+  "Editor Tools": "Editor tools",
+  Other: "Other extensions",
+};
+const extensionLine = {
+  display: "flex",
+  alignItems: "center",
+  gap: t("metrics.gap"),
+};
+const inventoryInset = {
+  paddingLeft: t("metrics.inset"),
+  paddingRight: t("metrics.inset"),
+};
+const EXTENSION_CHUNK = 32;
+
+function ExtensionInventory({ model, bindings }: SettingsPanelProps) {
+  const groups = new Map<ExtensionCategory, Extension[]>();
+  for (const extension of model.extensions) {
+    const category = model.extensionCategory(extension);
+    const group = groups.get(category);
+    if (group) group.push(extension);
+    else groups.set(category, [extension]);
+  }
+  const categories = (Object.keys(categoryLabels) as ExtensionCategory[]).filter((type) =>
+    groups.has(type),
+  );
+  const expanded = categories.filter((category) => model.extensionGroupOpen(category));
+  const count = expanded.reduce((n, category) => n + groups.get(category)!.length, 0);
+  // A large expansion publishes in the host's normal commit budget. All
+  // category rows remain in the page's one scrolling column.
+  const [limit, setLimit] = useState(EXTENSION_CHUNK);
+  useLayoutEffect(() => {
+    if (limit >= count) return;
+    const more = setTimeout(() => setLimit(limit + EXTENSION_CHUNK), 0);
+    return () => clearTimeout(more);
+  }, [count, limit]);
+  let remaining = limit;
+  const counts = model.extensionCounts;
+  const filters = Object.keys(extensionFilterLabels) as ExtensionFilter[];
+  const ready = model.publication.extensionsState === "ready";
   return (
-    <>
-      {/* The filter stands on the page's text column, over the list's card. */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: t("metrics.gap"),
-          height: t("metrics.form_row"),
-          paddingLeft: t("metrics.inset"),
-          paddingRight: t("metrics.inset"),
-        }}
-      >
-        <div style={{ display: "flex", flexGrow: 1, flexShrink: 1 }}>
+    <div style={{ ...column, gap: t("metrics.gap") }}>
+      {!model.query.trim() && (
+        <div style={{ ...column, ...inventoryInset, marginBottom: t("metrics.inset") }}>
+          <text role="heading" style={{ ...text, fontSize: t("typography.heading") }}>
+            Extensions
+          </text>
+          <text style={{ ...text, color: t("colors.secondary") }}>
+            {sectionCopy.extensions.description}
+          </text>
+        </div>
+      )}
+      <div style={{ ...extensionLine, ...inventoryInset }}>
+        <div style={{ display: "flex", flexGrow: 1, flexShrink: 1, minWidth: 0 }}>
           <UI.TextField
-            label="Filter extensions"
+            id="settings.extension-search"
+            label="Search extensions"
             binding={bindings.extensionSearch}
             value={model.extensionQuery}
-            metadata={{ placeholder: "Filter", search: true }}
+            metadata={{ placeholder: "Search extensions", search: true }}
             onInput={(e) => {
               if (typeof e.value === "string") model.filterExtensions(e.value);
             }}
           />
         </div>
         <UI.PopUpButton
-          label="Extension Type"
+          id="settings.extension-type"
+          label="Extension type"
           binding={bindings.extensionType}
           value={model.extensionType}
-          options={[...extensionTypes]}
+          display={model.extensionType === "All Types" ? "All types" : categoryLabels[model.extensionType]}
+          options={model.extensionTypeOptions.map((type) => ({
+            v: type,
+            label: type === "All Types" ? "All types" : categoryLabels[type],
+          }))}
           onChange={(e) => {
-            if (
-              extensionTypes.includes(
-                e.value as (typeof extensionTypes)[number],
-              )
-            )
-              model.filterExtensions(
-                model.extensionQuery,
-                e.value as (typeof extensionTypes)[number],
-              );
+            const type = model.extensionTypeOptions.find((kind) => kind === e.value);
+            if (type) model.filterExtensions(model.extensionQuery, type);
           }}
         />
       </div>
-      <Group title="Installed">
-        <div
-          style={{
-            ...column,
-            // The rows stand on the card as every page's; a state's words
-            // keep their room.
-            ...(listed
-              ? {}
-              : {
-                  paddingTop: t("metrics.inset"),
-                  paddingBottom: t("metrics.inset"),
-                }),
+      <div style={{ display: "flex", ...inventoryInset }}>
+        <UI.SegmentedControl
+          label="Filter extensions"
+          fitContent
+          value={model.extensionFilter}
+          options={filters.map((id) => ({ id, label: `${extensionFilterLabels[id]} ${counts[id]}` }))}
+          onChange={(id) => {
+            const filter = filters.find((value) => value === id);
+            if (filter) model.setExtensionFilter(filter);
           }}
-        >
+        />
+      </div>
+      <UI.FormGroup label="Installed extensions">
+        <div id="settings.extensions" role="list" label="Extensions" metadata={{ rowCount: model.extensions.length }}
+             style={{ ...column, paddingTop: t("metrics.pill_inset"), paddingBottom: t("metrics.pill_inset") }}>
+          {ready && categories.map((category) => {
+            const items = groups.get(category)!;
+            const open = model.extensionGroupOpen(category);
+            const visible = open ? items.slice(0, remaining) : [];
+            remaining -= visible.length;
+            return (
+              <UI.DisclosureGroup
+                key={category}
+                id={`settings.extension-category.${category}`}
+                label={`${categoryLabels[category]}, ${items.length} ${items.length === 1 ? "extension" : "extensions"}`}
+                open={open}
+                onChange={(next) => model.setExtensionGroupOpen(category, next)}
+                inlineHeading={
+                  <div style={extensionLine} aria-hidden>
+                    <div
+                      metadata={{ symbol: categoryIcons[category] }}
+                      style={{ color: t("colors.secondary"), symbolSize: t("metrics.symbol_inline") }}
+                    />
+                    <text style={text}>{categoryLabels[category]}</text>
+                    <text style={{
+                      ...help,
+                      paddingLeft: t("metrics.gap"),
+                      paddingRight: t("metrics.gap"),
+                      background: t("colors.field"),
+                      borderRadius: t("metrics.control_radius"),
+                      borderWidth: t("metrics.border"),
+                      borderColor: t("colors.separator"),
+                    }}>{items.length}</text>
+                  </div>
+                }
+              >
+                {visible.map((extension) => (
+                  <ExtensionInventoryRow key={extension.id} extension={extension} model={model} />
+                ))}
+              </UI.DisclosureGroup>
+            );
+          })}
           {model.publication.extensionsState === "loading" ? (
             <UI.ProgressRow label="Loading extensions…" />
           ) : model.publication.extensionsState === "error" ? (
-            <UI.EmptyState
-              label="Extensions couldn’t be loaded."
-              explanation=""
-              action={
-                <Button
-                  label="Try Again"
-                  disabled={!model.services}
-                  onClick={() => {
-                    void model.perform({ type: "extensions.retry" });
-                  }}
-                />
-              }
-            />
+            <UI.EmptyState label="Extensions couldn’t be loaded." explanation="" action={
+              <Button label="Try Again" disabled={!model.services} onClick={() => {
+                void model.perform({ type: "extensions.retry" });
+              }} />
+            } />
           ) : model.publication.extensionsState === "unavailable" ? (
+            <UI.EmptyState label="Extensions are unavailable in this session." explanation="" action={null} />
+          ) : categories.length === 0 ? (
             <UI.EmptyState
-              label="Extensions are unavailable in this session."
-              explanation=""
-              action={null}
+              label={counts.all === 0 ? "No Extensions" : "No Results"}
+              explanation={counts.all === 0
+                ? "Extensions you install appear here."
+                : "No extensions match your search or filters."}
+              action={counts.all === 0 ? null : <Button label="Clear filters" onClick={() => {
+                model.filterExtensions("", "All Types");
+                model.setExtensionFilter("all");
+              }} />}
             />
-          ) : model.extensions.length === 0 &&
-            (model.extensionQuery.trim() ||
-              model.extensionType !== "All Types") ? (
-            <UI.EmptyState
-              label="No Results"
-              explanation="No extensions match this filter."
-              action={null}
-            />
-          ) : model.extensions.length === 0 ? (
-            <UI.EmptyState
-              label="No Extensions"
-              explanation="Extensions you install appear here."
-              action={null}
-            />
-          ) : (
-            // API GAP: structural virtual-list is the existing wire primitive; the kit
-            // has no VirtualList/source-list component or AXRowCount projection yet.
-            <virtual-list
-              key={JSON.stringify([model.extensionQuery, model.extensionType])}
-              id="settings.extensions"
-              role="list"
-              label="Extensions"
-              count={model.extensions.length}
-              range={model.range}
-              metadata={{
-                rowCount: model.extensions.length,
-                // Its height (PM-386): every row up to forty, in the page
-                // that scrolls them; past that a forty-row list scrolls
-                // itself and shows only what is in view.
-                rowFloor: Math.min(model.extensions.length, 40),
-                rowHeightToken: "metrics.form_row",
-                anchorId: model.anchorId ?? "",
-              }}
-              onRangeChange={(event) => {
-                if (event.range)
-                  model.viewport(
-                    event.range[0],
-                    event.range[1] - event.range[0],
-                  );
-              }}
-            >
-              {model.visibleExtensions.map((extension, i) => (
-                // A row of the card as every page's: its name, what it is
-                // and where it came from, and the way into its page, with
-                // the card's hairline between two rows.
-                <div
-                  key={extension.id}
-                  id={`settings.extension.${extension.id}`}
-                  role="listitem"
-                  label={extension.name}
-                  tabIndex={0}
-                  aria-selected={false}
-                  onClick={() => model.viewExtension(extension.id)}
-                  preventDefault={{ keydown: ["Enter", " "] }}
-                  onKeyDown={(e: { key?: string }) => {
-                    if (e.key === "Enter" || e.key === " ")
-                      model.viewExtension(extension.id);
-                  }}
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    height: t("metrics.form_row"),
-                    minWidth: t("metrics.hit"),
-                    minHeight: t("metrics.hit"),
-                  }}
-                >
-                  {model.range[0] + i > 0 && <Separator />}
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      flexGrow: 1,
-                      gap: t("metrics.gap"),
-                      paddingLeft: t("metrics.inset"),
-                      paddingRight: t("metrics.inset"),
-                    }}
-                  >
-                    <text
-                      style={{
-                        ...text,
-                        fontSize: t("typography.title"),
-                        flexGrow: 1,
-                        flexShrink: 1,
-                        whiteSpace: "nowrap",
-                        textOverflow: "ellipsis",
-                      }}
-                    >
-                      {extension.name}
-                    </text>
-                    <text style={{ ...help, flexShrink: 0 }}>
-                      {`${extension.type} · ${extension.source}`}
-                    </text>
-                    {/* On or off here, as from the Library: its panels,
-                        effects and commands stop or come back at once
-                        (PM-435). */}
-                    {extension.binding && (
-                      <UI.Switch
-                        label={extension.name}
-                        binding={extension.binding}
-                        value={extension.enabled}
-                        disabled={
-                          !model.services || model.pending.has(extension.id)
-                        }
-                        onChange={(e) => {
-                          if (typeof e.value === "boolean")
-                            void model.perform({
-                              type: "extension.enabled",
-                              id: extension.id,
-                              enabled: e.value,
-                            });
-                        }}
-                      />
-                    )}
-                    <div
-                      metadata={{ symbol: "chevron.right" }}
-                      style={{
-                        color: t("colors.muted"),
-                        symbolSize: t("metrics.symbol_inline"),
-                        flexShrink: 0,
-                      }}
-                    />
+          ) : null}
+        </div>
+      </UI.FormGroup>
+      {ready && (
+        <div role="status" style={{ ...extensionLine, ...inventoryInset, justifyContent: "space-between" }}>
+          <text style={help}>{model.extensions.length === counts.all
+            ? `${counts.all} installed`
+            : `${model.extensions.length} of ${counts.all} extensions`}</text>
+          <text style={help}>{`${counts.enabled} enabled · ${counts.off} off`}</text>
+        </div>
+      )}
+    </div>
+  );
+}
 
-                  </div>
-                </div>
-              ))}
-            </virtual-list>
-          )}
+function ExtensionInventoryRow({
+  extension,
+  model,
+}: {
+  extension: Extension;
+  model: SettingsModel;
+  key?: string;
+}) {
+  const status = extension.attention === "missing"
+    ? "Missing files"
+    : extension.attention === "error"
+      ? "Needs attention"
+      : null;
+  const control = extension.binding
+    ? { binding: extension.binding, disabled: !model.services || model.pending.has(extension.id) }
+    : { disabled: true as const };
+  return (
+    <div
+      id={`settings.extension.${extension.id}`}
+      role="listitem"
+      style={{
+        ...rowStyle,
+        alignItems: "center",
+        paddingLeft: t("metrics.sheet_inset"),
+        gap: t("metrics.gap"),
+      }}
+    >
+      <button
+        label={extension.name}
+        onClick={() => model.viewExtension(extension.id)}
+        style={{
+          ...extensionLine,
+          flexGrow: 1,
+          flexShrink: 1,
+          minWidth: t("metrics.hit"),
+          minHeight: t("metrics.hit"),
+        }}
+      >
+        <div
+          metadata={{ symbol: "circle.fill" }}
+          style={{
+            color: t(extension.attention ? "colors.warning" : extension.enabled ? "colors.success" : "colors.muted"),
+            symbolSize: t("metrics.symbol_inline"),
+            flexShrink: 0,
+          }}
+        />
+        <div style={{ ...column, flexShrink: 1, minWidth: 0 }}>
+          <text style={{ ...text, whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+            {extension.name}
+          </text>
+          <text style={help}>{[extension.author, extension.source].filter(Boolean).join(" · ")}</text>
         </div>
-      </Group>
-      <Group title="Store">
-        <div role="group" label="Powermove Store" style={describedRow}>
-          <RowCopy
-            title="Powermove Store"
-            detail="Publish and manage your extensions on the Store."
-          />
-          <div style={trailing}>
-            <Button
-              label="Open Store"
-              disabled={!model.services}
-              onClick={() => {
-                void model.perform({ type: "store.open" });
-              }}
-            />
-          </div>
-        </div>
-      </Group>
-    </>
+      </button>
+      <div style={trailing}>
+        {status && <text style={{ ...help, color: t("colors.warning") }}>{status}</text>}
+        <UI.Switch
+          {...control}
+          id={`settings.extension-toggle.${extension.id}`}
+          label={extension.name}
+          value={extension.enabled}
+          onChange={(e) => {
+            if (typeof e.value === "boolean")
+              void model.perform({ type: "extension.enabled", id: extension.id, enabled: e.value });
+          }}
+        />
+      </div>
+    </div>
   );
 }
 const memoryGroups = [
@@ -936,7 +980,7 @@ function ShareRow({ model }: { model: SettingsModel; key?: string }) {
 }
 /** A shortcut's keys as keycaps (the build note's custom piece): each
  * modifier its own cap, then the key. */
-function Keycaps({ keys, fixed }: { keys: string; fixed?: boolean }) {
+function Keycaps({ keys, fixed }: { keys: string; fixed?: boolean; key?: number }) {
   const caps: string[] = [];
   let rest = keys;
   while (rest && "⌘⌥⇧⌃".includes(rest[0]!)) {

@@ -174,7 +174,6 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
         extensions: Array.from({ length: 60_000 }, (_, i) => extension(i)),
       });
       model.select("extensions");
-      model.viewport(30_000, 20);
     },
   ],
   [
@@ -285,11 +284,11 @@ for (const [state, prepare] of stateCases)
     const row = replay(commits);
     expect(opTree(row)).toMatchSnapshot();
     if (state === "60k-extensions") {
-      const virtual = Object.values(row.nodes).find(
-        (n: any) => n.type === "virtual-list",
+      const list = Object.values(row.nodes).find(
+        (n: any) => n.props.id === "settings.extensions",
       ) as any;
-      expect(virtual.props.count).toBe(60_000);
-      expect(virtual.children).toHaveLength(60);
+      expect(list.props.metadata.rowCount).toBe(60_000);
+      expect(list.children).toHaveLength(1);
       expect(Object.keys(row.nodes).length).toBeLessThan(600);
     }
     if (state.endsWith("not-applicable"))
@@ -398,7 +397,7 @@ test("extension row enters details, back returns without clearing search, Delete
   const f = fixture({ extensions: [extension()] });
   f.model.show();
   f.model.select("extensions");
-  f.model.viewport(0, 10);
+  f.model.setExtensionGroupOpen("Effects", true);
   const { root, commits } = recorder();
   const render = () =>
     root.render(<SettingsPanel model={f.model} bindings={bindings} />);
@@ -430,7 +429,7 @@ test("an extension's row turns it on or off with its own switch, without opening
   });
   f.model.show();
   f.model.select("extensions");
-  f.model.viewport(0, 10);
+  f.model.setExtensionGroupOpen("Effects", true);
   const { root } = recorder();
   await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
   const toggle = find(root, "Fixture 0", "switch");
@@ -441,6 +440,13 @@ test("an extension's row turns it on or off with its own switch, without opening
     { type: "extension.enabled", id: "fixture-0", enabled: false },
   ]);
   expect(f.model.detailId).toBeUndefined();
+  await root.flush();
+  expect(find(root, "Fixture 0", "switch").props["aria-checked"]).toBe(false);
+  expect(find(root, "Off 1", "segment")).toBeDefined();
+  await event(root, find(root, "Fixture 0", "switch").id, "change", { value: true });
+  await root.flush();
+  expect(find(root, "Fixture 0", "switch").props["aria-checked"]).toBe(true);
+  expect(find(root, "Enabled 1", "segment")).toBeDefined();
   root.dispose();
   f.model.dispose();
 });
@@ -559,7 +565,6 @@ test("AX help/count requirements remain declared for the native projection", asy
   });
   f.model.show();
   f.model.select("accounts");
-  f.model.viewport(0, 1);
   const { root, commits } = recorder();
   await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
   const { ax } = accessibility(commits);
@@ -577,7 +582,7 @@ test("AX help/count requirements remain declared for the native projection", asy
   f.model.select("extensions");
   await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
   const extensionsAx = accessibility(commits).ax;
-  const list = root.inspect().nodes.find((n) => n.type === "virtual-list")!;
+  const list = root.inspect().nodes.find((n) => n.props.id === "settings.extensions")!;
   expect(list.props.metadata).toHaveProperty("rowCount", 1);
   const projectedList = extensionsAx.find((n) => n.id === list.id)!;
   expect(projectedList).toBeDefined();
@@ -679,26 +684,50 @@ test("a search matching hundreds of commands lists a page the host takes: forty 
   model.dispose();
 });
 
-test("the installed extensions take their rows' height (PM-386): every row up to forty in the page, a forty-row list past that", async () => {
-  for (const [count, floor] of [
-    [39, 39],
-    [60_000, 40],
-  ] as const) {
-    const f = fixture({
-      extensions: Array.from({ length: count }, (_, i) => extension(i)),
-    });
-    f.model.show("extensions");
-    const { root } = recorder();
-    await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
-    const list = root
-      .inspect()
-      .nodes.find((n) => n.props.id === "settings.extensions");
-    expect((list?.props.metadata as { rowFloor?: number })?.rowFloor).toBe(
-      floor,
-    );
-    root.dispose();
-    f.model.dispose();
+test("the installed extensions use one scrolling page and collapse without losing category counts", async () => {
+  const f = fixture({
+    extensions: [
+      extension(),
+      { ...extension(1), type: "Panels", attention: "error" },
+      { ...extension(2), enabled: false, attention: "missing", binding: undefined },
+    ],
+  });
+  f.model.show("extensions");
+  const { root } = recorder();
+  await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
+  const tree = () => root.inspect().nodes;
+  const disclosure = () => find(root, "Effects, 2 extensions", "disclosure-button");
+  expect(tree().filter((n) => n.type === "scroll")).toHaveLength(1);
+  expect(tree().some((n) => n.type === "virtual-list")).toBe(false);
+  expect(disclosure().props["aria-expanded"]).toBe(false);
+  expect(find(root, "Needs attention 2", "segment")).toBeDefined();
+  expect(tree().some((n) => n.props.id === "settings.extension.fixture-0")).toBe(false);
+  await event(root, disclosure().id, "click");
+  expect(disclosure().props["aria-expanded"]).toBe(true);
+  expect(tree().some((n) => n.props.id === "settings.extension.fixture-0")).toBe(true);
+  const switchFor = (i: number) =>
+    tree().find((n) => n.props.id === `settings.extension-toggle.fixture-${i}`);
+  expect(switchFor(0)?.props).toMatchObject({ role: "switch", "aria-checked": true });
+  expect(switchFor(2)?.props).toMatchObject({ role: "switch", "aria-checked": false, disabled: true });
+  expect(tree().some((n) => n.text === "Active" || n.text === "Off")).toBe(false);
+  const warning = tree().find((n) => n.text === "Missing files");
+  expect(warning).toBeDefined();
+  expect(tree().find((n) => n.children.includes(warning!.id))?.props.style).toMatchObject({
+    color: { token: "colors.warning" },
+  });
+  for (const label of ["All 3", "Enabled 2", "Off 1", "Needs attention 2"]) {
+    expect(find(root, label, "segment").props.style).toMatchObject({ flexShrink: 0 });
   }
+  f.model.select("general");
+  await root.flush();
+  f.model.select("extensions");
+  await root.flush();
+  expect(disclosure().props["aria-expanded"]).toBe(true);
+  await event(root, find(root, "Needs attention 2", "segment").id, "click");
+  expect(tree().some((n) => n.props.id === "settings.extension.fixture-0")).toBe(false);
+  expect(tree().some((n) => n.props.id === "settings.extension.fixture-2")).toBe(true);
+  root.dispose();
+  f.model.dispose();
 });
 test("every command on Shortcuts arrives in commits the host's 1 MiB argument quota accepts", async () => {
   const { model } = fixture();
@@ -761,4 +790,29 @@ test("the detail scroll identity survives refresh but changes on navigation", as
   expect(detailId()).not.toBe(general);
   root.dispose();
   model.dispose();
+});
+
+test("an extension error offers Reload and missing files stay visible", async () => {
+  const f = fixture({
+    extensions: [
+      { ...extension(), attention: "error" },
+      { ...extension(1), attention: "missing" },
+    ],
+  });
+  f.model.show("extensions");
+  f.model.setExtensionFilter("attention");
+  f.model.setExtensionGroupOpen("Effects", true);
+  const { root } = recorder();
+  await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
+  expect(find(root, "Needs attention 2", "segment")).toBeDefined();
+  await event(root, find(root, "Fixture 0").id, "click");
+  await event(root, find(root, "Reload", "push-button").id, "click");
+  expect(f.actions.at(-1)).toEqual({ type: "extension.reload", id: "fixture-0" });
+  f.model.closeDetail();
+  await root.flush();
+  await event(root, find(root, "Fixture 1").id, "click");
+  expect(root.inspect().nodes.some((node) => node.text === "Missing files")).toBe(true);
+  expect(root.inspect().nodes.some((node) => node.props.label === "Reload")).toBe(false);
+  root.dispose();
+  f.model.dispose();
 });

@@ -230,29 +230,6 @@ test("extension filters, in-place details and stale publications preserve identi
   expect(model.publish(publication({ revision: 2 }))).toBe(true);
   expect(model.detail).toBeUndefined();
 });
-test("60k extension virtual range is bounded; stable first-visible anchor survives prepend", () => {
-  const extensions = Array.from({ length: 60_000 }, (_, i) => extension(i));
-  const { model } = fixture({ extensions });
-  model.viewport(30_000, 20);
-  expect(model.extensions.length).toBe(60_000);
-  expect(model.visibleExtensions).toHaveLength(60);
-  expect(model.range).toEqual([29_980, 30_040]);
-  model.publish(
-    publication({
-      revision: 2,
-      extensions: [extension(60_000), ...extensions],
-    }),
-  );
-  expect(model.range).toEqual([29_981, 30_041]);
-  expect(model.anchorId).toBe("fixture-30000");
-  for (const args of [
-    [-1, 20],
-    [NaN, 2],
-    [0, Infinity],
-    [0.1, 1],
-  ])
-    expect(() => model.viewport(args[0], args[1])).toThrow();
-});
 test("model service actions acknowledge; archive never invokes a raw delete", async () => {
   const { model, actions } = fixture({
     extensions: [extension(), { ...extension(1), canArchive: false }],
@@ -552,32 +529,30 @@ test("Shortcuts: found by command, menu or key, and its rows send their actions"
   model.dispose();
 });
 
-test("a filter whose results exclude the first visible extension shows rows from the top", () => {
-  const extensions = Array.from({ length: 160 }, (_, i) => extension(i));
-  const { model } = fixture({ extensions });
-  model.viewport(90, 40);
-  model.filterExtensions("Fixture 12");
-  expect(model.visibleExtensions.map((item) => item.id)).toEqual(
-    model.extensions.map((item) => item.id),
-  );
-  expect(model.visibleExtensions.length).toBeGreaterThan(0);
-});
-
-test("a refresh that removes the visible extension still supplies the last reachable rows", () => {
-  const extensions = Array.from({ length: 160 }, (_, i) => extension(i));
-  const { model } = fixture({ extensions });
-  model.viewport(90, 40);
-  model.publish(publication({ revision: 2, extensions: extensions.slice(0, 55) }));
-  expect(model.visibleExtensions.at(-1)?.id).toBe("fixture-54");
-  expect(model.visibleExtensions.length).toBeGreaterThanOrEqual(40);
-});
-
-test("returning to Extensions supplies rows for the new page at the top", () => {
-  const extensions = Array.from({ length: 160 }, (_, i) => extension(i));
-  const { model } = fixture({ extensions });
+test("extension categories combine search, capability and status and keep their disclosures", async () => {
+  const { model } = fixture({
+    extensions: [
+      { ...extension(0), name: "Glow", includes: ["effects", "panels"] },
+      { ...extension(1), name: "Glow Tools", enabled: false, attention: "error" },
+      { ...extension(2), name: "Notes", type: "Panels", attention: "missing" },
+      { ...extension(3), source: "Built in" },
+    ],
+  });
   model.show("extensions");
-  model.viewport(90, 40);
+  expect(model.extensionCounts).toEqual({ all: 3, enabled: 2, off: 1, attention: 2 });
+  expect(model.extensionGroupOpen("Effects")).toBe(false);
+  model.setExtensionGroupOpen("Effects", true);
   model.select("general");
   model.select("extensions");
-  expect(model.visibleExtensions[0]?.id).toBe("fixture-0");
+  expect(model.extensionGroupOpen("Effects")).toBe(true);
+  model.filterExtensions("glow", "Panels");
+  expect(model.extensions.map((item) => item.name)).toEqual(["Glow"]);
+  expect(model.extensionCategory(model.extensions[0]!)).toBe("Panels");
+  model.filterExtensions("", "All Types");
+  model.setExtensionFilter("attention");
+  expect(model.extensions.map((item) => item.name)).toEqual(["Glow Tools", "Notes"]);
+  model.setExtensionFilter("off");
+  expect(model.extensions.map((item) => item.name)).toEqual(["Glow Tools"]);
+  await model.search("notes");
+  expect(model.extensions).toEqual([]);
 });

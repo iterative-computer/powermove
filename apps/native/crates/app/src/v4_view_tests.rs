@@ -2260,14 +2260,52 @@ fn settings_scroll_wheels_each_page_without_waking_the_editor(cx: &mut TestAppCo
             })
         });
         let mut first = publication(&rig);
-        // Shortcuts arrives in bounded commits. Measure after its final
-        // command is present so before and after use the same row count.
-        if section == "shortcuts" {
+        // Expand the same inventory that was always open in the base.
+        if section == "extensions" {
+            let disclosure = first
+                .surface
+                .nodes()
+                .values()
+                .find(|node| {
+                    node.props.get("data-pm-component").and_then(Value::as_str)
+                        == Some("disclosure-button")
+                })
+                .expect("installed extension category");
+            let ticket = rig
+                .runtime
+                .pointer_event(
+                    "settings",
+                    first.generation,
+                    disclosure.id,
+                    "click",
+                    Default::default(),
+                )
+                .unwrap();
+            settle(cx, |_| {
+                ticket.try_take().is_some_and(|result| {
+                    result.unwrap();
+                    true
+                })
+            });
+            if let Some(next) = rig.runtime.take_publications().pop() {
+                first = next;
+            }
+        }
+        // These pages arrive in chunks. Time the full fixture in both runs.
+        let last = match section {
+            "shortcuts" => Some("settings.shortcut.c159"),
+            "extensions" => Some("settings.extension.extension-085"),
+            _ => None,
+        };
+        if let Some(last) = last {
             let deadline = Instant::now() + Duration::from_secs(10);
-            while !first.surface.nodes().values().any(|node| {
-                node.props.get("id").and_then(Value::as_str) == Some("settings.shortcut.c159")
-            }) {
-                assert!(Instant::now() < deadline, "shortcuts fixture never filled");
+            while !first
+                .surface
+                .nodes()
+                .values()
+                .any(|node| node.props.get("id").and_then(Value::as_str) == Some(last))
+            {
+                assert!(Instant::now() < deadline, "{section} fixture never filled");
                 std::thread::sleep(Duration::from_millis(1));
                 if let Some(next) = rig.runtime.take_publications().pop() {
                     first = next;
@@ -2293,7 +2331,11 @@ fn settings_scroll_wheels_each_page_without_waking_the_editor(cx: &mut TestAppCo
         let mut vcx = VisualTestContext::from_window(window.into(), cx);
         let child = root.read_with(&vcx, |root, _| root.child.clone());
         vcx.run_until_parked();
-        let start = bounds(&mut vcx, selector).origin.y;
+        // Replayed scroll frames intentionally skip layout debug probes.
+        let detail = child
+            .read_with(&vcx, |v, _| v.test_scroll_handle("settings.detail"))
+            .unwrap();
+        let start = detail.offset().y;
         let position = point(px(310.), px(150.));
         vcx.simulate_mouse_move(position, None, Modifiers::none());
         let before = child.read_with(&vcx, |v, _| v.renders);
@@ -2326,6 +2368,7 @@ fn settings_scroll_wheels_each_page_without_waking_the_editor(cx: &mut TestAppCo
                 TouchPhase::Started,
             ),
         ] {
+            let previous = detail.offset().y;
             let at = Instant::now();
             vcx.simulate_event(ScrollWheelEvent {
                 position,
@@ -2334,8 +2377,17 @@ fn settings_scroll_wheels_each_page_without_waking_the_editor(cx: &mut TestAppCo
                 ..Default::default()
             });
             samples.push(at.elapsed().as_secs_f64() * 1000.);
+            let moved = detail.offset().y;
+            if let ScrollDelta::Pixels(delta) = delta {
+                assert!(
+                    (moved - (previous + delta.y).clamp(-detail.max_offset().y, px(0.))).abs()
+                        < px(0.1),
+                    "{section} changed offset unexpectedly: {previous:?} + {:?} -> {moved:?}",
+                    delta.y,
+                );
+            }
         }
-        let end = bounds(&mut vcx, selector).origin.y;
+        let end = detail.offset().y;
         let frames = child.read_with(&vcx, |v, _| v.renders) - before;
         let editor_frames = editor.read_with(&editor_cx, |v, _| v.0) - editor_before;
         samples.sort_by(f64::total_cmp);
@@ -2346,10 +2398,7 @@ fn settings_scroll_wheels_each_page_without_waking_the_editor(cx: &mut TestAppCo
         if editor_frames > 0 || (section == "shortcuts" && frames >= samples.len()) {
             problems.push((section, frames, editor_frames));
         }
-        let detail = child
-            .read_with(&vcx, |v, _| v.test_scroll_handle("settings.detail"))
-            .unwrap();
-        let after_wheel = detail.offset().y;
+        let after_wheel = end;
         child.update(&mut vcx, |v, cx| v.publish(refresh, cx));
         settle(cx, |cx| !child.read_with(cx, |v, _| v.compiling()));
         assert_eq!(
