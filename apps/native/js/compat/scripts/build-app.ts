@@ -208,7 +208,7 @@ import {RemoteDOM} from ${JSON.stringify(join(root, "../remote-dom/src/shim.ts")
 import * as helpers from ${JSON.stringify(join(root, "src/frozen/reference/kernel/editor-helpers.ts"))};
 ${moduleImports}
 import {definitionSnapshots} from ${JSON.stringify(join(root, "src/definitions.ts"))};
-import {panelStyle} from ${JSON.stringify(join(root, "src/panels.ts"))};
+import {panelStyle,panelFailure} from ${JSON.stringify(join(root, "src/panels.ts"))};
 import {linkRequest} from ${JSON.stringify(join(root, "src/module-graph.ts"))};
 const pure=new Set(${JSON.stringify(pure)});
 const powermove=Object.fromEntries(Object.keys(helpers).map(name=>[name,pure.has(name)?helpers[name]:(...args)=>{
@@ -218,7 +218,7 @@ const powermove=Object.fromEntries(Object.keys(helpers).map(name=>[name,pure.has
 }]));
 const registry=list=>({entries:()=>(list??[]).map(item=>({id:item.id,ownerId:"store",item}))});
 const definitions=({effects,transitions,layers})=>definitionSnapshots({effects:registry(effects),transitions:registry(transitions),layerTypes:registry(layers),ownerOrigin:()=>"store"});
-globalThis.StoreCompat={createSandboxAPI,sandboxControl,sandboxReporter,definitions,panelStyle,RemoteDOM,linkRequest,runtimeModules:{powermove,${moduleTable}}};`;
+globalThis.StoreCompat={createSandboxAPI,sandboxControl,sandboxReporter,definitions,panelStyle,panelFailure,RemoteDOM,linkRequest,runtimeModules:{powermove,${moduleTable}}};`;
 await write(
   "store.js",
   await Bun.build({

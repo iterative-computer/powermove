@@ -39,6 +39,8 @@ pub trait StoreViews: Send + Sync {
     /// False is backpressure: the helper keeps the batch and retries.
     fn batch(&self, batch: Value) -> bool;
     fn panel(&self, id: &str, open: bool);
+    /// Restart only this helper, retiring partial mounts and owned callbacks.
+    fn reload(&self);
 }
 pub struct StoreRuntimeHost {
     kernel: Arc<dyn StoreAuthority>,
@@ -119,6 +121,13 @@ impl StoreRuntimeHost {
         method: &str,
         args: &Value,
     ) -> Result<Option<Value>> {
+        if method == "reload" {
+            if args.as_array().is_none_or(|args| !args.is_empty()) {
+                return Err(Error::Invalid("Store reload arguments"));
+            }
+            self.views.as_ref().ok_or(Error::Invalid("Store views are not attached"))?.reload();
+            return Ok(Some(json!({})));
+        }
         if ["runtime-error", "sandbox-report", "log"].contains(&method) {
             let mut reports = self.reports.lock().unwrap();
             let report = json!({"method":method,"args":args});
@@ -519,6 +528,7 @@ pub fn store_method_policy() -> pm_store_host::Result<MethodPolicy> {
         "log",
         "sandbox-report",
         "runtime-error",
+        "reload",
         "storage.get",
         "storage.set",
         "storage.delete",

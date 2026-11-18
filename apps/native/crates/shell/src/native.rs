@@ -3014,10 +3014,13 @@ impl ToolbarDelegate {
         // image and title for Export): the system draws its glass, spaces
         // it and sizes it. Export is the bar's one prominent item, tinted
         // with the accent.
-        let &(_, sym, label) = TOOLBAR_BUTTONS
-            .iter()
-            .find(|(n, ..)| *n == name.as_str())?;
-        item.setImage(Some(&toolbar_symbol(sym, label, t)));
+        let &(_, sym, label) = TOOLBAR_BUTTONS.iter().find(|(n, ..)| *n == name.as_str())?;
+        let image = if name == "agent" {
+            agent_toolbar_image(&AgentStatus::default(), 0., t)
+        } else {
+            toolbar_symbol(sym, label, t)
+        };
+        item.setImage(Some(&image));
         unsafe {
             item.setTarget(Some(target));
             item.setAction(Some(sel!(act:)));
@@ -3064,6 +3067,8 @@ impl Host {
 pub struct AgentStatus {
     pub working: bool,
     pub attention: bool,
+    pub unread: bool,
+    pub failed: bool,
     /// `m:ss` of the run in view, for the tooltip.
     pub elapsed: Option<String>,
     pub background: usize,
@@ -3075,6 +3080,10 @@ impl AgentStatus {
     pub fn tooltip(&self) -> String {
         if self.attention {
             "Agent needs your answer".into()
+        } else if self.failed {
+            "Agent run failed".into()
+        } else if self.unread {
+            "Agent finished · unread reply".into()
         } else if self.working {
             match &self.elapsed {
                 Some(e) => format!("Agent is working · {e}"),
@@ -3177,17 +3186,20 @@ fn task_toolbar_image(status: &TaskStatus, turn: f64, t: &Tokens) -> Retained<NS
     image.setAccessibilityDescription(Some(&NSString::from_str(&status.spoken())));
     image
 }
-/// The Agent item's glyph: the toolbar symbol in accent ink with a three-
-/// quarter ring at `turn` (working), or with a dot at its top trailing
-/// corner (attention). Idle is the plain template symbol.
+/// A primary-label sparkle; an accent working ring or a trailing notice dot.
+/// AppKit retains ownership of the bezel and inactive-window treatment.
 fn agent_toolbar_image(status: &AgentStatus, turn: f64, t: &Tokens) -> Retained<NSImage> {
-    let glyph = toolbar_symbol("sparkles", "Agent", t);
-    if !status.working && !status.attention {
-        return glyph;
-    }
-    let size = t.metrics.symbol_toolbar as f64 + 8.;
+    let glyph = symbol("sparkles", "Agent");
+    let config =
+        objc2_app_kit::NSImageSymbolConfiguration::configurationWithPointSize_weight(15., unsafe {
+            objc2_app_kit::NSFontWeightMedium
+        });
+    let glyph = glyph.imageWithSymbolConfiguration(&config).unwrap_or(glyph);
+    let size = 23.;
     let accent = t.colors.accent;
-    let (working, attention) = (status.working && !status.attention, status.attention);
+    let secondary = t.colors.secondary;
+    let (working, attention) = (status.working, status.attention);
+    let (failed, unread) = (status.failed, status.unread);
     let dot = t.metrics.status_dot as f64;
     let draw = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
         let inner = glyph.size();
@@ -3199,10 +3211,10 @@ fn agent_toolbar_image(status: &AgentStatus, turn: f64, t: &Tokens) -> Retained<
             inner,
         );
         glyph.drawInRect(at);
-        // The glyph in accent ink.
-        native_color(accent).set();
+        // Neutral primary ink, including idle; AppKit owns inactive dimming.
+        NSColor::labelColor().set();
         NSRectFillUsingOperation(at, NSCompositingOperation::SourceAtop);
-        if working {
+        if working && !attention && !failed && !unread {
             let path = NSBezierPath::bezierPath();
             let centre = NSPoint::new(rect.size.width / 2., rect.size.height / 2.);
             let start = 90. - turn * 360.;
@@ -3217,12 +3229,19 @@ fn agent_toolbar_image(status: &AgentStatus, turn: f64, t: &Tokens) -> Retained<
             native_color(accent).setStroke();
             path.stroke();
         }
-        if attention {
+        if attention || failed || unread {
             let r = NSRect::new(
                 NSPoint::new(rect.size.width - dot, rect.size.height - dot),
                 NSSize::new(dot, dot),
             );
-            native_color(accent).setFill();
+            let ink = if attention {
+                native_color(accent)
+            } else if failed {
+                NSColor::systemRedColor()
+            } else {
+                native_color(secondary)
+            };
+            ink.setFill();
             NSBezierPath::bezierPathWithOvalInRect(r).fill();
         }
         objc2::runtime::Bool::YES
@@ -3411,6 +3430,9 @@ impl Host {
         }
         self.set_agent_presence(&status);
 
+        self.paint_agent_status(status, false);
+    }
+    fn paint_agent_status(&mut self, status: AgentStatus, force: bool) {
         let Some(item) = self
             ._toolbar
             .items()
@@ -3434,7 +3456,10 @@ impl Host {
             }
         }
         item.setToolTip(Some(&NSString::from_str(&status.tooltip())));
-        let visual_changed = status.working != self.agent_status.working
+        let visual_changed = force
+            || status.failed != self.agent_status.failed
+            || status.unread != self.agent_status.unread
+            || status.working != self.agent_status.working
             || status.attention != self.agent_status.attention
             || status.paused != self.agent_status.paused
             || status.held != self.agent_status.held;
@@ -3442,6 +3467,8 @@ impl Host {
             && !status.attention
             && !status.paused
             && !status.held
+            && !status.failed
+            && !status.unread
             && !tokens.accessibility.reduce_motion;
         if !turning {
             if let Some(timer) = self.agent_timer.take() {
@@ -5893,6 +5920,11 @@ impl Host {
             popup.borrow_mut().update_tokens(&t, surface);
         }
         self.tokens = t;
+        // Rebuild token-coloured notices and the timer's captured appearance.
+        if let Some(timer) = self.agent_timer.take() {
+            timer.invalidate();
+        }
+        self.paint_agent_status(self.agent_status.clone(), true);
         // The sidebar material follows the appearance and transparency setting.
         if let Some(view) = self.sidebar.borrow_mut().take() {
             view.removeFromSuperview();
@@ -9260,6 +9292,9 @@ mod tab_layout_tests {
         assert_eq!(token_change(true, true, true), TokenChange::Now);
     }
 }
+#[cfg(test)]
+#[path = "agent_toolbar_tests.rs"]
+mod agent_status_tests;
 #[cfg(test)]
 mod key_order_tests {
     use super::passes_straight;

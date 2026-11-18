@@ -257,7 +257,7 @@ mod project_layout_tests {
 /// The Project panel's id (its media, bins and compositions).
 pub const PROJECT_PANEL: &str = "assets";
 type LauncherFacts = (Vec<(String, String, String, u64, bool, bool)>, u64, String);
-type AgentStatus = (bool, bool, Option<u64>, usize, LauncherFacts, Option<String>);
+type AgentStatus = (bool, bool, Option<u64>, usize, LauncherFacts, Option<String>, bool, bool);
 pub struct Builtins {
     agent_status_cache: Mutex<AgentStatus>,
     pool: RuntimePool,
@@ -959,6 +959,11 @@ impl Builtins {
     /// a question or approval waiting, the run in view's time, and how many
     /// threads run behind the one in view.
     pub fn agent_status(&self) -> (bool, bool, Option<u64>, usize) {
+        let (working, attention, elapsed, background, _, _) = self.agent_status_with_notice(false);
+        (working, attention, elapsed, background)
+    }
+
+    pub fn agent_status_with_notice(&self, shown: bool) -> (bool, bool, Option<u64>, usize, bool, bool) {
         // Called by the UI drain. Never wait for the JS backend, provider launch,
         // prompt construction or durable storage. The next drain refreshes facts.
         let mut cached = self
@@ -968,17 +973,21 @@ impl Builtins {
         let observed = (|| {
             let entries = self.broker.entries.try_lock().ok()?;
             let Some(entry) = entries.get("agent").cloned() else {
-                return Some((false, false, None, 0, (vec![], 0, String::new()), None));
+                return Some((false, false, None, 0, (vec![], 0, String::new()), None, false, false));
             };
             drop(entries);
             let backend = entry.try_lock().ok()?.backend.clone();
             let backend = backend.try_lock().ok()?;
             let Some(agent) = backend.native.agent.clone() else {
-                return Some((false, false, None, 0, (vec![], 0, String::new()), None));
+                return Some((false, false, None, 0, (vec![], 0, String::new()), None, false, false));
             };
             drop(backend);
-            let state = agent.try_lock().ok()?;
-            let panel = &state.panel;
+            let mut state = agent.try_lock().ok()?;
+            let panel = &mut state.panel;
+            if shown {
+                panel.mark_toolbar_seen();
+            }
+            let (unread, failed) = panel.toolbar_notice();
             let session = panel.session(panel.active_id()).ok()?;
             let background = panel.background_runs();
             let mut revision = 0;
@@ -999,12 +1008,14 @@ impl Builtins {
                 background,
                 (tasks, revision, panel.active_id().into()),
                 session.run.as_ref().map(|_| if !session.activity.is_empty() { session.activity.clone() } else { session.progress.last().cloned().unwrap_or_else(|| "Agent working".into()) }),
+                unread,
+                failed,
             ))
         })();
         if let Some(observed) = observed {
             *cached = observed;
         }
-        (cached.0, cached.1, cached.2, cached.3)
+        (cached.0, cached.1, cached.2, cached.3, cached.6, cached.7)
     }
 
     /// Live facts across every thread, independent of panel visibility.
@@ -1338,7 +1349,7 @@ impl Builtins {
             },
         )?;
         Ok(Self {
-            agent_status_cache: Mutex::new((false, false, None, 0, (vec![], 0, String::new()), None)),
+            agent_status_cache: Mutex::new((false, false, None, 0, (vec![], 0, String::new()), None, false, false)),
             pool,
             broker,
             realms: Mutex::default(),

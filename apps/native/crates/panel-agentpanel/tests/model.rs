@@ -1523,7 +1523,6 @@ fn steering_with_a_live_quote_sends_its_archived_source_id() {
     assert!(!text.contains(&format!("live:{source}")));
 }
 
-#[test]
 /// PM-507: a run whose edits were rolled back after it ended says so in its
 /// thread, after its own last words; another run's news changes nothing.
 #[test]
@@ -1536,4 +1535,71 @@ fn a_rolled_back_run_says_so_in_its_thread() {
     let last = p.session("t").unwrap().conversation.values().last().unwrap().clone();
     assert_eq!(last["text"], "This run's changes were rolled back.");
     assert_eq!(last["rolledBack"], true);
+}
+
+#[test]
+fn toolbar_completion_notices_clear_on_view_and_cancel_does_not_badge() {
+    for (error, cancelled, expected) in [
+        (false, false, (true, false)),
+        (true, false, (false, true)),
+        (false, true, (false, false)),
+    ] {
+        let mut p = panel();
+        start(&mut p);
+        p.receive(
+            "t",
+            "run1",
+            1,
+            Update::Complete {
+                text: "Finished".into(),
+                error,
+                cancelled,
+            },
+            20,
+        )
+        .unwrap();
+        assert_eq!(p.toolbar_notice(), expected);
+        p.mark_toolbar_seen();
+        assert_eq!(p.toolbar_notice(), (false, false));
+    }
+}
+
+#[test]
+fn hidden_background_failures_win_over_unread_success_without_switching_threads() {
+    let mut p = panel();
+    start(&mut p);
+    p.new_thread("other", 11).unwrap();
+    p.draft_mut("other")
+        .unwrap()
+        .insert_text("another task", 12, false);
+    p.submit("other", "run2", "request2", 13).unwrap();
+    p.receive(
+        "t",
+        "run1",
+        1,
+        Update::Complete {
+            text: "Done".into(),
+            error: false,
+            cancelled: false,
+        },
+        20,
+    )
+    .unwrap();
+    assert_eq!(p.toolbar_notice(), (true, false));
+    p.receive(
+        "other",
+        "run2",
+        1,
+        Update::Complete {
+            text: "Failed".into(),
+            error: true,
+            cancelled: false,
+        },
+        21,
+    )
+    .unwrap();
+    assert_eq!(p.active_id(), "other");
+    assert_eq!(p.toolbar_notice(), (false, true));
+    p.mark_toolbar_seen();
+    assert_eq!(p.toolbar_notice(), (false, false));
 }
