@@ -3170,6 +3170,35 @@ unsafe extern "C" fn dealloc_view(this: &Objc2Object, _: Sel) {
     }
 }
 
+/// Public AppKit APIs only. Cache the retained cursor on the main thread;
+/// a missing SF Symbol falls back without unwrapping across the ObjC boundary.
+fn split_cursor() -> ObjcId {
+    thread_local! { static CURSOR: Cell<ObjcId> = const { Cell::new(ptr::null_mut()) }; }
+    CURSOR.with(|slot| {
+        if !slot.get().is_null() { return slot.get(); }
+        unsafe {
+            let image: ObjcId = msg_send![class!(NSImage), imageWithSystemSymbolName: &*ns_string("scissors"), accessibilityDescription: ptr::null::<Objc2Object>()];
+            if image.is_null() { return msg_send![class!(NSCursor), crosshairCursor]; }
+            let copy: ObjcId = msg_send![image, copy];
+            let _: () = msg_send![copy, setSize: NSSize::new(20., 20.)];
+            let cursor: ObjcId = msg_send![class!(NSCursor), alloc];
+            let cursor: ObjcId = msg_send![cursor, initWithImage: copy, hotSpot: Objc2NSPoint::new(10., 10.)];
+            let _: () = msg_send![copy, release];
+            if cursor.is_null() { return msg_send![class!(NSCursor), crosshairCursor]; }
+            slot.set(cursor);
+            cursor
+        }
+    })
+}
+
+/// Headless capture smoke check: constructs the real AppKit cursor without
+/// installing it or creating a native window.
+#[cfg(feature = "frame-capture")]
+pub fn split_cursor_is_custom() -> bool {
+    let fallback: ObjcId = unsafe { msg_send![class!(NSCursor), crosshairCursor] };
+    split_cursor() != fallback
+}
+
 unsafe extern "C" fn reset_cursor_rects(this: &Objc2Object, _: Sel) {
     // SAFETY: AppKit invokes cursor-rect updates on the main thread for GPUIView instances,
     // whose WINDOW_STATE_IVAR is initialized when the view is created. The cursor registered
@@ -3183,6 +3212,7 @@ unsafe extern "C" fn reset_cursor_rects(this: &Objc2Object, _: Sel) {
         let cursor: ObjcId = match cursor_style {
             CursorStyle::Arrow => msg_send![class!(NSCursor), arrowCursor],
             CursorStyle::IBeam => msg_send![class!(NSCursor), IBeamCursor],
+            CursorStyle::Split => split_cursor(),
             CursorStyle::Crosshair => msg_send![class!(NSCursor), crosshairCursor],
             CursorStyle::ClosedHand => msg_send![class!(NSCursor), closedHandCursor],
             CursorStyle::OpenHand => msg_send![class!(NSCursor), openHandCursor],

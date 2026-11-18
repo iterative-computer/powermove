@@ -533,6 +533,9 @@ pub struct TimelineSurface {
     /// Clears the skimmer when the window stops being active (Cmd-Tab, key
     /// loss, hide): the pointer may never move out of the timeline.
     activation: Option<Subscription>,
+    split_modifiers: Option<Subscription>,
+    /// A click dismisses the cut preview until actual pointer motion.
+    split_preview_hidden: bool,
     /// Where media being dragged over the timeline would land (window
     /// position), for the insertion line.
     media_over: Option<Point<Pixels>>,
@@ -641,6 +644,8 @@ impl TimelineSurface {
             // both hear it.
             focused: true,
             activation: None,
+            split_modifiers: None,
+            split_preview_hidden: false,
             media_over: None,
             effect_over: None,
             late: None,
@@ -905,8 +910,10 @@ impl TimelineSurface {
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
         self.row_scroll = None;
         if self.audio_cancel(cx) { return true; }
+        let split = self.model.edit_tool == EditTool::Split;
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
-            Gesture::Idle => return false,
+            Gesture::Idle if !split => return false,
+            Gesture::Idle => (),
             Gesture::Dragging { .. } => {
                 self.queue.retain(|job| !matches!(job, Job::Sample(_)));
                 self.sample_scheduled = false;
@@ -917,6 +924,9 @@ impl TimelineSurface {
             }
             Gesture::Scrub(..) => self.delegate.scrubbing(false, cx),
             _ => {}
+        }
+        if split {
+            self.queue.push_back(Job::Command { id: "timeline.tool:selection".into(), time: 0., frames: None, shift: false });
         }
         cx.notify();
         self.pump(cx);
@@ -2133,6 +2143,24 @@ impl TimelineSurface {
             return;
         }
         if x < column {
+            return;
+        }
+        if self.model.edit_tool == pm_panel_timeline::EditTool::Split
+            && y >= self.tokens.metrics.ruler as f64 {
+            self.split_preview_hidden = true;
+            cx.notify();
+            if let Some(id) = self.split_clip_at(x, y) {
+                let at = self.model.split_time(self.time_at(x), self.delegate.time(cx), self.snap_radius());
+                let all = event.modifiers.shift;
+                let locked = self.model.index.layers.iter().any(|l| (all || l.id == id)
+                    && l.effectively_locked && at > l.from && at < l.from + l.duration);
+                if locked { self.delegate.report("Locked layers were skipped.".into(), cx); }
+                match self.model.split_at(&id, at, all) {
+                    Ok(plan) if !plan.calls.is_empty() => { self.queue.push_back(Job::Apply(plan)); self.pump(cx); }
+                    Err(e) => self.delegate.report(e.to_string(), cx),
+                    _ => (),
+                }
+            }
             return;
         }
         let mods = Self::mods(event.modifiers);
@@ -3759,6 +3787,19 @@ impl TimelineSurface {
             .and_then(|f| f.hit_clip(x, y))
             .map(|(id, edge)| (id.to_owned(), edge))
     }
+    /// A razor targets only the visible bar, without a trim handle's reach
+    /// into the neighbouring empty space.
+    fn split_clip_at(&self, x: f64, y: f64) -> Option<String> {
+        let (id, _) = self.clip_at(x, y)?;
+        self.frame.as_ref()?.ops.iter()
+            .find(|op| {
+                let b = op.bounds;
+                op.id.strip_prefix("clip:") == Some(id.as_str())
+                    && x >= b.x && x < b.x + b.width
+                    && y >= b.y && y < b.y + b.height
+            })
+            .map(|_| id)
+    }
     /// The layer bar hovered now (tests).
     pub fn hovered_clip(&self) -> Option<String> {
         self.hover_clip.as_ref().map(|(id, _)| id.clone())
@@ -3771,9 +3812,13 @@ impl TimelineSurface {
     /// covered them closes over a resting pointer), only notes where it is.
     fn hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         let moved = self.pointer.is_some_and(|seen| seen != position);
+        if self.pointer != Some(position) { self.split_preview_hidden = false; }
         self.pointer = Some(position);
         let (x, y) = self.local(position);
-        if moved {
+        if self.model.edit_tool == pm_panel_timeline::EditTool::Split {
+            self.set_skimmer(None, cx);
+            cx.notify();
+        } else if moved {
             self.skim_to(x, cx);
             self.skim_playhead = Some(self.delegate.time(cx));
         } else if self.skim_live(cx) {
@@ -3801,7 +3846,10 @@ impl TimelineSurface {
         }
         self.hover_clip = hovered;
         let m = self.tokens.metrics;
-        let cursor = if let Some(cursor) = self.graph_cursor(x, y) {
+        let cursor = if self.model.edit_tool == pm_panel_timeline::EditTool::Split && self.split_clip_at(x, y).is_some()
+            && (x - self.view.layer_column).abs() > m.hit as f64 / 4. {
+            CursorStyle::Split
+        } else if let Some(cursor) = self.graph_cursor(x, y) {
             cursor
         } else if (x - self.view.layer_column).abs() <= m.hit as f64 / 4.
             && y >= m.ruler as f64
@@ -4768,6 +4816,11 @@ impl Render for TimelineSurface {
                 }
             }));
         }
+        if self.split_modifiers.is_none() {
+            self.split_modifiers = Some(cx.observe_window_modifiers(window, |s, _, cx| {
+                if s.model.edit_tool == EditTool::Split && s.pointer.is_some() { cx.notify(); }
+            }));
+        }
         let this = cx.entity().downgrade();
         let tokens = self.tokens.clone();
         let graph = self.graph_ops(Some(self.delegate.time(cx))).map(|mut ops| {
@@ -4794,8 +4847,21 @@ impl Render for TimelineSurface {
         let region = self.graph_region();
         let column = self.view.layer_column;
         let decorations = self.decorations.clone();
-        let hover_clip = self.hover_clip.clone();
+        let hover_clip = (self.model.edit_tool != EditTool::Split).then(|| self.hover_clip.clone()).flatten();
         let skimmer = self.skimmer_at();
+        // The readout can stand in the ruler. As for the skimmer, omit a
+        // tick label it would partially cover instead of cutting its text.
+        let split_ruler_chip = (self.model.edit_tool == EditTool::Split && !self.split_preview_hidden)
+            .then_some(self.pointer).flatten().and_then(|pointer| {
+                let (x, y) = self.local(pointer);
+                let id = self.split_clip_at(x, y)?;
+                let clip = self.frame.as_ref()?.ops.iter().find(|op| op.id.strip_prefix("clip:") == Some(id.as_str()))?;
+                if (clip.bounds.y as f32 - 24.).max(2.) >= self.tokens.metrics.ruler { return None; }
+                let at = self.model.split_time(self.time_at(x), self.delegate.time(cx), self.snap_radius());
+                let cut_x = self.view.layer_column + (at - self.view.scroll_time) * self.view.pps;
+                let left = (cut_x as f32 + 12.).min(f32::from(self.bounds.size.width) - 100.) as f64;
+                Some((left - 4., left + 90.))
+            });
         let marquee = match &self.gesture {
             Gesture::Marquee { origin, at, .. } => Some(Bounds::from_corners(
                 point(origin.x.min(at.x), origin.y.min(at.y)),
@@ -4804,7 +4870,29 @@ impl Render for TimelineSurface {
             _ => None,
         };
         let weak = this.clone();
+        if let Some(pointer) = self.pointer {
+            let (x, y) = self.local(pointer);
+            if self.model.edit_tool == EditTool::Split
+                && (x - self.view.layer_column).abs() > self.tokens.metrics.hit as f64 / 4.
+                && (self.split_clip_at(x, y).is_some() || self.frame.is_none() && self.hover_clip.is_some()) {
+                self.cursor = CursorStyle::Split;
+            } else if self.cursor == CursorStyle::Split { self.cursor = CursorStyle::Arrow; }
+        } else if self.cursor == CursorStyle::Split { self.cursor = CursorStyle::Arrow; }
         let t = &self.tokens;
+        let tools = div().id("timeline-ruler-tools").occlude().absolute().left(px(t.metrics.inset)).top(px(0.)).h(px(t.metrics.ruler))
+            .flex().items_center().children([
+                (EditTool::Selection, "cursorarrow", "Selection (V)"),
+                (EditTool::Roll, "arrow.left.and.right.righttriangle.left.righttriangle.right", "Roll — or ⌥-drag a cut"),
+                (EditTool::Split, "scissors", "Split (C) — click a clip to cut it. ⇧-click cuts every layer."),
+            ].into_iter().map(|(tool, symbol, label)| {
+                let image = pm_shell::symbol::rasterize(symbol, t.metrics.symbol_panel, pm_shell::symbol::Weight::Regular, t.colors.text, window.scale_factor());
+                div().id(SharedString::from(tool.command())).debug_selector(move || tool.command()).size(px(t.metrics.control)).flex().items_center().justify_center()
+                    .rounded(px(t.metrics.control_radius)).when(self.model.edit_tool == tool, |d| d.bg(rgb(t.colors.floating)))
+                    .role(Role::Button).aria_label(label).aria_selected(self.model.edit_tool == tool)
+                    .tooltip(pm_shell::kit::tooltip(t, label))
+                    .children(image.map(|im| img(ImageSource::Render(im)).size(px(t.metrics.symbol_panel))))
+                    .on_click(cx.listener(move |s, _, _, cx| { s.command(&tool.command(), 0., None, false, cx); }))
+            }));
         // Media dragged over the timeline: where it would land, an
         // insertion line between layers and the frame under the pointer.
         if !cx.has_active_drag() {
@@ -5338,7 +5426,7 @@ impl Render for TimelineSurface {
                                     let left = x + reach + (m.border * 2.) as f64;
                                     let gutter = (m.gap + m.border * 2.) as f64;
                                     (left, left + f32::from(text.width) as f64 + gutter)
-                                });
+                                }).or_else(|| split_ruler_chip.map(|(left, right)| (left + reach, right + reach)));
                                 let ops: Vec<Op> = frame.ops[..frame.fixed]
                                     .iter()
                                     .filter(|o| {
@@ -5403,6 +5491,44 @@ impl Render for TimelineSurface {
                         }
                         if let Some(surface) = this.upgrade() {
                             let surface = surface.read(cx);
+                            if surface.model.edit_tool == pm_panel_timeline::EditTool::Split && !surface.split_preview_hidden {
+                                if let Some(pointer) = surface.pointer {
+                                    let (x, y) = surface.local(pointer);
+                                    if let Some(id) = surface.split_clip_at(x, y)
+                                        && (x - surface.view.layer_column).abs() > tokens.metrics.hit as f64 / 4. {
+                                        let at = surface.model.split_time(surface.time_at(x), surface.delegate.time(cx), surface.snap_radius());
+                                        let cut_x = surface.view.layer_column + (at - surface.view.scroll_time) * surface.view.pps;
+                                        // An explicit foreground paint layer keeps these hairlines
+                                        // above the independently composited clip fills.
+                                        window.paint_layer(bounds, |window| {
+                                        for op in surface.frame.iter().flat_map(|f| &f.ops).filter(|o| o.id.starts_with("clip:")) {
+                                            let layer = &op.id[5..];
+                                            if (window.modifiers().shift || layer == id) && surface.model.index.layer(layer).is_some_and(|l| at > l.from && at < l.from + l.duration) {
+                                                let top = op.bounds.y.max(tokens.metrics.ruler as f64);
+                                                let bottom = (op.bounds.y + op.bounds.height).min(f32::from(surface.bounds.size.height) as f64);
+                                                if bottom > top && cut_x >= surface.view.layer_column && cut_x < f32::from(surface.bounds.size.width) as f64 {
+                                                    let line = Bounds::new(bounds.origin + point(px(cut_x.floor() as f32), px(top as f32)), size(px(1.), px((bottom - top) as f32)));
+                                                    // A narrow contrast edge keeps the 1 pt orange line
+                                                    // legible against bright video and clip fills at 1×.
+                                                    window.paint_quad(PaintQuad::new(Bounds::new(line.origin - point(px(1.), px(0.)), size(px(3.), line.size.height))).background(rgb(tokens.colors.panel)));
+                                                    window.paint_quad(PaintQuad::new(line).background(rgb(tokens.colors.accent)));
+                                                }
+                                            }
+                                        }
+                                        });
+                                        let label = format!("{}{}", if at < 0. { "−" } else { "" }, crate::captions_panel::timecode(at.abs(), surface.model.index.fps));
+                                        let runs = [TextRun { len: label.len(), font: window.text_style().font(), color: rgb_to_hsla(rgb(tokens.colors.text)), background_color: None, underline: None, strikethrough: None, letter_spacing: None }];
+                                        let text = window.text_system().shape_line(label.into(), px(tokens.typography.minimum), &runs);
+                                        let top = surface.frame.iter().flat_map(|f| &f.ops).find(|o| o.id.strip_prefix("clip:") == Some(id.as_str())).map_or(tokens.metrics.ruler, |o| o.bounds.y as f32);
+                                        let pos = bounds.origin + point(px((cut_x as f32 + 12.).min(f32::from(bounds.size.width) - 100.)), px((top - 24.).max(2.)));
+                                        window.paint_quad(PaintQuad::new(Bounds::new(pos - point(px(4.), px(2.)), size(px(94.), px(20.)))).background(rgb(tokens.colors.floating)).corner_radii(px(tokens.metrics.control_radius)));
+                                        let _ = text.paint(pos, px(16.), TextAlign::Left, None, window, cx);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(surface) = this.upgrade() {
+                            let surface = surface.read(cx);
                             if let Gesture::ParentPick { origin, at, target, moved: true, .. } = &surface.gesture {
                                 // v1 installParentPickwhip: the same cubic and target label.
                                 let mut line = PathBuilder::stroke(px(2.));
@@ -5436,6 +5562,7 @@ impl Render for TimelineSurface {
                                     if s.bounds.contains(&e.position) && !over {
                                         s.hover(e.position, cx);
                                     } else {
+                                        if s.model.edit_tool == EditTool::Split { s.pointer = None; cx.notify(); }
                                         s.set_skimmer(None, cx);
                                     }
                                 });
@@ -5446,6 +5573,7 @@ impl Render for TimelineSurface {
                             if phase == DispatchPhase::Capture {
                                 let _ = exited.update(cx, |s, cx| {
                                     s.pointer = None;
+                                    if s.model.edit_tool == EditTool::Split { cx.notify(); }
                                     s.set_skimmer(None, cx);
                                 });
                             }
@@ -5478,6 +5606,9 @@ impl Render for TimelineSurface {
             .children(reorder.into_iter().flatten().flatten())
             .children(effect_row)
             .children(tip)
+            // The DOM outline's scroll hitbox covers the column, including
+            // its transparent ruler band. Keep these native controls above it.
+            .child(gpui::deferred(tools))
             .children(self.graph_readout_element())
             .child(self.audio_overlay(cx))
     }

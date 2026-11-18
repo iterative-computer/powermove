@@ -4289,3 +4289,111 @@ fn g3_tracks_group_clamp_uses_member_span_not_container_metadata() {
     assert_eq!(c.model.index.layer("b").unwrap().from, 0.);
     block_on(c.finish_drag(true)).unwrap();
 }
+
+#[test]
+fn g6_split_keys_and_snapping() {
+    for (key, expected) in [
+        ("c", "timeline.tool:split"),
+        ("v", "timeline.tool:selection"),
+        ("escape", "deselect"),
+    ] {
+        assert_eq!(
+            resolve_key(&KeyInput {
+                key,
+                modifiers: mods(),
+                repeat: false,
+                in_field: false
+            })
+            .unwrap()
+            .command,
+            expected
+        );
+    }
+    let (_actor, mut c) = client();
+    command(&mut c, "timeline.tool:split", 0.);
+    assert_eq!(c.model.edit_tool, EditTool::Split);
+    command(&mut c, "timeline.tool:selection", 0.);
+    assert_eq!(c.model.edit_tool, EditTool::Selection);
+    command(&mut c, "timeline.tool:split", 0.);
+    command(&mut c, "deselect", 0.);
+    assert_eq!(c.model.edit_tool, EditTool::Selection);
+    assert!(resolve_key(&KeyInput { key: "c", modifiers: mods(), repeat: false, in_field: true }).is_none());
+    assert_eq!(c.model.split_time(3.97, 8., 0.05), 4.);
+    let mut m = c.model.clone();
+    m.track_snap_disabled = true;
+    assert_eq!(m.split_time(3.97, 8., 0.05), 119. / 30.);
+}
+
+#[test]
+fn g6_split_one_undo_and_edge_noop() {
+    let (_actor, mut c) = client();
+    assert!(
+        c.model
+            .split_at("a", 1. + 1. / 30., false)
+            .unwrap()
+            .calls
+            .is_empty()
+    );
+    let p = c.model.split_at("a", 3., false).unwrap();
+    run(&mut c, p);
+    assert_eq!(c.model.index.layers.len(), 4);
+    assert_eq!(c.model.index.layer("a").unwrap().duration, 2.);
+    command(&mut c, "undo", 3.);
+    assert_eq!(c.model.index.layers.len(), 3);
+    assert_eq!(c.model.index.layer("a").unwrap().duration, 4.);
+}
+
+#[test]
+fn g6_shift_splits_overlapping_unlocked_layers_in_one_undo() {
+    let fixture = r##"{"id":"P","compId":"C","name":"Split","w":200,"h":100,"fps":30,"dur":10,"comps":{},"assets":{},"layers":[
+    {"id":"a","name":"A","type":"shape","from":0,"dur":5,"on":true,"p":{}},
+    {"id":"b","name":"B","type":"shape","from":1,"dur":5,"on":true,"p":{}},
+    {"id":"c","name":"Locked","type":"shape","from":0,"dur":5,"on":true,"lock":true,"p":{}}]}"##;
+    let (_actor, mut c) = client_with(parse(fixture).unwrap());
+    assert!(c.model.split_at("c", 2., false).unwrap().calls.is_empty());
+    assert!(
+        c.model
+            .split_at("empty", 2., true)
+            .unwrap()
+            .calls
+            .is_empty()
+    );
+    let p = c.model.split_at("a", 2., true).unwrap();
+    assert_eq!(p.calls.len(), 1);
+    assert!(
+        matches!(&p.calls[0], Call::Transact { label: Some(label), .. } if label == "Split 2 layers")
+    );
+    run(&mut c, p);
+    assert_eq!(c.model.index.layers.len(), 5);
+    assert_eq!(c.model.index.layer("c").unwrap().duration, 5.);
+    command(&mut c, "undo", 2.);
+    assert_eq!(c.model.index.layers.len(), 3);
+    assert_eq!(c.model.index.layer("a").unwrap().duration, 5.);
+    assert_eq!(c.model.index.layer("b").unwrap().duration, 5.);
+}
+
+#[test]
+fn g6_pointer_and_playhead_split_use_identical_kernel_payload() {
+    let (_actor, mut c) = client();
+    select(&mut c, &["a"]);
+    let pointer = c.model.split_at("a", 3., false).unwrap();
+    let playhead = c
+        .model
+        .command("split", 3., None, false, 0, &PropertyFacts::default())
+        .unwrap();
+    let split = |p: &Plan| match &p.calls[0] {
+        Call::Transact {
+            body: WriteBody::Commands(commands),
+            ..
+        } => match &commands[0] {
+            Command::Timing(pm_kernel::TimingCommand::Split {
+                layer_ids,
+                time,
+                new_ids,
+            }) => (layer_ids.clone(), *time, new_ids.len()),
+            other => panic!("Unexpected split command: {other:?}"),
+        },
+        _ => panic!("Expected one transaction"),
+    };
+    assert_eq!(split(&pointer), split(&playhead));
+}

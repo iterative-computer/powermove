@@ -52,6 +52,8 @@ pub enum GraphMode {
 pub enum EditTool {
     #[default]
     Selection,
+    /// Click to split at the pointer; Shift splits all overlapping layers.
+    Split,
     /// An edge drag ripples: what follows on the track moves with it.
     Ripple,
     /// An edge drag rolls the edit between two clips.
@@ -62,8 +64,9 @@ pub enum EditTool {
     Slide,
 }
 impl EditTool {
-    pub const ALL: [(Self, &'static str); 5] = [
+    pub const ALL: [(Self, &'static str); 6] = [
         (Self::Selection, "selection"),
+        (Self::Split, "split"),
         (Self::Ripple, "ripple"),
         (Self::Roll, "roll"),
         (Self::Slip, "slip"),

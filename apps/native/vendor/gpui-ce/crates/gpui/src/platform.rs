@@ -3312,6 +3312,9 @@ pub enum CursorStyle {
     /// corresponds to the CSS cursor value `crosshair`
     Crosshair,
 
+    /// Powermove timeline scissors, with the cut at the glyph centre.
+    Split,
+
     /// A closed hand cursor
     /// corresponds to the CSS cursor value `grabbing`
     ClosedHand,

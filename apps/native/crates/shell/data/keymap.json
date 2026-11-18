@@ -3179,5 +3179,15 @@
     "in_fields": true,
     "repeat": false,
     "loose": false
+  },
+  {
+    "id": "native.timelineSplitTool",
+    "chord": "c",
+    "command": "timeline.tool:split",
+    "args": [],
+    "priority": 100,
+    "in_fields": false,
+    "repeat": false,
+    "loose": false
   }
 ]

@@ -3840,6 +3840,7 @@ fn shortcut_glyphs() -> HashMap<String, String> {
         .into_iter()
         .flat_map(|(_, i)| i)
         .chain(menu::tools())
+        .chain(menu::timeline_tools())
         .chain(menu::extras().into_iter().map(|(_, i)| i))
     {
         if !i.chord.is_empty() {
@@ -8630,6 +8631,8 @@ pub fn install_menus() {
     }
     let tools_start = commands.len();
     commands.extend(menu::tools().into_iter().map(|i| (i.command, i.args)));
+    let timeline_tools_start = commands.len();
+    commands.extend(menu::timeline_tools().into_iter().map(|i| (i.command, i.args)));
     let new_layers_start = commands.len();
     commands.extend(menu::new_layers().into_iter().map(|i| (i.command, i.args)));
     let new3d_start = commands.len();
@@ -8709,6 +8712,14 @@ pub fn install_menus() {
                     let workspaces = NSMenu::new(mtm);
                     delegate(&workspaces, MenuKind::Workspaces);
                     item.setSubmenu(Some(&workspaces));
+                }
+                "timelineTools" => {
+                    let tools = NSMenu::new(mtm);
+                    for (i, t) in menu::timeline_tools().iter().enumerate() {
+                        tools.addItem(&row(&t.label, &t.chord, timeline_tools_start + i));
+                    }
+                    delegate(&tools, MenuKind::DisplayOnly);
+                    item.setSubmenu(Some(&tools));
                 }
                 "tools" => {
                     let tools = NSMenu::new(mtm);

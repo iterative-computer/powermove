@@ -177,6 +177,8 @@ pub fn resolve_key(input: &KeyInput<'_>) -> Option<Shortcut> {
         ("k", false, false, true) => "timeline.adjacentKeyframe:next",
         ("i", false, false, false) => "gotoLayerIn",
         ("o", false, false, false) => "gotoLayerOut",
+        ("c", false, false, false) => "timeline.tool:split",
+        ("v", false, false, false) => "timeline.tool:selection",
         ("[", false, false, false) => "moveLayerIn",
         ("]", false, false, false) => "moveLayerOut",
         ("[", false, true, false) => "trimIn",
@@ -529,6 +531,7 @@ impl TimelineModel {
                 plan
             }
             "deselect" => {
+                self.edit_tool = crate::EditTool::Selection;
                 self.key_selection_active = false;
                 Plan {
                     calls: vec![SelectionCall::Clear.user().into()],
@@ -2703,5 +2706,76 @@ pub fn menu_label(id: &str) -> &'static str {
         "graph.merge" => "Merge Selected Curves",
         "graph.combined" => "Show Layer Bars with Graph",
         _ => "",
+    }
+}
+
+impl TimelineModel {
+    /// Pointer cuts share the playhead split kernel command and one transaction.
+    pub fn split_at(&self, hit: &str, time: f64, all: bool) -> Result<Plan, ModelError> {
+        if !time.is_finite() || self.index.layer(hit).is_none() {
+            return Ok(Plan::default());
+        }
+        let margin = 1. / self.index.fps.max(1.);
+        let layers: Vec<_> = self
+            .index
+            .layers
+            .iter()
+            .filter(|l| {
+                (all || l.id == hit)
+                    && !l.effectively_locked
+                    && time - l.from > margin + 1e-9
+                    && l.from + l.duration - time > margin + 1e-9
+            })
+            .collect();
+        if layers.is_empty() {
+            return Ok(Plan::default());
+        }
+        let label = if all {
+            format!("Split {} layers", layers.len())
+        } else {
+            format!("Split {}", layers[0].name.to_string_lossy())
+        };
+        let ids = layers.iter().map(|l| l.id.clone()).collect::<Vec<_>>();
+        let tails = ids.iter().map(|_| new_id("L")).collect::<Vec<_>>();
+        let mut commands = Vec::new();
+        if self.mode == crate::TimelineMode::Tracks {
+            // Freeze the displayed lanes before Split creates its new pieces.
+            // Otherwise the automatic layout can pack them into another track.
+            commands.push(TimingCommand::PinTracks {
+                lanes: crate::tracks::relative_lanes(&self.index, &self.reveal),
+            }.into());
+        }
+        commands.push(TimingCommand::Split {
+            layer_ids: ids,
+            time,
+            new_ids: tails,
+        }.into());
+        let mut plan = Plan::edit(commands, self.index.revision);
+        if let Some(Call::Transact { label: slot, .. }) = plan.calls.first_mut() {
+            *slot = Some(label);
+        }
+        Ok(plan)
+    }
+    /// Snap to actual cut boundaries, keys, markers and the stationary playhead.
+    pub fn split_time(&self, raw: f64, playhead: f64, radius: f64) -> f64 {
+        let rounded = frame(raw, self.index.fps);
+        if self.track_snap_disabled {
+            return rounded;
+        }
+        let mut times = vec![playhead];
+        times.extend(self.index.markers.iter().map(|m| m.time));
+        for l in &self.index.layers {
+            times.extend([l.from, l.from + l.duration]);
+            times.extend(
+                l.channels
+                    .iter()
+                    .flat_map(|c| c.keys.iter().map(|k| l.from + k.time)),
+            );
+        }
+        times
+            .into_iter()
+            .filter(|t| t.is_finite() && (*t - raw).abs() <= radius)
+            .min_by(|a, b| (a - raw).abs().total_cmp(&(b - raw).abs()))
+            .unwrap_or(rounded)
     }
 }

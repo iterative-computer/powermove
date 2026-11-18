@@ -1972,6 +1972,7 @@ const SELECTION: &[&str] = &[
 /// Rows that need a document, on top of the selection-based ones.
 const DOCUMENT: &[&str] = &[
     "timeline.tool:selection",
+    "timeline.tool:split",
     "timeline.tool:ripple",
     "timeline.tool:roll",
     "timeline.tool:slip",

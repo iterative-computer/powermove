@@ -78,7 +78,7 @@ pub const QUIT_ACTION: &str = "pmQuit:";
 /// but never matched by AppKit. Their shortcuts come from the W1 registry and are
 /// resolved only by the shell's ordered key resolver, so a declined key replays
 /// to the focused control (typing `v` in a field) instead of firing a menu item.
-pub const DISPLAY_ONLY: [&str; 4] = ["Layer", "Timeline", "tools", "view3d"];
+pub const DISPLAY_ONLY: [&str; 5] = ["Layer", "Timeline", "tools", "timelineTools", "view3d"];
 /// Commands that act on the app, not on the window a sheet covers: they stay
 /// in the menu while a sheet is up, as in other Mac apps. Every other command
 /// waits for the sheet. The Edit commands stay for the sheet's own fields
@@ -102,11 +102,12 @@ pub fn runs_beside_sheet(command: &str, field_editing: bool) -> bool {
     BESIDE_SHEET.contains(&command) || (field_editing && command.starts_with("context"))
 }
 /// Commands whose items get a dynamic submenu (rebuilt when opened).
-pub const SUBMENUS: [&str; 7] = [
+pub const SUBMENUS: [&str; 8] = [
     "openRecent",
     "workspaces",
     "panels",
     "tools",
+    "timelineTools",
     "new3d",
     "newLayers",
     "view3d",
@@ -127,6 +128,12 @@ pub fn tools() -> Vec<Item> {
     .iter()
     .map(|(l, c)| Item::registered(&keymap, l, c, json!([])))
     .collect()
+}
+/// The native timeline's persistent edit tools.
+pub fn timeline_tools() -> Vec<Item> {
+    vec![Item::command("Selection", "timeline.tool:selection", "V"),
+         Item::command("Roll — or ⌥-drag a cut", "timeline.tool:roll", ""),
+         Item::command("Split (C)", "timeline.tool:split", "C")]
 }
 /// Items of View ▸ 3D (3d-studio.md §2): the viewer's 3D group as menu items,
 /// in the bar's order (command `studio.view`, arguments `[group, value]`).
@@ -462,6 +469,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
         (
             "Timeline",
             vec![
+                Item::command("Tools", "timelineTools", ""),
                 r("Play/Pause", "play"),
                 r("Shuttle Reverse", "shuttleBackward"),
                 r("Shuttle Stop", "shuttleStop"),
