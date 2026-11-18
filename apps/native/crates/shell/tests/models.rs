@@ -1069,3 +1069,84 @@ fn p1_resize_keeps_unrelated_fluid_group() {
         assert_eq!(heights, vec![300. + delta, 300. - delta, 300.]);
     }
 }
+
+fn sticky_geometry(scroll: f32) -> (Layout, Geometry, Tokens) {
+    let t = tokens();
+    let mut l = Layout::preset("design");
+    l.docks[0].groups.push(Group {
+        tabs: vec!["notes".into()],
+        active: 0,
+        size: Some(300.),
+        collapsed: false,
+    });
+    let mut g = Geometry::default();
+    g.side_docks.insert(
+        0,
+        Rect {
+            x: 0.,
+            y: 50.,
+            w: 300.,
+            h: 200.,
+        },
+    );
+    for (group, y) in [(0, 50.), (1, 350.)] {
+        g.panels.push(Placement {
+            dock: 0,
+            group,
+            rect: Rect {
+                x: 0.,
+                y: y - scroll,
+                w: 300.,
+                h: 300.,
+            },
+        });
+    }
+    (l, g, t)
+}
+#[test]
+fn sticky_header_pins_while_body_intersects() {
+    let (_, g, t) = sticky_geometry(100.);
+    assert_eq!(g.header_rect(&g.panels[0], &t).y, 50.);
+    assert_eq!(g.panels[0].rect.y, -50., "body keeps its column offset");
+}
+#[test]
+fn sticky_header_is_pushed_by_next_header() {
+    let (_, g, t) = sticky_geometry(300. - tokens().metrics.header / 2.);
+    let next = g.header_rect(&g.panels[1], &t);
+    let first = g.header_rect(&g.panels[0], &t);
+    assert_eq!(first.y, next.y - t.metrics.header);
+    assert!(first.y < 50.);
+}
+#[test]
+fn sticky_header_hit_test_targets_tabs() {
+    let (l, mut g, t) = sticky_geometry(100.);
+    g.tabs.insert((0, 0), vec![(0, 0., 100.), (1, 100., 200.)]);
+    let hit = l
+        .drop_target(
+            &g,
+            Rect {
+                x: 0.,
+                y: 0.,
+                w: 1200.,
+                h: 900.,
+            },
+            120.,
+            55.,
+            &t,
+        )
+        .unwrap();
+    assert_eq!(
+        hit.target,
+        DropTarget::Tab {
+            dock: 0,
+            group: 0,
+            index: 1
+        }
+    );
+}
+#[test]
+fn sticky_short_body_keeps_natural_header() {
+    let (_, mut g, t) = sticky_geometry(10.);
+    g.panels[0].rect.h = t.metrics.header * 1.5;
+    assert_eq!(g.header_rect(&g.panels[0], &t).y, g.panels[0].rect.y);
+}

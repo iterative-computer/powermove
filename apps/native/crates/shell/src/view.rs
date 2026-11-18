@@ -1887,6 +1887,15 @@ impl Editor {
             })
             .map(|p| p.rect)
     }
+    /// The header's window-space rect after column scrolling.
+    pub fn panel_header_rect(&self, id: &str) -> Option<Rect> {
+        let (dock, group, _) = self.layout.find(id)?;
+        self.geometry
+            .panels
+            .iter()
+            .find(|p| (p.dock, p.group) == (dock, group))
+            .map(|p| self.geometry.header_rect(p, &self.tokens))
+    }
     /// The live arrangement in the agents' digest shape (get_panel_layout).
     pub fn layout_digest(&self, cx: &App) -> serde_json::Value {
         let panels = self.panels(cx);
@@ -2585,7 +2594,9 @@ impl Render for Editor {
         };
         let mut root = div()
             .id("editor")
-            .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.dock_wheel(e, cx)))
+            .on_scroll_wheel(
+                cx.listener(|this, e: &ScrollWheelEvent, _, cx| this.dock_wheel(e, cx)),
+            )
             .role(Role::Group)
             .accessibility_id("shell.editor")
             .aria_label("Powermove editor")
@@ -2866,6 +2877,8 @@ impl Render for Editor {
                         + TAB_SPACING
                 })
                 .collect();
+            let header_rect = self.geometry.header_rect(&p, &t);
+            let header_offset = header_rect.y - p.rect.y;
             let mut panel = positioned(self.slides.shown(&id, p.rect))
                 .id(format!("group-{}-{}", p.dock, p.group))
                 .role(Role::Group)
@@ -2882,7 +2895,9 @@ impl Render for Editor {
                 // hairline, its corner continuous.
                 .corner(&t, m.panel_radius)
                 .elevated(&t, pm_design::Elevation::Panel)
-                .overflow_hidden();
+                // During push-off a header can extend into the dock gap.
+                // Its body clips separately; the dock still clips both.
+                .when(header_offset <= 0., |p| p.overflow_hidden());
             if body_native && !collapsed {
                 // A native body (an extension's web page) takes the pointer
                 // where it shows, so it stops short of the dividers' grab.
@@ -2973,9 +2988,10 @@ impl Render for Editor {
                 .pr(px(m.gap))
                 // The native viewer body has no panel fill, and the timeline paints
                 // its own ground: their headers carry the material.
-                .when((is_viewer && native) || own_ground, |h| {
-                    h.bg(tint(c.panel, t.translucency.panel))
-                })
+                .when(
+                    (is_viewer && native) || own_ground || header_offset > 0.,
+                    |h| h.bg(tint(c.panel, t.translucency.panel)),
+                )
                 .when(!is_viewer, |h| {
                     h.border_b(px(m.border))
                         .border_color(tint(line, line_alpha))
@@ -3267,7 +3283,21 @@ impl Render for Editor {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
                 );
             }
-            panel = panel.child(header);
+            // Keep the original interactive header and paint it over the body
+            // only while pinned. Unscrolled and folded groups keep normal flow.
+            let stuck_header = if header_offset > 0. {
+                panel = panel.child(div().h(px(m.header)).flex_none());
+                Some(
+                    header
+                        .absolute()
+                        .top(px(header_offset))
+                        .left(px(0.))
+                        .w_full(),
+                )
+            } else {
+                panel = panel.child(header);
+                None
+            };
             if collapsed {
                 if let Some(bounds) = self.geometry.side_docks.get(&p.dock) {
                     let mut local = self.slides.shown(&id, p.rect);
@@ -3289,7 +3319,16 @@ impl Render for Editor {
                 .as_ref()
                 .and_then(|i| i.panel(&id, p.rect, w, cx));
             if let Some(content) = content {
-                panel = panel.child(content);
+                panel = if header_offset > 0. {
+                    panel.child(
+                        div()
+                            .h(px((p.rect.h - m.header).max(0.)))
+                            .overflow_hidden()
+                            .child(content),
+                    )
+                } else {
+                    panel.child(content)
+                };
             } else {
                 let unknown = format!("No installed extension provides “{id}”.");
                 let loading = self.integration.as_ref().is_some_and(|i| i.panels_loading(cx));
@@ -3356,6 +3395,9 @@ impl Render for Editor {
                 }
                 panel = panel.child(empty);
             }
+            if let Some(header) = stuck_header {
+                panel = panel.child(header);
+            }
             if let Some(bounds) = self.geometry.side_docks.get(&p.dock) {
                 let mut local = self.slides.shown(&id, p.rect);
                 local.x -= bounds.x;
@@ -3383,7 +3425,15 @@ impl Render for Editor {
                         .layout
                         .find(id)
                         .and_then(|(di, _, _)| self.geometry.side_docks.get(&di))
-                        .map_or(*r, |bounds| r.intersection(*bounds));
+                        .map_or(*r, |bounds| {
+                            let mut clip = r.intersection(*bounds);
+                            if let Some(header) = self.panel_header_rect(id) {
+                                let bottom = clip.y + clip.h;
+                                clip.y = clip.y.max(header.y + header.h);
+                                clip.h = (bottom - clip.y).max(0.);
+                            }
+                            clip
+                        });
                     (id.clone(), clip)
                 })
                 .collect();

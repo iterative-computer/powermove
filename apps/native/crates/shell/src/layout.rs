@@ -164,6 +164,28 @@ pub struct Geometry {
     pub tabs: std::collections::HashMap<(usize, usize), Vec<(usize, f32, f32)>>,
 }
 impl Geometry {
+    /// Window-space header geometry, shared by painting and docking hit tests.
+    pub fn header_rect(&self, p: &Placement, t: &Tokens) -> Rect {
+        let mut header = Rect {
+            h: t.metrics.header.min(p.rect.h),
+            ..p.rect
+        };
+        // Tiny/folded bodies retain their natural header placement.
+        if p.rect.h < 2. * header.h {
+            return header;
+        }
+        if let Some(viewport) = self.side_docks.get(&p.dock) {
+            let end = self
+                .panels
+                .iter()
+                .filter(|next| next.dock == p.dock && next.group > p.group)
+                .min_by_key(|next| next.group)
+                .map_or(p.rect.y + p.rect.h, |next| next.rect.y);
+            header.y = p.rect.y.max(viewport.y).min(end - header.h);
+        }
+        header
+    }
+
     /// Bubble-only wheel routing: inner scroll views have first refusal. The
     /// dock's divider grab extends past its viewport into the edge gutter.
     pub fn wheel_dock(&self, x: f32, y: f32, reach: f32) -> Option<usize> {
@@ -765,6 +787,18 @@ impl Layout {
         y: f32,
         t: &Tokens,
     ) -> Option<DropPreview> {
+        // Pinned headers sit above their bodies, including the inter-group
+        // gap during push-off. Test them before the ordinary panel zones.
+        if let Some(p) = geometry.panels.iter().find(|p| {
+            !self.docks[p.dock].groups[p.group].collapsed
+                && geometry.header_rect(p, t).contains(x, y)
+                && geometry
+                    .side_docks
+                    .get(&p.dock)
+                    .is_none_or(|r| r.contains(x, y))
+        }) {
+            return Some(self.panel_zone(geometry, p, x, y, t, true));
+        }
         // A folded panel is not a zone (its header is all there is of it):
         // the dock around it places the panel above or below it.
         if let Some(p) = geometry
@@ -1000,6 +1034,7 @@ impl Layout {
         let r = p.rect;
         let g = &self.docks[p.dock].groups[p.group];
         let group = groupable && g.tabs.iter().all(|id| stacks(id));
+        let header = geometry.header_rect(p, t);
         let header_end = (r.y + t.metrics.header).min(r.y + r.h);
         let tab = |index: usize| DropPreview {
             target: DropTarget::Tab {
@@ -1014,7 +1049,7 @@ impl Layout {
             },
             near: Near::Tab(p.dock, p.group),
         };
-        if group && y < header_end {
+        if group && header.contains(x, y) {
             // Before the first tab whose middle is right of the pointer.
             let spans = geometry
                 .tabs
