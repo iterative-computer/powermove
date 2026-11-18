@@ -74,6 +74,7 @@ impl Client {
         if self.done {
             return e;
         }
+        e.events.extend(crate::user_mcp::startup_warnings(&v));
         if let Some(s) = v["session_id"].as_str().filter(|s| crate::valid_id(s, 200))
             && self.session.as_deref() != Some(s)
         {

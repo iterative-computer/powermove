@@ -308,15 +308,22 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
     let grant = grants::issue(&request.run, request.access)
         .map_err(|e| format!("The agent's tool access couldn't be prepared: {e}"))?;
     let token = grant.token().to_owned();
+    let loaded = crate::user_mcp::load(request.provider, request.access, &environment.vars);
+    let warnings = loaded
+        .warnings
+        .iter()
+        .cloned()
+        .map(crate::Event::Warning)
+        .collect::<Vec<_>>();
     let handle = match request.provider {
-        Provider::Claude => claude(environment, request, authority, &token),
+        Provider::Claude => claude(environment, request, authority, &token, &loaded),
         Provider::Chatgpt if request.access == Access::Editor => {
-            codex_app(environment, request, &token)
+            codex_app(environment, request, &token, &loaded)
         }
-        Provider::Chatgpt => codex_project(environment, request, authority, &token),
+        Provider::Chatgpt => codex_project(environment, request, authority, &token, &loaded),
         Provider::Compatible => compatible(environment, request, &token),
     }?;
-    Ok(handle.hold(grant))
+    Ok(handle.prepend_events(warnings).hold(grant))
 }
 /// A run on the saved API or local model: the same tools, through this app's
 /// tool server; Composition-only runs get the Composition tools.
@@ -354,6 +361,7 @@ fn claude(
     request: Request,
     authority: Authority,
     token: &str,
+    user_mcp: &crate::user_mcp::Loaded,
 ) -> Result<Handle, String> {
     let executable = env
         .binary(Runtime::Claude)
@@ -381,7 +389,7 @@ fn claude(
         native_tools: Some(json!({"command":command,"args":args})),
         tool_names: prefix(&env.tools),
         inspection_tool_names: prefix(&env.composition_tools),
-        external_mcp_servers: json!({}),
+        external_mcp_servers: Value::Object(user_mcp.servers.clone()),
         ask_outside_sandbox: true,
     };
     let spec = ProcessSpec {
@@ -403,7 +411,12 @@ fn editor_config(command: &str, args: &[String], tools: &[String]) -> Value {
         }}
     })
 }
-fn codex_app(env: &Environment, request: Request, token: &str) -> Result<Handle, String> {
+fn codex_app(
+    env: &Environment,
+    request: Request,
+    token: &str,
+    user_mcp: &crate::user_mcp::Loaded,
+) -> Result<Handle, String> {
     let executable = env
         .binary(Runtime::Codex)
         .ok_or_else(|| missing("ChatGPT"))?;
@@ -415,6 +428,11 @@ fn codex_app(env: &Environment, request: Request, token: &str) -> Result<Handle,
         cwd: request.workspace.clone(),
         env: env.codex_vars()?,
     };
+    let mut config = editor_config(&command, &args, &env.composition_tools);
+    let servers = config["mcp_servers"].as_object_mut().expect("editor server map");
+    for (name, server) in &user_mcp.servers {
+        servers.entry(name.clone()).or_insert_with(|| server.clone());
+    }
     let run = codex::Run {
         id: request.run,
         cwd: request.workspace.to_string_lossy().into_owned(),
@@ -426,7 +444,7 @@ fn codex_app(env: &Environment, request: Request, token: &str) -> Result<Handle,
         reasoning_effort: request.effort,
         schema: None,
         image_paths: request.images.clone(),
-        config: editor_config(&command, &args, &env.composition_tools),
+        config,
         resume_thread: None,
     };
     let handle = transport::spawn(spec, Machine::Codex(codex::Client::default()), vec![]);
@@ -441,6 +459,7 @@ fn codex_project(
     request: Request,
     authority: Authority,
     token: &str,
+    user_mcp: &crate::user_mcp::Loaded,
 ) -> Result<Handle, String> {
     let executable = env
         .binary(Runtime::Codex)
@@ -450,7 +469,7 @@ fn codex_project(
     fs::write(&schema, reply_schema().to_string()).map_err(|e| e.to_string())?;
     let (command, args) = env.mcp(token);
     let instructions = format!("{INSTRUCTIONS}\n\n{}", request.additional());
-    let mcp_config = [
+    let mut mcp_config: Vec<String> = [
         format!("mcp_servers.powermove.command={}", json!(command)),
         format!("mcp_servers.powermove.args={}", json!(args)),
         "mcp_servers.powermove.required=true".into(),
@@ -461,6 +480,7 @@ fn codex_project(
     .into_iter()
     .flat_map(|pair| ["--config".to_owned(), pair])
     .collect();
+    mcp_config.extend(user_mcp.codex_argv());
     let options = codex_exec::Options {
         authority: authority.clone(),
         extensions: request.workspace.to_string_lossy().into_owned(),
