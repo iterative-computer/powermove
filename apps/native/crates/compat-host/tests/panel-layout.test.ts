@@ -103,7 +103,7 @@ test("the shared page keeps recovered panel bodies and late roots in their own s
   dom.window.call = () => {};
   dom.window.eval(readFileSync(new URL('../src/panel-layout.js', import.meta.url), 'utf8'));
   const source = readFileSync(new URL('../src/remote-dom.js', import.meta.url), 'utf8');
-  const callbacks = source.slice(source.indexOf('  const panelLayouts ='), source.indexOf("  document.addEventListener('scroll'"));
+  const callbacks = source.slice(source.indexOf('  const contributionBounds ='), source.indexOf("  document.addEventListener('scroll'"));
   dom.window.eval(callbacks.replace('const panelLayouts =', 'globalThis.layouts ='));
   const queue = dom.window.layouts;
   const tick = () => frames.splice(0).forEach(f => f());
