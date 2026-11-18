@@ -103,6 +103,10 @@ fn every_native_segmented_control_is_the_glass_one() {
     let kit = std::fs::read_to_string(kit_path).unwrap();
     assert_eq!(kit.matches("super(NSSegmentedControl)").count(), 1);
     assert!(kit.contains("control.setBorderShape(NSControlBorderShape::Capsule)"));
+    assert!(
+        kit.contains("setRole: TABS_ROLE"),
+        "the shared kit uses AppKit's tracking lens"
+    );
     assert!(kit.contains("SegmentedControl::new(mtm, size, options.len())"));
     assert!(kit.contains("setLabel_forSegment"));
     let toolbar = std::fs::read_to_string(root().join("crates/shell/src/native.rs")).unwrap();

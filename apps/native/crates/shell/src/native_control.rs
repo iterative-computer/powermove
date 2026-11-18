@@ -50,6 +50,15 @@ impl SegmentedControl {
         let control: Retained<Self> = unsafe {
             msg_send![super(Self::alloc(mtm).set_ivars(())), initWithFrame: NSRect::ZERO]
         };
+        // macOS 27's Tabs role gives AppKit's neutral selection and the
+        // tracking lens. The automatic value-selection role uses the accent.
+        // objc2's AppKit bindings predate the role property.
+        const TABS_ROLE: isize = 1; // NSSegmentedControlRoleTabs
+        if control.respondsToSelector(sel!(setRole:)) {
+            unsafe {
+                let _: () = msg_send![&*control, setRole: TABS_ROLE];
+            }
+        }
         control.setSegmentCount(count as isize);
         control.setTrackingMode(NSSegmentSwitchTracking::SelectOne);
         control.setControlSize(size);
