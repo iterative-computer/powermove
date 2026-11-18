@@ -16,7 +16,7 @@ use pm_panel_agentpanel::{
     model::{Effect, EffectKind, Panel},
     runtime::ProviderRuns,
 };
-use pm_runtime_v8::Realm;
+use pm_runtime_v8::{Realm, StateChannel};
 use serde_json::Value;
 use std::{
     path::PathBuf,
@@ -274,7 +274,7 @@ impl AgentLink {
     }
     fn publish(&self) {
         for realm in self.realms.shared().iter() {
-            let _ = realm.eval("__pmBuiltin.publish()");
+            let _ = realm.notify_latest(StateChannel::Publication, "__pmBuiltin.publish()");
         }
     }
 }

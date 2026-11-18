@@ -1489,7 +1489,7 @@ impl Builtins {
     /// The person chose `key` from the items `panel` gave the last gather.
     pub fn run_menu(&self, panel: &str, key: &str) -> Result<Ticket<Evaluation>> {
         self.realm_of(panel)?
-            .eval(format!("__pmBuiltin.runMenu({})", json!(key)))
+            .eval_discrete(format!("__pmBuiltin.runMenu({})", json!(key)))
     }
     /// Clip decorations for the timeline's visible clips from each realm
     /// with a painter (`timeline.paint`); each answers JSON text.
@@ -1516,11 +1516,11 @@ impl Builtins {
     pub fn viewer_frame(&self, frame: &Value) {
         let script = format!("__pmBuiltin.viewerFrame({frame})");
         for (_, realm) in self.user_realms() {
-            let _ = realm.eval(script.clone());
+            let _ = realm.eval_latest(StateChannel::ViewerFrame, script.clone());
         }
     }
     pub fn run_command(&self, panel: &str, id: &str, args: &[Value]) -> Result<Ticket<Evaluation>> {
-        self.realm_of(panel)?.eval(format!(
+        self.realm_of(panel)?.eval_discrete(format!(
             "__pmBuiltin.runCommand({},{})",
             json!(id),
             json!(args)
@@ -1536,13 +1536,27 @@ impl Builtins {
             .cloned()
             .ok_or(Error::Closed)
     }
+    pub fn script_queue_stats(&self, panel: &str) -> Option<QueueStats> {
+        self.realm_of(panel).ok().map(|realm| realm.queue_stats())
+    }
     pub fn publish(&self) -> Vec<(String, Result<Ticket<Evaluation>>)> {
-        let extensions = self.extension_realms.shared();
-        let realms = self.realms.shared();
+        let realms: Vec<_> = {
+            let extensions = self.extension_realms.shared();
+            let realms = self.realms.shared();
+            realms
+                .iter()
+                .chain(extensions.iter())
+                .map(|(id, realm)| (id.clone(), realm.clone()))
+                .collect()
+        };
         realms
-            .iter()
-            .chain(extensions.iter())
-            .map(|(id, realm)| (id.clone(), realm.eval("__pmBuiltin.publish()")))
+            .into_iter()
+            .map(|(id, realm)| {
+                (
+                    id,
+                    realm.eval_latest(StateChannel::Publication, "__pmBuiltin.publish()"),
+                )
+            })
             .collect()
     }
     /// Playing, one panel follows the playhead (Properties' keyframed
@@ -1568,7 +1582,7 @@ impl Builtins {
             backend.native.facts["time"] = json!(time);
             backend.native.facts["playing"] = json!(playing);
         }
-        Some(realm.eval("__pmBuiltin.publish()"))
+        Some(realm.eval_latest(StateChannel::Publication, "__pmBuiltin.publish()"))
     }
     /// The Export sheet's encoder checks end on a worker, which only wakes
     /// the host: the sheet is published again here, once per finished check,
@@ -1580,8 +1594,9 @@ impl Builtins {
         let probe = backend.shared().native.export_probe.clone();
         let finished = std::mem::take(&mut probe.lock().unwrap().unpublished);
         finished.then(|| {
-            self.realm_of("export")
-                .and_then(|realm| realm.eval("__pmBuiltin.publish()"))
+            self.realm_of("export").and_then(|realm| {
+                realm.eval_latest(StateChannel::Publication, "__pmBuiltin.publish()")
+            })
         })
     }
     pub fn take_publications(&self) -> Vec<Publication> {
@@ -1707,25 +1722,28 @@ impl Builtins {
         );
     }
     pub fn observe_export(&self, run: Value) -> Result<Ticket<Evaluation>> {
-        self.realm_of("export")?.eval(format!(
-            "runtime.engine('export.observe',{});__pmBuiltin.publish()",
-            run
-        ))
+        self.realm_of("export")?.eval_latest(
+            StateChannel::ExportProgress,
+            format!(
+                "runtime.engine('export.observe',{});__pmBuiltin.publish()",
+                run
+            ),
+        )
     }
     /// Brings Settings forward on one of its pages (`shortcuts`).
     pub fn show_section(&self, panel: &str, section: &str) -> Result<Ticket<Evaluation>> {
         let section = serde_json::to_string(section).unwrap_or_default();
         self.realm_of(panel)?
-            .eval(format!("__pmBuiltin.show({section})"))
+            .eval_discrete(format!("__pmBuiltin.show({section})"))
     }
     /// Something done in a panel's native chrome (Settings' sidebar and
     /// search field), for the panel's model.
     pub fn panel_act(&self, panel: &str, intent: &Value) -> Result<Ticket<Evaluation>> {
         self.realm_of(panel)?
-            .eval(format!("__pmBuiltin.act({intent})"))
+            .eval_discrete(format!("__pmBuiltin.act({intent})"))
     }
     pub fn show(&self, panel: &str) -> Result<Ticket<Evaluation>> {
-        self.realm_of(panel)?.eval("__pmBuiltin.show()")
+        self.realm_of(panel)?.eval_discrete("__pmBuiltin.show()")
     }
     /// A shell-admitted mask reveal uses the same model and persistence as M in the timeline.
     pub fn reveal_masks(&self) -> Result<Ticket<Evaluation>> {
@@ -1734,7 +1752,7 @@ impl Builtins {
             .get_or_init(std::time::Instant::now)
             .elapsed()
             .as_millis() as u64;
-        self.realm_of("timeline")?.eval(format!(
+        self.realm_of("timeline")?.eval_discrete(format!(
             "__pmBuiltin.command('panel.timeline',{})",
             json!({"type":"keyDown","millis":millis,"event":{"key":"m","repeat":false}})
         ))
@@ -1753,7 +1771,7 @@ impl Builtins {
     /// include decimal document/revision stamps from the inspected frame.
     pub fn timeline_action(&self, intent: Value) -> Result<Ticket<Evaluation>> {
         self.realm_of("timeline")?
-            .eval(format!("__pmBuiltin.command('panel.timeline',{})", intent))
+            .eval_discrete(format!("__pmBuiltin.command('panel.timeline',{})", intent))
     }
 
     /// A panel's own command with `intent`, exactly as its controls send it.
@@ -1763,7 +1781,7 @@ impl Builtins {
         command: &str,
         intent: &Value,
     ) -> Result<Ticket<Evaluation>> {
-        self.realm_of(panel)?.eval(format!(
+        self.realm_of(panel)?.eval_discrete(format!(
             "__pmBuiltin.command({},{})",
             json!(command),
             intent
@@ -1776,8 +1794,21 @@ impl Builtins {
             .eval("JSON.stringify(runtime.engine('timeline.easing.library',{}))")
     }
     pub fn write(&self, panel: &str, handle: &str, value: Value) -> Result<Ticket<Evaluation>> {
-        self.realm_of(panel)?
-            .eval(format!("__pmBuiltin.write({},{})", json!(handle), value))
+        self.realm_of(panel)?.eval_barrier(
+            StateChannel::Parameter(handle.to_owned()),
+            format!("__pmBuiltin.write({},{})", json!(handle), value),
+        )
+    }
+    pub fn write_sample(
+        &self,
+        panel: &str,
+        handle: &str,
+        value: Value,
+    ) -> Result<Ticket<Evaluation>> {
+        self.realm_of(panel)?.eval_latest(
+            StateChannel::Parameter(handle.to_owned()),
+            format!("__pmBuiltin.write({},{})", json!(handle), value),
+        )
     }
     /// Every panel of this window copies and pastes effects through
     /// `clipboard` (the app's one), from panels mounted after this on.
@@ -1807,7 +1838,27 @@ impl Builtins {
     }
     pub fn status(&self) -> Vec<Value> {
         let entries = self.broker.entries.shared().clone();
-        entries.into_iter().map(|(id,e)|{let e=e.shared();json!({"panel":id,"generation":e.generation,"surfaceRevision":e.surface.revision(),"subscriptions":e.router.subscription_count(),"kernelRevision":e.backend.shared().service_revision})}).collect()
+        entries
+            .into_iter()
+            .map(|(panel, entry)| {
+                let queue = self.script_queue_stats(&panel).map(|stats| {
+                    json!({
+                        "busy_rejections": stats.busy_rejections,
+                        "coalesced": stats.coalesced,
+                        "deferred_discrete": stats.deferred_discrete,
+                    })
+                });
+                let entry = entry.shared();
+                json!({
+                    "panel": panel,
+                    "generation": entry.generation,
+                    "surfaceRevision": entry.surface.revision(),
+                    "subscriptions": entry.router.subscription_count(),
+                    "kernelRevision": entry.backend.shared().service_revision,
+                    "scriptQueue": queue,
+                })
+            })
+            .collect()
     }
     pub fn take_errors(&self) -> Vec<String> {
         std::mem::take(&mut *self.broker.errors.shared())
@@ -1838,8 +1889,34 @@ impl Builtins {
     ) -> Result<Ticket<Evaluation>> {
         trace(json!({"panel": panel, "dispatch": event}));
         let entry = self.broker.entry(panel).ok_or(Error::Closed)?;
-        let mut entry = entry.shared();
-        let entry = &mut *entry;
+        let (channel, sample) = Self::event_channel(panel, target, event, &detail);
+        let source = Self::event_source(
+            &mut entry.shared(),
+            generation,
+            revision,
+            target,
+            event,
+            detail,
+            semantic,
+        )?;
+        let realm = self.realm_of(panel)?;
+        if sample {
+            realm.eval_latest(channel, source)
+        } else {
+            realm.eval_barrier(channel, source)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn event_source(
+        entry: &mut Entry,
+        generation: u64,
+        revision: u64,
+        target: u64,
+        event: &str,
+        detail: EventDetail,
+        semantic: Option<String>,
+    ) -> Result<String> {
         let mut event = entry
             .interaction
             .drive(
@@ -1854,9 +1931,9 @@ impl Builtins {
             .map_err(Error::Host)?;
         event.plan.semantic = semantic;
         let wire = serde_json::to_string(&event).map_err(|e| Error::Host(e.to_string()))?;
-        self.realm_of(panel)?
-            .eval(format!("__pmBuiltin.event({wire})"))
+        Ok(format!("__pmBuiltin.event({wire})"))
     }
+
     /// A press may republish before its click lands. Activation still reaches
     /// a node only while it carries the same semantic identity as the one hit.
     #[allow(clippy::too_many_arguments)]
@@ -1888,8 +1965,33 @@ impl Builtins {
         };
         self.dispatch(panel, generation, revision, target, event, detail, semantic)
     }
-    /// Pointer stream events address the current tree. A publication landing
-    /// mid-gesture must not drop a release.
+    /// Enqueue UI input in call order. Planning and model locks stay off the UI
+    /// thread. An activation may follow a republished node with the same identity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn queue_activation(
+        &self,
+        panel: &str,
+        generation: u64,
+        revision: u64,
+        target: u64,
+        semantic: Option<&str>,
+        event: &str,
+        detail: EventDetail,
+        sample: bool,
+    ) -> Result<Ticket<Evaluation>> {
+        self.queue_event(
+            panel,
+            generation,
+            Some(revision),
+            target,
+            semantic.map(str::to_owned),
+            event,
+            detail,
+            sample,
+        )
+    }
+
+    /// Pointer and range input address the current tree of the same generation.
     pub fn pointer_event(
         &self,
         panel: &str,
@@ -1898,14 +2000,80 @@ impl Builtins {
         event: &str,
         detail: EventDetail,
     ) -> Result<Ticket<Evaluation>> {
-        let revision = self
-            .broker
-            .entry(panel)
-            .ok_or(Error::Closed)?
-            .shared()
-            .surface
-            .revision();
-        self.event(panel, generation, revision, target, event, detail)
+        self.queue_event(panel, generation, None, target, None, event, detail, false)
+    }
+
+    fn event_channel(
+        panel: &str,
+        target: u64,
+        event: &str,
+        detail: &EventDetail,
+    ) -> (StateChannel, bool) {
+        let panel = panel.to_owned();
+        match event {
+            "pointermove" | "pointerdown" | "pointerup" | "pointercancel" | "pointerenter"
+            | "pointerleave" => (
+                StateChannel::Pointer {
+                    panel,
+                    pointer: detail.pointer_id.unwrap_or(1),
+                },
+                event == "pointermove",
+            ),
+            "click" | "dblclick" | "contextmenu" if detail.pointer_id.is_some() => (
+                StateChannel::Pointer {
+                    panel,
+                    pointer: detail.pointer_id.unwrap(),
+                },
+                false,
+            ),
+            "rangechange" | "wheel" => (
+                StateChannel::Range { panel, target },
+                // Wheel deltas are relative input; replacing one loses scroll distance.
+                event == "rangechange",
+            ),
+            _ => (StateChannel::Control { panel, target }, false),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn queue_event(
+        &self,
+        panel: &str,
+        generation: u64,
+        revision: Option<u64>,
+        target: u64,
+        semantic: Option<String>,
+        event: &str,
+        detail: EventDetail,
+        sample: bool,
+    ) -> Result<Ticket<Evaluation>> {
+        let (channel, observation) = Self::event_channel(panel, target, event, &detail);
+        let realm = self.realm_of(panel)?;
+        let broker = Arc::downgrade(&self.broker);
+        let panel = panel.to_owned();
+        let event = event.to_owned();
+        realm.eval_input(channel, sample || observation, move || {
+            trace(json!({"panel": panel, "dispatch": event}));
+            let broker = broker.upgrade().ok_or(Error::Closed)?;
+            let entry = broker.entry(&panel).ok_or(Error::Closed)?;
+            let mut entry = entry.shared();
+            let semantic = semantic.filter(|id| {
+                entry
+                    .surface
+                    .node(target)
+                    .and_then(|n| n.props.get("id"))
+                    .and_then(Value::as_str)
+                    == Some(id.as_str())
+            });
+            let revision = if semantic.is_some() {
+                entry.surface.revision()
+            } else {
+                revision.unwrap_or_else(|| entry.surface.revision())
+            };
+            Self::event_source(
+                &mut entry, generation, revision, target, &event, detail, semantic,
+            )
+        })
     }
     /// One kernel gesture for a dragged number field, so a scrub is one undo step.
     /// Runs off the main thread; no sample passes through V8.

@@ -44,6 +44,197 @@ fn actor() -> KernelActor {
         .unwrap();
     actor
 }
+// Keep the owner inside a bounded evaluation while filling the production queue.
+fn saturate_script_queue(realm: &Realm) -> Ticket<Evaluation> {
+    let held = realm
+        .eval("new Promise(resolve => setTimeout(resolve, 1000))")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !realm
+        .active_execution()
+        .is_some_and(|active| active.execution == held.execution)
+    {
+        assert!(Instant::now() < deadline, "script owner did not start");
+        thread::sleep(Duration::from_millis(1));
+    }
+    for _ in 0..Limits::default().queue_capacity {
+        realm.eval("0").unwrap();
+    }
+    assert!(matches!(realm.eval("0"), Err(Error::Busy)));
+    held
+}
+
+#[test]
+fn queue_busy_builtin_publication_arrives_without_another_change() {
+    let actor = actor();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    finish(panels.mount("layer-effects").unwrap());
+    panels.take_publications();
+    let realm = panels.realm_of("layer-effects").unwrap();
+    let held = saturate_script_queue(&realm);
+    actor
+        .handle()
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec!["a".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let (_, update) = panels.publish().pop().unwrap();
+    finish(held);
+    finish(update.expect("publication survives a full queue"));
+    let updated = panels.take_publications().pop().unwrap();
+    assert!(
+        updated
+            .surface
+            .nodes()
+            .values()
+            .any(|node| node.text == "Headline")
+    );
+    panels.close();
+    actor.shutdown();
+}
+
+const QUEUE_PANEL: &str = "synthetic-queue";
+
+fn queue_panel() -> (KernelActor, Builtins, Publication, u64, Realm) {
+    let actor = actor();
+    let panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let graph = json!({
+        "sources": {
+            "powermove:bundle": "export * from './index.tsx';",
+            "index.tsx": "import { jsx } from 'powermove/jsx-runtime';
+                globalThis.received = [];
+                export function view() {
+                    return jsx('div', { id: 'queue-target',
+                        onPointerDown: () => received.push('down'),
+                        onPointerUp: () => received.push('up'),
+                        onPointerMove: e => received.push(e.x),
+                        onRangeChange: e => received.push(e.range)
+                    });
+                }"
+        },
+        "edges": {
+            "powermove:bundle": {"./index.tsx":"index.tsx"},
+            "index.tsx": {"powermove/jsx-runtime":"runtime:powermove/jsx-runtime"}
+        }
+    });
+    finish(panels.mount_extension(QUEUE_PANEL, &graph, None).unwrap());
+    let publication = panels.take_publications().pop().unwrap();
+    let id = publication
+        .surface
+        .nodes()
+        .values()
+        .find(|node| node.props.get("id") == Some(&json!("queue-target")))
+        .unwrap()
+        .id;
+    let realm = panels.realm_of(QUEUE_PANEL).unwrap();
+    (actor, panels, publication, id, realm)
+}
+
+fn pointer_barriers(saturated: bool) {
+    let (actor, panels, publication, id, realm) = queue_panel();
+    let held = saturated.then(|| saturate_script_queue(&realm));
+    let send = |event, x| {
+        panels.pointer_event(
+            QUEUE_PANEL,
+            publication.generation,
+            id,
+            event,
+            EventDetail {
+                pointer_id: Some(1),
+                x,
+                ..Default::default()
+            },
+        )
+    };
+    let down = send("pointerdown", None);
+    for x in [1., 2., 3.] {
+        let _ = send("pointermove", Some(x));
+    }
+    let drag_end = send("pointermove", Some(4.));
+    let up = send("pointerup", None);
+    for x in [5., 6., 7.] {
+        let _ = send("pointermove", Some(x));
+    }
+    let hover_end = send("pointermove", Some(8.));
+    if let Some(held) = held {
+        finish(held);
+    }
+    finish(down.expect("pointerdown survives a full queue"));
+    finish(drag_end.expect("last drag move survives a full queue"));
+    finish(up.expect("pointerup survives a full queue"));
+    finish(hover_end.expect("last post-release move survives a full queue"));
+    let value = finish(realm.eval("JSON.stringify(received)").unwrap()).value;
+    let events: Vec<Value> = serde_json::from_str(&value).unwrap();
+    if saturated {
+        assert_eq!(events, [json!("down"), json!(4), json!("up"), json!(8)]);
+    } else {
+        assert_eq!(events.first(), Some(&json!("down")));
+        let up = events.iter().position(|event| event == "up").unwrap();
+        assert_eq!(events[up - 1], json!(4));
+        assert_eq!(events.last(), Some(&json!(8)));
+        assert!(
+            events[1..up]
+                .iter()
+                .all(|x| matches!(x.as_u64(), Some(1..=4)))
+        );
+        assert!(
+            events[up + 1..]
+                .iter()
+                .all(|x| matches!(x.as_u64(), Some(5..=8)))
+        );
+    }
+    panels.close();
+    actor.shutdown();
+}
+
+#[test]
+fn queue_busy_pointer_barriers_seal_the_latest_move() {
+    pointer_barriers(true);
+}
+
+#[test]
+fn queue_pointer_barriers_preserve_order_without_saturation() {
+    pointer_barriers(false);
+}
+
+#[test]
+fn queue_busy_final_range_arrives_with_no_new_observation() {
+    let (actor, panels, publication, id, realm) = queue_panel();
+    let held = saturate_script_queue(&realm);
+    let send = |range| {
+        panels.pointer_event(
+            QUEUE_PANEL,
+            publication.generation,
+            id,
+            "rangechange",
+            EventDetail {
+                range: Some(range),
+                ..Default::default()
+            },
+        )
+    };
+    let _ = send((0, 5));
+    let final_range = send((5, 15));
+    finish(held);
+    finish(final_range.expect("final range survives a full queue"));
+    let value = finish(realm.eval("JSON.stringify(received)").unwrap()).value;
+    assert_eq!(
+        serde_json::from_str::<Value>(&value).unwrap(),
+        json!([[5, 15]])
+    );
+    panels.close();
+    actor.shutdown();
+}
+
 #[test]
 fn a_panic_holding_a_panel_lock_never_stops_the_v8_owner_thread() {
     let actor = actor();

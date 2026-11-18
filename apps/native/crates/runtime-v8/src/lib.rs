@@ -22,6 +22,8 @@ pub enum Error {
     Host(String),
     Closed,
     Busy,
+    /// A newer observation replaced this pending work before evaluation.
+    Superseded,
     Invalid(&'static str),
     StaleGeneration,
 }

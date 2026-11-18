@@ -690,7 +690,7 @@ impl SurfaceView {
                 .pending
                 .borrow_mut()
                 .insert(id, (live, std::time::Instant::now()));
-            self.change(id, json!(live), cx);
+            self.change_sample(id, json!(live), cx);
             cx.notify();
             return;
         }
