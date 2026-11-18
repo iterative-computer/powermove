@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { compile } from "svelte/compiler";
 import { mkdir } from "node:fs/promises";
-import { CompatRealm } from "../src";
+import { CompatPanels, CompatRealm } from "../src";
 import { FakeHost } from "./fake-host";
 import { harness } from "../../remote-dom/test/harness";
 
@@ -249,6 +249,57 @@ test("remote DOM runs panel handlers before the kernel keymap and keeps input fi
     // it does not assert that preventDefault retroactively cancels WebKit.
     expect(h.late).toContain("keydown");
     expect(h.errors).toEqual([]);
+  } finally {
+    realm.dispose();
+    restore();
+    h.close();
+  }
+});
+
+test("failed legacy panel build remains visible and can reload", async () => {
+  const h = harness(),
+    restore = h.shim.installGlobals(),
+    host = new FakeHost();
+  let panels: CompatPanels;
+  const realm = new CompatRealm({
+    capabilities: {
+      panelsBackend: { refresh: (id: string) => panels.refresh(id) },
+    },
+    id: "fixture",
+    generation: 1,
+    initial: host.publication(),
+    host,
+    dom: h.shim,
+  });
+  try {
+    let fail = true;
+    const api = realm.extension("anchor-fixture", 1).api;
+    api.panels.register({
+      id: "anchor-fixture",
+      title: "Anchor fixture",
+      build(body: any) {
+        if (fail) {
+          body.style.display = "none";
+          body.setAttribute("hidden", "");
+          throw new Error("Synthetic bounds failure");
+        }
+        body.textContent = "Recovered anchor controls";
+      },
+    });
+    panels = new CompatPanels(realm.kernel.panels, h.shim.document);
+    expect(() => panels.open("anchor-fixture")).not.toThrow();
+    panels.place("anchor-fixture", [0, 0, 220, 300]);
+    await h.settle();
+    const page = h.page.window.document;
+    expect(page.body.textContent).toContain("Synthetic bounds failure");
+    expect(page.body.textContent).toContain("Anchor fixture");
+    const errorBody = page.querySelector("[role=alert]")!.parentElement!;
+    expect(h.page.window.getComputedStyle(errorBody).display).toBe("block");
+    expect(errorBody.hasAttribute("hidden")).toBe(false);
+    fail = false;
+    page.querySelector("button")!.click();
+    await h.settle();
+    expect(page.body.textContent).toContain("Recovered anchor controls");
   } finally {
     realm.dispose();
     restore();

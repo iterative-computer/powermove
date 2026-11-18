@@ -204,3 +204,87 @@ test("manifest nativeStyle is scoped to its own trusted panel", async () => {
     h.close();
   }
 });
+
+test("a styled v1 anchor panel survives hide, move, refresh and project publications", async () => {
+  const h = harness(),
+    host = new FakeHost();
+  const realm = new CompatRealm({
+    id: "fixture",
+    generation: 1,
+    host,
+    initial: host.publication(),
+    dom: h.shim,
+  });
+  const panels = new CompatPanels(realm.kernel.panels, h.shim.document);
+  const extension = realm.extension("synthetic-anchor", 1);
+  let builds = 0,
+    cleanups = 0;
+  try {
+    extension.api.panels.register({
+      id: "synthetic-anchor",
+      title: "Anchor",
+      build(body: any) {
+        builds++;
+        const doc = h.shim.document,
+          root = doc.createElement("div"),
+          style = doc.createElement("style");
+        style.textContent =
+          ".synthetic-anchor{display:grid;grid-template-columns:repeat(3,1fr)}";
+        root.className = "synthetic-anchor";
+        root.append(style);
+        for (const name of [
+          "Upper left",
+          "Upper center",
+          "Upper right",
+          "Middle left",
+          "Center",
+          "Middle right",
+          "Lower left",
+          "Lower center",
+          "Lower right",
+        ]) {
+          const button = doc.createElement("button");
+          button.textContent = name;
+          root.append(button);
+        }
+        body.append(root);
+        const update = () =>
+          root.setAttribute(
+            "data-selection",
+            String(extension.api.selection.layers().length),
+          );
+        const subscriptions = ["selection", "time", "project:changed"].map(
+          (name) => extension.api.on(name, update),
+        );
+        update();
+        return () => {
+          cleanups++;
+          subscriptions.forEach((s) => s.dispose());
+          root.remove();
+        };
+      },
+    });
+    panels.open("synthetic-anchor");
+    for (const rect of [[0, 0, 218, 300], null, [300, 40, 250, 300]] as const) {
+      panels.place("synthetic-anchor", rect ? [...rect] : null);
+      await h.settle();
+      expect(h.page.window.document.querySelectorAll("button")).toHaveLength(9);
+    }
+    panels.refresh("synthetic-anchor");
+    const publication = host.publication();
+    publication.events = [
+      { name: "project:changed", value: { kind: "structure" } },
+    ];
+    realm.receive(publication);
+    await h.settle();
+    expect(h.page.window.document.querySelectorAll("button")).toHaveLength(9);
+    expect(builds).toBe(2);
+    expect(cleanups).toBe(1);
+    expect(h.errors).toEqual([]);
+  } finally {
+    panels.dispose();
+    extension.dispose();
+    realm.dispose();
+    h.close();
+  }
+});

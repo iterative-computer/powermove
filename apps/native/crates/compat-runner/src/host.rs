@@ -202,6 +202,7 @@ enum Input {
     Menu(String, Value, u64),
     StorePage(String, u64, Value),
     StoreDom(String),
+    ReloadStore(String, Writer),
     Dom,
     Canvases,
     Health(String, Value),
@@ -684,6 +685,7 @@ impl Measures {
 /// A confined helper's views: its batches wait here for the owner to admit them.
 struct ViewEvents {
     id: String,
+    owner: Writer,
     shared: Arc<Shared>,
     inbox: Sender<Input>,
     pending: Mutex<VecDeque<Value>>,
@@ -700,6 +702,9 @@ impl StoreViews for ViewEvents {
         pending.push_back(batch);
         let _ = self.inbox.send(Input::StoreDom(self.id.clone()));
         true
+    }
+    fn reload(&self) {
+        let _ = self.inbox.send(Input::ReloadStore(self.id.clone(), self.owner));
     }
     fn panel(&self, id: &str, open: bool) {
         let request = json!({"kind":"panel","id":id,"open":open});
@@ -1590,6 +1595,15 @@ impl Owner {
                 self.drain_store_dom(&id);
             }
             Input::StoreDom(id) => self.drain_store_dom(&id),
+            Input::ReloadStore(id, owner) => {
+                // A retired helper cannot restart a later helper of this id.
+                if let Some(index) = self.stores.iter().position(|s| s.extension.id == id && s.owner == owner) {
+                    let store = self.stores.remove(index);
+                    self.stop_store(store);
+                    self.sync_stores();
+                    self.publish_store();
+                }
+            }
             Input::Panel(id, open) => {
                 if open {
                     self.open.entry(id.clone()).or_default();
@@ -2458,6 +2472,7 @@ impl Owner {
         };
         let views = Arc::new(ViewEvents {
             id: id.to_owned(),
+            owner,
             shared: self.shared.clone(),
             inbox: self.inbox.clone(),
             pending: Mutex::default(),
@@ -6471,4 +6486,6 @@ mod tests {
         drop(again);
         drop(actor);
     }
+    include!("library_panel_tests.rs");
+
 }

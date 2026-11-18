@@ -10,6 +10,48 @@ export const panelStyle = (rect: [number, number, number, number] | null) => {
   return `position:fixed;left:${x}px;top:${y}px;width:${w}px;height:${h}px;overflow:auto;box-sizing:border-box`;
 };
 
+/** Keep a failed contribution visible, with text treated as text, not markup. */
+export function panelFailure(
+  body: any,
+  name: string,
+  error: unknown,
+  reload: () => unknown,
+) {
+  body.replaceChildren();
+  // A failed build may have hidden or restyled its body while loading.
+  body.removeAttribute("class");
+  body.removeAttribute("hidden");
+  body.setAttribute(
+    "style",
+    "position:relative;width:100%;height:100%;box-sizing:border-box;overflow:auto;display:block",
+  );
+  const doc = body.ownerDocument;
+  const notice = doc.createElement("div");
+  notice.setAttribute("role", "alert");
+  notice.setAttribute("style", "padding:12px");
+  const title = doc.createElement("strong");
+  title.textContent = name;
+  const message = doc.createElement("p");
+  message.textContent = String(
+    error instanceof Error ? error.message : error,
+  ).slice(0, 240);
+  const button = doc.createElement("button");
+  button.textContent = "Reload";
+  button.addEventListener("click", () => {
+    const failed = (error: unknown) => {
+      console.error(`Panel ${name} reload failed`, error);
+      message.textContent = `Reload failed: ${String(error instanceof Error ? error.message : error).slice(0, 200)}`;
+    };
+    try {
+      Promise.resolve(reload()).catch(failed);
+    } catch (error) {
+      failed(error);
+    }
+  });
+  notice.append(title, message, button);
+  body.append(notice);
+}
+
 /** Mounts actual contribution builds in the V8 DOM mirror. The rendering host
  * still owns placement and paint acknowledgements; opening is not a paint ack.
  */
@@ -117,8 +159,8 @@ export class CompatPanels {
       else if (typeof cleanup?.dispose === "function")
         entry.cleanup = () => cleanup.dispose();
     } catch (error) {
-      this.remove(id);
-      throw error;
+      console.error(`Panel ${id} build failed`, error);
+      panelFailure(body, definition.title ?? id, error, () => this.refresh(id));
     }
   };
   private remove(id: string) {

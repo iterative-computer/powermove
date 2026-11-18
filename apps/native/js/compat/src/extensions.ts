@@ -1,3 +1,4 @@
+import { panelFailure } from "./panels";
 import { createExtensionAPI } from "./frozen/host/host";
 import { HostError } from "./channel";
 import { makePMFacades, mergeDescriptors } from "./facades";
@@ -232,8 +233,38 @@ export function extensionAPI(
     haptic: backends.host?.haptic,
     workspaceAppearance: backends.workspaceAppearance,
     themeAppearance: backends.themeAppearance,
-    reportRuntimeError: (extensionId: string, error: unknown, label: string) =>
-      realm.reportError({ extensionId, label, error }),
+    reportRuntimeError: (
+      extensionId: string,
+      error: unknown,
+      label: string,
+    ) => {
+      const panelId = /^panel (.+) (?:build|mount)$/.exec(label)?.[1];
+      if (panelId) {
+        for (const root of realm.document?.querySelectorAll(
+          "[data-pm-contribution]",
+        ) ?? []) {
+          if (root.getAttribute("data-pm-contribution") !== panelId) continue;
+          const body = root.querySelector("[data-pm-panel-body]");
+          if (!body) break;
+          panelFailure(
+            body,
+            settings.manifest?.name ??
+              realm.kernel.panels.get(panelId)?.title ??
+              extensionId,
+            error,
+            () =>
+              backends.extensions?.reload
+                ? backends.extensions.reload(extensionId)
+                : backends.panelsBackend?.refresh?.(panelId),
+          );
+          // The guard logged the owner and label. This contained view failure
+          // must not trip the unhandled-fault cutoff and remove its error UI.
+          realm.reportError(error);
+          return;
+        }
+      }
+      realm.reportError({ extensionId, label, error });
+    },
   };
   const handle = createExtensionAPI(
     realm.kernel,
