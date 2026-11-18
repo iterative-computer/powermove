@@ -28,6 +28,38 @@ struct PanelDrag {
     at: Point<Pixels>,
     moved: bool,
     preview: Option<DropPreview>,
+    /// The target the window shows the layout of: `preview`, once the
+    /// pointer has rested on it (`drag::rested`). A release never waits
+    /// for it; it lands on `preview`.
+    shown: Option<DropPreview>,
+    /// Where and when the pointer last came to rest.
+    rest: ((f32, f32), std::time::Instant),
+    /// The panel is in the layout: the window shows the layout a drop
+    /// would give while the drag lasts (`Editor::retarget`). False for a
+    /// panel dragged in from outside, which shows its landing place only.
+    live: bool,
+    /// The geometry targets are read from: as drawn at pick-up, so no zone
+    /// moves under the pointer when the layout re-flows to the preview.
+    geometry: Geometry,
+    /// Each column's scroll at pick-up (a cancel returns to it) ...
+    scroll: HashMap<String, f32>,
+    /// ... and how far the drag's own edge scroll has moved each since.
+    scrolled: HashMap<String, f32>,
+    /// When the press became a drag: the chip fades in from then.
+    lifted: Option<std::time::Instant>,
+    /// When the edge scroll last ran.
+    scroll_tick: Option<std::time::Instant>,
+}
+/// After a release: the chip gliding to where the panel landed (or back to
+/// where it was picked up) and the landing slot's wash fading.
+#[derive(Clone)]
+struct Settle {
+    name: String,
+    from: (f32, f32),
+    to: (f32, f32),
+    /// The panel whose slot fades (a drop on a column position).
+    slot: Option<String>,
+    since: std::time::Instant,
 }
 #[derive(Clone)]
 enum Gesture {
@@ -62,6 +94,13 @@ pub struct Editor {
     /// workspace switch: each panel's offset from its new rect, springing to
     /// nothing (v1 moved panels the same way). Live resizes never slide.
     slides: PanelSlides,
+    /// Tabs sliding along their strips after the same changes.
+    tab_slides: crate::drag::TabSlides,
+    /// The drag chip settling after a release.
+    settle: Option<Settle>,
+    /// Where each extension body was placed this frame (its panel's
+    /// animated rect, less the header and the dividers' grab).
+    native_body_rects: Vec<(String, Rect)>,
     maximized_panel: Option<String>,
     /// Tabs of panels whose owner went away for a moment (an extension
     /// reloading), and where they were: the panel returns there.
@@ -174,6 +213,9 @@ impl Editor {
             reveal_motion: None,
             header_wash: None,
             slides: PanelSlides::default(),
+            tab_slides: Default::default(),
+            settle: None,
+            native_body_rects: Vec::new(),
             maximized_panel: None,
             parked: HashMap::new(),
             awaiting_panels: true,
@@ -227,9 +269,15 @@ impl Editor {
     }
     /// The dragged panel's name, or its stack's names joined (“Effects +
     /// Takes”), as the original app's drag card says it.
-    fn moving_name(&self, id: &str, stack: bool, panels: &layout::Panels) -> String {
-        match self.layout.find(id) {
-            Some((d, g, _)) if stack => self.layout.docks[d].groups[g]
+    fn moving_name(
+        &self,
+        layout: &Layout,
+        id: &str,
+        stack: bool,
+        panels: &layout::Panels,
+    ) -> String {
+        match layout.find(id) {
+            Some((d, g, _)) if stack => layout.docks[d].groups[g]
                 .tabs
                 .iter()
                 .map(|t| panels.title(t).to_string())
@@ -247,7 +295,7 @@ impl Editor {
     ) -> (String, &'static str) {
         // Named after the tab that will show there once the dragged one left.
         let title = |d: usize, g: usize| {
-            self.layout
+            drag.original
                 .shown_after(d, g, &drag.id, drag.stack)
                 .map_or_else(String::new, |id| panels.title(&id).to_string())
         };
@@ -256,34 +304,11 @@ impl Editor {
             layout::Near::Above(d, g) => (title(d, g), "above"),
             layout::Near::Below(d, g) => (title(d, g), "below"),
             layout::Near::Dock(d) => (
-                dock_label(self.layout.docks.get(d).map_or("", |d| d.id.as_str())),
+                dock_label(drag.original.docks.get(d).map_or("", |d| d.id.as_str())),
                 "dock",
             ),
             layout::Near::Edge(e) => (dock_label(e.dock_id()), "dock"),
             layout::Near::Nothing => (String::new(), "dock"),
-        }
-    }
-    /// The drag card's second line: where the panel would go.
-    fn destination(&self, drag: &PanelDrag, panels: &layout::Panels) -> String {
-        if let Some(p) = drag.preview {
-            let (name, kind) = self.near_name(p.near, drag, panels);
-            return match kind {
-                "tab" => format!("Tab with {name}"),
-                "above" => format!("Above {name}"),
-                "below" => format!("Below {name}"),
-                _ => format!("Place in {name}"),
-            };
-        }
-        match self.layout.drop_outcome(
-            &self.geometry,
-            self.dock_bounds,
-            (f32::from(drag.at.x), f32::from(drag.at.y)),
-            &self.tokens,
-            &drag.id,
-            drag.stack,
-        ) {
-            layout::DropOutcome::Here => "Already here".into(),
-            _ => "Not a drop zone".into(),
         }
     }
     /// A drag in progress put back as it began: Escape, or the window
@@ -293,6 +318,12 @@ impl Editor {
             return;
         };
         let moved = matches!(&g, Gesture::Panel(d) if d.moved);
+        if let Gesture::Panel(drag) = &g
+            && drag.moved
+        {
+            self.put_back(drag, cx);
+        }
+        self.slides.follow = false;
         self.layout = g.original();
         self.resize_live = false;
         if moved {
@@ -1542,27 +1573,270 @@ impl Editor {
     #[doc(hidden)]
     pub fn simulate_drag(&mut self, id: &str, x: f32, y: f32) {
         let at = point(px(x), px(y));
-        let original = match self.gesture.take() {
-            Some(Gesture::Panel(d)) => d.original,
-            _ => self.layout.clone(),
-        };
-        let preview = self.layout.drop_target_for(
-            &self.geometry,
-            self.dock_bounds,
-            (x, y),
-            &self.tokens,
-            id,
-            false,
-        );
-        self.gesture = Some(Gesture::Panel(PanelDrag {
+        if !matches!(&self.gesture, Some(Gesture::Panel(d)) if d.live && d.id == id) {
+            if let Some(g) = self.gesture.take() {
+                self.layout = g.original();
+            }
+            self.gesture = Some(Gesture::Panel(self.new_drag(id, at, false, true)));
+        }
+        if let Some(Gesture::Panel(drag)) = &mut self.gesture {
+            drag.at = at;
+            drag.moved = true;
+        }
+        self.retarget(true);
+    }
+    /// A drag of `id` (its whole stack when `stack`) beginning at `at`, with
+    /// the layout, the geometry and the column scroll as they are now.
+    fn new_drag(&self, id: &str, at: Point<Pixels>, stack: bool, live: bool) -> PanelDrag {
+        PanelDrag {
             id: id.into(),
-            stack: false,
+            stack,
             start: at,
-            original,
+            original: self.layout.clone(),
             at,
-            moved: true,
-            preview,
-        }));
+            moved: false,
+            preview: None,
+            shown: None,
+            rest: ((f32::from(at.x), f32::from(at.y)), crate::drag::now()),
+            live,
+            geometry: self.geometry.clone(),
+            scroll: self.dock_scroll.clone(),
+            scrolled: HashMap::new(),
+            lifted: None,
+            scroll_tick: None,
+        }
+    }
+    /// The zones a drag's targets are read from: the panels as drawn at
+    /// pick-up, moved only by the drag's own edge scroll. The layout shown
+    /// re-flows to each preview; the zones never move under the pointer.
+    fn drag_zones(drag: &PanelDrag) -> Geometry {
+        let mut zones = drag.geometry.clone();
+        for p in &mut zones.panels {
+            if let Some(by) = drag
+                .original
+                .docks
+                .get(p.dock)
+                .and_then(|d| drag.scrolled.get(&d.id))
+            {
+                p.rect.y -= by;
+            }
+        }
+        zones
+    }
+    /// Chooses the drag's target for where the pointer is (steadily: see
+    /// `drag::steady`) and, once the pointer rests on it (or at once when
+    /// `now`, or for a tab moving within its own strip), shows the layout a
+    /// drop there would give: the layout the drag began in with that drop
+    /// made, or that layout itself over no target. Panels and tabs travel
+    /// to it on the move spring.
+    fn retarget(&mut self, now: bool) {
+        let Some(Gesture::Panel(drag)) = &mut self.gesture else {
+            return;
+        };
+        if !drag.live || !drag.moved {
+            return;
+        }
+        let time = crate::drag::now();
+        if drag.lifted.is_none() {
+            // The press itself may have re-laid the panels (the tab it
+            // showed): targets are read from the panels as drawn at lift.
+            drag.lifted = Some(time);
+            drag.geometry = self.geometry.clone();
+            drag.scroll = self.dock_scroll.clone();
+        }
+        let zones = Self::drag_zones(drag);
+        let (bounds, tokens) = (self.dock_bounds, &self.tokens);
+        let at = (f32::from(drag.at.x), f32::from(drag.at.y));
+        if !crate::drag::within_rest(drag.rest.0, at) {
+            drag.rest = (at, time);
+        }
+        let preview = crate::drag::steady(drag.preview, at, |at| {
+            drag.original
+                .drop_target_for(&zones, bounds, at, tokens, &drag.id, drag.stack)
+        });
+        let mut scratch = drag.original.clone();
+        drag.preview = preview.filter(|p| scratch.apply_drop(&drag.id, p, drag.stack).is_ok());
+        let target = |p: &Option<DropPreview>| p.map(|p| p.target);
+        // A tab moving along its own strip follows the pointer, as Safari's.
+        let own_strip = match (target(&drag.preview), drag.original.find(&drag.id)) {
+            (Some(DropTarget::Tab { dock, group, .. }), Some((d, g, _))) => {
+                !drag.stack && (dock, group) == (d, g)
+            }
+            _ => false,
+        };
+        if target(&drag.preview) != target(&drag.shown)
+            && (now
+                || own_strip
+                || tokens.accessibility.reduce_motion
+                || crate::drag::rested(drag.rest.1, time))
+        {
+            drag.shown = drag.preview;
+        }
+        let mut shown = drag.original.clone();
+        if let Some(p) = drag.shown
+            && shown.apply_drop(&drag.id, &p, drag.stack).is_err()
+        {
+            shown = drag.original.clone();
+            drag.shown = None;
+        }
+        // In the hand over no target: its stack already shows the tab that
+        // shows once it has left (a release here still puts it back).
+        if drag.shown.is_none()
+            && !drag.stack
+            && let Some((d, g, _)) = shown.find(&drag.id)
+            && let Some(next) = shown.shown_after(d, g, &drag.id, false)
+            && let Some(tab) = shown.docks[d].groups[g].tabs.iter().position(|t| *t == next)
+        {
+            shown.docks[d].groups[g].active = tab;
+        }
+        self.slides.follow = true;
+        if shown != self.layout {
+            self.layout = shown;
+            self.slides.armed = true;
+            self.tab_slides.armed = true;
+        }
+    }
+    /// Each frame of a drag: the layout catches up with the target once
+    /// the pointer rests, and a scrolling column scrolls under a drag held
+    /// near its edge.
+    fn drag_frame(&mut self, window: &mut Window) {
+        let waiting = |v: &Self| {
+            matches!(&v.gesture, Some(Gesture::Panel(d)) if d.live && d.moved
+                && d.preview.map(|p| p.target) != d.shown.map(|p| p.target))
+        };
+        if waiting(self) {
+            self.retarget(false);
+            if waiting(self) {
+                window.request_animation_frame();
+            }
+        }
+        self.drag_edge_scroll(window);
+    }
+    /// While a drag is held near the top or bottom of a scrolling column,
+    /// the column scrolls towards that edge and the target follows.
+    fn drag_edge_scroll(&mut self, window: &mut Window) {
+        let Some(Gesture::Panel(drag)) = &mut self.gesture else {
+            return;
+        };
+        if !drag.live || !drag.moved {
+            return;
+        }
+        let (x, y) = (f32::from(drag.at.x), f32::from(drag.at.y));
+        let column = self
+            .geometry
+            .side_docks
+            .iter()
+            .find(|(_, r)| r.contains(x, y))
+            .and_then(|(di, r)| {
+                let id = self.layout.docks.get(*di)?.id.clone();
+                let speed = crate::drag::autoscroll(y, r.y, r.y + r.h);
+                let old = self.dock_scroll.get(&id).copied().unwrap_or(0.);
+                let most = self.dock_scroll_max.get(&id).copied().unwrap_or(0.);
+                ((speed < 0. && old > 0.) || (speed > 0. && old < most))
+                    .then_some((id, speed, old, most))
+            });
+        let Some((id, speed, old, most)) = column else {
+            drag.scroll_tick = None;
+            return;
+        };
+        let now = crate::drag::now();
+        let dt = drag.scroll_tick.replace(now).map_or(0., |last| {
+            now.saturating_duration_since(last).as_secs_f32().min(0.05)
+        });
+        window.request_animation_frame();
+        let next = (old + speed * dt).clamp(0., most);
+        if next == old {
+            return;
+        }
+        *drag.scrolled.entry(id.clone()).or_default() += next - old;
+        self.dock_scroll.insert(id, next);
+        self.retarget(false);
+    }
+    /// A drag let go over no target, or cancelled: the columns scroll back
+    /// to where they were, the panels travel home, and the chip glides back
+    /// to where it was picked up.
+    fn put_back(&mut self, drag: &PanelDrag, cx: &App) {
+        for (id, at) in &drag.scroll {
+            self.dock_scroll.insert(id.clone(), *at);
+        }
+        self.slides.armed = true;
+        self.tab_slides.armed = true;
+        if !drag.live || self.tokens.accessibility.reduce_motion {
+            return;
+        }
+        let panels = self.panels(cx);
+        let o = crate::drag::CHIP_OFFSET;
+        self.settle = Some(Settle {
+            name: self.moving_name(&drag.original, &drag.id, drag.stack, &panels),
+            from: (f32::from(drag.at.x) + o, f32::from(drag.at.y) + o),
+            to: (f32::from(drag.start.x), f32::from(drag.start.y)),
+            slot: None,
+            since: crate::drag::now(),
+        });
+    }
+    /// Where tab `id` (or a lone title) is drawn in its header, as last
+    /// rendered. For headless recordings and tests.
+    #[doc(hidden)]
+    pub fn tab_rect(&self, id: &str) -> Option<Rect> {
+        let (dock, group, tab) = self.layout.find(id)?;
+        let p = self
+            .geometry
+            .panels
+            .iter()
+            .find(|p| (p.dock, p.group) == (dock, group))?;
+        let header = self.geometry.header_rect(p, &self.tokens);
+        let (_, left, right) = self
+            .geometry
+            .tabs
+            .get(&(dock, group))?
+            .iter()
+            .find(|(i, ..)| *i == tab)?;
+        Some(Rect {
+            x: *left,
+            y: header.y,
+            w: right - left,
+            h: header.h,
+        })
+    }
+    /// Whether a panel drag is in progress (past its threshold).
+    #[doc(hidden)]
+    pub fn dragging_panel(&self) -> bool {
+        matches!(&self.gesture, Some(Gesture::Panel(d)) if d.moved)
+    }
+    /// The slot a dragged panel shows in: its place in the layout shown,
+    /// less what a scrolling column hides of it.
+    fn slot_rect(&self, id: &str) -> Option<Rect> {
+        let (dock, group, _) = self.layout.find(id)?;
+        let rect = self
+            .geometry
+            .panels
+            .iter()
+            .find(|p| (p.dock, p.group) == (dock, group))?
+            .rect;
+        let rect = self
+            .geometry
+            .side_docks
+            .get(&dock)
+            .map_or(rect, |column| rect.intersection(*column));
+        (rect.w > 0. && rect.h > 0.).then_some(rect)
+    }
+    /// Where the chip settles after a drop: the panel's tab, or its title.
+    fn landing_point(&self, id: &str) -> Option<(f32, f32)> {
+        let m = self.tokens.metrics;
+        let (d, g, ti) = self.layout.find(id)?;
+        let r = self
+            .geometry
+            .panels
+            .iter()
+            .find(|p| (p.dock, p.group) == (d, g))?
+            .rect;
+        let x = self
+            .geometry
+            .tabs
+            .get(&(d, g))
+            .and_then(|spans| spans.iter().find(|(i, ..)| *i == ti))
+            .map_or(r.x + m.inset, |(_, left, _)| *left);
+        Some((x, r.y + (m.header - m.hit) / 2.))
     }
     /// A panel that is not in the workspace (the Agent popover, a window of
     /// its own) dragged over it to `at` (this window's points): the same drop
@@ -1570,20 +1844,22 @@ impl Editor {
     /// True when a drop there would dock it.
     pub fn drag_from_outside(&mut self, id: &str, at: (f32, f32), cx: &mut Context<Self>) -> bool {
         let preview = self.outside_target(id, at, cx);
-        let original = match self.gesture.take() {
-            Some(Gesture::Panel(d)) => d.original,
-            _ => self.layout.clone(),
-        };
         let pointer = point(px(at.0), px(at.1));
-        self.gesture = Some(Gesture::Panel(PanelDrag {
-            id: id.into(),
-            stack: false,
-            start: pointer,
-            original,
-            at: pointer,
-            moved: true,
-            preview,
-        }));
+        let mut drag = match self.gesture.take() {
+            Some(Gesture::Panel(d)) if !d.live => d,
+            other => {
+                if let Some(g) = other {
+                    self.layout = g.original();
+                }
+                self.new_drag(id, pointer, false, false)
+            }
+        };
+        drag.id = id.into();
+        drag.at = pointer;
+        drag.moved = true;
+        drag.lifted.get_or_insert_with(crate::drag::now);
+        drag.preview = preview;
+        self.gesture = Some(Gesture::Panel(drag));
         cx.notify();
         preview.is_some()
     }
@@ -1644,6 +1920,10 @@ impl Editor {
         let Some(Gesture::Panel(drag)) = self.gesture.take() else {
             return None;
         };
+        // The window shows the drop already: make it from the layout the
+        // drag began in, as a release does.
+        self.slides.follow = false;
+        self.layout = drag.original.clone();
         let preview = drag.preview?;
         self.layout
             .apply_drop(&drag.id, &preview, drag.stack)
@@ -1658,17 +1938,45 @@ impl Editor {
             return;
         };
         self.resize_live = false;
+        self.slides.follow = false;
         if let Gesture::Panel(drag) = g
             && drag.moved
         {
             // The original app says what happened: where it went, that it
             // was already there, or that it was no drop zone.
             let panels = self.panels(cx);
-            let name = self.moving_name(&drag.id, drag.stack, &panels);
+            let name = self.moving_name(&drag.original, &drag.id, drag.stack, &panels);
+            // The window shows the drop already (`retarget`); the release
+            // makes it from the layout the drag began in, as it always has:
+            // one change, saved once.
+            if drag.live {
+                self.layout = drag.original.clone();
+            }
+            if drag.preview.is_none() {
+                self.put_back(&drag, cx);
+            }
             let message = match drag.preview {
                 Some(p) => {
                     let (near, kind) = self.near_name(p.near, &drag, &panels);
                     let moved = self.layout.apply_drop(&drag.id, &p, drag.stack);
+                    if moved.is_ok() && !self.tokens.accessibility.reduce_motion {
+                        // The chip settles into the panel's new place.
+                        let o = crate::drag::CHIP_OFFSET;
+                        let from = (f32::from(drag.at.x) + o, f32::from(drag.at.y) + o);
+                        self.settle = Some(Settle {
+                            name: name.clone(),
+                            from,
+                            // (Released before the layout caught up: it fades
+                            // where it is while the panels travel.)
+                            to: self
+                                .landing_point(&drag.id)
+                                .filter(|_| drag.shown.map(|s| s.target) == Some(p.target))
+                                .unwrap_or(from),
+                            slot: (!matches!(p.target, DropTarget::Tab { .. }))
+                                .then(|| drag.id.clone()),
+                            since: crate::drag::now(),
+                        });
+                    }
                     match moved {
                         Ok(()) => match kind {
                             "tab" => format!("{name} tabbed with {near}"),
@@ -1680,7 +1988,7 @@ impl Editor {
                     }
                 }
                 None => match self.layout.drop_outcome(
-                    &self.geometry,
+                    &Self::drag_zones(&drag),
                     self.dock_bounds,
                     (f32::from(drag.at.x), f32::from(drag.at.y)),
                     &self.tokens,
@@ -1695,6 +2003,7 @@ impl Editor {
         }
         // A panel let go in a new place travels there.
         self.slides.armed = true;
+        self.tab_slides.armed = true;
         self.save();
         cx.notify();
     }
@@ -1732,15 +2041,8 @@ impl Editor {
     }
     fn begin_panel_drag(&mut self, id: &str, at: Point<Pixels>, stack: bool) {
         self.maximized_panel = None;
-        self.gesture = Some(Gesture::Panel(PanelDrag {
-            id: id.into(),
-            stack,
-            start: at,
-            original: self.layout.clone(),
-            at,
-            moved: false,
-            preview: None,
-        }));
+        self.settle = None;
+        self.gesture = Some(Gesture::Panel(self.new_drag(id, at, stack, true)));
         self.split_focus = None;
         if let Some(h) = &self.host {
             h.borrow_mut().splitter_focus = false;
@@ -1767,6 +2069,7 @@ impl Editor {
             }
             "cancelDrag" => {
                 if let Some(g) = self.gesture.take() {
+                    self.slides.follow = false;
                     self.layout = g.original();
                 }
             }
@@ -2085,7 +2388,7 @@ fn title_width(text: &str, size: f32, window: &Window) -> f32 {
 pub use crate::kit::ink as tint;
 /// Panels gliding to the places a discrete layout change gave them. Each is
 /// laid out at its new size at once and travels from where it was on the
-/// layout spring; anything else (a splitter drag, a window resize) places
+/// move spring (`drag::move_spring`: no overshoot; Reduce Motion places it); anything else (a splitter drag, a window resize) places
 /// panels where they are with no lag.
 #[derive(Default)]
 pub struct PanelSlides {
@@ -2096,11 +2399,14 @@ pub struct PanelSlides {
     clock: pm_design::motion::Clock,
     /// The next placement is a discrete change: panels that moved slide.
     pub armed: bool,
+    /// A panel drag is in progress: a live change under it (its edge
+    /// scroll) carries the slides under way along instead of ending them.
+    pub follow: bool,
 }
 impl PanelSlides {
     /// Takes this frame's rects; true while something still travels.
     pub fn place(&mut self, placed: &[(String, Rect)], t: &Tokens) -> bool {
-        let dt = self.clock.tick(std::time::Instant::now());
+        let dt = self.clock.tick(crate::drag::now());
         if std::mem::take(&mut self.armed) {
             for (id, rect) in placed {
                 // The viewer's picture is a Metal layer placed from the
@@ -2119,10 +2425,16 @@ impl PanelSlides {
                     pm_design::motion::Spring::SNAP,
                     pm_design::motion::POINT_PRECISION,
                 );
-                slide.animate_to([0., 0.], t.spring(pm_design::motion::Preset::Layout));
+                let spring = crate::drag::move_spring(t);
+                if spring.snaps() {
+                    self.moving.remove(id);
+                    continue;
+                }
+                slide.animate_to([0., 0.], spring);
                 self.moving.insert(id.clone(), slide);
             }
-        } else if placed
+        } else if !self.follow
+            && placed
             .iter()
             .any(|(id, r)| self.last.get(id).is_some_and(|o| o != r))
         {
@@ -2144,6 +2456,16 @@ impl PanelSlides {
             y: rect.y + slide.value[1],
             ..rect
         })
+    }
+}
+/// An extension body inside its panel's rect: below the header, short of
+/// the dividers' grab (`edge`) on the other three sides.
+fn native_body(panel: Rect, edge: f32, header: f32) -> Rect {
+    Rect {
+        x: panel.x + edge,
+        y: panel.y + header,
+        w: (panel.w - edge * 2.).max(0.),
+        h: (panel.h - header - edge).max(0.),
     }
 }
 fn positioned(r: Rect) -> Div {
@@ -2311,6 +2633,7 @@ impl Render for Editor {
             w: (f32::from(viewport.width) - m.dock_gap * 2.).max(0.),
             h: (f32::from(viewport.height) - top - m.status - m.dock_gap).max(0.),
         };
+        self.drag_frame(w);
         // Freeze content measurements during a splitter drag, so every delta
         // uses the same starting geometry. Explicitly resized heights win below.
         if !matches!(self.gesture, Some(Gesture::Resize(..))) {
@@ -2668,22 +2991,12 @@ impl Render for Editor {
                         }
                         Some(Gesture::Panel(drag)) => {
                             drag.at = e.position;
-                            let dx = f32::from(e.position.x - drag.start.x);
-                            let dy = f32::from(e.position.y - drag.start.y);
-                            drag.moved |= dx.hypot(dy) >= this.tokens.metrics.panel_drag_threshold;
-                            drag.preview = drag
-                                .moved
-                                .then(|| {
-                                    this.layout.drop_target_for(
-                                        &this.geometry,
-                                        this.dock_bounds,
-                                        (f32::from(e.position.x), f32::from(e.position.y)),
-                                        &this.tokens,
-                                        &drag.id,
-                                        drag.stack,
-                                    )
-                                })
-                                .flatten();
+                            drag.moved |= crate::drag::lifted(
+                                (f32::from(drag.start.x), f32::from(drag.start.y)),
+                                (f32::from(e.position.x), f32::from(e.position.y)),
+                                this.tokens.metrics.panel_drag_threshold,
+                            );
+                            this.retarget(false);
                             cx.notify();
                         }
                         None => {}
@@ -2755,14 +3068,32 @@ impl Render for Editor {
                 .child("Untitled"),
             );
         }
-        let dragged = match &self.gesture {
-            Some(Gesture::Panel(d)) if d.moved => Some(d.id.clone()),
-            _ => None,
+        // The tabs in the hand (one, or a header's whole stack), and whether
+        // they show at a tab position: then they are the drag's indicator.
+        let (in_hand, at_tab): (Vec<String>, bool) = match &self.gesture {
+            Some(Gesture::Panel(d)) if d.moved && d.live => (
+                match d.original.find(&d.id) {
+                    Some((dock, group, _)) if d.stack => {
+                        d.original.docks[dock].groups[group].tabs.clone()
+                    }
+                    _ => vec![d.id.clone()],
+                },
+                matches!(d.shown.map(|p| p.target), Some(DropTarget::Tab { .. })),
+            ),
+            _ => (vec![], false),
         };
+        let lifted_only = match &self.gesture {
+            Some(Gesture::Panel(d)) => d.shown.is_none(),
+            _ => false,
+        };
+        let in_slot = !in_hand.is_empty() && !at_tab && !lifted_only;
+        self.tab_slides.begin();
         if let Some(integration) = &self.integration {
             integration.open_panels(&self.layout.open_panels(), cx);
         }
         let mut native_bodies = vec![];
+        // How far each extension body is from its place this frame.
+        let mut body_travel: HashMap<String, (f32, f32)> = HashMap::new();
         // Where each header's tabs are drawn, for drops over a header.
         let mut tab_spans: HashMap<(usize, usize), Vec<(usize, f32, f32)>> = HashMap::new();
         for p in ordered {
@@ -2793,7 +3124,10 @@ impl Render for Editor {
                 .collect();
             let header_rect = self.geometry.header_rect(&p, &t);
             let header_offset = header_rect.y - p.rect.y;
-            let mut panel = positioned(self.slides.shown(&id, p.rect))
+            // Where the panel shows this frame: its place, plus what is left
+            // of its travel there. Its tabs and its extension body follow.
+            let shown = self.slides.shown(&id, p.rect);
+            let mut panel = positioned(shown)
                 .id(format!("group-{}-{}", p.dock, p.group))
                 .role(Role::Group)
                 .tab_group()
@@ -2808,7 +3142,15 @@ impl Render for Editor {
                 // A panel is a borderless surface: its edge is the elevation's
                 // hairline, its corner continuous.
                 .corner(&t, m.panel_radius)
-                .elevated(&t, pm_design::Elevation::Panel)
+                // In its slot during a drag the panel is lifted: a soft shadow.
+                .elevated(
+                    &t,
+                    if in_slot && in_hand.contains(&id) {
+                        pm_design::Elevation::Menu
+                    } else {
+                        pm_design::Elevation::Panel
+                    },
+                )
                 // During push-off a header can extend into the dock gap.
                 // Its body clips separately; the dock still clips both.
                 .when(header_offset <= 0., |p| p.overflow_hidden());
@@ -2816,22 +3158,17 @@ impl Render for Editor {
                 // A native body (an extension's web page) takes the pointer
                 // where it shows, so it stops short of the dividers' grab.
                 let edge = m.border.max(m.splitter_reach);
-                let body = Rect {
-                    x: p.rect.x + edge,
-                    y: p.rect.y + m.header,
-                    w: (p.rect.w - edge * 2.).max(0.),
-                    h: (p.rect.h - m.header - edge).max(0.),
-                };
-                native_bodies.push((
-                    self.integration
-                        .as_ref()
-                        .map_or_else(|| id.to_string(), |i| i.native_panel_id(&id, cx)),
-                    body,
-                ));
+                let body = native_body(shown, edge, m.header);
+                let native_id = self
+                    .integration
+                    .as_ref()
+                    .map_or_else(|| id.to_string(), |i| i.native_panel_id(&id, cx));
+                body_travel.insert(native_id.clone(), (shown.x - p.rect.x, shown.y - p.rect.y));
+                native_bodies.push((native_id, body));
                 // The panel's material everywhere around the page (its header
                 // and the edge it leaves the dividers), and in the corners the
                 // page rounds off: one surface, as every other panel.
-                let (whole, fill) = (p.rect, tint(c.panel, t.translucency.panel));
+                let (whole, fill) = (shown, tint(c.panel, t.translucency.panel));
                 let radius = (m.panel_radius - edge).max(0.);
                 panel = panel.child(
                     canvas(
@@ -2959,6 +3296,7 @@ impl Render for Editor {
                     if !tab_track.visible.contains(&ti) {
                         continue;
                     }
+                    let tab_left;
                     {
                         let full = if multi {
                             widths[ti] - TAB_SPACING
@@ -2970,12 +3308,21 @@ impl Render for Editor {
                             None => full,
                         };
                         spans.push((ti, span_x, span_x + drawn));
+                        tab_left = span_x;
                         span_x += drawn + TAB_SPACING;
                     }
+                    // A tab given a new place in its strip slides to it.
+                    let slide =
+                        self.tab_slides
+                            .offset(tab, tab_left + shown.x - p.rect.x, p.rect.y, &t);
+                    let held = in_hand.contains(tab);
                     let tabid = tab.clone();
                     let menu_id = tab.clone();
                     let selected = ti == active;
-                    let ghost = dragged.as_deref() == Some(tab.as_str());
+                    // In the hand over no target: dimmed where it was. At a
+                    // tab position: the accent pill, the drag's one indicator.
+                    let ghost = held && lifted_only;
+                    let landing = held && at_tab && multi;
                     let close_id = tab.clone();
                     let closable = layout::closable(tab) && multi;
                     let tab_group: SharedString = format!("tab-{tab}").into();
@@ -2999,14 +3346,24 @@ impl Render for Editor {
                         .items_center()
                         .h(px(m.hit))
                         .when(multi, |s| {
-                            s.pl(px(close_slot))
+                            let s = s
+                                .pl(px(close_slot))
                                 .pr(px(m.gap))
-                                .rounded(px(m.control_radius))
-                                .hover_style(|s| s.bg(rgb(c.hover)))
+                                .rounded(px(m.control_radius));
+                            if landing {
+                                s.bg(rgb(c.accent_wash))
+                            } else {
+                                s.hover_style(|s| s.bg(rgb(c.hover)))
+                            }
                         })
+                        .when(slide != 0., |s| s.left(px(slide)))
                         .when(ghost, |s| s.opacity(0.4))
-                        .text_color(rgb(if selected || !multi { c.text } else { c.muted }))
-                        .when(multi && !selected, |s| {
+                        .text_color(rgb(if selected || !multi || landing {
+                            c.text
+                        } else {
+                            c.muted
+                        }))
+                        .when(multi && !selected && !landing, |s| {
                             s.group_hover_style(tab_group.clone(), |s| {
                                 s.text_color(rgb(c.secondary))
                             })
@@ -3054,6 +3411,20 @@ impl Render for Editor {
                                     cx.stop_propagation();
                                     this.shell_command(&format!("panel:close:{close_id}"), cx);
                                 })),
+                        );
+                    }
+                    if landing {
+                        // The strong cue at a tab position: an accent
+                        // insertion line at the tab's leading edge.
+                        cell = cell.child(
+                            div()
+                                .absolute()
+                                .left(px(0.))
+                                .top(px(m.gap / 2.))
+                                .bottom(px(m.gap / 2.))
+                                .w(px(m.drop_stroke))
+                                .rounded(px(m.drop_stroke / 2.))
+                                .bg(rgb(c.accent)),
                         );
                     }
                     strip = strip.child(
@@ -3336,12 +3707,16 @@ impl Render for Editor {
         // Electron v1.2.0 hides side-column scrollbar chrome. Wheel and
         // momentum still move the column; no idle scrollbar timer is needed.
         self.geometry.tabs = tab_spans;
+        if self.tab_slides.end() {
+            w.request_animation_frame();
+        }
         if let Some(integration) = &self.integration {
             // Every panel on screen, built-in or an extension's: the viewer
             // and the timeline are not native bodies but are shown.
             let shown: Vec<&str> = self.panel_order.iter().map(String::as_str).collect();
             integration.shown_panels(&shown, cx);
         }
+        self.native_body_rects = native_bodies.clone();
         if let Some(h) = &self.host {
             let clips = native_bodies
                 .iter()
@@ -3352,7 +3727,9 @@ impl Render for Editor {
                         .and_then(|(di, _, _)| self.geometry.side_docks.get(&di))
                         .map_or(*r, |bounds| {
                             let mut clip = r.intersection(*bounds);
-                            if let Some(header) = self.panel_header_rect(id) {
+                            if let Some(mut header) = self.panel_header_rect(id) {
+                                // The header travels with its panel.
+                                header.y += body_travel.get(id).map_or(0., |by| by.1);
                                 let bottom = clip.y + clip.h;
                                 clip.y = clip.y.max(header.y + header.h);
                                 clip.h = (bottom - clip.y).max(0.);
@@ -3548,113 +3925,97 @@ impl Render for Editor {
                 root = root.child(splitter);
             }
         }
-        // Drop preview and a card that follows the pointer. Work-surface
-        // overlays stay solid tints (no glass below the controls band).
+        // The drag's one indicator for a column position (a tab position's
+        // is the tab itself, above) and the chip beside the pointer. Neither
+        // takes the pointer. Work-surface overlays stay solid tints (no
+        // glass below the controls band).
+        let o = crate::drag::CHIP_OFFSET;
+        let mut chip: Option<(String, (f32, f32), f32)> = None;
+        let mut slot: Option<(Rect, f32)> = None;
         if let Some(Gesture::Panel(drag)) = &self.gesture
             && drag.moved
         {
-            let drag = drag.clone();
-            let moving = self.moving_name(&drag.id, drag.stack, &panels);
-            if let Some(p) = drag.preview {
-                // The original app outlines the panel it lands on or beside.
-                let target = match p.near {
-                    layout::Near::Tab(d, g)
-                    | layout::Near::Above(d, g)
-                    | layout::Near::Below(d, g) => self
-                        .geometry
-                        .panels
-                        .iter()
-                        .find(|q| (q.dock, q.group) == (d, g))
-                        .map(|q| (d, g, q.rect)),
-                    _ => None,
-                };
-                if let Some((_, _, r)) = target {
-                    root = root.child(
-                        positioned(r)
-                            .id("drop-frame")
-                            .rounded(px(m.panel_radius))
-                            .border(px(m.drop_stroke))
-                            .border_color(rgb(c.accent)),
-                    );
-                }
-                // Where the panel lands: a light wash of the accent inside a
-                // 2 pt accent outline, so the panels it would cover stay in
-                // view (an opaque wash hid them while their hosted controls
-                // showed).
-                root = root.child(
-                    positioned(p.rect)
-                        .id("drop-preview")
-                        .rounded(px(m.panel_radius))
-                        .border(px(m.drop_stroke))
-                        .border_color(rgb(c.accent))
-                        .bg(tint(c.accent, t.translucency.selected)),
-                );
-                // Joining a stack: a tab marks its place in the header.
-                if let (DropTarget::Tab { index, .. }, Some((d, g, r))) = (p.target, target) {
-                    let spans = self.geometry.tabs.get(&(d, g));
-                    let x = spans
-                        .and_then(|s| s.iter().find(|(i, ..)| *i == index).map(|(_, l, _)| *l))
-                        .or_else(|| {
-                            spans
-                                .and_then(|s| s.last())
-                                .map(|(_, _, r)| r + TAB_SPACING)
-                        })
-                        .unwrap_or(r.x + m.inset);
-                    let x = x.min(r.x + r.w - m.hit * 2.).max(r.x);
-                    root = root.child(
-                        div()
-                            .id("drop-tab")
-                            .absolute()
-                            .left(px(x))
-                            .top(px(r.y + (m.header - m.hit) / 2.))
-                            .h(px(m.hit))
-                            .max_w(px((r.x + r.w - x - m.gap).max(m.hit)))
-                            .px(px(m.gap))
-                            .flex()
-                            .items_center()
-                            .rounded(px(m.control_radius))
-                            .bg(rgb(c.accent_wash))
-                            .border(px(m.border))
-                            .border_color(rgb(c.accent))
-                            .text_color(rgb(c.text))
-                            .text_size(px(t.typography.title))
-                            .font_weight(FontWeight(t.typography.medium_weight))
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .child(moving.clone()),
-                    );
-                }
+            let since = drag.lifted.unwrap_or_else(crate::drag::now);
+            let shown = crate::drag::progress(since, crate::drag::LIFT, &t);
+            if shown < 1. {
+                w.request_animation_frame();
             }
-            // The card: what moves and where it would go.
-            let destination = self.destination(&drag, &panels);
+            chip = Some((
+                self.moving_name(&drag.original, &drag.id, drag.stack, &panels),
+                (f32::from(drag.at.x) + o, f32::from(drag.at.y) + o),
+                shown,
+            ));
+            slot = if drag.live {
+                // The panel is in its slot already: the slot is where it is.
+                drag.shown
+                    .filter(|p| !matches!(p.target, DropTarget::Tab { .. }))
+                    .and_then(|_| self.slot_rect(&drag.id))
+                    .map(|r| (r, 1.))
+            } else {
+                // From outside: where it would dock.
+                drag.preview.map(|p| (p.rect, 1.))
+            };
+        } else if let Some(settle) = self.settle.clone() {
+            // After the release: the chip glides to where the panel landed
+            // (or home) as it fades, and the slot's wash fades with it.
+            let done = crate::drag::progress(settle.since, crate::drag::SETTLE, &t);
+            if done >= 1. {
+                self.settle = None;
+            } else {
+                let at = (
+                    settle.from.0 + (settle.to.0 - settle.from.0) * done,
+                    settle.from.1 + (settle.to.1 - settle.from.1) * done,
+                );
+                chip = Some((settle.name, at, 1. - done));
+                slot = settle
+                    .slot
+                    .and_then(|id| self.slot_rect(&id))
+                    .map(|r| (r, 1. - done));
+                w.request_animation_frame();
+            }
+        }
+        if let Some((r, alpha)) = slot {
+            // Calm: the real panel on its own surface (lifted, above), a
+            // hairline accent ring and the faintest accent tint. Increase
+            // Contrast keeps the full drop stroke.
+            let contrast = t.accessibility.increase_contrast;
+            root = root.child(
+                positioned(r)
+                    .id("drop-preview")
+                    .rounded(px(m.panel_radius))
+                    .border(px(if contrast { m.drop_stroke } else { m.border.max(1.) }))
+                    .border_color(tint(c.accent, if contrast { 1. } else { crate::drag::SLOT_RING }))
+                    .bg(tint(c.accent, crate::drag::SLOT_TINT))
+                    .opacity(alpha),
+            );
+        }
+        if let Some((name, at, alpha)) = chip {
+            // Wholly inside the window, however long the name.
+            let width =
+                title_width(&name, t.typography.title, w) + 2. * (m.gap + 2.) + m.gap;
+            let (x, y) = crate::drag::chip_origin(
+                at,
+                (width, m.hit),
+                (f32::from(viewport.width), f32::from(viewport.height)),
+            );
             root = root.child(
                 div()
                     .id("drag-ghost")
                     .absolute()
-                    .left(drag.at.x + px(12.))
-                    .top(drag.at.y + px(12.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(m.border))
+                    .left(px(x))
+                    .top(px(y))
+                    .h(px(m.hit))
                     .px(px(m.gap + 2.))
-                    .py(px(m.gap - 2.))
+                    .flex()
+                    .items_center()
                     .rounded(px(m.control_radius))
                     .bg(rgb(c.floating))
                     .elevated(&t, pm_design::Elevation::Menu)
-                    .shadow_md()
-                    .child(
-                        div()
-                            .font_weight(FontWeight(t.typography.semibold_weight))
-                            .whitespace_nowrap()
-                            .child(moving),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(t.typography.minimum))
-                            .text_color(rgb(c.secondary))
-                            .whitespace_nowrap()
-                            .child(destination),
-                    ),
+                    .opacity(alpha)
+                    .text_size(px(t.typography.title))
+                    .font_weight(FontWeight(t.typography.semibold_weight))
+                    .whitespace_nowrap()
+                    .child(name),
             );
         }
         let workspace = workspace::record_name(&self.record).to_owned();
@@ -4668,6 +5029,16 @@ mod tests {
         let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
         let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
         cx.run_until_parked();
+        // The panels' travel after a drop runs on this clock: each press
+        // below is made once they have arrived, on the header it names.
+        crate::drag::set_frame_time(Some(std::time::Instant::now()));
+        let arrive = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..4 {
+                crate::drag::advance_frame_time(0.25);
+                view.update(cx, |_, cx| cx.notify());
+                cx.run_until_parked();
+            }
+        };
         let none = Modifiers::none();
         let header = |v: &Editor, id: &str| {
             let (d, g, _) = v.layout.find(id).unwrap();
@@ -4717,6 +5088,7 @@ mod tests {
         });
         // 2. Again, and the next thing is a press on a splitter: the panel
         // lands first and the press starts the splitter's own drag.
+        arrive(cx);
         let landed = view.read_with(cx, |v, _| v.layout.clone());
         let from = view.read_with(cx, |v, _| header(v, "fxbrowser"));
         // Onto the left dock's middle: it joins that stack.
@@ -4750,6 +5122,7 @@ mod tests {
             );
         });
         cx.simulate_mouse_up(at, MouseButton::Left, none);
+        arrive(cx);
         // 3. A splitter drag whose release is lost keeps the size it reached.
         let divider = view.read_with(cx, |v, _| {
             v.geometry
@@ -5128,6 +5501,459 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         assert_eq!(last(), [other]);
+    }
+    // Panel dragging (DESIGN: what shows while dragging is what a release gives).
+    fn drag_none() -> gpui::Modifiers {
+        gpui::Modifiers::none()
+    }
+    fn at(p: (f32, f32)) -> gpui::Point<gpui::Pixels> {
+        gpui::point(gpui::px(p.0), gpui::px(p.1))
+    }
+    /// The middle of `id`'s tab (or lone title).
+    fn tab_middle(v: &Editor, id: &str) -> (f32, f32) {
+        let r = v.tab_rect(id).unwrap_or_else(|| panic!("{id} has a tab"));
+        (r.x + r.w / 2., r.y + r.h / 2.)
+    }
+    /// The rect of the stack `id` is in.
+    fn stack_rect(v: &Editor, id: &str) -> crate::layout::Rect {
+        let (d, g, _) = v.layout.find(id).unwrap();
+        v.geometry
+            .panels
+            .iter()
+            .find(|p| (p.dock, p.group) == (d, g))
+            .unwrap()
+            .rect
+    }
+    fn press(cx: &mut gpui::VisualTestContext, from: (f32, f32)) {
+        cx.simulate_mouse_move(at(from), None, drag_none());
+        cx.simulate_mouse_down(at(from), gpui::MouseButton::Left, drag_none());
+    }
+    fn pull(cx: &mut gpui::VisualTestContext, from: (f32, f32), to: (f32, f32)) {
+        for s in 1..=8 {
+            let t = s as f32 / 8.;
+            let p = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+            cx.simulate_mouse_move(at(p), gpui::MouseButton::Left, drag_none());
+        }
+    }
+    /// The pointer rests where it is: the layout catches up with the target.
+    fn rest(cx: &mut gpui::VisualTestContext, view: &gpui::Entity<Editor>) {
+        crate::drag::advance_frame_time(0.3);
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+    }
+    /// Time passes until every panel travelling has arrived.
+    fn arrive(cx: &mut gpui::VisualTestContext, view: &gpui::Entity<Editor>) {
+        for _ in 0..4 {
+            rest(cx, view);
+        }
+    }
+    /// Where every panel is: each dock's stacks, each stack's tabs.
+    fn places(layout: &crate::layout::Layout) -> Vec<Vec<Vec<String>>> {
+        layout
+            .docks
+            .iter()
+            .map(|d| d.groups.iter().map(|g| g.tabs.clone()).collect())
+            .collect()
+    }
+    fn target(v: &Editor) -> Option<crate::layout::DropTarget> {
+        match &v.gesture {
+            Some(super::Gesture::Panel(d)) => d.preview.map(|p| p.target),
+            _ => None,
+        }
+    }
+
+    /// A press that stays within the threshold is a click: no drag, no
+    /// chip, the layout as it was. Past it the panel is in the hand.
+    #[gpui::test]
+    fn a_click_never_starts_a_drag_and_five_points_do(cx: &mut TestAppContext) {
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
+        cx.run_until_parked();
+        let from = view.read_with(cx, |v, _| tab_middle(v, "inspector"));
+        let before = view.read_with(cx, |v, _| v.layout.clone());
+        press(cx, from);
+        cx.simulate_mouse_move(at((from.0 + 3., from.1 + 2.)), gpui::MouseButton::Left, drag_none());
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_some(), "the press is held");
+            assert!(!v.dragging_panel(), "3 pt is still a click");
+            assert_eq!(v.layout, before);
+        });
+        cx.simulate_mouse_up(at((from.0 + 3., from.1 + 2.)), gpui::MouseButton::Left, drag_none());
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            assert!(v.settle.is_none(), "a click leaves no chip");
+            assert_eq!(v.layout, before);
+        });
+        press(cx, from);
+        cx.simulate_mouse_move(at((from.0 + 6., from.1)), gpui::MouseButton::Left, drag_none());
+        view.read_with(cx, |v, _| {
+            assert!(v.dragging_panel(), "6 pt lifts it");
+            assert_eq!(v.layout, before, "over its own place nothing moves");
+        });
+        cx.simulate_mouse_up(at((from.0 + 6., from.1)), gpui::MouseButton::Left, drag_none());
+        view.read_with(cx, |v, _| assert_eq!(v.layout, before));
+    }
+
+    /// Each kind of drop (a tab position, a column position beside a panel,
+    /// a dock's edge): the window shows the dropped layout while the drag
+    /// lasts, the release keeps exactly that, and it is written once (one
+    /// undo step). A cancel, or a release back home, writes nothing.
+    #[gpui::test]
+    fn a_drag_shows_the_layout_its_drop_gives_and_lands_as_one_change(cx: &mut TestAppContext) {
+        use crate::layout::DropTarget;
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
+        cx.run_until_parked();
+        crate::drag::set_frame_time(Some(std::time::Instant::now()));
+        let m = view.read_with(cx, |v, _| v.tokens.metrics);
+        for kind in ["tab", "column", "dock"] {
+            view.update(cx, |v, cx| {
+                v.layout = crate::layout::Layout::preset("design");
+                v.save();
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let before = view.read_with(cx, |v, _| v.layout.clone());
+            let written = view.read_with(cx, |v, _| v.outbox.len());
+            let (id, to) = view.read_with(cx, |v, _| {
+                let left = stack_rect(v, "assets");
+                match kind {
+                    // Onto the left stack's header, past its tabs: its last tab.
+                    "tab" => ("easing", (left.x + left.w - 60., left.y + m.header / 2.)),
+                    // Low in the left stack's body: below it in that column.
+                    "column" => ("inspector", (left.x + left.w / 2., left.y + left.h * 0.92)),
+                    // The window's bottom edge: into the bottom dock.
+                    _ => (
+                        "fxbrowser",
+                        (
+                            v.dock_bounds.x + v.dock_bounds.w / 2.,
+                            v.dock_bounds.y + v.dock_bounds.h - 2.,
+                        ),
+                    ),
+                }
+            });
+            let from = view.read_with(cx, |v, _| tab_middle(v, id));
+            press(cx, from);
+            pull(cx, from, to);
+            // On the way the layout stands still; it re-flows once the
+            // pointer rests on the target.
+            // (A showing tab in the hand lets its stack show the next one.)
+            assert_eq!(
+                view.read_with(cx, |v, _| places(&v.layout)),
+                places(&before),
+                "{kind}: in passing"
+            );
+            rest(cx, &view);
+            let (shown, aimed) = view.read_with(cx, |v, _| (v.layout.clone(), target(v)));
+            assert_ne!(shown, before, "{kind}: the layout re-flows while dragging");
+            match (kind, aimed) {
+                ("tab", Some(DropTarget::Tab { .. }))
+                | ("column" | "dock", Some(DropTarget::Split { .. })) => {}
+                other => panic!("unexpected target: {other:?}"),
+            }
+            let left_dock = before.docks.iter().position(|d| d.id == "left").unwrap();
+            let (dock, group, _) = shown.find(id).unwrap();
+            match kind {
+                "tab" => {
+                    assert_eq!(dock, left_dock);
+                    assert_eq!(shown.docks[dock].groups[group].tabs.last().unwrap(), id);
+                    assert_eq!(shown.docks[dock].groups[group].active(), id);
+                    // Its old stack shows the tab that was beside it.
+                    let (d, g, _) = shown.find("fxbrowser").unwrap();
+                    assert_eq!(shown.docks[d].groups[g].tabs, ["fxbrowser"]);
+                }
+                "column" => {
+                    assert_eq!((dock, group), (left_dock, 1), "below the left stack");
+                    assert_eq!(shown.docks[dock].groups[group].tabs, [id]);
+                }
+                _ => assert_eq!(shown.docks[dock].id, "bottom"),
+            }
+            assert_eq!(view.read_with(cx, |v, _| v.outbox.len()), written, "nothing saved yet");
+            cx.simulate_mouse_up(at(to), gpui::MouseButton::Left, drag_none());
+            view.read_with(cx, |v, _| {
+                assert!(v.gesture.is_none());
+                assert_eq!(v.layout, shown, "{kind}: the release keeps what showed");
+                assert_eq!(v.outbox.len(), written + 1, "{kind}: one change, one undo step");
+                assert!(v.settle.is_some(), "the chip settles into place");
+            });
+            cx.run_until_parked();
+        }
+        // Escape (or the window letting go of the drag) puts everything back.
+        view.update(cx, |v, cx| {
+            v.layout = crate::layout::Layout::preset("design");
+            v.save();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let before = view.read_with(cx, |v, _| v.layout.clone());
+        let written = view.read_with(cx, |v, _| v.outbox.len());
+        let from = view.read_with(cx, |v, _| tab_middle(v, "inspector"));
+        let to = view.read_with(cx, |v, _| {
+            let left = stack_rect(v, "assets");
+            (left.x + left.w / 2., left.y + left.h * 0.92)
+        });
+        press(cx, from);
+        pull(cx, from, to);
+        rest(cx, &view);
+        view.update(cx, |v, cx| {
+            assert_ne!(v.layout, before);
+            v.cancel_gesture(cx);
+            assert_eq!(v.layout, before, "a cancel restores the layout");
+            assert_eq!(v.outbox.len(), written, "and writes nothing");
+            assert!(v.settle.as_ref().is_some_and(|s| s.slot.is_none()), "the chip goes home");
+            assert!(v.slides.armed, "the panels travel back");
+        });
+        cx.simulate_mouse_up(at(to), gpui::MouseButton::Left, drag_none());
+        cx.run_until_parked();
+        // (The panel is back in its place before it is pressed again.)
+        arrive(cx, &view);
+        // Dragged out and brought back home: released there, nothing changes.
+        press(cx, from);
+        pull(cx, from, to);
+        rest(cx, &view);
+        assert_ne!(view.read_with(cx, |v, _| v.layout.clone()), before);
+        pull(cx, to, (from.0 + 8., from.1));
+        rest(cx, &view);
+        view.read_with(cx, |v, _| {
+            assert_eq!(target(v), None, "over its own place");
+            assert_eq!(v.layout, before, "the layout shown is the original again");
+        });
+        cx.simulate_mouse_up(at((from.0 + 8., from.1)), gpui::MouseButton::Left, drag_none());
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.layout, before);
+            assert_eq!(v.outbox.len(), written);
+        });
+        // Let go in passing, before the layout caught up: it still lands
+        // on the target under the pointer, as one change.
+        arrive(cx, &view);
+        press(cx, from);
+        pull(cx, from, to);
+        let aimed = view.read_with(cx, |v, _| {
+            assert_eq!(v.layout, before, "not shown yet");
+            target(v)
+        });
+        assert!(matches!(aimed, Some(DropTarget::Split { .. })), "{aimed:?}");
+        cx.simulate_mouse_up(at(to), gpui::MouseButton::Left, drag_none());
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.layout.find("inspector").map(|(d, g, _)| (d, g)), Some((0, 1)));
+            assert_eq!(v.outbox.len(), written + 1);
+        });
+        crate::drag::set_frame_time(None);
+    }
+
+    /// Targets are read from the panels as they stood at pick-up and held
+    /// with hysteresis: a pointer just over a boundary keeps the target it
+    /// had, however the layout has re-flowed under it.
+    #[gpui::test]
+    fn a_drag_target_holds_at_a_boundary_while_the_layout_reflows(cx: &mut TestAppContext) {
+        use crate::layout::DropTarget;
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
+        cx.run_until_parked();
+        let m = view.read_with(cx, |v, _| v.tokens.metrics);
+        let left = view.read_with(cx, |v, _| stack_rect(v, "assets"));
+        // Where the left stack's body turns from "tab" to "below".
+        let body = left.h - m.header;
+        let boundary = left.y + m.header + body * (1. - crate::layout::BODY_EDGE);
+        let x = left.x + left.w / 2.;
+        let from = view.read_with(cx, |v, _| tab_middle(v, "inspector"));
+        press(cx, from);
+        pull(cx, from, (x, boundary - 30.));
+        cx.run_until_parked();
+        let tab = view.read_with(cx, |v, _| target(v));
+        assert!(matches!(tab, Some(DropTarget::Tab { .. })), "{tab:?}");
+        // The layout has re-flowed (the panel is a tab there now); just
+        // over the line and back, again and again, nothing changes.
+        for dy in [2., -2., 3., -1., 4., 0.] {
+            cx.simulate_mouse_move(at((x, boundary + dy)), gpui::MouseButton::Left, drag_none());
+            cx.run_until_parked();
+            assert_eq!(view.read_with(cx, |v, _| target(v)), tab, "held at {dy}");
+        }
+        // Clear of the line: the neighbouring target, steadily.
+        cx.simulate_mouse_move(at((x, boundary + 9.)), gpui::MouseButton::Left, drag_none());
+        cx.run_until_parked();
+        let below = view.read_with(cx, |v, _| target(v));
+        assert!(matches!(below, Some(DropTarget::Split { .. })), "{below:?}");
+        for dy in [-2., 1., -4.] {
+            cx.simulate_mouse_move(at((x, boundary + dy)), gpui::MouseButton::Left, drag_none());
+            cx.run_until_parked();
+            assert_eq!(view.read_with(cx, |v, _| target(v)), below, "held at {dy}");
+        }
+        view.update(cx, |v, cx| v.cancel_gesture(cx));
+    }
+
+    /// A press while panels are still travelling lands on what is under
+    /// the pointer: the header of a panel in mid-slide, pressed where it
+    /// shows (not where it will rest), lifts that panel.
+    #[gpui::test]
+    fn a_press_on_a_sliding_panel_lifts_that_panel(cx: &mut TestAppContext) {
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
+        cx.run_until_parked();
+        crate::drag::set_frame_time(Some(std::time::Instant::now()));
+        let m = view.read_with(cx, |v, _| v.tokens.metrics);
+        let home = view.read_with(cx, |v, _| stack_rect(v, "fxbrowser"));
+        let from = view.read_with(cx, |v, _| tab_middle(v, "inspector"));
+        // Properties dropped (in passing) below the Effects stack, in the
+        // same column: the stack sets off upwards for the top of it.
+        let to = (home.x + home.w / 2., home.y + home.h * 0.92);
+        press(cx, from);
+        pull(cx, from, to);
+        cx.simulate_mouse_up(at(to), gpui::MouseButton::Left, drag_none());
+        cx.run_until_parked();
+        let place = view.read_with(cx, |v, _| stack_rect(v, "fxbrowser"));
+        assert!(home.y - place.y > 100., "the stack has a new place above: {place:?}");
+        // On its way, the header still more than its own height from rest.
+        let mut shown = place;
+        for _ in 0..40 {
+            crate::drag::advance_frame_time(0.01);
+            view.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            shown = view.read_with(cx, |v, _| v.slides.shown("fxbrowser", place));
+            if shown.y - place.y <= 40. {
+                break;
+            }
+        }
+        assert!(shown.y - place.y > 18., "in mid-slide: {shown:?} on its way to {place:?}");
+        // Its header where it shows now: its body, were it already at rest.
+        let header = (shown.x + shown.w * 0.6, shown.y + m.header / 2.);
+        assert!(header.1 > place.y + m.header, "not where the header will rest");
+        press(cx, header);
+        cx.simulate_mouse_move(at((header.0 + 8., header.1)), gpui::MouseButton::Left, drag_none());
+        view.read_with(cx, |v, _| match &v.gesture {
+            Some(super::Gesture::Panel(d)) => {
+                assert!(
+                    d.id == "fxbrowser" || d.id == "easing",
+                    "the panel under the pointer lifts, not {}",
+                    d.id
+                );
+                assert!(d.moved);
+            }
+            _ => panic!("the press on the sliding panel's header starts its drag"),
+        });
+        view.update(cx, |v, cx| v.cancel_gesture(cx));
+        crate::drag::set_frame_time(None);
+    }
+
+    /// An extension's body is a native surface placed from a rect.
+    struct NativeBody;
+    impl crate::integration::Integration for NativeBody {
+        fn observe(&self, _: &mut gpui::Context<Editor>) {}
+        fn command(&self, _: &crate::native::Command, _: &mut Window, _: &mut App) -> bool {
+            false
+        }
+        fn panel(
+            &self,
+            _: &str,
+            _: crate::layout::Rect,
+            _: &mut Window,
+            _: &mut App,
+        ) -> Option<AnyElement> {
+            None
+        }
+        fn native_panel(&self, id: &str, _: &App) -> bool {
+            id == "inspector"
+        }
+        fn project_id(&self, _: &App) -> Option<String> {
+            None
+        }
+        fn status(&self, _: &App) -> String {
+            String::new()
+        }
+        fn drop_paths(&self, _: Vec<std::path::PathBuf>, _: &mut App) {}
+    }
+
+    /// With motion, panels travel to the previewed layout and an extension
+    /// body's frame is its panel's animated rect on every frame, never its
+    /// final place ahead of the panel. With Reduce Motion everything is
+    /// placed at once and no chip glides, but the slot indicator still shows.
+    #[gpui::test]
+    fn native_bodies_follow_their_panel_and_reduce_motion_places_everything(
+        cx: &mut TestAppContext,
+    ) {
+        for reduced in [false, true] {
+            let tokens = Tokens::new(
+                pm_design::Scheme::Dark,
+                pm_design::Accessibility {
+                    reduce_motion: reduced,
+                    ..Default::default()
+                },
+            );
+            let (view, cx) = cx.add_window_view(|_, cx| {
+                let mut e = Editor::new(tokens, None, cx);
+                e.integration = Some(Rc::new(NativeBody));
+                e
+            });
+            cx.run_until_parked();
+            crate::drag::set_frame_time(Some(std::time::Instant::now()));
+            let m = view.read_with(cx, |v, _| v.tokens.metrics);
+            let edge = m.border.max(m.splitter_reach);
+            let body = |v: &Editor| {
+                v.native_body_rects
+                    .iter()
+                    .find(|(id, _)| id == "inspector")
+                    .map(|(_, r)| *r)
+                    .expect("the extension body is placed")
+            };
+            let home = view.read_with(cx, |v, _| stack_rect(v, "inspector"));
+            assert_eq!(
+                view.read_with(cx, |v, _| body(v)),
+                super::native_body(home, edge, m.header),
+                "at rest: inside its panel"
+            );
+            let from = view.read_with(cx, |v, _| tab_middle(v, "inspector"));
+            let to = view.read_with(cx, |v, _| {
+                let left = stack_rect(v, "assets");
+                (left.x + left.w / 2., left.y + left.h * 0.92)
+            });
+            press(cx, from);
+            pull(cx, from, to);
+            if !reduced {
+                // (Reduce Motion shows each target at once.)
+                assert_eq!(view.read_with(cx, |v, _| stack_rect(v, "inspector")), home);
+                crate::drag::advance_frame_time(0.3);
+                // The frame the layout catches up on: nothing has moved yet.
+                view.update(cx, |v, _| v.retarget(false));
+            }
+            view.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+            view.read_with(cx, |v, _| {
+                let place = stack_rect(v, "inspector");
+                assert_ne!(place, home, "the preview moved it");
+                let shown = v.slides.shown("inspector", place);
+                assert_eq!(body(v), super::native_body(shown, edge, m.header));
+                assert!(v.slot_rect("inspector").is_some(), "the slot indicator shows");
+                if reduced {
+                    assert_eq!(shown, place, "placed at once");
+                    assert!(v.slides.moving.is_empty() && !v.tab_slides.travelling());
+                } else {
+                    assert!(
+                        (shown.x - place.x).abs() > 100.,
+                        "still on its way from the right: {shown:?} to {place:?}"
+                    );
+                }
+            });
+            // Part of the way, then there: the body is with the panel throughout.
+            for (step, seconds) in [0.05, 0.25, 0.25, 0.25].into_iter().enumerate() {
+                crate::drag::advance_frame_time(seconds);
+                view.update(cx, |_, cx| cx.notify());
+                cx.run_until_parked();
+                view.read_with(cx, |v, _| {
+                    let place = stack_rect(v, "inspector");
+                    let shown = v.slides.shown("inspector", place);
+                    assert_eq!(body(v), super::native_body(shown, edge, m.header));
+                    if step == 3 {
+                        assert_eq!(shown, place, "arrived");
+                    }
+                });
+            }
+            cx.simulate_mouse_up(at(to), gpui::MouseButton::Left, drag_none());
+            view.read_with(cx, |v, _| {
+                assert_eq!(v.settle.is_none(), reduced, "no glide with Reduce Motion");
+                assert!(v.layout.find("inspector").is_some());
+            });
+            crate::drag::set_frame_time(None);
+        }
     }
 }
 
