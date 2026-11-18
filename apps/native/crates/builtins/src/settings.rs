@@ -109,7 +109,7 @@ impl Backend {
     /// Mac's choice, shown with or without a project. On until turned off.
     pub(crate) fn timeline_rows(&mut self) -> Vec<Value> {
         let on = self.native.facts["skimming"].as_bool().unwrap_or(true);
-        let mut row = json!({"id":"timeline.skimming","section":"general","group":"Timeline",
+        let mut row = json!({"id":"timeline.skimming","section":"general","group":"Playback",
             "label":"Hover to Scrub","control":"switch","value":on,
             "detail":"Show the frame under the pointer as it moves over the timeline. The playhead stays put until you click."});
         if let Ok(fields) = self.fields(&json!(["timeline.skimming"])) {
@@ -133,7 +133,7 @@ impl Backend {
                     .join(" · ");
                 let id = format!("account.{}", name.to_lowercase());
                 // The signed-in account (none while signing in) a press acts on.
-                let mut row = json!({"id":id,"section":"accounts","group":"Subscriptions",
+                let mut row = json!({"id":id,"section":"agents","group":"Subscriptions",
                     "label":name,"target":target});
                 let (action, label) = match status.state {
                     State::Connected => (Some("account.disconnect"), "Sign Out"),
@@ -184,7 +184,12 @@ impl Backend {
             .map(|r| {
                 let or =
                     |key: &str, default: &str| r[key].as_str().map_or(json!(default), |v| json!(v));
-                json!({"id":r["id"],"section":or("section","media"),"group":or("group","Proxies"),
+                let group = match r["id"].as_str() {
+                    Some("media.importToTimeline" | "media.stillDuration") => "Import",
+                    Some("media.renderLimit") => "Storage",
+                    _ => "Proxies",
+                };
+                json!({"id":r["id"],"section":or("section","media"),"group":or("group",group),
                     "label":r["label"],"control":or("control", if r["value"].is_boolean() { "switch" } else { "choice" }),"value":r["value"],
                     "options":r["options"],"detail":r["detail"],
                     "binding":leases[r["id"].as_str().unwrap_or_default()],"disabled":false})
@@ -368,7 +373,7 @@ impl Backend {
         );
         rows.extend(self.export_default_rows(root, comp)?);
         let memory = self.fields(&json!(["memory.enabled"]))?;
-        rows.push(json!({"id":"memory.enabled","section":"memory","group":"Project Memory",
+        rows.push(json!({"id":"memory.enabled","section":"project","group":"Project Memory",
             "label":"Use Project Memory","control":"switch", "disabled":false,
             "value":root.get("memoryEnabled").map(pm_model::Node::to_value) != Some(pm_model::Value::Bool(false)),
             "detail":"Agents read these notes before they edit, and add to them as they work. Turning it off keeps the notes but hides them from agents.",
@@ -884,6 +889,12 @@ impl Backend {
                 ));
                 Ok(NativeCommand::Value(self.settings_snapshot()?))
             }
+            Some("row") if action["action"] == "about.check-updates" => {
+                self.native
+                    .platform
+                    .push(("command".into(), json!({"name": "checkForUpdates"})));
+                Ok(NativeCommand::Value(self.settings_snapshot()?))
+            }
             // The After Effects workspace comes over with the agent, in its panel.
             Some("row") if action["action"] == "workspace.import" => {
                 self.native
@@ -992,7 +1003,7 @@ pub(crate) fn cloud_rows(cloud: &Value) -> Vec<Value> {
     }
     let busy = cloud["busy"] == true;
     let row = |id: &str, label: &str, control: &str| {
-        json!({"id":format!("account.{id}"),"section":"accounts","group":"Powermove Account",
+        json!({"id":format!("account.{id}"),"section":"account","group":"Powermove Account",
             "label":label,"control":control,"disabled":busy})
     };
     if cloud["signedIn"] != true {
@@ -1034,7 +1045,7 @@ pub(crate) fn provider_rows(provider: &Value) -> Vec<Value> {
         return Vec::new();
     }
     let status = |id: &str, label: &str, value: Value| {
-        json!({"id":format!("account.{id}"),"section":"accounts","group":"API or Local Model",
+        json!({"id":format!("account.{id}"),"section":"agents","group":"API or Local Model",
             "label":label,"control":"status","value":value})
     };
     let connected = provider["connected"] == true;
@@ -1079,7 +1090,7 @@ pub(crate) fn provider_rows(provider: &Value) -> Vec<Value> {
             }),
         ),
     ];
-    let mut action = json!({"id":"account.status","section":"accounts","group":"API or Local Model",
+    let mut action = json!({"id":"account.status","section":"agents","group":"API or Local Model",
         "label":"Status","control":"action","action":"provider.setup",
         "actionLabel":if connected { "Change…" } else { "Set Up…" },"disabled":provider["busy"] == true});
     action["detail"] = json!(if connected {
@@ -1092,7 +1103,7 @@ pub(crate) fn provider_rows(provider: &Value) -> Vec<Value> {
     action["target"] = json!(target);
     rows.push(action);
     if connected {
-        rows.push(json!({"id":"account.disconnect","section":"accounts","group":"API or Local Model",
+        rows.push(json!({"id":"account.disconnect","section":"agents","group":"API or Local Model",
             "label":"Disconnect","control":"action","action":"provider.disconnect","actionLabel":"Disconnect",
             "target":target}));
     }
@@ -1120,7 +1131,7 @@ pub(crate) fn agent_client_rows(agents: &Value) -> Vec<Value> {
                 _ if custom => "Powermove is set up in this app.".into(),
                 _ => client["detail"].as_str().unwrap_or_default().into(),
             });
-        let mut row = json!({"id":format!("agents.{id}"),"section":"accounts","group":"Other Agent Apps",
+        let mut row = json!({"id":format!("agents.{id}"),"section":"agents","group":"Other Agent Apps",
             "label":client["name"],"detail":detail,"disabled":busy.is_some()});
         let working = busy == Some(id);
         match (client["state"].as_str(), custom) {
@@ -1149,7 +1160,7 @@ pub(crate) fn agent_client_rows(agents: &Value) -> Vec<Value> {
         }
         rows.push(row);
     }
-    rows.push(json!({"id":"agents.other","section":"accounts","group":"Other Agent Apps",
+    rows.push(json!({"id":"agents.other","section":"agents","group":"Other Agent Apps",
         "label":"Any Other Agent","control":"action","action":"agents.copy",
         "actionLabel":if agents["notes"]["other"] == "Copied." { "Copied" } else { "Copy Setup" },
         "detail":"Paste into any app that supports MCP servers, such as Cline, Roo Code or Kiro. It runs on that app’s own plan."}));
@@ -1248,7 +1259,7 @@ fn notification_row() -> Value {
         2 => Authorization::Denied,
         _ => Authorization::NotDetermined,
     };
-    let mut row = json!({"id":"notifications.agent","section":"general","group":"Notifications",
+    let mut row = json!({"id":"notifications.agent","section":"agents","group":"Permissions",
         "label":"Agent Notifications","detail":notification_detail(status)});
     if status == Authorization::Denied {
         row["control"] = json!("action");

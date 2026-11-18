@@ -8,16 +8,18 @@ for (const project of [undefined, { id: "p", name: "Fixture" }])
     const { model, effects } = fixture({ project });
     model.show();
     model.show();
-    expect(model.active).toBe(project ? "project" : "general");
+    expect(model.active).toBe("general");
     expect(model.availableSections).toEqual([
-      ...(project ? ["project" as const, "memory" as const] : []),
+      "account",
       "general",
-      "shortcuts",
+      ...(project ? ["project" as const] : []),
       "media",
-      "storage",
-      "accounts",
+      "shortcuts",
       "transcription",
+      "storage",
+      "agents",
       "extensions",
+      "about",
     ]);
     expect(effects.filter((e) => e[0] === "present")).toHaveLength(2);
     model.dispose();
@@ -159,27 +161,27 @@ test("sidebar arrows/Home/End navigate matching sections only; scroll tracking c
   const { model, effects } = fixture();
   model.show();
   model.navigate("End");
-  expect(model.active).toBe("extensions");
+  expect(model.active).toBe("about");
   model.navigate("Home");
-  expect(model.active).toBe("general");
+  expect(model.active).toBe("account");
   model.navigate("ArrowDown");
-  expect(model.active).toBe("shortcuts");
-  model.navigate("ArrowUp");
   expect(model.active).toBe("general");
+  model.navigate("ArrowUp");
+  expect(model.active).toBe("account");
   await model.search("instant");
   model.navigate("End");
   expect(model.active).toBe("general");
   await model.search("");
-  model.trackSection("accounts");
-  expect(effects.at(-1)).toEqual(["title", "accounts"]);
+  model.trackSection("agents");
+  expect(effects.at(-1)).toEqual(["title", "agents"]);
 });
 test("reduced motion navigation jumps through the host contract", () => {
   const { model, effects } = fixture();
   model.reduceMotion = true;
-  model.select("accounts");
+  model.select("agents");
   expect(effects.at(-1)).toEqual([
     "scroll",
-    { section: "accounts", reduceMotion: true },
+    { section: "agents", reduceMotion: true },
   ]);
 });
 test("Escape clears search, then closes detail, then window and restores editor focus", async () => {
@@ -279,7 +281,7 @@ test("a published account row replaces the disabled catalogue row and performs i
       rows: [
         {
           id: "account.chatgpt",
-          section: "accounts",
+          section: "agents",
           group: "Subscriptions",
           label: "ChatGPT",
           control: "action",
@@ -371,9 +373,9 @@ test("retired controller cannot enqueue new preference writes or native effects"
   const before = effects.length;
   expect(await model.write("appearance", "dark")).toBe(false);
   await model.hydrate();
-  model.select("accounts");
+  model.select("agents");
   model.close();
-  model.trackSection("accounts");
+  model.trackSection("agents");
   expect(model.key({ key: "f", metaKey: true })).toBe(false);
   expect(requests).toEqual([]);
   expect(effects).toHaveLength(before);
@@ -479,14 +481,14 @@ test("project memory is read-only, searchable and only available with a project"
       ],
     },
   });
-  model.show("memory");
-  expect(model.active).toBe("memory");
+  model.show("project");
+  expect(model.active).toBe("project");
   await model.search("Synthetic reason");
-  expect(model.visibleSections).toEqual(["memory"]);
+  expect(model.visibleSections).toEqual(["project"]);
   expect(model.publication.memory?.entries[0].text).toBe("Synthetic intent");
   expect(await model.write("note", "Changed")).toBe(false);
   model.publish(publication({ revision: 2 }));
-  expect(model.availableSections).not.toContain("memory");
+  expect(model.availableSections).not.toContain("project");
   expect(model.active).toBe("general");
 });
 

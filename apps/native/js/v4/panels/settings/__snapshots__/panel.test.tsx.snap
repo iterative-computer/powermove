@@ -46,20 +46,6 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
                   text
                     text "Frames kept in memory so replays are instant."
                 div
-        div group label="Media"
-          div
-            text heading
-              text "Media"
-          div group label="Media"
-            div form-group group label="Media"
-              div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                div
-                  text
-                    text "Automatically Download Cloud Media"
-                  text
-                    text "Download offloaded files when opening a project."
-                div
-                  button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
           div
             text heading
@@ -130,20 +116,6 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
                   text
                     text "Frames kept in memory so replays are instant."
                 div
-        div group label="Media"
-          div
-            text heading
-              text "Media"
-          div group label="Media"
-            div form-group group label="Media"
-              div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                div
-                  text
-                    text "Automatically Download Cloud Media"
-                  text
-                    text "Download offloaded files when opening a project."
-                div
-                  button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
           div
             text heading
@@ -171,37 +143,8 @@ Focus: ["Bring My Workspace…"]"
 exports[`selected: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
 "root
   div group settings label="Settings"
-    scroll group settings.detail label="Accounts"
-      div group settings.section.accounts label="Accounts"
-        div group label="Powermove Account"
-          div
-            text heading
-              text "Powermove Account"
-          div group label="Powermove Account"
-            div form-group group label="Powermove Account"
-              div group settings.row.account.sign-in label="Powermove Account"
-                div
-                  text
-                    text "Powermove Account"
-                  text
-                    text "Remember installs and publish to the Store."
-                div
-                  button push-button label="Sign In…" disabled
-                    text "Sign In…"
-              div group settings.row.account.remember label="Remember Installs on This Account"
-                div
-                  text
-                    text "Remember Installs on This Account"
-                div
-              div group settings.row.account.bring-sign-ins label="Sign-Ins from the Original App"
-                div
-                  text
-                    text "Sign-Ins from the Original App"
-                  text
-                    text "Copies your extension secrets and sign-ins, with one macOS Keychain request."
-                div
-                  button push-button label="Bring Sign-Ins from the Original App…"
-                    text "Bring Sign-Ins from the Original App…"
+    scroll group settings.detail label="Agents"
+      div group settings.section.agents label="Agents"
         div group label="Subscriptions"
           div
             text heading
@@ -270,7 +213,7 @@ exports[`selected: six-op tree snapshot passes the real Rust wire and kit valida
                 div
                   button push-button label="Test and Connect" disabled
                     text "Test and Connect"
-Focus: ["Bring Sign-Ins from the Original App…"]"
+Focus: []"
 `;
 
 exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
@@ -319,20 +262,6 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
                   text
                     text "Frames kept in memory so replays are instant."
                 div
-        div group label="Media"
-          div
-            text heading
-              text "Media"
-          div group label="Media"
-            div form-group group label="Media"
-              div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                div
-                  text
-                    text "Automatically Download Cloud Media"
-                  text
-                    text "Download offloaded files when opening a project."
-                div
-                  button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
           div
             text heading
@@ -403,20 +332,6 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
                   text
                     text "Frames kept in memory so replays are instant."
                 div
-        div group label="Media"
-          div
-            text heading
-              text "Media"
-          div group label="Media"
-            div form-group group label="Media"
-              div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                div
-                  text
-                    text "Automatically Download Cloud Media"
-                  text
-                    text "Download offloaded files when opening a project."
-                div
-                  button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
           div
             text heading
@@ -487,20 +402,6 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
                   text
                     text "Frames kept in memory so replays are instant."
                 div
-        div group label="Media"
-          div
-            text heading
-              text "Media"
-          div group label="Media"
-            div form-group group label="Media"
-              div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                div
-                  text
-                    text "Automatically Download Cloud Media"
-                  text
-                    text "Download offloaded files when opening a project."
-                div
-                  button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
           div
             text heading
@@ -571,20 +472,6 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
                   text
                     text "Frames kept in memory so replays are instant."
                 div
-        div group label="Media"
-          div
-            text heading
-              text "Media"
-          div group label="Media"
-            div form-group group label="Media"
-              div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                div
-                  text
-                    text "Automatically Download Cloud Media"
-                  text
-                    text "Download offloaded files when opening a project."
-                div
-                  button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
           div
             text heading
@@ -655,20 +542,6 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
                   text
                     text "Frames kept in memory so replays are instant."
                 div
-        div group label="Media"
-          div
-            text heading
-              text "Media"
-          div group label="Media"
-            div form-group group label="Media"
-              div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                div
-                  text
-                    text "Automatically Download Cloud Media"
-                  text
-                    text "Download offloaded files when opening a project."
-                div
-                  button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
           div
             text heading
@@ -751,20 +624,6 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
                   text
                     text "Frames kept in memory so replays are instant."
                 div
-        div group label="Media"
-          div
-            text heading
-              text "Media"
-          div group label="Media"
-            div form-group group label="Media"
-              div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                div
-                  text
-                    text "Automatically Download Cloud Media"
-                  text
-                    text "Download offloaded files when opening a project."
-                div
-                  button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
           div
             text heading
@@ -835,20 +694,6 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
                   text
                     text "Frames kept in memory so replays are instant."
                 div
-        div group label="Media"
-          div
-            text heading
-              text "Media"
-          div group label="Media"
-            div form-group group label="Media"
-              div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                div
-                  text
-                    text "Automatically Download Cloud Media"
-                  text
-                    text "Download offloaded files when opening a project."
-                div
-                  button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
           div
             text heading
@@ -919,20 +764,6 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
                   text
                     text "Frames kept in memory so replays are instant."
                 div
-        div group label="Media"
-          div
-            text heading
-              text "Media"
-          div group label="Media"
-            div form-group group label="Media"
-              div group settings.row.cloud-media label="Automatically Download Cloud Media"
-                div
-                  text
-                    text "Automatically Download Cloud Media"
-                  text
-                    text "Download offloaded files when opening a project."
-                div
-                  button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
           div
             text heading
@@ -962,6 +793,21 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
   div group settings label="Settings"
     scroll group settings.detail label="Extensions"
       div group settings.section.extensions label="Extensions"
+        div group label="Sign-Ins"
+          div
+            text heading
+              text "Sign-Ins"
+          div group label="Sign-Ins"
+            div form-group group label="Sign-Ins"
+              div group settings.row.account.bring-sign-ins label="Sign-Ins from the Original App"
+                div
+                  text
+                    text "Sign-Ins from the Original App"
+                  text
+                    text "Copies your extension secrets and sign-ins, with one macOS Keychain request."
+                div
+                  button push-button label="Bring Sign-Ins from the Original App…"
+                    text "Bring Sign-Ins from the Original App…"
         div
           input text-field label="Filter extensions" value=""
           button pop-up-button label="Extension Type" value="All Types"
@@ -1468,7 +1314,7 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
                 div
                   button push-button label="Open Store"
                     text "Open Store"
-Focus: ["Filter extensions","Extension Type","Details for Fixture 29980","Details for Fixture 29981","Details for Fixture 29982","Details for Fixture 29983","Details for Fixture 29984","Details for Fixture 29985","Details for Fixture 29986","Details for Fixture 29987","Details for Fixture 29988","Details for Fixture 29989","Details for Fixture 29990","Details for Fixture 29991","Details for Fixture 29992","Details for Fixture 29993","Details for Fixture 29994","Details for Fixture 29995","Details for Fixture 29996","Details for Fixture 29997","Details for Fixture 29998","Details for Fixture 29999","Details for Fixture 30000","Details for Fixture 30001","Details for Fixture 30002","Details for Fixture 30003","Details for Fixture 30004","Details for Fixture 30005","Details for Fixture 30006","Details for Fixture 30007","Details for Fixture 30008","Details for Fixture 30009","Details for Fixture 30010","Details for Fixture 30011","Details for Fixture 30012","Details for Fixture 30013","Details for Fixture 30014","Details for Fixture 30015","Details for Fixture 30016","Details for Fixture 30017","Details for Fixture 30018","Details for Fixture 30019","Details for Fixture 30020","Details for Fixture 30021","Details for Fixture 30022","Details for Fixture 30023","Details for Fixture 30024","Details for Fixture 30025","Details for Fixture 30026","Details for Fixture 30027","Details for Fixture 30028","Details for Fixture 30029","Details for Fixture 30030","Details for Fixture 30031","Details for Fixture 30032","Details for Fixture 30033","Details for Fixture 30034","Details for Fixture 30035","Details for Fixture 30036","Details for Fixture 30037","Details for Fixture 30038","Details for Fixture 30039","Open Store"]"
+Focus: ["Bring Sign-Ins from the Original App…","Filter extensions","Extension Type","Details for Fixture 29980","Details for Fixture 29981","Details for Fixture 29982","Details for Fixture 29983","Details for Fixture 29984","Details for Fixture 29985","Details for Fixture 29986","Details for Fixture 29987","Details for Fixture 29988","Details for Fixture 29989","Details for Fixture 29990","Details for Fixture 29991","Details for Fixture 29992","Details for Fixture 29993","Details for Fixture 29994","Details for Fixture 29995","Details for Fixture 29996","Details for Fixture 29997","Details for Fixture 29998","Details for Fixture 29999","Details for Fixture 30000","Details for Fixture 30001","Details for Fixture 30002","Details for Fixture 30003","Details for Fixture 30004","Details for Fixture 30005","Details for Fixture 30006","Details for Fixture 30007","Details for Fixture 30008","Details for Fixture 30009","Details for Fixture 30010","Details for Fixture 30011","Details for Fixture 30012","Details for Fixture 30013","Details for Fixture 30014","Details for Fixture 30015","Details for Fixture 30016","Details for Fixture 30017","Details for Fixture 30018","Details for Fixture 30019","Details for Fixture 30020","Details for Fixture 30021","Details for Fixture 30022","Details for Fixture 30023","Details for Fixture 30024","Details for Fixture 30025","Details for Fixture 30026","Details for Fixture 30027","Details for Fixture 30028","Details for Fixture 30029","Details for Fixture 30030","Details for Fixture 30031","Details for Fixture 30032","Details for Fixture 30033","Details for Fixture 30034","Details for Fixture 30035","Details for Fixture 30036","Details for Fixture 30037","Details for Fixture 30038","Details for Fixture 30039","Open Store"]"
 `;
 
 exports[`project-open: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `

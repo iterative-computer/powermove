@@ -281,7 +281,9 @@ impl Controller {
                 Some(Section {
                     id: s["id"].as_str()?.to_owned(),
                     title: s["title"].as_str()?.to_owned(),
-                    project: s["project"].as_bool().unwrap_or(false),
+                    account_name: (s["id"] == "account")
+                        .then(|| input["accountName"].as_str().map(str::to_owned))
+                        .flatten(),
                     dim: s["dim"].as_bool().unwrap_or(false),
                 })
             })
