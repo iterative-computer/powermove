@@ -130,13 +130,16 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
       select,
       search,
       tell: again,
+      escape,
     } = (intent ?? {}) as {
       select?: string;
       search?: string;
       tell?: boolean;
+      escape?: boolean;
     };
     const section = sections.find((s) => s === select);
     if (section) model.select(section as Section);
+    if (escape) model.key({ key: "Escape" });
     if (typeof search === "string") await model.search(search);
     // A window that just opened asks for what to show.
     if (again) {

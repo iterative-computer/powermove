@@ -403,7 +403,11 @@ test("extension row enters details, back returns without clearing search, Delete
   const render = () =>
     root.render(<SettingsPanel model={f.model} bindings={bindings} />);
   await render();
-  await event(root, find(root, "Fixture 0").id, "click");
+  await event(
+    root,
+    find(root, "Details for Fixture 0", "push-button").id,
+    "click",
+  );
   expect(f.model.detailId).toBe("fixture-0");
   await render();
   await event(root, find(root, "Delete…", "push-button").id, "click");
@@ -411,7 +415,7 @@ test("extension row enters details, back returns without clearing search, Delete
   expect(f.actions).toEqual([{ type: "extension.archive", id: "fixture-0" }]);
   await f.model.search("Fixture");
   await render();
-  await event(root, find(root, "Extensions", "toolbar-item").id, "click");
+  await event(root, find(root, "Extensions", "push-button").id, "click");
   expect(f.model.detailId).toBeUndefined();
   expect(f.model.query).toBe("Fixture");
   replay(commits);
@@ -444,7 +448,7 @@ test("an extension's row turns it on or off with its own switch, without opening
   root.dispose();
   f.model.dispose();
 });
-test("AX contract has labelled groups, selected neutral sidebar, search/list first focus and no secrets", async () => {
+test("AX contract has labelled groups, native sidebar, search/list first focus and no secrets", async () => {
   const f = fixture();
   f.model.show();
   const { root, commits } = recorder();

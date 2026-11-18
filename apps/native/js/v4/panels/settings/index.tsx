@@ -34,10 +34,7 @@ export interface SettingsPanelProps {
   /** The header's picker chose project `id`; Show in Finder. */
   window?: { project(id: string): void; reveal(): void };
 }
-const t = UI.token;
-const text = { color: t("colors.text"), fontSize: t("typography.body") };
-const help = { color: t("colors.muted"), fontSize: t("typography.minimum") };
-const column = { display: "flex", flexDirection: "column" };
+
 function Copy({
   children,
   secondary = false,
@@ -46,15 +43,21 @@ function Copy({
   secondary?: boolean;
   key?: string | number;
 }) {
-  return <text style={secondary ? help : text}>{children}</text>;
+  return (
+    <text metadata={{ settingsLayout: secondary ? "secondary" : "label" }}>
+      {children}
+    </text>
+  );
 }
 function Button({
   label,
+  accessibilityLabel,
   disabled,
   onClick,
   destructive = false,
 }: {
   label: string;
+  accessibilityLabel?: string;
   destructive?: boolean;
   disabled?: boolean;
   onClick: () => void;
@@ -62,7 +65,7 @@ function Button({
 }) {
   return (
     <UI.PushButton
-      label={label}
+      label={accessibilityLabel ?? label}
       role={destructive ? "destructive" : "normal"}
       disabled={disabled}
       onClick={onClick}
@@ -126,7 +129,7 @@ function RowControl({
   // AppKit's minimal colour well, its colour named beside it.
   if (row.control === "colour" && typeof row.value === "string")
     return (
-      <div style={trailing}>
+      <div metadata={{ settingsLayout: "line" }}>
         <Copy secondary>{colourName(row.value)}</Copy>
         <UI.ColorWell
           {...common}
@@ -152,7 +155,7 @@ function RowControl({
     // A size beside its button (Settings › Storage: 9.3 GB  Delete…).
     if (typeof row.value !== "string") return button;
     return (
-      <div style={trailing}>
+      <div metadata={{ settingsLayout: "line" }}>
         <Copy secondary>{row.value}</Copy>
         {button}
       </div>
@@ -174,17 +177,11 @@ function RowControl({
         unit={row.unit}
         precision={row.precision}
         metadata={{ form: true, stepper: STEPPED.has(row.id) }}
-        style={{ width: t("metrics.settings_number_field") }}
       />
     );
   if (row.control === "text" && typeof row.value === "string")
     return (
-      <UI.TextField
-        {...common}
-        value={row.value}
-        metadata={{ form: true }}
-        style={{ width: t("metrics.settings_text_field") }}
-      />
+      <UI.TextField {...common} value={row.value} metadata={{ form: true }} />
     );
   if (
     row.control === "choice" &&
@@ -217,41 +214,6 @@ function RowControl({
     );
   return null;
 }
-/** A row of a card (the Settings build note): its title over its
- * description, the control trailing on the title's line. A single line is
- * `form_row` tall; a description adds its lines and the inset under them. */
-const rowStyle = {
-  display: "flex",
-  alignItems: "start",
-  justifyContent: "space-between",
-  gap: t("metrics.inset"),
-  minHeight: t("metrics.form_row"),
-  paddingLeft: t("metrics.inset"),
-  paddingRight: t("metrics.inset"),
-  paddingTop: t("metrics.gap"),
-  paddingBottom: t("metrics.gap"),
-};
-const describedRow = { ...rowStyle, paddingBottom: t("metrics.inset") };
-/** The title's line: as tall as a control, so the control beside it is
- * centred on the title, not on the row. */
-const titleLine = {
-  display: "flex",
-  alignItems: "center",
-  minHeight: t("metrics.control"),
-};
-const trailing = {
-  ...titleLine,
-  flexShrink: 0,
-  gap: t("metrics.gap"),
-};
-/** A row's words: they take what the control leaves and wrap in it. */
-const copyColumn = {
-  ...column,
-  flexGrow: 1,
-  flexShrink: 1,
-  // It may be narrower than its longest line, which then wraps.
-  minWidth: 0,
-};
 function RowCopy({
   title,
   detail,
@@ -262,48 +224,13 @@ function RowCopy({
   children?: ComponentChildren;
 }) {
   return (
-    <div style={copyColumn}>
-      <div style={titleLine}>
-        <text style={{ ...text, fontSize: t("typography.title") }}>
-          {title}
-        </text>
-      </div>
-      {detail && (
-        <text style={{ ...help, fontSize: t("typography.minimum") }}>
-          {detail}
-        </text>
-      )}
+    <div metadata={{ settingsLayout: "copy" }}>
+      <text>{title}</text>
+      {detail && <text metadata={{ settingsLayout: "footer" }}>{detail}</text>}
       {children}
     </div>
   );
 }
-/** The rows of one card, a hairline between each two (inset on both sides). */
-function Rows({ children }: { children: ComponentChildren }) {
-  const rows = (Array.isArray(children) ? children.flat() : [children]).filter(
-    (row) => row !== null && row !== undefined && row !== false,
-  );
-  return (
-    <>
-      {rows.flatMap((row, i) =>
-        i === 0 ? [row] : [<Separator key={`separator.${i}`} />, row],
-      )}
-    </>
-  );
-}
-/** The hairline between two rows of a card, inset on both sides. */
-function Separator(_: { key?: string }) {
-  return (
-    <div
-      style={{
-        height: t("metrics.border"),
-        marginLeft: t("metrics.inset"),
-        marginRight: t("metrics.inset"),
-        background: t("colors.separator"),
-      }}
-    />
-  );
-}
-/** A group of rows: its name over its card (13 pt medium, outside it). */
 function Group({
   title,
   muted,
@@ -315,22 +242,16 @@ function Group({
   key?: string;
 }) {
   return (
-    <div role="group" label={title} style={column}>
-      <text
-        role="heading"
-        style={{
-          color: t(muted ? "colors.muted" : "colors.text"),
-          fontSize: t("typography.title"),
-          fontWeight: t("typography.medium_weight"),
-          paddingLeft: t("metrics.inset"),
-          marginBottom: t("metrics.dock_gap"),
-        }}
-      >
-        {title}
-      </text>
-      <UI.FormGroup label={title}>
-        <Rows>{children}</Rows>
-      </UI.FormGroup>
+    <div role="group" label={title} metadata={{ settingsLayout: "group" }}>
+      <div metadata={{ settingsLayout: "headingLine" }}>
+        <text
+          role="heading"
+          metadata={{ settingsLayout: muted ? "mutedHeading" : "heading" }}
+        >
+          {title}
+        </text>
+      </div>
+      <UI.FormGroup label={title}>{children}</UI.FormGroup>
     </div>
   );
 }
@@ -347,24 +268,29 @@ function SettingRow({
       id={`settings.row.${row.id}`}
       role="group"
       label={row.label}
-      style={row.detail || row.error ? describedRow : rowStyle}
+      metadata={{ settingsLayout: "row" }}
     >
-      <RowCopy title={row.label} detail={row.detail}>
+      <RowCopy
+        title={row.label}
+        detail={row.id === "media.location" ? undefined : row.detail}
+      >
         {row.error && (
           <div
             role="status"
             label={row.error}
-            metadata={{ symbol: "exclamationmark.triangle.fill" }}
-            style={{
-              color: t("colors.danger"),
-              fontSize: t("typography.minimum"),
+            metadata={{
+              settingsLayout: "error",
+              symbol: "exclamationmark.triangle.fill",
             }}
           >
             {row.error}
           </div>
         )}
       </RowCopy>
-      <div style={trailing}>
+      <div metadata={{ settingsLayout: "line" }}>
+        {row.id === "media.location" && row.detail && (
+          <text metadata={{ settingsLayout: "path" }}>{row.detail}</text>
+        )}
         <RowControl row={row} model={model} />
       </div>
     </div>
@@ -383,7 +309,7 @@ function SpeechRow({
   };
   const disabled = !model.services || model.pending.has(item.id);
   return (
-    <div role="group" label={item.name} style={describedRow}>
+    <div role="group" label={item.name} metadata={{ settingsLayout: "row" }}>
       <RowCopy
         title={
           item.recommended && item.state !== "installed"
@@ -392,7 +318,7 @@ function SpeechRow({
         }
         detail={item.size}
       />
-      <div style={trailing}>
+      <div metadata={{ settingsLayout: "line" }}>
         {item.state === "available" && (
           <Button
             label="Download"
@@ -433,8 +359,10 @@ function SpeechRow({
             <div
               role="status"
               label={item.error ?? ""}
-              metadata={{ symbol: "exclamationmark.triangle.fill" }}
-              style={{ color: t("colors.danger") }}
+              metadata={{
+                settingsLayout: "error",
+                symbol: "exclamationmark.triangle.fill",
+              }}
             >
               {item.error}
             </div>
@@ -458,37 +386,45 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
       <div
         role="group"
         label={detail.name}
-        style={{ ...column, gap: t("metrics.sheet_inset") }}
+        metadata={{ settingsLayout: "section" }}
       >
-        <div style={{ display: "flex" }}>
-          <UI.ToolbarItem
+        <div metadata={{ settingsLayout: "line" }}>
+          <UI.PushButton
             label="Extensions"
             metadata={{ symbol: "chevron.left" }}
             onClick={() => model.closeDetail()}
           >
             Extensions
-          </UI.ToolbarItem>
+          </UI.PushButton>
         </div>
         <Group title={detail.name}>
-          <div role="group" label="About" style={describedRow}>
+          <div role="group" label="About" metadata={{ settingsLayout: "row" }}>
             <RowCopy title="About" detail={detail.about} />
           </div>
           {detail.includes.length > 0 && (
-            <div role="group" label="Includes" style={describedRow}>
+            <div
+              role="group"
+              label="Includes"
+              metadata={{ settingsLayout: "row" }}
+            >
               <RowCopy title="Includes" detail={detail.includes.join("\n")} />
             </div>
           )}
           {detail.shortcuts.length > 0 && (
-            <div role="group" label="Keyboard Shortcuts" style={describedRow}>
+            <div
+              role="group"
+              label="Keyboard Shortcuts"
+              metadata={{ settingsLayout: "row" }}
+            >
               <RowCopy
                 title="Keyboard Shortcuts"
                 detail={detail.shortcuts.join("\n")}
               />
             </div>
           )}
-          <div role="group" label="Files" style={describedRow}>
+          <div role="group" label="Files" metadata={{ settingsLayout: "row" }}>
             <RowCopy title="Files" detail={detail.files.join("\n")} />
-            <div style={trailing}>
+            <div metadata={{ settingsLayout: "line" }}>
               <Button
                 label="Show in Finder"
                 disabled={!model.services}
@@ -511,12 +447,16 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
         )}
         {detail.canArchive && (
           <Group title="Remove">
-            <div role="group" label="Delete" style={describedRow}>
+            <div
+              role="group"
+              label="Delete"
+              metadata={{ settingsLayout: "row" }}
+            >
               <RowCopy
                 title="Delete Extension"
                 detail="Its files move to the archive in your Powermove profile, and its settings are kept."
               />
-              <div style={trailing}>
+              <div metadata={{ settingsLayout: "line" }}>
                 <Button
                   label="Delete…"
                   destructive
@@ -534,34 +474,23 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
         )}
       </div>
     );
-  const listed =
-    !["loading", "error", "unavailable"].includes(
-      model.publication.extensionsState ?? "",
-    ) && model.extensions.length > 0;
   return (
     <>
       {/* The filter stands on the page's text column, over the list's card. */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: t("metrics.gap"),
-          height: t("metrics.form_row"),
-          paddingLeft: t("metrics.inset"),
-          paddingRight: t("metrics.inset"),
-        }}
-      >
-        <div style={{ display: "flex", flexGrow: 1, flexShrink: 1 }}>
-          <UI.TextField
-            label="Filter extensions"
-            binding={bindings.extensionSearch}
-            value={model.extensionQuery}
-            metadata={{ placeholder: "Filter", search: true }}
-            onInput={(e) => {
-              if (typeof e.value === "string") model.filterExtensions(e.value);
-            }}
-          />
-        </div>
+      <div metadata={{ settingsLayout: "line" }}>
+        <UI.TextField
+          label="Filter extensions"
+          binding={bindings.extensionSearch}
+          value={model.extensionQuery}
+          metadata={{
+            placeholder: "Filter",
+            search: true,
+            settingsLayout: "filterField",
+          }}
+          onInput={(e) => {
+            if (typeof e.value === "string") model.filterExtensions(e.value);
+          }}
+        />
         <UI.PopUpButton
           label="Extension Type"
           binding={bindings.extensionType}
@@ -581,19 +510,7 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
         />
       </div>
       <Group title="Installed">
-        <div
-          style={{
-            ...column,
-            // The rows stand on the card as every page's; a state's words
-            // keep their room.
-            ...(listed
-              ? {}
-              : {
-                  paddingTop: t("metrics.inset"),
-                  paddingBottom: t("metrics.inset"),
-                }),
-          }}
-        >
+        <div metadata={{ settingsLayout: "column" }}>
           {model.publication.extensionsState === "loading" ? (
             <UI.ProgressRow label="Loading extensions…" />
           ) : model.publication.extensionsState === "error" ? (
@@ -656,60 +573,24 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
                   );
               }}
             >
-              {model.visibleExtensions.map((extension, i) => (
-                // A row of the card as every page's: its name, what it is
-                // and where it came from, and the way into its page, with
-                // the card's hairline between two rows.
+              {model.visibleExtensions.map((extension) => (
                 <div
                   key={extension.id}
                   id={`settings.extension.${extension.id}`}
                   role="listitem"
                   label={extension.name}
-                  tabIndex={0}
-                  aria-selected={false}
-                  onClick={() => model.viewExtension(extension.id)}
-                  preventDefault={{ keydown: ["Enter", " "] }}
-                  onKeyDown={(e: { key?: string }) => {
-                    if (e.key === "Enter" || e.key === " ")
-                      model.viewExtension(extension.id);
-                  }}
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    height: t("metrics.form_row"),
-                    minWidth: t("metrics.hit"),
-                    minHeight: t("metrics.hit"),
-                  }}
+                  metadata={{ settingsLayout: "row" }}
                 >
-                  {model.range[0] + i > 0 && <Separator />}
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      flexGrow: 1,
-                      gap: t("metrics.gap"),
-                      paddingLeft: t("metrics.inset"),
-                      paddingRight: t("metrics.inset"),
-                    }}
-                  >
-                    <text
-                      style={{
-                        ...text,
-                        fontSize: t("typography.title"),
-                        flexGrow: 1,
-                        flexShrink: 1,
-                        whiteSpace: "nowrap",
-                        textOverflow: "ellipsis",
-                      }}
-                    >
-                      {extension.name}
-                    </text>
-                    <text style={{ ...help, flexShrink: 0 }}>
-                      {`${extension.type} · ${extension.source}`}
-                    </text>
-                    {/* On or off here, as from the Library: its panels,
-                        effects and commands stop or come back at once
-                        (PM-435). */}
+                  <UI.PushButton
+                    tabIndex={-1}
+                    label={extension.name}
+                    metadata={{ settingsLayout: "nameButton" }}
+                    onClick={() => model.viewExtension(extension.id)}
+                  />
+                  <div metadata={{ settingsLayout: "line" }}>
+                    <Copy
+                      secondary
+                    >{`${extension.type} · ${extension.source}`}</Copy>
                     {extension.binding && (
                       <UI.Switch
                         label={extension.name}
@@ -728,15 +609,11 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
                         }}
                       />
                     )}
-                    <div
-                      metadata={{ symbol: "chevron.right" }}
-                      style={{
-                        color: t("colors.muted"),
-                        symbolSize: t("metrics.symbol_inline"),
-                        flexShrink: 0,
-                      }}
+                    <Button
+                      label="Details"
+                      accessibilityLabel={`Details for ${extension.name}`}
+                      onClick={() => model.viewExtension(extension.id)}
                     />
-
                   </div>
                 </div>
               ))}
@@ -745,12 +622,16 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
         </div>
       </Group>
       <Group title="Store">
-        <div role="group" label="Powermove Store" style={describedRow}>
+        <div
+          role="group"
+          label="Powermove Store"
+          metadata={{ settingsLayout: "row" }}
+        >
           <RowCopy
             title="Powermove Store"
             detail="Publish and manage your extensions on the Store."
           />
-          <div style={trailing}>
+          <div metadata={{ settingsLayout: "line" }}>
             <Button
               label="Open Store"
               disabled={!model.services}
@@ -786,7 +667,11 @@ function MemoryNotes({ model }: { model: SettingsModel }) {
   if (!memory.entries.length)
     return (
       <Group title="Notes">
-        <div role="group" label="No Notes Yet" style={describedRow}>
+        <div
+          role="group"
+          label="No Notes Yet"
+          metadata={{ settingsLayout: "row" }}
+        >
           <RowCopy
             title="No Notes Yet"
             detail="When an agent records a goal, rule or decision for this project, it will show up here."
@@ -819,37 +704,15 @@ function MemoryNotes({ model }: { model: SettingsModel }) {
                   key={`${kind}.${index}`}
                   role="group"
                   label={note.text}
-                  style={{
-                    ...column,
-                    minHeight: t("metrics.form_row"),
-                    padding: t("metrics.inset"),
-                  }}
+                  metadata={{ settingsLayout: "note" }}
                 >
+                  <text>{note.text}</text>
+                  {note.why && <text>{note.why}</text>}
                   <text
-                    style={{
-                      fontSize: t("typography.body"),
-                      color: t(memory.enabled ? "colors.text" : "colors.muted"),
+                    metadata={{
+                      settingsLayout: "secondary",
+                      ...(note.resolved ? { symbol: "checkmark.circle" } : {}),
                     }}
-                  >
-                    {note.text}
-                  </text>
-                  {note.why && (
-                    <text
-                      style={{
-                        fontSize: t("typography.reading"),
-                        color: t(
-                          memory.enabled ? "colors.secondary" : "colors.muted",
-                        ),
-                      }}
-                    >
-                      {note.why}
-                    </text>
-                  )}
-                  <text
-                    metadata={
-                      note.resolved ? { symbol: "checkmark.circle" } : {}
-                    }
-                    style={help}
                   >
                     {meta}
                   </text>
@@ -872,7 +735,7 @@ const SHORTCUT_CHUNK = 60;
 function More({ count, title }: { count: number; title: string }) {
   if (count <= 0) return null;
   return (
-    <text role="status" style={{ ...help, paddingLeft: t("metrics.inset") }}>
+    <text role="status" metadata={{ settingsLayout: "secondary" }}>
       {`${count} more in ${title}. Keep typing to narrow the search.`}
     </text>
   );
@@ -912,13 +775,13 @@ function ShareRow({ model }: { model: SettingsModel; key?: string }) {
       id="settings.row.shortcuts.share"
       role="group"
       label="Share Shortcuts"
-      style={describedRow}
+      metadata={{ settingsLayout: "row" }}
     >
       <RowCopy
         title="Share Shortcuts"
         detail="Bring in keys from another Mac or your agent, or save them to a file."
       />
-      <div style={trailing}>
+      <div metadata={{ settingsLayout: "line" }}>
         <Button
           label="Import…"
           disabled={!model.services}
@@ -933,67 +796,6 @@ function ShareRow({ model }: { model: SettingsModel; key?: string }) {
     </div>
   );
 }
-/** A shortcut's keys as keycaps (the build note's custom piece): each
- * modifier its own cap, then the key. */
-function Keycaps({ keys, fixed }: { keys: string; fixed?: boolean }) {
-  const caps: string[] = [];
-  let rest = keys;
-  while (rest && "⌘⌥⇧⌃".includes(rest[0]!)) {
-    caps.push(rest[0]!);
-    rest = rest.slice(1);
-  }
-  if (rest) caps.push(rest);
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: t("metrics.pill_inset"),
-      }}
-    >
-      {caps.map((cap, i) => (
-        <div
-          key={i}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            minWidth: t("metrics.field"),
-            height: t("metrics.field"),
-            paddingLeft: t("metrics.gap"),
-            paddingRight: t("metrics.gap"),
-            borderRadius: t("metrics.inner_radius"),
-            borderWidth: t("metrics.border"),
-            borderColor: t("colors.separator"),
-            // A keycap stands on the card as a button does; a key the menu
-            // bar keeps is drawn, not raised (System Settings dims it).
-            ...(fixed ? {} : { background: t("colors.raised") }),
-          }}
-        >
-          <text style={fixed ? { ...text, color: t("colors.muted") } : text}>
-            {cap}
-          </text>
-        </div>
-      ))}
-    </div>
-  );
-}
-/** A command's shortcuts side by side, each its own keycaps, an "or"
- * between two so their caps never read as one shortcut. */
-function KeyGroups({ list, fixed }: { list: string[]; fixed?: boolean }) {
-  return list.flatMap((keys, i) => [
-    ...(i
-      ? [
-          <text key={`or${i}`} style={{ ...help, color: t("colors.muted") }}>
-            or
-          </text>,
-        ]
-      : []),
-    <Keycaps key={i} keys={keys} fixed={fixed} />,
-  ]);
-}
-/** A command's keys, pressed to take a new one (a menu bar key is shown,
- * not pressed). */
 function ShortcutKeys({
   row,
   onRecord,
@@ -1001,82 +803,37 @@ function ShortcutKeys({
   row: import("./model").ShortcutRow;
   onRecord: () => void;
 }) {
-  // macOS's own items (Hide, Quit) keep their keys: dimmed, with nothing to
-  // press (no "None" that reads like an empty, recordable key).
+  const keys = row.keys.join("  /  ");
   if (row.fixed)
     return (
-      <div
-        role="group"
+      <text
         label={
           row.keys.length
             ? `${row.label}: macOS's key, not assignable`
             : `${row.label}: not assignable`
         }
-        title="macOS keeps this key"
-        style={trailing}
+        metadata={{ settingsLayout: "secondary" }}
       >
-        {row.keys.length ? (
-          <KeyGroups list={row.keys} fixed />
-        ) : (
-          <text style={{ ...help, color: t("colors.muted") }}>—</text>
-        )}
-      </div>
+        {keys || "—"}
+      </text>
     );
-  const shown = row.keys.length ? (
-    <KeyGroups list={row.keys} />
-  ) : (
-    <text style={help}>None</text>
-  );
   return (
-    <button
-      tabIndex={0}
-      label={`Change the shortcut for ${row.label}`}
-      title="Press to type a new shortcut"
-      style={{
-        ...trailing,
-        minWidth: t("metrics.hit"),
-        minHeight: t("metrics.hit"),
+    <UI.PushButton
+      label={
+        row.recording
+          ? "Type a shortcut. Escape cancels."
+          : `Change the shortcut for ${row.label}`
+      }
+      metadata={{
+        settingsLayout: row.recording ? "shortcutRecorder" : "shortcutButton",
       }}
       onClick={onRecord}
     >
-      {shown}
-    </button>
+      {row.recording ? "Type a shortcut…" : keys || "None"}
+    </UI.PushButton>
   );
 }
-/** The row taking a new key: a capsule ringed in the accent. */
-function Recording({ onCancel }: { onCancel: () => void }) {
-  return (
-    <button
-      tabIndex={0}
-      label="Type a shortcut. Escape cancels."
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: t("metrics.gap"),
-        minWidth: t("metrics.hit"),
-        minHeight: t("metrics.hit"),
-        paddingLeft: t("metrics.inset"),
-        paddingRight: t("metrics.inset"),
-        borderRadius: t("metrics.field"),
-        borderWidth: t("metrics.border"),
-        borderColor: t("colors.accent"),
-        background: t("colors.accent_wash"),
-      }}
-      onClick={onCancel}
-    >
-      <text
-        style={{
-          color: t("colors.accent_text"),
-          fontSize: t("typography.minimum"),
-        }}
-      >
-        ●
-      </text>
-      <text style={text}>Type a shortcut…</text>
-    </button>
-  );
-}
-/** Settings › Shortcuts: every command with its keys as keycaps, grouped by
+/** Settings › Shortcuts: every command with its keys, grouped by
  * its menu, filtered by Search Commands. Pressing a command's keys takes
  * the next key; a key another command has asks first ("press it again to
  * move it here"); Delete takes the key away, Escape keeps the old one. */
@@ -1128,44 +885,29 @@ function Shortcuts({
     void model.perform({ type: "shortcut", op, id });
   };
   const disabled = (id: string) => !model.services || model.pending.has(id);
-  const commandRow = (row: import("./model").ShortcutRow) => [
+  const commandRow = (row: import("./model").ShortcutRow) => (
     <div
       key={row.id}
       id={`settings.shortcut.${row.id}`}
       role="group"
       label={row.label}
-      style={
-        row.recording && row.asked
-          ? { ...rowStyle, background: t("colors.accent_wash") }
-          : rowStyle
-      }
+      metadata={{ settingsLayout: "row" }}
     >
       {/* The command's name takes a click too: it starts listening, as a
        * click on its keys does (the keys stay the keyboard's target). */}
-      <button
-        tabIndex={-1}
-        label={row.label}
-        disabled={row.fixed}
-        style={{
-          ...copyColumn,
-          minWidth: t("metrics.hit"),
-          minHeight: t("metrics.hit"),
-        }}
-        onClick={() => act("record", row.id)}
-      >
-        <div style={titleLine}>
-          <text
-            style={{
-              ...text,
-              fontSize: t("typography.title"),
-              ...(row.fixed ? { color: t("colors.secondary") } : {}),
-            }}
-          >
-            {row.label}
-          </text>
-        </div>
-      </button>
-      <div style={trailing}>
+      {row.fixed ? (
+        <RowCopy title={row.label} />
+      ) : (
+        <UI.PushButton
+          tabIndex={-1}
+          label={row.label}
+          metadata={{ settingsLayout: "nameButton" }}
+          onClick={() => act("record", row.id)}
+        >
+          {row.label}
+        </UI.PushButton>
+      )}
+      <div metadata={{ settingsLayout: "line" }}>
         {row.changed && !row.fixed && !row.recording ? (
           <Button
             key="reset"
@@ -1174,37 +916,21 @@ function Shortcuts({
             onClick={() => act("reset", row.id)}
           />
         ) : null}
-        {row.recording ? (
-          <Recording onCancel={() => act("record", row.id)} />
-        ) : (
-          <ShortcutKeys row={row} onRecord={() => act("record", row.id)} />
-        )}
+        <ShortcutKeys row={row} onRecord={() => act("record", row.id)} />
       </div>
-    </div>,
-    row.recording && row.asked ? (
-      <div
-        key={`${row.id}.asked`}
-        role="status"
-        label="Shortcut in use"
-        metadata={{ symbol: "exclamationmark.triangle.fill" }}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: t("metrics.gap"),
-          paddingLeft: t("metrics.inset"),
-          paddingRight: t("metrics.inset"),
-          paddingBottom: t("metrics.gap"),
-          background: t("colors.accent_wash"),
-          color: t("colors.secondary"),
-          fontSize: t("typography.minimum"),
-        }}
-      >
-        {row.asked.menu
-          ? `${row.asked.keys} belongs to ${row.asked.other} in the menu bar. Type another, or Esc to cancel.`
-          : `${row.asked.keys} is used by ${row.asked.other}. Press it again to move it here, or Esc to cancel.`}
-      </div>
-    ) : null,
-  ];
+      {row.recording && row.asked && (
+        <div
+          role="status"
+          label="Shortcut in use"
+          metadata={{ settingsLayout: "error" }}
+        >
+          {row.asked.menu
+            ? `${row.asked.keys} belongs to ${row.asked.other} in the menu bar. Type another, or Esc to cancel.`
+            : `${row.asked.keys} is used by ${row.asked.other}. Press it again to move it here, or Esc to cancel.`}
+        </div>
+      )}
+    </div>
+  );
   return (
     <>
       {/* The first group's header carries Search Commands; it keeps one key
@@ -1216,52 +942,25 @@ function Shortcuts({
           key={i === 0 ? "first" : menu!}
           role="group"
           label={menu ?? "Search Commands"}
-          style={column}
+          metadata={{ settingsLayout: "group" }}
         >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: t("metrics.inset"),
-              paddingLeft: t("metrics.inset"),
-              marginBottom: t("metrics.dock_gap"),
-            }}
-          >
-            <text
-              role="heading"
-              style={{
-                color: t("colors.text"),
-                fontSize: t("typography.title"),
-                fontWeight: t("typography.medium_weight"),
-              }}
-            >
-              {menu ?? "No Matching Commands"}
-            </text>
+          <div metadata={{ settingsLayout: "headingLine" }}>
+            <text role="heading">{menu ?? "No Matching Commands"}</text>
             {i === 0 && bindings.commandSearch ? (
-              <div
-                style={{
-                  display: "flex",
-                  width: t("metrics.settings_text_field"),
+              <UI.TextField
+                label="Search Commands"
+                binding={bindings.commandSearch}
+                value={filter}
+                metadata={{ placeholder: "Search Commands", search: true }}
+                onInput={(event) => {
+                  if (typeof event.value === "string") setFilter(event.value);
                 }}
-              >
-                <UI.TextField
-                  label="Search Commands"
-                  binding={bindings.commandSearch}
-                  value={filter}
-                  metadata={{ placeholder: "Search Commands", search: true }}
-                  onInput={(event) => {
-                    if (typeof event.value === "string") setFilter(event.value);
-                  }}
-                />
-              </div>
+              />
             ) : null}
           </div>
           {menu === null ? null : (
             <UI.FormGroup label={menu}>
-              <Rows>
-                {rows.filter((row) => row.menu === menu).flatMap(commandRow)}
-              </Rows>
+              {rows.filter((row) => row.menu === menu).map(commandRow)}
             </UI.FormGroup>
           )}
         </div>
@@ -1274,7 +973,7 @@ function Shortcuts({
               id={`settings.shared.${clash.chord}`}
               role="group"
               label={clash.keys}
-              style={describedRow}
+              metadata={{ settingsLayout: "row" }}
             >
               <RowCopy
                 title={clash.keys}
@@ -1297,58 +996,17 @@ function ProjectHeader({ model, bindings, window }: SettingsPanelProps) {
   if (!project || !header) return null;
   const projects = header.projects ?? [];
   const nameRow = model.rows.find((row) => row.id === HEADER_ROW);
-  const name = {
-    ...text,
-    fontSize: t("typography.heading"),
-    fontWeight: t("typography.semibold_weight"),
-  };
   return (
     <UI.FormGroup label="Project">
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: t("metrics.inset"),
-          padding: t("metrics.inset"),
-        }}
-      >
-        <div
-          style={{
-            position: "relative",
-            flexShrink: 0,
-            width: t("metrics.settings_poster_width"),
-            height: t("metrics.settings_poster_height"),
-            borderRadius: t("metrics.inner_radius"),
-            overflow: "hidden",
-            background: t("colors.field"),
-          }}
-        >
-          {header.poster ? (
-            <img
-              resource={header.poster}
-              alt={project.name}
-              style={{ position: "absolute", inset: "fill" }}
-            />
-          ) : (
-            // No picture yet (a project never shown): its symbol, not a
-            // bare grey box.
-            <div
-              metadata={{ symbol: "film" }}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexGrow: 1,
-                height: t("metrics.settings_poster_height"),
-                color: t("colors.muted"),
-                symbolSize: t("metrics.symbol_panel"),
-              }}
-            />
-          )}
-        </div>
-        <div style={copyColumn}>
+      <div metadata={{ settingsLayout: "header" }}>
+        {header.poster ? (
+          <img resource={header.poster} alt={project.name} />
+        ) : (
+          <div metadata={{ settingsLayout: "poster", symbol: "film" }} />
+        )}
+        <div metadata={{ settingsLayout: "column" }}>
           {projects.length > 1 && bindings.project ? (
-            <div style={{ display: "flex" }}>
+            <div metadata={{ settingsLayout: "line" }}>
               <UI.PopUpButton
                 label="Project"
                 // The design's pull-down: the project's name, the menu of
@@ -1364,30 +1022,18 @@ function ProjectHeader({ model, bindings, window }: SettingsPanelProps) {
               />
             </div>
           ) : (
-            <text style={name}>{project.name}</text>
+            <text>{project.name}</text>
           )}
           {header.path ? (
-            <text
-              style={{
-                ...help,
-                fontSize: t("typography.minimum"),
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "middle",
-              }}
-            >
-              {header.path}
-            </text>
+            <text metadata={{ settingsLayout: "path" }}>{header.path}</text>
           ) : null}
         </div>
         {header.path ? (
-          <div style={trailing}>
+          <div metadata={{ settingsLayout: "line" }}>
             <Button label="Show in Finder" onClick={() => window?.reveal()} />
           </div>
         ) : null}
       </div>
-      {/* The project's name is the card's second row, as the design has it. */}
-      {nameRow ? <Separator /> : null}
       {nameRow ? (
         <SettingRow row={{ ...nameRow, detail: undefined }} model={model} />
       ) : null}
@@ -1427,30 +1073,11 @@ function SectionContent({
       id={`settings.section.${section}`}
       role="group"
       label={copy.title}
-      style={{
-        ...column,
-        paddingTop: t("metrics.dock_gap"),
-        paddingLeft: t("metrics.sheet_inset"),
-        paddingRight: t("metrics.sheet_inset"),
-        paddingBottom: t("metrics.sheet_inset"),
-        gap: t("metrics.sheet_inset"),
-      }}
+      metadata={{ settingsLayout: "section" }}
     >
       {/* The toolbar names the section; a search lists several, each
           under its name. */}
-      {model.query.trim() ? (
-        <text
-          role="heading"
-          style={{
-            fontSize: t("typography.title"),
-            fontWeight: t("typography.semibold_weight"),
-            color: t("colors.text"),
-            paddingLeft: t("metrics.inset"),
-          }}
-        >
-          {copy.title}
-        </text>
-      ) : null}
+      {model.query.trim() ? <text role="heading">{copy.title}</text> : null}
       {section === "project" && !model.query.trim() ? (
         <ProjectHeader model={model} bindings={bindings} window={window} />
       ) : null}
@@ -1497,15 +1124,9 @@ export function SettingsPanel({ model, bindings, window }: SettingsPanelProps) {
       label="Settings"
       focusScope
       metadata={{
-        windowTitle: sectionCopy[model.active].title,
         hostWindow: "settings",
-        resize: "height",
-        widthToken: "metrics.settings_width",
-        heightToken: "metrics.settings_height",
+        windowTitle: sectionCopy[model.active].title,
       }}
-      // The page of the Settings window: AppKit's sidebar, search field and
-      // toolbar (which names the section) frame it (PM-375).
-      style={{ display: "flex" }}
       onKeyDown={(event) => {
         event.stopPropagation();
         // Native cancellation must already have happened in the shell planner.
@@ -1513,87 +1134,33 @@ export function SettingsPanel({ model, bindings, window }: SettingsPanelProps) {
         model.key(event);
       }}
     >
-      <div style={{ display: "flex", flexGrow: 1, flexShrink: 1 }}>
-        <scroll
-          id="settings.detail"
-          role="group"
-          label={sectionCopy[model.active].title}
-          // A column: the page is as wide as the window leaves it.
-          style={{ ...column, flexGrow: 1, flexShrink: 1, minWidth: 0 }}
-        >
-          {model.query.trim() && model.matches.count === 0 ? (
-            // Search uses the same empty-state copy as the native windows.
-            <div
-              role="status"
-              label="No Results. Try a different search."
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexDirection: "column",
-                gap: t("metrics.gap"),
-              }}
-            >
-              <text
-                style={{
-                  fontSize: t("typography.heading"),
-                  color: t("colors.text"),
-                }}
-              >
-                No Results
-              </text>
-              <text
-                style={{
-                  fontSize: t("typography.reading"),
-                  color: t("colors.secondary"),
-                }}
-              >
-                Try a different search.
-              </text>
-            </div>
-          ) : (
-            // A readable form column centred in the sheet, as the original
-            // app's Settings: however wide the window, labels and their
-            // controls stay close enough to read as pairs.
-            // Its natural height (never shrunk to the viewport): the scroll
-            // scrolls it, and a list inside keeps the rows it shows.
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "center",
-                flexShrink: 0,
-              }}
-            >
-              <div
-                style={{
-                  ...column,
-                  flexGrow: 1,
-                  flexShrink: 1,
-                  minWidth: 0,
-                  maxWidth: t("metrics.settings_column"),
-                }}
-              >
-                {/* One section per page, as v1 and System Settings; a search
-                    lists every section with a match. */}
-                {(model.query.trim()
-                  ? model.visibleSections
-                  : model.visibleSections.filter(
-                      (section) => section === model.active,
-                    )
-                ).map((section) => (
-                  <SectionContent
-                    key={section}
-                    section={section}
-                    model={model}
-                    bindings={bindings}
-                    window={window}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-        </scroll>
-      </div>
+      <scroll
+        id="settings.detail"
+        role="group"
+        label={sectionCopy[model.active].title}
+      >
+        {model.query.trim() && model.matches.count === 0 ? (
+          <UI.EmptyState
+            label="No Results"
+            explanation="Try a different search."
+          />
+        ) : (
+          (model.query.trim()
+            ? model.visibleSections
+            : model.visibleSections.filter(
+                (section) => section === model.active,
+              )
+          ).map((section) => (
+            <SectionContent
+              key={section}
+              section={section}
+              model={model}
+              bindings={bindings}
+              window={window}
+            />
+          ))
+        )}
+      </scroll>
     </div>
   );
 }

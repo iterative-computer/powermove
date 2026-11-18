@@ -1056,7 +1056,7 @@ fn compile(
 /// Characters a split value well shows at `body` size (half the value
 /// column of a panel at its usual width, less a trailing control).
 const SPLIT_WELL_CHARS: usize = 9;
-fn number_facts(node: &Node) -> NumberFacts {
+pub(crate) fn number_facts(node: &Node) -> NumberFacts {
     let number = |key: &str, default| {
         node.props
             .get(key)
