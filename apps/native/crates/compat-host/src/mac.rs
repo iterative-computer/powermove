@@ -154,6 +154,14 @@ struct Shared {
     fonts: RefCell<BTreeMap<String, std::sync::Arc<[u8]>>>,
 }
 impl Shared {
+    fn capture_layout_is_current(&self, id: &str, generation: u64) -> bool {
+        let layouts = self.layouts.borrow();
+        layouts
+            .get(id)
+            .is_some_and(|(current, _, _)| *current == generation)
+            && layouts.values().all(|(_, _, applied)| *applied)
+    }
+
     fn send(&self, event: Value) -> Result<()> {
         let generation = self.channel.borrow().generation;
         self.channel.borrow_mut().send(generation, event)?;
@@ -1513,11 +1521,7 @@ impl MacDomHost {
                 if shared.closed.get() {
                     return;
                 }
-                let valid = shared
-                    .layouts
-                    .borrow()
-                    .get(&pending.id)
-                    .is_some_and(|(g, _, _)| *g == pending.generation);
+                let valid = shared.capture_layout_is_current(&pending.id, pending.generation);
                 if valid && error.is_null() {
                     if let Some(image) = unsafe { image.as_ref() } {
                         let mut snapshots = shared.snapshots.borrow_mut();
@@ -1645,11 +1649,7 @@ impl MacDomHost {
                         if shared.closed.get() {
                             return;
                         }
-                        let valid = shared
-                            .layouts
-                            .borrow()
-                            .get(&id)
-                            .is_some_and(|(g, _, applied)| *g == generation && *applied)
+                        let valid = shared.capture_layout_is_current(&id, generation)
                             && shared
                                 .snapshots
                                 .borrow()
@@ -2269,6 +2269,21 @@ mod admission_tests {
             assert_eq!(inner.y + inner.h, target.h);
         }
     }
+    #[test]
+    fn a_pending_neighbour_invalidates_a_shared_page_capture() {
+        let (state, _) = shared(Trust::Trusted);
+        let rect = Rect::new(0., 0., 300., 100.);
+        state.layouts.borrow_mut().extend([
+            ("pixel-comparison".into(), (5, rect, true)),
+            ("pexels".into(), (6, Rect::new(0., 100., 300., 100.), false)),
+        ]);
+
+        assert!(!state.capture_layout_is_current("pixel-comparison", 5));
+        state.layouts.borrow_mut().get_mut("pexels").unwrap().2 = true;
+        assert!(!state.capture_layout_is_current("pixel-comparison", 4));
+        assert!(state.capture_layout_is_current("pixel-comparison", 5));
+    }
+
     #[test]
     fn snapshot_clips_to_its_body_and_keeps_the_same_content_origin() {
         let source = Rect::new(0., 0., 300., 200.);
