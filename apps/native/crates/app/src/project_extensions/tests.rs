@@ -15,7 +15,11 @@ const SYNTHETIC: &str = r##"{
     "w":32,"h":32,"fps":30,"dur":2,"bg":"#000000","assets":{},"comps":{},
     "layers":[{
         "id":"plate","type":"solid","name":"Plate","on":true,"from":0,"dur":2,
-        "p":{"x":{"v":16,"kf":[]},"y":{"v":16,"kf":[]},"opacity":{"v":100,"kf":[]}},
+        "blend":"normal","masks":[],
+        "p":{"position.x":{"v":0,"kf":[]},"position.y":{"v":0,"kf":[]},
+             "anchor.x":{"v":0,"kf":[]},"anchor.y":{"v":0,"kf":[]},
+             "scale.x":{"v":100,"kf":[]},"scale.y":{"v":100,"kf":[]},
+             "rotation":{"v":0,"kf":[]},"opacity":{"v":100,"kf":[]}},
         "d":{"w":32,"h":32,"color":"#ffffff"},
         "fx":[{"id":"tint","type":"toy.tint","on":true,"p":{}}]
     }]
@@ -34,7 +38,7 @@ fn write_extension(profile: &Path, version: &str, factor: f32) {
     )
     .unwrap();
     fs::write(folder.join("index.ts"), format!(
-        "export default function(api) {{ api.effects.register({{ id:'toy.tint', label:'Toy tint', group:'Test', params:[], frag:'o=src(v_uv)*{factor:.2};' }}); }}"
+        "export default function(api) {{ api.effects.register({{ id:'toy.tint', label:'Toy tint', group:'Test', params:[], frag:'o=vec4(vec3({factor:.2}), 1.0);' }}); }}"
     )).unwrap();
 }
 fn host(actor: &KernelActor, project: &str, profile: &Path, scope: ProjectScope) -> ExtensionHost {
@@ -55,14 +59,20 @@ fn host(actor: &KernelActor, project: &str, profile: &Path, scope: ProjectScope)
         scope,
     )
 }
-fn render(snapshot: &Snapshot, host: &ExtensionHost) -> Vec<f32> {
+fn render(snapshot: &Snapshot, host: &ExtensionHost, apply_tint: bool) -> Vec<f32> {
     let (_, value) = host
         .wait_contributions(Duration::from_secs(30), &|| false)
         .unwrap();
     let mut renderer = pm_render::Renderer::headless().unwrap();
     renderer.set_isolate_layers(true);
+    let definitions = crate::extensions::definitions(&value);
+    assert_eq!(
+        definitions.iter().any(|def| def.id.as_str() == "toy.tint"),
+        apply_tint,
+        "the synthetic effect did not register as expected"
+    );
     let refused = renderer
-        .set_document_effects(&snapshot.document, &crate::extensions::definitions(&value))
+        .set_document_effects(&snapshot.document, &definitions)
         .unwrap();
     assert!(refused.is_empty(), "{refused:?}");
     let frame = renderer
@@ -98,7 +108,11 @@ fn project_extensions_keep_the_bundle_version_private_and_render_the_original_pi
         .unwrap();
     let snapshot = &kernel.published("writer").unwrap().snapshot;
     let original = host(&actor, "writer", &source, Default::default());
-    let original_pixels = render(snapshot, &original);
+    let original_pixels = render(snapshot, &original, true);
+    assert!(
+        original_pixels.chunks_exact(4).any(|pixel| pixel[0] > 0.0),
+        "the synthetic plate did not draw"
+    );
     let bundle = Bundle::collect(
         references(snapshot.root().unwrap()),
         &installed(&library_roots(&source)),
@@ -132,7 +146,7 @@ fn project_extensions_keep_the_bundle_version_private_and_render_the_original_pi
     let (scope, errors) = prepared.install(Choice::Project, &empty_profile, "Synthetic Film");
     assert!(errors.is_empty());
     let accepted = host(&actor, "received", &empty_profile, scope);
-    assert_eq!(render(received, &accepted), original_pixels);
+    assert!(render(received, &accepted, true) == original_pixels);
     assert!(!empty_profile.join("extensions").exists());
     drop(accepted);
 
@@ -144,17 +158,18 @@ fn project_extensions_keep_the_bundle_version_private_and_render_the_original_pi
         .unwrap()
         .unwrap();
     let library = host(&actor, "library", &recipient, Default::default());
-    let library_pixels = render(&kernel.published("library").unwrap().snapshot, &library);
-    assert_ne!(library_pixels, original_pixels);
+    let library_snapshot = &kernel.published("library").unwrap().snapshot;
+    let library_pixels = render(library_snapshot, &library, true);
+    assert!(
+        library_pixels != original_pixels,
+        "the versions produced identical pixels"
+    );
     let (scope, errors) =
         Open::prepare(&extra, &recipient).install(Choice::Project, &recipient, "Synthetic Film");
     assert!(errors.is_empty());
     let local = host(&actor, "received", &recipient, scope);
-    assert_eq!(render(received, &local), original_pixels);
-    assert_eq!(
-        render(&kernel.published("library").unwrap().snapshot, &library),
-        library_pixels
-    );
+    assert!(render(received, &local, true) == original_pixels);
+    assert!(render(library_snapshot, &library, true) == library_pixels);
     assert_eq!(
         installed(&library_roots(&recipient))["toy"]
             .manifest
@@ -168,7 +183,7 @@ fn project_extensions_keep_the_bundle_version_private_and_render_the_original_pi
         Open::prepare(&extra, &recipient).install(Choice::Without, &recipient, "Synthetic Film");
     assert!(scope.excluded.contains("toy"));
     let bypass = host(&actor, "received", &recipient, scope);
-    assert_ne!(render(received, &bypass), original_pixels);
+    assert!(render(received, &bypass, false) != original_pixels);
     assert!(
         references(received.root().unwrap())
             .iter()

@@ -549,17 +549,21 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                       }
                     >
                       {included.map((entry) => (
-                        <div key={entry.id} style={{ ...line, ...column }}>
-                          <text style={text}>
-                            {entry.name} {entry.version}
-                          </text>
-                          <text style={detail}>{sizeLabel(entry.bytes)}</text>
+                        <div key={entry.id}>
+                          <UI.FormRow
+                            label={`${entry.name} ${entry.version}`}
+                            control={
+                              <text style={detail}>{sizeLabel(entry.bytes)}</text>
+                            }
+                          />
                         </div>
                       ))}
                     </UI.DisclosureGroup>
                   )}
                   {!extensionsExpanded && included.length > 0 && (
-                    <text style={{ ...detail, ...column }}>
+                    <text
+                      style={{ ...detail, ...column, paddingBottom: token("metrics.gap") }}
+                    >
                       {included
                         .map((entry) => `${entry.name} ${entry.version}`)
                         .join(", ")}
