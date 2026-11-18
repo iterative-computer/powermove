@@ -195,7 +195,7 @@ impl Backend {
             "Calculating storage…".to_owned()
         } else {
             format!(
-                "Proxies {} · Optimized Media {} · Renders {}",
+                "Proxies: {} · Optimized Media: {} · Renders: {}",
                 used["proxies"].as_str().unwrap_or(""),
                 used["optimized"].as_str().unwrap_or(""),
                 used["renders"].as_str().unwrap_or("")
@@ -206,7 +206,7 @@ impl Backend {
                 "control":"action","action":"media.location","actionLabel":"Change…",
                 "detail":media["location"]}),
             json!({"id":"media.used","section":"media","group":"Storage","label":"Space Used",
-                "control":"status","value":space}),
+                "control":"status","detail":space}),
             json!({"id":"media.clear","section":"media","group":"Storage",
                 "label":"Generated Media","control":"action","action":"media.clear",
                 "actionLabel":"Clear…",
