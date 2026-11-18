@@ -5333,6 +5333,7 @@ dependencies = [
  "pm-kernel",
  "pm-model",
  "pm-surface",
+ "serde",
  "serde_json",
 ]
 

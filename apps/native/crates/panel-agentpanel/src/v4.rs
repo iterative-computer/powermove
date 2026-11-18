@@ -117,6 +117,7 @@ impl Window {
                 .map(|t| json!({"id":t.id,"title":t.title,"busy":t.busy,"updatedAt":t.updated_at}))
                 .collect::<Vec<_>>()
         );
+        value["interruptedRun"] = panel.interrupted_snapshot(&self.thread)?;
         value["plan"] = session.plan.clone().unwrap_or(Value::Null);
         value["result"] = session.result.clone().unwrap_or(Value::Null);
         let idle = session.run.is_none() && !session.applying && !session.archiving;
@@ -455,6 +456,17 @@ pub fn dispatch(
         )?),
         "stopTask" => {
             Some(panel.stop_task(thread, &control_id(panel, thread, string(action, "id")?)?)?)
+        }
+        "resumeInterrupted" => Some(panel.resume_interrupted(
+            thread,
+            string(action, "runId")?,
+            context.run,
+            context.request,
+            now,
+        )?),
+        "dismissInterrupted" => {
+            panel.dismiss_interrupted(thread, string(action, "runId")?, now)?;
+            None
         }
         "keepResult" => {
             panel.keep_result(thread)?;
@@ -1105,17 +1117,28 @@ mod tests {
         let mut p = panel();
         draft(&mut p);
         act(&mut p, json!({"type":"submit"})).unwrap();
-        p.host_result("thread", "run", json!({"runId":"run","changed":true})).unwrap();
+        p.host_result("thread", "run", json!({"runId":"run","changed":true}))
+            .unwrap();
         assert!(act(&mut p, json!({"type":"keepResult"})).is_err());
         assert!(act(&mut p, json!({"type":"undoResult"})).is_err());
         assert!(p.session("thread").unwrap().result.is_some());
-        p.receive("thread", "run", 1, Update::Complete { text: String::new(), error: false, cancelled: false }, 12).unwrap();
+        p.receive(
+            "thread",
+            "run",
+            1,
+            Update::Complete {
+                text: String::new(),
+                error: false,
+                cancelled: false,
+            },
+            12,
+        )
+        .unwrap();
         p.session_mut("thread").unwrap().archiving = true;
         assert!(act(&mut p, json!({"type":"keepResult"})).is_err());
         assert!(act(&mut p, json!({"type":"undoResult"})).is_err());
         assert!(p.session("thread").unwrap().result.is_some());
     }
-
 }
 
 #[cfg(test)]
@@ -1270,5 +1293,4 @@ mod scoped_tests {
             "synthetic-attachment-body"
         );
     }
-
 }

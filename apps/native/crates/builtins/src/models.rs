@@ -2048,7 +2048,35 @@ impl Backend {
                         && session.result.is_some())
                     .then(|| session.last_run().map(str::to_owned))
                     .flatten();
-                    crate::agent_host::admit(action, link.available(provider), live)?;
+                    let admission_provider = if action["type"] == "resumeInterrupted" {
+                        if state.runs.active() >= 8 {
+                            return Err(
+                                "Eight agents are already running. Wait for one to finish.".into(),
+                            );
+                        }
+                        state
+                            .panel
+                            .recovery_provider(&thread)
+                            .map_err(|e| e.to_string())?
+                    } else if action["type"] == "setAccess" && action["access"] == "full" {
+                        let recovery = state
+                            .panel
+                            .interrupted_snapshot(&thread)
+                            .map_err(|e| e.to_string())?;
+                        if recovery["requestAvailable"] == true
+                            && recovery["requiresComputerConsent"] == true
+                        {
+                            state
+                                .panel
+                                .recovery_provider(&thread)
+                                .map_err(|e| e.to_string())?
+                        } else {
+                            provider
+                        }
+                    } else {
+                        provider
+                    };
+                    crate::agent_host::admit(action, link.available(admission_provider), live)?;
                     if crate::agent_host::sends(action) {
                         crate::agent_host::admit_send(&state, &thread)?;
                     }
@@ -2064,6 +2092,8 @@ impl Backend {
                     let request = new_id("request");
                     let new_thread = new_id("thread");
                     let catalogs = |provider| link.catalog(provider);
+                    let recovery_before =
+                        (action["type"] == "resumeInterrupted").then(|| state.panel.clone());
                     let effect = pm_panel_agentpanel::v4::dispatch_at(
                         &mut state.panel,
                         sequence,
@@ -2090,6 +2120,15 @@ impl Backend {
                     if effect.is_none() && matches!(action["type"].as_str(), Some("draft" | "key"))
                     {
                         state.panel.defer_save(now);
+                    } else if let Some(before) = recovery_before {
+                        state
+                            .panel
+                            .save_recovery_admission(
+                                &mut KernelStore::new(self.kernel.clone(), self.application),
+                                before,
+                                now,
+                            )
+                            .map_err(|e| format!("{e:?}"))?;
                     } else {
                         state
                             .panel

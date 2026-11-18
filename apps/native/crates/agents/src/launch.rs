@@ -263,7 +263,7 @@ pub fn is_valid_model_id(id: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "._:/[]-".contains(c))
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Request {
     pub run: String,
     pub prompt: String,

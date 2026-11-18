@@ -40,12 +40,14 @@ pub struct Target {
     pub thread: String,
     pub run: Option<String>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub provider: Provider,
     pub model: String,
     pub effort: String,
     pub access: Access,
+    #[serde(rename = "approvalMode")]
     pub approval: ApprovalMode,
     pub scope: String,
     pub auto_apply_panels: bool,
@@ -101,6 +103,9 @@ pub struct Session {
     pub plan: Option<Value>,
     pub result: Option<Value>,
     result_message: Option<String>,
+    admitted_request: Option<Value>,
+    recovery: Option<Value>,
+    resume_request: Option<Value>,
     pub stop_error: Option<String>,
     pub disclosures: HashMap<String, bool>,
     pub(crate) questions: HashMap<String, QuestionDraft>,
@@ -178,6 +183,9 @@ impl Session {
             plan: None,
             result: None,
             result_message: None,
+            admitted_request: v.get("nativeRunRequest").filter(|v| v.is_object()).cloned(),
+            recovery: (v["lastRunStatus"] == "interrupted").then(|| recovery::notice(v)),
+            resume_request: None,
             stop_error: None,
             disclosures: HashMap::new(),
             questions: HashMap::new(),
@@ -221,7 +229,7 @@ impl Session {
         }
         if !self.trace.rows.is_empty() {
             let duration = self.run.as_ref().map(|r| now.saturating_sub(r.started_at));
-            self.append(json!({"role":"trace","steps":self.trace.rows.values().collect::<Vec<_>>(),"steering":steering,"durationMs":duration}))?;
+            self.append(json!({"role":"trace","steps":self.trace.rows.values().collect::<Vec<_>>(),"steering":steering,"durationMs":duration,"runId":self.run.as_ref().map(|r| r.id.as_str()).or_else(|| self.recovery.as_ref().and_then(|v| v["runId"].as_str()))}))?;
             self.trace = Trace::default();
         }
         Ok(())
@@ -360,7 +368,9 @@ pub enum ShellAction {
     Pin,
     BeginDrag,
     CancelDrag,
-    CommitDrag { dock: Option<String> },
+    CommitDrag {
+        dock: Option<String>,
+    },
     OpenGlobal,
     ImportWorkspace,
     RepairExtension(String),
@@ -524,6 +534,7 @@ impl Panel {
         let conversation = s.conversation.values().cloned().collect::<Vec<_>>();
         let trace = s.trace.rows.values().cloned().collect::<Vec<_>>();
         let run = s.run.as_ref().map(|r| r.id.clone());
+        let admitted_request = s.admitted_request.clone();
         let settings = s.settings.clone();
         let settings_dirty = s.settings_dirty;
         let s_access_dirty = s.access_dirty;
@@ -537,6 +548,7 @@ impl Panel {
         record["attachments"] = json!(attachments);
         record["conversation"] = json!(conversation);
         record["nativeLiveTrace"] = json!(trace);
+        record["nativeRunRequest"] = admitted_request.unwrap_or(Value::Null);
         if settings_dirty {
             record["provider"] = json!(settings.provider.name());
             record["model"] = json!(settings.model);
@@ -960,16 +972,20 @@ impl Panel {
         }
         // Archive steering checkpoints before the next user turn, retaining all
         // reasoning and work. Tool updates can still find archived step ids.
-        if steer {
-            session.archive_trace(now, true)?;
+        if steer || session.recovery.is_some() {
+            session.archive_trace(now, steer)?;
         }
-        session.append(json!({"role":"user","text":typed,"attachments":placed,"steering":steer}))?;
+        session
+            .append(json!({"role":"user","text":typed,"attachments":placed,"steering":steer}))?;
         session.archive_result()?;
         session.draft.clear_after_send();
         session.plan = None;
         session.result = None;
         session.result_message = None;
         if !steer {
+            session.recovery = None;
+            session.admitted_request = None;
+            session.resume_request = None;
             session.last_run = Some(run_id.into());
             session.run = Some(Run {
                 id: run_id.into(),
@@ -1078,6 +1094,11 @@ impl Panel {
                 error,
                 cancelled,
             } => {
+                let recovery_record = if error && s.resume_request.is_some() {
+                    json!({"lastRunId":run_id,"nativeRunRequest":s.admitted_request,"nativeLiveTrace":s.trace.rows.values().cloned().collect::<Vec<_>>(),"conversation":s.conversation.values().cloned().collect::<Vec<_>>()})
+                } else {
+                    Value::Null
+                };
                 // The reply is shown once: a run that streamed it (the app
                 // server) already has it in its trail; a run that only
                 // returns it at the end (Codex exec in Auto/Supervised) has
@@ -1124,8 +1145,14 @@ impl Panel {
                     Phase::Prompt
                 };
                 s.stop_error = None;
+                if error && s.resume_request.is_some() {
+                    s.recovery = Some(recovery::notice(&recovery_record));
+                }
+                s.resume_request = None;
                 let record = self.archive.thread_mut(id).expect("session record");
-                record["lastRunStatus"] = json!(if cancelled {
+                record["lastRunStatus"] = json!(if s.recovery.is_some() {
+                    "interrupted"
+                } else if cancelled {
                     "cancelled"
                 } else if error {
                     "failed"
@@ -2008,3 +2035,6 @@ mod consent_tests {
         ));
     }
 }
+
+#[path = "recovery.rs"]
+mod recovery;
