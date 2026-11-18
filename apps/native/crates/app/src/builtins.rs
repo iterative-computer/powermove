@@ -1524,6 +1524,7 @@ impl Controller {
                             .size_full()
                             .overflow_y_scroll()
                             .track_scroll(&handle)
+                            .scroll_edge_fade_y(px(pm_design::DOCK_SCROLL_FADE))
                             .on_scroll_wheel(on_wheel)
                             // As tall as its content, at least its slot.
                             .child({
@@ -4309,17 +4310,15 @@ pub(crate) struct PanelBody {
 }
 impl Render for PanelBody {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Only the Project panel's body: measured on the release build, a
-        // panel that redraws while it scrolls (Properties follows the
-        // playhead and its springs) pays the recording on each redraw and
-        // lost frames with the layer (PM-311). A native view inside draws on
-        // its own: the body draws in full.
+        // The Project body replays its drawing between edge-mask changes.
+        // Native surfaces retain their own frame callbacks.
         let native = self.view.read(cx).has_native();
         div()
             .id(self.id.clone())
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.handle)
+            .scroll_edge_fade_y(px(pm_design::DOCK_SCROLL_FADE))
             .when(!native, |d| d.scroll_layer())
             .child(
                 self.view

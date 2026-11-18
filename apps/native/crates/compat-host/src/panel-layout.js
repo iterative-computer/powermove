@@ -36,23 +36,29 @@ globalThis.PMPanelLayout = class {
   }
   refresh() {
     if (this.explicitActive) this.visibility(this.active);
-    for (const [id, placement] of this.placements) this.pending.set(id, placement);
-    this.schedule();
+    // The realm's batch can replace a root's inline style after the host has
+    // acknowledged it. Repair the same DOM batch before WebKit can paint it.
+    this.pending.clear();
+    const rendered = this.applyPlacements(this.placements.values());
+    if (rendered.length) this.frame(() => this.frame(() => this.confirm(rendered)));
+  }
+  applyPlacements(placements) {
+    return [...placements].filter((placement) => this.apply(placement) !== false);
+  }
+  confirm(rendered) {
+    for (const placement of rendered) {
+      if (this.active.has(placement.id) && this.latest.get(placement.id) === placement.generation)
+        this.acknowledge(placement);
+    }
   }
   schedule() {
     if (this.scheduled || !this.pending.size) return;
     this.scheduled = true;
     this.frame(() => {
       this.scheduled = false;
-      const applied = [...this.pending.values()];
+      const rendered = this.applyPlacements(this.pending.values());
       this.pending.clear();
-      const rendered = applied.filter((placement) => this.apply(placement) !== false);
-      // The second animation frame follows the layout frame's paint opportunity.
-      this.frame(() => {
-        for (const placement of rendered)
-          if (this.active.has(placement.id) && this.latest.get(placement.id) === placement.generation)
-            this.acknowledge(placement);
-      });
+      if (rendered.length) this.frame(() => this.confirm(rendered));
     });
   }
 };

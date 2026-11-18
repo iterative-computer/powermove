@@ -1224,3 +1224,23 @@ pub mod workspace {
     pub const DEFAULT_TIMELINE: f32 = 344.;
     pub const DEFAULT_EFFECTS: f32 = 268.;
 }
+
+/// The desktop dock's CSS mask uses a 28 point linear ramp.
+pub const DOCK_SCROLL_FADE: f32 = 28.;
+
+pub fn dock_scroll_edges(offset: f32, maximum: f32) -> (bool, bool) {
+    (maximum > 1. && offset > 1., maximum > 1. && maximum - offset > 1.)
+}
+
+#[cfg(test)]
+mod dock_scroll_edge_tests {
+    use super::*;
+
+    #[test]
+    fn only_edges_with_remaining_content_fade() {
+        assert_eq!(dock_scroll_edges(0., 0.5), (false, false));
+        assert_eq!(dock_scroll_edges(0., 80.), (false, true));
+        assert_eq!(dock_scroll_edges(30., 80.), (true, true));
+        assert_eq!(dock_scroll_edges(80., 80.), (true, false));
+    }
+}

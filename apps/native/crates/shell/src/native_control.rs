@@ -1428,7 +1428,12 @@ impl NativeControl {
             return;
         }
         match self.layer.kept(window) {
-            Some((bounds, clip)) => self.slot.stage(ns_rect(bounds), ns_rect(clip)),
+            Some((bounds, clip)) => self.slot.stage_with_scroll_fade(
+                ns_rect(bounds),
+                ns_rect(clip.bounds),
+                crate::layer_stage::vertical_fade(clip),
+            ),
+            None if self.layer.recorded_in_scroll_layer() => self.slot.hide(),
             None => self.slot.keep(),
         }
     }
@@ -1647,8 +1652,7 @@ impl Render for NativeControl {
                 canvas(
                     |_, _, _| (),
                     move |painted, _, window, cx| {
-                        let (bounds, clip) =
-                            layer.painted(painted, window.content_mask().bounds, window);
+                        let (bounds, clip) = layer.painted(painted, window.content_mask(), window);
                         // The picture is painted inside the same filter/opacity boundary
                         // as the build snapshot. Restore normal alpha before its early return.
                         if build.is_none() {
@@ -1660,7 +1664,11 @@ impl Render for NativeControl {
                             slot.hide();
                             return;
                         }
-                        slot.stage(ns_rect(bounds), ns_rect(clip));
+                        slot.stage_with_scroll_fade(
+                            ns_rect(bounds),
+                            ns_rect(clip.bounds),
+                            crate::layer_stage::vertical_fade(clip),
+                        );
                         if let Some(build) = build {
                             if let Some(revision) = build.revision {
                                 if pixels.borrow_mut().capture(&native, bounds, revision) {

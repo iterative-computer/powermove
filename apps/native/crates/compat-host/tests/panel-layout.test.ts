@@ -44,6 +44,31 @@ test("a not-yet-mounted panel is retried after a DOM batch and never acknowledge
   queue.refresh(); tick(); tick();
   expect(acks.map(p => p.generation)).toEqual([1]);
 });
+
+test("a realm batch cannot move acknowledged panels into each other's slots", () => {
+  const context: any = {};
+  runInNewContext(readFileSync(new URL("../src/panel-layout.js", import.meta.url), "utf8"), context);
+  const frames: (() => void)[] = [];
+  const positions = new Map<string, number>();
+  const queue = new context.PMPanelLayout(
+    (frame: () => void) => frames.push(frame),
+    (placement: { id: string; y: number }) => positions.set(placement.id, placement.y),
+    () => {},
+  );
+  const tick = () => frames.splice(0).forEach(frame => frame());
+  queue.enqueue([
+    { id: "pixel-comparison", generation: 1, y: 10 },
+    { id: "pexels", generation: 2, y: 190 },
+  ]);
+  tick();
+  tick();
+
+  // A delayed realm batch writes its old inline styles after the host ack.
+  positions.set("pixel-comparison", 190);
+  positions.set("pexels", 10);
+  queue.refresh();
+  expect([...positions]).toEqual([["pixel-comparison", 10], ["pexels", 190]]);
+});
 test("restore and page load never revive a hidden tab or acknowledge its old paint", () => {
   const context: any = {};
   runInNewContext(readFileSync(new URL("../src/panel-layout.js", import.meta.url), "utf8"), context);
@@ -126,3 +151,23 @@ test("agent panel reads include hidden text and control labels", async () => {
     expect(root.style.visibility).toBe('hidden');
   } finally { dom.window.close(); }
 });
+
+test("a delayed clear cannot remove another panel's prepared snapshot", async () => {
+  const { createRequire } = await import("node:module");
+  const require = createRequire(new URL("../../../js/remote-dom/package.json", import.meta.url));
+  const { JSDOM } = require("jsdom");
+  const dom = new JSDOM('<body><section data-pm-contribution="pexels">Pexels</section></body>', { runScripts: 'outside-only' });
+  const { window } = dom;
+  window.requestAnimationFrame = () => {};
+  window.call = () => {};
+  const source = readFileSync(new URL('../src/remote-dom.js', import.meta.url), 'utf8');
+  const apply = source.slice(source.indexOf('  const apply = async (event)'), source.indexOf('    } else if (event.kind === "panel_layout")'));
+  window.eval(apply.replace('const apply =', 'globalThis.apply =') + '}};');
+  try {
+    await window.apply({ kind: 'overscan_prepare', id: 'pexels', generation: 4, rect: { x: 0, y: 0, w: 200, h: 100 } });
+    await window.apply({ kind: 'overscan_clear', id: 'pixel-comparison', generation: 3 });
+    expect(window.document.querySelector('[data-pm-overscan]').textContent).toBe('Pexels');
+  } finally {
+    window.close();
+  }
+}, 20000);

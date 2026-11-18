@@ -299,9 +299,13 @@ impl TextField {
                         canvas(
                             |_, _, _| (),
                             move |bounds, _, window, cx| {
-                                let mask = window.content_mask().bounds;
+                                let mask = window.content_mask();
                                 let (bounds, mask) = layer.painted(bounds, mask, window);
-                                slot.stage(rect(bounds), rect(mask));
+                                slot.stage_with_scroll_fade(
+                                    rect(bounds),
+                                    rect(mask.bounds),
+                                    crate::layer_stage::vertical_fade(mask),
+                                );
                                 if let Some(build) = build {
                                     if let Some(revision) = build.revision {
                                         if pixels.borrow_mut().capture(
@@ -363,10 +367,12 @@ impl TextField {
             return;
         }
         match self.layer.kept(window) {
-            Some((bounds, clip)) => self.slot.stage(
+            Some((bounds, clip)) => self.slot.stage_with_scroll_fade(
                 crate::native_control::ns_rect(bounds),
-                crate::native_control::ns_rect(clip),
+                crate::native_control::ns_rect(clip.bounds),
+                crate::layer_stage::vertical_fade(clip),
             ),
+            None if self.layer.recorded_in_scroll_layer() => self.slot.hide(),
             None => self.slot.keep(),
         }
     }
@@ -659,7 +665,7 @@ impl Render for TextField {
                         {
                             let _ = entity.update(cx, |_, cx| cx.notify());
                         }
-                        let mask = window.content_mask().bounds;
+                        let mask = window.content_mask();
                         let rect = |b: Bounds<Pixels>| {
                             NSRect::new(
                                 NSPoint::new(
@@ -692,7 +698,11 @@ impl Render for TextField {
                             slot.hide();
                             return;
                         }
-                        slot.stage(rect(bounds), rect(mask));
+                        slot.stage_with_scroll_fade(
+                            rect(bounds),
+                            rect(mask.bounds),
+                            crate::layer_stage::vertical_fade(mask),
+                        );
                         if let Some(build) = build {
                             if !dense {
                                 if let Some(revision) = build.revision {

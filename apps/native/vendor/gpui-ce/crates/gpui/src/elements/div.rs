@@ -1911,6 +1911,12 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Fade the vertical edges of a tracked scroller where it has more content.
+    fn scroll_edge_fade_y(mut self, depth: Pixels) -> Self {
+        self.interactivity().scroll_edge_fade_y = depth;
+        self
+    }
+
     /// Track the scroll state of this element with the given handle.
     fn anchor_scroll(mut self, scroll_anchor: Option<ScrollAnchor>) -> Self {
         self.interactivity().scroll_anchor = scroll_anchor;
@@ -2878,6 +2884,7 @@ pub struct Interactivity {
     pub(crate) disabled: bool,
     pub(crate) tracked_focus_handle: Option<FocusHandle>,
     pub(crate) tracked_scroll_handle: Option<ScrollHandle>,
+    pub(crate) scroll_edge_fade_y: Pixels,
     pub(crate) scroll_anchor: Option<ScrollAnchor>,
     /// Powermove P-SCROLL-LAYER: the content's drawing doesn't depend on the
     /// offset, so a step that only moves it replays the recorded content
@@ -3165,9 +3172,10 @@ impl Interactivity {
                     }
                 }
 
+                let scroll_offset = self.clamp_scroll_position(bounds, &style, window, cx);
                 window.with_text_style(style.text_style().cloned(), |window| {
                     window.with_content_mask(
-                        style.overflow_mask(bounds, window.rem_size()),
+                        self.scroll_content_mask(&style, bounds, window.rem_size()),
                         |window| {
                             let hitbox = if self.should_insert_hitbox(&style, window, cx) {
                                 let hitbox = window.insert_hitbox_mut(bounds, self.hitbox_behavior);
@@ -3180,8 +3188,6 @@ impl Interactivity {
                                 None
                             };
 
-                            let scroll_offset =
-                                self.clamp_scroll_position(bounds, &style, window, cx);
                             let result = f(&style, scroll_offset, hitbox, window, cx);
                             (result, element_state)
                         },
@@ -3216,6 +3222,31 @@ impl Interactivity {
             || self.drag_over_style.is_some()
             || self.tooltip_builder.is_some()
             || window.is_inspector_picking(cx)
+    }
+
+    fn vertical_scroll_edges(offset: Pixels, maximum: Pixels) -> (bool, bool) {
+        (maximum > px(1.) && -offset > px(1.), maximum > px(1.) && maximum + offset > px(1.))
+    }
+
+    fn scroll_content_mask(
+        &self,
+        style: &Style,
+        bounds: Bounds<Pixels>,
+        rem: Pixels,
+    ) -> Option<crate::ContentMask<Pixels>> {
+        let mut mask = style.overflow_mask(bounds, rem)?;
+        if self.scroll_edge_fade_y > px(0.)
+            && let Some(scroll) = &self.tracked_scroll_handle
+        {
+            let (top, bottom) = Self::vertical_scroll_edges(scroll.offset().y, scroll.max_offset().y);
+            if top {
+                mask.fade_out.top = self.scroll_edge_fade_y;
+            }
+            if bottom {
+                mask.fade_out.bottom = self.scroll_edge_fade_y;
+            }
+        }
+        Some(mask)
     }
 
     fn clamp_scroll_position(
@@ -3315,6 +3346,7 @@ impl Interactivity {
 
                 let tab_group = self.tab_group.then_some(self.tab_index).flatten();
 
+                let content_mask = self.scroll_content_mask(&style, bounds, window.rem_size());
                 let paint_content = |window: &mut Window, cx: &mut App| {
                     // Register the container inside its tab group so `focus_next` enters
                     // its own children. Outside the group, it would sort ahead of the
@@ -3419,7 +3451,7 @@ impl Interactivity {
 
                 let paint_content_mask = |window: &mut Window, cx: &mut App| {
                     window.with_content_mask(
-                        style.overflow_mask(bounds, window.rem_size()),
+                        content_mask,
                         |window| paint_tab_group(window, cx),
                     );
                 };
@@ -4202,6 +4234,7 @@ impl Interactivity {
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
             let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
             let line_height = window.line_height();
+            let fades_at_edges = self.scroll_edge_fade_y > px(0.);
             let hitbox = hitbox.clone();
             let current_view = window.current_view();
             let layer = (self.scroll_layer && crate::scroll_layer::enabled())
@@ -4265,8 +4298,11 @@ impl Interactivity {
                         if remaining.x.is_zero() && remaining.y.is_zero() {
                             cx.stop_propagation();
                         }
+                        let new_edges = fades_at_edges
+                            && Self::vertical_scroll_edges(old_scroll_offset.y, scroll_max.y)
+                                != Self::vertical_scroll_edges(scroll_offset.y, scroll_max.y);
                         drop(scroll_offset);
-                        let moved = layer.is_some_and(|key| {
+                        let moved = !new_edges && layer.is_some_and(|key| {
                             window.scroll_layer_step(key, current_view, cx)
                         });
                         if !moved {

@@ -470,6 +470,21 @@ impl Editor {
         true
     }
 
+    fn dock_body_fade(&self, dock: usize, body: Rect) -> (f32, f32) {
+        let Some(viewport) = self.geometry.side_docks.get(&dock) else {
+            return (0., 0.);
+        };
+        let id = &self.layout.docks[dock].id;
+        let (top, bottom) = pm_design::dock_scroll_edges(
+            self.dock_scroll.get(id).copied().unwrap_or(0.),
+            self.dock_scroll_max.get(id).copied().unwrap_or(0.),
+        );
+        let depth = pm_design::DOCK_SCROLL_FADE;
+        let top = top && body.y <= viewport.y + self.tokens.metrics.header;
+        let bottom = bottom && body.y + body.h >= viewport.y + viewport.h;
+        (if top { depth } else { 0. }, if bottom { depth } else { 0. })
+    }
+
     /// Save the layout in its workspace record and session.
     pub fn save(&mut self) {
         // A parked panel keeps its place in the workspace (v1 kept a retired
@@ -2325,6 +2340,7 @@ impl Editor {
             let h = h.borrow();
             h.viewer_rect.set(None);
             h.native_panel_clips.borrow_mut().clear();
+            h.native_panel_fades.borrow_mut().clear();
             // Home covers the viewer: its extra 3D views have no place.
             h.viewer_tiles.borrow_mut().clear();
             h.canvas_focus.set(false);
@@ -2982,7 +2998,7 @@ impl Render for Editor {
             let header_rect = self.geometry.header_rect(&p, &t);
             let header_offset = header_rect.y - p.rect.y;
             let mut panel = positioned(self.slides.shown(&id, p.rect))
-                .id(format!("group-{}-{}", p.dock, p.group))
+                .id(SharedString::from(format!("group-{id}")))
                 .role(Role::Group)
                 .tab_group()
                 .tab_index(self.panel_order.iter().position(|v| v == &id).unwrap_or(0) as isize)
@@ -3432,16 +3448,47 @@ impl Render for Editor {
                 .as_ref()
                 .and_then(|i| i.panel(&id, p.rect, w, cx));
             if let Some(content) = content {
-                panel = if header_offset > 0. {
-                    panel.child(
+                if let Some(viewport) = self.geometry.side_docks.get(&p.dock) {
+                    let height = (p.rect.h - m.header).max(0.);
+                    let y = p.rect.y + m.header;
+                    let clip_start = header_offset.max(viewport.y - y);
+                    let clip_end = height.min(viewport.y + viewport.h - y);
+                    let (top, bottom) = self.dock_body_fade(p.dock, Rect { y, h: height, ..p.rect });
+                    // Keep the body's layout origin while the sticky header
+                    // occludes its first rows. AppKit slots also read this mask.
+                    panel = panel.child(
                         div()
-                            .h(px((p.rect.h - m.header).max(0.)))
-                            .overflow_hidden()
-                            .child(content),
-                    )
+                            .relative()
+                            .flex_none()
+                            .h(px(height))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top(px(clip_start))
+                                    .w_full()
+                                    .h(px((clip_end - clip_start).max(0.)))
+                                    .overflow_hidden()
+                                    .overflow_fade(Edges::<AbsoluteLength> {
+                                        top: px(top).into(),
+                                        right: px(0.).into(),
+                                        bottom: px(bottom).into(),
+                                        left: px(0.).into(),
+                                    })
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left_0()
+                                            .top(px(-clip_start))
+                                            .w_full()
+                                            .h(px(height))
+                                            .child(content),
+                                    ),
+                            ),
+                    );
                 } else {
-                    panel.child(content)
-                };
+                    panel = panel.child(content);
+                }
             } else {
                 let unknown = format!("No installed extension provides “{id}”.");
                 let loading = self.integration.as_ref().is_some_and(|i| i.panels_loading(cx));
@@ -3550,7 +3597,16 @@ impl Render for Editor {
                     (id.clone(), clip)
                 })
                 .collect();
+            let fades = native_bodies
+                .iter()
+                .filter_map(|(id, body)| {
+                    let (dock, _, _) = self.layout.find(id)?;
+                    let (top, bottom) = self.dock_body_fade(dock, *body);
+                    Some((id.clone(), [f64::from(top), f64::from(bottom)]))
+                })
+                .collect();
             *h.borrow().native_panel_clips.borrow_mut() = clips;
+            *h.borrow().native_panel_fades.borrow_mut() = fades;
             *h.borrow().native_panels.borrow_mut() = native_bodies;
         }
         for (i, d) in self.geometry.dividers.clone().into_iter().enumerate() {
@@ -6019,3 +6075,7 @@ mod library_capture_tests {
         }
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "dock_render_tests.rs"]
+mod dock_render_tests;

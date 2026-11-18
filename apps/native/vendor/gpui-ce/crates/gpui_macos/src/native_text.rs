@@ -121,6 +121,7 @@ struct State {
     /// What a paint staged, with that paint's number: placed by the present
     /// that follows that paint, and by no later one.
     geometry: Cell<Option<(u64, NSRect, NSRect)>>,
+    scroll_fade: crate::scroll_fade::ScrollFade,
     staged: Cell<Option<(NSRect, NSRect)>>,
     build_alpha: Cell<Option<(u64, f64)>>,
     kept_alpha: Cell<f64>,
@@ -784,6 +785,7 @@ impl NativeTextSlot {
             events: RefCell::new(Vec::new()),
             wake: RefCell::new(None),
             geometry: Cell::new(None),
+            scroll_fade: Default::default(),
             staged: Cell::new(None),
             build_alpha: Cell::new(None),
             kept_alpha: Cell::new(1.),
@@ -917,8 +919,12 @@ impl NativeTextSlot {
     }
     /// Top-left point bounds and inherited rectangular content clip, in GPUI coordinates.
     pub fn stage(&self, bounds: NSRect, clip: NSRect) {
+        self.stage_with_scroll_fade(bounds, clip, [0., 0.]);
+    }
+    pub fn stage_with_scroll_fade(&self, bounds: NSRect, clip: NSRect, fade: [f64; 2]) {
         self.state.stage(Some((bounds, clip)));
         self.state.staged.set(Some((bounds, clip)));
+        self.state.scroll_fade.stage(fade);
     }
     pub fn stage_build_alpha(&self, alpha: f64) {
         let paint = crate::composition::open_paint(Retained::as_ptr(&self.state.gpui) as usize);
@@ -1261,6 +1267,9 @@ fn place(key: usize, apply: bool) -> bool {
             if apply {
                 state.wrapper.setFrame(frame);
             }
+        }
+        if !hidden {
+            moved |= state.scroll_fade.place(&state.wrapper, visible, clip, apply);
         }
         let local = NSRect::new(
             NSPoint::new(

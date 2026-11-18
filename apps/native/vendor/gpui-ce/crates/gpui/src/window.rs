@@ -4237,9 +4237,12 @@ impl Window {
     pub fn scroll_layer_shift(
         &self,
         layer: crate::ScrollLayerId,
-    ) -> Option<(Point<Pixels>, Bounds<Pixels>)> {
+    ) -> Option<(Point<Pixels>, ContentMask<Pixels>)> {
         let layer = self.scroll_layers.get(&layer.0)?;
-        Some((layer.current() - layer.recorded, layer.clip.bounds))
+        if layer.frame != self.scroll_layer_frame {
+            return None;
+        }
+        Some((layer.current() - layer.recorded, layer.clip))
     }
 
     /// A step its owner makes on a driven scroll layer

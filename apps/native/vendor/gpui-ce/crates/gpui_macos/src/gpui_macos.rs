@@ -31,6 +31,7 @@ mod composition_accessibility;
 mod composition_accessibility_order;
 pub mod native_text;
 pub mod native_control;
+mod scroll_fade;
 mod platform;
 mod window;
 mod window_appearance;

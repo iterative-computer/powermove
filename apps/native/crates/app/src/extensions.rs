@@ -848,7 +848,8 @@ impl Controller {
                 if busy.is_some() || place.is_some() {
                     body.push_str(&format!(
                         "\n\nBusy{}{}.",
-                        busy.as_deref().map_or_else(String::new, |b| format!(" for {b}")),
+                        busy.as_deref()
+                            .map_or_else(String::new, |b| format!(" for {b}")),
                         place.map_or_else(String::new, |p| format!(" in {p}"))
                     ));
                 }
@@ -2188,6 +2189,7 @@ impl Controller {
         let mut shell = self.host.borrow_mut();
         let bodies = shell.native_panels.clone();
         let clips = shell.native_panel_clips.clone();
+        let fades = shell.native_panel_fades.clone();
         let stage = self.extensions.stage.clone();
         let sent = self.extensions.sent.clone();
         // Native panel over native window tint, over the shared material.
@@ -2239,33 +2241,6 @@ impl Controller {
                 };
                 let panel_regions: Vec<Rect> = mine.iter().map(|(id, r)| clipped(id, *r)).collect();
                 let overlay_regions: Vec<Rect> = stage.as_ref().map(to_rect).into_iter().collect();
-                // ... and its content only within that panel's body and every
-                // place recently sent to the page: a page that has not yet
-                // moved a panel's content (a splitter drag) never shows it
-                // through a neighbour's body; the panel's ground shows there.
-                let content = (!(cfg!(debug_assertions)
-                    && std::env::var_os("PM_NATIVE_NO_PANEL_MASK").is_some()))
-                .then(|| {
-                    mine.iter()
-                        .map(|(id, r)| {
-                            let mask = if host.panel_layout_applied(id, *r) {
-                                *r
-                            } else {
-                                sent.mask(id, *r)
-                            };
-                            let clip = clipped(id, *r);
-                            Rect::new(
-                                mask.x.max(clip.x),
-                                mask.y.max(clip.y),
-                                ((mask.x + mask.w).min(clip.x + clip.w) - mask.x.max(clip.x))
-                                    .max(0.),
-                                ((mask.y + mask.h).min(clip.y + clip.h) - mask.y.max(clip.y))
-                                    .max(0.),
-                            )
-                        })
-                        .chain(stage.as_ref().map(to_rect))
-                        .collect()
-                });
                 if !(cfg!(debug_assertions)
                     && std::env::var_os("PM_NATIVE_LEGACY_PANEL_LAYOUT").is_some())
                 {
@@ -2275,10 +2250,36 @@ impl Controller {
                             .collect(),
                     );
                 }
+                // A shared page can draw into a neighbour's slot until all
+                // its roots reach the new layout. Until then it presents the
+                // last completed snapshot of each panel at the new placement.
+                let settled = mine.iter().all(|(id, r)| host.panel_layout_applied(id, *r));
+                let content = (!(cfg!(debug_assertions)
+                    && std::env::var_os("PM_NATIVE_NO_PANEL_MASK").is_some()))
+                .then(|| {
+                    mine.iter()
+                        .filter(|_| settled)
+                        .map(|(id, r)| clipped(id, *r))
+                        .chain(stage.as_ref().map(to_rect))
+                        .collect()
+                });
                 let _ = host.set_regions_with_transparent_overlays(panel_regions, overlay_regions);
                 host.set_corner_radius(corner);
+                let fades = fades.borrow();
+                host.set_body_fades(
+                    mine.iter()
+                        .filter_map(|(id, rect)| {
+                            let (_, fade) = fades.iter().find(|(key, _)| key == *id)?;
+                            Some((clipped(id, *rect), *fade))
+                        })
+                        .collect(),
+                );
                 let _ = host.set_content_regions(content);
-                host.set_bodies(mine.iter().map(|(id, r)| ((*id).clone(), *r)).collect());
+                host.set_bodies(
+                    mine.iter()
+                        .map(|(id, r)| ((*id).clone(), clipped(id, *r)))
+                        .collect(),
+                );
                 host.set_fill(Some(fill.get()));
                 dirty |= host.composition_dirty();
                 let _ = host.attach(
@@ -2460,6 +2461,9 @@ impl Controller {
         }
     }
     fn close_extension_panel(&mut self, id: &str) {
+        if let Some(page) = self.extensions.page_of(id) {
+            page.borrow_mut().forget_panel_snapshot(id);
+        }
         self.extensions.placed.remove(id);
         self.extensions.hidden.remove(id);
         if self.extensions.panels.remove(id).is_some()

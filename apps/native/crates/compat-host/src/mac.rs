@@ -3,7 +3,7 @@ use block2::DynBlock;
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
     rc::Retained,
-    runtime::{Bool, ProtocolObject},
+    runtime::{AnyObject, Bool, ProtocolObject},
     sel,
 };
 use objc2_app_kit::*;
@@ -74,16 +74,26 @@ impl StoreDataStores {
         }
     }
 }
-fn snapshot_geometry(source: Rect, target: Rect, height: f64) -> (Rect, Rect) {
+fn snapshot_geometry(source: Rect, target: Rect, clip: Rect, height: f64) -> (Rect, Rect) {
+    let visible = target.intersection(clip);
     (
-        Rect::new(target.x, height - target.y - target.h, target.w, target.h),
-        Rect::new(0., target.h - source.h, source.w, source.h),
+        Rect::new(
+            visible.x,
+            height - visible.y - visible.h,
+            visible.w,
+            visible.h,
+        ),
+        Rect::new(
+            target.x - visible.x,
+            visible.y + visible.h - target.y - source.h,
+            source.w,
+            source.h,
+        ),
     )
 }
 #[derive(Default)]
 struct PanelSnapshot {
     request_sequence: u64,
-    failed: bool,
     build_done: bool,
     requested: u64,
     revision: u64,
@@ -94,18 +104,26 @@ impl PanelSnapshot {
     fn invalidate_build(&mut self) {
         self.request_sequence = self.request_sequence.wrapping_add(1);
         self.requested = 0;
-        self.failed = false;
         self.build_done = false;
     }
     fn begin_capture(&mut self, generation: u64) -> u64 {
         self.request_sequence = self.request_sequence.wrapping_add(1);
         self.requested = generation;
-        self.failed = false;
         self.build_done = false;
         self.request_sequence
     }
     fn accepts(&self, sequence: u64) -> bool {
         self.request_sequence == sequence
+    }
+    fn complete(&mut self, rect: Rect, image: Option<&NSImage>) {
+        self.build_done = true;
+        if let Some(image) = image {
+            let size = image.size();
+            if size.width > 0. && size.height > 0. {
+                self.image = Some((rect, image.retain()));
+                self.captured_revision = self.revision;
+            }
+        }
     }
 }
 #[derive(Clone)]
@@ -136,6 +154,14 @@ struct Shared {
     fonts: RefCell<BTreeMap<String, std::sync::Arc<[u8]>>>,
 }
 impl Shared {
+    fn capture_layout_is_current(&self, id: &str, generation: u64) -> bool {
+        let layouts = self.layouts.borrow();
+        layouts
+            .get(id)
+            .is_some_and(|(current, _, _)| *current == generation)
+            && layouts.values().all(|(_, _, applied)| *applied)
+    }
+
     fn send(&self, event: Value) -> Result<()> {
         let generation = self.channel.borrow().generation;
         self.channel.borrow_mut().send(generation, event)?;
@@ -373,7 +399,10 @@ impl Shared {
                     && !payload["event"].as_str().is_some_and(passes_detached)
                     && self.panels.borrow().items[&id].slot.is_none()
                 {
-                    eprintln!("extension page: input refused while hidden: {}", payload["event"]);
+                    eprintln!(
+                        "extension page: input refused while hidden: {}",
+                        payload["event"]
+                    );
                     return Err(Error::Forbidden);
                 }
                 self.handler.remote_dom(payload)?;
@@ -814,24 +843,66 @@ impl SlotView {
     }
     /// Shows the page only within `rects` (window points from the top), each
     /// with continuous bottom corners of `radius` (a panel body's corners).
-    fn clip(&self, rects: Vec<Rect>, radius: f64) {
+    fn clip(&self, rects: Vec<Rect>, radius: f64, fades: &[(Rect, [f64; 2])]) {
+        use objc2_quartz_core::{CAGradientLayer, CALayer, CAShapeLayer};
         let path = CGMutablePath::new();
+        let group = CALayer::new();
+        group.setFrame(self.bounds());
         let h = self.bounds().size.height;
         for r in &rects {
-            add_bottom_rounded(
-                &path,
-                NSRect::new(NSPoint::new(r.x, h - r.y - r.h), NSSize::new(r.w, r.h)),
-                radius,
-            );
+            let frame = NSRect::new(NSPoint::new(r.x, h - r.y - r.h), NSSize::new(r.w, r.h));
+            let fade = fades
+                .iter()
+                .find(|(rect, distances)| rect == r && *distances != [0., 0.]);
+            if let Some((_, [top, bottom])) = fade {
+                if r.h <= 0. || r.w <= 0. {
+                    continue;
+                }
+                let gradient = CAGradientLayer::new();
+                let stop = |alpha: f64| {
+                    let color =
+                        NSColor::colorWithSRGBRed_green_blue_alpha(0., 0., 0., alpha).CGColor();
+                    unsafe { Retained::retain(&*color as *const _ as *mut AnyObject).unwrap() }
+                };
+                let top_edge = (*top / r.h).min(1.);
+                let bottom_edge = (1. - *bottom / r.h).max(top_edge);
+                let colors = [
+                    if *top > 0. { 0. } else { 1. },
+                    1.,
+                    1.,
+                    if *bottom > 0. { 0. } else { 1. },
+                ]
+                .map(stop);
+                unsafe {
+                    gradient.setColors(Some(&NSArray::from_retained_slice(&colors)));
+                }
+                gradient.setLocations(Some(&NSArray::from_retained_slice(
+                    &[0., top_edge, bottom_edge, 1.].map(NSNumber::new_f64),
+                )));
+                gradient.setStartPoint(NSPoint::new(0.5, 1.));
+                gradient.setEndPoint(NSPoint::new(0.5, 0.));
+                gradient.setFrame(frame);
+                let shape = CAShapeLayer::new();
+                shape.setFrame(gradient.bounds());
+                let rounded = CGMutablePath::new();
+                add_bottom_rounded(&rounded, gradient.bounds(), radius);
+                shape.setPath(Some(&rounded));
+                unsafe {
+                    gradient.setMask(Some(&shape));
+                }
+                group.addSublayer(&gradient);
+            } else {
+                add_bottom_rounded(&path, frame, radius);
+            }
         }
         *self.ivars().borrow_mut() = rects;
         self.setWantsLayer(true);
-        let mask = objc2_quartz_core::CAShapeLayer::new();
-        // A mask is drawn within its own bounds; without a frame it hides everything.
+        let mask = CAShapeLayer::new();
         mask.setFrame(self.bounds());
         mask.setPath(Some(&path));
+        group.addSublayer(&mask);
         if let Some(layer) = self.layer() {
-            unsafe { layer.setMask(Some(&mask)) }
+            unsafe { layer.setMask(Some(&group)) }
         }
     }
 }
@@ -882,6 +953,7 @@ pub struct MacDomHost {
     /// The panels shown and their bodies (`set_bodies`); `None`: unknown,
     /// a press is judged by the regions alone.
     bodies: Option<Vec<(String, Rect)>>,
+    body_fades: Vec<(Rect, [f64; 2])>,
     /// The panel last pressed, whose field the caret is in.
     caret_panel: Option<String>,
     activity: Option<Activity>,
@@ -1034,6 +1106,7 @@ impl MacDomHost {
             web,
             pressed,
             bodies: None,
+            body_fades: Vec::new(),
             caret_panel: None,
             slot,
             ground,
@@ -1349,6 +1422,12 @@ impl MacDomHost {
     pub fn set_bodies(&mut self, bodies: Vec<(String, Rect)>) {
         self.bodies = Some(bodies);
     }
+    pub fn set_body_fades(&mut self, fades: Vec<(Rect, [f64; 2])>) {
+        if self.body_fades != fades {
+            self.body_fades = fades;
+            self.shared.geometry_dirty.set(true);
+        }
+    }
     /// Whether the panel last pressed stopped showing (PM-294).
     fn caret_left(&mut self) -> bool {
         let Some(bodies) = &self.bodies else {
@@ -1407,6 +1486,9 @@ impl MacDomHost {
         let image = snapshot.and_then(|s| s.image.clone());
         (snapshot.is_some_and(|s| s.build_done), image)
     }
+    pub fn forget_panel_snapshot(&mut self, id: &str) {
+        self.shared.snapshots.borrow_mut().remove(id);
+    }
     pub fn finish_panel_build(&mut self, id: &str) {
         if self.build_masks.remove(id).is_some() {
             self.shared.geometry_dirty.set(true);
@@ -1435,7 +1517,7 @@ impl MacDomHost {
                 return Err(Error::InvalidGeometry);
             }
             let previous = layouts.get(&id);
-            if previous.is_some_and(|(_, old, _)| *old == rect) {
+            if !retired && previous.is_some_and(|(_, old, _)| *old == rect) {
                 continue;
             }
             let generation = self.shared.layout_sequence.get() + 1;
@@ -1444,8 +1526,9 @@ impl MacDomHost {
             changed.push(json!({"id":id,"generation":generation,"rect":rect}));
         }
         if retired || !changed.is_empty() {
-            self.shared
-                .send(json!({"kind":"panel_layout","panel":0,"placements":changed,"active":active}))?;
+            self.shared.send(
+                json!({"kind":"panel_layout","panel":0,"placements":changed,"active":active}),
+            )?;
         }
         *self.shared.layouts.borrow_mut() = layouts;
         Ok(())
@@ -1477,17 +1560,14 @@ impl MacDomHost {
                 if shared.closed.get() {
                     return;
                 }
-                let valid = shared
-                    .layouts
-                    .borrow()
-                    .get(&pending.id)
-                    .is_some_and(|(g, _, _)| *g == pending.generation);
+                let valid = shared.capture_layout_is_current(&pending.id, pending.generation);
                 if valid && error.is_null() {
                     if let Some(image) = unsafe { image.as_ref() } {
                         let mut snapshots = shared.snapshots.borrow_mut();
                         let snapshot = snapshots.entry(pending.id.clone()).or_default();
-                        snapshot.image = Some((pending.rect, image.retain()));
-                        snapshot.captured_revision = pending.revision;
+                        if snapshot.revision == pending.revision {
+                            snapshot.complete(pending.rect, Some(image));
+                        }
                     }
                 }
                 let _ = shared.send(json!({"kind":"overscan_clear","panel":0,"id":pending.id,"generation":pending.generation}));
@@ -1505,13 +1585,24 @@ impl MacDomHost {
             return;
         }
         let snapshots = self.shared.snapshots.borrow();
-        let candidate = layouts.iter().find(|(id, (_, rect, _))| {
-            snapshots.get(*id).is_some_and(|snapshot| {
-                snapshot.image.as_ref().is_some_and(|(source, _)| {
-                    source.w == rect.w
-                        && (source.h < viewport.h || snapshot.captured_revision < snapshot.revision)
+        let candidate = layouts.iter().find(|(id, (generation, rect, _))| {
+            let clip = self
+                .bodies
+                .as_ref()
+                .and_then(|bodies| bodies.iter().find(|(panel, _)| panel == *id))
+                .map_or(viewport, |(_, clip)| viewport.intersection(*clip));
+            rect.w > 0.
+                && rect.h > 0.
+                && clip.w > 0.
+                && clip.h > 0.
+                && snapshots.get(*id).is_none_or(|snapshot| {
+                    snapshot.requested != *generation
+                        && snapshot.image.as_ref().is_none_or(|(source, _)| {
+                            source.w != rect.w
+                                || source.h < rect.h.min(viewport.h)
+                                || snapshot.captured_revision < snapshot.revision
+                        })
                 })
-            })
         });
         let Some((id, (generation, rect, _))) = candidate else {
             return;
@@ -1519,7 +1610,7 @@ impl MacDomHost {
         let regions = self.shared.panels.borrow().visible();
         let strip = [0., (viewport.w - rect.w) / 2., viewport.w - rect.w]
             .into_iter()
-            .map(|x| Rect::new(x, 0., rect.w, viewport.h))
+            .map(|x| Rect::new(x, 0., rect.w, rect.h.min(viewport.h)))
             .find(|strip| {
                 regions.iter().all(|r| {
                     let overlap = strip.intersection(*r);
@@ -1537,7 +1628,9 @@ impl MacDomHost {
             ready: false,
             capturing: false,
         };
+        drop(snapshots);
         if self.shared.send(json!({"kind":"overscan_prepare","panel":0,"id":id,"generation":generation,"rect":strip})).is_ok() {
+            self.shared.snapshots.borrow_mut().entry(id.clone()).or_default().requested = *generation;
             *self.shared.overscan.borrow_mut() = Some(pending);
         }
     }
@@ -1545,6 +1638,7 @@ impl MacDomHost {
     /// original scale, pinned to the new top-left and clipped by a native layer.
     fn present_snapshots(&mut self, viewport: Rect) {
         let layouts = self.shared.layouts.borrow().clone();
+        let settled = layouts.values().all(|(_, _, applied)| *applied);
         self.build_masks.retain(|id, _| layouts.contains_key(id));
         self.overlays.retain(|id, (view, _)| {
             let keep = layouts.contains_key(id);
@@ -1553,22 +1647,28 @@ impl MacDomHost {
             }
             keep
         });
-        self.shared
-            .snapshots
-            .borrow_mut()
-            .retain(|id, _| layouts.contains_key(id));
         for (id, (generation, rect, applied)) in layouts {
-            if applied {
+            // Capturing a rectangle in the shared page is safe only when
+            // every panel is in its acknowledged slot, and the whole capture
+            // is on the page. Offscreen/partial panels use an isolated copy.
+            let clip = self
+                .bodies
+                .as_ref()
+                .and_then(|bodies| bodies.iter().find(|(panel, _)| panel == &id))
+                .map_or(viewport, |(_, clip)| viewport.intersection(*clip));
+            if settled && applied && rect.intersection(clip) == rect && rect.w > 0. && rect.h > 0. {
+                let mut snapshots = self.shared.snapshots.borrow_mut();
+                let snapshot = snapshots.entry(id.clone()).or_default();
                 if let Some((view, _)) = self.overlays.get(&id) {
                     view.setHidden(true);
                 }
-                let mut snapshots = self.shared.snapshots.borrow_mut();
-                let snapshot = snapshots.entry(id.clone()).or_default();
                 if snapshot.requested == generation
-                    || snapshot
-                        .image
-                        .as_ref()
-                        .is_some_and(|(source, _)| source.w == rect.w && source.h >= viewport.h)
+                    || snapshot.image.as_ref().is_some_and(|(source, _)| {
+                        source.w == rect.w
+                            && source.h == rect.h
+                            && snapshot.captured_revision == snapshot.revision
+                            && snapshot.build_done
+                    })
                 {
                     continue;
                 }
@@ -1588,11 +1688,7 @@ impl MacDomHost {
                         if shared.closed.get() {
                             return;
                         }
-                        let valid = shared
-                            .layouts
-                            .borrow()
-                            .get(&id)
-                            .is_some_and(|(g, _, applied)| *g == generation && *applied)
+                        let valid = shared.capture_layout_is_current(&id, generation)
                             && shared
                                 .snapshots
                                 .borrow()
@@ -1601,34 +1697,16 @@ impl MacDomHost {
                         if !valid {
                             return;
                         }
-                        if !error.is_null() || image.is_null() {
-                            {
-                                let mut snapshots = shared.snapshots.borrow_mut();
-                                let snapshot = snapshots.entry(id.clone()).or_default();
-                                snapshot.failed = true;
-                                snapshot.build_done = true;
-                                snapshot.image = None;
-                            }
-                            shared.geometry_dirty.set(true);
-                            shared.handler.event(HostEvent::GeometryChanged);
-                            return;
+                        let image = if error.is_null() {
+                            unsafe { image.as_ref() }
+                        } else {
+                            None
+                        };
+                        if let Some(snapshot) = shared.snapshots.borrow_mut().get_mut(&id) {
+                            snapshot.complete(rect, image);
                         }
-                        if let Some(image) = unsafe { image.as_ref() } {
-                            shared
-                                .snapshots
-                                .borrow_mut()
-                                .entry(id.clone())
-                                .or_default()
-                                .build_done = true;
-                            shared
-                                .snapshots
-                                .borrow_mut()
-                                .entry(id.clone())
-                                .or_default()
-                                .image = Some((rect, image.retain()));
-                            shared.geometry_dirty.set(true);
-                            shared.handler.event(HostEvent::GeometryChanged);
-                        }
+                        shared.geometry_dirty.set(true);
+                        shared.handler.event(HostEvent::GeometryChanged);
                     });
                 unsafe {
                     self.web.takeSnapshotWithConfiguration_completionHandler(
@@ -1636,7 +1714,7 @@ impl MacDomHost {
                         &callback,
                     );
                 }
-            } else {
+            } else if !settled {
                 let snapshots = self.shared.snapshots.borrow();
                 let Some((source, image)) = snapshots.get(&id).and_then(|s| s.image.as_ref())
                 else {
@@ -1660,7 +1738,7 @@ impl MacDomHost {
                     self.slot.addSubview(&view);
                     (view, picture)
                 });
-                let (outer, inner) = snapshot_geometry(*source, rect, viewport.h);
+                let (outer, inner) = snapshot_geometry(*source, rect, clip, viewport.h);
                 view.setFrame(NSRect::new(
                     NSPoint::new(outer.x, outer.y),
                     NSSize::new(outer.w, outer.h),
@@ -1676,7 +1754,9 @@ impl MacDomHost {
                         &NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.).CGColor(),
                     ));
                 }
-                view.setHidden(false);
+                view.setHidden(outer.w <= 0. || outer.h <= 0.);
+            } else if let Some((view, _)) = self.overlays.get(&id) {
+                view.setHidden(true);
             }
         }
     }
@@ -1713,8 +1793,11 @@ impl MacDomHost {
             NSPoint::ZERO,
             NSSize::new(viewport.w, viewport.h),
         ));
-        self.slot
-            .clip(self.shared.panels.borrow().visible(), self.corner_radius);
+        self.slot.clip(
+            self.shared.panels.borrow().visible(),
+            self.corner_radius,
+            &self.body_fades,
+        );
         // The panel the page's caret is in stopped showing (another tab,
         // closed, a layout without it): the editor takes the keyboard back,
         // or keys and the input-source badge stay with a hidden field
@@ -2217,7 +2300,7 @@ mod admission_tests {
             Rect::new(50., 100., 180., 90.),
             Rect::new(50., 100., 400., 300.),
         ] {
-            let (outer, inner) = snapshot_geometry(source, target, 900.);
+            let (outer, inner) = snapshot_geometry(source, target, target, 900.);
             assert_eq!(outer.x, target.x);
             assert_eq!(outer.y + outer.h, 900. - target.y);
             assert_eq!((outer.w, outer.h), (target.w, target.h));
@@ -2225,6 +2308,44 @@ mod admission_tests {
             assert_eq!(inner.y + inner.h, target.h);
         }
     }
+    #[test]
+    fn a_pending_neighbour_invalidates_a_shared_page_capture() {
+        let (state, _) = shared(Trust::Trusted);
+        let rect = Rect::new(0., 0., 300., 100.);
+        state.layouts.borrow_mut().extend([
+            ("pixel-comparison".into(), (5, rect, true)),
+            ("pexels".into(), (6, Rect::new(0., 100., 300., 100.), false)),
+        ]);
+
+        assert!(!state.capture_layout_is_current("pixel-comparison", 5));
+        state.layouts.borrow_mut().get_mut("pexels").unwrap().2 = true;
+        assert!(!state.capture_layout_is_current("pixel-comparison", 4));
+        assert!(state.capture_layout_is_current("pixel-comparison", 5));
+    }
+
+    #[test]
+    fn snapshot_clips_to_its_body_and_keeps_the_same_content_origin() {
+        let source = Rect::new(0., 0., 300., 200.);
+        let target = Rect::new(700., 15., 300., 200.);
+        let clip = Rect::new(700., 70., 300., 110.);
+        let (outer, inner) = snapshot_geometry(source, target, clip, 600.);
+        assert_eq!(outer, Rect::new(700., 420., 300., 110.));
+        assert_eq!(outer.y + inner.y + inner.h, 600. - target.y);
+    }
+
+    #[test]
+    fn failed_snapshot_keeps_the_previous_pixels_for_that_panel() {
+        let mut snapshot = PanelSnapshot::default();
+        let rect = Rect::new(0., 0., 300., 100.);
+        let good = NSImage::initWithSize(NSImage::alloc(), NSSize::new(300., 100.));
+        snapshot.complete(rect, Some(&good));
+        snapshot.begin_capture(2);
+        snapshot.complete(Rect::new(0., -10., 300., 100.), None);
+        let (kept_rect, kept) = snapshot.image.as_ref().unwrap();
+        assert_eq!(*kept_rect, rect);
+        assert!(std::ptr::eq(&**kept, &*good));
+    }
+
     #[test]
     fn panel_layout_acknowledgements_ignore_stale_generations() {
         let (s, _) = shared(Trust::Trusted);
@@ -2291,12 +2412,22 @@ mod admission_tests {
         s.panels.borrow_mut().get(1).unwrap().slot = None;
         // visibilitychange: the 17-tab run's page stopped on it (PM-509/513).
         let own = [
-            "blur", "focusout", "focus", "focusin", "selectionchange", "scroll",
-            "visibilitychange", "pagehide", "pageshow", "resize",
+            "blur",
+            "focusout",
+            "focus",
+            "focusin",
+            "selectionchange",
+            "scroll",
+            "visibilitychange",
+            "pagehide",
+            "pageshow",
+            "resize",
         ];
         for event in own {
-            let message =
-                INPUT.replace(r#"{"kind":"event"}"#, &format!(r#"{{"kind":"event","event":"{event}"}}"#));
+            let message = INPUT.replace(
+                r#"{"kind":"event"}"#,
+                &format!(r#"{{"kind":"event","event":"{event}"}}"#),
+            );
             assert_eq!(s.handle(&message), Ok(Value::Null), "{event}");
         }
         assert_eq!(h.feedback.get() as usize, own.len());
