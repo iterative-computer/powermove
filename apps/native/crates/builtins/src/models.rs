@@ -2124,8 +2124,10 @@ impl Backend {
                     let run = state
                         .panel
                         .session(&thread)
-                        .ok()
-                        .and_then(|s| s.run.as_ref().map(|r| r.id.clone()))
+                        .map_err(|e| format!("{e:?}"))?
+                        .run
+                        .as_ref()
+                        .map(|run| run.id.clone())
                         .unwrap_or_else(|| new_id("run"));
                     let request = new_id("request");
                     let new_thread = new_id("thread");

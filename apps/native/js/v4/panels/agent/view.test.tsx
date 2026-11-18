@@ -990,3 +990,18 @@ test("view styles contain no literal visual values; mutation probes catch regres
     check('const style={color:"#123456",fontSize:12,height:32,duration:0.3}'),
   ).toHaveLength(4);
 });
+
+test("composer sends direction with a draft during a run", async () => {
+  const { root } = mount();
+  const actions: Action[] = [];
+  const p = fixture();
+  p.snapshot.runId = "run";
+  p.snapshot.draft.text = "Make it blue";
+  p.snapshot.sendable = true;
+  await root.render(<AgentView publication={p} send={(a) => actions.push(a)} />);
+  expect(byId(root, "agent-composer-text").props.disabled).not.toBe(true);
+  expect(byId(root, "agent-send").props.disabled).toBe(false);
+  await root.drive(byId(root, "agent-send").id, "click");
+  expect(actions).toEqual([{ type: "submit" }]);
+  root.dispose();
+});

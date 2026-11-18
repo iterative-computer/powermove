@@ -8,7 +8,18 @@ def emit(value):
     print(json.dumps(value), flush=True)
 
 mode = sys.argv[1]
-if mode == 'claude':
+if mode == 'idle':
+    for line in sys.stdin:
+        pass
+elif mode == 'claude-steer':
+    emit({'type':'assistant','message':{'content':[{'type':'text','text':'First answer'}]}})
+    direction = json.loads(sys.stdin.readline())
+    assert direction['type'] == 'user'
+    emit({'type':'result','result':'First answer'})
+    assert sys.stdin.read() == ''
+    time.sleep(2.2)  # A queued turn outlives the ordinary two-second reap grace.
+    emit({'type':'result','result':'Blue answer'})
+elif mode == 'claude':
     emit({'type': 'control_request', 'request_id': 'control', 'request': {
         'subtype': 'can_use_tool', 'tool_name': 'AskUserQuestion', 'tool_use_id': 'question',
         'input': {'questions': [{'question': 'Choose a style?', 'options': [{'label': 'Soft'}]}]}}})

@@ -453,6 +453,29 @@ fn codex_app(
         .map_err(|_| "The agent runtime is not accepting work.".to_owned())?;
     Ok(handle)
 }
+/// Reply artifacts belong to one process, including overlapping restarts.
+struct ReplyFiles(PathBuf);
+impl Drop for ReplyFiles {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+fn reply_files(workspace: &Path) -> std::io::Result<ReplyFiles> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let directory = workspace.join(format!(
+            ".reply-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => return Ok(ReplyFiles(directory)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
 /// Project access runs the autonomous CLI, which owns its sandbox and reviewer.
 fn codex_project(
     env: &Environment,
@@ -464,8 +487,9 @@ fn codex_project(
     let executable = env
         .binary(Runtime::Codex)
         .ok_or_else(|| missing("ChatGPT"))?;
-    let schema = request.workspace.join("reply-schema.json");
-    let output = request.workspace.join("reply.json");
+    let reply = reply_files(&request.workspace).map_err(|e| e.to_string())?;
+    let schema = reply.0.join("reply-schema.json");
+    let output = reply.0.join("reply.json");
     fs::write(&schema, reply_schema().to_string()).map_err(|e| e.to_string())?;
     let (command, args) = env.mcp(token);
     let instructions = format!("{INSTRUCTIONS}\n\n{}", request.additional());
@@ -508,7 +532,8 @@ fn codex_project(
             output,
         },
         vec![],
-    ))
+    )
+    .hold(reply))
 }
 /// The user-visible text of a structured reply; other text passes unchanged.
 pub fn reply_text(text: &str) -> String {
@@ -569,5 +594,80 @@ mod tests {
         assert!(super::private_store(&config).is_err());
         assert_eq!(std::fs::read_to_string(&config).unwrap(), "not = [toml");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod exec_reply_tests {
+    use super::*;
+    #[test]
+    fn exec_restart_never_reuses_an_earlier_reply_file() {
+        let directory =
+            std::env::temp_dir().join(format!("pm-exec-restart-output-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(directory.clone());
+        let workspace = directory.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("reply.json"), "Old answer").unwrap();
+        let resources = directory.join("Resources");
+        let executable = resources.join("codex/bin/codex");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, "#!/usr/bin/python3\nimport json\nfor value in [{'type':'thread.started','thread_id':'synthetic'}, {'type':'turn.started'}, {'type':'item.completed','item':{'id':'answer','type':'agent_message','text':'New answer'}}]:\n print(json.dumps(value), flush=True)\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let environment = Environment {
+            profile: directory.clone(),
+            resources: Some(resources),
+            app_version: "test".into(),
+            executable: "/bin/false".into(),
+            vars: BTreeMap::new(),
+            tools: vec![],
+            composition_tools: vec![],
+            compatible: None,
+        };
+        let request = Request {
+            run: "same-run".into(),
+            prompt: "ORIGINAL REQUEST\nOriginal brief\n\nNEW DIRECTION\nMake it blue".into(),
+            provider: Provider::Chatgpt,
+            model: None,
+            effort: None,
+            access: Access::Project,
+            approval: ApprovalMode::Auto,
+            computer_consent: false,
+            workspace: workspace.clone(),
+            images: vec![],
+            role: None,
+            files: vec![],
+        };
+        let handle = launch(&environment, request).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut completion = None;
+        while std::time::Instant::now() < deadline {
+            match handle.try_event() {
+                Ok(crate::Event::Completed { result, .. }) => {
+                    completion = Some(result);
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                _ => std::thread::sleep(std::time::Duration::from_millis(2)),
+            }
+        }
+        assert_eq!(
+            completion,
+            Some(crate::RunResult::success(
+                "New answer".into(),
+                Access::Project
+            ))
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("reply.json")).unwrap(),
+            "Old answer"
+        );
+        drop(handle);
     }
 }

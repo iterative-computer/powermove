@@ -17,7 +17,7 @@ use std::{
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
@@ -142,15 +142,74 @@ const MAX_RESPONSE: usize = 2_000_000;
 const TURNS: usize = 160;
 const RUN_LIMIT: Duration = Duration::from_secs(60 * 60);
 
+#[derive(Debug, Default)]
+struct Directions {
+    closed: bool,
+    pending: Vec<(String, Vec<String>)>,
+}
+impl Directions {
+    fn push(&mut self, prompt: String, images: Vec<String>) -> bool {
+        if self.closed || self.pending.len() >= 128 {
+            return false;
+        }
+        self.pending.push((prompt, images));
+        true
+    }
+    fn drain(&mut self, finish: bool) -> Vec<(String, Vec<String>)> {
+        if finish && self.pending.is_empty() {
+            self.closed = true;
+        }
+        std::mem::take(&mut self.pending)
+    }
+}
+fn user_content(prompt: &str, images: &[String], vision: bool) -> Result<Value, String> {
+    let mut content = vec![json!({"type":"text","text":prompt})];
+    if vision {
+        for path in images {
+            let bytes = std::fs::read(path)
+                .map_err(|e| format!("An attached image could not be read: {e}"))?;
+            let kind = if bytes.first() == Some(&0xff) {
+                "jpeg"
+            } else {
+                "png"
+            };
+            content.push(json!({"type":"image_url","image_url":{"url":format!("data:image/{kind};base64,{}", STANDARD.encode(bytes))}}));
+        }
+        Ok(Value::Array(content))
+    } else if images.is_empty() {
+        Ok(json!(prompt))
+    } else {
+        Ok(json!(format!(
+            "{prompt}\n\nREFERENCE IMAGES\n{}",
+            images.join("\n")
+        )))
+    }
+}
 /// Starts the run on its own worker; the handle stops it.
 pub fn start(host: Arc<dyn ChatHost>, run: Run) -> Handle {
     let (handle, actions, events) = transport::worker(crate::delivery::Surface::Compatible);
     let stop = Arc::new(AtomicBool::new(false));
     let id = run.id.clone();
+    let directions = Arc::new(Mutex::new(Directions::default()));
     {
+        let directions = directions.clone();
         let stop = stop.clone();
         thread::spawn(move || {
             for (action, reply) in actions {
+                if let Action::Steer {
+                    run,
+                    prompt,
+                    images,
+                } = action
+                {
+                    let accepted = run == id
+                        && !stop.load(Ordering::Acquire)
+                        && directions.lock().unwrap().push(prompt, images);
+                    if let Some(reply) = reply {
+                        let _ = reply.try_send(accepted);
+                    }
+                    continue;
+                }
                 let accepted = match action {
                     Action::Cancel(run) => run == id,
                     Action::Shutdown => true,
@@ -177,8 +236,10 @@ pub fn start(host: Arc<dyn ChatHost>, run: Run) -> Handle {
             events: events.clone(),
             run,
             started,
+            directions: directions.clone(),
         }
         .run();
+        directions.lock().unwrap().closed = true;
         let result = match outcome {
             Ok(text) => RunResult::success(text, access),
             Err(_) if stop.load(Ordering::Acquire) => RunResult::failure("Stopped.", true),
@@ -200,6 +261,7 @@ struct Loop {
     events: SyncSender<Event>,
     run: Run,
     started: Instant,
+    directions: Arc<Mutex<Directions>>,
 }
 impl Loop {
     fn trace(&self, value: Value) -> Result<(), String> {
@@ -235,24 +297,7 @@ impl Loop {
         let key = self.host.key(&saved.base_url).filter(|k| !k.is_empty());
         let mut tools = Tools::start(&self.run, self.stop.clone())?;
         let specs = tools.list(&self.run.allowed)?;
-        let mut user = vec![json!({"type":"text","text":self.run.prompt})];
-        if saved.vision {
-            for path in &self.run.images {
-                let bytes = std::fs::read(path)
-                    .map_err(|e| format!("An attached image could not be read: {e}"))?;
-                let kind = if bytes.first() == Some(&0xff) {
-                    "jpeg"
-                } else {
-                    "png"
-                };
-                user.push(json!({"type":"image_url","image_url":{"url":format!("data:image/{kind};base64,{}", STANDARD.encode(bytes))}}));
-            }
-        }
-        let user = if saved.vision {
-            Value::Array(user)
-        } else {
-            json!(self.run.prompt)
-        };
+        let user = user_content(&self.run.prompt, &self.run.images, saved.vision)?;
         let mut messages = vec![
             json!({"role":"system","content":self.run.instructions}),
             json!({"role":"user","content":user}),
@@ -260,6 +305,11 @@ impl Loop {
         let url = format!("{}/chat/completions", saved.base_url.trim_end_matches('/'));
         for _ in 0..TURNS {
             self.check()?;
+            for (prompt, images) in self.directions.lock().unwrap().drain(false) {
+                messages.push(
+                    json!({"role":"user","content":user_content(&prompt, &images, saved.vision)?}),
+                );
+            }
             let mut body = json!({"model":model,"messages":messages,"stream":true});
             if let Some(effort) = &effort {
                 body["reasoning_effort"] = json!(effort);
@@ -271,6 +321,13 @@ impl Loop {
             let message = self.complete(&url, key.as_deref(), &body)?;
             messages.push(message.assistant());
             if message.calls.is_empty() {
+                let pending = self.directions.lock().unwrap().drain(true);
+                if !pending.is_empty() {
+                    for (prompt, images) in pending {
+                        messages.push(json!({"role":"user","content":user_content(&prompt, &images, saved.vision)?}));
+                    }
+                    continue;
+                }
                 if message.content.trim().is_empty() {
                     return Err(
                         "The model returned an empty response. Try again or choose another model."
@@ -825,5 +882,117 @@ mod tests {
         assert_eq!(out["ok"], true);
         assert_eq!(out["outputTruncated"], true);
         assert!(out["content"][0]["text"].as_str().unwrap().len() < 10_000);
+    }
+}
+
+#[cfg(test)]
+mod steering_replay_tests {
+    use super::*;
+    #[derive(Debug)]
+    struct Host {
+        fixture: Value,
+        directions: Arc<Mutex<Directions>>,
+        calls: Mutex<usize>,
+    }
+    impl ChatHost for Host {
+        fn saved(&self) -> Option<Saved> {
+            Some(Saved {
+                base_url: "http://synthetic.invalid".into(),
+                model: "fake".into(),
+                ..Saved::default()
+            })
+        }
+        fn key(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn stream(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            body: Vec<u8>,
+            _: &AtomicBool,
+            sink: &mut dyn FnMut(&[u8]) -> Result<(), String>,
+        ) -> Result<u16, String> {
+            let mut calls = self.calls.lock().unwrap();
+            let delta = if *calls == 0 {
+                assert!(
+                    self.directions
+                        .lock()
+                        .unwrap()
+                        .push(self.fixture["direction"].as_str().unwrap().into(), vec![])
+                );
+                self.fixture["firstDelta"].clone()
+            } else {
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                let messages = body["messages"].as_array().unwrap();
+                assert_eq!(
+                    json!(
+                        messages
+                            .iter()
+                            .map(|m| m["role"].clone())
+                            .collect::<Vec<_>>()
+                    ),
+                    self.fixture["expectedRoles"]
+                );
+                assert_eq!(
+                    messages.last().unwrap()["content"],
+                    self.fixture["direction"]
+                );
+                json!({"content":"Blue answer"})
+            };
+            *calls += 1;
+            sink(
+                format!(
+                    "data: {}\n\ndata: [DONE]\n\n",
+                    json!({"choices":[{"delta":delta}]})
+                )
+                .as_bytes(),
+            )?;
+            Ok(200)
+        }
+    }
+    #[test]
+    fn compatible_replay_steers_after_tools_and_during_final_answer() {
+        for fixture in [
+            include_str!("../fixtures/replay/providers/compatible-steer-final.json"),
+            include_str!("../fixtures/replay/providers/compatible-steer-tools.json"),
+        ] {
+            let directions = Arc::new(Mutex::new(Directions::default()));
+            let host = Arc::new(Host {
+                fixture: serde_json::from_str(fixture).unwrap(),
+                directions: directions.clone(),
+                calls: Mutex::new(0),
+            });
+            let script = "import sys,json\nfor line in sys.stdin:\n v=json.loads(line)\n if 'id' not in v: continue\n result={'tools':[{'name':'complete_task','inputSchema':{'type':'object'}}]} if v.get('method')=='tools/list' else {'content':[{'type':'text','text':'tool done'}]}\n print(json.dumps({'jsonrpc':'2.0','id':v['id'],'result':result}),flush=True)";
+            let run = Run {
+                id: "run".into(),
+                prompt: "Original brief".into(),
+                model: None,
+                effort: None,
+                access: Access::Editor,
+                instructions: "Instructions".into(),
+                images: vec![],
+                tools: (
+                    "/usr/bin/python3".into(),
+                    vec!["-u".into(), "-c".into(), script.into()],
+                ),
+                tool_env: Default::default(),
+                allowed: vec!["complete_task".into()],
+            };
+            let (events, _rx) = mpsc::sync_channel(256);
+            let result = Loop {
+                host: host.clone(),
+                stop: Arc::new(AtomicBool::new(false)),
+                events,
+                run,
+                started: Instant::now(),
+                directions: directions.clone(),
+            }
+            .run()
+            .unwrap();
+            assert_eq!(result, "Blue answer");
+            assert_eq!(*host.calls.lock().unwrap(), 2);
+            assert!(!directions.lock().unwrap().push("Too late".into(), vec![]));
+        }
     }
 }

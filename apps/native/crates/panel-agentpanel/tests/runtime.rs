@@ -616,3 +616,368 @@ fn real_provider_pipes_publish_through_single_kernel_writer_and_reopen() {
     );
     actor.shutdown();
 }
+
+#[test]
+fn claude_steer_with_attachments_is_dispatchable() {
+    let temp = Temp::new();
+    let (mut store, mut panel, effect) = setup();
+    let mut runs = ProviderRuns::default();
+    runs.start(&mut panel, &mut store, &effect, 10, || {
+        Ok(peer(&temp, "idle"))
+    })
+    .unwrap();
+    assert!(runs.steerable("run"));
+    panel
+        .draft_mut("t")
+        .unwrap()
+        .insert_text("Make it blue", 11, false);
+    let mut steer = panel.submit("t", "run", "direction", 12).unwrap();
+    if let pm_panel_agentpanel::model::EffectKind::Send { attachments, .. } = &mut steer.kind {
+        attachments.push(json!({"name":"reference.txt","text":"blue"}));
+    }
+    runs.dispatch(&mut panel, &mut store, &steer, 12).unwrap();
+    assert!(
+        panel
+            .session("t")
+            .unwrap()
+            .conversation
+            .values()
+            .any(|m| m["steering"] == true)
+    );
+}
+
+#[test]
+fn compatible_steer_with_and_without_attachments_is_dispatchable() {
+    use pm_agents::compatible::{self, ChatHost, Saved};
+    use std::sync::{Arc, Mutex, atomic::AtomicBool, mpsc};
+    #[derive(Debug)]
+    struct Held(Mutex<mpsc::Receiver<()>>);
+    impl ChatHost for Held {
+        fn saved(&self) -> Option<Saved> {
+            let _ = self.0.lock().unwrap().recv_timeout(Duration::from_secs(5));
+            None
+        }
+        fn key(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn stream(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: Vec<u8>,
+            _: &AtomicBool,
+            _: &mut dyn FnMut(&[u8]) -> Result<(), String>,
+        ) -> Result<u16, String> {
+            panic!("no network")
+        }
+    }
+    for attached in [false, true] {
+        let (mut store, mut panel, effect) = setup();
+        let mut runs = ProviderRuns::default();
+        let (release, held) = mpsc::channel();
+        let handle = compatible::start(
+            Arc::new(Held(Mutex::new(held))),
+            compatible::Run {
+                id: "run".into(),
+                prompt: "Original brief".into(),
+                model: None,
+                effort: None,
+                access: Access::Editor,
+                instructions: String::new(),
+                images: vec![],
+                tools: ("unused".into(), vec![]),
+                tool_env: Default::default(),
+                allowed: vec![],
+            },
+        );
+        runs.start(&mut panel, &mut store, &effect, 10, || Ok(handle))
+            .unwrap();
+        panel
+            .draft_mut("t")
+            .unwrap()
+            .insert_text("Make it blue", 11, false);
+        let mut steer = panel.submit("t", "run", "direction", 12).unwrap();
+        if attached
+            && let pm_panel_agentpanel::model::EffectKind::Send { attachments, .. } =
+                &mut steer.kind
+        {
+            attachments.push(json!({"name":"reference.txt","text":"blue"}));
+        }
+        let result = runs.dispatch(&mut panel, &mut store, &steer, 12);
+        release.send(()).unwrap();
+        result.unwrap();
+    }
+}
+
+#[test]
+fn rejected_steer_restarts_with_original_and_directions() {
+    let temp = Temp::new();
+    let (mut store, mut panel, effect) = setup();
+    let mut runs = ProviderRuns::default();
+    let mismatched = transport::spawn(
+        spec(&temp, "idle"),
+        Machine::Claude(claude::Client::new(
+            "other-run".into(),
+            Authority::new(Access::Editor, ApprovalMode::Auto, false).unwrap(),
+            0,
+        )),
+        vec![],
+    );
+    runs.start(&mut panel, &mut store, &effect, 10, || Ok(mismatched))
+        .unwrap();
+    panel
+        .draft_mut("t")
+        .unwrap()
+        .insert_text("Make it blue", 11, false);
+    let steer = panel.submit("t", "run", "direction", 12).unwrap();
+    let prompt = runs.continued_request("run", "Make it blue").unwrap();
+    assert!(prompt.contains("ORIGINAL REQUEST\nOriginal brief"));
+    assert!(prompt.contains("NEW DIRECTION\nMake it blue"));
+    let restarted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let called = restarted.clone();
+    let restart_spec = spec(&temp, "idle");
+    runs.steer(
+        &mut panel,
+        &mut store,
+        &steer,
+        12,
+        "Make it blue".into(),
+        vec![],
+        Box::new(move || {
+            called.store(true, Ordering::SeqCst);
+            Ok(transport::spawn(
+                restart_spec,
+                Machine::Claude(claude::Client::new(
+                    "run".into(),
+                    Authority::new(Access::Editor, ApprovalMode::Auto, false).unwrap(),
+                    0,
+                )),
+                vec![claude::user_message(&prompt, &[])],
+            ))
+        }),
+    )
+    .unwrap();
+    let end = Instant::now() + Duration::from_secs(3);
+    while !restarted.load(Ordering::SeqCst) && Instant::now() < end {
+        runs.poll(&mut panel, &mut store, 13, 256).unwrap();
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(restarted.load(Ordering::SeqCst));
+    let next = runs.continued_request("run", "Keep it short").unwrap();
+    assert!(next.contains("Original brief"));
+    assert!(next.contains("Make it blue\n\nKeep it short"));
+    assert!(panel.session("t").unwrap().run.is_some());
+}
+#[test]
+fn failed_steer_shows_a_notice() {
+    let temp = Temp::new();
+    let (mut store, mut panel, effect) = setup();
+    let mut runs = ProviderRuns::default();
+    runs.start(&mut panel, &mut store, &effect, 10, || {
+        Ok(peer(&temp, "idle"))
+    })
+    .unwrap();
+    panel
+        .draft_mut("t")
+        .unwrap()
+        .insert_text("Make it blue", 11, false);
+    let steer = panel.submit("t", "run", "direction", 12).unwrap();
+    runs.refuse(&mut panel, &mut store, &steer, 13, &Error::Busy)
+        .unwrap();
+    runs.poll(&mut panel, &mut store, 14, 256).unwrap();
+    assert!(
+        format!("{:?}", panel.session("t").unwrap().trace.rows).contains("could not be delivered")
+    );
+}
+
+#[test]
+fn exec_steer_restarts_and_preserves_attachment_metadata() {
+    let temp = Temp::new();
+    let (mut store, mut panel, mut effect) = setup();
+    let context = json!({"kind":"layer","id":"original-target"});
+    if let pm_panel_agentpanel::model::EffectKind::Send { attachments, .. } = &mut effect.kind {
+        attachments
+            .push(json!({"name":"original.txt","content":"original", "targetContext":context}));
+    }
+    let handle = transport::spawn(
+        spec(&temp, "idle"),
+        Machine::CodexExec {
+            client: pm_agents::codex_exec::Client::new(
+                "run".into(),
+                Authority::new(Access::Project, ApprovalMode::Auto, false).unwrap(),
+                0,
+            ),
+            output: temp.0.join("result"),
+        },
+        vec![],
+    );
+    assert!(handle.supports_steering());
+    assert!(!handle.supports_live_steering());
+    let mut runs = ProviderRuns::default();
+    runs.start(&mut panel, &mut store, &effect, 10, || Ok(handle))
+        .unwrap();
+    panel
+        .draft_mut("t")
+        .unwrap()
+        .insert_text("Make it blue", 11, false);
+    let mut steer = panel.submit("t", "run", "direction", 12).unwrap();
+    if let pm_panel_agentpanel::model::EffectKind::Send { attachments, .. } = &mut steer.kind {
+        attachments
+            .push(json!({"name":"new.txt","content":"blue","targetContext":{"id":"new-target"}}));
+    }
+    let continued = runs.continuation_effect(&steer).unwrap();
+    if let pm_panel_agentpanel::model::EffectKind::Send { attachments, .. } = &continued.kind {
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(attachments[0]["targetContext"], context);
+        assert_eq!(attachments[1]["targetContext"]["id"], "new-target");
+    } else {
+        panic!("expected send");
+    }
+    let prompt = runs.continued_request("run", "Make it blue").unwrap();
+    assert!(prompt.contains("ORIGINAL REQUEST\nOriginal brief"));
+    assert!(prompt.contains("NEW DIRECTION\nMake it blue"));
+    let restarted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let called = restarted.clone();
+    let restart_spec = spec(&temp, "idle");
+    runs.steer(
+        &mut panel,
+        &mut store,
+        &steer,
+        12,
+        "Make it blue".into(),
+        vec![],
+        Box::new(move || {
+            called.store(true, Ordering::SeqCst);
+            Ok(transport::spawn(
+                restart_spec,
+                Machine::Claude(claude::Client::new(
+                    "run".into(),
+                    Authority::new(Access::Editor, ApprovalMode::Auto, false).unwrap(),
+                    0,
+                )),
+                vec![],
+            ))
+        }),
+    )
+    .unwrap();
+    assert!(restarted.load(Ordering::SeqCst));
+    assert!(runs.steerable("run"));
+}
+
+#[test]
+fn claude_queued_steer_publishes_last_result_after_stdin_closes() {
+    let temp = Temp::new();
+    let (mut store, mut panel, effect) = setup();
+    let mut runs = ProviderRuns::default();
+    runs.start(&mut panel, &mut store, &effect, 10, || {
+        Ok(peer(&temp, "claude-steer"))
+    })
+    .unwrap();
+    panel
+        .draft_mut("t")
+        .unwrap()
+        .insert_text("Make it blue", 11, false);
+    let steer = panel.submit("t", "run", "direction", 12).unwrap();
+    runs.steer(
+        &mut panel,
+        &mut store,
+        &steer,
+        12,
+        "Make it blue".into(),
+        vec![],
+        Box::new(|| panic!("live stdin must accept the steer")),
+    )
+    .unwrap();
+    drain(&mut runs, &mut panel, &mut store, |p| {
+        p.session("t").unwrap().run.is_none()
+    });
+    let settled = runs.take_settled();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(
+        settled[0].1,
+        RunResult::success("Blue answer".into(), Access::Editor)
+    );
+}
+
+#[test]
+fn steering_a_held_turn_discards_its_previous_completion() {
+    let temp = Temp::new();
+    let (mut store, mut panel, effect) = setup();
+    let mut runs = ProviderRuns::default();
+    runs.start(&mut panel, &mut store, &effect, 10, || {
+        Ok(peer(&temp, "idle"))
+    })
+    .unwrap();
+    assert!(runs.orchestrate("run"));
+    runs.inject(
+        "run",
+        Event::Completed {
+            run: "run".into(),
+            result: RunResult::success("Old answer".into(), Access::Editor),
+        },
+    );
+    runs.poll(&mut panel, &mut store, 11, 16).unwrap();
+    assert!(runs.held("run"));
+    panel
+        .draft_mut("t")
+        .unwrap()
+        .insert_text("Make it blue", 12, false);
+    let steer = panel.submit("t", "run", "direction", 13).unwrap();
+    let replacement = peer(&temp, "idle");
+    runs.steer(
+        &mut panel,
+        &mut store,
+        &steer,
+        13,
+        "Make it blue".into(),
+        vec![],
+        Box::new(move || Ok(replacement)),
+    )
+    .unwrap();
+    assert!(!runs.held("run"));
+    assert!(runs.take_ended().is_empty());
+    runs.release("run");
+    runs.poll(&mut panel, &mut store, 14, 16).unwrap();
+    assert!(panel.session("t").unwrap().run.is_some());
+    assert!(runs.take_settled().is_empty());
+}
+
+#[test]
+fn rejected_steer_with_failed_restart_reports_a_quiet_notice() {
+    let temp = Temp::new();
+    let (mut store, mut panel, effect) = setup();
+    let mut runs = ProviderRuns::default();
+    let mismatched = transport::spawn(
+        spec(&temp, "idle"),
+        Machine::Claude(claude::Client::new(
+            "other-run".into(),
+            Authority::new(Access::Editor, ApprovalMode::Auto, false).unwrap(),
+            0,
+        )),
+        vec![],
+    );
+    runs.start(&mut panel, &mut store, &effect, 10, || Ok(mismatched))
+        .unwrap();
+    panel
+        .draft_mut("t")
+        .unwrap()
+        .insert_text("Make it blue", 11, false);
+    let steer = panel.submit("t", "run", "direction", 12).unwrap();
+    runs.steer(
+        &mut panel,
+        &mut store,
+        &steer,
+        12,
+        "Make it blue".into(),
+        vec![],
+        Box::new(|| Err(Error::Host("synthetic restart refused".into()))),
+    )
+    .unwrap();
+    drain(&mut runs, &mut panel, &mut store, |p| {
+        format!("{:?}", p.session("t").unwrap().trace.rows).contains("could not be delivered")
+    });
+    let rows = format!("{:?}", panel.session("t").unwrap().trace.rows);
+    assert!(rows.contains("synthetic restart refused"));
+    assert!(rows.contains("Please send it again"));
+    assert!(panel.session("t").unwrap().run.is_some());
+}

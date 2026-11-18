@@ -2453,3 +2453,127 @@ fn send_latency_status_never_waits_for_provider_or_storage_locks() {
     panel.wait(idle);
     panel.panels.close();
 }
+
+#[test]
+fn steering_a_held_parent_retains_the_direction_after_child_results() {
+    for original_brief in ["Original brief", agent_host::WORKSPACE_IMPORT_LABEL] {
+        let markers = (0..6)
+            .map(|index| format!("[Attachment: original-{index}.png]"))
+            .collect::<String>();
+        let expected_original = format!("{markers}{}", agent_host::expand_request(original_brief));
+        let expected_direction = "[Attachment: latest.png]Make it blue";
+        let root = tempfile::tempdir().unwrap();
+        let actor = actor();
+        let requests = root.path().join("requests.jsonl");
+        let mut environment = slow_environment(root.path(), "1.0");
+        environment.vars.insert(
+            "PM_FAKE_REQUESTS".into(),
+            requests.to_string_lossy().into_owned(),
+        );
+        let mut panel = Agent::mount(&actor, environment);
+        panel.connected(Provider::Chatgpt);
+        let agent = panel.agent();
+        let thread = thread_id(&agent);
+        let document = actor
+            .handle()
+            .published("synthetic")
+            .unwrap()
+            .snapshot
+            .doc_id;
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        panel.panels.agent_attach((0..6).map(|index| json!({
+            "id":format!("original-{index}"),"name":format!("original-{index}.png"),"type":"image/png","size":68,"dataUrl":format!("data:image/png;base64,{png}"),
+            "targetContext":{"projectId":"synthetic","documentId":document,"panelId":"viewer","selection":[format!("original-{index}")]}
+        })).collect()).unwrap();
+        panel.send(original_brief);
+        let run = live_run(&agent, &thread);
+        let task = panel
+            .panels
+            .agent_orchestrate(
+                "delegate_task",
+                &json!({"agentRunId":run,"task":"Hold: forever"}),
+            )
+            .unwrap();
+        panel.wait(|state| state.runs.held(&run));
+        let recorded = || -> Vec<Value> {
+            std::fs::read_to_string(&requests)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect()
+        };
+        let original = recorded()
+            .into_iter()
+            .find(|record| {
+                record["request"]["params"]["input"][0]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(expected_original.as_str()))
+            })
+            .expect("original request recorded");
+        let workspace = original["cwd"].clone();
+        panel.panels.agent_attach(vec![json!({
+            "id":"latest-pick","name":"latest.png","type":"image/png","size":68,"dataUrl":format!("data:image/png;base64,{png}"),
+            "targetContext":{"projectId":"synthetic","documentId":document,"panelId":"viewer","selection":["new-target"],"compositionTime":1.5}
+        })]).unwrap();
+        panel.send("Make it blue");
+        panel.wait(|state| {
+            assert!(state.panel.session(&thread).unwrap().run.is_some());
+            recorded().iter().any(|record| {
+                record["cwd"] == workspace
+                    && record["request"]["params"]["input"][0]["text"]
+                        .as_str()
+                        .is_some_and(|text| {
+                            text.contains(&format!("NEW DIRECTION\n{expected_direction}"))
+                        })
+            })
+        });
+        // The person's Stop task delivers the outcome to its parent. The
+        // agent's task_cancel acknowledges it, so it intentionally does not.
+        agent
+            .lock()
+            .unwrap()
+            .tasks
+            .stop_task(
+                &panel.panels.broker.agent,
+                &run,
+                task["taskId"].as_str().unwrap(),
+            )
+            .unwrap();
+        panel.wait(|state| {
+            state.panel.session(&thread).unwrap().run.is_none() && state.tasks.idle()
+        });
+        let turns: Vec<_> = recorded()
+            .into_iter()
+            .filter(|record| record["cwd"] == workspace)
+            .collect();
+        assert_eq!(
+            turns.len(),
+            3,
+            "original, steered restart, then child-result continuation: {turns:?}"
+        );
+        for turn in &turns[1..] {
+            let text = turn["request"]["params"]["input"][0]["text"]
+                .as_str()
+                .unwrap();
+            assert!(
+                text.contains(&format!("ORIGINAL REQUEST\n{expected_original}")),
+                "{text}"
+            );
+            assert!(
+                text.contains(&format!("NEW DIRECTION\n{expected_direction}")),
+                "{text}"
+            );
+            assert!(text.contains("original-0"), "{text}");
+            assert!(text.contains("original-5"), "{text}");
+            assert!(text.contains("new-target"), "{text}");
+            let images = turn["request"]["params"]["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|part| part["type"] == "localImage")
+                .count();
+            assert_eq!(images, 7, "all original and new images survive: {turn}");
+        }
+        panel.panels.close();
+    }
+}

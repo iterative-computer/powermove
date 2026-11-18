@@ -371,6 +371,22 @@ impl Tasks {
         );
         self.launched.insert(request.run.clone(), request.clone());
     }
+    /// A new direction supersedes a held answer and becomes the base for
+    /// subsequent child-result continuations as well as provider restarts.
+    pub fn directed(&mut self, request: &Request) {
+        self.launched.insert(request.run.clone(), request.clone());
+        if let Some(root) = self.roots.get_mut(&request.run) {
+            root.ended = None;
+            root.draining = false;
+            root.waiting_note = None;
+            if let Some(mut saved) = root.scope.request(&request.run).cloned() {
+                saved["prompt"] = json!(request.prompt);
+                saved["images"] = json!(request.images);
+                saved["attachments"] = json!(request.files);
+                root.scope.set_request(&request.run, saved);
+            }
+        }
+    }
     /// The monitor keeps 512 runs; finished, unwatched ones go first (their
     /// results stay in the thread archive).
     fn retire_terminal_runs(&mut self) {
@@ -1674,7 +1690,7 @@ impl Tasks {
                         },
                     );
                 }
-            } else if handle.supports_steering()
+            } else if handle.supports_live_steering()
                 && handle
                     .send(Action::Steer {
                         run: child_run.clone(),
