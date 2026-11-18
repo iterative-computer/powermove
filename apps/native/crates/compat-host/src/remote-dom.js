@@ -269,7 +269,7 @@
     const root = [...document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])')]
       .find((node) => node.getAttribute('data-pm-contribution') === id);
     if (!root) return false;
-    for (const [key, value] of Object.entries({position:'fixed', left:rect.x+'px', top:rect.y+'px', width:rect.w+'px', height:rect.h+'px', 'box-sizing':'border-box', 'min-width':'0', 'min-height':'0', 'max-width':rect.w+'px', 'max-height':rect.h+'px'}))
+    for (const [key, value] of Object.entries({position:'fixed', left:rect.x+'px', top:rect.y+'px', width:rect.w+'px', height:rect.h+'px', 'box-sizing':'border-box', 'min-width':'0', 'min-height':'0', 'max-width':rect.w+'px', 'max-height':rect.h+'px', 'clip-path':'inset(0)'}))
       root.style.setProperty(key, value, 'important');
   }, (placement) => {
     const root = [...document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])')]
@@ -278,6 +278,9 @@
     const box = root.getBoundingClientRect();
     call({kind:'panel_layout_applied', panel:0, payload:{...placement,
       rect:{x:box.x,y:box.y,w:box.width,h:box.height}}});
+  }, (active) => {
+    for (const root of document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])'))
+      root.style.setProperty('visibility', active.has(root.getAttribute('data-pm-contribution')) ? 'visible' : 'hidden', 'important');
   });
   document.addEventListener('scroll', (event) => {
     if (event.target.closest?.('[data-pm-overscan]')) return;
@@ -286,19 +289,32 @@
   }, true);
   const apply = async (event) => {
     if (event.kind === "overscan_clear") {
-      document.querySelector('[data-pm-overscan]')?.remove();
+      const clone = document.querySelector('[data-pm-overscan]');
+      if (clone?.getAttribute('data-pm-contribution') === event.id &&
+          clone.getAttribute('data-pm-overscan') === String(event.generation)) clone.remove();
       requestAnimationFrame(() => requestAnimationFrame(() => call({kind:'overscan_cleared',panel:0,payload:{id:event.id,generation:event.generation}})));
     } else if (event.kind === "overscan_prepare") {
       document.querySelector('[data-pm-overscan]')?.remove();
       const root = [...document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])')]
         .find((node) => node.getAttribute('data-pm-contribution') === event.id);
-      if (!root) return;
+      if (!root) {
+        call({kind:'overscan_cleared',panel:0,payload:{id:event.id,generation:event.generation}});
+        return;
+      }
       const clone = root.cloneNode(true);
-      clone.setAttribute('data-pm-overscan', '');
+      clone.setAttribute('data-pm-overscan', String(event.generation));
       clone.setAttribute('aria-hidden', 'true');
       clone.setAttribute('inert', '');
       const rect = event.rect;
-      clone.style.cssText = `position:fixed!important;left:${rect.x}px!important;top:0!important;width:${rect.w}px!important;height:${rect.h}px!important;max-height:${rect.h}px!important;box-sizing:border-box!important;overflow-x:hidden!important;overflow-y:${root.scrollHeight > root.clientHeight ? "scroll" : "hidden"}!important;pointer-events:none!important;z-index:2147483647`;
+      const captureStyle = {
+        position: 'fixed',
+        left: rect.x + 'px', top: rect.y + 'px', width: rect.w + 'px', height: rect.h + 'px',
+        'max-height': rect.h + 'px', 'min-height': '0', 'box-sizing': 'border-box',
+        'clip-path': 'inset(0)', isolation: 'isolate',
+        'background-color': 'var(--pm-ground, #202020)',
+        'pointer-events': 'none', 'z-index': '2147483647',
+      };
+      for (const [key, value] of Object.entries(captureStyle)) clone.style.setProperty(key, value, 'important');
       document.body.append(clone);
       const originals = [root, ...root.querySelectorAll('*')];
       const copies = [clone, ...clone.querySelectorAll('*')];
@@ -314,7 +330,7 @@
       });
       requestAnimationFrame(() => requestAnimationFrame(() => call({kind:'overscan_ready',panel:0,payload:{id:event.id,generation:event.generation}})));
     } else if (event.kind === "panel_layout") {
-      panelLayouts.enqueue(event.placements);
+      panelLayouts.enqueue(event.placements, event.active);
     } else if (event.kind === "fonts") {
       await loadFonts(event.faces);
     } else if (event.kind === "theme") {

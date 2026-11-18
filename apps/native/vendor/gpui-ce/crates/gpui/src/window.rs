@@ -4239,6 +4239,9 @@ impl Window {
         layer: crate::ScrollLayerId,
     ) -> Option<(Point<Pixels>, Bounds<Pixels>)> {
         let layer = self.scroll_layers.get(&layer.0)?;
+        if layer.frame != self.scroll_layer_frame {
+            return None;
+        }
         Some((layer.current() - layer.recorded, layer.clip.bounds))
     }
 

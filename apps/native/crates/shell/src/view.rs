@@ -2798,7 +2798,7 @@ impl Render for Editor {
             let header_rect = self.geometry.header_rect(&p, &t);
             let header_offset = header_rect.y - p.rect.y;
             let mut panel = positioned(self.slides.shown(&id, p.rect))
-                .id(format!("group-{}-{}", p.dock, p.group))
+                .id(SharedString::from(format!("group-{id}")))
                 .role(Role::Group)
                 .tab_group()
                 .tab_index(self.panel_order.iter().position(|v| v == &id).unwrap_or(0) as isize)
@@ -3250,16 +3250,37 @@ impl Render for Editor {
                 .as_ref()
                 .and_then(|i| i.panel(&id, p.rect, w, cx));
             if let Some(content) = content {
-                panel = if header_offset > 0. {
-                    panel.child(
+                if self.geometry.side_docks.contains_key(&p.dock) {
+                    let height = (p.rect.h - m.header).max(0.);
+                    // Keep the body's layout origin while the sticky header
+                    // occludes its first rows. AppKit slots also read this mask.
+                    panel = panel.child(
                         div()
-                            .h(px((p.rect.h - m.header).max(0.)))
-                            .overflow_hidden()
-                            .child(content),
-                    )
+                            .relative()
+                            .flex_none()
+                            .h(px(height))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left_0()
+                                    .top(px(header_offset))
+                                    .w_full()
+                                    .h(px((height - header_offset).max(0.)))
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left_0()
+                                            .top(px(-header_offset))
+                                            .w_full()
+                                            .h(px(height))
+                                            .child(content),
+                                    ),
+                            ),
+                    );
                 } else {
-                    panel.child(content)
-                };
+                    panel = panel.child(content);
+                }
             } else {
                 let unknown = format!("No installed extension provides “{id}”.");
                 let coming =
@@ -5291,3 +5312,7 @@ mod library_capture_tests {
         }
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "dock_render_tests.rs"]
+mod dock_render_tests;

@@ -28,6 +28,10 @@ impl LayerStage {
         (bounds, clip)
     }
 
+    pub fn recorded_in_scroll_layer(&self) -> bool {
+        self.0.get().is_some()
+    }
+
     /// Where the slot stands on a frame that did not paint it, when it is
     /// inside a scroll layer that is still there.
     pub fn kept(&self, window: &Window) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {

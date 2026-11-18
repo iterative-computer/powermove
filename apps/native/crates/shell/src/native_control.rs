@@ -1036,6 +1036,7 @@ impl NativeControl {
         }
         match self.layer.kept(window) {
             Some((bounds, clip)) => self.slot.stage(ns_rect(bounds), ns_rect(clip)),
+            None if self.layer.recorded_in_scroll_layer() => self.slot.hide(),
             None => self.slot.keep(),
         }
     }

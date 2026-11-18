@@ -367,6 +367,7 @@ impl TextField {
                 crate::native_control::ns_rect(bounds),
                 crate::native_control::ns_rect(clip),
             ),
+            None if self.layer.recorded_in_scroll_layer() => self.slot.hide(),
             None => self.slot.keep(),
         }
     }
