@@ -339,6 +339,13 @@ fn separator(mtm: objc2::MainThreadMarker) -> Retained<NSView> {
     view
 }
 
+fn flexible_space(mtm: objc2::MainThreadMarker) -> Retained<NSView> {
+    let space = NSView::new(mtm);
+    space.setTranslatesAutoresizingMaskIntoConstraints(false);
+    space.setContentHuggingPriority_forOrientation(1., NSLayoutConstraintOrientation::Horizontal);
+    space
+}
+
 struct Row {
     body: Pile,
     line: Pile,
@@ -353,13 +360,11 @@ impl Row {
             .constraintGreaterThanOrEqualToConstant(ROW_HEIGHT)
             .setActive(true);
         let line = Pile::new(mtm, true, 8., 0., 0.);
-        let space = NSView::new(mtm);
-        space.setTranslatesAutoresizingMaskIntoConstraints(false);
-        space.setContentHuggingPriority_forOrientation(
-            1.,
-            NSLayoutConstraintOrientation::Horizontal,
-        );
-        Self { body, line, space }
+        Self {
+            body,
+            line,
+            space: flexible_space(mtm),
+        }
     }
 
     fn set(
@@ -523,6 +528,7 @@ impl Drop for VirtualList {
 enum Widget {
     Pile(Pile),
     Group(Group),
+    Header(Pile, Retained<NSView>),
     Row(Row),
     Virtual(VirtualList),
     Control(FormControl),
@@ -543,7 +549,7 @@ enum Widget {
 impl Widget {
     fn view(&self) -> &NSView {
         match self {
-            Self::Pile(value) => &value.stack,
+            Self::Pile(value) | Self::Header(value, _) => &value.stack,
             Self::Group(value) => &value.box_view,
             Self::Row(value) => &value.body.stack,
             Self::Virtual(value) => &value.scroll,
@@ -605,6 +611,13 @@ impl Render<'_, '_> {
                 row.set(leading, trailing, footers);
             }
             Widget::Pile(pile) => pile.set(&self.children(&node.children)),
+            Widget::Header(pile, space) => {
+                let mut views = self.children(&node.children);
+                if views.len() > 2 {
+                    views.insert(2, space.clone());
+                }
+                pile.set(&views);
+            }
             Widget::Control(control) => {
                 let (kind, value, options) = control_value(self.surface, node, component);
                 control.update(&value, &options, disabled(node));
@@ -741,7 +754,10 @@ impl Render<'_, '_> {
         }
         match layout(node) {
             "row" => Widget::Row(Row::new(mtm)),
-            "header" => Widget::Pile(Pile::new(mtm, true, ROW_INSET, ROW_INSET, ROW_INSET)),
+            "header" => Widget::Header(
+                Pile::new(mtm, true, ROW_INSET, ROW_INSET, ROW_INSET),
+                flexible_space(mtm),
+            ),
             "headingLine" => Widget::Pile(Pile::new(mtm, true, ROW_INSET, ROW_INSET, 0.)),
             "line" => Widget::Pile(Pile::new(mtm, true, 6., 0., 0.)),
             "group" => Widget::Pile(Pile::new(mtm, false, 5., 0., 0.)),
