@@ -371,6 +371,7 @@ fn add(id: &str, kind: &str) -> AddLayer {
         visible: None,
         shy: None,
         collapsed: None,
+        track: None,
         time: 2.51,
     }
 }

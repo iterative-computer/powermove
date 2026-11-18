@@ -1,8 +1,9 @@
 //! Settings is a window of its own again, one for the app (PM-375). The
-//! editor that opened it hosts it: its Settings surface is the page, under
-//! AppKit's sidebar and toolbar (`pm_shell::settings_window`). Another
-//! editor asking for Settings takes the window over, so the Project and
-//! Memory sections are always the project it was asked from.
+//! editor that opened it supplies the settings model for the AppKit form. Another
+//! editor asking for Settings takes the window over, so Project settings and
+//! notes reflect the project it was asked from.
+pub(crate) mod form;
+
 use crate::session::Controller;
 use gpui::*;
 use pm_shell::settings_window::{Event, Section, SettingsChrome};
@@ -12,12 +13,6 @@ use std::{cell::RefCell, rc::Rc};
 thread_local! {
     /// The editor hosting the Settings window.
     static HOST: RefCell<Option<WeakEntity<Controller>>> = const { RefCell::new(None) };
-}
-
-/// The window's appearance for its chrome: dark or light, and the page's
-/// ground.
-pub(crate) fn scheme(t: &pm_design::Tokens) -> (bool, u32) {
-    (t.scheme == pm_design::Scheme::Dark, t.colors.panel_secondary)
 }
 
 /// Where the toolbar's back and forward go: the sections visited, in order.
@@ -104,13 +99,14 @@ pub(crate) fn install(
 ) -> Option<Rc<SettingsChrome>> {
     let (tx, rx) = async_channel::unbounded();
     let chrome = Rc::new(SettingsChrome::install(view, tx)?);
-    let (dark, ground) = scheme(&owner.read(cx).host.borrow().tokens);
-    chrome.set_scheme(dark, ground);
+    chrome.update_sidebar_appearance();
     // A check of the window as built, for any bundle (release included).
     if let Some(path) = std::env::var_os("PM_NATIVE_SETTINGS_PROBE") {
         let probe = chrome.clone();
         cx.spawn(async move |cx| {
-            cx.background_executor().timer(std::time::Duration::from_secs(2)).await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
             let _ = cx.update(|_| std::fs::write(&path, probe.report().to_string()));
         })
         .detach();
@@ -143,9 +139,11 @@ pub(crate) fn install(
         }
     })
     .detach();
-    let runtime = owner.update(cx, |v, _| {
+    let runtime = owner.update(cx, |v, cx| {
         v.builtins.settings_chrome = Some(chrome.clone());
         v.builtins.settings_history = History::default();
+        v.builtins.settings_form = Some(form::Form::new(chrome.page()));
+        v.mount_settings_form(cx);
         v.builtins.runtime.clone()
     });
     // The panel showed before its window was here: it says again what the
@@ -182,6 +180,7 @@ impl Controller {
     /// not show it again (PM-397).
     pub(crate) fn settings_closed(&mut self, _cx: &mut Context<Self>) {
         self.builtins.windows.remove("settings");
+        self.cache_closed_settings_form();
         self.builtins.settings_chrome = None;
         self.builtins.settings_me = None;
         self.builtins.settings_watch = None;
@@ -195,9 +194,19 @@ impl Controller {
             return Value::Null;
         };
         let id = &session.project;
+        // Its Home poster, else the picture its viewer last showed (kept
+        // for every project opened here), else none.
         let (file, _) = crate::poster::files(&self.profile.join("caches").join("thumbnails"), id);
-        let poster = file.exists().then(|| {
-            let key = format!("settings/poster/{id}");
+        let (last, _) = crate::poster::last_frame_files(&self.profile, id);
+        let poster = [file, last].into_iter().find(|f| f.exists()).map(|file| {
+            // Its key names the file it shows: a picture written since is a
+            // new key, never the cached one.
+            let stamp = std::fs::metadata(&file)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_millis());
+            let key = format!("settings/poster/{id}/{stamp}");
             crate::media_thumbs::register(&key, file);
             key
         });
@@ -272,7 +281,9 @@ impl Controller {
                 Some(Section {
                     id: s["id"].as_str()?.to_owned(),
                     title: s["title"].as_str()?.to_owned(),
-                    project: s["project"].as_bool().unwrap_or(false),
+                    account_name: (s["id"] == "account")
+                        .then(|| input["accountName"].as_str().map(str::to_owned))
+                        .flatten(),
                     dim: s["dim"].as_bool().unwrap_or(false),
                 })
             })
@@ -294,6 +305,7 @@ impl Controller {
     ) -> Option<(std::sync::Arc<pm_builtins::Builtins>, Value)> {
         let intent = match event {
             Event::Select(id) => json!({ "select": id }),
+            Event::Escape => json!({ "escape": true }),
             Event::Search(query) => json!({ "search": query }),
             Event::Back => match self.builtins.settings_history.back() {
                 Some(id) => json!({ "select": id }),

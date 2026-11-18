@@ -32,6 +32,10 @@ use std::{
 /// 100 to 300).
 const LARGE: usize = 1000;
 
+/// The rows kept built on either side of what shows, in viewports, where no
+/// scroll layer moves them.
+const NEAR: f32 = 0.25;
+
 /// Rows not measured yet that a frame builds anyway, to measure them.
 const MEASURE_PER_FRAME: usize = 4;
 
@@ -160,11 +164,16 @@ impl SurfaceView {
                 let from = top.max(0.) - top - offset;
                 let to = (top + f32::from(bounds.size.height)).min(window_height) - top - offset;
                 let shown = (to - from).max(0.);
-                // A viewport kept on either side: never less than what a
-                // scroll layer records past its edges (`scroll_layer::REACH`,
-                // one viewport), so a step it replays shows only rows built,
-                // and a step past it draws the panel again.
-                let near = (from - shown, to + shown);
+                // A viewport kept on either side where a scroll layer moves
+                // the rows (the Project panel): never less than what it
+                // records past its edges (`scroll_layer::REACH`, one
+                // viewport), so a step it replays shows only rows built, and
+                // a step past it draws the panel again. Elsewhere each step
+                // draws the panel at its new offset, and a quarter of one
+                // covers rows not measured yet; a fast wheel on Settings ›
+                // Shortcuts built three viewports of rows a frame.
+                let margin = if self.layered() { shown } else { shown * NEAR };
+                let near = (from - margin, to + margin);
                 let mut budget = MEASURE_PER_FRAME;
                 let before = self.cull.culled.len();
                 self.flow(scroller, &handle, 0., near, &extents, &mut budget);
@@ -177,13 +186,20 @@ impl SurfaceView {
             window.request_animation_frame();
         }
         if crate::diag::enabled() {
-            let scrollers: Vec<(f32, f32, f32)> = self
+            let scrollers: Vec<(f32, f32, f32, f32)> = self
                 .prepared
                 .nodes
                 .values()
                 .filter(|n| n.scroll_y)
                 .filter_map(|n| self.scrolls.get(&n.id))
-                .map(|h| (f32::from(h.bounds().origin.y), f32::from(h.bounds().size.height), -f32::from(h.offset().y)))
+                .map(|h| {
+                    (
+                        f32::from(h.bounds().origin.y),
+                        f32::from(h.bounds().size.height),
+                        -f32::from(h.offset().y),
+                        f32::from(h.max_offset().y),
+                    )
+                })
                 .collect();
             crate::diag::line(serde_json::json!({"ui": "cull", "nodes": self.prepared.nodes.len(),
                 "culled": self.cull.culled.len(), "measured": self.cull.measured.len(),
@@ -335,6 +351,11 @@ impl SurfaceView {
     /// few milliseconds to make, which a frame should not pay).
     pub(super) fn cull_large(&self) -> bool {
         self.prepared.nodes.len() > LARGE
+    }
+    /// Whether this panel's scrollers move their rows with a scroll layer
+    /// (`v4_view`, next to its `.scroll_layer()`).
+    pub(super) fn layered(&self) -> bool {
+        &*self.publication.panel == pm_builtins::PROJECT_PANEL
     }
     /// Whether the last frame left rows out: a body that scrolls around the
     /// panel draws it again on each step, so rows come back as they near.

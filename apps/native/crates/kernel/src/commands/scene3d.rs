@@ -547,12 +547,11 @@ pub(crate) fn all(layer: &Value) -> Vec<(String, Vec<Step>)> {
                 "object"
             },
         )
-    }) {
-        if let Ok(object) = pm_scene3d::from_model(object) {
-            for (name, _) in pm_scene3d::contract::channels(&object) {
-                if let Some(p) = path(layer, &name) {
-                    out.push((name, p));
-                }
+    }) && let Ok(object) = pm_scene3d::from_model(object)
+    {
+        for (name, _) in pm_scene3d::contract::channels(&object) {
+            if let Some(p) = path(layer, &name) {
+                out.push((name, p));
             }
         }
     }
@@ -985,7 +984,8 @@ fn import(
     import_placement::place(cx, comp, layer_id, receipt, time, setup_studio)?;
     if empty && setup_studio {
         let assets = import_placement::AssetBounds;
-        for operation in [serde_json::json!({"operation":"auto_studio","target":layer_id})] {
+        {
+            let operation = serde_json::json!({"operation":"auto_studio","target":layer_id});
             let snapshot = crate::Snapshot {
                 doc_id: 0,
                 revision: 0,
@@ -1349,10 +1349,10 @@ pub fn resolve_scene_with_camera(
             self.query("evP", l, t, serde_json::json!({"key":path,"prop":c}))
         }
         fn active(&mut self, l: &serde_json::Value, t: f64) -> pm_scene3d::Result<bool> {
-            if let Some(camera) = &self.camera {
-                if pm_scene3d::schema::role(l) == Some(pm_scene3d::schema::Role::Camera) {
-                    return Ok(l["id"] == camera.as_str());
-                }
+            if let Some(camera) = &self.camera
+                && pm_scene3d::schema::role(l) == Some(pm_scene3d::schema::Role::Camera)
+            {
+                return Ok(l["id"] == camera.as_str());
             }
             self.query("active", l, t, serde_json::json!({}))
                 .map(|v| v == true)
@@ -1386,13 +1386,13 @@ pub fn resolve_scene_with_camera(
         .as_array()
         .ok_or_else(|| invalid("No layers"))?
         .clone();
-    if let Some(camera) = camera {
-        if !layers.iter().any(|l| {
+    if let Some(camera) = camera
+        && !layers.iter().any(|l| {
             l["id"] == camera
                 && pm_scene3d::schema::role(l) == Some(pm_scene3d::schema::Role::Camera)
-        }) {
-            return Err(invalid("View camera layer is missing"));
-        }
+        })
+    {
+        return Err(invalid("View camera layer is missing"));
     }
     pm_scene3d::service::resolve(
         &c,

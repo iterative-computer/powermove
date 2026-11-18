@@ -48,14 +48,16 @@ export interface SurfaceProps {
    * (inline, or quiet: no wash), a pull-down titled with its value (a
    * header's picker), a row whose selection spans its whole band,
    * code (a command, path or tool output, in the monospaced face), or a
-   * plate (the grading material a Colour panel group stands on). */
+   * plate (the grading material a Colour panel group stands on), or
+   * glass (the system segmented control used for mode switches). */
   "data-pm-variant"?:
     | "inline"
     | "quiet"
     | "pulldown"
     | "band"
     | "code"
-    | "plate";
+    | "plate"
+    | "glass";
   /** Files dropped from Finder land on this target. */
   "data-pm-drop"?: "files";
   /** An end-anchored scroller (`metadata.scrollAnchor: "end"`) reports

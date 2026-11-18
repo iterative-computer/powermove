@@ -675,6 +675,50 @@ fn settings_project_services_validate_and_publish_only_after_actor_ack() {
     assert_eq!(comp.get("fps").unwrap().to_value().as_f64(), Some(29.97));
 }
 
+/// Settings › Project shows a duration as every duration field does: two
+/// places, so 73.53 s never reads "74 s".
+#[test]
+fn settings_show_a_duration_to_two_places() {
+    let actor = actor();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend =
+        data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    let publication = backend.settings_snapshot().unwrap();
+    let row = publication["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "project.duration")
+        .expect("a duration row");
+    assert_eq!(row["precision"], json!(2), "{row}");
+    assert_eq!(row["unit"], json!("s"), "{row}");
+}
+
+/// Settings › Extensions places an extension as v1 did, by what it
+/// contributes: its content before a companion panel, command or hook.
+#[test]
+fn an_extension_is_placed_by_what_it_contributes() {
+    let kind = |c: &[&str]| {
+        models::extension_kind(&c.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    };
+    assert_eq!(kind(&["effects"]), "Effects");
+    assert_eq!(kind(&["effects", "hooks"]), "Effects");
+    assert_eq!(kind(&["panels", "commands"]), "Panels");
+    assert_eq!(kind(&["themes", "panels", "commands"]), "Appearance");
+    assert_eq!(kind(&["layers", "commands"]), "Layer Types");
+    assert_eq!(kind(&["panels", "hooks"]), "Panels");
+    assert_eq!(kind(&["hooks"]), "Editor Tools");
+    assert_eq!(kind(&[]), "Other");
+    // Every kind it can give is one the page lists.
+    for c in [&["media"][..], &["inspector"], &["transitions"]] {
+        assert!(models::EXTENSION_KINDS.contains(&kind(c)));
+    }
+}
+
 #[test]
 fn application_scope_never_exposes_a_real_document_with_the_transport_id() {
     let actor = actor();
@@ -2507,6 +2551,7 @@ mod effect_delta;
 mod effect_registry;
 mod expressions;
 mod text_animators;
+mod trim_paths;
 
 mod precomp_delta;
 
@@ -4626,6 +4671,8 @@ fn media_and_playback_rows_show_without_a_project_and_follow_their_fact() {
         json!({"mediaSettings":{"rows":[
             {"id":"media.renderLimit","label":"Render Files Limit","detail":"","value":limit,
              "options":[{"v":10,"label":"10 GB"},{"v":25,"label":"25 GB"}]},
+            {"id":"media.importToTimeline","label":"Add Imported Media to the Timeline","detail":"",
+             "value":true,"options":[{"v":true,"label":"On"},{"v":false,"label":"Off"}]},
             {"id":"media.backgroundRender","label":"Background Rendering","detail":"","value":true,
              "options":[{"v":true,"label":"On"},{"v":false,"label":"Off"}],
              "section":"general","group":"Playback","control":"switch"}],
@@ -4637,6 +4684,15 @@ fn media_and_playback_rows_show_without_a_project_and_follow_their_fact() {
     let rows = publication["rows"].as_array().unwrap();
     let row = |id: &str| rows.iter().find(|r| r["id"] == id).cloned().unwrap();
     assert_eq!(row("media.renderLimit")["section"], "media");
+    assert_eq!(row("media.used")["detail"], "Calculating storage…");
+    let import = row("media.importToTimeline");
+    assert_eq!(import["control"], "switch");
+    assert_eq!(import["value"], true);
+    assert!(
+        import["binding"]
+            .as_str()
+            .is_some_and(|binding| !binding.is_empty())
+    );
     let playback = row("media.backgroundRender");
     assert_eq!(
         (
@@ -4648,7 +4704,21 @@ fn media_and_playback_rows_show_without_a_project_and_follow_their_fact() {
     );
     let before = backend.settings_snapshot().unwrap()["revision"].clone();
     backend.native.facts = fact(10);
-    assert_ne!(backend.settings_snapshot().unwrap()["revision"], before);
+    backend.native.facts["mediaSettings"]["used"] =
+        json!({"proxies":"1 GB","optimized":"256 MB","renders":"0 bytes"});
+    let after = backend.settings_snapshot().unwrap();
+    assert_ne!(after["revision"], before);
+    let used = after["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "media.used")
+        .unwrap();
+    assert!(used["value"].is_null());
+    assert_eq!(
+        used["detail"],
+        "Proxies: 1 GB · Optimized Media: 256 MB · Renders: 0 bytes"
+    );
 }
 #[test]
 fn storage_rows_show_without_a_project_and_a_new_measurement_republishes() {
@@ -4678,6 +4748,69 @@ fn storage_rows_show_without_a_project_and_a_new_measurement_republishes() {
     assert!(super::settings::destructive_for_test(
         "storage.delete.backups"
     ));
+}
+/// PM-435: Settings › Extensions turns an extension off and then on again,
+/// each time with the revision of the page it was shown on.
+#[test]
+fn settings_turn_an_extension_off_and_on_again() {
+    let actor = actor();
+    actor
+        .handle()
+        .state_transaction(pm_kernel::state::StateTransaction {
+            expected_revision: None,
+            ops: vec![pm_kernel::state::StateOp::Extension(
+                pm_kernel::state::ExtensionEntry {
+                    id: "com.example.glow".into(),
+                    installed: true,
+                    enabled: true,
+                    version: "1.0.0".into(),
+                    source: pm_model::json::parse(
+                        r#"{"hostRecord":{"name":"Glow","trust":"local","health":{"state":"ok"}}}"#,
+                    )
+                    .unwrap(),
+                },
+            )],
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    let identity = pm_surface::host_api::Identity {
+        realm: "settings".into(),
+        generation: 1,
+        project: "synthetic".into(),
+    };
+    let mut backend =
+        data::Backend::new(actor.handle(), identity, "settings", false).unwrap();
+    let enabled = |b: &mut data::Backend| {
+        b.settings_snapshot().unwrap()["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"] == "com.example.glow")
+            .unwrap()["enabled"]
+            .clone()
+    };
+    for on in [false, true, false, true] {
+        let revision = backend.settings_snapshot().unwrap()["revision"].clone();
+        let args = json!({"revision":revision,"action":{"type":"extension.enabled","id":"com.example.glow","enabled":on}});
+        let models::NativeCommand::State(tx) =
+            backend.native_command("panel.settings", &args).unwrap()
+        else {
+            panic!("a state transaction")
+        };
+        actor.handle().state_transaction(tx).wait().unwrap().unwrap();
+        assert_eq!(enabled(&mut backend), json!(on), "turned {on}");
+    }
+    // The page moved on since it was shown (the host unloaded it): the
+    // switch still stands, for an extension still listed.
+    let stale = backend.settings_snapshot().unwrap()["revision"].as_u64().unwrap() + 7;
+    let args = json!({"revision":stale,"action":{"type":"extension.enabled","id":"com.example.glow","enabled":false}});
+    assert!(matches!(
+        backend.native_command("panel.settings", &args),
+        Ok(models::NativeCommand::State(_))
+    ));
+    let gone = json!({"revision":stale,"action":{"type":"extension.enabled","id":"com.example.none","enabled":false}});
+    assert!(backend.native_command("panel.settings", &gone).is_err());
 }
 #[test]
 fn mods_show_in_finder_and_delete_reach_the_app_only_for_what_this_mac_installed() {
@@ -4984,7 +5117,7 @@ fn a_color_wheel_drag_writes_red_green_and_blue_as_one_undo_step() {
     let ack = |pending: Result<
         pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>>,
     >| pending.unwrap().wait().unwrap().unwrap();
-    let gesture = match ack(panels.scrub_begin("color")).reply {
+    let gesture = match ack(panels.scrub_begin("color", Some("Lift"))).reply {
         pm_kernel::Reply::Gesture(id) => id,
         other => panic!("no gesture: {other:?}"),
     };
@@ -5000,6 +5133,8 @@ fn a_color_wheel_drag_writes_red_green_and_blue_as_one_undo_step() {
     ack(panels.scrub_finish("color", gesture, true));
     let p = kernel.published("synthetic").unwrap();
     assert_eq!(p.history.entries, before + 1, "one Undo step");
+    // Named for the wheel, as v1's were, not "Change Property".
+    assert_eq!(p.history.undo_label.as_deref(), Some("Lift"));
     let backend = panels
         .broker
         .entry("color")
@@ -5124,9 +5259,28 @@ fn every_color_wheels_on_the_layer_has_its_controls_in_the_color_panel() {
             .collect()
     };
     let mut shown = Vec::new();
+    // Each wheel node's props, by id (its master rides on it).
+    let mut wheel_props = std::collections::HashMap::new();
     while Instant::now() < deadline {
         if let Some(publication) = panels.take_publications().pop() {
             shown = ids(&publication);
+            wheel_props = publication
+                .surface
+                .nodes()
+                .values()
+                .filter_map(|n| {
+                    let id = n.props.get("id").and_then(Value::as_str)?;
+                    let master = n
+                        .props
+                        .get("metadata")
+                        .and_then(|m| m.get("pmKit"))
+                        .and_then(|k| k.get("masterBinding"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    id.starts_with("color:wheel:")
+                        .then(|| (id.to_owned(), master.to_owned()))
+                })
+                .collect();
         }
         if shown.iter().any(|id| id.starts_with("color:field:")) {
             break;
@@ -5140,24 +5294,39 @@ fn every_color_wheels_on_the_layer_has_its_controls_in_the_color_panel() {
             "Color Wheels {effect} has no Reset: {shown:?}"
         );
         // A wheel's red, green and blue are its drawn wheel (one control
-        // over the three); Tone and each Master are fields.
-        assert!(
-            shown.contains(&format!("color:wheel:{effect}:gain")),
-            "the Gain wheel of Color Wheels {effect} is not drawn"
-        );
-        for key in ["exposure", "liftMaster", "gainMaster"] {
-            let row = rows
-                .iter()
+        // over the three), and its master the strip the wheel draws under
+        // itself, bound to the master's own parameter; Tone is a field.
+        let row = |key: &str| {
+            rows.iter()
                 .find(|r| {
                     r["kind"] == "parameter"
                         && r["parameter"]["effect"] == effect
                         && r["parameter"]["key"] == key
                 })
-                .unwrap_or_else(|| panic!("{effect} has no {key} row"));
-            let field = format!("color:field:{}", row["id"].as_str().unwrap());
+                .unwrap_or_else(|| panic!("{effect} has no {key} row"))
+        };
+        let field = |key: &str| format!("color:field:{}", row(key)["id"].as_str().unwrap());
+        assert!(
+            shown.contains(&field("exposure")),
+            "exposure of Color Wheels {effect} is not shown"
+        );
+        for wheel in ["lift", "gain"] {
+            let id = format!("color:wheel:{effect}:{wheel}");
+            let carried = wheel_props
+                .get(&id)
+                .unwrap_or_else(|| panic!("the {wheel} wheel of Color Wheels {effect} is not drawn"));
+            let master = format!("{wheel}Master");
+            let binding = row(&master)["parameter"]["binding"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{master} of {effect} has no binding"))
+                .to_owned();
+            assert_eq!(
+                carried, &binding,
+                "the {wheel} wheel of Color Wheels {effect} does not carry its master"
+            );
             assert!(
-                shown.contains(&field),
-                "{key} of Color Wheels {effect} is not shown"
+                !shown.contains(&field(&master)),
+                "{master} of Color Wheels {effect} is still a separate field"
             );
         }
     }
@@ -6392,4 +6561,111 @@ fn export_destination_choice_does_not_start_or_change_the_draft_and_blocks_dupli
         assert!(backend.native_command(command, &json!({"options":before["options"]})).is_err());
     }
     assert_eq!(backend.native.platform.len(), 1);
+}
+
+
+#[test]
+fn properties_show_and_edit_a_layer_transition() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    let project = pm_model::json::parse(r##"{"id":"synthetic","name":"T","compId":"root","w":96,"h":54,"fps":30,"dur":10,"assets":{},"comps":{},"layers":[
+      {"id":"a","type":"solid","name":"A","from":0,"dur":6,"on":true,"lock":false,"p":{"opacity":{"v":100,"kf":[]}},"d":{"w":10,"h":10,"color":"#112233"},"fx":[],
+       "transitionIn":{"type":"wipe","dur":0.5,"p":{"angle":{"v":45,"kf":[],"expr":null}}},"transitionOut":null}]}"##).unwrap();
+    kernel
+        .open("synthetic", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                SelectionCall::Layers {
+                    ids: vec!["a".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let mut presenter = properties::Properties::default();
+    presenter.transitions = crate::models::registered_transitions(&kernel.state());
+    assert!(presenter.transitions.iter().any(|t| t.id == "crossfade"));
+    let snapshot = |presenter: &mut properties::Properties| {
+        let mut model = pm_panel_inspector::Inspector::new(
+            kernel.published("synthetic").unwrap(),
+            Default::default(),
+        );
+        let publication = presenter.snapshot(&mut model, 0., false).unwrap();
+        let sections: Vec<Value> = publication["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["id"].as_str().is_some_and(|id| id.starts_with("transition.")))
+            .cloned()
+            .collect();
+        (sections, model)
+    };
+    let send = |request| {
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)), "{:?}", ack.reply);
+    };
+    let (sections, mut model) = snapshot(&mut presenter);
+    assert_eq!(sections.len(), 1, "only the In edge has one");
+    let section = &sections[0];
+    assert_eq!(section["title"], "Transition In");
+    assert_eq!(section["action"], "remove-transition");
+    let rows = section["rows"].as_array().unwrap();
+    let row = |label: &str| rows.iter().find(|r| r["label"] == label).unwrap_or_else(|| panic!("{label}"));
+    assert_eq!(row("Type")["control"]["value"], "wipe");
+    assert!(
+        row("Type")["control"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["v"] == "crossfade")
+    );
+    let duration = &row("Duration")["control"]["axes"][0];
+    assert_eq!(duration["value"], 0.5);
+    assert_eq!(duration["unit"], "s");
+    assert!(rows.iter().any(|r| r["control"]["axes"][0]["value"] == 45.), "the angle row");
+    // Duration: the same wipe, its angle kept.
+    let handle = duration["binding"]["handle"].as_str().unwrap().to_owned();
+    send(
+        presenter
+            .write(&mut model, Caller::native(), &handle, 1.25f64.into(), 0.)
+            .unwrap(),
+    );
+    let (sections, mut model) = snapshot(&mut presenter);
+    let rows = sections[0]["rows"].as_array().unwrap();
+    assert!(rows.iter().any(|r| r["label"] == "Duration" && r["control"]["axes"][0]["value"] == 1.25));
+    assert!(rows.iter().any(|r| r["control"]["axes"][0]["value"] == 45.), "kept");
+    // Type: a Crossfade, the duration kept.
+    let handle = rows.iter().find(|r| r["label"] == "Type").unwrap()["control"]["binding"]["handle"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let request = presenter
+        .write(&mut model, Caller::native(), &handle, "crossfade".into(), 0.)
+        .unwrap();
+    assert!(matches!(&request.call, pm_kernel::Call::Transact { label: Some(l), .. } if l == "Set Crossfade"));
+    send(request);
+    let (sections, mut model) = snapshot(&mut presenter);
+    let rows = sections[0]["rows"].as_array().unwrap();
+    assert!(rows.iter().any(|r| r["label"] == "Type" && r["control"]["value"] == "crossfade"));
+    assert!(rows.iter().any(|r| r["label"] == "Duration" && r["control"]["axes"][0]["value"] == 1.25));
+    // Remove.
+    let request = presenter
+        .intent(
+            &mut model,
+            Caller::native(),
+            &serde_json::json!({"type":"section-action","section":"transition.in","action":"remove-transition"}),
+            0.,
+        )
+        .unwrap()
+        .unwrap();
+    send(request);
+    assert!(snapshot(&mut presenter).0.is_empty());
 }

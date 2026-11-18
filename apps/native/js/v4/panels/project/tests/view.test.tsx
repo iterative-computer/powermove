@@ -1,5 +1,4 @@
 import { beforeAll, expect, test } from "bun:test";
-import { binaries } from "./build-model";
 import { ProjectView, type ProjectViewProps } from "../index";
 import { asset, comp, folder, projection } from "./fixtures";
 import {
@@ -15,9 +14,10 @@ import {
 import { accessibleName, meta, status } from "../presentation";
 import type { Input, Projection } from "../contract";
 
-// Compile the native validator in setup, outside each five-second AX check.
-beforeAll(() => {
-  if (!process.env.PM_PROJECT_INSPECT_WIRE) binaries();
+// The wire inspector is a cargo build; do it before the first case, not inside its 5 s budget.
+beforeAll(async () => {
+  const { binaries } = await import("./build-model");
+  binaries();
 }, 120_000);
 
 const selected = asset();
@@ -155,7 +155,10 @@ for (const [state, view, extra] of cases)
       expect(
         Object.values(report.nodes).some(
           // The quiet line says it (no glyph: lists are quiet text).
-          (node: any) => node.text === "Syncing…" || node.props?.text === "Syncing…" || node.props?.label === "Syncing…",
+          (node: any) =>
+            node.text === "Syncing…" ||
+            node.props?.text === "Syncing…" ||
+            node.props?.label === "Syncing…",
         ),
       ).toBe(true);
     }
@@ -751,7 +754,7 @@ test("scrolling inside the rows loaded asks for no new page", async () => {
     [101, 107],
     [94, 100],
     [106, 112],
-  ])
+  ] as [number, number][])
     await event(root, list().id, "rangechange", { range });
   expect(pages).toEqual([[188, 36]]);
   await event(root, list().id, "rangechange", { range: [110, 116] });

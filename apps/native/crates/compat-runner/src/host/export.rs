@@ -451,7 +451,9 @@ impl Run {
                 .progress
                 .note("waiting for memory for the export's extensions".into());
         })?;
-        crate::boot_realm(&realm, &host, "")?;
+        // No window shows an export's panels: its realm builds none of them
+        // (a panel's fetch or timers would hold its start for nothing).
+        crate::boot_realm(&realm, &host, "globalThis.__compatWindowless=true")?;
         self.router = Some(
             RemoteDomPanel::new(
                 PANEL,
@@ -636,6 +638,7 @@ impl Run {
             return;
         };
         let culprit = realm.culprit(execution);
+        let place = realm.culprit_place(execution);
         realm.stop(execution);
         let records = self.start.records.as_array().cloned().unwrap_or_default();
         let name = culprit.and_then(|id| {
@@ -646,9 +649,12 @@ impl Run {
                     .to_owned()
             })
         });
+        let place = place.map_or_else(String::new, |place| format!(" (in {place})"));
         self.failure = Some(match name {
-            Some(name) => format!("{name} stopped responding while drawing the export"),
-            None => "An extension stopped responding while drawing the export".into(),
+            Some(name) => format!("{name} stopped responding while drawing the export{place}"),
+            None => format!(
+                "Powermove's extension host stopped responding while drawing the export{place}"
+            ),
         });
     }
     fn page(&mut self, message: Value) {
@@ -673,7 +679,7 @@ impl Run {
         if router.receive(message, &mut delivered).is_err() {
             return;
         }
-        for message in delivered.0 {
+        for message in &delivered.0 {
             if message["kind"] == "layout"
                 && let Some(request) = message["request"].as_u64()
             {
@@ -681,11 +687,14 @@ impl Run {
                     .measuring
                     .lock()
                     .unwrap()
-                    .answer(request, &message);
+                    .answer(request, message);
             }
-            self.queue.push_back(format!(
-                "__compat.dom.receive({message});__compat.dom.flush()"
-            ));
+        }
+        if !delivered.0.is_empty()
+            && let Some((_, _, host)) = &self.live
+            && host.push_page_messages(std::mem::take(&mut delivered.0))
+        {
+            self.queue.push_back("__compat.receivePage()".into());
         }
         self.dispatch();
         self.drain_dom();

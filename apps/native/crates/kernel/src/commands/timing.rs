@@ -102,6 +102,37 @@ pub enum TimingCommand {
     /// Clamped at the neighbours' limits; refuses when it cannot move.
     /// Label "Slide Layer".
     Slide { layer_id: String, delta: f64 },
+    /// A Ripple Trim, Roll or Slide made in the Tracks timeline, where a
+    /// clip's track is the lane it shows on. `lanes` gives that lane for the
+    /// layers of the levels the edit reaches (relative to their group, as a
+    /// layer's stored `track` is): each unlocked one whose stored `track`
+    /// differs is written first, so the edit's neighbours are the ones on
+    /// its track and no clip changes track with it. A ripple then closes or
+    /// opens time on the edited clips' own tracks only (Premiere without
+    /// sync lock). Any other command runs as it is. Label: the command's.
+    InTracks {
+        lanes: Vec<(String, u32)>,
+        command: Box<TimingCommand>,
+    },
+    /// Speed/Duration: a video or audio clip plays at `speed` (1 = normal,
+    /// above 0.05) from the same source In; its length scales so it shows the
+    /// same media (never past the media's end). With `ripple`, the later
+    /// clips on its track move by the change, so no gap opens and nothing is
+    /// covered (inside `InTracks`, its track is the lane it shows on). An
+    /// animated speed or a remapped clip refuses. `keep_pitch` sets how its
+    /// audio sounds at that speed (`d.pitch`: kept, or following the speed
+    /// as tape would); `None` leaves it. Label "Change Speed".
+    SetSpeed {
+        layer_id: String,
+        speed: f64,
+        ripple: bool,
+        keep_pitch: Option<bool>,
+    },
+    /// Writes each unlocked layer's lane in the Tracks timeline as its
+    /// stored `track` where they differ (see `InTracks`), first in a
+    /// transaction whose edit (a pro edit's drag) decides tracks from them.
+    /// Label "Edit Clips" (it travels with the edit it serves).
+    PinTracks { lanes: Vec<(String, u32)> },
     /// Lift (`close: false`) or Extract (`close: true`) `start..end`
     /// (After Effects Edit ▸ Lift/Extract Work Area): the layers' parts
     /// inside the range go (a layer across the whole range is split, its
@@ -155,6 +186,9 @@ impl TimingCommand {
             TimingCommand::RippleTrim { .. } => "Ripple Trim",
             TimingCommand::Roll { .. } => "Roll Edit",
             TimingCommand::Slide { .. } => "Slide Layer",
+            TimingCommand::InTracks { command, .. } => return command.label(),
+            TimingCommand::PinTracks { .. } => "Edit Clips",
+            TimingCommand::SetSpeed { .. } => "Change Speed",
             TimingCommand::RemoveRange { close: false, .. } => "Lift Work Area",
             TimingCommand::RemoveRange { close: true, .. } => "Extract Work Area",
             TimingCommand::Retime { mode, .. } => match mode {
@@ -208,7 +242,25 @@ impl TimingCommand {
                 layer_ids,
                 edge,
                 time,
-            } => ripple_trim(cx, layer_ids, *edge, *time),
+            } => ripple_trim(cx, layer_ids, *edge, *time, false),
+            TimingCommand::InTracks { lanes, command } => {
+                pin_tracks(cx, lanes)?;
+                match command.as_ref() {
+                    TimingCommand::RippleTrim {
+                        layer_ids,
+                        edge,
+                        time,
+                    } => ripple_trim(cx, layer_ids, *edge, *time, true),
+                    other => other.plan(cx),
+                }
+            }
+            TimingCommand::PinTracks { lanes } => pin_tracks(cx, lanes),
+            TimingCommand::SetSpeed {
+                layer_id,
+                speed,
+                ripple,
+                keep_pitch,
+            } => set_speed(cx, layer_id, *speed, *ripple, *keep_pitch),
             TimingCommand::Roll {
                 layer_id,
                 edge,
@@ -460,7 +512,10 @@ fn trim(cx: &mut Cx<'_>, layer_ids: &[String], time: f64, start: bool) -> Result
             next = cut_head(&layer, next, nf);
             preserve_source_time(cx, loc.comp_id.as_deref(), &layer, &mut next, nf)?;
         } else {
-            values::obj(&mut next).insert("dur", Value::Number((1.0 / fps).max(time - from)));
+            // Never past the media's end at the clip's speed.
+            let longest = media_limit(cx, &layer).unwrap_or(f64::INFINITY);
+            let dur = (time - from).min(longest).max(1.0 / fps);
+            values::obj(&mut next).insert("dur", Value::Number(dur));
         }
         cx.put_layer(&loc, next)?;
     }
@@ -809,6 +864,9 @@ fn split(
 
 /// Edits closer than this meet (abutting layers, a playhead on an edge).
 const EDGE_EPS: f64 = 1e-6;
+/// The track a ripple keeps to (its track id and index), or `None` when it
+/// ripples across tracks.
+type RippleTrack = Option<(Option<String>, f64)>;
 
 fn ends(layer: &Value) -> (f64, f64) {
     let from = values::num(layer, "from").unwrap_or(0.0);
@@ -862,6 +920,7 @@ fn abutting(layers: &[Value], layer: &Value, at: f64, before: bool) -> Option<Va
             values::text(l, "id") != values::text(layer, "id")
                 && values::text(l, "type") != Some("group")
                 && values::text(l, "group") == values::text(layer, "group")
+                && area(l) == area(layer)
                 && track(l) == track(layer)
                 && !locked_here(layers, l)
                 && ((if before { end } else { from }) - at).abs() < EDGE_EPS
@@ -889,20 +948,177 @@ fn first_start(layer: &Value) -> f64 {
     }
 }
 
+/// The playback rate of a clip's media (`speed`, audio's too), or `None`
+/// when time remapping or an animated speed decides which frame shows.
+fn media_rate(layer: &Value) -> Option<f64> {
+    let d = layer.get("d")?;
+    let remapped = d.get("timeRemap").is_some_and(|r| {
+        if values::is_property(r) {
+            r.get("v").is_some_and(Value::is_truthy) || !track::keys_of(r).is_empty()
+        } else {
+            r.is_truthy()
+        }
+    });
+    let speed = d.get("speed");
+    let animated = speed.filter(|s| values::is_property(s)).is_some_and(|s| {
+        !track::keys_of(s).is_empty() || s.get("expr").is_some_and(Value::is_truthy)
+    });
+    if remapped || animated {
+        return None;
+    }
+    Some(
+        content_number(layer, "speed")
+            .filter(|s| *s > 0.0 && s.is_finite())
+            .unwrap_or(1.0),
+    )
+}
+
+/// The longest a video or audio clip may run before its media ends, at its
+/// speed from its source In; `None` without a known media length (or when
+/// its frames come from remapping).
+fn media_limit(cx: &Cx<'_>, layer: &Value) -> Option<f64> {
+    if !is_timed(layer) {
+        return None;
+    }
+    let rate = media_rate(layer)?;
+    let asset = layer.get("d").and_then(|d| values::text(d, "asset"))?;
+    let length = cx
+        .root()
+        .get("assets")
+        .and_then(|a| a.get(asset))
+        .and_then(|a| a.get("dur"))
+        .and_then(crate::model::number_of)
+        .filter(|n| n.is_finite() && *n > 0.0)?;
+    Some(((length - trim_of(layer)) / rate).max(0.0))
+}
+
+/// Speed/Duration (see `TimingCommand::SetSpeed`).
+fn set_speed(
+    cx: &mut Cx<'_>,
+    id: &str,
+    speed: f64,
+    ripple: bool,
+    keep_pitch: Option<bool>,
+) -> Result<(), CommandError> {
+    let speed = values::finite(speed, "speed")?;
+    if !(0.05..=100.0).contains(&speed) {
+        return Err(CommandError::Invalid(
+            "Choose a speed between 5% and 10000%.".into(),
+        ));
+    }
+    let (comp, layer, _) = editable(cx, id)?;
+    if !is_timed(&layer) {
+        return Err(CommandError::Invalid(
+            "Speed changes a video or audio clip.".into(),
+        ));
+    }
+    let Some(previous) = media_rate(&layer) else {
+        return Err(CommandError::Invalid(
+            "The clip's speed is animated or remapped: change it in Properties.".into(),
+        ));
+    };
+    let mut next = layer.clone();
+    if let Some(keep) = keep_pitch {
+        let pitch = if keep { "preserve" } else { "follow" };
+        values::obj(&mut next)
+            .get_mut("d")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| CommandError::Invalid("The clip has no source content.".into()))?
+            .insert("pitch", Value::from(pitch));
+    }
+    if (previous - speed).abs() < 1e-12 {
+        return put(cx, next);
+    }
+    let frame = 1.0 / cx.fps(comp.as_deref());
+    let (from, end) = ends(&layer);
+    set_content(&mut next, "speed", Value::Number(speed));
+    let mut dur = ((end - from) * previous / speed).max(frame);
+    if let Some(limit) = media_limit(cx, &next) {
+        dur = dur.min(limit.max(frame));
+    }
+    let track = track_of(&layer);
+    put(cx, with_dur(next, dur))?;
+    if ripple {
+        let delta = from + dur - end;
+        let layers = cx.layers(comp.as_deref());
+        for other in &layers {
+            let oid = values::text(other, "id").unwrap_or_default();
+            if oid == id
+                || values::text(other, "type") == Some("group")
+                || locked_here(&layers, other)
+                || track_of(other) != track
+            {
+                continue;
+            }
+            let (ofrom, _) = ends(other);
+            if ofrom >= end - EDGE_EPS {
+                let mut path = cx.find(oid)?.path();
+                path.push("from".into());
+                cx.set(path, Value::Number(ofrom + delta))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The Tracks timeline area a layer's lanes count in: audio, captions or
+/// video (each numbers its lanes from 0).
+fn area(layer: &Value) -> &'static str {
+    match values::text(layer, "type") {
+        Some("audio") => "audio",
+        Some("captions") => "captions",
+        _ => "video",
+    }
+}
+
+/// A layer's track key: its group, area and stored `track` (Tracks
+/// timeline): V1, A1 and the first caption lane are different tracks.
+fn track_of(layer: &Value) -> (Option<String>, f64) {
+    (
+        values::text(layer, "group")
+            .map(|g| format!("{g}\u{1f}{}", area(layer)))
+            .or_else(|| Some(area(layer).to_owned())),
+        values::num(layer, "track").unwrap_or(0.0),
+    )
+}
+
+/// Writes each unlocked layer's lane as its stored `track` where they differ.
+/// The stack is never touched here: a trim, roll, slide or slip changes no
+/// layer's place in it (the timeline's view state holds the lanes it shows).
+fn pin_tracks(cx: &mut Cx<'_>, lanes: &[(String, u32)]) -> Result<(), CommandError> {
+    for (id, lane) in lanes {
+        let Ok(loc) = cx.find(id) else { continue };
+        let Ok((_, layer)) = cx.layer(id) else {
+            continue;
+        };
+        let lane = f64::from(*lane);
+        if values::num(&layer, "track").unwrap_or(0.0) == lane || cx.check_lock(&loc, id).is_err() {
+            continue;
+        }
+        let mut path = loc.path();
+        path.push("track".into());
+        cx.set(path, Value::Number(lane))?;
+    }
+    Ok(())
+}
+
 fn ripple_trim(
     cx: &mut Cx<'_>,
     ids: &[String],
     edge: TimeEdge,
     time: f64,
+    by_track: bool,
 ) -> Result<(), CommandError> {
     let time = values::finite(time, "time")?;
     let (comp, targets) = leaves(cx, ids)?;
     let frame = 1.0 / cx.fps(comp.as_deref());
-    let mut removed: Vec<(f64, f64)> = vec![];
-    // An edge dragged outward: (the layer's old end, the time it gained).
-    let mut grown: Vec<(String, f64, f64)> = vec![];
+    let mut removed: Vec<(f64, f64, RippleTrack)> = vec![];
+    // An edge dragged outward: (the layer's old end, the time it gained,
+    // its track when the ripple keeps to tracks).
+    let mut grown: Vec<(String, f64, f64, RippleTrack)> = vec![];
     for layer in targets {
         let (from, end) = ends(&layer);
+        let track = by_track.then(|| track_of(&layer));
         let id = values::text(&layer, "id").unwrap_or_default().to_owned();
         match edge {
             TimeEdge::In if time < from - EDGE_EPS => {
@@ -912,22 +1128,25 @@ fn ripple_trim(
                     let mut longer = cut_head(&layer, layer.clone(), t);
                     values::obj(&mut longer).insert("from", Value::Number(from));
                     put(cx, longer)?;
-                    grown.push((id, end, from - t));
+                    grown.push((id, end, from - t, track));
                 }
             }
             TimeEdge::Out if time > end + EDGE_EPS => {
-                put(cx, with_dur(layer, time - from))?;
-                grown.push((id, end, time - end));
+                let t = time.min(from + media_limit(cx, &layer).unwrap_or(f64::INFINITY));
+                if t - end > EDGE_EPS {
+                    put(cx, with_dur(layer, t - from))?;
+                    grown.push((id, end, t - end, track));
+                }
             }
             _ if time <= from + EDGE_EPS || time >= end - EDGE_EPS => {}
             TimeEdge::In => {
                 let t = time.min(end - frame);
-                removed.push((from, t));
+                removed.push((from, t, track));
                 put(cx, cut_head(&layer, layer.clone(), t))?;
             }
             TimeEdge::Out => {
                 let t = time.max(from + frame);
-                removed.push((t, end));
+                removed.push((t, end, track));
                 put(cx, with_dur(layer, t - from))?;
             }
         }
@@ -942,17 +1161,20 @@ fn ripple_trim(
         let layers = cx.layers(comp.as_deref());
         for layer in &layers {
             let id = values::text(layer, "id").unwrap_or_default();
-            if values::text(layer, "type") == Some("group")
-                || locked_here(&layers, layer)
-                || grown.iter().any(|(g, ..)| g == id)
-            {
+            if values::text(layer, "type") == Some("group") || locked_here(&layers, layer) {
                 continue;
             }
             let (from, _) = ends(layer);
+            // A grown target moves on by the others' growth before it, never
+            // by its own.
             let shift: f64 = grown
                 .iter()
-                .filter(|(_, pivot, _)| from >= pivot - EDGE_EPS)
-                .map(|(.., gained)| gained)
+                .filter(|(g, pivot, _, track)| {
+                    g != id
+                        && from >= pivot - EDGE_EPS
+                        && track.as_ref().is_none_or(|t| *t == track_of(layer))
+                })
+                .map(|(_, _, gained, _)| gained)
                 .sum();
             if shift > 0.0 {
                 let mut path = cx.find(id)?.path();
@@ -966,17 +1188,19 @@ fn ripple_trim(
 
 /// Every unlocked layer moves back by the removed time that ends at or
 /// before its start (overlapping removed spans count once).
+/// With a track on a span (a ripple kept to tracks), only layers on that
+/// track move for it.
 fn close_up(
     cx: &mut Cx<'_>,
     comp: Option<&str>,
-    mut removed: Vec<(f64, f64)>,
+    mut removed: Vec<(f64, f64, RippleTrack)>,
 ) -> Result<(), CommandError> {
     removed.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut spans: Vec<(f64, f64)> = vec![];
-    for (start, end) in removed {
-        match spans.last_mut() {
+    let mut spans: Vec<(f64, f64, RippleTrack)> = vec![];
+    for (start, end, track) in removed {
+        match spans.iter_mut().rev().find(|s| s.2 == track) {
             Some(last) if start <= last.1 + EDGE_EPS => last.1 = last.1.max(end),
-            _ => spans.push((start, end)),
+            _ => spans.push((start, end, track)),
         }
     }
     let layers = cx.layers(comp);
@@ -987,8 +1211,10 @@ fn close_up(
         let (from, _) = ends(layer);
         let shift: f64 = spans
             .iter()
-            .filter(|(_, end)| from >= end - EDGE_EPS)
-            .map(|(start, end)| end - start)
+            .filter(|(_, end, track)| {
+                from >= end - EDGE_EPS && track.as_ref().is_none_or(|t| *t == track_of(layer))
+            })
+            .map(|(start, end, _)| end - start)
             .sum();
         if shift > 0.0 {
             let id = values::text(layer, "id").unwrap_or_default();
@@ -1020,7 +1246,10 @@ fn roll(cx: &mut Cx<'_>, id: &str, edge: TimeEdge, time: f64) -> Result<(), Comm
     match edge {
         TimeEdge::Out => {
             let next = abutting(&layers, &layer, end, false);
-            let (mut lo, mut hi) = (from + frame, f64::INFINITY);
+            let (mut lo, mut hi) = (
+                from + frame,
+                from + media_limit(cx, &layer).unwrap_or(f64::INFINITY),
+            );
             if let Some(next) = &next {
                 hi = ends(next).1 - frame;
                 lo = lo.max(first_start(next));
@@ -1033,9 +1262,13 @@ fn roll(cx: &mut Cx<'_>, id: &str, edge: TimeEdge, time: f64) -> Result<(), Comm
         }
         TimeEdge::In => {
             let previous = abutting(&layers, &layer, from, true);
-            let (mut lo, hi) = (first_start(&layer), end - frame);
+            let (mut lo, mut hi) = (first_start(&layer), end - frame);
             if let Some(previous) = &previous {
                 lo = lo.max(ends(previous).0 + frame);
+                // The clip before grows: never past its media's end.
+                if let Some(limit) = media_limit(cx, previous) {
+                    hi = hi.min(ends(previous).0 + limit);
+                }
             }
             let t = time.clamp(lo.min(hi), hi);
             put(cx, cut_head(&layer, layer.clone(), t))?;
@@ -1058,6 +1291,10 @@ fn slide(cx: &mut Cx<'_>, id: &str, delta: f64) -> Result<(), CommandError> {
     let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
     if let Some(p) = &previous {
         lo = lo.max(ends(p).0 + frame - from);
+        // The clip before grows as this one moves on: never past its media.
+        if let Some(limit) = media_limit(cx, p) {
+            hi = hi.min(ends(p).0 + limit - from);
+        }
     }
     if let Some(n) = &next {
         hi = hi.min(ends(n).1 - frame - end);

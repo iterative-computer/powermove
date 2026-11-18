@@ -1,9 +1,5 @@
-//! PM-409: the app has one segmented control, the UI kit's Liquid Glass one
-//! (`SegmentedControl` in js/v4, the system's glass capsule natively). A
-//! panel that draws its own, a second kit variant, or a native segmented
-//! control that is not the glass one fails here. Settings' pages keep the
-//! plain AppKit control (`v4_view`), and the toolbar's tool picker is the
-//! toolbar's own system control.
+//! PM-409: v4 panels and the toolbar share the kit's AppKit segmented
+//! control. AppKit draws the capsule at each context's control size.
 use std::path::{Path, PathBuf};
 
 fn root() -> PathBuf {
@@ -75,27 +71,46 @@ fn every_native_segmented_control_is_the_glass_one() {
     let mut sources = vec![];
     files(&root().join("crates/app/src"), &[".rs"], &mut sources);
     files(&root().join("crates/shell/src"), &[".rs"], &mut sources);
+    let kit_path = root().join("crates/shell/src/native_control.rs");
     for file in &sources {
         let text = std::fs::read_to_string(file).unwrap();
+        for banned in [
+            "pub fn segmented(",
+            "setSelectedSegmentBezelColor",
+            "segment_face(",
+        ] {
+            assert!(
+                !text.contains(banned),
+                "{}: custom segmented rendering ({banned})",
+                file.display()
+            );
+        }
+        // Only the kit can build a system control. Other callers may use
+        // NSSegmentedControl as the action sender's type.
         assert!(
-            !text.contains("pub fn segmented("),
-            "{}: a drawn segmented control in the kit",
+            !text.contains("NSSegmentedControl::"),
+            "{}: create the control through SegmentedControl::new",
             file.display()
         );
-        let lines: Vec<&str> = text.lines().collect();
-        for (i, line) in lines.iter().enumerate() {
-            if !line.contains("Kind::Segmented,") || !line.contains("kind:") {
-                continue;
-            }
-            let spec = lines[i..(i + 20).min(lines.len())].join("\n");
+        if *file != kit_path {
             assert!(
-                spec.contains("glass: true"),
-                "{}:{}: a segmented control that is not the glass one",
-                file.display(),
-                i + 1
+                !text.contains("super(NSSegmentedControl)"),
+                "{}: a second segmented control subclass",
+                file.display()
             );
         }
     }
+    let kit = std::fs::read_to_string(kit_path).unwrap();
+    assert_eq!(kit.matches("super(NSSegmentedControl)").count(), 1);
+    assert!(kit.contains("control.setBorderShape(NSControlBorderShape::Capsule)"));
+    assert!(
+        kit.contains("setRole: TABS_ROLE"),
+        "the shared kit uses AppKit's tracking lens"
+    );
+    assert!(kit.contains("SegmentedControl::new(mtm, size, options.len())"));
+    assert!(kit.contains("setLabel_forSegment"));
+    let toolbar = std::fs::read_to_string(root().join("crates/shell/src/native.rs")).unwrap();
+    assert!(toolbar.contains("SegmentedControl::new(mtm, NSControlSize::Regular, TOOLS.len())"));
     // A row of options drawn as radio buttons in Rust (a two-word toggle as
     // segments) is a segmented control of its own. The kit's lone radio
     // button and the first-launch choice cards are other controls.
@@ -112,8 +127,5 @@ fn every_native_segmented_control_is_the_glass_one() {
         );
     }
     let view = std::fs::read_to_string(root().join("crates/app/src/v4_view.rs")).unwrap();
-    assert!(
-        view.contains("glass: matches!(kind, crate::v4_control::Kind::Segmented)"),
-        "panels' segmented controls must be glass whatever their variant"
-    );
+    assert!(view.contains("Some(Component::SegmentedControl) => Some(Kind::Segmented)"));
 }

@@ -1,4 +1,4 @@
-//! Settings › Accounts › API or Local Model (A01/S071): connect an
+//! Settings › Agents › API or Local Model (A01/S071): connect an
 //! OpenAI-compatible API, Ollama or LM Studio. A native sheet takes the
 //! address, the key (an `NSSecureTextField`; the key goes to the Keychain per
 //! address and never into Settings' tree or a file), the model with
@@ -373,7 +373,7 @@ fn changed(cx: &mut App) {
         }
     });
 }
-/// Settings › Accounts reads this through the built-in facts. No key.
+/// Settings › Agents reads this through the built-in facts. No key.
 pub fn fact(cx: &App) -> Value {
     let Some(p) = cx.try_global::<Provider>() else {
         return Value::Null;
@@ -388,7 +388,7 @@ pub fn fact(cx: &App) -> Value {
         None => json!({"revision":p.revision,"connected":false,"busy":busy}),
     }
 }
-/// Settings › Accounts › Set Up… / Change…: the connection sheet on `window`.
+/// Settings › Agents › Set Up… / Change…: the connection sheet on `window`.
 pub fn open(window: Retained<NSWindow>, cx: &mut App) {
     if !cx.has_global::<Provider>() || cx.global::<Provider>().sheet.is_some() {
         return;
@@ -657,7 +657,7 @@ fn failure(error: &ServiceError) -> String {
         _ => "The API address or model was not found. Check the connection.".into(),
     }
 }
-/// Settings › Accounts › Disconnect.
+/// Settings › Agents › Disconnect.
 pub fn disconnect(cx: &mut App) {
     if !cx.has_global::<Provider>() {
         return;

@@ -90,6 +90,9 @@ pub fn parse_row(id: &str) -> Result<RowId, Error> {
         _ => Err(Error::InvalidIntent("row id")),
     }
 }
+/// The app commands the timeline's empty state offers (v1's buttons).
+pub const RUN_COMMANDS: [&str; 5] = ["newText", "newShape", "newSolid", "newNull", "import"];
+
 fn string<'a>(v: &'a Value, key: &'static str) -> Result<&'a str, Error> {
     v.get(key)
         .and_then(Value::as_str)
@@ -112,6 +115,23 @@ fn modifiers(v: &Value) -> Result<Modifiers, Error> {
         meta: flag("metaKey")?,
         control: flag("ctrlKey")?,
     })
+}
+/// `["track", area, lane]` (see `track_window`).
+fn track_row(intent: &Value) -> Option<(crate::tracks::Area, usize)> {
+    use crate::tracks::Area;
+    let parts: Vec<Value> = serde_json::from_str(intent.get("id")?.as_str()?).ok()?;
+    match parts.as_slice() {
+        [kind, area, lane] if kind.as_str() == Some("track") => {
+            let area = match area.as_str()? {
+                "Video" => Area::Video,
+                "Audio" => Area::Audio,
+                "Captions" => Area::Captions,
+                _ => return None,
+            };
+            Some((area, usize::try_from(lane.as_u64()?).ok()?))
+        }
+        _ => None,
+    }
 }
 fn layer_row(intent: &Value) -> Result<String, Error> {
     match parse_row(string(intent, "id")?)? {
@@ -286,6 +306,13 @@ pub async fn dispatch(
             }
             persist = true;
             Plan::default()
+        }
+        // A track row's switches (Tracks mode) act on every clip on its lane.
+        "switch" if track_row(intent).is_some() => {
+            let (area, lane) = track_row(intent).expect("checked");
+            client
+                .model
+                .track_switch(area, lane, string(intent, "name")?, context.time)?
         }
         "switch" => {
             let id = layer_row(intent)?;
@@ -486,12 +513,30 @@ pub async fn dispatch(
             effects: vec![client.model.import_drop(context.time, None, false)?],
             ..Plan::default()
         },
+        // The empty composition's buttons run the app's own commands, as
+        // v1's did; only these.
+        "run" => {
+            let command = string(intent, "command")?;
+            if !RUN_COMMANDS.contains(&command) {
+                return Err(Error::InvalidIntent("command"));
+            }
+            Plan {
+                effects: vec![HostEffect::Run(command.into())],
+                ..Plan::default()
+            }
+        }
         "tab" => return Err(Error::MissingHost("composition tab closing")),
         // Pointer gestures on tracks run in the native surface, never through V8.
         _ => return Err(Error::InvalidIntent("action")),
     };
     let effects = client.dispatch(plan).await?;
-    if persist && let Err(error) = client.publish_view().await {
+    // Whatever changed the view (a key toggling the mode too) publishes it.
+    let published = if persist {
+        client.publish_view().await
+    } else {
+        client.publish_view_if_changed().await
+    };
+    if let Err(error) = published {
         if let Some(published) = client.kernel.published(&client.project) {
             client.model.restore_ui(&published.ui_state);
         }

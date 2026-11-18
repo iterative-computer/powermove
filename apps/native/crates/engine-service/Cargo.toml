@@ -60,6 +60,10 @@ tempfile = "3"
 pm-proxy = { path = "../../../../engine/crates/pm-proxy" }
 # Sequence export tests write 16-bit frames.
 png = "0.18"
+# A 3D layer added the way Layer ▸ Add 3D Layer adds it, rendered among 2D layers.
+pm-panel-studio3d = { path = "../panel-studio3d" }
+# Which built-in effects read their layer's bounds (their shaders).
+pm-fx-defs = { path = "../../../../engine/crates/pm-fx-defs" }
 
 [[test]]
 name = "fonts"

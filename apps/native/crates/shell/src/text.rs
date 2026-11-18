@@ -39,6 +39,16 @@ pub struct TextField {
     ink: Option<u32>,
     /// The width the editor was last given, to count its wrapped lines.
     width: Rc<std::cell::Cell<f32>>,
+    /// Shown as a picture of itself while its surface's body scrolls.
+    picture: crate::picture::Picture,
+    /// A press opened it and the keyboard is on its way (it moves at the next
+    /// present): keys typed meanwhile wait for it (`typing`, PM-487).
+    awaiting_keyboard: bool,
+}
+impl Drop for TextField {
+    fn drop(&mut self) {
+        self.picture.retire();
+    }
 }
 impl EventEmitter<TextEvent> for TextField {}
 /// Whether `window` can host a native field (an AppKit window, not a
@@ -114,6 +124,8 @@ impl TextField {
             code: None,
             ink: None,
             width: Rc::default(),
+            picture: Default::default(),
+            awaiting_keyboard: false,
         }
     }
     /// The lines a multi-line field shows: its text as it wraps in the
@@ -332,6 +344,16 @@ impl TextField {
             }))
             .into_any_element()
     }
+    /// Shares its surface's picture hold (P-SLOT-PICTURE).
+    pub fn picture_with(&mut self, hold: &crate::picture::PictureHold) {
+        self.picture.hold = hold.clone();
+    }
+    /// The surface's hold changed: a held editor draws as its picture, a
+    /// released one as itself again.
+    pub fn hold_changed(&mut self, cx: &mut Context<Self>) {
+        self.picture.hold_changed();
+        cx.notify();
+    }
     pub fn set_placeholder(&mut self, text: &str) {
         if self.placeholder != text {
             self.slot.set_placeholder(text);
@@ -341,6 +363,11 @@ impl TextField {
     /// Stages the slot again on a frame whose cached paint did not run: as
     /// last painted, or shifted with the scroll layer it is in.
     pub fn keep(&self, window: &Window) {
+        if self.picture.standing() {
+            // Its picture stands in the scene the frame replays.
+            self.slot.hide();
+            return;
+        }
         match self.layer.kept(window) {
             Some((bounds, clip)) => self.slot.stage(
                 crate::native_control::ns_rect(bounds),
@@ -378,8 +405,23 @@ impl TextField {
         self.slot.has_keyboard()
     }
     pub fn begin_editing(&mut self, cx: &mut Context<Self>) {
+        // Already typing in it: asked again (a double-click's second press,
+        // a focus that follows the first), it keeps the keyboard. Taking it
+        // again ends the edit, committing it and closing a field opened on
+        // demand, so the next ⌘A selected every layer.
+        if self.slot.has_keyboard() {
+            return;
+        }
         self.slot.begin_editing();
+        self.await_keyboard();
         cx.notify();
+    }
+    /// Typing was held for a field on its way (a press that opens it): when
+    /// this one takes the keyboard, what waited goes to it.
+    fn await_keyboard(&mut self) {
+        if crate::typing::expecting() && !self.slot.has_keyboard() {
+            self.awaiting_keyboard = true;
+        }
     }
     /// Ends editing and gives the keyboard back to the editor (Escape in a
     /// docked composer).
@@ -389,8 +431,11 @@ impl TextField {
     }
     /// Focused with all its text selected, so typing replaces it.
     pub fn begin_editing_selecting_all(&mut self, cx: &mut Context<Self>) {
-        self.slot.begin_editing();
+        if !self.slot.has_keyboard() {
+            self.slot.begin_editing();
+        }
         self.slot.set_selection(0, usize::MAX);
+        self.await_keyboard();
         cx.notify();
     }
     pub fn set_tokens(&mut self, tokens: pm_design::Tokens) {
@@ -450,6 +495,17 @@ const MONO_ADVANCE: f32 = 0.602;
 const MULTILINE_MOST: usize = 6;
 impl Render for TextField {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The keyboard a press asked for has come: what waited for it goes in.
+        if self.awaiting_keyboard {
+            if self.slot.has_keyboard() {
+                self.awaiting_keyboard = false;
+                crate::typing::field_ready();
+            } else if crate::typing::expecting() {
+                window.request_animation_frame();
+            } else {
+                self.awaiting_keyboard = false;
+            }
+        }
         if matches!(self.kind, TextKind::Form | TextKind::FormNumber) {
             return self.render_form(window, cx);
         }
@@ -468,6 +524,7 @@ impl Render for TextField {
         let entity = cx.entity().downgrade();
         let dense = matches!(self.kind, TextKind::DenseText | TextKind::DenseNumber);
         let editing = self.slot.is_editing() && build.is_none();
+        let picture = self.picture.painter();
         let (t, bare) = (&self.tokens, self.bare);
         let single = !matches!(self.kind, TextKind::Composer | TextKind::Multiline) && !self.fill;
         // A well is a soft ink fill with no outline; while it is edited a
@@ -549,11 +606,22 @@ impl Render for TextField {
             .font_family(pm_design::TEXT_FONT)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    if this.build.is_none() {
+                cx.listener(|this, _, window, cx| {
+                    // A press on its picture goes to the editor once shown.
+                    // One while it already has the keyboard (a double-click's
+                    // second press) leaves it: taking it again ended the edit,
+                    // which commits and closes a field opened on demand.
+                    if this.build.is_none() && !this.picture.press(window) && !this.slot.has_keyboard() {
                         this.slot.begin_editing();
-                        cx.notify();
+                        // Under load the keyboard moves a slow frame later:
+                        // what is typed until then is for this field, never
+                        // ⌘A on the layers or digits on the playhead.
+                        if !this.slot.has_keyboard() {
+                            crate::typing::expect();
+                            this.awaiting_keyboard = true;
+                        }
                     }
+                    cx.notify();
                 }),
             )
             .flex()
@@ -624,7 +692,13 @@ impl Render for TextField {
                             bounds.origin.y += px(DENSE_EDIT_DROP);
                             bounds.size.height -= px(DENSE_EDIT_DROP);
                         }
+                        let painted = bounds;
                         let (bounds, mask) = layer.painted(bounds, mask, window);
+                        let size = rect(bounds).size;
+                        if picture.paint(painted, || slot.picture(size), window) {
+                            slot.hide();
+                            return;
+                        }
                         slot.stage(rect(bounds), rect(mask));
                         if let Some(build) = build {
                             if !dense {

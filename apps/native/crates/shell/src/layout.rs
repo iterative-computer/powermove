@@ -2040,6 +2040,22 @@ impl Panels {
             })
     }
 }
+/// A name for a panel id nothing has titled yet: `background-remover.panel`
+/// reads "Background Remover".
+pub fn readable_title(id: &str) -> String {
+    let base = id.strip_suffix(".panel").unwrap_or(id);
+    let base = base.rsplit_once('.').map_or(base, |(_, last)| last);
+    base.split(['-', '_', ' '])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_uppercase().chain(c).collect::<String>())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 fn builtin_title(id: &str) -> &str {
     match id {
         "assets" => "Project",
@@ -2350,8 +2366,14 @@ pub fn reserve_build(
 pub fn remove_build(layout: &mut Layout, id: &str) {
     for dock in &mut layout.docks {
         for group in &mut dock.groups {
+            let first = group.tabs.first().is_some_and(|p| p == id);
             group.tabs.retain(|p| p != id);
             group.active = group.active.min(group.tabs.len().saturating_sub(1));
+            // A fluid height is keyed by the group's first panel: it moves to
+            // the next one, or goes with the group (never saved under a build).
+            if first {
+                rekey_basis(&mut layout.flex_bases, id, group);
+            }
         }
         dock.groups.retain(|g| !g.tabs.is_empty());
     }
@@ -2359,8 +2381,14 @@ pub fn remove_build(layout: &mut Layout, id: &str) {
 #[cfg(test)]
 mod build_slot_tests {
     use super::*;
-    #[test] fn reserves_and_cancels() {
-        let mut l = Layout { flex_bases: Default::default(), version: 1, workspace: "test".into(), docks: vec![] };
+    #[test]
+    fn reserves_and_cancels() {
+        let mut l = Layout {
+            flex_bases: Default::default(),
+            version: 1,
+            workspace: "test".into(),
+            docks: vec![],
+        };
         let used = reserve_build(&mut l, "build", &serde_json::json!({"dock":"left"}), 280.);
         assert_eq!(used["dock"], "left"); assert_eq!(l.docks[0].groups[0].size, Some(280.));
         remove_build(&mut l,"build"); assert!(l.docks[0].groups.is_empty());
@@ -2371,6 +2399,41 @@ mod build_slot_tests {
         reserve_build(&mut l,"two",&serde_json::json!({"tab_in":"one"}),500.);
         assert_eq!(l.docks[0].groups.len(),1); assert_eq!(l.docks[0].groups[0].size,Some(250.));
         assert_eq!(l.docks[0].groups[0].active(),"two");
+    }
+    /// A build first in its group hands the group's fluid height to the next
+    /// panel, and one alone takes it with it: no basis stays under a build.
+    #[test]
+    fn removing_a_build_keeps_fluid_heights_off_build_ids() {
+        let mut l = Layout {
+            flex_bases: Default::default(),
+            version: 1,
+            workspace: "test".into(),
+            docks: vec![],
+        };
+        reserve_build(
+            &mut l,
+            "panel-build-a",
+            &serde_json::json!({"dock":"left"}),
+            250.,
+        );
+        reserve_build(
+            &mut l,
+            "inspector",
+            &serde_json::json!({"tab_in":"panel-build-a"}),
+            250.,
+        );
+        reserve_build(
+            &mut l,
+            "panel-build-b",
+            &serde_json::json!({"dock":"left"}),
+            250.,
+        );
+        l.flex_bases.insert("panel-build-a".into(), 300.);
+        l.flex_bases.insert("panel-build-b".into(), 200.);
+        remove_build(&mut l, "panel-build-a");
+        remove_build(&mut l, "panel-build-b");
+        assert_eq!(l.flex_bases.get("inspector"), Some(&300.));
+        assert!(!l.flex_bases.keys().any(|k| k.starts_with("panel-build-")));
     }
 }
 

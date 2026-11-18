@@ -71,6 +71,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.agent_gap` | Space between turns in the Agent conversation | 16 | 16 | 16 | 16 |
 | `metrics.agent_height` | Agent popover height when the window has room | 680 | 680 | 680 | 680 |
 | `metrics.agent_width` | Default agent panel width | 440 | 440 | 440 | 440 |
+| `metrics.align_well` | Least width of an alignment well: three cells at the least hit target | 72 | 72 | 72 | 72 |
 | `metrics.anchor_mark` | Anchor point crosshair circle | 11 | 11 | 11 | 11 |
 | `metrics.band_least` | Least height of the timeline's dock | 120 | 120 | 120 | 120 |
 | `metrics.band_room` | Height the timeline's dock leaves above it | 160 | 160 | 160 | 160 |
@@ -108,6 +109,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.export_job_progress_height` | Inline export job progress stroke | 2 | 2 | 2 | 2 |
 | `metrics.export_job_progress_width` | Inline export job progress width | 80 | 80 | 80 | 80 |
 | `metrics.export_job_row` | Two-line export job row height | 44 | 44 | 44 | 44 |
+| `metrics.export_preview` | Export progress sheet's picture of the frame last encoded | 315 | 315 | 315 | 315 |
 | `metrics.fader_knob` | Mixer fader knob height | 14 | 14 | 14 | 14 |
 | `metrics.field` | Value well height inside a row | 22 | 22 | 22 | 22 |
 | `metrics.field_menu_height` | Field menu maximum height | 280 | 280 | 280 | 280 |
@@ -116,8 +118,9 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.gap` | Gap between panels and to the window edge | 6 | 6 | 6 | 6 |
 | `metrics.gizmo_handle` | Transform handle and path vertex square | 7 | 7 | 7 | 7 |
 | `metrics.gizmo_keyline` | Gizmo stroke and keyline width over the image | 1 | 1 | 1 | 1 |
-| `metrics.grade_field` | A colour wheel's master field under the wheel | 72 | 72 | 72 | 72 |
+| `metrics.grade_field` | Room for a colour wheel master's number beside its strip | 72 | 72 | 72 | 72 |
 | `metrics.grade_pair` | Least width of two colour wheels side by side on their plates | 254 | 254 | 254 | 254 |
+| `metrics.grade_pair_max` | Most width of two colour wheel plates side by side | 446 | 446 | 446 | 446 |
 | `metrics.grade_wheel` | A colour wheel's least diameter | 112 | 112 | 112 | 112 |
 | `metrics.grade_wheel_max` | A colour wheel's greatest diameter in a wide panel | 220 | 220 | 220 | 220 |
 | `metrics.group_radius` | Settings grouped-form card corner | 12 | 12 | 12 | 12 |
@@ -205,6 +208,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.track_row` | Timeline layer row | 30 | 30 | 30 | 30 |
 | `metrics.tree_indent` | Indent per outline level | 16 | 16 | 16 | 16 |
 | `metrics.value_column` | Least width of an inspector row's value column | 128 | 128 | 128 | 128 |
+| `metrics.value_column_most` | Most width of a capped inspector row's value column (Effect Controls) | 240 | 240 | 240 | 240 |
 | `metrics.viewer_3d_collapse` | Viewer width below which the 3D toolbar becomes one pull-down | 560 | 560 | 560 | 560 |
 | `metrics.viewer_3d_labels` | Minimum viewer width for labels in the 3D toolbar | 860 | 860 | 860 | 860 |
 | `metrics.viewer_ruler` | The viewer's ruler bands | 16 | 16 | 16 | 16 |

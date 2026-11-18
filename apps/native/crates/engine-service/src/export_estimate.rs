@@ -192,6 +192,22 @@ impl Viewer {
         Ok(receive)
     }
 }
+impl Viewer {
+    /// Drops this viewer's 3D estimate, queued or measuring: an export that
+    /// starts needs the GPU it would measure, and the sheet shows the
+    /// export's progress from then on. A viewer with an estimate pending
+    /// counts as busy, so one that could not finish held every export back.
+    pub fn cancel_export_estimate(&self, reason: &str) {
+        let mut state = self.shared.state.lock().unwrap();
+        if let Some(v) = state.views.get_mut(&self.id)
+            && (v.export_estimate.is_some()
+                || !matches!(v.status.export_estimate, ExportEstimateState::Idle))
+        {
+            cancel(v, reason);
+            state.notify();
+        }
+    }
+}
 fn validate(size: Size, frames: u64) -> Result<(), String> {
     if size.width == 0
         || size.height == 0
@@ -997,6 +1013,33 @@ mod tests {
             viewer.status().export_estimate,
             ExportEstimateState::Idle
         ));
+        // An export that starts drops the estimate: the viewer is no longer
+        // busy with it, so the export's frames are not held behind it.
+        let stamp = viewer.stamp().unwrap();
+        let dropped = viewer
+            .estimate_studio_export(stamp, Ticks::ZERO, Size::new(64, 64), 3)
+            .unwrap();
+        assert!(matches!(
+            viewer.status().export_estimate,
+            ExportEstimateState::Queued
+        ));
+        viewer.cancel_export_estimate("an export started");
+        assert!(matches!(
+            viewer.status().export_estimate,
+            ExportEstimateState::Idle
+        ));
+        assert!(
+            dropped
+                .try_recv()
+                .unwrap()
+                .unwrap_err()
+                .contains("an export started")
+        );
+        assert!(
+            service.shared.state.lock().unwrap().views[&viewer.id]
+                .export_estimate
+                .is_none()
+        );
         viewer.retire();
     }
 }

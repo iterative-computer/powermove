@@ -599,6 +599,25 @@ impl Panel {
         }
         Ok(())
     }
+    /// The run `run`'s edits were rolled back after it ended (it did not
+    /// keep them): its thread says so after whatever the run said, so a
+    /// "Done" never stands beside a project that lost the change (PM-507).
+    /// `false`: no thread here had that run.
+    pub fn note_rolled_back(&mut self, run: &str, text: &str) -> Result<bool> {
+        let Some(id) = self
+            .sessions
+            .iter()
+            .find(|(_, s)| {
+                s.last_run.as_deref() == Some(run) || s.run.as_ref().is_some_and(|r| r.id == run)
+            })
+            .map(|(id, _)| id.clone())
+        else {
+            return Ok(false);
+        };
+        self.session_mut(&id)?
+            .append(json!({"role":"assistant","text":text,"rolledBack":true}))?;
+        Ok(true)
+    }
     pub fn save(&mut self, store: &mut impl Store, now: u64) -> Result<()> {
         let ids: Vec<_> = self.sessions.keys().cloned().collect();
         for id in ids {
@@ -978,7 +997,11 @@ impl Panel {
         if let Some(file) = session.draft.attachments().find(|f| !f.payload_available()) {
             return Err(Error::MissingPayload(file.id().into()));
         }
+        // The agent reads where each attachment sits ("[Attachment: …]");
+        // the thread keeps what the person typed, each attachment at its
+        // place (`promptOffset`), so the bubble and the title show their words.
         let text = session.draft.request_text();
+        let (typed, placed) = session.draft.legacy();
         let steer = session.run.is_some();
         if steer && target.run.as_deref() != Some(run_id) {
             return Err(Error::Stale);
@@ -990,7 +1013,7 @@ impl Panel {
         }
         let citations = session.draft.citations().to_vec();
         let provider_text = pm_agents::citations::context(&text, &citations);
-        session.append(json!({"role":"user","text":text,"citations":citations,"attachments":files,"steering":steer}))?;
+        session.append(json!({"role":"user","text":typed,"citations":citations,"attachments":placed,"steering":steer}))?;
         session.archive_result()?;
         session.draft.clear_after_send();
         session.plan = None;

@@ -46,6 +46,10 @@ pub struct NewProjectForm {
     pub height: String,
     pub fps: String,
     pub duration: String,
+    /// The frame rate and duration the sheet opened with, exact, and the
+    /// text each shows: left as shown, the exact value is the one created
+    /// (2206 frames at 30 fps show `73.53`).
+    pub seeded: [(String, f64); 2],
     pub background: String,
     pub preset: Option<usize>,
     /// S018 review answer: inspector Link toggle, initially on.
@@ -68,8 +72,12 @@ impl NewProjectForm {
             name: unique("Untitled", names),
             width: seed.width.to_string(),
             height: seed.height.to_string(),
-            fps: seed.fps.to_string(),
-            duration: seed.duration.to_string(),
+            fps: crate::dialogs::number_text(seed.fps),
+            duration: crate::dialogs::number_text(seed.duration),
+            seeded: [
+                (crate::dialogs::number_text(seed.fps), seed.fps),
+                (crate::dialogs::number_text(seed.duration), seed.duration),
+            ],
             background: seed.background.clone(),
             preset: RESOLUTIONS
                 .iter()
@@ -108,8 +116,8 @@ impl NewProjectForm {
                 .parse::<u32>()
                 .is_ok_and(|n| (16..=8192).contains(&n))
         });
-        let fps = finite(&self.fps).filter(|n| (1.0..=240.0).contains(n));
-        let duration = fps.and_then(|fps| parse_duration(&self.duration, fps));
+        let fps = self.fps_value().filter(|n| (1.0..=240.0).contains(n));
+        let duration = fps.and_then(|fps| self.duration_value(fps));
         Validation {
             name: self.name.trim().is_empty().then_some(NAME_ERROR),
             size: (!size_valid).then_some(SIZE_ERROR),
@@ -129,17 +137,35 @@ impl NewProjectForm {
         if !self.validation().valid() {
             return None;
         }
-        let fps = finite(&self.fps)?;
+        let fps = self.fps_value()?;
         Some(NewProject {
             name: self.name.trim().into(),
             format: Format {
                 width: self.width.trim().parse().ok()?,
                 height: self.height.trim().parse().ok()?,
                 fps,
-                duration: parse_duration(&self.duration, fps)?,
+                duration: self.duration_value(fps)?,
                 background: self.background.clone(),
             },
         })
+    }
+    /// The frame rate: as it opened while its text is, else as typed.
+    fn fps_value(&self) -> Option<f64> {
+        let (shown, exact) = &self.seeded[0];
+        if self.fps.trim() == shown {
+            Some(*exact)
+        } else {
+            finite(&self.fps)
+        }
+    }
+    /// The duration: as it opened while its text is, else as typed.
+    fn duration_value(&self, fps: f64) -> Option<f64> {
+        let (shown, exact) = &self.seeded[1];
+        if self.duration.trim() == shown {
+            Some(*exact)
+        } else {
+            parse_duration(&self.duration, fps)
+        }
     }
     pub fn can_create(&self) -> bool {
         !self.submitting && self.values().is_some()

@@ -18,77 +18,8 @@ use std::{
 
 const TICK: Duration = Duration::from_millis(33);
 const HIDDEN: Duration = Duration::from_secs(1);
-/// The fader's console law (`FADER_MARKS`): dB and rail position, top down.
-const MARKS: [(f64, f64); 9] = [
-    (12., 1.),
-    (6., 0.86),
-    (0., 0.72),
-    (-6., 0.58),
-    (-12., 0.45),
-    (-20., 0.33),
-    (-30., 0.22),
-    (-40., 0.13),
-    (-60., 0.04),
-];
-const FLOOR_DB: f64 = -100.;
-const DETENT_DB: f64 = 0.35;
-
-/// Rail position (0 bottom, 1 top) of a level in dB (`faderPosition`).
-pub fn fader_position(db: f64) -> f64 {
-    if db.is_nan() || db <= FLOOR_DB {
-        return 0.;
-    }
-    if db >= MARKS[0].0 {
-        return 1.;
-    }
-    let (low_db, low_pos) = MARKS[MARKS.len() - 1];
-    if db < low_db {
-        return (db - FLOOR_DB) / (low_db - FLOOR_DB) * low_pos;
-    }
-    for pair in MARKS.windows(2) {
-        let ((high_db, high_pos), (low_db, low_pos)) = (pair[0], pair[1]);
-        if db >= low_db {
-            return low_pos + (db - low_db) / (high_db - low_db) * (high_pos - low_pos);
-        }
-    }
-    0.
-}
-/// The level at a rail position (`faderDb`).
-pub fn fader_db(position: f64) -> f64 {
-    if position.is_nan() || position <= 0. {
-        return f64::NEG_INFINITY;
-    }
-    if position >= 1. {
-        return MARKS[0].0;
-    }
-    let (low_db, low_pos) = MARKS[MARKS.len() - 1];
-    if position < low_pos {
-        return FLOOR_DB + position / low_pos * (low_db - FLOOR_DB);
-    }
-    for pair in MARKS.windows(2) {
-        let ((high_db, high_pos), (low_db, low_pos)) = (pair[0], pair[1]);
-        if position >= low_pos {
-            return low_db + (position - low_pos) / (high_pos - low_pos) * (high_db - low_db);
-        }
-    }
-    f64::NEG_INFINITY
-}
-/// Readout text (`formatDb`): `0.0`, `+2.5`, `−3.2`, `−∞`.
-pub fn format_db(db: f64) -> String {
-    if db.is_nan() || db <= FLOOR_DB {
-        return "−∞".into();
-    }
-    let rounded = (db * 10.).round() / 10.;
-    if rounded == 0. {
-        return "0.0".into();
-    }
-    let text = format!("{:.1}", rounded.abs());
-    if rounded > 0. {
-        format!("+{text}")
-    } else {
-        format!("−{text}")
-    }
-}
+// The fader's law, shared with the timeline's level line.
+pub use pm_panel_timeline::level::{DETENT_DB, MARKS, fader_db, fader_position, format_db};
 /// `levelLabel`: the Undo step a level edit is named for.
 fn level_label(strip: Option<&Strip>) -> &'static str {
     match strip {

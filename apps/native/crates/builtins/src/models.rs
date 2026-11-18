@@ -255,6 +255,10 @@ impl Backend {
         self.native
             .properties
             .focus_part(&self.native.facts["focusPart"]);
+        let transitions = registered_transitions(&self.kernel.state());
+        if self.native.properties.transitions != transitions {
+            self.native.properties.transitions = transitions;
+        }
         if self.native.properties.originals != self.native.originals {
             self.native.properties.originals = self.native.originals.clone();
         }
@@ -857,11 +861,6 @@ impl Backend {
                     (true, Some("local")) => "Custom",
                     _ => "Installed",
                 };
-                // D11 Stop turns it off for this run, not in the saved preference.
-                let stopped = host
-                    .and_then(|h| h.get("stopped"))
-                    .and_then(pm_model::Value::as_bool)
-                    == Some(true);
                 // Its folder can't be reached (an unmounted volume): kept, said so.
                 let about = if host
                     .and_then(|h| h.get("unavailable"))
@@ -872,15 +871,39 @@ impl Backend {
                 } else {
                     text("about").unwrap_or_default()
                 };
-                json!({"id":e.id,"name":text("name").unwrap_or_else(|| e.id.clone()),"type":"Other","source":source,
-                    "enabled":e.enabled && !stopped,"about":about,"includes":includes,
+                json!({"id":e.id,"name":text("name").unwrap_or_else(|| e.id.clone()),"type":extension_kind(&includes),"source":source,
+                    // A D11 Stop turns it off for this run, not in the saved choice.
+                    "enabled":e.enabled && !e.stopped_this_run(),"about":about,"includes":includes,
                     "shortcuts":[],"files":[],"variables":[],"canArchive":can_archive})
             })
             .collect::<Vec<_>>();
+        // Like kinds together, in the order the page lists them, then by name.
+        // Each row's switch is a local control: its lease only names it.
+        let mut extensions = extensions;
+        for e in &mut extensions {
+            let name = format!("extension.{}", e["id"].as_str().unwrap_or(""));
+            let lease = self.fields(&json!([name]))?;
+            e["binding"] = lease[&name].clone();
+        }
+        extensions.sort_by_cached_key(|e| {
+            let kind = e["type"].as_str().unwrap_or("Other");
+            (
+                EXTENSION_KINDS.iter().position(|k| *k == kind),
+                e["name"].as_str().unwrap_or("").to_lowercase(),
+            )
+        });
         let accounts = self.account_rows();
         let speech = crate::speech::status();
-        let speech_rows = speech.as_ref().map(crate::speech::rows).unwrap_or_default();
+        let mut speech_rows = speech.as_ref().map(crate::speech::rows).unwrap_or_default();
+        if let Some(language) = speech_rows
+            .iter_mut()
+            .find(|row| row["id"] == "speech.language")
+        {
+            let fields = self.fields(&json!(["speech.language"]))?;
+            language["binding"] = fields["speech.language"].clone();
+        }
         let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready",
+            "accountName":self.native.facts["cloud"]["identity"],
             "speech":speech.as_ref().map(crate::speech::models).unwrap_or_default(),
             // Settings › Shortcuts, built by the app from the keymap it uses.
             "shortcuts":self.native.facts["shortcuts"],
@@ -931,6 +954,17 @@ impl Backend {
             rows.extend(timeline_rows);
             rows.extend(shortcut_rows);
             rows.extend(storage_rows);
+            if let Some(version) = self.native.facts["settingsVersion"].as_str() {
+                rows.push(
+                    json!({"id":"about.version","section":"about","group":"Powermove",
+                    "label":"Version","control":"status","value":version}),
+                );
+                rows.push(
+                    json!({"id":"about.check-updates","section":"about","group":"Powermove",
+                    "label":"Software Updates","control":"action","action":"about.check-updates",
+                    "actionLabel":"Check for Updates…"}),
+                );
+            }
         }
         // Targets stay here: recorded for this revision, not published.
         let mut targets = serde_json::Map::new();
@@ -1057,6 +1091,10 @@ impl Backend {
                 // The editor's own timeline fits its view to the curves.
                 HostEffect::FitCurves(..) => json!({"kind":"command","name":"graph.fit"}),
                 HostEffect::OpenComposition(id) => json!({"kind":"openComposition","id":id}),
+                // The empty composition's buttons: the app's own commands.
+                HostEffect::Run(name) => json!({"kind":"command","name":name}),
+                // Import… from the timeline: File › Import…, at the playhead.
+                HostEffect::Import { .. } => json!({"kind":"command","name":"import"}),
                 other => return Some(Err(format!("Timeline host effect unavailable: {other:?}"))),
             };
             actions.push(("timeline.effect".into(), action));
@@ -1251,10 +1289,11 @@ impl Backend {
                 .model
                 .menu(&context)
                 .into_iter()
+                .filter(|item| item.is_action())
                 .map(|item| {
                     json!({
                         "id": item.id,
-                        "label": pm_panel_timeline::menu_label(item.id),
+                        "label": item.label,
                         "checked": item.checked,
                         "enabled": item.enabled,
                         "intent": {"type":"graphMenu","action":item.id},
@@ -1490,7 +1529,7 @@ impl Backend {
                 "hasAudio":kept("hasAudio", json!(false)),"captionLayers":kept("captionLayers", json!(0)),
                 "hasWorkArea":comp.get("work").is_some(),"workArea":work_area.map(|(a, b)| [a, b]),
                 "duration":n("dur", 0.),"hdr":pm_kernel::model::project_output(root).hdr(),
-                "summary":kept("summary", json!(""))});
+                "summary":kept("summary", json!("")),"note":kept("note", json!(""))});
             let studio = kept("studio", Value::Null);
             self.native.export["project"] = project;
             if !studio.is_null() {
@@ -1515,7 +1554,7 @@ impl Backend {
         let work_area = comp
             .get("work")
             .and_then(|w| crate::settings::work_span(&wire(&w.to_value())));
-        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"workArea":work_area.map(|(a, b)| [a, b]),"duration":n("dur", 0.),"hdr":pm_kernel::model::project_output(root).hdr(),"summary":plan.summary});
+        self.native.export["project"] = json!({"id":p.project,"name":name,"width":width,"height":height,"hasAudio":plan.has_audio,"captionLayers":plan.captions,"hasWorkArea":comp.get("work").is_some(),"workArea":work_area.map(|(a, b)| [a, b]),"duration":n("dur", 0.),"hdr":pm_kernel::model::project_output(root).hdr(),"summary":plan.summary,"note":plan.note});
         // A composition with 3D layers offers a per-export 3D quality; the sheet
         // names the composition's own preset as the default choice.
         let comp_key = format!(
@@ -1575,7 +1614,13 @@ impl Backend {
             let changed = self.native.export_estimate_key.as_deref() != Some(key.as_str());
             self.native.export_estimate_seen =
                 (status, if changed { 0 } else { asked + superseded as u8 });
-            if changed || superseded {
+            // An export running (or starting) uses the GPU the estimate would
+            // measure; the sheet shows its progress instead: nothing is asked.
+            let exporting = matches!(
+                self.native.export["run"]["phase"].as_str(),
+                Some("choosingDestination" | "preparing" | "rendering" | "checking" | "cancelling")
+            );
+            if (changed || superseded) && !exporting {
                 self.native.export_estimate_key = Some(key);
                 self.native.platform.push((
                     "export.estimate".into(),
@@ -1585,7 +1630,8 @@ impl Backend {
             let preset = policy["preset"].as_str().unwrap_or("production");
             // Asked just now: say so until the viewer's state catches up,
             // rather than flash the static guess before the measured range.
-            let asked = (changed || superseded).then(|| format!("3D {label}, measuring…"));
+            let asked =
+                ((changed || superseded) && !exporting).then(|| format!("3D {label}, measuring…"));
             let from_viewer = asked.is_some()
                 || crate::delivery::measured_estimate_scaled(
                     &self.native.facts["studioExportEstimate"],
@@ -2060,7 +2106,15 @@ impl Backend {
                     if crate::agent_host::sends(action) {
                         crate::agent_host::admit_send(&state, &thread)?;
                     }
-                    let run = new_id("run");
+                    // A fresh run, or, while the thread runs, the current
+                    // one: a message sent then steers it (PM-506: a fresh id
+                    // there was refused as stale, and the steer was lost).
+                    let run = state
+                        .panel
+                        .session(&thread)
+                        .ok()
+                        .and_then(|s| s.run.as_ref().map(|r| r.id.clone()))
+                        .unwrap_or_else(|| new_id("run"));
                     let request = new_id("request");
                     let new_thread = new_id("thread");
                     let catalogs = |provider| link.catalog(provider);
@@ -2449,6 +2503,46 @@ pub(crate) fn mod_records(
         entries,
     }
 }
+/// The kinds Settings › Extensions sorts by, in the order it lists them
+/// (v1.3.2 `EXTENSION_GROUPS`).
+pub(crate) const EXTENSION_KINDS: [&str; 7] = [
+    "Effects",
+    "Panels",
+    "Appearance",
+    "Layer Types",
+    "Media",
+    "Editor Tools",
+    "Other",
+];
+/// What an extension is, from what it contributes, as v1 placed it: its
+/// content before a companion panel, command or property control (an effect
+/// with a panel is an effect), and Other when it names nothing known.
+pub(crate) fn extension_kind(contributes: &[String]) -> &'static str {
+    let has = |kinds: &[&str]| contributes.iter().any(|c| kinds.contains(&c.as_str()));
+    if has(&["effects", "transitions"]) {
+        "Effects"
+    } else if has(&["themes"]) {
+        "Appearance"
+    } else if has(&["layers"]) {
+        "Layer Types"
+    } else if has(&["media"]) {
+        "Media"
+    } else if has(&["panels"]) {
+        "Panels"
+    } else if has(&[
+        "commands",
+        "inspector",
+        "keybindings",
+        "palette",
+        "menus",
+        "status",
+        "hooks",
+    ]) {
+        "Editor Tools"
+    } else {
+        "Other"
+    }
+}
 /// Deleted from Settings: the folder is in the archive, its values are kept.
 fn archived(entry: &pm_kernel::state::ExtensionEntry) -> bool {
     entry
@@ -2540,4 +2634,38 @@ pub struct Probe {
     /// That check is not on the sheet yet: the host publishes the sheet
     /// again (`Builtins::publish_finished_checks`).
     pub unpublished: bool,
+}
+
+/// The transitions the registry offers, in its order, for Properties.
+pub(crate) fn registered_transitions(
+    state: &pm_kernel::state::StateSnapshot,
+) -> Vec<crate::properties::RegisteredTransition> {
+    state
+        .registries
+        .get("transitions")
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let definition = pm_kernel::commands::effects::registered_transition(state, &entry.id)?;
+            let text = |v: &pm_model::Value, key: &str| {
+                v.get(key)
+                    .and_then(pm_model::Value::as_str)
+                    .map(str::to_owned)
+            };
+            let labels = entry
+                .definition
+                .get("params")
+                .and_then(pm_model::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|p| Some((text(p, "k")?, text(p, "label")?)))
+                .collect();
+            Some(crate::properties::RegisteredTransition {
+                id: entry.id.clone(),
+                label: text(&entry.definition, "label").unwrap_or_else(|| entry.id.clone()),
+                definition,
+                labels,
+            })
+        })
+        .collect()
 }

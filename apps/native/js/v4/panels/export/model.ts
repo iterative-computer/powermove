@@ -87,7 +87,13 @@ export type Run =
     }
   /** Every frame is encoded; the written file is checked against what was
    * rendered, frame by frame, before it is kept. */
-  | { phase: "checking"; frame: number; total: number; elapsed: number }
+  | {
+      phase: "checking";
+      frame: number;
+      total: number;
+      elapsed: number;
+      preview?: string;
+    }
   | { phase: "done"; path: string }
   /** `offline`: refused because clips are offline; Export Without Them applies. */
   | { phase: "failed"; message: string; offline?: boolean }

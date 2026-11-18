@@ -24,6 +24,8 @@ export interface Extension {
   // Opaque resource, never a filesystem path or web URL.
   icon?: string;
   canArchive: boolean;
+  /** The host's lease for the row's on/off switch. */
+  binding?: string;
 }
 export interface SpeechModel {
   id: string;
@@ -71,6 +73,7 @@ export interface Shortcuts {
 }
 export interface Publication {
   revision: number;
+  accountName?: string | null;
   shortcuts?: Shortcuts;
   project?: { id: string; name: string };
   /** Settings › Project's header: the project's poster (a host picture
@@ -180,7 +183,7 @@ export class SettingsModel {
     readonly profileSettings?: ProfileSettings,
   ) {
     this.publication = publication;
-    this.active = publication.project ? "project" : "general";
+    this.active = "general";
     this.reindex();
   }
   subscribe = (listener: () => void) => {
@@ -207,8 +210,7 @@ export class SettingsModel {
     return rows
       .filter(
         (r) =>
-          !["project", "memory"].includes(r.section) ||
-          !!this.publication.project,
+          r.section !== "project" || !!this.publication.project,
       )
       .map((r) => ({
         ...r,
@@ -229,7 +231,7 @@ export class SettingsModel {
   }
   get availableSections() {
     return sections.filter(
-      (s) => !["project", "memory"].includes(s) || !!this.publication.project,
+      (s) => s !== "project" || !!this.publication.project,
     );
   }
   get visibleSections() {
@@ -285,9 +287,7 @@ export class SettingsModel {
     this.active =
       target && this.availableSections.includes(target)
         ? target
-        : this.publication.project
-          ? "project"
-          : "general";
+        : "general";
     this.window.present(this.active);
     this.window.scrollTo(this.active, { reduceMotion: true });
     this.changed();
@@ -299,7 +299,14 @@ export class SettingsModel {
     this.changed();
   }
   select(section: Section) {
-    if (!this.alive || !this.visibleSections.includes(section)) return;
+    if (!this.alive) return;
+    if (section === "account" && this.query) {
+      this.query = "";
+      this.searching = false;
+      this.searchEpoch++;
+      this.reindex();
+    }
+    if (!this.visibleSections.includes(section)) return;
     this.active = section;
     this.window.title(section);
     this.window.scrollTo(section, { reduceMotion: this.reduceMotion });
@@ -391,7 +398,7 @@ export class SettingsModel {
           .toLocaleLowerCase()
           .includes(query)
       ) {
-        matches.sections.add("memory");
+        matches.sections.add("project");
         matches.count++;
       }
     }

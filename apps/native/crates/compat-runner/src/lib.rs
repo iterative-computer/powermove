@@ -187,9 +187,6 @@ pub struct BaseRasterRequest {
     pub scale: f64,
     /// Today's preview crop window `[x, y, w, h]` in raster pixels.
     pub crop: Option<[u32; 4]>,
-    /// Only this window `[x, y, w, h]` of the whole (uncropped) raster is
-    /// wanted: the reply holds just its pixels ([`BaseRasterReply::window`]).
-    pub window: Option<[u32; 4]>,
 }
 /// A base raster's straight RGBA8 canvas and today's geometry.
 pub struct BaseRasterReply {
@@ -203,9 +200,6 @@ pub struct BaseRasterReply {
     /// The part of the canvas the quad samples: a crop window's canvas is
     /// placed inside the whole raster (today's `uv`).
     pub uv: [f64; 4],
-    /// For a window request: the part of the `width` × `height` canvas
-    /// `straight_rgba` holds (`[x, y, w, h]`).
-    pub window: Option<[u32; 4]>,
 }
 /// What an override answered for one layer at one frame.
 #[derive(Debug)]
@@ -226,8 +220,7 @@ pub enum RasterAnswer {
     /// delivered): not the override's doing, so it is asked again.
     Unavailable(String),
     /// The override's canvas: premultiplied RGBA8 rows (a canvas's backing
-    /// store), the quad's size, anchor and `uv`. With `window`, the rows are
-    /// that part (`[x, y, w, h]`) of the `width` × `height` canvas only.
+    /// store), the quad's size, anchor and `uv`.
     Raster {
         width: u32,
         height: u32,
@@ -235,7 +228,6 @@ pub enum RasterAnswer {
         size: [f64; 2],
         anchor: [f64; 2],
         uv: [f64; 4],
-        window: Option<[u32; 4]>,
     },
 }
 /// The app's side of raster overrides.
@@ -591,6 +583,65 @@ mod tests {
     fn dom_runner() -> CompatRunner {
         runner()
     }
+    /// PM-509: the window's page faulted and every extension panel stayed
+    /// blank until extensions restarted. The realm keeps its document through
+    /// the fault, and a fresh page gets all of it from the first batch: the
+    /// panel's content, what changed while no page applied, and its events.
+    #[test]
+    fn after_a_page_fault_a_fresh_page_gets_the_whole_document_again() {
+        let runner = dom_runner();
+        let session = json!({"panel":"compat","generation":1});
+        let id = runner
+            .json(
+                "(()=>{const d=__compat.dom.document;const root=d.createElement('section');
+                 root.setAttribute('data-pm-contribution','anchor-point');
+                 const title=d.createElement('h2');title.textContent='Anchor Point';
+                 const button=d.createElement('button');button.textContent='Reset';
+                 button.addEventListener('click',()=>{globalThis.clicked=(globalThis.clicked||0)+1});
+                 root.append(title,button);d.body.append(root);globalThis.panelTitle=title;
+                 __compat.dom.flush();return __compat.dom.id(button)})()",
+            )
+            .unwrap();
+        let first = runner.take_dom_batches();
+        let seq = first.last().unwrap()["seq"].as_u64().unwrap();
+        runner
+            .receive_dom(&json!({"kind":"applied","session":session,"seq":seq}))
+            .unwrap();
+        // The page faults: nothing more goes to it, and the document stays.
+        runner
+            .receive_dom(&json!({"kind":"fault","session":session,"seq":seq,"message":"page fault"}))
+            .unwrap();
+        runner
+            .eval("panelTitle.textContent='changed meanwhile';__compat.dom.flush()")
+            .unwrap();
+        assert!(runner.take_dom_batches().is_empty(), "a faulted page takes nothing");
+        // A fresh page: everything again, from batch 1.
+        runner.eval("__compat.replayDom()").unwrap();
+        let replay = runner.take_dom_batches();
+        assert_eq!(replay[0]["seq"], 1, "{:?}", replay[0]["seq"]);
+        for (i, batch) in replay.iter().enumerate() {
+            assert_eq!(batch["seq"].as_u64(), Some(i as u64 + 1));
+        }
+        let text = serde_json::to_string(&replay).unwrap();
+        for needed in ["anchor-point", "changed meanwhile", "Reset", "\"click\""] {
+            assert!(text.contains(needed), "{needed} missing from the replay");
+        }
+        let last = replay.last().unwrap()["seq"].as_u64().unwrap();
+        runner
+            .receive_dom(&json!({"kind":"applied","session":session,"seq":last}))
+            .unwrap();
+        // The fresh page's first event reaches the realm's listener.
+        runner.receive_dom(&json!({"kind":"event","session":session,"seq":1,"applied":last,"target":id,"event":"click",
+            "bubbles":true,"cancelable":true,"default_prevented":false,"data":{}})).unwrap();
+        assert_eq!(runner.json("globalThis.clicked").unwrap(), 1);
+        // And changes keep going to it.
+        runner
+            .eval("panelTitle.textContent='after the replay';__compat.dom.flush()")
+            .unwrap();
+        let next = runner.take_dom_batches();
+        assert_eq!(next[0]["seq"].as_u64(), Some(last + 1));
+        assert!(serde_json::to_string(&next).unwrap().contains("after the replay"));
+    }
     fn decode(bytes: &[u8]) -> (png::OutputInfo, Vec<u8>) {
         let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
         let mut reader = decoder.read_info().unwrap();
@@ -598,6 +649,160 @@ mod tests {
         let info = reader.next_frame(&mut pixels).unwrap();
         pixels.truncate(info.buffer_size());
         (info, pixels)
+    }
+    /// An extension's animation frames wait while none of its panels shows
+    /// (not open, or placed behind another tab) and run while one does, as a
+    /// hidden page's do in a browser: a collapsed game panel kept the realm
+    /// busy on every frame.
+    #[test]
+    fn a_panel_that_does_not_show_gets_no_animation_frames() {
+        let runner = dom_runner();
+        let manifest =
+            json!({"id":"anim","name":"Anim","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){globalThis.ticks=0;
+                 api.panels.register({id:'anim.panel',title:'Anim',build(){}});
+                 const loop=()=>{globalThis.ticks++;requestAnimationFrame(loop)};requestAnimationFrame(loop);}",
+            )
+            .unwrap();
+        let ticks = || runner.json("globalThis.ticks").unwrap().as_f64().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(ticks(), 0., "no panel of it shows");
+        runner
+            .eval("__compat.openPanel('anim.panel');__compat.placePanel('anim.panel',[0,0,100,100])")
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ticks() < 3. {
+            assert!(std::time::Instant::now() < deadline, "a showing panel's frames run");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        runner.eval("__compat.placePanel('anim.panel',null)").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let held = ticks();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(ticks() <= held + 1., "behind another tab: {} after {held}", ticks());
+    }
+    /// A runner with one extension `id` whose activation runs `setup` and
+    /// then loops on animation frames, counting them in `globalThis.ticks`.
+    fn frame_loop(id: &str, setup: &str) -> CompatRunner {
+        let runner = dom_runner();
+        let manifest =
+            json!({"id":id,"name":id,"version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                &format!(
+                    "export default function activate(api){{globalThis.ticks=0;{setup}
+                     const loop=()=>{{globalThis.ticks++;requestAnimationFrame(loop)}};requestAnimationFrame(loop);}}"
+                ),
+            )
+            .unwrap();
+        runner
+    }
+    fn ticks(runner: &CompatRunner) -> f64 {
+        runner.json("globalThis.ticks").unwrap().as_f64().unwrap()
+    }
+    fn ticking(runner: &CompatRunner, why: &str) {
+        let from = ticks(runner);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while ticks(runner) < from + 3. {
+            assert!(std::time::Instant::now() < deadline, "{why}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    /// A panel the workspace restored (opened before its extension
+    /// registered it) shows before the shell places it: its frames run
+    /// without waiting for a placement (when in doubt a panel gets them).
+    #[test]
+    fn a_restored_panel_gets_its_frames_before_it_is_placed() {
+        let runner = dom_runner();
+        runner.eval("__compat.openPanel('restored.panel')").unwrap();
+        let manifest = json!({"id":"restored","name":"restored","version":"1.0.0","apiVersion":3,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){globalThis.ticks=0;
+                 api.panels.register({id:'restored.panel',title:'R',build(root){root.textContent='drawn'}});
+                 const loop=()=>{globalThis.ticks++;requestAnimationFrame(loop)};requestAnimationFrame(loop);}",
+            )
+            .unwrap();
+        ticking(&runner, "a restored, not yet placed panel gets frames");
+        // Placed behind another tab: now it is known not to show.
+        runner.eval("__compat.placePanel('restored.panel',null)").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let held = ticks(&runner);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(ticks(&runner) <= held + 1., "behind another tab it waits");
+        runner
+            .eval("__compat.placePanel('restored.panel',[0,0,100,100])")
+            .unwrap();
+        ticking(&runner, "shown again, its frames run");
+    }
+    /// An extension of API 1 (whose panels are hooks no owner is known for)
+    /// keeps its animation frames while its panel is closed.
+    #[test]
+    fn an_old_api_panel_keeps_its_frames() {
+        let runner = dom_runner();
+        let manifest = json!({"id":"oldpanel","name":"oldpanel","version":"1.0.0","apiVersion":1,"entry":"index.js"});
+        runner
+            .activate(
+                &manifest,
+                "export default function activate(api){globalThis.ticks=0;
+                 api.panels.register({id:'oldpanel.panel',title:'O',build(root){root.textContent='drawn'}});
+                 const loop=()=>{globalThis.ticks++;requestAnimationFrame(loop)};requestAnimationFrame(loop);}",
+            )
+            .unwrap();
+        ticking(&runner, "an old-API extension's frames run");
+    }
+    /// An extension with no panel keeps its animation frames: its surface may
+    /// be a viewer overlay, a gizmo, a tool or a service pacing work.
+    #[test]
+    fn an_extension_without_panels_keeps_its_animation_frames() {
+        let runner = frame_loop("paced", "");
+        ticking(&runner, "an extension with no panel gets frames");
+    }
+    /// An extension whose panel is collapsed but which draws a viewer overlay
+    /// keeps its animation frames: every surface it contributes counts.
+    #[test]
+    fn an_extension_with_a_viewer_overlay_keeps_its_frames_while_its_panel_is_hidden() {
+        let runner = frame_loop(
+            "overlaid",
+            "api.panels.register({id:'overlaid.panel',title:'O',build(){}});api.events.on('overlay',()=>{});",
+        );
+        ticking(&runner, "its overlay shows");
+    }
+    /// An extension with a hidden panel that also restyles the window with a
+    /// theme keeps its frames (a workspace theme schedules its shell updates
+    /// on them).
+    #[test]
+    fn an_extension_with_a_theme_keeps_its_frames_while_its_panel_is_hidden() {
+        let runner = frame_loop(
+            "themed",
+            "api.panels.register({id:'themed.panel',title:'T',build(){}});api.theme.register({id:'themed.look',name:'Look',tokens:{}});",
+        );
+        ticking(&runner, "its theme shows");
+    }
+    /// A window that is a tab behind another: its panels count as not showing,
+    /// and come back when it is selected.
+    #[test]
+    fn panels_in_a_window_that_cannot_be_seen_get_no_animation_frames() {
+        let runner = frame_loop(
+            "tabbed",
+            "api.panels.register({id:'tabbed.panel',title:'T',build(){}});",
+        );
+        runner
+            .eval("__compat.openPanel('tabbed.panel');__compat.placePanel('tabbed.panel',[0,0,100,100])")
+            .unwrap();
+        ticking(&runner, "a showing panel's frames run");
+        runner.eval("__compat.windowShown(false)").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let held = ticks(&runner);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(ticks(&runner) <= held + 1., "a hidden window's panel kept its frames");
+        runner.eval("__compat.windowShown(true)").unwrap();
+        ticking(&runner, "selected again, its frames run");
     }
     #[test]
     fn dom_canvas_uses_native_pixels_stable_context_and_immutable_png_resources() {
@@ -928,17 +1133,10 @@ mod tests {
                     request.composition,
                     request.content.is_some()
                 ]));
-                // A window of the whole 2 × 2 raster holds just its pixels.
-                let window = request.window.map(|[x, y, w, h]| {
-                    let (x, y) = (x.min(2), y.min(2));
-                    [x, y, w.min(2 - x), h.min(2 - y)]
-                });
-                let held = window.map_or(4, |[_, _, w, h]| (w * h) as usize);
                 Ok(Some(crate::BaseRasterReply {
                     width: 2,
                     height: 2,
-                    window,
-                    straight_rgba: [255, 0, 0, 255].repeat(held),
+                    straight_rgba: [255, 0, 0, 255].repeat(4),
                     size: (2., 2.),
                     anchor: (1., 1.),
                     selection: None,
@@ -969,32 +1167,12 @@ mod tests {
                             size,
                             anchor,
                             uv,
-                            window: None,
                         } => json!([
                             batch,
                             width,
                             height,
                             &premultiplied_rgba[..4],
                             &premultiplied_rgba[premultiplied_rgba.len() - 4..],
-                            size,
-                            anchor,
-                            uv
-                        ]),
-                        crate::RasterAnswer::Raster {
-                            width,
-                            height,
-                            premultiplied_rgba,
-                            size,
-                            anchor,
-                            uv,
-                            window: Some(window),
-                        } => json!([
-                            batch,
-                            "window",
-                            width,
-                            height,
-                            window,
-                            premultiplied_rgba.len(),
                             size,
                             anchor,
                             uv
@@ -1170,12 +1348,13 @@ mod tests {
             ]
         );
     }
-    /// An untouched base raster returned without the frame's crop window is
-    /// answered with only that window painted, at the whole raster's size; a
-    /// base the override read (geometry or canvas) or forwarded keeps today's
-    /// answer.
+    /// An untouched base raster an override returned without the frame's
+    /// crop window (a wrapper that drops `crop`) passes the layer through, as
+    /// one returned with it does: the engine draws the layer, as an export
+    /// (which never crops) does. Reading its geometry leaves it untouched;
+    /// reading its canvas (which may be drawn into) makes it the override's.
     #[test]
-    fn an_uncropped_base_raster_is_answered_with_just_the_crop_window() {
+    fn an_untouched_uncropped_base_raster_passes_the_layer_through() {
         let (runner, painted, answered, _) = raster_runner();
         let manifest =
             json!({"id":"drop","name":"Drop","version":"1.0.0","apiVersion":3,"entry":"index.js"});
@@ -1199,30 +1378,15 @@ mod tests {
                      ask('read',{x:1,y:0,width:1,height:1}),ask('forwarded',{x:1,y:0,width:1,height:1}),ask('dropped')]);")
             .unwrap();
         let answered = answered.lock().unwrap().clone();
-        // The window is clamped to the 2 × 2 raster: one texel, 4 bytes.
-        assert_eq!(
-            answered[0],
-            json!([
-                1,
-                "window",
-                2,
-                2,
-                [1, 0, 1, 1],
-                4,
-                [2., 2.],
-                [1., 1.],
-                [0., 0., 1., 1.]
-            ])
-        );
-        assert_eq!(answered[1][1], 2, "a measured base is the whole canvas");
-        assert_eq!(answered[2][1], 2, "a read canvas is the whole canvas");
+        assert_eq!(answered[0], json!([1, "native"]));
+        assert_eq!(answered[1], json!([1, "native"]), "a measured base is untouched");
+        assert_eq!(answered[2][1], 2, "a read canvas is the override's");
         assert_eq!(answered[3], json!([1, "native"]));
-        // Without a crop window the base is the layer itself.
         assert_eq!(answered[4], json!([1, "native"]));
         assert_eq!(
             painted.lock().unwrap().len(),
-            3,
-            "passed-through bases paint nothing"
+            2,
+            "only the read and measured bases paint"
         );
     }
     /// A runner whose 2 × 2 base rasters record the revision of the document
@@ -1234,21 +1398,11 @@ mod tests {
         let (p, a) = (painted.clone(), answered.clone());
         runner.host.set_rasters(Some(crate::RasterHooks {
             base: Arc::new(move |request: crate::BaseRasterRequest| {
-                p.lock().unwrap().push(json!([
-                    request.layer,
-                    request.document.revision(),
-                    request.window.is_some()
-                ]));
-                let held = request
-                    .window
-                    .map_or(4, |[_, _, w, h]| (w.min(2) * h.min(2)) as usize);
+                p.lock().unwrap().push(json!([request.layer, request.document.revision()]));
                 Ok(Some(crate::BaseRasterReply {
                     width: 2,
                     height: 2,
-                    window: request
-                        .window
-                        .map(|[x, y, w, h]| [x.min(2), y.min(2), w.min(2), h.min(2)]),
-                    straight_rgba: [255, 0, 0, 255].repeat(held),
+                    straight_rgba: [255, 0, 0, 255].repeat(4),
                     size: (2., 2.),
                     anchor: (1., 1.),
                     selection: None,
@@ -1259,9 +1413,6 @@ mod tests {
             answers: Arc::new(move |_, answers| {
                 for answer in answers {
                     a.lock().unwrap().push(match answer {
-                        crate::RasterAnswer::Raster {
-                            window: Some(_), ..
-                        } => json!("window"),
                         crate::RasterAnswer::Raster {
                             premultiplied_rgba, ..
                         } => json!(premultiplied_rgba[..4]),
@@ -1274,9 +1425,9 @@ mod tests {
         }));
         (runner, painted, answered)
     }
-    /// A base the frame's need gets only a window of is decided once the
-    /// whole batch ran: a later override drawing into its canvas makes it an
-    /// override's canvas, read back with that drawing (review of 3065d9378).
+    /// An uncropped base is decided once the whole batch ran: a later
+    /// override drawing into its canvas makes it an override's canvas, read
+    /// back with that drawing (review of 3065d9378).
     #[test]
     fn a_base_another_override_draws_into_later_in_the_batch_is_read_whole() {
         let (runner, _, answered) = revision_runner();
@@ -1305,89 +1456,6 @@ mod tests {
             vec![json!([0, 255, 0, 255]), json!("native")]
         );
     }
-    /// A windowed base an extension keeps paints, when it reads it later, the
-    /// frame it was returned for, from that revision's document, whatever the
-    /// project is now (review of 3065d9378).
-    #[test]
-    fn a_kept_windowed_base_reads_the_revision_it_was_returned_for() {
-        let (runner, painted, answered) = revision_runner();
-        let manifest =
-            json!({"id":"hold","name":"Hold","version":"1.0.0","apiVersion":3,"entry":"index.js"});
-        runner
-            .activate(
-                &manifest,
-                "export default function activate(api){const base=api.services.get('raster');
-                 api.services.register('raster',(L,s,T)=>{globalThis.saved=base(L,s,T);return globalThis.saved});}",
-            )
-            .unwrap();
-        runner
-            .eval("__compat.realm.PM.proj.layers.push({id:'a',type:'shape',name:'a',d:{}})")
-            .unwrap();
-        let before = runner
-            .json("(__compat.realm.flush(),__compat.realm.revision)")
-            .unwrap();
-        runner
-            .eval("__compat.answerRasters(1,[{composition:'synthetic-comp',layer:'a',seconds:0,scale:1,crop:{x:0,y:0,width:1,height:1}}]);")
-            .unwrap();
-        assert_eq!(*answered.lock().unwrap(), vec![json!("window")]);
-        runner
-            .eval("__compat.realm.PM.proj.layers.push({id:'later',type:'shape',name:'later',d:{}})")
-            .unwrap();
-        let after = runner
-            .json("(__compat.realm.flush(),__compat.realm.revision)")
-            .unwrap();
-        assert_ne!(before, after, "the project moved on");
-        assert_eq!(runner.json("globalThis.saved.cv.width").unwrap(), json!(2));
-        let painted = painted.lock().unwrap().clone();
-        assert_eq!(painted.len(), 2, "{painted:?}");
-        assert_eq!(painted[1], json!(["a", before, false]), "{painted:?}");
-    }
-    /// A base an override keeps returning keeps the document it was first
-    /// answered from: answering it again after an edit doesn't move it to the
-    /// project as it is now (review of 3bcf93827).
-    #[test]
-    fn a_base_answered_again_after_an_edit_keeps_its_first_document() {
-        let (runner, painted, answered) = revision_runner();
-        let manifest =
-            json!({"id":"same","name":"Same","version":"1.0.0","apiVersion":3,"entry":"index.js"});
-        runner
-            .activate(
-                &manifest,
-                "export default function activate(api){const base=api.services.get('raster');
-                 api.services.register('raster',(L,s,T)=>globalThis.saved??=base(L,s,T));}",
-            )
-            .unwrap();
-        runner
-            .eval("__compat.realm.PM.proj.layers.push({id:'a',type:'shape',name:'a',d:{}})")
-            .unwrap();
-        let first = runner
-            .json("(__compat.realm.flush(),__compat.realm.revision)")
-            .unwrap();
-        let batch = "__compat.answerRasters(1,[{composition:'synthetic-comp',layer:'a',seconds:0,scale:1,crop:{x:0,y:0,width:1,height:1}}]);";
-        runner.eval(batch).unwrap();
-        runner
-            .eval("__compat.realm.PM.proj.layers.push({id:'later',type:'shape',name:'later',d:{}})")
-            .unwrap();
-        let second = runner
-            .json("(__compat.realm.flush(),__compat.realm.revision)")
-            .unwrap();
-        assert_ne!(first, second);
-        runner.eval(batch).unwrap();
-        assert_eq!(
-            *answered.lock().unwrap(),
-            vec![json!("window"), json!("window")]
-        );
-        runner.json("globalThis.saved.cv.width").unwrap();
-        let painted = painted.lock().unwrap().clone();
-        assert_eq!(
-            painted,
-            vec![
-                json!(["a", first, true]),
-                json!(["a", first, true]),
-                json!(["a", first, false])
-            ]
-        );
-    }
     /// What a batch's flush emits may draw into a candidate base: it is
     /// checked after the flush, and read whole (review of 3bcf93827).
     #[test]
@@ -1410,72 +1478,6 @@ mod tests {
             .eval("__compat.answerRasters(1,[{composition:'synthetic-comp',layer:'a',seconds:0,scale:1,crop:{x:0,y:0,width:1,height:1}}]);")
             .unwrap();
         assert_eq!(*answered.lock().unwrap(), vec![json!([0, 255, 0, 255])]);
-    }
-    /// Kept documents are capped (past the cap a base is read whole), and a
-    /// collected base lets its document go (review of 3bcf93827).
-    #[test]
-    fn kept_documents_are_capped_and_go_with_their_bases() {
-        let (runner, _, answered) = revision_runner();
-        let manifest =
-            json!({"id":"many","name":"Many","version":"1.0.0","apiVersion":3,"entry":"index.js"});
-        runner
-            .activate(
-                &manifest,
-                "export default function activate(api){const base=api.services.get('raster');globalThis.kept=[];
-                 api.services.register('raster',(L,s,T)=>{const b=base(L,s,T);kept.push(b);return b});}",
-            )
-            .unwrap();
-        let round = |i: usize| {
-            runner
-                .eval(&format!("__compat.realm.PM.proj.layers.push({{id:'l{i}',type:'shape',name:'l',d:{{}}}});__compat.realm.flush();
-                    __compat.answerRasters({i},[{{composition:'synthetic-comp',layer:'l{i}',seconds:0,scale:1,crop:{{x:0,y:0,width:1,height:1}}}}]);"))
-                .unwrap();
-            answered.lock().unwrap().last().cloned().unwrap()
-        };
-        for i in 0..crate::recorder::MAX_PINNED_REVISIONS {
-            assert_eq!(round(i), json!("window"), "revision {i}");
-        }
-        // Every kept base holds its own revision: the next one is read whole.
-        assert_eq!(round(100), json!([255, 0, 0, 255]));
-        // Once the realm collects them, their documents go.
-        runner.eval("globalThis.kept=[]").unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            runner
-                .eval("(()=>{let n=0;for(let i=0;i<64;i++)n+=new Array(65536).fill(i).length;return n})()")
-                .unwrap();
-            let next = 200 + answered.lock().unwrap().len();
-            if round(next) == json!("window") {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the kept documents never went"
-            );
-            runner.eval("globalThis.kept=[]").unwrap();
-        }
-    }
-    /// The canvas round trip of a window is the window of the whole canvas's.
-    #[test]
-    fn a_window_s_canvas_round_trip_is_the_whole_canvas_s_there() {
-        let (w, h) = (37u32, 11u32);
-        let straight: Vec<u8> = (0..w * h * 4)
-            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
-            .collect();
-        let whole = crate::recorder::canvas_round_trip(w, h, straight.clone()).unwrap();
-        let [x, y, ww, wh] = [5u32, 3, 20, 7];
-        let window: Vec<u8> = (y..y + wh)
-            .flat_map(|r| {
-                straight[((r * w + x) * 4) as usize..((r * w + x + ww) * 4) as usize].to_vec()
-            })
-            .collect();
-        let part = crate::recorder::canvas_round_trip(ww, wh, window).unwrap();
-        let expected: Vec<u8> = (y..y + wh)
-            .flat_map(|r| {
-                whole[((r * w + x) * 4) as usize..((r * w + x + ww) * 4) as usize].to_vec()
-            })
-            .collect();
-        assert_eq!(part, expected);
     }
     /// An override's own throw is deterministic; an answer the realm could
     /// not read back or deliver is not, and is reported as such so the viewer

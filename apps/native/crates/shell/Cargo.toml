@@ -42,6 +42,9 @@ harness = false
 name = "hidden_release"
 harness = false
 [[test]]
+name = "quit_sheets"
+harness = false
+[[test]]
 name = "tab_close_gpui"
 harness = false
 [[test]]
@@ -49,4 +52,7 @@ name = "hosted_present"
 harness = false
 [[test]]
 name = "window_tabs"
+harness = false
+[[test]]
+name = "modal_sheets"
 harness = false

@@ -33,13 +33,14 @@ pub(crate) fn effect_binding_rows<'a>(
     channels: &[String],
 ) -> Option<Vec<&'a Value>> {
     // Every editable parameter the panel shows: its own rows, and those a
-    // summary row edits (Effect Controls' wheel master).
+    // summary row edits (Effect Controls' wheel master) or a point row does
+    // (its X and Y).
     let parameters: Vec<&Value> = projection["rows"]
         .as_array()?
         .iter()
         .flat_map(|r| match r["kind"].as_str() {
             Some("parameter") => vec![&r["parameter"]],
-            Some("summary") => r["parameters"]
+            Some("summary" | "point" | "ramp") => r["parameters"]
                 .as_array()
                 .map(|list| list.iter().collect())
                 .unwrap_or_default(),
@@ -328,7 +329,11 @@ impl Backend {
                 .remove_definition(&id);
         }
         self.panel.presentation.parameters.clear();
+        self.panel.presentation.ui.clear();
         for (id, d) in latest {
+            if let Some(ui) = d.get("ui").filter(|ui| ui.is_array()) {
+                self.panel.presentation.ui.insert(id.clone(), ui.clone());
+            }
             let mut params = vec![];
             for p in d["params"].as_array().into_iter().flatten() {
                 let Some(key) = p["k"].as_str() else {
@@ -365,6 +370,7 @@ impl Backend {
                                 .map(|a| a.iter().map(model).collect())
                                 .transpose()?
                                 .unwrap_or_default(),
+                            advanced: p["advanced"].as_bool(),
                         },
                     );
                 }
@@ -417,6 +423,20 @@ impl Backend {
                 order.push(entry.id.clone());
             }
             items.insert(entry.id.clone(), json!({"id":entry.id,"label":text("label").unwrap_or(&entry.id), "group":group, "kind":"effect","installed":true}));
+        }
+        // v1's Effects panel lists transitions too (transitions-basic): drop one
+        // on a clip's edge, or Add for the selection's In.
+        for entry in state.registries.get("transitions").into_iter().flatten() {
+            let text = |key: &str| entry.definition.get(key).and_then(pm_model::Value::as_str);
+            let group = "Transitions".to_owned();
+            if !groups.contains(&group) {
+                groups.push(group.clone());
+            }
+            let key = format!("transition:{}", entry.id);
+            if !items.contains_key(&key) {
+                order.push(key.clone());
+            }
+            items.insert(key, json!({"id":entry.id,"label":text("label").unwrap_or(&entry.id), "group":group, "kind":"transition","installed":true}));
         }
         let items = order
             .iter()
@@ -814,6 +834,28 @@ impl KernelData for Data {
                             {
                                 all.extend(commands);
                             }
+        }
+                        // A transition from the browser: the selection's In
+                        // (v1's Add), or the edge it names.
+                        if command.command == "transition.set" {
+                            let target =
+                                command.args["target"].as_str().ok_or("transition target")?;
+                            if b.model.as_ref().ok_or("No open project")?.primary() != Some(target) {
+                                return Err("Transition target selection changed".into());
+                            }
+                            let id = command.args["definition"]
+                                .as_str()
+                                .ok_or("transition definition")?;
+                            let edge = match command.args["edge"].as_str() {
+                                Some("out") => pm_kernel::commands::effects::Edge::Out,
+                                _ => pm_kernel::commands::effects::Edge::In,
+                            };
+                            let state = b.kernel.state();
+                            let set = pm_kernel::commands::effects::add_transition(
+                                &state, target, edge, id, None,
+                            )
+                            .map_err(|e| e.to_string())?;
+                            all.push(set.into());
                             continue;
                         }
                         if command.command != "effect.add" {
@@ -867,6 +909,12 @@ impl KernelData for Data {
                         .map_err(|e| e.to_string())?;
                     kernel = next.request.take();
                     plan = Some(next);
+                    // A plan the kernel need not run (a disclosure, a
+                    // selection, the rows' window) is answered at once with
+                    // the projection it changed: the panel adopts only that.
+                    if kernel.is_none() {
+                        return b.projection();
+                    }
                 }
                 HostOperation::Command { command, args } => {
                     match b.native_command(command, args)? {

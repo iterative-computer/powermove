@@ -157,6 +157,9 @@ pub enum Kit {
         /// Its master's push from neutral, -1 to 1 of the master's range
         /// (shown on the wheel's bezel).
         master: Option<f64>,
+        /// The master as its strip under the wheel sets it: its value and
+        /// range, and the binding a drag there writes.
+        master_strip: Option<(f64, [f64; 2], SharedString)>,
     },
     /// A curve editor: `[count, x0, y0, …]` and its channel's ink.
     Curve {
@@ -167,6 +170,20 @@ pub enum Kit {
     Ease {
         curve: [f64; 4],
         thumbnail: bool,
+    },
+    /// v1's point pad: the point (X, Y) and its bounds.
+    Pad {
+        point: [f64; 2],
+        min: [f64; 2],
+        max: [f64; 2],
+    },
+    /// v1's gradient bar: its ends (`0xRRGGBB`) and, when it has one, its
+    /// midpoint and the midpoint's range.
+    Ramp {
+        start: u32,
+        end: u32,
+        midpoint: Option<f64>,
+        range: [f64; 2],
     },
 }
 #[derive(Clone, Debug)]
@@ -186,6 +203,10 @@ pub struct NodeView {
     pub style: StyleRefinement,
     pub hidden: bool,
     pub scroll_y: bool,
+    /// `metadata.scrollEdge` (a colour token, the ground under the
+    /// scroller): content past an edge fades into that ground there, so a
+    /// region with no scroller still says there is more (a sheet body).
+    pub scroll_edge: Option<u32>,
     pub scroll_x: bool,
     pub semantic: Option<SharedString>,
     pub text: Option<SharedString>,
@@ -194,6 +215,9 @@ pub struct NodeView {
     /// An `img`'s resource: an opaque key the host resolves (a Project
     /// panel thumbnail, `media_thumbs`), never a path.
     pub resource: Option<SharedString>,
+    /// `metadata.fit: "contain"`: the picture shows whole, letterboxed;
+    /// otherwise it covers the node.
+    pub contain: bool,
     pub disabled: bool,
     pub events: Events,
     pub ax: Option<Ax>,
@@ -210,11 +234,17 @@ pub struct NodeView {
     /// (`metadata.fixedItems`), so an item may fill its height.
     pub fixed_items: bool,
     pub is_plain_text: bool,
+    /// A line of text led by a symbol (a warning's triangle): the glyph
+    /// stands before the words, not over them.
+    pub symbol_leads: bool,
     pub binding: Option<SharedString>,
     pub number: Option<NumberFacts>,
     pub local_change: bool,
     /// Escape reports an empty change, so a transient editor can close.
     pub cancel_change: bool,
+    /// A click (1) or a double-click (2) here opens a text field
+    /// (`opensField`): what is typed after it waits for that field.
+    pub opens_field: Option<usize>,
     pub timeline_scrub: Option<(SharedString, SharedString)>,
     /// The timeline's layer name: a press there can lift into a reorder.
     pub timeline_layer_drag: Option<SharedString>,
@@ -228,6 +258,11 @@ pub struct NodeView {
     /// `metadata.fixedWidthSample`: the node is at least as wide as this text in
     /// its own font, so a changing readout (timecode) never reflows its row.
     pub fixed_width: Option<SharedString>,
+    /// `metadata.fitsLabels`: the node is at least as wide as the widest of
+    /// these texts in its own font plus the room around it (its own
+    /// horizontal padding and `metadata.fitsInsetToken`, its rows' indent),
+    /// so none of a rail's names is cut (the Effects rail, PM-455).
+    pub fits_labels: Option<(Arc<Vec<SharedString>>, f32)>,
     /// `data-pm-slot="body"`: the part of a sheet between its title and its
     /// actions, which gives way while the sheet's height changes.
     pub sheet_body: bool,
@@ -740,6 +775,18 @@ fn compile(
                 .items_center()
                 .min_w(px(t.metrics.value_column))
                 .gap(px(t.metrics.inner_radius));
+            // A row whose panel caps its value column (`valueMostToken`, a
+            // metric) keeps label and control together on a wide panel.
+            let most = node
+                .parent
+                .and_then(|p| surface.node(p))
+                .filter(|row| Component::of(row) == Some(Component::InspectorRow))
+                .and_then(|row| row.props.get("metadata")?.get("valueMostToken")?.as_str())
+                .filter(|name| name.starts_with("metrics."))
+                .and_then(|name| table.number(&serde_json::json!({ "token": name })));
+            if let Some(most) = most {
+                compiled.sheet = compiled.sheet.max_w(px(most));
+            }
             if joined(Some(node.id)) {
                 compiled.sheet = compiled
                     .sheet
@@ -798,6 +845,9 @@ fn compile(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(|s| SharedString::from(s.to_owned()));
+    let symbol_leads = node.r#type == "text"
+        && symbol.is_some()
+        && (!node.text.is_empty() || !node.children.is_empty());
     let virtual_window = (node.r#type == "virtual-list")
         .then(|| {
             let count = node.props.get("count")?.as_u64()?;
@@ -807,13 +857,17 @@ fn compile(
                 .get("itemSize")
                 .and_then(Value::as_f64)
                 .or_else(|| {
-                    (node
+                    // Any metric names the rows' height (a Settings card's
+                    // rows are `metrics.form_row`).
+                    let name = node
                         .props
                         .get("metadata")
                         .and_then(|m| m.get("rowHeightToken"))
-                        .and_then(Value::as_str)
-                        == Some("metrics.row"))
-                    .then_some(t.metrics.row as f64)
+                        .and_then(Value::as_str)?;
+                    name.starts_with("metrics.")
+                        .then(|| table.number(&serde_json::json!({ "token": name })))
+                        .flatten()
+                        .map(f64::from)
                 })?;
             pm_builtins::virtualization::Window::new(
                 count as usize,
@@ -848,11 +902,39 @@ fn compile(
             .and_then(|m| m.get("fixedWidthSample"))
             .and_then(Value::as_str)
             .map(|s| s.to_owned().into()),
+        fits_labels: meta
+            .and_then(|m| m.get("fitsLabels"))
+            .and_then(Value::as_array)
+            .map(|labels| {
+                let style = node.props.get("style");
+                let side = |key: &str| {
+                    style
+                        .and_then(|s| s.get(key))
+                        .and_then(|v| table.number(v))
+                        .unwrap_or(0.)
+                };
+                let inset = meta
+                    .and_then(|m| m.get("fitsInsetToken"))
+                    .and_then(Value::as_str)
+                    .and_then(|name| table.number(&serde_json::json!({ "token": name })))
+                    .unwrap_or(0.);
+                let labels = labels
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|label| SharedString::from(label.to_owned()))
+                    .collect();
+                (Arc::new(labels), side("paddingLeft") + side("paddingRight") + inset)
+            }),
         local_change: node.listeners.contains_key("change"),
         cancel_change: meta
             .and_then(|m| m.get("cancelChange"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        opens_field: match meta.and_then(|m| m.get("opensField")).and_then(Value::as_str) {
+            Some("click") => Some(1),
+            Some("doubleClick") => Some(2),
+            _ => None,
+        },
         timeline_scrub: meta.and_then(|m| m.get("timelineScrub")).and_then(|t| {
             Some((
                 SharedString::from(t.get("layer")?.as_str()?.to_owned()),
@@ -899,6 +981,9 @@ fn compile(
             && (compiled.scroll_y
                 || matches!(component, Some(Component::List | Component::Tree))
                 || matches!(node.r#type.as_str(), "scroll" | "virtual-list")),
+        scroll_edge: meta
+            .and_then(|m| m.get("scrollEdge"))
+            .and_then(|edge| table.color(&serde_json::json!({ "token": edge }))),
         scroll_x: compiled.scroll_x,
         semantic: header_id.map(|s| SharedString::from(s.to_owned())),
         text: (!node.text.is_empty()).then(|| node.text.clone().into()),
@@ -909,6 +994,12 @@ fn compile(
             .then(|| node.props.get("resource").and_then(Value::as_str))
             .flatten()
             .map(|r| SharedString::from(r.to_owned())),
+        contain: node
+            .props
+            .get("metadata")
+            .and_then(|m| m.get("fit"))
+            .and_then(Value::as_str)
+            == Some("contain"),
         disabled,
         events: Events::of(node),
         ax,
@@ -936,6 +1027,7 @@ fn compile(
         kit: kit(node, component, panel, table),
         virtual_window,
         is_plain_text: node.r#type == "text" && node.props.is_empty() && node.children.is_empty(),
+        symbol_leads,
         binding: node
             .props
             .get("binding")
@@ -976,7 +1068,7 @@ fn compile(
 /// Characters a split value well shows at `body` size (half the value
 /// column of a panel at its usual width, less a trailing control).
 const SPLIT_WELL_CHARS: usize = 9;
-fn number_facts(node: &Node) -> NumberFacts {
+pub(crate) fn number_facts(node: &Node) -> NumberFacts {
     let number = |key: &str, default| {
         node.props
             .get(key)
@@ -1090,11 +1182,51 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
                 };
                 ((m - neutral) / span.max(1e-9)).clamp(-1., 1.)
             });
+            let master_strip = node
+                .props
+                .get("metadata")
+                .and_then(|m| m.get("pmKit"))
+                .and_then(|k| k.get("masterBinding"))
+                .and_then(Value::as_str)
+                .zip(option("master"))
+                .map(|(binding, value)| {
+                    (
+                        value,
+                        [
+                            option("masterMin").unwrap_or(neutral - 1.),
+                            option("masterMax").unwrap_or(neutral + 1.),
+                        ],
+                        SharedString::from(binding.to_owned()),
+                    )
+                });
             Kit::Wheel {
                 rgb: std::array::from_fn(|i| numbers.get(i).copied().unwrap_or(neutral)),
                 neutral,
                 range: [option("min").unwrap_or(-1.), option("max").unwrap_or(1.)],
                 master,
+                master_strip,
+            }
+        }
+        Some(component @ (Component::PointPad | Component::GradientBar)) => {
+            let option = |key: &str| node.props.get("metadata").and_then(|m| m.get("pmKit")).and_then(|k| k.get(key));
+            let number = |key: &str, default: f64| option(key).and_then(Value::as_f64).unwrap_or(default);
+            if component == Component::PointPad {
+                let n = numbers(value);
+                Kit::Pad {
+                    point: [n.first().copied().unwrap_or(0.), n.get(1).copied().unwrap_or(0.)],
+                    min: [number("minX", -100.), number("minY", -100.)],
+                    max: [number("maxX", 100.), number("maxY", 100.)],
+                }
+            } else {
+                let colour = |key: &str, default: u32| {
+                    option(key).and_then(Value::as_str).and_then(parse_hex).unwrap_or(default)
+                };
+                Kit::Ramp {
+                    start: colour("start", 0x000000),
+                    end: colour("end", 0xffffff),
+                    midpoint: value.and_then(Value::as_f64),
+                    range: [number("min", 0.), number("max", 100.)],
+                }
             }
         }
         Some(Component::CurveEditor) => Kit::Curve {
@@ -1312,6 +1444,9 @@ fn apply(mut e: StyleRefinement, style: &pm_surface::Props, table: &TokenTable) 
             "flexGrow" => {
                 if n.is_some_and(|n| n > 0.) {
                     e = e.flex_1();
+                } else if n == Some(0.) {
+                    // Takes no spare room (over a kit recipe's `flex_1`).
+                    e = e.flex_grow(0.);
                 }
             }
             "flexShrink" => {

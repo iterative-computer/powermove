@@ -71,8 +71,30 @@ function FormRow(props: {
     />
   );
 }
+/** A card of rows with Settings' hairline between each two (inset both sides). */
 function Group(props: { label: string; children: ComponentChildren }) {
-  return <UI.FormGroup title={props.label}>{props.children}</UI.FormGroup>;
+  const rows = (
+    Array.isArray(props.children) ? props.children.flat() : [props.children]
+  ).filter((row) => row !== null && row !== undefined && row !== false);
+  return (
+    <UI.FormGroup title={props.label}>
+      {rows.flatMap((row, i) =>
+        i === 0 ? [row] : [<Hairline key={`hairline.${i}`} />, row],
+      )}
+    </UI.FormGroup>
+  );
+}
+function Hairline(_: { key?: string }) {
+  return (
+    <div
+      style={{
+        height: token("metrics.border"),
+        marginLeft: token("metrics.inset"),
+        marginRight: token("metrics.inset"),
+        background: token("colors.separator"),
+      }}
+    />
+  );
 }
 /** Native NSButton role metadata is owned by the approved kit. */
 function Action(props: {
@@ -318,7 +340,11 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             role="heading"
             style={{ ...text, fontWeight: token("typography.display_weight") }}
           >
-            {model.queueOpen ? "Queue" : "Export"}
+            {currentProgress
+              ? `Exporting “${currentName}”`
+              : model.queueOpen
+                ? "Queue"
+                : "Export"}
           </text>
         </div>
         <UI.ToolbarItem
@@ -332,7 +358,93 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
           onClick={() => watch(model.dismiss())}
         />
       </div>
-      {model.queueOpen ? (
+      {currentProgress ? (
+        <>
+          <div
+            id="export.current"
+            role="group"
+            label="Current export"
+            style={{
+              ...stack,
+              gap: token("space.sm"),
+              flexShrink: 1,
+              minHeight: 0,
+            }}
+          >
+            <div
+              id="export.preview"
+              role="img"
+              label="Frame last exported"
+              style={{
+                position: "relative",
+                overflow: "hidden",
+                height: token("metrics.export_preview"),
+                minHeight: token("metrics.label_column"),
+                flexShrink: 1,
+                background: token("colors.viewer"),
+                borderRadius: token("metrics.control_radius"),
+              }}
+            >
+              {(s.run.phase === "rendering" || s.run.phase === "checking") &&
+              s.run.preview ? (
+                <img
+                  resource={s.run.preview}
+                  alt=""
+                  metadata={{ fit: "contain" }}
+                  style={{ position: "absolute", inset: "fill" }}
+                />
+              ) : null}
+            </div>
+            <UI.ProgressRow
+              id="export.progress"
+              label="Export progress"
+              value={fraction}
+              children={[]}
+              metadata={{
+                export: {
+                  valueDescription:
+                    progress(s.run).ax ?? progress(s.run).leading,
+                },
+              }}
+            />
+            <div style={line}>
+              <text style={text}>
+                {active
+                  ? progress(s.run).leading
+                  : `${Math.round((fraction ?? 0) * 100)} %`}
+              </text>
+              {progress(s.run).eta ? (
+                <text style={detail}>{progress(s.run).eta}</text>
+              ) : null}
+              <Action
+                id="export.cancel"
+                label={s.run.phase === "cancelling" ? "Cancelling…" : "Cancel"}
+                disabled={s.run.phase === "cancelling"}
+                onClick={() =>
+                  watch(
+                    !active && rendering
+                      ? model.queueAction(rendering.id, "cancel")
+                      : model.cancel(),
+                  )
+                }
+              />
+            </div>
+          </div>
+          <scroll
+            id="export.queue.rows"
+            label="Render queue and history"
+            style={{
+              ...stack,
+              flexShrink: 1,
+              minHeight: token("metrics.label_column"),
+              maxHeight: token("metrics.sheet_body_max"),
+              overflow: "hidden",
+            }}
+          >
+            <RenderQueue model={model} watch={watch} />
+          </scroll>
+        </>
+      ) : model.queueOpen ? (
         <scroll
           id="export.queue.rows"
           label="Render queue and history"
@@ -355,6 +467,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             options={kinds}
             disabled={busy}
             style={{ flexShrink: 0 }}
+            data-pm-variant="glass"
             onChange={(kind) => {
               model.chooseKind(kind as "video" | "images" | "project");
               setTimeout(() => watch(model.refreshPlan()), 0);
@@ -393,6 +506,18 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                     disabled: !s.capabilities[f.v].available,
                   })),
               )}
+              {model.kind === "project" ? (
+                <div
+                  id="export.project.editable"
+                  style={{ ...stack, padding: token("metrics.inset") }}
+                >
+                  <text style={text}>Keep every layer editable</text>
+                  <text style={detail}>
+                    Save a portable Powermove project with its media, effects,
+                    keyframes and composition settings.
+                  </text>
+                </div>
+              ) : null}
               {shows(o, "quality") ? select("quality", qualities) : null}
               {shows(o, "profile") ? select("profile", profiles) : null}
               {shows(o, "depth") ? select("depth", depths) : null}
@@ -629,6 +754,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   : colorNote}
               </text>
             ) : null}
+            <RenderQueue model={model} watch={watch} />
           </scroll>
           <text
             id="export.summary"
@@ -705,72 +831,6 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                 onClick={() => watch(model.retry())}
               />
             </div>
-          ) : currentProgress ? (
-            <div
-              id="export.current"
-              role="group"
-              label="Current export"
-              title={[progress(s.run).leading, progress(s.run).eta]
-                .filter(Boolean)
-                .join(" · ")}
-              style={{
-                ...cluster,
-                flexShrink: 0,
-                minHeight: token("metrics.control"),
-              }}
-            >
-              <text
-                id="export.current.name"
-                style={{
-                  ...text,
-                  flexGrow: 1,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {currentName}
-              </text>
-              <UI.ProgressRow
-                id="export.progress"
-                label="Export progress"
-                value={fraction}
-                children={[]}
-                metadata={{
-                  pmKit: { queueProgress: "bar" },
-                  export: {
-                    valueDescription:
-                      progress(s.run).ax ?? progress(s.run).leading,
-                  },
-                }}
-                style={{
-                  width: token("metrics.export_job_progress_width"),
-                  height: token("metrics.export_job_progress_height"),
-                }}
-              />
-              <text
-                id="export.current.percent"
-                style={{ ...detail, fontVariantNumeric: "tabular-nums" }}
-              >
-                {fraction === undefined
-                  ? progress(s.run).leading
-                  : `${Math.round(fraction * 100)} %`}
-              </text>
-              <UI.ToolbarItem
-                id="export.cancel"
-                label="Cancel export"
-                title="Cancel"
-                attr={{ symbol: "xmark" }}
-                disabled={s.run.phase === "cancelling"}
-                onClick={() =>
-                  watch(
-                    !active && rendering
-                      ? model.queueAction(rendering.id, "cancel")
-                      : model.cancel(),
-                  )
-                }
-              />
-            </div>
           ) : null}
         </>
       )}
@@ -796,6 +856,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
               : "Show queue and history"
           }
           active={model.queueOpen}
+          disabled={currentProgress}
           onClick={() =>
             model.queueOpen ? model.backToSettings() : model.showQueue()
           }
@@ -821,24 +882,26 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
             ) : null}
           </div>
         </UI.ToolbarItem>
-        <div style={actions}>
-          <Action
-            id="export.queue.add"
-            label="Add to Queue"
-            disabled={!model.canExport}
-            onClick={() => watch(model.addToQueue())}
-          />
-          <Action
-            id="export.start"
-            label={model.startWanted ? "Preparing…" : "Export"}
-            primary
-            disabled={!model.canExport && !model.canPress}
-            onClick={() => {
-              model.backToSettings();
-              watch(model.start());
-            }}
-          />
-        </div>
+        {!currentProgress ? (
+          <div style={actions}>
+            <Action
+              id="export.queue.add"
+              label="Add to Queue"
+              disabled={!model.canExport}
+              onClick={() => watch(model.addToQueue())}
+            />
+            <Action
+              id="export.start"
+              label={model.startWanted ? "Preparing…" : "Export"}
+              primary
+              disabled={!model.canExport && !model.canPress}
+              onClick={() => {
+                model.backToSettings();
+                watch(model.start());
+              }}
+            />
+          </div>
+        ) : null}
       </div>
     </UI.SheetAnchor>
   );

@@ -81,6 +81,14 @@ pub struct Editor {
     /// opening): a tab whose panel has not registered yet keeps its place
     /// with a quiet body, not "Panel Unavailable" (`panels:waiting/ready`).
     awaiting_panels: bool,
+    /// Panels the workspace names that nothing provides once the extensions
+    /// are in (one from an extension not installed here): v1 keeps them in
+    /// the workspace but gives them no slot, and they come back with their
+    /// extension (`visibleDockPlan`). Parked meanwhile.
+    absent: std::collections::BTreeSet<String>,
+    /// Panels asked back before their extension had registered them (at
+    /// launch): restored once the extensions are ready, never an error.
+    pending_restores: Vec<String>,
     /// Docking area of the last render, in window points.
     dock_bounds: Rect,
     gesture: Option<Gesture>,
@@ -102,8 +110,16 @@ pub struct Editor {
     /// The workspace this window last showed by choice (restored or
     /// activated); a new window follows the store's last activated one.
     preferred: Option<String>,
+    /// The project that choice was made for (`None`: Home). Another
+    /// project bound to the window later never takes it: a new project
+    /// starts with the default workspace as shipped (PM-454).
+    preferred_for: Option<String>,
     /// Writes for the kernel, sent on the next frame.
     outbox: Vec<workspace::Write>,
+    /// The window took another project and its store still describes the
+    /// last one: the record shown belongs to that one, so it is never
+    /// written as this project's workspace (PM-454).
+    binding: bool,
     /// The status last passed to the app's status line.
     noted: String,
     project: String,
@@ -167,6 +183,8 @@ impl Editor {
             maximized_panel: None,
             parked: HashMap::new(),
             awaiting_panels: true,
+            absent: Default::default(),
+            pending_restores: Vec::new(),
             dock_bounds: Rect::default(),
             gesture: None,
             focus: cx.focus_handle(),
@@ -180,7 +198,9 @@ impl Editor {
             pending: vec![],
             seen: None,
             preferred: None,
+            preferred_for: None,
             outbox: vec![],
+            binding: false,
             noted: String::new(),
             project,
             split_focus: None,
@@ -291,6 +311,7 @@ impl Editor {
         self.window_id = state.id;
         self.project = state.project.clone();
         self.preferred = Some(state.workspace.clone());
+        self.preferred_for = Some(state.project.clone()).filter(|p| !p.is_empty());
         self.show_record(self.workspaces.active(self.preferred.as_deref()));
     }
     pub fn follow_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -357,8 +378,15 @@ impl Editor {
         self.parked.clear();
         self.project = project;
         // The project's own workspace arrives with the store; until then the
-        // window keeps showing what it showed.
+        // window keeps showing what it showed, and writes none of it: the
+        // kernel files a window's workspace under the project it holds when
+        // the write is sent, and a new project (no workspace yet) took the
+        // edited layout a new tab showed before it (PM-454).
         self.seen = None;
+        self.binding = true;
+        self.pending.clear();
+        self.outbox
+            .retain(|w| !matches!(w, workspace::Write::Active { .. }));
         self.persist_session();
     }
     fn dock_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
@@ -430,6 +458,10 @@ impl Editor {
     /// The window now shows `after`: the store learns it on the next frame.
     fn commit(&mut self, after: serde_json::Value) {
         let after = workspace::persistent_record(after);
+        if self.binding {
+            self.record = after;
+            return;
+        }
         let before = self
             .pending
             .last()
@@ -445,8 +477,19 @@ impl Editor {
         self.pending.push(after.clone());
         self.record = after;
     }
+    /// This window's choice, when it was made for the project it shows now.
+    fn preferred_here(&self) -> Option<&str> {
+        self.preferred
+            .as_deref()
+            .filter(|_| self.preferred_for == self.workspaces.project_id)
+    }
     fn show_record(&mut self, record: serde_json::Value) {
         self.maximized_panel = None;
+        // Places in the layout this replaces; the new one's absent panels
+        // are found again on the next frame.
+        for id in std::mem::take(&mut self.absent) {
+            self.parked.remove(&id);
+        }
         self.layout = workspace::layout(&record);
         self.parked.retain(|id, _| self.layout.find(id).is_some());
         self.record = record;
@@ -454,6 +497,7 @@ impl Editor {
     /// Shows workspace `record` in this window and makes it the active one.
     fn activate_record(&mut self, record: serde_json::Value) {
         self.preferred = workspace::record_id(&record).map(str::to_owned);
+        self.preferred_for = self.workspaces.project_id.clone();
         self.show_record(record.clone());
         self.commit(record);
         self.persist_session();
@@ -484,7 +528,10 @@ impl Editor {
         if !Rc::ptr_eq(&store, &self.workspaces) {
             self.workspaces = store;
         }
-        let target = self.workspaces.active(self.preferred.as_deref());
+        if self.binding && self.workspaces.project_id == integration.project_id(cx) {
+            self.binding = false;
+        }
+        let target = self.workspaces.active(self.preferred_here());
         // Freeze the inherited workspace even if no layout edit follows.
         // Otherwise saving an old/new project writes a null workspace and
         // opening it later inherits whichever global layout is current then.
@@ -560,16 +607,39 @@ impl Editor {
     }
     /// The workspace records this window offers: (id, name, built-in).
     pub fn workspace_choices(&self) -> Vec<(String, String, bool)> {
-        self.workspaces
-            .offered()
+        // One entry per name: the one this window shows, else its project's,
+        // else the last used (PM-449).
+        let prefer: Vec<&str> = [
+            workspace::record_id(&self.record),
+            self.workspaces.project.as_ref().and_then(workspace::record_id),
+            self.workspaces.current.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let offered = workspace::one_per_name(self.workspaces.offered(), &prefer);
+        let names: Vec<String> = offered
+            .iter()
+            .map(|r| workspace::record_name(r).to_owned())
+            .collect();
+        offered
             .into_iter()
-            .map(|r| {
+            .zip(workspace::told_apart(&names))
+            .map(|(r, name)| {
                 (
                     workspace::record_id(r).unwrap_or_default().to_owned(),
-                    workspace::record_name(r).to_owned(),
+                    name,
                     workspace::is_builtin(r),
                 )
             })
+            .collect()
+    }
+    /// The names of the workspaces there are, as saved.
+    fn workspace_names(&self) -> Vec<String> {
+        self.workspaces
+            .offered()
+            .into_iter()
+            .map(|r| workspace::record_name(r).to_owned())
             .collect()
     }
     /// The active workspace record.
@@ -588,6 +658,7 @@ impl Editor {
             tab_index: host.tab_index(),
             pages: host.page_ids(),
             fullscreen: host.is_fullscreen(),
+            name: (!self.project.is_empty()).then(|| host.shown_project_name()).flatten(),
         })
     }
     /// Queues this window's state for the shared session file (other windows
@@ -646,8 +717,20 @@ impl Editor {
                 contributed.push((id, title));
             }
         }
-        let remembered = self.integration.as_ref()
-            .map(|i| i.remembered_panel_titles(cx)).unwrap_or_default();
+        let mut remembered = self
+            .integration
+            .as_ref()
+            .map(|i| i.remembered_panel_titles(cx))
+            .unwrap_or_default();
+        // A panel waiting for its extension is named, never shown by its id
+        // ("background-remover.panel", PM-454).
+        for id in self.layout.open_panels() {
+            if !layout::PANELS.contains(&id)
+                && !contributed.iter().chain(&remembered).any(|(p, _)| p == id)
+            {
+                remembered.push((id.to_owned(), layout::readable_title(id)));
+            }
+        }
         layout::Panels::new(contributed).with_remembered(remembered).while_loading(
             self.integration.as_ref().is_some_and(|i| i.panels_loading(cx)),
         )
@@ -704,6 +787,36 @@ impl Editor {
             .iter()
             .any(|d| d.id == id && !d.collapsed && !d.groups.is_empty())
     }
+    /// Once the extensions are in, a panel nothing provides takes no slot
+    /// (its stack's other tabs and the column fill the space) and keeps its
+    /// place in the workspace; it comes back when something registers it.
+    fn settle_absent_panels(&mut self, cx: &mut Context<Self>) {
+        if self.awaiting_panels || self.integration.is_none() {
+            return;
+        }
+        let panels = self.panels(cx);
+        let back: Vec<String> = self
+            .absent
+            .iter()
+            .filter(|id| panels.contains(id))
+            .cloned()
+            .collect();
+        for id in back {
+            self.absent.remove(&id);
+            self.shell_command(&format!("panel:restore:{id}"), cx);
+        }
+        let gone: Vec<String> = self
+            .layout
+            .open_panels()
+            .into_iter()
+            .filter(|id| !panels.contains(id) && !self.agent_build_slots.contains_key(*id))
+            .map(str::to_owned)
+            .collect();
+        for id in gone {
+            self.shell_command(&format!("panel:park:{id}"), cx);
+            self.absent.insert(id);
+        }
+    }
     /// Shell-owned commands. Returns false when the command is not the shell's.
     fn shell_command(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
         // A command that rearranges the docks moves panels to their new
@@ -716,6 +829,16 @@ impl Editor {
         let rest = parts.next().unwrap_or("");
         if kind == "panels" && matches!(verb, "waiting" | "ready") {
             self.awaiting_panels = verb == "waiting";
+            if verb == "ready" {
+                let known = self.panels(cx);
+                for id in std::mem::take(&mut self.pending_restores) {
+                    // One whose extension never came stays away quietly.
+                    if known.contains(&id) {
+                        self.shell_command(&format!("panel:restore:{id}"), cx);
+                    }
+                }
+                self.settle_absent_panels(cx);
+            }
             cx.notify();
             return true;
         }
@@ -802,6 +925,14 @@ impl Editor {
                         })
                 }
                 _ if self.layout.find(rest).is_some() => Ok(()),
+                // Its extension has not registered it yet (launch): it comes
+                // back when the extensions are ready, not as "Unknown panel".
+                _ if !panels.contains(rest) => {
+                    if !self.pending_restores.iter().any(|id| id == rest) {
+                        self.pending_restores.push(rest.to_owned());
+                    }
+                    Ok(())
+                }
                 _ => self.layout.show_panel(rest, &panels),
             },
             ("panel", "close") => {
@@ -954,12 +1085,16 @@ impl Editor {
             }
             ("layout", "save") if rest.is_empty() => {
                 if let Some(h) = &self.host {
-                    h.borrow()
-                        .prompt_workspace_name(workspace::record_name(&self.record));
+                    h.borrow().prompt_workspace_name(&workspace::save_name(
+                        workspace::record_name(&self.record),
+                        &self.workspace_names(),
+                    ));
                 }
                 Ok(())
             }
             ("layout", "save") => layout::layout_name(rest).map(|name| {
+                // Never a second workspace of a name already there.
+                let name = workspace::free_name(&name, &self.workspace_names());
                 let mut copy = workspace::write(&self.layout, &self.record);
                 copy["id"] = workspace::new_id().into();
                 copy["name"] = name.clone().into();
@@ -2175,8 +2310,33 @@ impl Editor {
             )
     }
 }
+/// Whether a control (a button, field or list) has the keyboard, so Return
+/// and the arrows are its own. The viewer's canvas is not a control: after a
+/// click on a layer there, Return edits a text layer and the arrows nudge
+/// (PM-480).
+fn control_has_keyboard(focused_elsewhere: bool, in_viewer: bool) -> bool {
+    focused_elsewhere && !in_viewer
+}
+#[cfg(test)]
+mod control_focus_tests {
+    #[test]
+    fn the_viewer_canvas_is_not_a_control() {
+        assert!(super::control_has_keyboard(true, false), "a panel's field or list");
+        assert!(!super::control_has_keyboard(true, true), "a layer clicked in the viewer");
+        assert!(!super::control_has_keyboard(false, false), "the editor itself");
+    }
+}
 impl Render for Editor {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Development builds: a frame as slow as asked, to check that input
+        // keeps its order behind it (PM-465).
+        #[cfg(debug_assertions)]
+        if let Some(ms) = std::env::var("PM_NATIVE_SLOW_FRAME_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(ms.min(2000)));
+        }
         let panels = self.panels(cx);
         if let Some(id) = self.integration.as_ref().and_then(|i| i.project_id(cx))
             && self.project != id
@@ -2184,6 +2344,7 @@ impl Render for Editor {
             self.bind_project(id);
         }
         self.sync_workspaces(cx);
+        self.settle_absent_panels(cx);
         for (id, (placement, height)) in &self.agent_build_slots {
             if !self.layout.open_panels().contains(&id.as_str()) {
                 layout::reserve_build(&mut self.layout, id, placement, *height);
@@ -2284,6 +2445,12 @@ impl Render for Editor {
                 })
                 .cloned()
                 && let Some(bounds) = self.geometry.side_docks.get(&p.dock).copied()
+                // Only a panel scrolled wholly out of the column (reached by
+                // the keyboard) is brought into view. One that shows is where
+                // the person is working: a press in it (focusing it) must not
+                // move it, or the control under the pointer leaves before the
+                // release (the Colour panel's Add row, scrolled past its tabs).
+                && (p.rect.y + p.rect.h <= bounds.y || p.rect.y >= bounds.y + bounds.h)
             {
                 let by = if p.rect.y < bounds.y {
                     p.rect.y - bounds.y
@@ -2374,18 +2541,24 @@ impl Render for Editor {
         if let Some(h) = &self.host {
             let h = h.borrow();
             h.viewer_rect.set(viewer);
+            // The canvas inside the viewer (its gizmos) has a focus handle of
+            // its own: a click on a layer there leaves the keyboard with the
+            // canvas, not with a control (PM-480).
+            let in_viewer = self
+                .panel_focus
+                .get("viewer")
+                .is_some_and(|p| p.contains_focused(w, cx));
             h.canvas_focus.set(
                 viewer.is_some()
-                    && w.focused(cx).is_none_or(|f| {
-                        f == self.focus || self.panel_focus.get("viewer").is_some_and(|p| *p == f)
-                    }),
+                    && (in_viewer || w.focused(cx).is_none_or(|f| f == self.focus)),
             );
             h.publish_menu_state(&self.menu_state(cx));
-            h.keyboard_control_focus.set(
+            h.keyboard_control_focus.set(control_has_keyboard(
                 w.focused(cx).is_some_and(|f| {
                     f != self.focus && !self.panel_focus.values().any(|p| *p == f)
                 }),
-            );
+                in_viewer,
+            ));
         }
         let native = self.host.is_some();
         let canvas_viewer = viewer;
@@ -4480,6 +4653,10 @@ mod tests {
     struct Kernel {
         store: RefCell<Rc<workspace::Store>>,
         writes: RefCell<Vec<workspace::Write>>,
+        /// The project the window holds (`None`: "p"); `home`: none.
+        project: RefCell<Option<String>>,
+        home: std::cell::Cell<bool>,
+        contributed: RefCell<Vec<(String, String)>>,
     }
     struct Stub(Rc<Kernel>);
     impl crate::integration::Integration for Stub {
@@ -4502,13 +4679,211 @@ mod tests {
         fn write_workspace(&self, write: workspace::Write, _: &mut App) {
             self.0.writes.borrow_mut().push(write);
         }
+        fn contributed_panels(&self, _: &App) -> Vec<(String, String)> {
+            self.0.contributed.borrow().clone()
+        }
         fn project_id(&self, _: &App) -> Option<String> {
-            Some("p".into())
+            (!self.0.home.get())
+                .then(|| self.0.project.borrow().clone().unwrap_or_else(|| "p".into()))
         }
         fn status(&self, _: &App) -> String {
             String::new()
         }
         fn drop_paths(&self, _: Vec<std::path::PathBuf>, _: &mut App) {}
+    }
+
+    /// Acceptance run 24: a workspace naming a panel from an extension not
+    /// installed here. While the extensions load, its tab waits under a name
+    /// ("Background Remover", not its id); once they are in it takes no slot
+    /// but keeps its place in the workspace, and it comes back in that place
+    /// when its extension registers it (v1's `visibleDockPlan`, PM-454).
+    #[gpui::test]
+    fn a_panel_no_extension_provides_waits_by_name_then_takes_no_slot(cx: &mut TestAppContext) {
+        const ID: &str = "background-remover.panel";
+        let mut mine = workspace::preset("design").unwrap();
+        mine["id"] = "mine".into();
+        mine["name"] = "Mine".into();
+        mine["builtin"] = false.into();
+        mine["layout"]["docks"] = serde_json::json!([
+            {"flex": true, "id": "center", "panels": [{"flex": true, "id": "viewer"}]},
+            {"id": "right", "size": 325, "panels": [
+                {"id": "inspector", "flex": true},
+                {"id": ID, "tabbed": true, "active": true}
+            ]}
+        ]);
+        let kernel = Rc::new(Kernel::default());
+        *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+            records: workspace::seeded(std::slice::from_ref(&mine)),
+            current: Some("mine".into()),
+            default: None,
+            project: Some(mine.clone()),
+            project_id: Some("p".into()),
+            trashed: vec![],
+        });
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let stub = kernel.clone();
+        let window = cx.add_window(|_, cx| {
+            let mut e = Editor::new(tokens, None, cx);
+            e.integration = Some(Rc::new(Stub(stub)));
+            e.project = "p".into();
+            e
+        });
+        window
+            .update(cx, |v, _, cx| {
+                v.sync_workspaces(cx);
+                v.settle_absent_panels(cx);
+                assert!(v.layout.open_panels().contains(&ID), "waits while extensions load");
+                assert_eq!(v.panels(cx).title(ID), "Background Remover");
+                assert!(v.run_shell_command("panels:ready", cx));
+                assert!(!v.layout.open_panels().contains(&ID), "no slot once they are in");
+                assert!(v.layout.open_panels().contains(&"inspector"));
+                v.save();
+                let saved = serde_json::to_string(&v.record).unwrap();
+                assert!(saved.contains(ID), "the workspace keeps it: {saved}");
+                // Its extension is installed: it is back where it was.
+                *kernel.contributed.borrow_mut() = vec![(ID.into(), "Background Remover".into())];
+                v.settle_absent_panels(cx);
+                let (dock, group, _) = v.layout.find(ID).expect("back");
+                assert!(v.layout.docks[dock].groups[group].tabs.iter().any(|t| t == "inspector"));
+            })
+            .unwrap();
+    }
+
+    /// Acceptance run 24: a new tab (Home until its project opens) shows the
+    /// last used workspace, an edited Design with its timeline collapsed. A
+    /// layout write it queued then, or one made before the store hears of
+    /// the project the tab took, never becomes that new project's
+    /// workspace: the project opens with Design as shipped (PM-454).
+    #[gpui::test]
+    fn a_new_tab_never_files_the_layout_it_showed_as_home_under_its_new_project(
+        cx: &mut TestAppContext,
+    ) {
+        let mut edited = workspace::preset("design").unwrap();
+        edited["id"] = "wsedited".into();
+        edited["name"] = "Design (edited)".into();
+        edited["builtin"] = false.into();
+        edited["layout"]["docks"] =
+            serde_json::json!([{"id": "center", "size": 300, "panels": ["viewer"]}]);
+        let kernel = Rc::new(Kernel::default());
+        kernel.home.set(true);
+        let home = workspace::Store {
+            records: workspace::seeded(std::slice::from_ref(&edited)),
+            current: Some("wsedited".into()),
+            default: None,
+            project: None,
+            project_id: None,
+            trashed: vec![],
+        };
+        *kernel.store.borrow_mut() = Rc::new(home.clone());
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let stub = kernel.clone();
+        let window = cx.add_window(|_, cx| {
+            let mut e = Editor::new(tokens, None, cx);
+            e.integration = Some(Rc::new(Stub(stub)));
+            e
+        });
+        let resized = |record: &serde_json::Value, size: u32| {
+            let mut r = record.clone();
+            r["layout"]["docks"][0]["size"] = size.into();
+            r
+        };
+        let active_ids = |kernel: &Kernel| -> Vec<String> {
+            kernel
+                .writes
+                .borrow()
+                .iter()
+                .filter_map(|w| match w {
+                    workspace::Write::Active { after, .. } => {
+                        workspace::record_id(after).map(str::to_owned)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        window
+            .update(cx, |v, _, cx| {
+                v.sync_workspaces(cx);
+                assert_eq!(v.layout.workspace, "wsedited", "Home follows the last used");
+                // A layout change queued while the tab is Home…
+                let r = resized(&v.record, 320);
+                v.commit(r);
+                // …and the tab takes a new project before the next frame.
+                kernel.home.set(false);
+                *kernel.project.borrow_mut() = Some("new".into());
+                v.bind_project("new".into());
+                // A change before the store hears of the project.
+                let r = resized(&v.record, 340);
+                v.commit(r);
+                v.sync_workspaces(cx);
+                assert!(active_ids(&kernel).is_empty(), "{:?}", kernel.writes.borrow());
+                // The store's answer: a project with no workspace of its own.
+                *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+                    project_id: Some("new".into()),
+                    ..home.clone()
+                });
+                v.sync_workspaces(cx);
+                assert_eq!(v.workspace_record(), &workspace::preset("design").unwrap());
+                // From here on its own layout changes are its own.
+                let r = resized(&v.record, 360);
+                v.commit(r);
+                v.sync_workspaces(cx);
+                assert_eq!(active_ids(&kernel), vec!["design".to_owned()]);
+            })
+            .unwrap();
+    }
+
+    /// Acceptance run 22: a window that showed an edited copy of Design (its
+    /// timeline collapsed) takes a new project, which has no workspace of
+    /// its own: the project starts with Design as shipped (PM-454).
+    #[gpui::test]
+    fn a_new_project_in_a_window_never_takes_the_windows_last_workspace(cx: &mut TestAppContext) {
+        let mut edited = workspace::preset("design").unwrap();
+        edited["id"] = "wsedited".into();
+        edited["name"] = "Design (edited)".into();
+        edited["builtin"] = false.into();
+        edited["layout"]["docks"] = serde_json::json!([{"id": "center", "panels": ["viewer"]}]);
+        let kernel = Rc::new(Kernel::default());
+        *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+            records: workspace::seeded(std::slice::from_ref(&edited)),
+            current: Some("wsedited".into()),
+            default: None,
+            project: Some(edited.clone()),
+            project_id: Some("old".into()),
+            trashed: vec![],
+        });
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let stub = kernel.clone();
+        let window = cx.add_window(|_, cx| {
+            let mut e = Editor::new(tokens, None, cx);
+            e.integration = Some(Rc::new(Stub(stub)));
+            e.restore(&crate::session::WindowState {
+                id: 1,
+                frame: [0., 0., 1440., 900.],
+                project: "old".into(),
+                workspace: "wsedited".into(),
+                tab_group: None,
+                tab_index: 0,
+                pages: vec![],
+                fullscreen: false,
+                name: None,
+            });
+            e
+        });
+        window
+            .update(cx, |v, _, cx| {
+                v.sync_workspaces(cx);
+                assert_eq!(v.layout.workspace, "wsedited", "its own project keeps it");
+                // The window takes a new project with no workspace of its own.
+                let before = (**kernel.store.borrow()).clone();
+                *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+                    project: None,
+                    project_id: Some("new".into()),
+                    ..before
+                });
+                v.sync_workspaces(cx);
+                assert_eq!(v.workspace_record(), &workspace::preset("design").unwrap());
+            })
+            .unwrap();
     }
 
     #[gpui::test]

@@ -122,26 +122,33 @@ fn joined_position_projection_and_selection_keep_all_subframe_key_identities() {
 }
 
 #[test]
-fn timeline_rejects_unimplemented_host_effect_instead_of_acknowledging_success() {
+/// The empty composition's Import… and its other buttons reach the app as
+/// its own commands (Import… was refused as an unavailable effect).
+fn timeline_empty_state_buttons_run_the_apps_commands() {
     let actor = actor();
     let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
     finish(panels.mount("timeline").unwrap());
-    let ticket = panels.timeline_action(json!({"type":"import"})).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let result = loop {
-        if let Some(result) = ticket.try_take() {
-            break result;
-        }
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(1));
-    };
-    assert!(format!("{result:?}").contains("Timeline host effect unavailable"));
-    assert!(
-        panels
-            .take_platform_requests()
-            .iter()
-            .all(|r| r.operation != "timeline.effect")
-    );
+    for (action, name) in [
+        (json!({"type":"import"}), "import"),
+        (json!({"type":"run","command":"newText"}), "newText"),
+    ] {
+        let _ticket = panels.timeline_action(action).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let request = loop {
+            if let Some(r) = panels
+                .take_platform_requests()
+                .into_iter()
+                .find(|r| r.operation == "timeline.effect")
+            {
+                break r;
+            }
+            assert!(Instant::now() < deadline, "no request for {name}");
+            thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(request.input, json!({"kind":"command","name":name}));
+        // The app ran it: the action is done.
+        panels.platform_reply(request.id, Ok(Value::Null));
+    }
 }
 
 fn library_source() -> Value {

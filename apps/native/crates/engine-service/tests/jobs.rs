@@ -764,6 +764,7 @@ fn a_delivery_names_the_installed_extension_that_provides_nothing_now() {
         id: "acme".into(),
         name: "Acme Effects".into(),
         why: "is turned off".into(),
+        provides: vec![],
     }];
     let refused = finish(off);
     assert_eq!(refused.state, JobState::Failed, "{refused:?}");
@@ -1038,6 +1039,47 @@ fn a_job_that_fails_to_start_or_loses_its_child_lets_go_of_its_pin() {
     let status = child.wait().unwrap();
     assert_eq!(status.state, JobState::Failed, "{status:?}");
     assert!(lost.load(Ordering::Acquire));
+}
+/// A job whose child keeps dying before its first frame ends every try with
+/// an error, once (nothing starts it again behind the person's back), and
+/// each try lets go of what it pinned (its extensions' realm and its isolate
+/// room), so tries never pile up.
+#[test]
+fn a_job_whose_child_keeps_dying_ends_each_try_with_an_error() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let starts = dir.path().join("starts");
+    let child = fake_child(
+        dir.path(),
+        &format!("echo started >> '{}'\nexit 3", starts.display()),
+    );
+    for attempt in 1..=3 {
+        let session = JobSession::new(request(dir.path().join(format!("try{attempt}")), 1));
+        let pin = session.cancellation();
+        let started = Instant::now();
+        let status = ExportHandle::start(&child, session)
+            .unwrap()
+            .wait()
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "try {attempt} ended at once"
+        );
+        assert_eq!(status.state, JobState::Failed, "try {attempt}: {status:?}");
+        assert!(
+            status
+                .error
+                .as_ref()
+                .is_some_and(|e| e.message.contains("without a terminal status")),
+            "try {attempt}: {status:?}"
+        );
+        assert!(
+            pin.load(Ordering::Acquire),
+            "try {attempt} let go of its pin"
+        );
+        let runs = std::fs::read_to_string(&starts).unwrap().lines().count();
+        assert_eq!(runs, attempt, "one child per try, never restarted");
+    }
 }
 /// A stand-in child: reads its request, then runs `script`.
 fn fake_child(dir: &Path, script: &str) -> std::path::PathBuf {

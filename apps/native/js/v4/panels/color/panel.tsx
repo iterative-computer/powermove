@@ -210,7 +210,7 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
         >
           <Heading title={p.name} detail={p.typeLabel} locked={p.locked} />
           {tools.length === 0 ? (
-            <Ungraded editable={editable} onAdd={add} />
+            <AddRow empty editable={editable} onAdd={add} />
           ) : null}
           {tools.map((g, i) => {
             const id = g.header.id;
@@ -292,6 +292,11 @@ export function ColorPanel({ controller: c, command }: ColorProps) {
               </UI.DisclosureGroup>
             );
           })}
+          {/* The grade is a stack: after the last block, each kind adds
+              another of its own, which applies after the rest. */}
+          {tools.length > 0 ? (
+            <AddRow empty={false} editable={editable} onAdd={add} />
+          ) : null}
         </scroll>
       )}
     </div>
@@ -367,18 +372,22 @@ function Header({
   );
 }
 
-/** A layer with no grade yet: what can be added, as quiet actions. */
-function Ungraded({
+/** What can be added, as quiet actions: on a layer with no grade yet, and
+ * after the last block of one that has some (each adds another block). */
+function AddRow({
+  empty,
   editable,
   onAdd,
 }: {
+  empty: boolean;
   editable: boolean;
   onAdd: (choice: string) => void;
 }) {
   return (
     <div
+      id={`${PANEL_ID}:add-row`}
       role="group"
-      label="Add a Grade"
+      label={empty ? "Add a Grade" : "Add Another Grade"}
       style={{
         display: "flex",
         flexDirection: "column",
@@ -386,13 +395,19 @@ function Ungraded({
         paddingLeft: t("metrics.inset"),
         paddingRight: t("metrics.inset"),
         paddingTop: t("metrics.gap"),
+        paddingBottom: t("metrics.gap"),
       }}
     >
-      <text
-        style={{ color: t("colors.muted"), fontSize: t("typography.minimum") }}
-      >
-        No grade on this layer.
-      </text>
+      {empty ? (
+        <text
+          style={{
+            color: t("colors.muted"),
+            fontSize: t("typography.minimum"),
+          }}
+        >
+          No grade on this layer.
+        </text>
+      ) : null}
       <div
         style={{
           display: "flex",
@@ -484,6 +499,8 @@ function Wheels({
         display: "flex",
         flexDirection: "row",
         flexWrap: "wrap",
+        // On a wide panel the row is centred, its plates at their largest.
+        justifyContent: "center",
         columnGap: t("metrics.gap"),
         rowGap: t("metrics.gap"),
         paddingTop: t("metrics.gap"),
@@ -503,6 +520,8 @@ function Wheels({
             flexGrow: 1,
             flexBasis: t("metrics.grade_pair"),
             minWidth: t("metrics.grade_pair"),
+            maxWidth: t("metrics.grade_pair_max"),
+            justifyContent: "center",
           }}
         >
           {pair.map((w) => (
@@ -548,6 +567,8 @@ function Wheel({
         padding: t("metrics.gap"),
         flexGrow: 1,
         flexBasis: t("metrics.grade_wheel"),
+        // A wheel stops growing at its largest; the plate with it.
+        maxWidth: t("metrics.grade_wheel_max"),
       }}
     >
       <text
@@ -575,6 +596,11 @@ function Wheel({
                   value: master.parameter.value as number,
                   min: master.parameter.min ?? w.range[0],
                   max: master.parameter.max ?? w.range[1],
+                  // Its strip under the wheel sets it (unless it is
+                  // locked or keyed read-only here).
+                  ...(locked || master.parameter.readonly
+                    ? {}
+                    : { binding: master.parameter.binding }),
                 },
               }
             : {})}
@@ -582,36 +608,8 @@ function Wheel({
           onKeyDown={stop}
         />
       )}
-      {/* Its numbers are subordinate to it: the master a short field
-          centred under the wheel, the channels a caption under that. */}
-      {master && (
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "row",
-            justifyContent: "center",
-          }}
-        >
-          <UI.NumberField
-            id={`${PANEL_ID}:field:${master.id}`}
-            label={`${w.title} Master`}
-            binding={master.parameter.binding}
-            value={master.parameter.value as number}
-            step={master.parameter.step}
-            min={master.parameter.min}
-            max={master.parameter.max}
-            precision={master.parameter.precision}
-            disabled={locked || master.parameter.readonly}
-            mixed={master.parameter.mixed}
-            onKeyDown={stop}
-            onClick={stop}
-            style={{
-              width: t("metrics.grade_field"),
-              textAlign: "center",
-            }}
-          />
-        </div>
-      )}
+      {/* The master is the strip the wheel draws under itself; the
+          channels are a caption under that. */}
       <div
         role="group"
         label={`${w.title} red ${signed(rgb[0])}, green ${signed(rgb[1])}, blue ${signed(rgb[2])}`}

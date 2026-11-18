@@ -39,9 +39,13 @@ pub fn route_sigterm() {
                     continue;
                 }
                 if !TERMINATE_HEARD.load(std::sync::atomic::Ordering::Acquire) {
-                    // No window yet, so nothing is open to close.
-                    std::process::exit(0);
+                    // No window yet, so nothing is open to close; ends
+                    // without exit handlers, as the signal's limit does.
+                    crate::quit_limit::stop_jobs_and_exit(0);
                 }
+                // Bounded here, not on the main thread: a quit already under
+                // way and stuck there would otherwise never hear it.
+                crate::quit_limit::signalled();
                 let _ = tx.try_send(());
             }
         });
@@ -167,11 +171,21 @@ pub fn paths_named(
     save: bool,
     name: &str,
 ) -> async_channel::Receiver<Option<PathBuf>> {
+    paths_named_in(window, save, name, None)
+}
+/// [`paths_named`], the panel starting in `start` when given.
+pub fn paths_named_in(
+    window: &NSWindow,
+    save: bool,
+    name: &str,
+    start: Option<&std::path::Path>,
+) -> async_channel::Receiver<Option<PathBuf>> {
     let (tx, rx) = async_channel::bounded(1);
     let mtm = MainThreadMarker::new().unwrap();
     if save {
         let panel = NSSavePanel::savePanel(mtm);
         panel.setNameFieldStringValue(&NSString::from_str(name));
+        start_in(&panel, start);
         let retained = panel.clone();
         let done = block2::RcBlock::new(move |result: NSModalResponse| {
             let path = (result == NSModalResponseOK)
@@ -597,23 +611,7 @@ pub fn reveal(path: &std::path::Path) {
     }
 }
 pub fn history_labels(undo: Option<&str>, redo: Option<&str>) {
-    let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
-    let Some(root) = app.mainMenu() else { return };
-    for top in root.itemArray() {
-        if top.title().to_string() != "Edit" {
-            continue;
-        }
-        if let Some(menu) = top.submenu() {
-            for (index, (verb, label)) in [("Undo", undo), ("Redo", redo)].into_iter().enumerate() {
-                if let Some(item) = menu.itemAtIndex(index as isize) {
-                    item.setTitle(&NSString::from_str(
-                        &label.map_or(verb.to_string(), |l| format!("{verb} {l}")),
-                    ));
-                    item.setEnabled(label.is_some());
-                }
-            }
-        }
-    }
+    pm_shell::history_titles(undo, redo);
 }
 
 // Preserve GPUI's existing application delegate while intercepting termination
@@ -709,6 +707,17 @@ pub fn quit_guard() -> (Retained<QuitDelegate>, async_channel::Receiver<()>) {
     (guard, rx)
 }
 impl QuitDelegate {
+    /// Quit Powermove or Cmd-Q (`pm_shell::native::set_quit_hook`): to the
+    /// quit coordinator like the Quit Apple Event, with or without a sheet;
+    /// once the quit is allowed, the app terminates.
+    pub fn chosen(&self) {
+        if self.ivars().allowed.get() {
+            let mtm = MainThreadMarker::new().unwrap();
+            NSApplication::sharedApplication(mtm).terminate(None);
+            return;
+        }
+        let _ = self.ivars().sender.try_send(());
+    }
     pub fn allow(&self) {
         self.ivars().allowed.set(true);
     }
@@ -769,10 +778,47 @@ fn review_destination(name: &str) -> Option<PathBuf> {
 pub fn reviewing_saves() -> bool {
     review_destination("x").is_some()
 }
+thread_local! {
+    /// Where this session last exported to.
+    static LAST_EXPORT_FOLDER: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+/// The folder an export's panel starts in (PM-491): the project file's own
+/// folder, else where this session last exported, else Movies; never the
+/// folder the last import came from.
+pub fn export_start(project_file: Option<&std::path::Path>) -> Option<PathBuf> {
+    let last = LAST_EXPORT_FOLDER.with(|l| l.borrow().clone());
+    let movies = std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Movies"));
+    export_start_from(project_file, last, movies)
+}
+fn export_start_from(
+    project_file: Option<&std::path::Path>,
+    last: Option<PathBuf>,
+    movies: Option<PathBuf>,
+) -> Option<PathBuf> {
+    project_file
+        .and_then(std::path::Path::parent)
+        .map(std::path::Path::to_path_buf)
+        .or(last)
+        .or(movies)
+        .filter(|folder| folder.is_dir())
+}
+/// Remembers where an export went, for the next one's panel.
+pub fn exported_to(destination: &std::path::Path) {
+    if let Some(folder) = destination.parent() {
+        LAST_EXPORT_FOLDER.with(|l| *l.borrow_mut() = Some(folder.to_path_buf()));
+    }
+}
+fn start_in(panel: &NSSavePanel, folder: Option<&std::path::Path>) {
+    if let Some(folder) = folder {
+        let url = objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&folder.to_string_lossy()));
+        panel.setDirectoryURL(Some(&url));
+    }
+}
 pub fn export_destination(
     window: &NSWindow,
     folder: bool,
     name: &str,
+    start: Option<PathBuf>,
 ) -> async_channel::Receiver<Option<PathBuf>> {
     if let Some(path) = review_destination(name) {
         let (tx, rx) = async_channel::bounded(1);
@@ -780,7 +826,7 @@ pub fn export_destination(
         return rx;
     }
     if !folder {
-        return paths_named(window, true, name);
+        return paths_named_in(window, true, name, start.as_deref());
     }
     let (tx, rx) = async_channel::bounded(1);
     let mtm = MainThreadMarker::new().unwrap();
@@ -789,6 +835,7 @@ pub fn export_destination(
     panel.setCanChooseFiles(false);
     panel.setAllowsMultipleSelection(false);
     panel.setCanCreateDirectories(true);
+    start_in(&panel, start.as_deref());
     let retained = panel.clone();
     // The suggestion is authored by the Export model, never a pathname.
     let name = PathBuf::from(name).file_name().map(|s| s.to_owned());
@@ -995,5 +1042,30 @@ pub fn request_attention() {
     let app = NSApplication::sharedApplication(mtm);
     if !app.isActive() {
         app.requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
+    }
+}
+
+#[cfg(test)]
+mod export_start_tests {
+    /// An export starts beside the project's file, else where the last one
+    /// went, else in Movies; never in the last import's folder (PM-491).
+    #[test]
+    fn an_export_starts_beside_the_project_then_the_last_export_then_movies() {
+        let root = tempfile::tempdir().unwrap();
+        let (project, last, movies) = (
+            root.path().join("Projects"),
+            root.path().join("Exports"),
+            root.path().join("Movies"),
+        );
+        for d in [&project, &last, &movies] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let file = project.join("Paper.pmv");
+        let start = |file: Option<&std::path::Path>, last: Option<std::path::PathBuf>| {
+            super::export_start_from(file, last, Some(movies.clone()))
+        };
+        assert_eq!(start(Some(&file), Some(last.clone())), Some(project.clone()));
+        assert_eq!(start(None, Some(last.clone())), Some(last.clone()));
+        assert_eq!(start(None, None), Some(movies.clone()));
     }
 }

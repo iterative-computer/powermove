@@ -245,33 +245,6 @@ pub fn material_slots_from_file(name: &str, bytes: &[u8]) -> Vec<(usize, String)
     load(name, bytes).map(|m| material_slots(&m)).unwrap_or_default()
 }
 
-#[cfg(test)]
-mod slot_tests {
-    #[test]
-    fn a_glb_lists_its_material_slots_by_source_index() {
-        let json = br#"{"asset":{"version":"2.0"},"materials":[{"name":"Aluminium"},{"name":" "},{"name":"Glass"}]}"#;
-        let mut padded = json.to_vec();
-        while padded.len() % 4 != 0 {
-            padded.push(b' ');
-        }
-        let mut glb = b"glTF".to_vec();
-        glb.extend(2u32.to_le_bytes());
-        glb.extend(((20 + padded.len()) as u32).to_le_bytes());
-        glb.extend((padded.len() as u32).to_le_bytes());
-        glb.extend(b"JSON");
-        glb.extend(&padded);
-        let slots = super::material_slots_from_file("Product.glb", &glb);
-        assert_eq!(
-            slots,
-            vec![
-                (0, "Aluminium".to_owned()),
-                (1, "Material 2".to_owned()),
-                (2, "Glass".to_owned())
-            ]
-        );
-        assert!(super::material_slots_from_file("mesh.obj", b"v 0 0 0").is_empty());
-    }
-}
 /// A GLB's or glTF's material slots with the values Properties shows before a
 /// part is edited (sRGB hex colours; iridescence as film thickness in nm):
 /// `[{index, name, values:{color, metallic, roughness, clearcoat,
@@ -337,4 +310,32 @@ pub fn material_slot_values_from_file(name: &str, bytes: &[u8]) -> Vec<serde_jso
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod slot_tests {
+    #[test]
+    fn a_glb_lists_its_material_slots_by_source_index() {
+        let json = br#"{"asset":{"version":"2.0"},"materials":[{"name":"Aluminium"},{"name":" "},{"name":"Glass"}]}"#;
+        let mut padded = json.to_vec();
+        while !padded.len().is_multiple_of(4) {
+            padded.push(b' ');
+        }
+        let mut glb = b"glTF".to_vec();
+        glb.extend(2u32.to_le_bytes());
+        glb.extend(((20 + padded.len()) as u32).to_le_bytes());
+        glb.extend((padded.len() as u32).to_le_bytes());
+        glb.extend(b"JSON");
+        glb.extend(&padded);
+        let slots = super::material_slots_from_file("Product.glb", &glb);
+        assert_eq!(
+            slots,
+            vec![
+                (0, "Aluminium".to_owned()),
+                (1, "Material 2".to_owned()),
+                (2, "Glass".to_owned())
+            ]
+        );
+        assert!(super::material_slots_from_file("mesh.obj", b"v 0 0 0").is_empty());
+    }
 }

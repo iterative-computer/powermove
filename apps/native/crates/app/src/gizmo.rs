@@ -1,6 +1,7 @@
 //! Viewer transform gizmos. The engine draws them in the frame's own pass, so
 //! they register with the picture at any zoom; this element owns hit testing and
 //! runs each drag as one kernel gesture on a worker, never through V8.
+use crate::gizmo_layer::{Mark, Shape};
 use gpui::{prelude::*, *};
 use pm_engine_service::OverlayLine;
 use pm_kernel::{
@@ -224,6 +225,10 @@ pub trait Host: 'static {
         at: Option<crate::gizmo_layer::Placement>,
         cx: &mut App,
     );
+    /// The marks that keep their size on screen (handles, the rotation
+    /// knob, the anchor's rings, the box's keyline), sent just before the
+    /// lines they go with.
+    fn marks(&self, _marks: Vec<Mark>, _cx: &mut App) {}
     fn navigate(&self, change: Navigate, cx: &mut App);
     /// The shared layer menu, on the selection the press made.
     /// The right-click menu over `layer`, or over empty canvas.
@@ -472,10 +477,11 @@ pub struct GizmoSurface {
     pen_reading: u64,
     /// The layer and open path new clicks extend.
     pen_active: Option<(String, String)>,
-    /// A pen read has landed since the tool was chosen.
+    /// A pen read that includes the Pen's own last press has landed.
     pen_ready: bool,
-    /// A press that came before the read, replayed when it lands.
-    pen_waiting: Option<(MouseDownEvent, [f64; 2], f64)>,
+    /// Presses, moves and releases that came before that read, replayed in
+    /// order when it lands.
+    pen_waiting: VecDeque<pen::PenInput>,
     /// Path and vertex whose tangents show.
     pen_selected: Option<(String, String)>,
     pen_drag: Option<pen::PenDrag>,
@@ -532,6 +538,15 @@ fn parent_inverse(world: &[f64; 6], local: &[f64; 6]) -> Option<[f64; 4]> {
         w[0] * inverse_local[2] + w[2] * inverse_local[3],
         w[1] * inverse_local[2] + w[3] * inverse_local[3],
     ])
+}
+/// Whether a View ▸ 3D key acts. The number row and the numpad are the 3D
+/// view's only while it has the keyboard: the canvas focused on a scene in
+/// Free View. Anywhere else digits do what v1's did (nothing, or the field
+/// they are typed into), so a digit typed for a number field that did not
+/// take the click never turns the view into 3D and orbits it (PM-480). The
+/// menu items (no key) and Fly Navigation's key always act.
+pub(crate) fn studio_key(group: &str, focused: bool, active: bool, free_look: bool) -> bool {
+    focused && active && (group == "fly" || free_look)
 }
 fn round(value: f64, digits: i32) -> f64 {
     let unit = 10f64.powi(digits);
@@ -752,7 +767,7 @@ impl GizmoSurface {
             pen_reading: 0,
             pen_active: None,
             pen_ready: false,
-            pen_waiting: None,
+            pen_waiting: VecDeque::new(),
             pen_selected: None,
             pen_drag: None,
             pen_pointer: None,
@@ -964,7 +979,7 @@ impl GizmoSurface {
         } else {
             &[]
         };
-        let mut lines = overlay(poses, frame, &self.tokens);
+        let (mut lines, mut marks) = overlay(poses, frame, &self.tokens);
         // The hover outline: the accent at 60% (viewer-chrome.md), never
         // over a gesture or on a layer the selection already outlines.
         if let Some((id, c)) = &self.hover_box
@@ -1003,7 +1018,9 @@ impl GizmoSurface {
             }
         }
         if self.controls && !editing {
-            lines.extend(self.studio_lines(frame));
+            let (studio, studio_marks) = self.studio_lines(frame);
+            lines.extend(studio);
+            marks.extend(studio_marks);
         }
         lines.truncate(pm_engine_service::OverlayGeometry::MAX_LINES);
         // The composition's rectangle in the viewer view (the gizmo covers it).
@@ -1018,6 +1035,7 @@ impl GizmoSurface {
                 f64::from(f32::from(self.bounds.size.height)),
             ],
         };
+        self.host.marks(marks, cx);
         self.host.overlay(lines, Some(at), cx);
     }
     fn to_comp(&self, position: Point<Pixels>, frame: ViewFrame) -> [f64; 2] {
@@ -1043,12 +1061,7 @@ impl GizmoSurface {
     /// next meaning; the menus and the bar still run the command.
     pub fn studio_takes_key(&self, group: &str, canvas: bool, window: &Window) -> bool {
         let focused = canvas || self.focus.as_ref().is_some_and(|f| f.is_focused(window));
-        focused
-            && self.studio.active()
-            && match group {
-                "look" | "fly" => true,
-                _ => self.studio.free_look,
-            }
+        studio_key(group, focused, self.studio.active(), self.studio.free_look)
     }
     /// View ▸ Show Rulers / Show Grid.
     pub fn set_rulers(&mut self, shown: bool, grid: bool, cx: &mut Context<Self>) {
@@ -1217,6 +1230,12 @@ impl GizmoSurface {
         {
             self.hover(at, cx);
         }
+    }
+    /// Drops the hover outline: the pointer went where the viewer cannot
+    /// follow it (a pick overlay over the editor takes every move).
+    pub fn clear_hover(&mut self, cx: &mut Context<Self>) {
+        self.hover_at = None;
+        self.unhover(cx);
     }
     fn unhover(&mut self, cx: &mut Context<Self>) {
         self.hover_next = None;
@@ -1926,15 +1945,36 @@ impl GizmoSurface {
     /// (the viewer was drawn again or covered while held). It ends now, as a
     /// release does, so no edit stays open.
     pub fn release_unheard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        // A marquee or a shape or text box being drawn, or a press whose
+        // pick has not answered yet, waits for the release as a drag does.
         let held = self.drag.is_some()
             || self.effect_drag.as_ref().is_some_and(|d| d.color_channel.is_none())
             || self.pen_drag.is_some()
+            || matches!(
+                self.pen_waiting.back(),
+                Some(pen::PenInput::Down(..) | pen::PenInput::Move(..))
+            )
             || self.panning.is_some()
-            || self.rulers.dragging.is_some();
+            || self.rulers.dragging.is_some()
+            || self.marquee.is_some()
+            || self.sketch.is_some()
+            || self.text_sketch.is_some()
+            || self.picking.is_some();
         if held {
             self.on_up(true, Some(window), cx);
         }
         held
+    }
+    /// A pointer gesture Escape would cancel (not a text session): ending
+    /// one reads the controller (its tool, its frame), so the controller
+    /// asks first and has it ended after its own update (PM-480).
+    pub fn gesture_to_cancel(&self) -> bool {
+        self.pen_drag.is_some()
+            || self.marquee.is_some()
+            || self.studio.busy()
+            || self.drag.is_some()
+            || self.sketch.is_some()
+            || self.text_sketch.is_some()
     }
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
         if self.effect_colour.is_some() {
@@ -2016,7 +2056,7 @@ impl GizmoSurface {
                         .call(&project, Request::new(Caller::native(), call))
                         .await
                         .ok_or("Kernel closed")?
-                        .map_err(|e| format!("{e:?}"))?;
+                        .map_err(|e| e.to_string())?;
                     if let Reply::Throw(error) = ack.reply {
                         return Err(error.to_string());
                     }
@@ -2082,7 +2122,7 @@ impl GizmoSurface {
                                 .call(&project, Request::new(Caller::native(), select.user()))
                                 .await
                                 .ok_or("Kernel closed")?
-                                .map_err(|e| format!("{e:?}"));
+                                .map_err(|e| e.to_string());
                         }
                         (Job::Transact(label, commands, select), _) => {
                             let selection = select.map_or_else(
@@ -2102,7 +2142,19 @@ impl GizmoSurface {
                                 .call(&project, Request::new(Caller::native(), call))
                                 .await
                                 .ok_or("Kernel closed")?
-                                .map_err(|e| format!("{e:?}"));
+                                .map_err(|e| e.to_string())?;
+                            if let (Some(id), false) =
+                                (select, matches!(ack.reply, Reply::Throw(_)))
+                            {
+                                let select = SelectionCall::Layers {
+                                    ids: vec![id],
+                                    add: false,
+                                };
+                                kernel
+                                    .call(&project, Request::new(Caller::native(), select))
+                                    .await;
+                            }
+                            return Ok(ack);
                         }
                         (Job::Begin(label), _) => GestureCall::Begin {
                             label: label.into(),
@@ -2126,7 +2178,7 @@ impl GizmoSurface {
                         .call(&project, Request::new(Caller::native(), call))
                         .await
                         .ok_or("Kernel closed")?
-                        .map_err(|e| format!("{e:?}"))
+                        .map_err(|e| e.to_string())
                 })
                 .await;
             crate::diag::line(
@@ -2134,13 +2186,29 @@ impl GizmoSurface {
             );
             let _ = this.update(cx, |s, cx| {
                 s.busy = false;
-                match result {
+                // A gesture that has finished (or never began) has no id to
+                // step: a later gesture's steps must never reach a committed
+                // one, which would leave the later one empty in the history
+                // (PM-433: two Cmd-Z presses undid one step).
+                let begun = match result {
                     Ok(ack) => match ack.reply {
-                        Reply::Gesture(id) => s.gesture = Some(id),
-                        Reply::Throw(error) => s.host.report(error.to_string(), cx),
-                        _ => {}
+                        Reply::Gesture(id) => {
+                            s.gesture = Some(id);
+                            true
+                        }
+                        Reply::Throw(error) => {
+                            s.host.report(error.to_string(), cx);
+                            false
+                        }
+                        _ => true,
                     },
-                    Err(error) => s.host.report(error, cx),
+                    Err(error) => {
+                        s.host.report(error, cx);
+                        false
+                    }
+                };
+                if kind == "finish" || (kind == "begin" && !begun) {
+                    s.gesture = None;
                 }
                 if s.queue.is_empty()
                     && s.drag.is_none()
@@ -2151,6 +2219,10 @@ impl GizmoSurface {
                     s.gesture = None;
                 }
                 s.pump(cx);
+                // Clicks the Pen holds act once its own work has landed.
+                if !s.busy && s.queue.is_empty() && !s.pen_waiting.is_empty() {
+                    s.refresh(cx);
+                }
             });
         })
         .detach();
@@ -2185,6 +2257,10 @@ impl GizmoSurface {
     #[cfg(test)]
     pub fn idle(&self) -> bool {
         !self.busy && self.queue.is_empty() && self.picks == 0
+    }
+    #[cfg(test)]
+    pub fn marquee_drawn(&self) -> bool {
+        self.marquee.is_some()
     }
     #[cfg(test)]
     pub fn hovered(&self) -> Option<String> {
@@ -2857,13 +2933,27 @@ fn pick_target(p: &pm_kernel::Published, press: Press) -> Option<Option<String>>
 }
 /// Accent box, handles and anchor as engine lines. Sizes follow the display,
 /// never the composition zoom.
-fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> Vec<OverlayLine> {
-    let accent = t.colors.accent;
-    let channel = |shift: u32| ((accent >> shift) & 255) as f32 / 255.;
-    let color = [channel(16), channel(8), channel(0), 1.];
+/// The handles' keyline and the knob's ground: the viewer's dark in both
+/// schemes (viewer-chrome.md), so an accent mark reads on orange or white
+/// footage.
+const MARK_DARK: [f32; 4] = [14. / 255., 14. / 255., 14. / 255., 1.];
+/// The box's outer keyline: `c.media_badge` (black) at 40 % (viewer-chrome.md).
+const BOX_KEYLINE_ALPHA: f32 = 0.4;
+/// The gizmo as the viewer draws it: the box, stem and anchor cross as 1 pt
+/// accent lines, and the marks that keep their size on screen (filled
+/// handles, the rotation knob, the anchor's rings, the box's keyline) as
+/// viewer-chrome.md specifies them.
+fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> (Vec<OverlayLine>, Vec<Mark>) {
+    let channels = |c: u32, alpha: f32| {
+        let channel = |shift: u32| ((c >> shift) & 255) as f32 / 255.;
+        [channel(16), channel(8), channel(0), alpha]
+    };
+    let color = channels(t.colors.accent, 1.);
+    let keyline = channels(t.colors.media_badge, BOX_KEYLINE_ALPHA);
     let [w, h] = frame.size;
     let n = |p: [f64; 2]| [(p[0] / w) as f32, (p[1] / h) as f32];
     let mut lines = vec![];
+    let mut marks = vec![];
     let mut line = |a: [f64; 2], b: [f64; 2]| {
         let (a, b) = (n(a), n(b));
         lines.push(OverlayLine {
@@ -2871,64 +2961,90 @@ fn overlay(poses: &[Pose], frame: ViewFrame, t: &pm_design::Tokens) -> Vec<Overl
             color,
         });
     };
-    let half = t.metrics.gizmo_handle as f64 / 2. / frame.scale;
-    let stem = t.metrics.rotation_stem as f64 / frame.scale;
-    // A circle as an octagon of engine lines (the rotation knob, the anchor ring).
-    let ring = |p: [f64; 2], r: f64, line: &mut dyn FnMut([f64; 2], [f64; 2])| {
-        let at = |i: usize| {
-            let a = i as f64 * std::f64::consts::FRAC_PI_4 + std::f64::consts::FRAC_PI_8;
-            [p[0] + r * a.cos(), p[1] + r * a.sin()]
-        };
-        for i in 0..8 {
-            line(at(i), at(i + 1));
-        }
+    let m = &t.metrics;
+    let stem = m.rotation_stem as f64 / frame.scale;
+    let handle = |p: [f64; 2]| Mark {
+        shape: Shape::Square,
+        at: n(p),
+        size: m.gizmo_handle,
+        fill: Some(color),
+        stroke: Some(MARK_DARK),
+        width: m.gizmo_keyline,
+        under: false,
     };
-    let square = |p: [f64; 2], line: &mut dyn FnMut([f64; 2], [f64; 2])| {
-        let c = [
-            [p[0] - half, p[1] - half],
-            [p[0] + half, p[1] - half],
-            [p[0] + half, p[1] + half],
-            [p[0] - half, p[1] + half],
-        ];
+    // Rotation is a round knob, so it never reads as a scale handle.
+    let knob = |p: [f64; 2]| Mark {
+        shape: Shape::Circle,
+        at: n(p),
+        size: m.gizmo_handle + 2. * m.gizmo_keyline,
+        fill: Some(MARK_DARK),
+        stroke: Some(color),
+        width: 1.5,
+        under: false,
+    };
+    let box_keyline = |corners: &[[f64; 2]; 4], marks: &mut Vec<Mark>| {
         for i in 0..4 {
-            line(c[i], c[(i + 1) % 4]);
+            marks.push(Mark {
+                shape: Shape::To(n(corners[(i + 1) % 4])),
+                at: n(corners[i]),
+                size: 0.,
+                fill: None,
+                stroke: Some(keyline),
+                width: 1. + 2. * m.gizmo_keyline,
+                under: true,
+            });
         }
     };
     // The box a press can take comes first: a huge selection over the
-    // engine's line budget loses its last per-layer outlines, never handles.
+    // engine's line budget loses its last per-layer outlines, never its box.
     let common = (poses.len() > 1).then(|| group_pose(poses)).flatten();
     if let Some(group) = &common {
         for i in 0..4 {
             line(group.corners[i], group.corners[(i + 1) % 4]);
         }
-        for i in 0..8 {
-            square(group.handle(i), &mut line);
-        }
+        box_keyline(&group.corners, &mut marks);
+        marks.extend((0..8).map(|i| handle(group.handle(i))));
         line(group.handle(1), group.rotate_handle(stem));
-        ring(group.rotate_handle(stem), half, &mut line);
+        marks.push(knob(group.rotate_handle(stem)));
     }
     if let [pose] = poses
         && !pose.locked
     {
-        for i in 0..8 {
-            square(pose.handle(i), &mut line);
-        }
-        // Rotation is a round knob, so it never reads as a scale handle.
+        box_keyline(&pose.corners, &mut marks);
+        marks.extend((0..8).map(|i| handle(pose.handle(i))));
         line(pose.handle(1), pose.rotate_handle(stem));
-        ring(pose.rotate_handle(stem), half, &mut line);
-        // The anchor point: a ring with a cross through it (After Effects, v1).
+        marks.push(knob(pose.rotate_handle(stem)));
+        // The anchor point: a ring with a cross through it (After Effects,
+        // v1), a white inner ring so it reads on any picture.
         let a = pose.anchor;
-        let reach = t.metrics.anchor_mark as f64 / 2. / frame.scale;
-        ring(a, reach * 0.6, &mut line);
+        let reach = m.anchor_mark as f64 / 2. / frame.scale;
         line([a[0] - reach, a[1]], [a[0] + reach, a[1]]);
         line([a[0], a[1] - reach], [a[0], a[1] + reach]);
+        marks.push(Mark {
+            shape: Shape::Circle,
+            at: n(a),
+            size: m.anchor_mark,
+            fill: None,
+            stroke: Some(color),
+            width: 1.5,
+            under: false,
+        });
+        marks.push(Mark {
+            shape: Shape::Circle,
+            at: n(a),
+            size: m.anchor_mark - 3.,
+            fill: None,
+            stroke: Some([1., 1., 1., 1.]),
+            width: 1.,
+            under: false,
+        });
     }
     for pose in poses {
         for i in 0..4 {
             line(pose.corners[i], pose.corners[(i + 1) % 4]);
         }
     }
-    lines
+    (lines, marks)
 }
 impl Render for GizmoSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2996,6 +3112,8 @@ impl Render for GizmoSurface {
                             definition: definition.to_string(),
                             label: drag.label.to_string(),
                             layer: None,
+                            edge: None,
+                            across: None,
                         },
                         cx,
                     );

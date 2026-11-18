@@ -20,7 +20,28 @@ pub const WAIT: Duration = Duration::from_millis(1500);
 
 /// The person just opened a text field: typing goes to it from now on.
 pub fn expect() {
-    EXPECTED.with(|e| e.set(Some(Instant::now() + WAIT)));
+    expect_for(WAIT);
+}
+
+/// As [`expect`], for a field that takes longer to come: the Text tool's
+/// text opens after asking the kernel what is under the click, and the first
+/// ones under load (fonts and the editor still cold) took longer than
+/// [`WAIT`], so the key typed after the click was dropped and the empty text
+/// left nothing (PM-465).
+pub fn expect_for(wait: Duration) {
+    EXPECTED.with(|e| e.set(Some(Instant::now() + wait)));
+}
+
+/// Whether a key goes to a field the person opened: what it types, and the
+/// editing chords a field answers (Select All, the clipboard, Undo). Typed
+/// before the field had the keyboard, ⌘A selected every layer and the digits
+/// after it moved the playhead (PM-487).
+pub fn for_field(chars: &str, command_or_control: bool, chord: &str) -> bool {
+    is_text(chars, command_or_control)
+        || matches!(
+            chord,
+            "cmd+a" | "cmd+c" | "cmd+v" | "cmd+x" | "cmd+z" | "cmd+shift+z"
+        )
 }
 
 /// Whether a field the person opened is still on its way.
@@ -53,7 +74,9 @@ pub fn decide(text: bool, field: bool, held: bool) -> Hold {
     if field && (held || waiting) {
         return Hold::Release;
     }
-    if waiting && text {
+    // Once letters wait, everything typed after them waits behind them (an
+    // Escape must not end the text before its letters reach it).
+    if waiting && (text || held) {
         return Hold::Held;
     }
     Hold::Pass
@@ -79,9 +102,19 @@ pub(crate) fn release(then: Option<objc2::rc::Retained<objc2_app_kit::NSEvent>>)
         return;
     };
     let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
-    for key in keys.into_iter().chain(then) {
-        app.postEvent_atStart(&key, false);
+    // Ahead of anything queued since: they were typed first.
+    let keys: Vec<_> = keys.into_iter().chain(then).collect();
+    for key in keys.iter().rev() {
+        app.postEvent_atStart(key, true);
     }
+}
+
+/// The keys held for a field, taken in order to hand over at once (the
+/// field has the keyboard and its edit is ending). The wait is over.
+#[cfg(target_os = "macos")]
+pub(crate) fn take_held() -> Vec<objc2::rc::Retained<objc2_app_kit::NSEvent>> {
+    EXPECTED.with(|e| e.set(None));
+    HELD.with(|h| std::mem::take(&mut *h.borrow_mut()))
 }
 
 /// The field the person opened has the keyboard (its view saw it take it):
@@ -118,7 +151,16 @@ mod tests {
         expect();
         assert_eq!(decide(true, false, false), Hold::Held, "on its way: held");
         assert_eq!(decide(false, false, false), Hold::Pass, "Escape and arrows pass");
+        assert_eq!(
+            decide(false, false, true),
+            Hold::Held,
+            "but wait behind letters already held (PM-465)"
+        );
         assert_eq!(decide(true, true, true), Hold::Release, "the field has it");
+        assert!(for_field("a", true, "cmd+a"), "Select All is the field's (PM-487)");
+        assert!(for_field("v", true, "cmd+v"));
+        assert!(!for_field("t", true, "cmd+t"), "a tool key is not");
+        assert!(!for_field("\u{1b}", false, "escape"));
         EXPECTED.with(|e| e.set(Some(Instant::now() - Duration::from_millis(1))));
         assert_eq!(decide(true, false, false), Hold::Pass, "the wait ran out");
     }

@@ -10,9 +10,18 @@ app="$out/Powermove.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$here/Info.plist" "$app/Contents/Info.plist"
+# Not the released product: it runs only on a profile it is given and never
+# on the product's own (main.rs `profile_refusal`). A bare start (macOS
+# reopening it, an activation by bundle id) exits before opening anything.
+/usr/libexec/PlistBuddy -c "Add :PMRequireProfile bool true" "$app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :LSEnvironment dict" "$app/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :LSEnvironment:PM_NATIVE_REQUIRE_PROFILE string 1" "$app/Contents/Info.plist"
 cp "$binary" "$app/Contents/MacOS/powermove-native"
 # Agent notifications play this as their own sound (S114).
 cp "$here/little-victory-deep.wav" "$app/Contents/Resources/"
+# The About window's notices, and the licence text of the icons it names.
+cp "$here/Credits.rtf" "$app/Contents/Resources/"
+cp "$here/../crates/shell/icons/pierre/LICENSE" "$app/Contents/Resources/Pierre Icons License.txt"
 # The app starts these by path; without the shader compiler no effect draws.
 for helper in pm-glsl-compiler pm-store-helper; do
   if [ -x "$(dirname "$binary")/$helper" ]; then

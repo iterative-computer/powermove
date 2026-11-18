@@ -827,6 +827,13 @@ impl MediaPanel {
                 }
                 out.effects.push(Effect::PickFiles { replace: Some(id) });
             }
+            InterpretFootage(id) => {
+                let a = c.assets.get(&id).ok_or(Error::MissingItem)?;
+                if !matches!(a.kind.as_str(), "video" | "image") {
+                    return Err(Error::InvalidTarget);
+                }
+                out.effects.push(Effect::InterpretFootage(id));
+            }
             Reveal(id) => {
                 let path = c
                     .assets

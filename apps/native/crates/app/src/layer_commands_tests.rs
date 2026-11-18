@@ -366,6 +366,7 @@ fn every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path() {
     // Transform (whose defaults are an identity too).
     assert_eq!(seeded.len(), 46);
     let mut changed = Vec::new();
+    let mut failed = Vec::new();
     for entry in seeded {
         let p = kernel.published("synthetic").unwrap();
         let version = entry.definition.get("version").cloned();
@@ -404,6 +405,8 @@ fn every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path() {
         );
         if draw(&mut headless, &kernel) != plain {
             changed.push(entry.id.clone());
+        } else if let Some(failure) = headless.definition_failure() {
+            failed.push(format!("{}: {failure}", entry.id));
         }
         send(&kernel, HistoryCall::Undo.into());
     }
@@ -430,7 +433,7 @@ fn every_seeded_effect_adds_through_the_kernel_and_draws_in_the_viewer_path() {
     ] {
         assert!(
             changed.iter().any(|c| c == id),
-            "{id} drew nothing: {changed:?}"
+            "{id} drew nothing: {changed:?}; failures: {failed:?}"
         );
     }
     // A neutral grade is an identity: the grading tools at their defaults
@@ -760,4 +763,29 @@ fn arrows_in_fields_never_dispatch_layer_nudge() {
         });
         assert_eq!(effects, vec![Effect::Replay(1)], "{chord}");
     }
+}
+
+#[test]
+/// Acceptance run 27 (PM-502): two layers named "Rect" looked the same in
+/// the Track Matte list. Rows read by stack number and name, as After
+/// Effects lists them.
+#[test]
+fn track_matte_rows_tell_layers_of_one_name_apart() {
+    let rect = |id: &str| {
+        layer(id, "shape", 0., 0., 0., "#ffffff", "")
+            .replace(&format!(r#""name":"{id}""#), r#""name":"Rect""#)
+    };
+    let (_actor, kernel) = open(&[
+        layer("t", "solid", 0., 0., 0., "#ffffff", ""),
+        rect("r1"),
+        rect("r2"),
+    ]);
+    let p = select(&kernel, &[]);
+    let rows = host_rows(
+        &p,
+        &serde_json::json!({"source": "layer-parents", "layer": "t"}),
+    )
+    .unwrap();
+    let labels: Vec<&str> = rows.iter().filter_map(|r| r["label"].as_str()).collect();
+    assert_eq!(labels, ["None", "2. Rect", "3. Rect"]);
 }

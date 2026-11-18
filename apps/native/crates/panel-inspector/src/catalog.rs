@@ -246,6 +246,25 @@ impl Inspector {
             }
             _ => {}
         }
+        // Trim Paths on each pen path's stroke (v1's Structured section):
+        // Start and End in percent of the path, Offset in degrees.
+        for path in array(d.and_then(|d| d.get("paths"))) {
+            let pid = text(path, "id");
+            if pid.is_empty() {
+                continue;
+            }
+            for (param, kind) in [
+                ("trimStart", number(1.0, Some(0.0), Some(100.0))),
+                ("trimEnd", number(1.0, Some(0.0), Some(100.0))),
+                ("trimOffset", number(1.0, None, None)),
+            ] {
+                out.push(FieldDescriptor {
+                    binding: Binding::Property(PropertyId::new(id, format!("g.{pid}.{param}"))),
+                    kind,
+                    animatable: true,
+                });
+            }
+        }
         if kind != "audio" {
             if let Some(properties) = layer.get("p").and_then(|v| v.as_object()) {
                 for key in properties.keys() {

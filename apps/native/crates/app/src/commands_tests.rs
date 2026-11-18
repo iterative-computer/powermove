@@ -471,6 +471,13 @@ fn edge_and_selected_event_commands_step_the_playhead(cx: &mut TestAppContext) {
     );
     assert!(disabled(None, &[], &Clipboard::Empty).contains("projectSettings"));
 }
+/// Over Home there is nothing to export: File ▸ Export and its keys are off
+/// (v1's dimmed row), and they come back while a project opens (PM-472).
+#[test]
+fn export_is_off_without_a_project() {
+    assert!(disabled(None, &[], &Clipboard::Empty).contains("export"));
+    assert!(crate::layer_commands::waits_for_project("export"));
+}
 fn key_times(s: &Stage, id: &str, channel: &str) -> Vec<f64> {
     let p = published(&s.rig.kernel);
     let root = p.snapshot.root().unwrap();
@@ -917,4 +924,20 @@ fn delete_groups_resolver_routes_globally_but_never_while_typing() {
             }
         }
     }
+}
+
+#[gpui::test]
+/// Slip with a layer that has no video or audio selected stays enabled and
+/// says why in the status line, instead of a key that does nothing (PM-477).
+#[gpui::test]
+fn slip_on_a_layer_with_no_media_says_why(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    select(&mut s, cx, &["l0"]);
+    let p = published(&s.rig.kernel);
+    assert!(!disabled(Some(&p), &layers(&s), &Clipboard::Empty).contains("slipLayers"));
+    assert!(crate::layer_commands::command_plan("slipLayers", &[serde_json::json!(1)], &p, 0.).is_none());
+    assert_eq!(
+        crate::layer_commands::nothing_reason("slipLayers", &p),
+        Some("Slip moves a clip's video or audio; the selected layers have none")
+    );
 }

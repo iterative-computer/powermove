@@ -116,6 +116,8 @@ pub struct McpSession {
     pending: Option<PendingHold>,
     bypass_hold: bool,
     hold_note: Option<Value>,
+    /// Its close rolled the run's edits back ([`Self::take_rolled_back`]).
+    rolled_back: bool,
     panel_lease: Option<crate::panel_lease::Lease>,
 }
 fn attach_hold_note(name: &str, result: &mut Value, pending: &mut Option<Value>) {
@@ -185,7 +187,13 @@ impl McpSession {
             bypass_hold: false,
             hold_note: None,
             panel_lease: None,
+            rolled_back: false,
         }
+    }
+    /// Whether this session's close rolled its edits back (the run ended
+    /// without keeping them): asked once, after `close`.
+    pub fn take_rolled_back(&mut self) -> bool {
+        std::mem::take(&mut self.rolled_back)
     }
     pub fn tools(&self) -> Value {
         json!(catalog::served_tools())
@@ -1517,6 +1525,7 @@ impl McpSession {
             let mut history_id = None;
             if !commit && changed {
                 rollback(&mut session, &mut host, &id, self.writer)?;
+                self.rolled_back = true;
             } else if changed && !session.external_actions {
                 if self.agent_token.is_some() {
                     history_id =

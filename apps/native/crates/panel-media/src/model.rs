@@ -48,6 +48,9 @@ pub enum MenuCommand {
     NewCompFromAsset(String),
     Replace(String),
     Reveal(String),
+    /// Interpret Footage… on a video or image: its colour, alpha, frame
+    /// rate, fields and pixel aspect.
+    InterpretFootage(String),
     Download(String),
     DeleteAssets,
     NewComposition,
@@ -144,6 +147,7 @@ pub enum Effect {
     Download(String),
     AddAsset(String),
     NewCompFromAsset(String),
+    InterpretFootage(String),
     NewComposition,
     OpenComposition(String),
     NestComposition(String),
@@ -714,6 +718,9 @@ impl MediaPanel {
                     }
                     if a.source_path.is_some() {
                         commands.push((Reveal(id.clone()), true));
+                    }
+                    if matches!(a.kind.as_str(), "video" | "image") {
+                        commands.push((InterpretFootage(id.clone()), true));
                     }
                     if a.kind == "video" {
                         renditions(c, r, std::slice::from_ref(&id), true, &mut commands);

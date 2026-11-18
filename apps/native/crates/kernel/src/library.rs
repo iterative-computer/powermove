@@ -28,7 +28,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use pm_model::json::{Map, Value, parse};
+use pm_model::json::{Map, Value};
 
 /// `STATIC_KEYS` at v1.2.0.
 pub const STATIC_KEYS: [&str; 42] = [
@@ -257,7 +257,9 @@ impl LibraryStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let value = parse(&text).map_err(|e| LibraryError::Json {
+        // A project's body or history is up to hundreds of megabytes: parsed
+        // on several threads.
+        let value = pm_model::json::parse_parallel(&text).map_err(|e| LibraryError::Json {
             key: key.to_owned(),
             message: e.to_string(),
         })?;
@@ -421,6 +423,23 @@ impl LibraryStore {
         }))
     }
 
+    /// The workspace `id` was last saved with, as its open takes it: its
+    /// `projectWorkspace`, else its session's (`projectMeta`, then the
+    /// older `projectState`). A window lays it out while the project opens.
+    pub fn saved_workspace(&self, id: &str) -> Option<Value> {
+        if let Ok(Some(workspace)) = self.read(&format!("projectWorkspace.{id}")) {
+            return Some(workspace);
+        }
+        ["projectMeta", "projectState"].into_iter().find_map(|family| {
+            self.read(&format!("{family}.{id}"))
+                .ok()
+                .flatten()?
+                .get("workspace")
+                .filter(|w| w.as_object().is_some())
+                .cloned()
+        })
+    }
+
     /// Counts per family, index reconciliation (no values).
     pub fn summary(&self) -> Result<LibrarySummary, LibraryError> {
         let keys = self.keys()?;
@@ -511,7 +530,7 @@ pub fn decode_disk_value(value: Value, limit: usize) -> Result<Value, String> {
         return Err("The compressed recovery record is incomplete.".into());
     }
     let text = String::from_utf8(out).map_err(|_| invalid())?;
-    parse(&text).map_err(|e| e.to_string())
+    pm_model::json::parse_parallel(&text).map_err(|e| e.to_string())
 }
 
 /// `R.unwrap`: `{v, proj}`, a bare project, or a JSON string of either.
@@ -519,7 +538,7 @@ fn parse_project_envelope(raw: Value) -> Option<Value> {
     let raw = match raw {
         Value::String(s) => {
             let text = s.as_str()?;
-            let mut raw = parse(text).ok()?;
+            let mut raw = pm_model::json::parse_parallel(text).ok()?;
             crate::asset_order::adopt_text(&mut raw, text);
             raw
         }

@@ -9,7 +9,7 @@ use pm_compat_runner::host::RasterInbox;
 use pm_compat_runner::{BaseRasterReply, BaseRasterRequest, RasterAnswer, RasterHooks};
 use pm_engine_service::EngineService;
 use pm_engine_service::compat::{
-    BaseRequest, CompatAnswer, CompatStore, Reply, hidden_raster, override_raster_window,
+    BaseRequest, CompatAnswer, CompatStore, Reply, hidden_raster, override_raster,
 };
 use pm_engine_service::jobs::{CompatJobNeed, CompatReply, JobSession, OverrideAnswers};
 use pm_kernel::{KernelHandle, Published};
@@ -166,11 +166,9 @@ fn answer_of(answer: RasterAnswer) -> Reply {
             size,
             anchor,
             uv,
-            window,
-        } => Reply::Draw(override_raster_window(
+        } => Reply::Draw(override_raster(
             width,
             height,
-            window,
             premultiplied_rgba,
             size,
             anchor,
@@ -259,12 +257,6 @@ impl Overrides {
                     width,
                     height,
                 }),
-                window: request.window.map(|[x, y, width, height]| PixelRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                }),
             })?;
             let ms = started.elapsed().as_millis() as u64;
             if ms >= 20 {
@@ -279,7 +271,6 @@ impl Overrides {
                 selection: r.selection,
                 font_offset: r.font_offset,
                 uv: r.uv,
-                window: r.window,
             }))
         });
         let (store, batches) = (self.jobs.store.clone(), self.jobs.batches.clone());
@@ -547,10 +538,6 @@ impl JobOverrides {
                         "The project's extensions could not answer for the export's revision"
                             .into(),
                     ),
-                    // Export frames never crop, so their answers are whole.
-                    RasterAnswer::Raster {
-                        window: Some(_), ..
-                    } => Err("An export frame was answered with a raster window".into()),
                     RasterAnswer::Raster {
                         width,
                         height,
@@ -558,7 +545,6 @@ impl JobOverrides {
                         size,
                         anchor,
                         uv,
-                        window: None,
                     } => Ok(CompatReply::Raster {
                         width,
                         height,

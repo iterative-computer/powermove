@@ -538,6 +538,21 @@ impl KernelHandle {
             .clone();
         sync.map_or(Ok(()), |sync| sync.sync())
     }
+    /// Best effort within `bound`, for a quit signal that cannot wait:
+    /// every journal's sync is attempted, each on its own, and each project's
+    /// is reported (synced, failed, or not confirmed in time).
+    pub fn sync_each_journal(
+        &self,
+        bound: std::time::Duration,
+    ) -> Vec<(String, Result<(), String>)> {
+        let sync = self
+            .shared
+            .journal_sync
+            .lock()
+            .expect("journal sync")
+            .clone();
+        sync.map_or_else(Vec::new, |sync| sync.sync_each(bound))
+    }
     /// Bind an immutable actor identity; cloned handles never change another caller's origin.
     /// Queue native UI/MCP pro actions. Never waits on the caller thread.
     pub fn pro_editing(

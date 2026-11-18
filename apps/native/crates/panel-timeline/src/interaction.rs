@@ -36,9 +36,20 @@ pub enum ModelError {
     MissingHost(&'static str),
     KernelPlan(String),
 }
+/// A sentence for the status line: never a variant name or an internal id.
 impl std::fmt::Display for ModelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self:?}")
+        match self {
+            Self::UnknownId(_) => f.write_str("That item is no longer in the timeline."),
+            Self::UnknownCommand(_) | Self::MissingHost(_) => {
+                f.write_str("The timeline can’t do that here.")
+            }
+            Self::HiddenRow => f.write_str("That row is hidden."),
+            Self::InvalidNumber => f.write_str("That isn’t a number the timeline can use."),
+            Self::Locked(_) => f.write_str("That layer is locked."),
+            Self::InvalidGesture => f.write_str("That timeline edit can’t be made."),
+            Self::KernelPlan(message) => f.write_str(message),
+        }
     }
 }
 impl std::error::Error for ModelError {}
@@ -47,6 +58,9 @@ impl std::error::Error for ModelError {}
 /// Returning an effect does not claim that host work has succeeded.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HostEffect {
+    /// One of the app's own commands, by name (the empty composition's
+    /// Text, Shape, Solid, Null and Import… buttons).
+    Run(String),
     Seek(f64),
     Status(String),
     TogglePlayback,
@@ -409,6 +423,33 @@ impl TimelineModel {
                 }
                 .into(),
             ),
+            // A selected transition goes, not its clip.
+            "delete"
+                if let Some((command, audio)) =
+                    self.transition.as_ref().and_then(|(l, edge)| {
+                        let layer = self.index.layer(l)?;
+                        Some((
+                            transition_command(layer, *edge, None, time)?,
+                            layer.kind == "audio",
+                        ))
+                    }) =>
+            {
+                Plan {
+                    calls: vec![Call::Transact {
+                        label: Some(
+                            if audio {
+                                "Remove Fade"
+                            } else {
+                                "Remove Transition"
+                            }
+                            .into(),
+                        ),
+                        body: WriteBody::Commands(vec![command]),
+                        expected_revision: Some(self.index.revision),
+                    }],
+                    ..Plan::default()
+                }
+            }
             "delete" if self.key_selection_active || !keys.is_empty() => {
                 self.key_selection_active = true;
                 if keys.is_empty() {
@@ -747,6 +788,22 @@ impl TimelineModel {
     }
     /// Every one of these keys holds its value to the next key: the legacy
     /// `hold` flag, or the outgoing interpolation the kernel writes now.
+    /// The named ease each key has (`None`: hold, custom or flat), read as
+    /// the kernel names what Set Easing wrote.
+    fn key_presets(&self, keys: &[String]) -> Vec<Option<&'static str>> {
+        let mut tracks: std::collections::HashMap<(String, String), Vec<pm_model::Value>> =
+            std::collections::HashMap::new();
+        keys.iter()
+            .map(|id| {
+                let (layer, channel, key) = self.index.key(id)?;
+                let at = channel.keys.iter().position(|k| k.id == key.id)?;
+                let stored = tracks
+                    .entry((layer.id.clone(), channel.path.clone()))
+                    .or_insert_with(|| channel.keys.iter().map(|k| k.stored.to_value()).collect());
+                pm_kernel::commands::keyframes::ease_preset(stored, at)
+            })
+            .collect()
+    }
     fn all_held(&self, keys: &[String]) -> bool {
         keys.iter().all(|id| {
             self.index.key(id).is_some_and(|(_, _, k)| {
@@ -1073,6 +1130,19 @@ pub enum DragKind {
     WorkIn,
     WorkOut,
     WorkMove,
+    /// An audio clip's level line: `start` is the gain's place on the fader
+    /// law (0 floor, 1 top) when the drag began; the sample's `value_delta`
+    /// moves it (a share of the clip's height).
+    Gain {
+        layer: String,
+        start: f64,
+    },
+    /// A transition's wedge (an audio clip's fade): its duration follows
+    /// the drag, from the clip's end to the pointer.
+    Transition {
+        layer: String,
+        edge: crate::render::Edge,
+    },
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DragSample {
@@ -1093,6 +1163,9 @@ pub struct DragSample {
 #[derive(Clone, Debug)]
 pub struct Drag {
     work_duration: f64,
+    /// Tracks mode: the lanes shown when the drag began, written as tracks
+    /// ahead of a pro edit so it keeps every clip on its track.
+    lanes: Option<Vec<(String, u32)>>,
     pub kind: DragKind,
     pub start: Arc<TimelineIndex>,
     pub snap: DirectionalSnap,
@@ -1157,6 +1230,16 @@ fn key_eases(index: &TimelineIndex, ids: &[String]) -> Vec<(String, EaseSide, Te
     out
 }
 impl Drag {
+    /// Tracks mode: the command writing the lanes shown when the drag began,
+    /// which goes ahead of each step of a pro edit.
+    pub fn pin_command(&self) -> Option<Command> {
+        self.lanes.as_ref().map(|lanes| {
+            pm_kernel::TimingCommand::PinTracks {
+                lanes: lanes.clone(),
+            }
+            .into()
+        })
+    }
     /// Captures identities and baselines once; never keeps a writer lease itself.
     pub fn begin(model: &TimelineModel, mut kind: DragKind) -> Result<Self, ModelError> {
         let index = &model.index;
@@ -1198,6 +1281,20 @@ impl Drag {
                     if index.layer(id).unwrap().effectively_locked {
                         return Err(ModelError::Locked(id.clone()));
                     }
+                }
+            }
+            DragKind::Transition { layer, edge } => {
+                let l = index
+                    .layer(layer)
+                    .ok_or_else(|| ModelError::UnknownId(layer.clone()))?;
+                if l.effectively_locked {
+                    return Err(ModelError::Locked(layer.clone()));
+                }
+                if l.transitions[*edge as usize]
+                    .as_ref()
+                    .is_none_or(|t| t.missing)
+                {
+                    return Err(ModelError::InvalidGesture);
                 }
             }
             DragKind::DuplicateLayers { ids, new_ids } => {
@@ -1263,6 +1360,18 @@ impl Drag {
                     model.require_channel(l, c)?;
                 }
             }
+            DragKind::Gain { layer, start } => {
+                finite(*start)?;
+                let l = index
+                    .layer(layer)
+                    .ok_or_else(|| ModelError::UnknownId(layer.clone()))?;
+                if l.effectively_locked {
+                    return Err(ModelError::Locked(l.id.clone()));
+                }
+                if l.kind != "audio" {
+                    return Err(ModelError::UnknownId(layer.clone()));
+                }
+            }
             _ => {}
         }
         let mut anchors = Vec::new();
@@ -1295,6 +1404,17 @@ impl Drag {
                         });
                     }
                 }
+            }
+            DragKind::Transition { layer, edge } => {
+                let l = index.layer(layer).unwrap();
+                let seconds = l.transitions[*edge as usize].as_ref().unwrap().duration;
+                anchors.push(Anchor {
+                    time: match edge {
+                        crate::render::Edge::In => l.from + seconds,
+                        crate::render::Edge::Out => l.from + l.duration - seconds,
+                    },
+                    edge: None,
+                });
             }
             DragKind::Keys { ids } | DragKind::GraphKeys { ids } => {
                 for id in ids {
@@ -1341,7 +1461,17 @@ impl Drag {
             }),
             _ => None,
         };
+        let lanes = (model.mode == crate::TimelineMode::Tracks
+            && matches!(
+                kind,
+                DragKind::ProEdit(_)
+                    | DragKind::Timing(_)
+                    | DragKind::TrimIn { .. }
+                    | DragKind::TrimOut { .. }
+            ))
+        .then(|| crate::tracks::relative_lanes(index, &model.reveal));
         Ok(Self {
+            lanes,
             handle_key,
             speed_eases,
             kind,
@@ -1355,7 +1485,10 @@ impl Drag {
             property_values: Default::default(),
         })
     }
-    pub fn label(&self) -> &'static str {
+    /// The gesture's undo name: v1's words (timeline.ts), in Title Case as
+    /// the Edit menu shows every action.
+    pub fn label(&self) -> String {
+        let many = |n: usize, one: &str, more: &str| if n > 1 { more } else { one }.to_owned();
         match self.kind {
             DragKind::ProEdit(ref command) => {
                 use pm_kernel::commands::pro_edit::ProEditCommand as Pro;
@@ -1368,32 +1501,40 @@ impl Drag {
                     Pro::Slide { .. } => "Slide Edit",
                     _ => "Edit Clips",
                 }
+                .into()
             }
             DragKind::Timing(ref command) => match command {
                 pm_kernel::TimingCommand::RippleTrim { .. } => "Ripple Trim",
                 pm_kernel::TimingCommand::Roll { .. } => "Roll Edit",
                 _ => "Slide Layer",
-            },
-            DragKind::Layers { .. } => "Move clip",
-            DragKind::DuplicateLayers { .. } => "Duplicate Layers",
-            DragKind::TrimIn { .. } | DragKind::TrimOut { .. } => "Trim clip",
-            DragKind::TextStagger { end, .. } => {
-                if end {
-                    "Stretch text animation"
-                } else {
-                    "Move text animation"
-                }
             }
-            DragKind::QuickOffsetLayers { .. } => "Quick offset layers",
-            DragKind::QuickOffsetKeys { .. } => "Quick offset keyframes",
-            DragKind::Keys { .. } => "Move keyframe",
-            DragKind::GraphKeys { .. } => "Edit curve",
-            DragKind::StretchKeys { .. } => "Stretch keyframes",
-            DragKind::TransformKeys { .. } => "Scale keyframes",
-            DragKind::Handle { .. } => "Adjust Handle",
-            DragKind::Property { .. } => "Change Property",
-            DragKind::WorkMove => "Move work area",
-            _ => "Work area",
+            .into(),
+            DragKind::Layers { .. } => "Move Clip".into(),
+            DragKind::DuplicateLayers { .. } => "Duplicate Layers".into(),
+            DragKind::TrimIn { .. } | DragKind::TrimOut { .. } => "Trim Clip".into(),
+            DragKind::TextStagger { end, .. } => if end {
+                "Stretch Text Animation"
+            } else {
+                "Move Text Animation"
+            }
+            .into(),
+            DragKind::QuickOffsetLayers { .. } => "Quick Offset Layers".into(),
+            DragKind::QuickOffsetKeys { .. } => "Quick Offset Keyframes".into(),
+            DragKind::Keys { ref ids } => many(ids.len(), "Move Keyframe", "Move Keyframes"),
+            DragKind::GraphKeys { ref ids } => many(ids.len(), "Edit Curve", "Edit Keyframes"),
+            DragKind::StretchKeys { .. } => "Stretch Keyframes".into(),
+            DragKind::TransformKeys { .. } => "Scale Keyframes".into(),
+            DragKind::Handle { .. } => "Adjust Easing".into(),
+            // v1: "Edit <property>" (the row's name).
+            DragKind::Property { ref targets, .. } => match targets.as_slice() {
+                [(_, channel)] => format!("Edit {}", crate::property_label(channel)),
+                _ => "Edit Properties".into(),
+            },
+            DragKind::WorkMove => "Move Work Area".into(),
+            // The Mixer names an audio layer's level edit the same.
+            DragKind::Gain { .. } => "Gain".into(),
+            DragKind::Transition { .. } => "Transition Duration".into(),
+            _ => "Work Area".into(),
         }
     }
     pub fn is_work_area(&self) -> bool {
@@ -1842,6 +1983,20 @@ impl Drag {
                     );
                 }
             }
+            DragKind::Transition { layer, edge } => {
+                let l = self
+                    .start
+                    .layer(layer)
+                    .ok_or(ModelError::UnknownId(layer.clone()))?;
+                let seconds = l.transitions[*edge as usize]
+                    .as_ref()
+                    .map_or(0., |t| t.duration);
+                let seconds = match edge {
+                    crate::render::Edge::In => seconds + delta,
+                    crate::render::Edge::Out => seconds - delta,
+                };
+                out.extend(transition_command(l, *edge, Some(seconds), sample.playhead));
+            }
             DragKind::WorkIn | DragKind::WorkOut | DragKind::WorkMove => {
                 let [a, b] = self.start.work;
                 let frame = 1. / self.start.fps;
@@ -1875,6 +2030,28 @@ impl Drag {
                     .into(),
                 );
             }
+            DragKind::Gain { layer, start } => {
+                let at = (start + sample.value_delta).clamp(0., 1.);
+                let gain = crate::level::db_gain(crate::level::fader_db(at));
+                let mut patch = pm_model::Map::new();
+                patch.insert("gain", Value::Number(gain));
+                out.push(
+                    pm_kernel::ContentCommand::Set {
+                        layer_id: layer.clone(),
+                        patch,
+                        time: sample.playhead,
+                    }
+                    .into(),
+                );
+            }
+        }
+        // Tracks mode: the lanes shown when the drag began go first, so the
+        // edit keeps every clip on its track (an edge trim that freed room on
+        // a lower lane let an untouched clip drop into it).
+        if !out.is_empty()
+            && let Some(pin) = self.pin_command()
+        {
+            out.insert(0, pin);
         }
         Ok(out)
     }
@@ -1993,6 +2170,52 @@ fn snap_targets(
     }
     out
 }
+/// The command setting `layer`'s transition at `edge` to `seconds` (kept
+/// within 0.02 s and the clip, as the kernel allows), or removing it with
+/// `None`. An audio clip's fade stands in for its transition. `None` when
+/// there is no transition there to edit.
+pub fn transition_command(
+    layer: &crate::Layer,
+    edge: crate::render::Edge,
+    seconds: Option<f64>,
+    time: f64,
+) -> Option<Command> {
+    let t = layer.transitions[edge as usize].as_ref()?;
+    let seconds = seconds.map(|s| s.clamp(0.02, layer.duration.clamp(0.02, 600.)));
+    let pm_edge = match edge {
+        crate::render::Edge::In => pm_kernel::commands::effects::Edge::In,
+        crate::render::Edge::Out => pm_kernel::commands::effects::Edge::Out,
+    };
+    Some(if layer.kind == "audio" {
+        let mut patch = pm_model::Map::new();
+        patch.insert(
+            if edge == crate::render::Edge::In {
+                "fadeIn"
+            } else {
+                "fadeOut"
+            },
+            Value::Number(seconds.unwrap_or(0.)),
+        );
+        pm_kernel::ContentCommand::Set {
+            layer_id: layer.id.clone(),
+            patch,
+            time,
+        }
+        .into()
+    } else {
+        match seconds {
+            Some(seconds) => pm_kernel::commands::effects::retime_transition(
+                &layer.id, pm_edge, &t.kind, &t.params, seconds,
+            ),
+            None => pm_kernel::commands::effects::EffectCommand::SetTransition {
+                layer_id: layer.id.clone(),
+                edge: pm_edge,
+                transition: None,
+            },
+        }
+        .into()
+    })
+}
 pub fn frame(time: f64, fps: f64) -> f64 {
     let result = (time * fps + 0.5).floor() / fps;
     if result == 0. { 0. } else { result }
@@ -2008,9 +2231,22 @@ pub(crate) fn finite(value: f64) -> Result<(), ModelError> {
 /// Semantic context rows; no labels, menu layout or styling. Extension rows append.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MenuItem {
+    /// The action (`menu_action`); [`MenuItem::SEPARATOR`] and
+    /// [`MenuItem::HEADER`] are rows that are no action.
     pub id: &'static str,
+    /// What the row says (a count when it acts on several keys).
+    pub label: String,
     pub enabled: bool,
     pub checked: bool,
+}
+impl MenuItem {
+    pub const SEPARATOR: &'static str = "-";
+    /// A section's title (the keyframe menu's "Keyframe" / "3 Keyframes").
+    pub const HEADER: &'static str = "header";
+    /// Whether choosing the row does something.
+    pub fn is_action(&self) -> bool {
+        self.id != Self::SEPARATOR && self.id != Self::HEADER
+    }
 }
 #[derive(Clone, Debug)]
 pub enum Context {
@@ -2025,12 +2261,31 @@ pub enum Context {
 impl TimelineModel {
     pub fn menu(&self, context: &Context) -> Vec<MenuItem> {
         let mut items = Vec::new();
-        let mut add = |id, enabled, checked| {
+        let mut row = |id: &'static str, label: String, enabled, checked| {
             items.push(MenuItem {
                 id,
+                label,
                 enabled,
                 checked,
             })
+        };
+        let mut add = |id, enabled, checked| row(id, menu_label(id).to_owned(), enabled, checked);
+        // v1 (timeline.ts onCtx): the work area's three, then the switch
+        // naming the timeline it goes to.
+        let work_and_mode = |add: &mut dyn FnMut(&'static str, bool, bool)| {
+            for id in ["work.start", "work.end", "work.reset"] {
+                add(id, true, false);
+            }
+            add(MenuItem::SEPARATOR, false, false);
+            add(
+                if self.mode == TimelineMode::Layers {
+                    "mode.tracks"
+                } else {
+                    "mode.layers"
+                },
+                true,
+                false,
+            );
         };
         match context {
             Context::Marker { id } => add(
@@ -2046,9 +2301,8 @@ impl TimelineModel {
                         .is_none(),
                     false,
                 );
-                for id in ["work.start", "work.end", "work.reset", "mode.toggle"] {
-                    add(id, true, false);
-                }
+                add(MenuItem::SEPARATOR, false, false);
+                work_and_mode(&mut add);
             }
             Context::Keys { ids } => {
                 let keys = self.context_keys(ids);
@@ -2058,10 +2312,23 @@ impl TimelineModel {
                             .key(id)
                             .is_some_and(|(l, _, _)| !l.effectively_locked)
                     });
+                // v1's pushKeyframeMenu: a header naming what it acts on,
+                // the dialogs, the eases (the one every key has checked),
+                // hold, then Copy and Delete.
+                let many = keys.len() > 1;
+                let count = keys.len();
+                drop(add);
+                row(
+                    MenuItem::HEADER,
+                    if many { format!("{count} Keyframes") } else { "Keyframe".into() },
+                    false,
+                    false,
+                );
+                for id in ["keys.value", "keys.velocity", "keys.scale"] {
+                    row(id, menu_label(id).into(), editable, false);
+                }
+                let presets = self.key_presets(&keys);
                 for id in [
-                    "keys.value",
-                    "keys.velocity",
-                    "keys.scale",
                     "ease.linear",
                     "ease.easeIn",
                     "ease.easeOut",
@@ -2072,12 +2339,25 @@ impl TimelineModel {
                     "ease.backOut",
                     "ease.snap",
                     "ease.glide",
-                    "keys.hold",
-                    "keys.delete",
                 ] {
-                    add(id, editable, false);
+                    let on = !presets.is_empty() && presets.iter().all(|p| *p == Some(&id[5..]));
+                    row(id, menu_label(id).into(), editable, on);
                 }
-                add("keys.copy", !keys.is_empty(), false);
+                let hold = if self.all_held(&keys) {
+                    "Remove Hold"
+                } else if many {
+                    "Hold Keyframes"
+                } else {
+                    "Toggle Hold"
+                };
+                row("keys.hold", hold.into(), editable, false);
+                row(MenuItem::SEPARATOR, String::new(), false, false);
+                let counted = |verb: &str| {
+                    if many { format!("{verb} {count} Keyframes") } else { format!("{verb} Keyframe") }
+                };
+                row("keys.copy", counted("Copy"), !keys.is_empty(), false);
+                row("keys.delete", counted("Delete"), editable, false);
+                return items;
             }
             Context::Track { layer, channel } => {
                 let editable = self.require_channel(layer, channel).is_ok();
@@ -2119,11 +2399,7 @@ impl TimelineModel {
                     self.graph_display == GraphDisplay::Combined,
                 );
             }
-            Context::Empty => {
-                for id in ["work.start", "work.end", "work.reset", "mode.toggle"] {
-                    add(id, true, false);
-                }
-            }
+            Context::Empty => work_and_mode(&mut add),
         }
         items
     }
@@ -2182,6 +2458,14 @@ impl TimelineModel {
                 .into(),
             ),
             "work.reset" => edit(CompCommand::ResetWorkArea { comp: None }.into()),
+            "mode.tracks" | "mode.layers" => {
+                self.mode = if action == "mode.tracks" {
+                    TimelineMode::Tracks
+                } else {
+                    TimelineMode::Layers
+                };
+                Plan::default()
+            }
             "mode.toggle" => {
                 self.mode = if self.mode == TimelineMode::Layers {
                     TimelineMode::Tracks
@@ -2340,12 +2624,14 @@ pub fn playhead_targets(index: &TimelineIndex) -> Vec<f64> {
 /// Menu row titles, shared by every surface that shows the model's menus.
 pub fn menu_label(id: &str) -> &'static str {
     match id {
-        "marker.add" => "Add Marker",
+        "marker.add" => "Add Marker Here",
         "marker.remove" => "Remove Marker",
         "work.start" => "Set Work Area Start",
         "work.end" => "Set Work Area End",
         "work.reset" => "Reset Work Area",
         "mode.toggle" => "Toggle Layers and Tracks",
+        "mode.tracks" => "Switch to Track Timeline",
+        "mode.layers" => "Switch to Layer Timeline",
         "keys.value" => "Edit Value…",
         "keys.velocity" => "Keyframe Velocity…",
         "keys.scale" => "Scale Keyframes…",
@@ -2362,9 +2648,9 @@ pub fn menu_label(id: &str) -> &'static str {
         "ease.backOut" => "Overshoot",
         "ease.snap" => "Snap",
         "ease.glide" => "Glide",
-        "track.add" => "Add Keyframe",
-        "track.paste" => "Paste Keyframes",
-        "track.clear" => "Remove All Keyframes",
+        "track.add" => "Add Keyframe Here",
+        "track.paste" => "Paste Keyframes Here",
+        "track.clear" => "Clear All Keyframes",
         "track.separate" => "Separate Dimensions",
         "layer.shared-menu" => "Layer Options…",
         "graph.value" => "Value Graph",

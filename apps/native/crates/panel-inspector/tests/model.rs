@@ -1175,6 +1175,7 @@ fn add_video(f: &mut Fixture, speed: Value) {
                     visible: None,
                     shy: None,
                     collapsed: None,
+                    track: None,
                     time: 0.0,
                 }))
                 .into(),

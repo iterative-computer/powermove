@@ -64,6 +64,14 @@ pub struct Preferences {
     pub background_render: bool,
     /// Its delay after the last interaction, in seconds.
     pub background_delay_s: u32,
+    /// Settings › Media › Still Duration, in seconds: how long a placed
+    /// still lasts. 0: until the composition ends (v1, After Effects).
+    pub still_duration_s: u32,
+    /// Settings › Media › Add Imported Media to the Timeline: an import
+    /// (⌘I, a drop on the window, a paste) places its files at the playhead,
+    /// as v1 did; off, they land in the Project panel only, as After Effects
+    /// and Premiere import.
+    pub import_to_timeline: bool,
 }
 
 impl Default for Preferences {
@@ -76,6 +84,8 @@ impl Default for Preferences {
             render_limit_gb: 25,
             background_render: true,
             background_delay_s: 5,
+            still_duration_s: 0,
+            import_to_timeline: true,
         }
     }
 }
@@ -92,6 +102,15 @@ pub type Row = (
 /// Settings › Media › Render Files Limit's choices, in GB.
 const RENDER_LIMITS: [(u32, &str); 4] =
     [(10, "10 GB"), (25, "25 GB"), (50, "50 GB"), (100, "100 GB")];
+/// Settings › Media › Still Duration's choices, in seconds (0: until the
+/// composition ends).
+const STILL_DURATIONS: [(u32, &str); 5] = [
+    (0, "Until the Composition Ends"),
+    (2, "2 Seconds"),
+    (3, "3 Seconds"),
+    (5, "5 Seconds"),
+    (10, "10 Seconds"),
+];
 /// Settings › General › Playback › Start Rendering After's choices, in seconds.
 const BACKGROUND_DELAYS: [(u32, &str); 4] = [
     (3, "3 Seconds"),
@@ -143,6 +162,26 @@ impl Preferences {
                 ],
             ),
             (
+                "media.importToTimeline",
+                "Add Imported Media to the Timeline",
+                "Imported files are placed at the playhead. Off, they go to the Project panel only.",
+                serde_json::json!(self.import_to_timeline),
+                vec![
+                    (serde_json::json!(true), "On"),
+                    (serde_json::json!(false), "Off"),
+                ],
+            ),
+            (
+                "media.stillDuration",
+                "Still Duration",
+                "How long an image lasts when it's placed in a composition.",
+                serde_json::json!(self.still_duration_s),
+                STILL_DURATIONS
+                    .iter()
+                    .map(|(s, label)| (serde_json::json!(s), *label))
+                    .collect(),
+            ),
+            (
                 "media.renderLimit",
                 "Render Files Limit",
                 "Rendered frames past this go oldest first; kept frames stay.",
@@ -184,6 +223,11 @@ impl Preferences {
         rows
     }
 
+    /// How long a placed still lasts (`None`: until the composition ends).
+    pub fn still(&self) -> Option<f64> {
+        (self.still_duration_s > 0).then(|| f64::from(self.still_duration_s))
+    }
+
     /// What the render cache's background rendering does.
     pub fn background(&self) -> pm_engine_service::render_cache::Background {
         pm_engine_service::render_cache::Background {
@@ -217,6 +261,16 @@ impl Preferences {
             }
             "media.backgroundRender" => {
                 self.background_render = value.as_bool().ok_or("Invalid setting value")?;
+            }
+            "media.importToTimeline" => {
+                self.import_to_timeline = value.as_bool().ok_or("Invalid setting value")?;
+            }
+            "media.stillDuration" => {
+                let seconds: u32 = serde_json::from_value(value.clone()).map_err(bad)?;
+                if !STILL_DURATIONS.iter().any(|(choice, _)| *choice == seconds) {
+                    return Err("Invalid setting value".into());
+                }
+                self.still_duration_s = seconds;
             }
             "media.backgroundDelay" => {
                 let seconds: u32 = serde_json::from_value(value.clone()).map_err(bad)?;
@@ -2767,6 +2821,33 @@ mod tests {
     /// The review's blocker: byte-identical originals share one stored
     /// proxy; clearing with only the second one's project open keeps it,
     /// and a record still naming a file (attached elsewhere) keeps it too.
+    /// Settings › Media › Add Imported Media to the Timeline: on by default
+    /// (v1 placed what it imported), off for the Project panel only.
+    #[test]
+    fn importing_to_the_timeline_is_a_setting_on_by_default() {
+        let mut prefs = Preferences::default();
+        assert!(prefs.import_to_timeline);
+        prefs.set("media.importToTimeline", &serde_json::json!(false)).unwrap();
+        assert!(!prefs.import_to_timeline);
+        assert!(prefs.set("media.importToTimeline", &serde_json::json!("no")).is_err());
+        let kept: Preferences = serde_json::from_str(r#"{"create":"allVideo"}"#).unwrap();
+        assert!(kept.import_to_timeline, "a profile without it keeps v1's behaviour");
+    }
+    /// Settings › Media › Still Duration: until the composition ends by
+    /// default (v1, After Effects), or one of its lengths; nothing else.
+    #[test]
+    fn still_duration_is_a_setting_with_v1s_default() {
+        let mut prefs = Preferences::default();
+        assert_eq!(prefs.still(), None);
+        prefs.set("media.stillDuration", &serde_json::json!(5)).unwrap();
+        assert_eq!(prefs.still(), Some(5.));
+        assert!(prefs.set("media.stillDuration", &serde_json::json!(7)).is_err());
+        assert_eq!(prefs.still(), Some(5.));
+        assert!(prefs.rows().iter().any(|r| r.0 == "media.stillDuration" && r.3 == serde_json::json!(5)));
+        // A v1.2.0 profile's settings, without it, keep the default.
+        let kept: Preferences = serde_json::from_str(r#"{"create":"allVideo"}"#).unwrap();
+        assert_eq!(kept.still(), None);
+    }
     #[test]
     fn clear_never_deletes_media_another_original_or_record_uses() {
         let (dir, media) = service();

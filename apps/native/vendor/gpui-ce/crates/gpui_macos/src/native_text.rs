@@ -548,6 +548,8 @@ impl NativeTextSlot {
             return;
         };
         let stepper = NSStepper::initWithFrame(NSStepper::alloc(mtm), NSRect::ZERO);
+        stepper.setFocusRingType(NSFocusRingType::None);
+        stepper.setControlSize(objc2_app_kit::NSControlSize::Regular);
         stepper.setMinValue(0.);
         stepper.setMaxValue(2.);
         stepper.setIncrement(1.);
@@ -568,6 +570,75 @@ impl NativeTextSlot {
         self.state.tab_inserts.set(inserts);
     }
     pub fn new(gpui: &NSView, kind: TextKind, label: &str, initial: &str) -> Self {
+        Self::new_inner(gpui, kind, label, initial, false)
+    }
+    /// The form field and its optional stepper, installed by an AppKit
+    /// container with Auto Layout instead of by the GPUI compositor.
+    pub fn new_form(
+        owner: &NSView,
+        label: &str,
+        initial: &str,
+        number: bool,
+        stepper: bool,
+    ) -> Self {
+        use objc2_app_kit::NSLayoutConstraint;
+        use objc2_foundation::NSArray;
+        let kind = if number {
+            TextKind::FormNumber
+        } else {
+            TextKind::Form
+        };
+        let slot = Self::new_inner(owner, kind, label, initial, true);
+        slot.set_stepper(stepper);
+        slot.set_escape_cancels(true);
+        let field = slot.native_view();
+        field.setTranslatesAutoresizingMaskIntoConstraints(false);
+        let wrapper = &slot.state.wrapper;
+        let mut constraints = vec![
+            field
+                .leadingAnchor()
+                .constraintEqualToAnchor(&wrapper.leadingAnchor()),
+            field
+                .topAnchor()
+                .constraintEqualToAnchor(&wrapper.topAnchor()),
+            field
+                .bottomAnchor()
+                .constraintEqualToAnchor(&wrapper.bottomAnchor()),
+        ];
+        if let Some(stepper) = slot.state.stepper.borrow().as_ref() {
+            stepper.setTranslatesAutoresizingMaskIntoConstraints(false);
+            stepper.setAccessibilityLabel(Some(&NSString::from_str(label)));
+            constraints.extend([
+                stepper
+                    .leadingAnchor()
+                    .constraintEqualToAnchor_constant(&field.trailingAnchor(), 5.),
+                stepper
+                    .trailingAnchor()
+                    .constraintEqualToAnchor(&wrapper.trailingAnchor()),
+                stepper
+                    .centerYAnchor()
+                    .constraintEqualToAnchor(&field.centerYAnchor()),
+            ]);
+        } else {
+            constraints.push(
+                field
+                    .trailingAnchor()
+                    .constraintEqualToAnchor(&wrapper.trailingAnchor()),
+            );
+        }
+        NSLayoutConstraint::activateConstraints(&NSArray::from_retained_slice(&constraints));
+        slot
+    }
+    pub fn form_view(&self) -> &NSView {
+        &self.state.wrapper
+    }
+    fn new_inner(
+        gpui: &NSView,
+        kind: TextKind,
+        label: &str,
+        initial: &str,
+        standalone: bool,
+    ) -> Self {
         let mtm = MainThreadMarker::new().expect("text slots require the main thread");
         let mut canvas = None;
         let mut composer = None;
@@ -637,10 +708,10 @@ impl NativeTextSlot {
             v.setBordered(false);
             v.setDrawsBackground(false);
             v.setFont(Some(&NSFont::systemFontOfSize(13.)));
-            v.setFocusRingType(NSFocusRingType::None);
             if kind.form() {
                 // AppKit's own rounded field; no accent focus ring (owner
                 // rule), the field's caret shows it has the keyboard.
+                v.setControlSize(objc2_app_kit::NSControlSize::Regular);
                 v.setBezeled(true);
                 v.setBezelStyle(NSTextFieldBezelStyle::RoundedBezel);
                 v.setDrawsBackground(true);
@@ -657,6 +728,7 @@ impl NativeTextSlot {
             }
             Editor::Field(v)
         };
+        editor.view().setFocusRingType(NSFocusRingType::None);
         editor.set(initial);
         editor
             .view()
@@ -672,9 +744,11 @@ impl NativeTextSlot {
         } else {
             NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO)
         };
-        wrapper.setWantsLayer(true);
-        if let Some(layer) = wrapper.layer() {
-            layer.setMasksToBounds(true);
+        if !standalone {
+            wrapper.setWantsLayer(true);
+            if let Some(layer) = wrapper.layer() {
+                layer.setMasksToBounds(true);
+            }
         }
         wrapper.setHidden(kind.dense());
         let scroll = if kind == TextKind::Canvas {
@@ -747,35 +821,37 @@ impl NativeTextSlot {
         }
         // Writing Tools, dictation, emoji and Services use NSTextView's ordinary responder.
         // No input-context replacement or keyDown override is installed.
-        // In GPUI's view's parent: the window's content view, or the detail
-        // view of a split view hosting GPUI's view (P-EMBED).
-        if let Some(content) = unsafe { gpui.superview() } {
-            // As a hosted control: it keeps its distance from the window's
-            // top edge until the next paint places it.
-            let top = objc2_app_kit::NSAutoresizingMaskOptions::ViewMinYMargin;
-            state.wrapper.setAutoresizingMask(top);
-            content.addSubview_positioned_relativeTo(
-                &state.wrapper,
-                NSWindowOrderingMode::Above,
-                Some(gpui),
-            );
-            if let Some((host, _)) = &state.caret {
-                host.setAutoresizingMask(top);
+        if !standalone {
+            // In GPUI's view's parent: the window's content view, or the detail
+            // view of a split view hosting GPUI's view (P-EMBED).
+            if let Some(content) = unsafe { gpui.superview() } {
+                // As a hosted control: it keeps its distance from the window's
+                // top edge until the next paint places it.
+                let top = objc2_app_kit::NSAutoresizingMaskOptions::ViewMinYMargin;
+                state.wrapper.setAutoresizingMask(top);
                 content.addSubview_positioned_relativeTo(
-                    host,
+                    &state.wrapper,
                     NSWindowOrderingMode::Above,
-                    Some(&state.wrapper),
+                    Some(gpui),
                 );
+                if let Some((host, _)) = &state.caret {
+                    host.setAutoresizingMask(top);
+                    content.addSubview_positioned_relativeTo(
+                        host,
+                        NSWindowOrderingMode::Above,
+                        Some(&state.wrapper),
+                    );
+                }
             }
+            SLOTS.with(|slots| {
+                slots
+                    .borrow_mut()
+                    .entry(gpui as *const NSView as usize)
+                    .or_default()
+                    .push(Rc::downgrade(&state))
+            });
+            crate::composition_accessibility::changed(gpui as *const NSView as usize);
         }
-        SLOTS.with(|slots| {
-            slots
-                .borrow_mut()
-                .entry(gpui as *const NSView as usize)
-                .or_default()
-                .push(Rc::downgrade(&state))
-        });
-        crate::composition_accessibility::changed(gpui as *const NSView as usize);
         Self {
             state,
             _delegate: delegate,
@@ -850,6 +926,26 @@ impl NativeTextSlot {
     pub fn keep(&self) {
         self.state.stage(self.state.staged.get());
         self.stage_build_alpha(self.state.kept_alpha.get());
+    }
+    /// P-SLOT-PICTURE: the editor as AppKit draws it now (its text, scroll
+    /// and appearance), `size` points, for a scroll to move instead of the
+    /// view. `None` for a field drawn by GPUI at rest (dense) or one being
+    /// edited: those are never pictured.
+    pub fn picture(&self, size: NSSize) -> Option<crate::native_control::SlotPicture> {
+        let state = &self.state;
+        if state.kind.dense() || state.kind == TextKind::Canvas || state.editing.get() {
+            return None;
+        }
+        match &state.scroll {
+            Some(scroll) => crate::native_control::picture_of(scroll, size),
+            None => crate::native_control::picture_of(state.editor.view(), size),
+        }
+    }
+    /// Stages nothing: the next present hides the editor (its picture stands
+    /// in the scene); [`Self::keep`] keeps it hidden.
+    pub fn hide(&self) {
+        self.state.stage(None);
+        self.state.staged.set(None);
     }
     pub fn begin_editing(&self) {
         if !self.state.editing.replace(true) {
@@ -1137,6 +1233,15 @@ fn place(key: usize, apply: bool) -> bool {
         // From GPUI's frame in its parent (P-EMBED).
         let g = state.gpui.frame();
         let visible = intersection(bounds, clip);
+        let hidden = visible.size.width <= 0.
+            || visible.size.height <= 0.
+            || (state.kind.dense() && !state.editing.get());
+        // Powermove P-HIDDEN-MOVES: a wrapper hidden before and after (a dense
+        // field at rest, a field scrolled out) still follows its row, but
+        // nothing on screen moved, so the frame needs no synchronous
+        // present: a panel of number fields made every frame of its scroll
+        // one.
+        let unseen = hidden && state.wrapper.isHidden();
         let frame = NSRect::new(
             NSPoint::new(
                 g.origin.x + visible.origin.x,
@@ -1145,7 +1250,7 @@ fn place(key: usize, apply: bool) -> bool {
             visible.size,
         );
         if state.wrapper.frame() != frame {
-            moved = true;
+            moved |= !unseen;
             if apply {
                 state.wrapper.setFrame(frame);
             }
@@ -1159,7 +1264,7 @@ fn place(key: usize, apply: bool) -> bool {
         );
         if let Some(scroll) = &state.scroll {
             if scroll.frame() != local {
-                moved = true;
+                moved |= !unseen;
                 if apply {
                     scroll.setFrame(local);
                 }
@@ -1182,22 +1287,19 @@ fn place(key: usize, apply: bool) -> bool {
                     NSSize::new(STEPPER.0, local.size.height),
                 );
                 if stepper.frame() != at {
-                    moved = true;
+                    moved |= !unseen;
                     if apply {
                         stepper.setFrame(at);
                     }
                 }
             }
             if state.editor.view().frame() != field {
-                moved = true;
+                moved |= !unseen;
                 if apply {
                     state.editor.view().setFrame(field);
                 }
             }
         }
-        let hidden = visible.size.width <= 0.
-            || visible.size.height <= 0.
-            || (state.kind.dense() && !state.editing.get());
         if state.wrapper.isHidden() != hidden {
             moved = true;
             if apply {

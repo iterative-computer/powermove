@@ -92,6 +92,11 @@ pub struct WindowState {
     pub pages: Vec<String>,
     #[serde(default)]
     pub fullscreen: bool,
+    /// Its project's name as the window showed it: a relaunch shows the tab
+    /// and its opening project by name from the first frame, before the
+    /// library is read (PM-384).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Session {
@@ -269,6 +274,23 @@ impl Session {
         std::fs::rename(tmp, path)?;
         Ok(())
     }
+}
+/// The order a launch opens `plan` in: the window (or tab group) that was in
+/// front last, so it lies over the others from the start (separate windows
+/// each take the front as they open); in its group, the front window right
+/// after the group's first, so its tab shows while the others open (each
+/// takes its own place in the strip, `native::restore_tab_index`).
+pub fn front_first(plan: Vec<WindowState>, front: Option<u64>) -> Vec<WindowState> {
+    let group = |s: &WindowState| s.tab_group.unwrap_or(s.id);
+    let front_group = plan.iter().find(|s| Some(s.id) == front).map(group);
+    let (mut ordered, mut last): (Vec<_>, Vec<_>) =
+        plan.into_iter().partition(|s| Some(group(s)) != front_group);
+    if let Some(at) = last.iter().position(|s| Some(s.id) == front).filter(|at| *at > 1) {
+        let window = last.remove(at);
+        last.insert(1, window);
+    }
+    ordered.extend(last);
+    ordered
 }
 /// One window's change to the shared session file.
 #[derive(Clone, Debug)]
@@ -466,6 +488,7 @@ mod writer_tests {
             tab_index: 0,
             pages: Vec::new(),
             fullscreen: false,
+            name: None,
         }
     }
 
@@ -529,6 +552,7 @@ mod upgrade_tests {
             tab_index: 0,
             pages: Vec::new(),
             fullscreen: false,
+            name: None,
         }
     }
     /// An earlier build's file: 21 entries, of which only the key window was
@@ -547,6 +571,29 @@ mod upgrade_tests {
             key: Some(4),
             complete: false,
         }
+    }
+
+    /// A launch opens the group that was in front last, and in it the front
+    /// window right after the group's first, so its tab shows while the
+    /// others open; a front window that is its group's first, or alone,
+    /// keeps its place.
+    #[test]
+    fn the_front_window_opens_early_in_its_group_and_its_group_last() {
+        let ids = |plan: Vec<WindowState>| plan.iter().map(|w| w.id).collect::<Vec<_>>();
+        let plan = || {
+            vec![
+                window(6, "lead", None),
+                window(5, "run13", Some(6)),
+                window(7, "a", Some(6)),
+                window(12, "paper", Some(6)),
+                window(13, "b", Some(6)),
+                window(4, "alone", None),
+            ]
+        };
+        assert_eq!(ids(front_first(plan(), Some(12))), [4, 6, 12, 5, 7, 13]);
+        assert_eq!(ids(front_first(plan(), Some(6))), [4, 6, 5, 7, 12, 13]);
+        assert_eq!(ids(front_first(plan(), Some(4))), [6, 5, 7, 12, 13, 4]);
+        assert_eq!(ids(front_first(plan(), None)), [6, 5, 7, 12, 13, 4]);
     }
 
     #[test]
@@ -615,6 +662,7 @@ mod order_tests {
             tab_index: index,
             pages: Vec::new(),
             fullscreen: false,
+            name: None,
         };
         // Opened 1, 2, 3, 4; the strip was then reordered to 1, 4, 2, 3.
         let s = Session {
@@ -640,6 +688,7 @@ mod bound_tests {
             tab_index: 0,
             pages: Vec::new(),
             fullscreen: false,
+            name: None,
         }
     }
     #[test]
@@ -692,6 +741,7 @@ mod quit_front_tests {
             tab_index: id as usize - 1,
             pages: Vec::new(),
             fullscreen: false,
+            name: None,
         };
         for id in 1..=3 {
             write(&path, Change::Upsert { state: w(id), key: id == 1 });
@@ -706,5 +756,24 @@ mod quit_front_tests {
         assert_eq!(s.key, Some(2));
         assert!(s.complete);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::WindowState;
+    /// A window keeps its project's name in the session, so a relaunch can
+    /// show the tab by name before the library is read (PM-384); a session
+    /// written before the name was kept still reads, without one.
+    #[test]
+    fn a_window_keeps_its_projects_name_and_old_sessions_still_read() {
+        let named = r#"{"id":3,"frame":[0,0,800,600],"project":"P1","workspace":"design","name":"Paper"}"#;
+        let state: WindowState = serde_json::from_str(named).unwrap();
+        assert_eq!(state.name.as_deref(), Some("Paper"));
+        let again: WindowState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(again, state);
+        let old = r#"{"id":3,"frame":[0,0,800,600],"project":"P1","workspace":"design"}"#;
+        assert_eq!(serde_json::from_str::<WindowState>(old).unwrap().name, None);
     }
 }

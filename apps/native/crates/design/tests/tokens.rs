@@ -188,8 +188,13 @@ fn a_strip_keeps_its_layer_hue_and_its_states_differ_by_the_rim() {
     assert!(lightness(pale.top) > 0.8 && lightness(pale.bottom) > lightness(pale.top));
     assert!(lightness(pale.foreground) < 0.45);
     // The dark canvas's slab: vivid glass, never the light canvas's pale
-    // tint, under a pale name.
-    assert!(lightness(m.top) < 0.7 && lightness(m.foreground) > 0.8);
+    // tint. Green is a light hue: as bright as the reference's amber, under a
+    // dark name and over a waveform in a deeper shade of the hue; violet
+    // stays the deeper slab under a pale name.
+    assert!(lightness(m.top) < 0.8 && lightness(m.bottom) > 0.7);
+    assert!(lightness(m.foreground) < 0.3 && lightness(m.primary) < lightness(m.bottom));
+    let violet = dark.strip(dark.colors.labels.violet, StripState::Rest);
+    assert!(lightness(violet.top) < 0.6 && lightness(violet.foreground) > 0.8);
     assert!(
         lightness(ringed.top) < lightness(pale.top),
         "selected is a step deeper"
@@ -222,5 +227,30 @@ fn a_strip_keeps_its_layer_hue_and_its_states_differ_by_the_rim() {
         // v1's playhead: the accent, under an 11 pt pin resting on the ruler.
         assert_eq!(t.playhead().color, t.colors.accent);
         assert_eq!((t.playhead().head, t.playhead().head_foot), (11., 1.));
+    }
+}
+/// A waveform is light caught inside the glass (the owner's reference: pale
+/// peach on amber, about 0.09 lighter than the slab once laid on it): on
+/// the dark canvas a pale tint lighter than the slab's foot for every hue;
+/// on the light canvas a soft mid-tone about 0.12 under it, never dark. The
+/// level line is the hue's light tone, never dark either.
+#[test]
+fn a_waveform_is_light_inside_the_glass() {
+    let lightness = |c| pm_design::color::to_oklch(c).0;
+    let laid = |m: &Strip, (c, a): (u32, f32)| mix(m.bottom, c, a);
+    for scheme in [Scheme::Dark, Scheme::Light] {
+        let t = Tokens::new(scheme, Accessibility::default());
+        let l = &t.colors.labels;
+        for hue in [l.red, l.orange, l.yellow, l.green, l.teal, l.blue, l.violet] {
+            let m = t.strip(hue, StripState::Rest);
+            let step = lightness(laid(&m, m.wave)) - lightness(m.bottom);
+            if scheme == Scheme::Dark {
+                assert!((0.06..0.16).contains(&step), "{hue:06x}: {step}");
+                assert!(lightness(m.level.0) > 0.85, "{hue:06x}: a pale line");
+            } else {
+                assert!((-0.16..-0.09).contains(&step), "{hue:06x}: {step}");
+                assert!(lightness(m.wave.0) > 0.65 && lightness(m.level.0) > 0.55, "{hue:06x}");
+            }
+        }
     }
 }

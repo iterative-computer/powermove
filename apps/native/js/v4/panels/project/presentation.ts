@@ -180,6 +180,7 @@ export function commandLabel(command: Command, row?: Row, count = 0): string {
       ? "Locate File…"
       : "Replace File…";
   if ("Reveal" in command) return "Show in Finder";
+  if ("InterpretFootage" in command) return "Interpret Footage…";
   if ("Download" in command) return "Download from Cloud";
   if ("ImportFolder" in command)
     return row && "Folder" in row.data

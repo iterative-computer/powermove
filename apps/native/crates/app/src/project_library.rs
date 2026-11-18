@@ -38,6 +38,9 @@ pub struct ThumbnailSource {
     pub profile: PathBuf,
     /// A frame renderer for any project, given a publication of it.
     pub factory: Option<Rc<dyn Fn(&str) -> Option<pm_compat_runner::FrameRenderer>>>,
+    /// The open project as it stood when Home showed: its poster says
+    /// whether it has a layer that can show.
+    pub published: Option<Arc<pm_kernel::Published>>,
 }
 use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, sync::Arc};
 
@@ -109,9 +112,18 @@ pub struct ProjectLibrary {
     idle_failed: std::collections::HashSet<String>,
     /// Projects whose poster left offline media out: their card says so.
     missing_media: std::collections::HashSet<String>,
-    /// Cards whose name and second line would read the same as an earlier
-    /// card's: the copy they are ("Copy 2"), so each tells itself apart.
-    copy_marks: std::collections::HashMap<String, usize>,
+    /// Projects whose poster is one flat colour (blank wherever it was
+    /// looked at, or all its media missing): the card says which on it,
+    /// never a bare grey page.
+    flat: std::collections::HashSet<String>,
+    /// Projects with no layer that can show, as their poster's stamp says:
+    /// the only cards that may say Blank (PM-285).
+    blank: std::collections::HashSet<String>,
+    /// Projects whose name another shares: their number among them ("Run6
+    /// (2)"), as the project strip names alike tabs, so every card tells
+    /// itself apart by its name. The first (by id, which never changes) has
+    /// none.
+    numbers: std::collections::HashMap<String, usize>,
     idle_running: bool,
     /// Development builds: the gallery's real controls.
     #[cfg(debug_assertions)]
@@ -141,7 +153,9 @@ pub struct ProjectLibrary {
     repeated: std::collections::HashSet<String>,
     /// Every shown card's title (`fit_title` tells apart those a cut makes alike).
     titles: Vec<String>,
-    search: Option<Entity<pm_shell::text::TextField>>,
+    search: Option<Entity<NativeControl>>,
+    section_label: pm_shell::motion::RollingLabel,
+    count_label: pm_shell::motion::RollingLabel,
     /// New Project, the system's glass button: the header's one raised
     /// action. The rest of the header is drawn.
     new_project: Option<Entity<NativeControl>>,
@@ -159,6 +173,15 @@ pub struct ProjectLibrary {
     kernel: KernelHandle,
 }
 impl ProjectLibrary {
+    /// The window's tokens now (Settings › Appearance switched while Home
+    /// was made): Home's grid, cards and sidebar rows follow, as every panel
+    /// does (`SurfaceView::retheme`).
+    pub(crate) fn set_tokens(&mut self, tokens: Tokens, cx: &mut Context<Self>) {
+        if self.tokens != tokens {
+            self.tokens = tokens;
+            cx.notify();
+        }
+    }
     /// The worker and its wake channel, started before the view exists.
     pub fn port(
         kernel: KernelHandle,
@@ -220,7 +243,9 @@ impl ProjectLibrary {
             idle_tried: Default::default(),
             idle_failed: Default::default(),
             missing_media: Default::default(),
-            copy_marks: Default::default(),
+            numbers: Default::default(),
+            flat: Default::default(),
+            blank: Default::default(),
             idle_running: false,
             #[cfg(debug_assertions)]
             gallery_native: Vec::new(),
@@ -236,6 +261,8 @@ impl ProjectLibrary {
             repeated: Default::default(),
             titles: Vec::new(),
             search: None,
+            section_label: Default::default(),
+            count_label: Default::default(),
             new_project: None,
             active: None,
             announced_open: None,
@@ -580,7 +607,7 @@ impl ProjectLibrary {
         match event.keystroke.key.as_str() {
             "f" if event.keystroke.modifiers.platform => {
                 if let Some(field) = &self.search {
-                    field.update(cx, |f, cx| f.begin_editing_selecting_all(cx));
+                    field.read(cx).focus();
                 }
             }
             "up" => self.controller.move_selection(-columns),
@@ -606,7 +633,7 @@ impl ProjectLibrary {
     }
     pub(crate) fn clear_search(&mut self, cx: &mut Context<Self>) {
         if let Some(field) = &self.search {
-            field.update(cx, |f, cx| f.set_value("", cx));
+            field.read(cx).clear_search();
         }
         self.set_text(String::new(), cx);
     }
@@ -666,8 +693,6 @@ const INSET: f32 = 24.;
 /// The header row, and the height of what stands in it: the search pill and
 /// the icon actions, with their glyph.
 const HEADER: f32 = 48.;
-const ACTION: f32 = 32.;
-const ACTION_SYMBOL: f32 = 18.;
 /// The search pill is at most this wide, and leaves this much of the sheet
 /// to the title and the actions.
 const SEARCH_MAX: f32 = 360.;
@@ -680,6 +705,23 @@ const CARD: f32 = 240.;
 /// A card's round "more" button.
 const MORE: f32 = 24.;
 const CARD_LEAST: f32 = 160.;
+/// Each project whose name another shares, numbered among them from 2 in the
+/// order of their ids (which never change, so an edit renumbers nothing);
+/// the first keeps its name as it is.
+fn numbers(rows: &[Row]) -> std::collections::HashMap<String, usize> {
+    let mut alike: std::collections::HashMap<String, Vec<&str>> = Default::default();
+    for row in rows {
+        alike.entry(row.title()).or_default().push(&row.id);
+    }
+    let mut numbers = std::collections::HashMap::new();
+    for mut ids in alike.into_values().filter(|ids| ids.len() > 1) {
+        ids.sort_unstable();
+        for (n, id) in ids.into_iter().enumerate().skip(1) {
+            numbers.insert(id.to_owned(), n + 1);
+        }
+    }
+    numbers
+}
 /// A card's title, `fits` characters at most. Cut at its end it would read
 /// like another title cut there ("Accept — Recovered — …" six times), so it
 /// keeps its start and its end and drops the middle, which the others share.
@@ -704,6 +746,46 @@ fn fit_title(title: &str, titles: &[String], fits: usize) -> String {
         chars[..start].iter().collect::<String>(),
         chars[chars.len() - end..].iter().collect::<String>()
     )
+}
+#[cfg(test)]
+mod number_tests {
+    use super::{Row, numbers};
+    fn row(id: &str, name: &str) -> Row {
+        Row {
+            id: id.into(),
+            name: name.into(),
+            modified_ms: None,
+            deleted_ms: None,
+            trashed: false,
+            summary: None,
+            file: None,
+            edited: false,
+            open: false,
+        }
+    }
+    /// Acceptance run 20: four cards read "Run6 — Native". Each alike name
+    /// after the first is numbered, by id, so an edit renumbers nothing.
+    #[test]
+    fn alike_names_are_numbered_and_others_are_not() {
+        let rows = [
+            row("Pd", "Run6 — Native"),
+            row("Pb", "Run6 — Native — Native"),
+            row("Pa", "Paper"),
+            row("Pc", "Run6 — Native"),
+            row("Pe", "Run6 — Native"),
+        ];
+        let n = numbers(&rows);
+        // "— Native — Native" reads as "Run6 — Native" too (original_name).
+        assert_eq!(n.get("Pb"), None, "the first by id keeps its name");
+        assert_eq!(
+            (n.get("Pc"), n.get("Pd"), n.get("Pe")),
+            (Some(&2), Some(&3), Some(&4))
+        );
+        assert_eq!(n.get("Pa"), None);
+        let mut edited = rows.clone();
+        edited.reverse();
+        assert_eq!(numbers(&edited), n, "the order cards stand in changes nothing");
+    }
 }
 #[cfg(test)]
 mod fit_title_tests {
@@ -784,23 +866,9 @@ impl ProjectLibrary {
         label: &'static str,
         tip: &'static str,
     ) -> Stateful<Div> {
-        let t = &kit.t;
-        let (text, pressed) = (t.colors.text, t.translucency.pressed);
-        let d = div()
-            .id(id)
-            .debug_selector(move || id.into())
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .size(px(ACTION))
-            .rounded(px(t.radius.md))
-            .role(Role::Button)
+        kit.icon_button(id, symbol, tip, false)
             .aria_label(label)
-            .tooltip(kit::tooltip(t, tip))
-            .child(kit.symbol(symbol, ACTION_SYMBOL, Weight::Regular, t.colors.secondary))
-            .active_style(move |s| s.bg(ink(text, pressed)));
-        kit.wash(d, kit::key(id), t.radius.md)
+            .debug_selector(move || id.into())
     }
     /// The rows of a button menu.
     fn rows_of(&self, menu: Menu) -> Vec<pm_shell::transient::Choice> {
@@ -989,43 +1057,43 @@ impl ProjectLibrary {
         let (file, stamp_file) = crate::poster::files(&source.dir, &id);
         // What a poster render needs, so drawing one at idle can borrow the view.
         let (renderer, dir) = (source.renderer.clone(), source.dir.clone());
-        let fade = kit::key(&format!("poster-{id}"));
-        let store = move |v: &mut Self, id: String, stamp: i64, png: Vec<u8>| {
-            v.thumbs.insert(
-                id,
-                (
-                    stamp as usize,
-                    Some(Arc::new(Image::from_bytes(ImageFormat::Png, png))),
-                ),
-            );
-            v.motion
-                .values
-                .borrow_mut()
-                .insert(fade, pm_design::motion::Animated::unit(0.));
-        };
+        let (published, profile) = (source.published.clone(), source.profile.clone());
+        let id_read = id.clone();
         if !self.posters_read.contains(&id) {
             if self.posters_started.insert((id.clone(), i64::MIN)) {
+                let (profile, dir) = (profile.clone(), dir.clone());
                 cx.spawn(async move |this, cx| {
                     let read = cx
                         .background_executor()
                         .spawn(async move {
-                            let (stamp, _) = crate::poster::stamp(&stamp_file)?;
-                            let missing = file.with_extension("missing").exists();
-                            Some((stamp, std::fs::read(file).ok()?, missing))
+                            // An older format may hold the Media Offline
+                            // card: none is shown, and one is drawn again.
+                            let current = crate::poster::stamp(&stamp_file)
+                                .filter(|_| crate::poster::current_format(&stamp_file));
+                            if let Some((stamp, _)) = current {
+                                let missing = file.with_extension("missing").exists();
+                                let blank = crate::poster::blank(&stamp_file);
+                                return Some((stamp, std::fs::read(file).ok()?, missing, blank));
+                            }
+                            // None in this format: the picture the viewer
+                            // last kept of it, when it shows something, at
+                            // once (PM-285).
+                            let taken = crate::poster::now_ms();
+                            let png = crate::poster::adopt_last_frame(&profile, &dir, &id_read, taken)?;
+                            Some((taken, png, false, Some(false)))
                         })
                         .await;
                     let _ = this.update(cx, |v, cx| {
                         v.posters_read.insert(id.clone());
-                        if let Some((_, _, missing)) = &read {
+                        if let Some((_, _, missing, _)) = &read {
                             v.mark_missing(&id, *missing);
                         }
-                        let read = read.map(|(stamp, png, _)| (stamp, png));
                         // The one already shown stays as it is.
                         let shown = v.thumbs.get(&id).map(|(at, _)| *at as i64);
-                        if let Some((stamp, png)) = read
+                        if let Some((stamp, png, _, blank)) = read
                             && shown != Some(stamp)
                         {
-                            store(v, id, stamp, png);
+                            v.take_poster(id, stamp, png, blank);
                         }
                         cx.notify();
                     });
@@ -1066,12 +1134,13 @@ impl ProjectLibrary {
                 let png = cx
                     .background_executor()
                     .spawn(async move {
-                        crate::poster::write(&renderer, None, &dir, &poster, taken, size, duration)
+                        let png = crate::poster::write(&renderer, published, &dir, &poster, taken, size, duration)?;
+                        Some((png, crate::poster::blank(&crate::poster::files(&dir, &poster).1)))
                     })
                     .await;
                 let _ = this.update(cx, |v, cx| {
-                    if let Some(png) = png {
-                        store(v, id, taken, png);
+                    if let Some((png, blank)) = png {
+                        v.take_poster(id, taken, png, blank);
                     }
                     cx.notify();
                 });
@@ -1079,6 +1148,33 @@ impl ProjectLibrary {
             .detach();
         }
         image
+    }
+    /// Shows `png` as `id`'s card picture (stamped `stamp`), fading in, with
+    /// what it is: a flat one says why on it only when the project has no
+    /// layer that can show (`blank`) or its media is missing.
+    fn take_poster(&mut self, id: String, stamp: i64, png: Vec<u8>, blank: Option<bool>) {
+        if crate::poster::has_content(&png) {
+            self.flat.remove(&id);
+        } else {
+            self.flat.insert(id.clone());
+        }
+        if blank == Some(true) {
+            self.blank.insert(id.clone());
+        } else {
+            self.blank.remove(&id);
+        }
+        let fade = kit::key(&format!("poster-{id}"));
+        self.thumbs.insert(
+            id,
+            (
+                stamp as usize,
+                Some(Arc::new(Image::from_bytes(ImageFormat::Png, png))),
+            ),
+        );
+        self.motion
+            .values
+            .borrow_mut()
+            .insert(fade, pm_design::motion::Animated::unit(0.));
     }
     /// Draws the next waiting poster (one at a time, a moment after the last,
     /// while Home shows and nothing is opening): the project's stored version
@@ -1119,7 +1215,7 @@ impl ProjectLibrary {
                 .spawn(async move {
                     // What the person last saw of it, when it was open, first.
                     if let Some(png) = crate::poster::adopt_last_frame(&profile, &dir, &poster, taken) {
-                        return Some(png);
+                        return Some((png, Some(false)));
                     }
                     let stored = match pm_kernel::LibraryStore::open(&profile).load(&poster) {
                         Ok(Some(stored)) => stored,
@@ -1129,7 +1225,8 @@ impl ProjectLibrary {
                         }
                     };
                     let published = Arc::new(pm_kernel::detached_publication(&poster, stored.project));
-                    crate::poster::write(&renderer, Some(published), &dir, &poster, taken, size, duration)
+                    let png = crate::poster::write(&renderer, Some(published), &dir, &poster, taken, size, duration)?;
+                    Some((png, crate::poster::blank(&crate::poster::files(&dir, &poster).1)))
                 })
                 .await;
             let _ = this.update(cx, |v, cx| {
@@ -1138,16 +1235,9 @@ impl ProjectLibrary {
                     v.idle_failed.insert(id.clone());
                     cx.notify();
                 }
-                if let Some(png) = png {
+                if let Some((png, blank)) = png {
                     v.mark_missing(&id, crate::mcp_services::poster_missed_media(&id));
-                    v.thumbs.insert(
-                        id.clone(),
-                        (taken as usize, Some(Arc::new(Image::from_bytes(ImageFormat::Png, png)))),
-                    );
-                    v.motion
-                        .values
-                        .borrow_mut()
-                        .insert(kit::key(&format!("poster-{id}")), pm_design::motion::Animated::unit(0.));
+                    v.take_poster(id.clone(), taken, png, blank);
                     cx.notify();
                 }
                 v.next_idle_poster(cx);
@@ -1196,10 +1286,14 @@ impl ProjectLibrary {
         if self.missing_media.contains(&row.id) {
             facts.push_str(" · Media missing");
         }
-        // First, so a narrow card never cuts the part that tells it apart.
-        match self.copy_marks.get(&row.id) {
-            Some(copy) => format!("Copy {copy} · {facts}"),
-            None => facts,
+        facts
+    }
+    /// The project's name as its card shows it: numbered among projects of
+    /// the same name.
+    fn shown_title(&self, row: &Row) -> String {
+        match self.numbers.get(&row.id) {
+            Some(n) => format!("{} ({n})", row.title()),
+            None => row.title(),
         }
     }
     fn told_apart(&self, row: &Row, now: i64) -> String {
@@ -1332,7 +1426,7 @@ impl ProjectLibrary {
         let c = &t.colors;
         // About how many characters of a title fit the card.
         let fits = (width / (t.typography.title * 0.55)).floor().max(8.) as usize;
-        let title = fit_title(&row.title(), &self.titles, fits);
+        let title = fit_title(&self.shown_title(row), &self.titles, fits);
         let active = self.active.as_deref() == Some(row.id.as_str());
         div()
             .flex()
@@ -1413,6 +1507,47 @@ impl ProjectLibrary {
             .size_full()
             .rounded(px(inner))
             .map(|page| match thumbnail {
+                // A flat picture: its colour, and on it what it is, when
+                // that is known: no layer that can show, or media missing.
+                // A project with a layer that shows never says Blank.
+                Some(image)
+                    if self.flat.contains(&row.id)
+                        && (self.missing_media.contains(&row.id) || self.blank.contains(&row.id)) =>
+                {
+                    let (symbol, says) = if self.missing_media.contains(&row.id) {
+                        ("photo.badge.exclamationmark", "Media missing")
+                    } else {
+                        ("rectangle.dashed", "Blank")
+                    };
+                    page.relative().bg(rgb(c.viewer)).child(
+                        img(ImageSource::Image(image))
+                            .absolute()
+                            .size_full()
+                            .object_fit(if fills {
+                                ObjectFit::Cover
+                            } else {
+                                ObjectFit::Contain
+                            })
+                            .when(fills, |picture| picture.rounded(px(inner))),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(t.space.xs))
+                            .text_role(t, Text::Caption)
+                            .text_color(ink(c.text, tr.faint))
+                            .child(kit.symbol(
+                                symbol,
+                                t.metrics.symbol_toolbar,
+                                Weight::Regular,
+                                c.secondary,
+                            ))
+                            .child(says),
+                    )
+                }
                 Some(image) => page.bg(rgb(c.viewer)).child(
                     img(ImageSource::Image(image))
                         .size_full()
@@ -1424,13 +1559,25 @@ impl ProjectLibrary {
                         .when(fills, |picture| picture.rounded(px(inner)))
                         .opacity(fade.clamp(0., 1.)),
                 ),
-                // No picture: while its poster is on its way, the empty
-                // frame; once none could be drawn, say so.
+                // No picture: while its poster is on its way, a faint
+                // picture glyph (never a bare grey page); once none could
+                // be drawn, say so.
                 None => page.bg(rgb(c.panel)).child(
                     div()
                         .text_role(t, Text::Caption)
                         .text_color(ink(c.text, tr.faint))
-                        .when(self.idle_failed.contains(&row.id), |d| d.child("No Preview")),
+                        .map(|d| {
+                            if self.idle_failed.contains(&row.id) {
+                                d.child("No Preview")
+                            } else {
+                                d.opacity(0.5).child(kit.symbol(
+                                    "photo",
+                                    t.metrics.symbol_toolbar,
+                                    Weight::Regular,
+                                    c.secondary,
+                                ))
+                            }
+                        }),
                 ),
             });
         // Under the pointer: a round "more" button at the page's top
@@ -1454,7 +1601,7 @@ impl ProjectLibrary {
                 .bg(rgba(if open { 0x000000a6 } else { 0x00000073 }))
                 .opacity(reveal)
                 .role(Role::Button)
-                .aria_label(format!("More actions for {}", row.title()))
+                .aria_label(format!("More actions for {}", self.shown_title(row)))
                 .tooltip(kit::tooltip(t, "More"))
                 .child(kit.symbol(
                     "ellipsis",
@@ -1531,8 +1678,8 @@ impl ProjectLibrary {
             .role(Role::ListItem)
             .aria_selected(selected)
             .aria_label(match self.tag(row) {
-                Some(tag) => format!("{}, {tag}, {facts}", row.title()),
-                None => format!("{}, {facts}", row.title()),
+                Some(tag) => format!("{}, {tag}, {facts}", self.shown_title(row)),
+                None => format!("{}, {facts}", self.shown_title(row)),
             })
             .child(poster)
             .child(self.caption(kit, row, &facts, width).px(px(t.space.hair)));
@@ -1558,8 +1705,8 @@ impl ProjectLibrary {
             .gap(px(t.space.lg))
             .role(Role::ListItem)
             .aria_label(match self.tag(row) {
-                Some(tag) => format!("{}, {tag}, {facts}", row.title()),
-                None => format!("{}, {facts}", row.title()),
+                Some(tag) => format!("{}, {tag}, {facts}", self.shown_title(row)),
+                None => format!("{}, {facts}", self.shown_title(row)),
             })
             .child(self.frame(
                 kit,
@@ -1585,7 +1732,7 @@ impl ProjectLibrary {
                             .truncate()
                             .text_role(t, Text::Title)
                             .text_color(rgb(t.colors.text))
-                            .child(row.title()),
+                            .child(self.shown_title(row)),
                     )
                     .children(self.tag(row).map(|tag| {
                         div()
@@ -1613,32 +1760,21 @@ impl Render for ProjectLibrary {
         let (c, m) = (&t.colors, &t.metrics);
         let kit = Kit::new(&t, &self.motion, Self::motion, window, cx);
         if self.search.is_none() && pm_shell::text::available(window) {
-            let tokens = t.clone();
-            // A bare field in the header's own pill: no bezel, no ring.
             let search = cx.new(|cx| {
-                let mut field = pm_shell::text::TextField::new(
-                    pm_shell::text::TextKind::Primary,
+                NativeControl::header_search(
                     "Search projects",
+                    "home-search",
                     &self.controller.query.text,
-                    tokens,
+                    &t,
                     window,
                     cx,
-                );
-                field.set_placeholder("Search projects");
-                field.set_bare(true);
-                // Escape clears the search and leaves the field in one step.
-                field.set_escape_cancels(true);
-                field
+                )
             });
-            cx.subscribe(&search, |v: &mut Self, _, event, cx| {
-                use pm_shell::text::TextEvent;
-                match event {
-                    TextEvent::Changed(text) | TextEvent::Committed(text) => {
-                        v.set_text(text.clone(), cx)
-                    }
-                    // Escape in the field clears the search, as on Home.
-                    TextEvent::Cancelled => v.clear_search(cx),
-                    _ => {}
+            cx.subscribe(&search, |v: &mut Self, _, event: &Value, cx| {
+                if let Some(text) = event.as_str() {
+                    v.set_text(text.to_owned(), cx);
+                } else if event["key"] == "Escape" {
+                    v.clear_search(cx);
                 }
             })
             .detach();
@@ -1672,10 +1808,9 @@ impl Render for ProjectLibrary {
             .flex()
             .flex_col()
             .flex_none()
-            .gap(px(t.space.hair))
             .w(px(m.sidebar))
             .h_full()
-            .px(px(m.dock_gap))
+            .px(px(Kit::SIDEBAR_INSET))
             .pt(px(t.space.sm))
             .pb(px(m.dock_gap))
             .role(Role::Group)
@@ -1684,7 +1819,7 @@ impl Render for ProjectLibrary {
                 self.nav_row(
                     &kit,
                     "home-recents",
-                    ("clock", "Recents".into()),
+                    ("clock.fill", "Recents".into()),
                     None,
                     section != Section::Deleted,
                 )
@@ -1702,8 +1837,14 @@ impl Render for ProjectLibrary {
             )
             .child(div().h(px(t.space.lg)))
             .child(
-                self.nav_row(&kit, "home-store", ("basket", "Store".into()), None, false)
-                    .on_click(cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("store"), cx))),
+                self.nav_row(
+                    &kit,
+                    "home-store",
+                    ("basket.fill", "Store".into()),
+                    None,
+                    false,
+                )
+                .on_click(cx.listener(|v, _, _, cx| (v.sink)(Outbound::Command("store"), cx))),
             )
             .child(div().flex_1())
             .child(match identity {
@@ -1711,7 +1852,7 @@ impl Render for ProjectLibrary {
                     .nav_row(
                         &kit,
                         "home-account",
-                        ("person.crop.circle", name),
+                        ("person.crop.circle.fill", name),
                         None,
                         false,
                     )
@@ -1721,7 +1862,7 @@ impl Render for ProjectLibrary {
                     .nav_row(
                         &kit,
                         "home-account",
-                        ("person.crop.circle", "Sign in".into()),
+                        ("person.crop.circle.fill", "Sign in".into()),
                         None,
                         false,
                     )
@@ -1738,6 +1879,14 @@ impl Render for ProjectLibrary {
             "{shown} {}",
             if shown == 1 { "project" } else { "projects" }
         );
+        let section_label = self.section_label.render(
+            section.title(),
+            &t,
+            Text::Headline,
+            c.text,
+            window,
+        );
+        let count_label = self.count_label.render(&count, &t, Text::Body, c.muted, window);
         let sort = self.controller.query.sort;
         let opening = self
             .controller
@@ -1746,7 +1895,6 @@ impl Render for ProjectLibrary {
             .or_else(|| self.notice.clone());
         // Newer work in the original app: one quiet line, never in the way.
         let recent = opening.is_none() && crate::recent_work::newer();
-        let tr = t.translucency;
         if self.new_project.is_none() && pm_shell::text::available(window) {
             let tokens = t.clone();
             let new_project = cx.new(|cx| {
@@ -1781,45 +1929,14 @@ impl Render for ProjectLibrary {
         }
         let sheet = (f32::from(window.viewport_size().width) - m.sidebar - m.dock_gap).max(0.);
         let search_width = SEARCH_MAX.min(sheet - SEARCH_ROOM).max(CARD_LEAST);
-        let search_key = kit::key("home-search");
-        let search = kit.track_hover(
-            div()
-                .id("home-search")
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(t.space.md))
-                .w(px(search_width))
-                .h(px(ACTION))
-                .px(px(t.space.md + t.space.hair))
-                .rounded(px(t.radius.md))
-                .bg(ink(
-                    c.text,
-                    tr.hover + (tr.selected - tr.hover) * kit.hovered(search_key),
-                ))
-                .child(kit.symbol(
-                    "magnifyingglass",
-                    m.symbol_toolbar + 1.,
-                    Weight::Regular,
-                    c.muted,
-                ))
-                .child(div().flex_1().min_w(px(0.)).children(self.search.clone()))
-                .when(self.controller.query.text.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .flex_none()
-                            .text_role(&t, Text::Caption)
-                            .text_color(rgb(c.faint))
-                            .child("⌘F"),
-                    )
-                })
-                .on_click(cx.listener(|v, _, _, cx| {
-                    if let Some(field) = &v.search {
-                        field.update(cx, |f, cx| f.begin_editing(cx));
-                    }
-                })),
-            search_key,
-        );
+        let search = self
+            .search
+            .clone()
+            .map_or_else(
+                || kit.search(None, Some("⌘F")),
+                |field| kit.header_well(field),
+            )
+            .w(px(search_width));
         let side = || div().flex().flex_1().min_w(px(0.)).items_center();
         let title_row =
             div()
@@ -1836,7 +1953,7 @@ impl Render for ProjectLibrary {
                             .role(Role::Heading)
                             .aria_label(format!("{}, {count}", section.title()))
                             .text_role(&t, Text::Headline)
-                            .child(section.title()),
+                            .child(section_label),
                     ),
                 )
                 .child(search)
@@ -1922,7 +2039,9 @@ impl Render for ProjectLibrary {
                     .text_role(&t, Text::Body)
                     .font_features(kit::tabular())
                     .text_color(rgb(c.muted))
-                    .child(count),
+                    .id("home-count")
+                    .aria_label(count)
+                    .child(count_label),
             )
             // A real project can take seconds to read: say so here until it
             // shows in the window.
@@ -2091,26 +2210,13 @@ impl Render for ProjectLibrary {
             Content::Projects => {
                 let mut rows = self.controller.rows.clone();
                 let mut seen = std::collections::HashSet::new();
-                self.titles = rows.iter().map(Row::title).collect();
                 self.repeated = rows
                     .iter()
                     .map(Row::title)
                     .filter(|title| !seen.insert(title.clone()))
                     .collect();
-                // Same name and same second line: the later ones are copies.
-                let now = crate::poster::now_ms();
-                let mut firsts = std::collections::HashMap::new();
-                self.copy_marks.clear();
-                let mut by_age: Vec<&Row> = rows.iter().collect();
-                by_age.sort_by_key(|r| (r.modified_ms, r.id.clone()));
-                for row in by_age {
-                    let key = (row.title(), self.told_apart(row, now));
-                    let n = firsts.entry(key).or_insert(0usize);
-                    *n += 1;
-                    if *n > 1 {
-                        self.copy_marks.insert(row.id.clone(), *n);
-                    }
-                }
+                self.numbers = numbers(&rows);
+                self.titles = rows.iter().map(|r| self.shown_title(r)).collect();
                 if self.controller.opening().is_some() {
                     let held = self
                         .held_order

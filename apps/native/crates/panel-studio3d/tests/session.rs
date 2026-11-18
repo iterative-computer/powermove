@@ -639,6 +639,7 @@ fn scene_summary_needs_a_3d_layer() {
                     visible: None,
                     shy: None,
                     collapsed: None,
+                    track: None,
                     time: 0.,
                 }))
                 .into(),

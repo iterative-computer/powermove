@@ -90,9 +90,11 @@ pub fn plan(published: &Published, shape: ShapeBox, time: f64, variant: &str) ->
         "star" => ("star", "Star", "Draw star", 0.),
         _ => ("rect", "Rect", "Draw rect", 0.),
     };
+    // A selected layer takes the box as a mask (After Effects' Shape tools
+    // over a selected layer); with none selected it is a new shape layer.
     let mask = match variant {
         "ellipse" => Some(MaskShape::Ellipse),
-        "rect" | "" => Some(MaskShape::Rect),
+        "rect" | "rounded" | "" => Some(MaskShape::Rect),
         _ => None,
     };
     if let Some(plan) = mask.and_then(|m| mask_plan(published, shape, time, m)) {
@@ -101,15 +103,16 @@ pub fn plan(published: &Published, shape: ShapeBox, time: f64, variant: &str) ->
     let id = new_id("L");
     let mut content = Map::new();
     content.insert("shape", Value::from(kind));
-    content.insert("w", Value::Number(100.));
-    content.insert("h", Value::Number(100.));
+    // The shape is the drawn size at Scale 100%, as After Effects draws it:
+    // a stroke keeps its width and corners stay round. v1 drew a 100 px
+    // shape scaled to the drawn size; its projects open unchanged (a shape
+    // is its own w and h times its Scale either way).
+    content.insert("w", Value::Number(shape.w()));
+    content.insert("h", Value::Number(shape.h()));
     content.insert("radius", Value::Number(radius));
-    // The source shape is 100 px, so Scale in percent is the drawn size.
     let mut properties = Map::new();
     properties.insert("position.x", Value::Number((shape.x0 + shape.x1) / 2.));
     properties.insert("position.y", Value::Number((shape.y0 + shape.y1) / 2.));
-    properties.insert("scale.x", Value::Number(shape.w()));
-    properties.insert("scale.y", Value::Number(shape.h()));
     let add = AddLayer {
         id: id.clone(),
         layer_type: "shape".into(),
@@ -127,6 +130,7 @@ pub fn plan(published: &Published, shape: ShapeBox, time: f64, variant: &str) ->
         visible: None,
         shy: None,
         collapsed: None,
+        track: None,
         time,
     };
     Some(ShapePlan {
@@ -147,7 +151,11 @@ fn mask_plan(
     let info = pm_kernel::model::list_layers(root, None)
         .into_iter()
         .find(|l| l.id == layer)?;
-    if info.effectively_locked || matches!(info.kind.as_str(), "shape" | "audio") {
+    // Shape layers too (v1 drew a new layer over them); layers with no
+    // pixels of their own take no mask.
+    if info.effectively_locked
+        || matches!(info.kind.as_str(), "audio" | "null" | "camera" | "light")
+    {
         return None;
     }
     let world = QueryMirror::new(published)

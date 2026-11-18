@@ -26,16 +26,21 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
         },
       },
       target: () => native("effects.target") as Target | null,
-      add: (item, target) => [
-        {
-          command: item.kind === "preset" ? "preset.apply" : "effect.add",
-          args: {
-            definition: item.id,
-            preset: item.id.slice(7),
-            target: target.id,
-          },
-        },
-      ],
+      // A transition goes on the selection's In, as v1's Add did.
+      add: (item, target) => {
+        const args: Record<string, string> = {
+          definition: item.id,
+          target: target.id,
+        };
+        if (item.kind === "preset") {
+          args.preset = item.id.slice(7);
+          return [{ command: "preset.apply", args }];
+        }
+        if (item.kind !== "transition")
+          return [{ command: "effect.add", args }];
+        args.edge = "in";
+        return [{ command: "transition.set", args }];
+      },
       reveal: (_item, target) => ({
         command: "effect.reveal",
         args: { target: target.id },

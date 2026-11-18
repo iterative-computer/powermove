@@ -185,11 +185,20 @@ pub struct Clip {
     /// An audio clip draws its waveform instead of a name; `None` while the
     /// peaks are still being read (a hairline then marks the clip's middle).
     pub audio: Option<Option<Waveform>>,
+    /// Its audio is muted: the waveform dims.
+    pub muted: bool,
+    /// An audio clip's level line: its gain and fades.
+    pub level: Option<Level>,
     pub trim: Option<Edge>,
     /// The first missing extension effect: the clip carries a quiet badge.
     pub missing_effect: Option<String>,
     /// A captions clip's cues (S089), drawn in place of its name.
     pub cues: Vec<CueMark>,
+    /// Seconds of its In and Out transitions (an audio clip's fades), drawn
+    /// as v1's wedges inside its ends.
+    pub transitions: [Option<f64>; 2],
+    /// The transition selected on it.
+    pub transition_selected: Option<Edge>,
 }
 /// One caption cue on its clip, in composition seconds.
 #[derive(Clone, Debug, PartialEq)]
@@ -210,12 +219,35 @@ pub fn parse_cue_op(id: &str) -> Option<(&str, &str)> {
 /// An audio file's peak envelope, read once per file off the main thread.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Waveform {
-    /// Largest absolute sample of any channel per bucket, 0–1.
-    pub peaks: std::sync::Arc<[f32]>,
-    /// Buckets per second of media.
-    pub rate: f64,
+    /// What the clip's media sounds like, at every zoom.
+    pub levels: std::sync::Arc<crate::waveform::Levels>,
     /// Media seconds skipped before the clip starts.
     pub trim: f64,
+    /// A retimed or reversed clip's media time, sampled evenly over the
+    /// clip (`crate::waveform::mapped`); `None`: the trim, at speed 1.
+    pub map: Option<std::sync::Arc<[f64]>>,
+}
+/// An audio clip's level as its line draws it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Level {
+    /// 1 = 0 dB (0–4).
+    pub gain: f64,
+    pub fade_in: f64,
+    pub fade_out: f64,
+    /// The gain is keyed: the line shows its base value.
+    pub animated: bool,
+}
+impl Waveform {
+    /// A mono clip from its peaks per bucket (`rate` a second), its loudness
+    /// the same as its peaks: for fixtures and tests.
+    pub fn from_peaks(peaks: &[f32], rate: f64, trim: f64) -> Self {
+        let pairs: Vec<[f32; 2]> = peaks.iter().map(|p| [*p, *p]).collect();
+        Waveform {
+            levels: std::sync::Arc::new(crate::waveform::Levels::new(rate, 1, &pairs, &pairs)),
+            trim,
+            map: None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edge {
@@ -536,9 +568,20 @@ impl Scene {
                                     hidden: !layer.visible,
                                     media: p.media(layer),
                                     audio: p.waveform(layer),
+                                    muted: layer.audio_muted,
+                                    level: level_of(layer),
                                     trim: None,
                                     missing_effect: layer.missing_effects.first().cloned(),
                                     cues: p.cues(layer),
+                                    transitions: layer
+                                        .transitions
+                                        .each_ref()
+                                        .map(|t| t.as_ref().map(|t| t.duration)),
+                                    transition_selected: model
+                                        .transition
+                                        .as_ref()
+                                        .filter(|(l, _)| *l == id.as_str())
+                                        .map(|(_, e)| *e),
                                 }),
                                 summary,
                             },
@@ -595,9 +638,20 @@ impl Scene {
                     hidden: !layer.visible,
                     media: p.media(layer),
                     audio: p.waveform(layer),
+                    muted: layer.audio_muted,
+                    level: level_of(layer),
                     trim: None,
                     missing_effect: layer.missing_effects.first().cloned(),
                     cues: p.cues(layer),
+                    transitions: layer
+                        .transitions
+                        .each_ref()
+                        .map(|t| t.as_ref().map(|t| t.duration)),
+                    transition_selected: model
+                        .transition
+                        .as_ref()
+                        .filter(|(l, _)| *l == item.id.as_str())
+                        .map(|(_, e)| *e),
                 });
             }
             let mut properties: HashMap<(Area, usize), Vec<PaintRow>> = HashMap::new();
@@ -1561,8 +1615,19 @@ fn minor_step(label_step: f64, pps: f64, fps: f64, frames: bool) -> Option<f64> 
         .map(|n| label_step / n)
         .find(|step| step * pps >= MINOR_ROOM)
 }
-/// A waveform is a soft shape in the strip's own hue, not a solid one.
-const WAVEFORM_OPACITY: f64 = 0.72;
+/// An audio layer's level line.
+fn level_of(layer: &crate::Layer) -> Option<Level> {
+    (layer.kind == "audio").then_some(Level {
+        gain: layer.gain,
+        fade_in: layer.fade_in,
+        fade_out: layer.fade_out,
+        animated: layer.gain_animated,
+    })
+}
+/// A muted clip's waveform: dimmed, still there.
+const WAVEFORM_MUTED: f64 = 0.4;
+/// A row this tall (points) shows a stereo clip's two sides apart.
+const STEREO_ROW: f64 = 56.;
 fn valid_clip(c: &Clip) -> bool {
     c.from.is_finite()
         && c.duration.is_finite()
@@ -1571,7 +1636,9 @@ fn valid_clip(c: &Clip) -> bool {
         && c.audio
             .iter()
             .flatten()
-            .all(|w| w.rate.is_finite() && w.rate > 0. && w.trim.is_finite() && w.trim >= 0.)
+            .all(|w| {
+                w.levels.rate.is_finite() && w.levels.rate > 0. && w.trim.is_finite() && w.trim >= 0.
+            })
 }
 /// The tracks a reader sees, in a frame's x: the whole view's, or for a
 /// frame prepared wider ([`Scene::prepare_wide`]) the part the view shows.
@@ -1630,12 +1697,20 @@ fn strip_state(c: &Clip) -> pm_design::StripState {
         StripState::Rest
     }
 }
+/// The op naming clip `layer`'s transition at `edge`.
+pub fn transition_op(layer: &str, edge: Edge) -> String {
+    let edge = if edge == Edge::In { "in" } else { "out" };
+    format!("transition:{edge}:{layer}")
+}
 /// How far past a layer's in or out point a press trims it.
 const TRIM_REACH: f64 = 5.;
 /// How far in from a strip's drawn end a press trims it: v1's five points,
 /// with room for an end drawn on a half point, so five points in trims at
 /// both ends (the out end was drawn on a half point and lost its fifth).
 const TRIM_INSIDE: f64 = 6.;
+/// The least reach of a transition's wedge under the pointer, so a short
+/// one near the clip's floor can still be taken.
+const TRANSITION_GRAB: f64 = 4.;
 /// The least width a strip is drawn at, in points (v1's 4 px).
 const MIN_STRIP: f64 = 4.;
 /// Paints clip `c` and gives back its strip's box on screen (none when the
@@ -1725,6 +1800,61 @@ fn paint_clip(
         o.detail = json!({"period": (h * 0.45).max(6.), "stripe": (h * 0.18).max(2.)});
         ops.push(o);
     }
+    // Transitions read as v1's wedges inside the clip's ends: full height at
+    // the edge, tapering to a point where the transition ends. A selected
+    // one is stronger and carries a grip at its tip, where it is dragged.
+    for (slot, edge) in [Edge::In, Edge::Out].into_iter().enumerate() {
+        let Some(seconds) = c.transitions[slot] else {
+            continue;
+        };
+        let w = (seconds * v.pps).clamp(0., end - start);
+        if w < 1. {
+            continue;
+        }
+        let x = match edge {
+            Edge::In => start,
+            Edge::Out => end - w,
+        };
+        let selected = c.transition_selected == Some(edge);
+        let mut o = Op::new(
+            transition_op(&c.id, edge),
+            "wedge",
+            Rect::new(x, r.y, w, r.height),
+            material.primary,
+        );
+        o.opacity = strength * if selected { 0.9 } else { 0.55 };
+        o.radius = radius;
+        o.clip = Some(Rect::new(
+            v.layer_column,
+            r.y,
+            (v.width - v.layer_column).max(0.),
+            r.height,
+        ));
+        o.detail = json!({
+            "edge": if edge == Edge::In { "in" } else { "out" },
+            "seconds": seconds,
+            "selected": selected,
+            "cursor": if c.locked { "notAllowed" } else { "resizeLeftRight" },
+        });
+        ops.push(o);
+        if selected && !c.locked {
+            let grip = t.trim_grip();
+            let gw = grip.width as f64;
+            let gh = (r.height * grip.height as f64).round();
+            let tip = match edge {
+                Edge::In => x + w - gw,
+                Edge::Out => x,
+            };
+            let mut o = Op::new(
+                format!("transition-grip:{}", c.id),
+                "rect",
+                Rect::new(tip, r.y + (r.height - gh) / 2., gw, gh),
+                grip.color,
+            );
+            o.radius = gw / 2.;
+            ops.push(o);
+        }
+    }
     // "Offline" leads in `danger`; the name follows in the clip's foreground.
     // The name starts clear of the trim grip that stands inside a hovered
     // strip's edge.
@@ -1801,9 +1931,13 @@ fn paint_clip(
             ops.push(o);
         }
     } else if let (Some(audio), false) = (&c.audio, offline) {
-        // Bars keep clear of the seam and the rounded corners on every side.
+        // The waveform is light caught inside the glass: it stands on the
+        // strip's floor, just inside the rim, over the strip's whole length,
+        // and the strip's rounded corners cut it (the painter follows them
+        // from the strip's own ends). Two columns per point (device pixels
+        // on Retina), read from the pyramid at this zoom, on a perceptual
+        // scale; the painter softens them and fills one smooth shape.
         let inset = 2. * m.border as f64;
-        let r = Rect::new(r.x + inset, r.y, (r.width - 2. * inset).max(0.), r.height);
         let mut o = Op::new(
             format!("clip-content:{}", c.id),
             "waveform",
@@ -1811,26 +1945,52 @@ fn paint_clip(
             material.primary,
         );
         o.text = Some(c.name.clone());
-        o.opacity = strength * WAVEFORM_OPACITY;
-        let left = v.x(c.from);
-        let bars: Vec<f32> = audio
-            .as_ref()
-            .map(|w| {
-                let count = r.width.floor().max(0.) as usize;
-                (0..count)
-                    .map(|i| {
-                        let at = w.trim + (r.x + i as f64 - left) / v.pps;
-                        let from = (at * w.rate).floor().max(0.) as usize;
-                        let to = (((at + 1. / v.pps) * w.rate).floor() as usize).max(from + 1);
-                        w.peaks
-                            .get(from.min(w.peaks.len())..to.min(w.peaks.len()))
-                            .map_or(0., |s| s.iter().copied().fold(0., f32::max))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        o.detail = json!({"bars": bars, "inset": m.border * 2., "minBar": m.border});
+        o.opacity = strength * if c.muted { WAVEFORM_MUTED } else { 1. };
+        let mut detail = json!({
+            "rim": material.ring_width,
+            "radius": radius,
+            "ends": [start, end],
+            "columns": crate::waveform::COLUMNS_PER_POINT,
+            "wave": material.wave.0,
+            "waveAlpha": material.wave.1,
+        });
+        if let Some(w) = audio {
+            let per = crate::waveform::COLUMNS_PER_POINT;
+            let count = (r.width * per).ceil().max(0.) as usize;
+            let step = 1. / (v.pps * per);
+            let left_time = (r.x - v.x(c.from)) / v.pps;
+            let trim = w.trim;
+            let linear = move |t: f64| t + trim;
+            let source: Box<dyn Fn(f64) -> f64> = match &w.map {
+                Some(map) => Box::new(crate::waveform::mapped(map, c.duration)),
+                None => Box::new(linear),
+            };
+            // A tall row shows a stereo clip's two sides, one above the other.
+            let sides = w.levels.sides.as_ref().filter(|_| r.height >= STEREO_ROW);
+            let read = |p: &crate::waveform::Pyramid| {
+                crate::waveform::columns(p, w.levels.rate, &*source, left_time, step, count)
+            };
+            match sides {
+                Some([left, right]) => {
+                    let (lp, lr) = read(left);
+                    let (rp, rr) = read(right);
+                    detail["peak"] = json!(crate::waveform::encode(&lp));
+                    detail["rms"] = json!(crate::waveform::encode(&lr));
+                    detail["peak2"] = json!(crate::waveform::encode(&rp));
+                    detail["rms2"] = json!(crate::waveform::encode(&rr));
+                }
+                None => {
+                    let (peak, rms) = read(&w.levels.combined);
+                    detail["peak"] = json!(crate::waveform::encode(&peak));
+                    detail["rms"] = json!(crate::waveform::encode(&rms));
+                }
+            }
+        }
+        o.detail = detail;
         ops.push(o);
+        if let Some(level) = c.level {
+            ops.push(level_line(c, level, r, v, inset, material.level, strength));
+        }
     } else {
         let mut o = Op::new(
             format!("clip-content:{}", c.id),
@@ -2249,6 +2409,27 @@ impl Frame {
     pub fn hit_key(&self, x: f64, y: f64, slop: f64) -> Option<(String, String)> {
         key_identity(self.hit_op("key:", x, y, slop)?)
     }
+    /// The key a press at `(x, y)` takes, as v1 picks it (timeline.ts
+    /// keyDown): the nearest whose centre is less than `reach` points across
+    /// from `x`, in the row under `y` (`row` high). Further off, a press on
+    /// the row starts a marquee and moves no key.
+    pub fn hit_key_across(&self, x: f64, y: f64, reach: f64, row: f64) -> Option<(String, String)> {
+        let centre = |o: &Op| (o.bounds.x + o.bounds.width / 2., o.bounds.y + o.bounds.height / 2.);
+        let op = self
+            .ops
+            .iter()
+            .filter(|o| o.id.starts_with("key:") && o.clip.is_none_or(|clip| clip.contains(x, y)))
+            .filter(|o| {
+                let (cx, cy) = centre(o);
+                (cx - x).abs() < reach && (cy - y).abs() <= row / 2.
+            })
+            .min_by(|a, b| (centre(a).0 - x).abs().total_cmp(&(centre(b).0 - x).abs()))?;
+        key_identity(op)
+    }
+    /// [`Self::hit_key_across`] as `(layer, key)`.
+    pub fn hit_layer_key_across(&self, x: f64, y: f64, reach: f64, row: f64) -> Option<(String, String)> {
+        self.hit_key_across(x, y, reach, row).and_then(on_layer)
+    }
     /// The key under a point as `(layer, key)`: key ids may repeat across
     /// layers, so the row it sits on names its layer.
     pub fn hit_layer_key(&self, x: f64, y: f64, slop: f64) -> Option<(String, String)> {
@@ -2289,6 +2470,32 @@ impl Frame {
                 })
             })
             .collect()
+    }
+    /// The transition under a point as `(layer, edge)`: inside its wedge,
+    /// clear of the trim zone at the clip's very end (a trim still takes
+    /// the edge), or on a selected one's grip.
+    pub fn hit_transition(&self, x: f64, y: f64) -> Option<(String, Edge)> {
+        if y < 0. || y >= self.viewport.height || x < self.viewport.layer_column {
+            return None;
+        }
+        self.ops.iter().rev().find_map(|o| {
+            let rest = o.id.strip_prefix("transition:")?;
+            let (edge, layer) = rest.split_once(':')?;
+            let edge = if edge == "in" { Edge::In } else { Edge::Out };
+            let b = o.bounds;
+            if y < b.y || y >= b.y + b.height {
+                return None;
+            }
+            // How far in from the clip's end, and the wedge's width at this
+            // height (it tapers to its tip at the floor).
+            let inward = match edge {
+                Edge::In => x - b.x,
+                Edge::Out => b.x + b.width - x,
+            };
+            let reach = (b.width * (1. - (y - b.y) / b.height)).max(TRANSITION_GRAB);
+            let grip = o.detail["selected"] == true && (inward - b.width).abs() <= TRANSITION_GRAB;
+            (grip || inward > TRIM_INSIDE && inward <= reach).then(|| (layer.to_owned(), edge))
+        })
     }
     pub fn hit_clip<'a>(&'a self, x: f64, y: f64) -> Option<(&'a str, Option<Edge>)> {
         if y < 0.
@@ -2792,4 +2999,48 @@ pub fn snap_guide(v: Viewport, ruler: f64, target: Option<f64>) -> Vec<Op> {
     );
     pin.clip = Some(clip);
     vec![line, pin]
+}
+
+/// An audio clip's level line (Premiere's clip volume line): flat at its
+/// gain on the Mixer's fader law, rising from the floor over its fade in and
+/// falling over its fade out; `r` is the part of the strip inside the glass.
+/// A press near its flat part drags the gain.
+/// An audio clip's level line. It is always there to be grabbed, but drawn
+/// only on a selected clip (`shown`) or under the pointer (the surface's
+/// hover paints it there, with its handle): at rest a clip shows its
+/// waveform alone.
+fn level_line(c: &Clip, level: Level, r: Rect, v: Viewport, inset: f64, light: (u32, f32), strength: f64) -> Op {
+    let top = r.y + inset;
+    let room = (r.height - 2. * inset).max(0.);
+    let floor = top + room;
+    let pos = crate::level::fader_position(crate::level::gain_db(level.gain));
+    let y = top + (1. - pos) * room;
+    let (start, end) = (v.x(c.from), v.x(c.from + c.duration));
+    let fade_in = (level.fade_in * v.pps).min(end - start);
+    let fade_out = (level.fade_out * v.pps).min(end - start - fade_in);
+    let mut points = vec![];
+    if fade_in > 0. {
+        points.push([start, floor]);
+    }
+    points.push([start + fade_in, y]);
+    points.push([end - fade_out, y]);
+    if fade_out > 0. {
+        points.push([end, floor]);
+    }
+    let mut o = Op::new(format!("level:{}", c.id), "levelline", r, light.0);
+    o.opacity = strength * light.1 as f64 * if c.muted { 0.5 } else { 1. };
+    o.clip = Some(r);
+    o.detail = json!({
+        "points": points,
+        "y": y,
+        "from": (start + fade_in).max(r.x),
+        "to": (end - fade_out).min(r.x + r.width),
+        "gain": level.gain,
+        "room": room,
+        "db": crate::level::format_db(crate::level::gain_db(level.gain)),
+        "animated": level.animated,
+        "cursor": "resizeUpDown",
+        "shown": c.selected,
+    });
+    o
 }

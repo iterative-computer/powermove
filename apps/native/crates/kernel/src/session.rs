@@ -45,6 +45,12 @@ pub enum ShellCall {
         ticket: String,
         decision: RecoveryDecision,
     },
+    /// The person cancelled the Recover question: the open it prepared goes,
+    /// its project lock with it; nothing is recovered or copied, the journal
+    /// is kept, and the next open asks again.
+    ForgetRecovery {
+        ticket: String,
+    },
     /// Library copies holding work for the file this session has open in
     /// place that the person has not been told about yet (see
     /// `Kernel::unoffered_copies`). Replies `Copies`.
@@ -873,6 +879,10 @@ impl Kernel {
                 self.pending_recovery.remove(&ticket);
                 Ok(ShellReply::RecoveryCancelled)
             }
+            ShellCall::ForgetRecovery { ticket } => {
+                self.pending_recovery.remove(&ticket);
+                Ok(ShellReply::Kept(Vec::new()))
+            }
             ShellCall::DecideRecovery { ticket, decision } => {
                 let mut pending = self
                     .pending_recovery
@@ -991,15 +1001,46 @@ impl Kernel {
             ShellCall::Close(handle) => {
                 self.ensure_idle(&handle)?;
                 self.flush_project(&handle.project)?;
-                // A file that already holds everything is not rewritten.
-                let unchanged = matches!(
-                    self.sessions[&handle.project].destination,
-                    Destination::File(_)
-                ) && !self.project(&handle.project).unwrap().store().needs_save();
+                // A file that already holds everything is not rewritten, nor
+                // the project's own library slot when it holds the project as
+                // it is (a recovered copy closed untouched rewrote its whole
+                // body for 15-20 s, run 22).
+                let store = self.project(&handle.project).unwrap().store();
+                let unchanged = match &self.sessions[&handle.project].destination {
+                    Destination::File(_) => !store.needs_save(),
+                    Destination::Library(slot) => {
+                        if std::env::var_os("PM_SAVE_TRACE").is_some() {
+                            eprintln!(
+                                "PM_SAVE close {}: own slot {}, unsaved {}, as saved {}, upgraded {}, slot holds {}",
+                                handle.project,
+                                slot == &handle.project,
+                                store.needs_save(),
+                                store.as_saved(),
+                                store.upgraded_on_open(),
+                                self.library_slot_holds(slot, store),
+                            );
+                        }
+                        slot == &handle.project
+                            && store.as_saved()
+                            && self.library_slot_holds(slot, store)
+                    }
+                };
                 // Nothing edited since it opened or was saved: what the close
                 // writes keeps the row's edit time (PM-392).
                 let edited = self.project(&handle.project).unwrap().store().needs_save();
                 let recovery_copy = if unchanged {
+                    // A layout change is no edit: the project's own workspace
+                    // record, which the next open prefers, takes it too, and
+                    // both are flushed before the journal holding it goes.
+                    // (One flush: the meta's write below flushes both.)
+                    if let Destination::Library(slot) = &self.sessions[&handle.project].destination
+                        && let Some(writer) = &self.library
+                    {
+                        let workspace = self.project(&handle.project).unwrap().workspace().clone();
+                        writer
+                            .set(&format!("projectWorkspace.{slot}"), workspace)
+                            .map_err(failure)?;
+                    }
                     self.save_session_meta(&handle.project)?;
                     None
                 } else {
@@ -1025,8 +1066,11 @@ impl Kernel {
                     recovery_copy
                 };
                 crate::fault_injection::hit(crate::fault_injection::Stage::InClose);
-                self.flush_project(&handle.project)?;
-                self.durability_barrier()?;
+                // What this close made durable before its journal goes: its
+                // own journal, the library, the queued durability work. Not
+                // every other open project's journal: that made each close
+                // of a quit with nine tabs sync all nine (run 24: 6 s).
+                self.close_barrier(&handle.project)?;
                 let journals = self.project_dir(&handle.project);
                 // A volume that could not prove the save durable may still
                 // lose it: the journal stays (and its local copy, see `local_copy`).
@@ -1252,6 +1296,15 @@ impl Kernel {
             {
                 path = None;
             }
+        }
+        // A Save As to the file the session already is (the same name
+        // chosen again, Replace) is a save in place: its lock is the
+        // session's own, and taking it again failed with an OS error.
+        if path
+            .as_deref()
+            .is_some_and(|p| self.is_own_file(&session.project, p))
+        {
+            path = None;
         }
         if path.is_none() {
             self.follow_file(&session.project);
@@ -2544,6 +2597,15 @@ impl Kernel {
         .map_err(failure)?;
         Ok(id)
     }
+    /// Whether `path` names the file the session `id` already saves to.
+    fn is_own_file(&self, id: &str, path: &std::path::Path) -> bool {
+        let Destination::File(now) = &self.sessions[id].destination else {
+            return false;
+        };
+        now == path
+            || matches!((std::fs::canonicalize(now), std::fs::canonicalize(path)),
+                (Ok(a), Ok(b)) if a == b)
+    }
     fn save_session(
         &mut self,
         handle: &SessionHandle,
@@ -2551,6 +2613,8 @@ impl Kernel {
     ) -> Result<ShellReply, KernelFailure> {
         self.ensure_idle(handle)?;
         let id = &handle.project;
+        // Save As to its own file: a save in place (see `prepare_save_of`).
+        let save_as = save_as.filter(|(path, _)| !self.is_own_file(id, path));
         if save_as.is_none() {
             self.follow_file(id);
         }
@@ -3744,6 +3808,46 @@ impl Kernel {
     }
     /// The library entry's view state alone, for a file closed unchanged:
     /// where the person left off, without rewriting the project body.
+    /// Whether library slot `slot` already holds what a close would write
+    /// for a store that is as saved: no closed-project rename waiting to be
+    /// written into its body, and every media item kept by the app: in the
+    /// library's media store, in the slot's own backing file under the
+    /// profile's recovery files (a recovered copy's), or a link the project
+    /// keeps outside. Media still read from another file (one that may go
+    /// away) are stored by the close.
+    fn library_slot_holds(&self, slot: &str, store: &crate::DocumentStore) -> bool {
+        let Some(writer) = &self.library else {
+            return false;
+        };
+        let Some(profile) = writer.store().dir().parent() else {
+            return false;
+        };
+        let media = profile.join(crate::library_media::DIR);
+        let own_file = store
+            .path()
+            .filter(|path| path.starts_with(profile.join("recovery-files")));
+        let kept = |entry: &project_io::MediaEntry| {
+            crate::library_media::is_stored(entry, &media)
+                || store.media().is_linked(&entry.id)
+                || match &entry.source {
+                    project_io::MediaSource::Embedded { file, .. } => {
+                        own_file.is_some_and(|own| own == file.path.as_path())
+                    }
+                    _ => false,
+                }
+        };
+        let renamed = writer.store().renamed(slot).ok().flatten().is_some();
+        let unstored: Vec<&str> = store
+            .media()
+            .iter()
+            .filter(|entry| !kept(entry))
+            .map(|entry| entry.id.as_str().unwrap_or("?"))
+            .collect();
+        if std::env::var_os("PM_SAVE_TRACE").is_some() {
+            eprintln!("PM_SAVE slot {slot}: renamed {renamed}, media not in the library {unstored:?}");
+        }
+        !renamed && unstored.is_empty()
+    }
     fn save_session_meta(&mut self, id: &str) -> Result<(), KernelFailure> {
         let Some(writer) = &self.library else {
             return Ok(());

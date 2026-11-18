@@ -31,6 +31,11 @@ pub struct Key {
     pub stored: Node,
 }
 impl Key {
+    /// A hold key, as the file stores it: v1's `hold: true`, or the AE
+    /// model's `outInterp: "hold"`.
+    pub fn held(&self) -> bool {
+        boolean(self.stored.get("hold")) || self.stored_string("outInterp") == Some("hold")
+    }
     pub fn stored_string(&self, field: &str) -> Option<&str> {
         match self.stored.get(field)?.kind() {
             NodeKind::String(value) => value.as_str(),
@@ -44,6 +49,17 @@ pub struct Channel {
     pub value: Value,
     pub expression: Option<JsString>,
     pub keys: Vec<Key>,
+}
+/// A layer's transition at one edge, as the timeline draws and edits it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Transition {
+    /// The registry id (`type`); `fade` for an audio clip's fade.
+    pub kind: String,
+    pub duration: f64,
+    /// Its extension is not installed: it shows, but is not edited.
+    pub missing: bool,
+    /// The parameter keys it stores (`p`), kept by a duration edit.
+    pub params: Vec<String>,
 }
 #[derive(Clone, Debug)]
 pub struct Layer {
@@ -72,9 +88,19 @@ pub struct Layer {
     pub asset: Option<String>,
     /// Seconds of the media skipped before the layer starts (`d.trim`).
     pub trim: f64,
+    /// An audio layer's level (`d.gain`, 1 = 0 dB; its base value when
+    /// animated), and its fades in seconds (`d.fadeIn`, `d.fadeOut`).
+    pub gain: f64,
+    /// `d.gain` has keys or an expression: the level line shows the base.
+    pub gain_animated: bool,
+    pub fade_in: f64,
+    pub fade_out: f64,
     /// Effects whose extension is missing (`fx[].missing`): the layer draws
     /// with them bypassed. Their display names, else types.
     pub missing_effects: Vec<String>,
+    /// The In and Out transitions (`transitionIn`, `transitionOut`); an
+    /// audio clip's fades (`d.fadeIn`, `d.fadeOut`) stand in for them.
+    pub transitions: [Option<Transition>; 2],
     pub masks: Vec<String>,
     pub definition: Option<String>,
     pub channels: Vec<Channel>,
@@ -428,17 +454,60 @@ impl TimelineIndex {
             .filter_map(|fx| string(fx.get("name")).or_else(|| string(fx.get("type"))))
             .collect();
         let asset = layer.get("d").and_then(|d| string(d.get("asset")));
+        let audio = string(layer.get("type")).as_deref() == Some("audio");
+        let transitions =
+            [("transitionIn", "fadeIn"), ("transitionOut", "fadeOut")].map(|(field, fade)| {
+                if audio {
+                    return number(layer.get("d").and_then(|d| d.get(fade)))
+                        .filter(|d| d.is_finite() && *d > 0.)
+                        .map(|duration| Transition {
+                            kind: "fade".into(),
+                            duration,
+                            missing: false,
+                            params: vec![],
+                        });
+                }
+                let t = layer.get(field)?;
+                let kind = string(t.get("type"))?;
+                let params = match t.get("p").map(Node::kind) {
+                    Some(NodeKind::Object(fields)) => {
+                        fields.iter().map(|(k, _)| k.to_string_lossy()).collect()
+                    }
+                    _ => vec![],
+                };
+                Some(Transition {
+                    kind,
+                    duration: number(t.get("dur")).filter(|d| d.is_finite())?.max(0.),
+                    missing: boolean(t.get("missing")),
+                    params,
+                })
+            });
         let masks = array(layer.get("masks"))
             .iter()
             .filter_map(|m| string(m.get("id")))
             .collect();
+        let field = |key: &str| layer.get("d").and_then(|d| d.get(key));
+        let channel_value = |n: Option<&Node>| {
+            number(n).or_else(|| number(n.and_then(|n| n.get("v"))))
+        };
+        let gain_node = field("gain");
+        let gain_animated = gain_node.is_some_and(|g| {
+            matches!(g.get("kf").map(Node::kind), Some(NodeKind::Array(k)) if !k.is_empty())
+                || string(g.get("expr")).is_some_and(|e| !e.is_empty())
+        });
+        let fade = |key: &str| channel_value(field(key)).filter(|f| *f > 0.).unwrap_or(0.);
         let mut read = Layer {
+            gain: channel_value(gain_node).filter(|g| *g >= 0.).unwrap_or(1.),
+            gain_animated,
+            fade_in: fade("fadeIn"),
+            fade_out: fade("fadeOut"),
             trim: number(layer.get("d").and_then(|d| d.get("trim")))
                 .filter(|t| t.is_finite())
                 .unwrap_or(0.)
                 .max(0.),
             asset,
             missing_effects,
+            transitions,
             id,
             name: js_string(layer.get("name")).unwrap_or_default(),
             kind: string(layer.get("type")).unwrap_or_default(),

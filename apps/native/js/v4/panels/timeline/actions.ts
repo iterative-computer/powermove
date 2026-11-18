@@ -90,6 +90,11 @@ export type NativeAction = (
     }
   | { type: "simplify"; ids: string[] }
   | { type: "command"; command: string }
+  /** The empty composition's buttons: the app's own commands. */
+  | {
+      type: "run";
+      command: "newText" | "newShape" | "newSolid" | "newNull" | "import";
+    }
   | ({ type: "proEdit"; linked?: boolean } & ProEdit)
 ) & { document?: string; revision?: string };
 

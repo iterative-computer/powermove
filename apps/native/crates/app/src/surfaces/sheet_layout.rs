@@ -147,9 +147,15 @@ pub mod native {
                 )
             };
             window.setTitle(&NSString::from_str(title));
-            // The ground the app's other sheets stand on.
-            window.setBackgroundColor(Some(&colour(tokens.colors.panel)));
+            // Settings' page ground, painted by the sheet itself: AppKit
+            // draws a sheet's own material over the window's background
+            // colour, and the cards then barely showed on it in dark.
+            window.setBackgroundColor(Some(&colour(tokens.colors.panel_secondary)));
             let content = NSView::initWithFrame(NSView::alloc(mtm), rect);
+            content.setWantsLayer(true);
+            if let Some(layer) = content.layer() {
+                layer.setBackgroundColor(Some(&colour(tokens.colors.panel_secondary).CGColor()));
+            }
             window.setContentView(Some(&content));
             let mut sheet = Self {
                 window,
@@ -318,6 +324,7 @@ pub mod native {
             let scroll = NSTextView::scrollableTextView(self.mtm);
             scroll.setDrawsBackground(false);
             scroll.setBorderType(NSBorderType::NoBorder);
+            scroll.setFocusRingType(NSFocusRingType::None);
             scroll.setHasVerticalScroller(true);
             scroll.setAutohidesScrollers(true);
             let Some(view) = scroll
@@ -326,6 +333,7 @@ pub mod native {
             else {
                 return;
             };
+            view.setFocusRingType(NSFocusRingType::None);
             let size = f64::from(t.typography.body);
             let font =
                 NSFont::monospacedSystemFontOfSize_weight(size, unsafe { NSFontWeightRegular });
@@ -397,6 +405,7 @@ pub mod native {
         /// A colour well as a swatch at the trailing edge.
         pub fn swatch(&mut self, id: &str, label: &str, well: Retained<NSColorWell>) {
             well.setColorWellStyle(NSColorWellStyle::Minimal);
+            well.setFocusRingType(NSFocusRingType::None);
             well.setAccessibilityLabel(Some(&NSString::from_str(label)));
             well.setIdentifier(Some(&NSString::from_str(id)));
             let size = NSSize::new(
@@ -410,6 +419,7 @@ pub mod native {
         }
         /// A radio or checkbox whose title is its own: one row of a card.
         pub fn option(&mut self, id: &str, control: Retained<NSControl>) {
+            control.setFocusRingType(NSFocusRingType::None);
             control.setIdentifier(Some(&NSString::from_str(id)));
             self.items.push(Item::Row(Row {
                 lead: control.clone().into_super(),
@@ -434,6 +444,7 @@ pub mod native {
             self.control(id, label, switch.into_super());
         }
         pub fn control(&mut self, id: &str, label: &str, control: Retained<NSControl>) {
+            control.setFocusRingType(NSFocusRingType::None);
             control.setAccessibilityLabel(Some(&NSString::from_str(label)));
             control.setIdentifier(Some(&NSString::from_str(id)));
             self.row(label, &control);
@@ -456,6 +467,7 @@ pub mod native {
                 )
             };
             button.setEnabled(enabled);
+            button.setFocusRingType(NSFocusRingType::None);
             button.setIdentifier(Some(&NSString::from_str(id)));
             button.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());
             button.setKeyEquivalent(&NSString::from_str(if cancel {
@@ -514,6 +526,8 @@ pub mod native {
             // Frames from the top of the sheet; flipped once its height is known.
             let mut frames: Vec<(Retained<NSView>, NSRect)> = Vec::new();
             let mut cards: Vec<(f64, f64)> = Vec::new();
+            // A hairline between two rows of one card, as Settings' groups.
+            let mut rules: Vec<f64> = Vec::new();
             let (mut y, mut card, mut after_line) = (l.inset, None::<f64>, false);
             for (index, item) in self.items.iter().enumerate() {
                 match item {
@@ -560,6 +574,8 @@ pub mod native {
                             // closer under its own heading.
                             y += if index == 1 { l.pad } else { l.gap };
                             card = Some(y);
+                        } else {
+                            rules.push(y);
                         }
                         after_line = false;
                         let mut right = l.control_right();
@@ -684,6 +700,19 @@ pub mod native {
                     NSSize::new(l.card_width(), bottom - top),
                 )));
                 self.content.addSubview(&card);
+            }
+            let hairline = 1. / self.window.backingScaleFactor().max(1.);
+            for top in rules {
+                let rule = NSBox::new(self.mtm);
+                rule.setBoxType(NSBoxType::Custom);
+                rule.setTitlePosition(NSTitlePosition::NoTitle);
+                rule.setBorderWidth(0.);
+                rule.setFillColor(&colour(t.colors.separator));
+                rule.setFrame(flipped(NSRect::new(
+                    NSPoint::new(l.text_x(), top),
+                    NSSize::new(l.card_width() - 2. * l.pad, hairline),
+                )));
+                self.content.addSubview(&rule);
             }
             for (view, frame) in frames {
                 view.setFrame(flipped(frame));

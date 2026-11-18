@@ -89,7 +89,11 @@ fn tracks(v: &Value) -> Result<Vec<TrackTarget>> {
                 Value::String(s) if !s.is_empty() => Some(s.clone()),
                 _ => return Err(invalid("group")),
             };
-            Ok(TrackTarget { track, group_id })
+            Ok(TrackTarget {
+                track,
+                group_id,
+                area: None,
+            })
         })
         .collect()
 }

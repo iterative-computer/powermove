@@ -168,9 +168,34 @@ static ACTIVITIES: Mutex<Vec<Activity>> = Mutex::new(Vec::new());
 /// work (the background render) waits until they have been idle a while,
 /// as it does after the viewer draws.
 pub fn note_input() {
+    noted_activity();
     for activity in ACTIVITIES.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         activity.touch();
     }
+}
+/// When the person or a viewer last did something, in milliseconds since
+/// [`ACTIVITY_EPOCH`].
+static LAST_ACTIVITY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ACTIVITY_EPOCH: std::sync::LazyLock<std::time::Instant> =
+    std::sync::LazyLock::new(std::time::Instant::now);
+fn noted_activity() {
+    LAST_ACTIVITY_MS.store(
+        ACTIVITY_EPOCH.elapsed().as_millis() as u64,
+        Ordering::Release,
+    );
+}
+/// Whether the person has pressed, scrolled and typed nothing, and no viewer
+/// has drawn or played, for `quiet`: work that can wait for them (projects
+/// of tabs behind the front one) goes now.
+pub fn app_quiet_for(quiet: std::time::Duration) -> bool {
+    let busy = ACTIVITIES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(Activity::busy);
+    let since = (ACTIVITY_EPOCH.elapsed().as_millis() as u64)
+        .saturating_sub(LAST_ACTIVITY_MS.load(Ordering::Acquire));
+    !busy && since >= quiet.as_millis() as u64
 }
 pub(crate) fn watch_activity(activity: &Activity) {
     ACTIVITIES
@@ -198,6 +223,7 @@ impl Activity {
             let _grant = self.quiet.0.lock().unwrap();
             self.busy.store(true, Ordering::Release);
             self.epoch.fetch_add(1, Ordering::AcqRel);
+            noted_activity();
             return;
         }
         self.busy.store(false, Ordering::Release);
@@ -219,13 +245,21 @@ impl Activity {
         self.quiet.1.notify_all();
     }
     /// Waits while the viewer is busy, unless `cancel` is set (whoever sets
-    /// it wakes the wait). Whether it waited.
-    fn wait_quiet(&self, cancel: &AtomicBool) -> bool {
+    /// it wakes the wait), and for at most `most`: an export the person
+    /// started is never held off by a viewer that stays busy (a picture or
+    /// a 3D estimate that never finishes); past it the export goes ahead in
+    /// bands. Whether it waited.
+    fn wait_quiet(&self, cancel: &AtomicBool, most: std::time::Duration) -> bool {
+        let until = std::time::Instant::now() + most;
         let mut quiet = self.quiet.0.lock().unwrap();
         let mut waited = false;
         while self.busy() && !cancel.load(Ordering::Acquire) {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return true;
+            }
             waited = true;
-            quiet = self.quiet.1.wait(quiet).unwrap();
+            quiet = self.quiet.1.wait_timeout(quiet, left).unwrap().0;
         }
         waited
     }
@@ -419,9 +453,12 @@ enum Dispute {
     /// Its registry answered a question with another face: why, and the
     /// job's question (to name its font and text).
     Differ(String, Option<pm_text::answers::Query>),
-    /// Its fonts are not the ones the job was asked to draw with any more
-    /// (or it has no registry): nothing can be compared.
+    /// It could not compare (no registry, a question it did not answer):
+    /// what did not answer.
     Moved(String),
+    /// The app's fonts changed since the job was asked: the fonts on this
+    /// Mac changed ([`FONTS_CHANGED`]), nothing left to compare.
+    Changed,
 }
 /// What the child sends the parent, one line each on its stdout.
 #[derive(Serialize, Deserialize)]
@@ -729,8 +766,15 @@ struct Reported {
     changed: Condvar,
 }
 impl Reported {
-    fn set(&self, status: JobStatus) {
-        *self.now.lock().unwrap() = status;
+    fn set(&self, mut status: JobStatus) {
+        let mut now = self.now.lock().unwrap();
+        // A running job's preview stands until a newer one comes: the child
+        // sends each once.
+        if status.preview.is_none() && status.state == JobState::Running {
+            status.preview = now.preview.take();
+        }
+        *now = status;
+        drop(now);
         self.changed.notify_all();
     }
 }
@@ -779,7 +823,12 @@ impl ExportHandle {
             matches!(request.spec, JobSpec::Export { .. }),
             "expected export job"
         );
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        if let Some(ledger) = export_ledger() {
+            // The job records its temporaries there (PM-478).
+            command.env(EXPORT_LEDGER_ENV, ledger);
+        }
+        let mut child = command
             .arg("--engine-job")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -894,7 +943,7 @@ impl ExportHandle {
                                 }
                             }
                             continue;
-                        } else if interactive.wait_quiet(&cancel) {
+                        } else if interactive.wait_quiet(&cancel, QUIET) {
                             active_at = Some(std::time::Instant::now());
                         }
                         if !cancel.load(Ordering::Acquire) {
@@ -1023,8 +1072,27 @@ fn end_with_parent() {
             }
         });
 }
+/// The variable an export job reads its ledger folder from.
+const EXPORT_LEDGER_ENV: &str = "PM_EXPORT_LEDGER";
+static EXPORT_LEDGER: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+fn export_ledger() -> Option<std::path::PathBuf> {
+    EXPORT_LEDGER.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+/// At launch, before any export: removes the export temporaries an earlier
+/// session ended by force left, as its ledger in `dir` names them (and
+/// nothing else), then records every new one there, in this process and in
+/// each export job (PM-478). Returns what it removed.
+pub fn adopt_export_ledger(dir: std::path::PathBuf) -> Vec<std::path::PathBuf> {
+    let removed = pm_export::atomic::clean_ledger(&dir);
+    pm_export::atomic::set_ledger(Some(dir.clone()));
+    *EXPORT_LEDGER.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
+    removed
+}
 pub fn run_child() -> Result<()> {
     end_with_parent();
+    if let Some(ledger) = std::env::var_os(EXPORT_LEDGER_ENV) {
+        pm_export::atomic::set_ledger(Some(ledger.into()));
+    }
     let mut lines = std::io::BufReader::new(std::io::stdin()).lines();
     let first = lines
         .next()
@@ -1408,6 +1476,17 @@ pub fn run_child() -> Result<()> {
                     checking: p
                         .checked
                         .map(|c| (c as f64 / p.frames.max(1) as f64).min(1.0)),
+                    // Only when a new one was made (at most every 250 ms):
+                    // the parent keeps the last one between them.
+                    preview: p
+                        .preview
+                        .as_ref()
+                        .map(|frame| pm_protocol::priority::JobPreview {
+                            frame: u32::try_from(frame.frame).unwrap_or(u32::MAX),
+                            width: frame.width,
+                            height: frame.height,
+                            jpeg: pm_protocol::common::Bytes(frame.jpeg.clone()),
+                        }),
                     ..status(&request.job, JobState::Running, p.fraction(), None, None)
                 });
             },
@@ -1615,6 +1694,10 @@ impl Faces {
                 *self.uncompared.lock().unwrap() = Some(why.clone());
                 Err(why)
             }
+            // Said as the fonts on this Mac changing (`FONTS_CHANGED`).
+            Ok(Err(Dispute::Changed)) => {
+                Err("the app's fonts changed since the job was asked".into())
+            }
             Err(_) => {
                 let why = "the app did not answer the export's font check".to_owned();
                 *self.uncompared.lock().unwrap() = Some(why.clone());
@@ -1820,10 +1903,7 @@ fn faces_agree(
 ) -> std::result::Result<(), Dispute> {
     let broker = font_broker()
         .ok_or_else(|| Dispute::Moved("the app has no font registry to compare with".into()))?;
-    let moved = || {
-        (Some(broker.generation()) != faces_of)
-            .then(|| Dispute::Moved("the app's fonts changed since the job was asked".into()))
-    };
+    let moved = || (Some(broker.generation()) != faces_of).then_some(Dispute::Changed);
     if let Some(moved) = moved() {
         return Err(moved);
     }
@@ -2229,15 +2309,12 @@ fn fill_cache(
     export_request: &pm_render::RenderRequest,
 ) -> Result<PathBuf> {
     use crate::render_cache::{DISK_FULL, FrameReport, LIMIT_FULL};
-    if fill.budget_us.is_some() {
-        // Background work never competes with the app for the CPU: the
-        // background class (efficiency cores, and only when nothing the
-        // person does needs them); its helper threads take it too.
-        let _ = crate::qos::set_job_qos(crate::qos::JobQos::Background);
-        // Every thread of this job process, not only this one (its render
-        // and helper threads start at the default class).
-        crate::qos::background_process();
-    }
+    // A background fill runs at the job process's utility class, not the
+    // background band: that band starved it on a busy machine (a tenth of
+    // the frames while the person was idle). It gives way to the person
+    // through the viewer's activity instead: a frame is granted the GPU only
+    // once they have stopped playing, drawing, pressing and typing for a
+    // while (the parent's grant loop), and a Play waits behind one frame.
     let cache = pm_promedia::cache::RenderCache::open(&fill.dir, fill.quota)?;
     let scene = crate::render::Scene {
         doc: doc.clone(),
@@ -2932,7 +3009,9 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let waiting = |activity: &Activity, cancel: &Arc<AtomicBool>| {
             let (activity, cancel) = (activity.clone(), cancel.clone());
-            std::thread::spawn(move || activity.wait_quiet(&cancel))
+            std::thread::spawn(move || {
+                activity.wait_quiet(&cancel, std::time::Duration::from_secs(60))
+            })
         };
         let quiet = waiting(&activity, &cancel);
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -2945,6 +3024,27 @@ mod tests {
         activity.wake();
         assert!(cancelled.join().unwrap());
         assert!(activity.busy());
+    }
+    /// A viewer that never goes quiet (a 3D estimate stuck waiting for its
+    /// renderer, a picture that never lands) holds an export back for at most
+    /// the quiet period per grant: the export goes ahead, in bands.
+    #[test]
+    fn a_viewer_that_stays_busy_never_holds_an_export_back() {
+        let activity = Activity::default();
+        activity.set(true);
+        let cancel = AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        for _ in 0..3 {
+            assert!(activity.wait_quiet(&cancel, std::time::Duration::from_millis(50)));
+        }
+        assert!(activity.busy(), "the viewer stayed busy");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "three grants in {:?}",
+            started.elapsed()
+        );
+        // Granted right after viewer activity: bands, not whole frames.
+        assert!(!grants_whole_frames(Some(std::time::Instant::now())));
     }
     /// An offline refusal names the first three clips and counts the rest.
     #[test]

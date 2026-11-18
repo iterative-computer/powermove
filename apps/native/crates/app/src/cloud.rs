@@ -4,7 +4,7 @@
 //! account. Protocol state lives in `pm-services` (`agent_auth`); this is the
 //! host: the registry over the system HTTP stack (bearer only to the registry
 //! origin, never across a foreign redirect), the session in the macOS
-//! Keychain, AppKit sheets for the steps, and Settings › Accounts rows through
+//! Keychain, AppKit sheets for the steps, and Settings › Account rows through
 //! the built-in facts. Every request runs on one service worker, so an
 //! exchange, its save and the refresh never interleave.
 use crate::sheets::{OpenSheet, from_surface};
@@ -58,7 +58,7 @@ impl Keychain {
     #[cfg(target_os = "macos")]
     pub fn for_app(profile: &Path) -> Self {
         let mut keychain = Self::named("Powermove Cloud", "session");
-        // Settings › Accounts › Sign-Ins from the Original App. Release builds
+        // Settings › Extensions › Sign-Ins from the Original App. Release builds
         // only: a development build never reads or touches a real account.
         if !cfg!(debug_assertions) {
             keychain.migrated = Some(profile.to_owned());
@@ -98,7 +98,7 @@ impl Keychain {
             return Ok(Vec::new());
         };
         let locators = pm_kernel::profile::registered_secrets(profile, "cloud/session")
-            .map_err(|e| format!("{e:?}"))?;
+            .map_err(|e| e.to_string())?;
         Ok(locators
             .into_iter()
             .rev()
@@ -610,7 +610,7 @@ async fn wait<T>(pending: pm_services::worker::Pending<T>, cx: &mut AsyncApp) ->
             .await;
     }
 }
-/// Settings › Accounts reads this through the built-in facts.
+/// Settings › Account reads this through the built-in facts.
 pub fn fact(cx: &App) -> Value {
     let Some(cloud) = cx.try_global::<Cloud>() else {
         return Value::Null;
@@ -632,7 +632,7 @@ fn changed(cx: &mut App) {
     });
 }
 
-/// Settings › Accounts › Sign In…: the first step's sheet on `window`.
+/// Settings › Account › Sign In…: the first step's sheet on `window`.
 pub fn open_sign_in(window: Retained<NSWindow>, cx: &mut App) {
     if !cx.has_global::<Cloud>() {
         return;
@@ -987,19 +987,19 @@ fn explain_settings(code: &str) -> String {
     }
 }
 
-/// Settings › Accounts › Sign Out.
+/// Settings › Account › Sign Out.
 pub fn sign_out(cx: &mut App) {
     if cx.has_global::<Cloud>() {
         submit(CloudWork::SignOut, Step::Settings, cx);
     }
 }
-/// Settings › Accounts › Remember Installs on This Account.
+/// Settings › Account › Remember Installs on This Account.
 pub fn set_remember(remember: bool, cx: &mut App) {
     if cx.has_global::<Cloud>() {
         submit(CloudWork::RememberInstalls(remember), Step::Settings, cx);
     }
 }
-/// Settings › Accounts › Delete Account…, after its confirmation.
+/// Settings › Account › Delete Account…, after its confirmation.
 pub fn delete_account(owner: Retained<NSWindow>, cx: &mut App) {
     use crate::alert::{Alert, Button};
     let confirm = copy::delete_account();

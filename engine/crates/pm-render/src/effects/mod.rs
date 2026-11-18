@@ -1127,6 +1127,7 @@ impl crate::composite::EffectHost for Effects {
             None,
             measure,
             frame.owner,
+            frame.bounds3d,
         )? {
             Ok(steps) => steps,
             Err(f) => return Ok(Err(f)),

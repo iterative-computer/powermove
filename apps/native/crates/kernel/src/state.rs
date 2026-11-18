@@ -53,6 +53,50 @@ pub struct ExtensionEntry {
     pub version: String,
     pub source: Value,
 }
+impl ExtensionEntry {
+    /// A D11 Stop turned it off for this run, whatever the saved choice.
+    pub fn stopped_this_run(&self) -> bool {
+        self.source
+            .get("hostRecord")
+            .and_then(|record| record.get("stopped"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    }
+    /// The entry turned on or off by the person (Settings, the Library, an
+    /// extension's `setEnabled`): the saved choice. Turning it on also ends a
+    /// Stop for this run, so it runs again at once.
+    pub fn switched(&self, enabled: bool) -> Self {
+        let mut entry = Self {
+            enabled,
+            ..self.clone()
+        };
+        if enabled
+            && let Some(record) = entry
+                .source
+                .as_object_mut()
+                .and_then(|source| source.get_mut("hostRecord"))
+                .and_then(Value::as_object_mut)
+        {
+            record.remove("stopped");
+        }
+        entry
+    }
+}
+/// Turns an installed extension on or off (PM-435): one state op that every
+/// window's extension host follows at once (it unloads the extension, or
+/// activates it again, with no relaunch) and that the saved state keeps
+/// across launches. `None` for an extension the state does not know.
+pub fn switch_extension(
+    state: &StateSnapshot,
+    id: &str,
+    enabled: bool,
+) -> Option<StateTransaction> {
+    let entry = state.extensions.get(id)?;
+    Some(StateTransaction {
+        expected_revision: None,
+        ops: vec![StateOp::Extension(entry.switched(enabled))],
+    })
+}
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StateSnapshot {
     pub revision: u64,
@@ -103,6 +147,10 @@ fn builtin_registries() -> Arc<BTreeMap<String, Vec<Registration>>> {
     })
     .clone()
 }
+/// A state transaction staged on a revision another write has moved past
+/// (`StateTransaction::expected_revision`): nothing was changed. A writer that
+/// patches what it read stages again on the new state.
+pub const STATE_CHANGED: &str = "Something else changed the project’s view at the same moment, so this change was not made.";
 impl StateSnapshot {
     /// The state every kernel starts from, before any profile is attached.
     pub fn seeded() -> Self {
@@ -160,7 +208,7 @@ impl StateSnapshot {
     }
     pub fn stage(&self, tx: StateTransaction) -> Result<(Self, Vec<StateChange>), String> {
         if tx.expected_revision.is_some_and(|r| r != self.revision) {
-            return Err("Kernel state changed".into());
+            return Err(STATE_CHANGED.into());
         }
         let mut next = self.clone();
         for op in tx.ops {
@@ -785,5 +833,45 @@ mod workspace_tests {
             })
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod extension_switch_tests {
+    use super::*;
+    fn entry(stopped: bool) -> ExtensionEntry {
+        let source =
+            parse(&format!(r#"{{"hostRecord":{{"stopped":{stopped},"name":"Glow"}}}}"#)).unwrap();
+        ExtensionEntry {
+            id: "glow".into(),
+            installed: true,
+            enabled: true,
+            version: "1.0.0".into(),
+            source,
+        }
+    }
+    /// PM-435: the person's switch is the saved choice; turning it on also
+    /// ends a Stop for this run, and turning it off keeps the Stop's mark.
+    #[test]
+    fn the_switch_is_the_saved_choice_and_turning_on_ends_a_stop() {
+        let stopped = entry(true);
+        assert!(stopped.stopped_this_run());
+        let off = stopped.switched(false);
+        assert!(!off.enabled && off.stopped_this_run());
+        let on = off.switched(true);
+        assert!(on.enabled && !on.stopped_this_run());
+        let name = |e: &ExtensionEntry| e.source.get("hostRecord").and_then(|r| r.get("name")).cloned();
+        assert_eq!(name(&on), name(&stopped), "the rest of its record stays");
+        let mut extensions = BTreeMap::new();
+        extensions.insert("glow".to_owned(), entry(false));
+        let state = StateSnapshot {
+            extensions: Arc::new(extensions),
+            ..StateSnapshot::default()
+        };
+        let Some(StateTransaction { ops, .. }) = switch_extension(&state, "glow", false) else {
+            panic!("a known extension switches");
+        };
+        assert!(matches!(&ops[..], [StateOp::Extension(e)] if !e.enabled && e.id == "glow"));
+        assert!(switch_extension(&state, "unknown", false).is_none());
     }
 }

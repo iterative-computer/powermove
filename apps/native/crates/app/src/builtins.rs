@@ -161,12 +161,16 @@ pub struct Host {
     /// toolbar's Agent item among them), so that same press's toggle does
     /// not open it again.
     agent_dismissed: Option<std::time::Instant>,
+    /// Select part of the screen is up: the popover stepped aside for it and
+    /// is not dismissed by the editor taking key meanwhile.
+    agent_picking: bool,
     /// The Settings page the next show asks for (Keyboard Shortcuts…).
     pub settings_page: Option<String>,
     /// The Settings window's AppKit chrome while this editor hosts it, and
     /// where its back and forward go (PM-375).
     pub settings_chrome: Option<std::rc::Rc<pm_shell::settings_window::SettingsChrome>>,
     pub(crate) settings_history: crate::settings_window::History,
+    pub(crate) settings_form: Option<crate::settings_window::form::Form>,
     /// This editor's entity while it hosts Settings (its picker lists the
     /// other editors' projects without reading this one, being updated).
     pub(crate) settings_me: Option<gpui::EntityId>,
@@ -234,8 +238,12 @@ impl Controller {
         let windows = std::mem::take(&mut self.builtins.windows);
         // The Settings window stays open across the restart: its chrome,
         // where its back and forward go, and that this editor hosts it.
+        if let Some(form) = &mut self.builtins.settings_form {
+            form.reset();
+        }
         let settings = (
             self.builtins.settings_chrome.take(),
+            self.builtins.settings_form.take(),
             std::mem::take(&mut self.builtins.settings_history),
             self.builtins.settings_me.take(),
             self.builtins.settings_watch.take(),
@@ -244,6 +252,7 @@ impl Controller {
         self.builtins.windows = windows;
         (
             self.builtins.settings_chrome,
+            self.builtins.settings_form,
             self.builtins.settings_history,
             self.builtins.settings_me,
             self.builtins.settings_watch,
@@ -482,6 +491,8 @@ impl Controller {
         if self.settling.as_deref() == Some(project) {
             self.settling = None;
             self.opening_name = None;
+            // No panel shows its ghost any more: its picture goes.
+            self.ghost_retire();
             self.open_timer.mark("settled", serde_json::json!({}));
             self.busy = None;
             // Bound to the open that brought `project`: they run only if this
@@ -647,7 +658,7 @@ impl Controller {
             .unwrap_or(1.);
         json!({"time":self.time(),"playing":playing,"looping":self.playback.looping,
             "channels":crate::viewer2::CHANNELS.iter().find(|(m, _, _)| *m == self.channels).map_or("viewer.showRGB", |(_, _, c)| c),"effectiveQuality":effective,"layerFailures":failures,"studioRefineProgress":status.as_ref().and_then(|s|s.refine_progress),"studioExportEstimate":status.as_ref().map(|s|&s.export_estimate),"studioDenoiser":if pm_engine_service::studio::OIDN{"oidn"}else{"guided"},"focusPart":self.part_focus.as_ref().map(|(layer,slot,seq)|json!({"layer":layer,"slot":slot,"seq":seq})),"stage":self.view.stage,"timelineShown":self.timeline_shown,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
-            "mediaSettings":self.media_settings_fact(),"storageSettings":self.storage_settings_fact(),"skimming":self.skimming.on,"shortcuts":self.shortcuts_page,"settingsHeader":self.settings_header(cx),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
+            "mediaSettings":self.media_settings_fact(),"storageSettings":self.storage_settings_fact(),"skimming":self.skimming.on,"shortcuts":self.shortcuts_page,"settingsHeader":self.settings_header(cx),"settingsVersion":crate::updates::current_version(),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
             // The Agent panel is a popover while its own window is open, a docked panel otherwise.
             "agentPopover":self.builtins.opening_windows.contains("agent")
                 || self.builtins.windows.get("agent").is_some_and(|w| cx.windows().contains(w))})
@@ -765,7 +776,24 @@ impl Controller {
         let gizmos = self.builtins.gizmos.clone();
         let views: Vec<_> = self.builtins.views.values().cloned().collect();
         timeline.is_some_and(|t| t.update(cx, |t, cx| t.cancel(cx)))
-            || gizmos.is_some_and(|g| g.update(cx, |g, cx| g.cancel(cx)))
+            || gizmos.is_some_and(|g| {
+                // A text session ends here (it reads nothing of this
+                // controller, and its keys keep their order, PM-459); a
+                // pointer gesture's end reads the controller through its
+                // host, so it ends after this update (PM-480).
+                if g.update(cx, |g, cx| g.finish_text(false, cx)) {
+                    return true;
+                }
+                if !g.read(cx).gesture_to_cancel() {
+                    return false;
+                }
+                cx.defer(move |cx| {
+                    g.update(cx, |g, cx| {
+                        g.cancel(cx);
+                    })
+                });
+                true
+            })
             || views
                 .into_iter()
                 .any(|view| view.update(cx, |view, cx| view.cancel_gesture(cx)))
@@ -850,11 +878,7 @@ impl Controller {
                 h: f32::from(b.size.height),
             })
         });
-        let owner = (!self.builtins.agent_docked)
-            .then(|| self.builtins.windows.get("agent").copied())
-            .flatten()
-            .and_then(|w| w.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
-            .flatten();
+        let owner = self.agent_popover_window(cx);
         let choices = options
             .iter()
             .enumerate()
@@ -894,6 +918,16 @@ impl Controller {
             request.input["placeholder"].as_str().unwrap_or("Search"),
         );
     }
+    /// The Agent popover's own window, while the panel is shown there (not
+    /// docked): what its menus and questions stand on, so answering them
+    /// leaves the popover open (a sheet on the editor took key from it).
+    fn agent_popover_window(&self, cx: &mut App) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+        (!self.builtins.agent_docked)
+            .then(|| self.builtins.windows.get("agent").copied())
+            .flatten()
+            .and_then(|w| w.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
+            .flatten()
+    }
     /// The Agent menu's answer: a row's value, or none when it closed unchosen.
     pub fn agent_picked(&mut self, index: &str) {
         if let Some((runtime, id, values)) = self.builtins.agent_pick.take() {
@@ -920,6 +954,13 @@ impl Controller {
         self.sync_keymap();
         if crate::first_run::take_workspace_request() {
             self.host.borrow().send_command("firstRunWorkspace", vec![]);
+        }
+        // A restored tab behind the front one starts its panels, media probes
+        // and thumbnails with its project's open: its turn comes once the
+        // front tab shows its first frame and the person is idle, or when it
+        // is selected (`Controller::restore_waiting`).
+        if self.restore_waiting() {
+            return;
         }
         self.start_builtins(cx);
         self.probe_builtin_media(cx);
@@ -1078,7 +1119,9 @@ impl Controller {
                 }
                 continue;
             }
-            if let Some(view) = self.builtins.views.get(&p.panel) {
+            if p.panel == "settings" && self.builtins.settings_form.is_some() {
+                self.publish_settings_form(p, cx);
+            } else if let Some(view) = self.builtins.views.get(&p.panel) {
                 view.update(cx, |v, cx| v.publish(p, cx));
             } else {
                 self.builtins.pending.insert(p.panel.clone(), p);
@@ -1125,6 +1168,26 @@ impl Controller {
             cx.notify();
         }
     }
+    pub(crate) fn mount_settings_form(&mut self, cx: &mut Context<Self>) {
+        if let Some(publication) = self.builtins.pending.remove("settings") {
+            self.publish_settings_form(publication, cx);
+        }
+    }
+
+    pub(crate) fn cache_closed_settings_form(&mut self) {
+        if let Some(mut form) = self.builtins.settings_form.take()
+            && let Some(publication) = form.take_publication()
+        {
+            self.builtins.pending.insert("settings".into(), publication);
+        }
+    }
+
+    fn publish_settings_form(&mut self, publication: Publication, cx: &mut Context<Self>) {
+        if let Some(form) = self.builtins.settings_form.as_mut() {
+            form.publish(publication, &self.host.borrow().tokens, cx);
+        }
+    }
+
     pub fn builtin_panel(
         &mut self,
         id: &str,
@@ -1302,6 +1365,8 @@ impl Controller {
                 if surface.read(cx).culls() {
                     surface.update(cx, |_, cx| cx.notify());
                 }
+                // Its AppKit controls show as pictures until it rests.
+                surface.update(cx, |s, cx| s.scroll_step(window, cx));
                 // The thumb goes once the scrolling has stopped.
                 cx.spawn_in(window, async move |this, cx| {
                     cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
@@ -1395,7 +1460,22 @@ impl Controller {
             .or_insert_with(|| cx.new(|cx| crate::v4_view::HeaderView::new(view, cx)))
             .clone();
         header.update(cx, |h, cx| h.set_tabbed(tabbed, cx));
-        Some(div().w_full().child(header).into_any_element())
+        // Beside a group's tabs the header's actions take their own width
+        // (the dock gives them a box as wide as its content): a cached view
+        // is laid out only by the style it is given, so one there, asked for
+        // the full width of a box sized by it, came out with none and the
+        // panel's + and menu did not show. Drawn in place instead.
+        if tabbed {
+            return Some(div().flex().h_full().child(header).into_any_element());
+        }
+        // Alone in its row: cached, drawn again only when its panel changes
+        // (it observes the panel), not with every frame the window draws.
+        Some(
+            div()
+                .w_full()
+                .child(header.cached(StyleRefinement::default().w_full()))
+                .into_any_element(),
+        )
     }
     /// Settings › General › Bring My Workspace…: Settings gives way to the
     /// Agent panel, where a new thread asks for the After Effects workspace.
@@ -1524,6 +1604,9 @@ impl Controller {
     /// (anywhere outside the popover) closes it; another window taking key
     /// (Settings, a file picker, another app) leaves it open.
     fn agent_resigned(&mut self, cx: &mut Context<Self>) {
+        if self.builtins.agent_picking {
+            return;
+        }
         let editor = self.close_window;
         if agent_dismisses(
             self.agent_open(cx),
@@ -1534,6 +1617,11 @@ impl Controller {
         }
     }
     pub fn show_builtin(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // The Export sheet stands over a project in front: never over Home,
+        // whatever asked for it (PM-472).
+        if id == "export" && (self.session.is_none() || self.home_visible) {
+            return;
+        }
         self.start_builtins(cx);
         if id == "settings" {
             // Settings › Media shows the protected folders as they are now,
@@ -1740,13 +1828,13 @@ impl Controller {
                             )
                             .detach();
                         }
-                        // Settings follows the app's appearance: when its
-                        // window changes, it draws again once the editor
-                        // has rebuilt the tokens it is drawn with.
                         if panel == "settings" {
                             cx.observe_window_appearance(
                                 window,
-                                |_: &mut SurfaceWindow, window, cx| {
+                                |this: &mut SurfaceWindow, window, cx| {
+                                    if let Some(chrome) = &this.chrome {
+                                        chrome.update_sidebar_appearance();
+                                    }
                                     cx.notify();
                                     cx.spawn_in(window, async move |this, cx| {
                                         cx.background_executor()
@@ -2015,6 +2103,32 @@ impl Controller {
                                     .collect();
                                     crate::quick_look::toggle(files);
                                 }
+                                // Double-click or Return on a ready item, and the
+                                // item menus (v1 `addFromAsset`, `Comps.fromAsset`,
+                                // `Comps.addToTimeline`).
+                                pm_panel_media::Effect::AddAsset(id) => {
+                                    self.add_to_timeline(&[id], &[], cx)
+                                }
+                                pm_panel_media::Effect::NestComposition(id) => {
+                                    self.add_to_timeline(&[], &[id], cx)
+                                }
+                                pm_panel_media::Effect::NewCompFromAsset(id) => {
+                                    self.new_comp_from_asset(&id, cx)
+                                }
+                                pm_panel_media::Effect::InterpretFootage(id) => {
+                                    self.interpret_asset_sheet(id, cx)
+                                }
+                                pm_panel_media::Effect::ConfirmDelete {
+                                    token,
+                                    assets,
+                                    references,
+                                } => self.confirm_delete_media(
+                                    effect.owner.clone(),
+                                    token,
+                                    &assets,
+                                    references,
+                                    cx,
+                                ),
                                 pm_panel_media::Effect::Focus(_)
                                 | pm_panel_media::Effect::ClearPreview => {}
                                 other => {
@@ -2063,6 +2177,10 @@ impl Controller {
                     Ok(Value::Null)
                 }
                 "export.begin" | "export.retry" | "export.without" => {
+                    // The 3D estimate measures the GPU the export now uses.
+                    if let Some(viewer) = &self.viewer {
+                        viewer.cancel_export_estimate("an export started");
+                    }
                     self.begin_builtin_export(
                         request.input.clone(),
                         request.operation != "export.begin",
@@ -2185,16 +2303,45 @@ impl Controller {
                             .unwrap_or(false)
                         })
                         .unwrap_or_else(|| window.window_handle());
-                    self.close_agent(cx);
+                    // The popover steps aside, kept as it is: back, it shows
+                    // the new chip at once instead of rebuilding first.
+                    let popover = self
+                        .builtins
+                        .windows
+                        .get("agent")
+                        .copied()
+                        .and_then(|h| h.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
+                        .flatten();
+                    if let Some(popover) = &popover {
+                        if let Some(parent) = popover.parentWindow() {
+                            parent.removeChildWindow(popover);
+                        }
+                        popover.orderOut(None);
+                    }
+                    self.builtins.agent_picking = popover.is_some();
                     let picked = pm_shell::region_pick::pick(&editor);
+                    // The overlay takes the pointer from here: no layer stays
+                    // outlined under it, nor after.
+                    // Deferred: the viewer's redraw reads this controller.
+                    if let Some(gizmos) = self.builtins.gizmos.clone() {
+                        cx.defer(move |cx| gizmos.update(cx, |g, cx| g.clear_hover(cx)));
+                    }
                     cx.spawn(async move |this, cx| {
                         let picked = picked.recv().await.ok().flatten();
                         let _ = handle.update(cx, |_, window, cx| {
                             let _ = this.update(cx, |v, cx| {
+                                v.builtins.agent_picking = false;
                                 if let Some(rect) = picked {
                                     v.attach_region(rect, window, cx);
                                 }
-                                v.show_builtin("agent", window, cx);
+                                match &popover {
+                                    Some(popover) if v.builtins.windows.contains_key("agent") => {
+                                        let editor = v.host.borrow().window.clone();
+                                        gpui_macos::child_window::attach(popover, &editor);
+                                        gpui_macos::child_window::show(popover, true);
+                                    }
+                                    _ => v.show_builtin("agent", window, cx),
+                                }
                             });
                         });
                     })
@@ -2376,6 +2523,13 @@ impl Controller {
                 "agent.consent" => {
                     let effect = request.input["effect"].as_u64().unwrap_or_default();
                     use crate::alert::{Alert, Button};
+                    // The request comes through the editor's window, never
+                    // the popover's: the sheet's window is looked up.
+                    let on: objc2::rc::Retained<objc2_app_kit::NSWindow> = consent_window(
+                        self.agent_popover_window(cx),
+                        crate::platform::ns_window(window),
+                        self.host.borrow().window.clone(),
+                    );
                     let rx = Alert::new(
                         "Give the agent full access?",
                         "It can run commands and edit files anywhere on this Mac without asking. Choose this only for work you trust.",
@@ -2385,10 +2539,15 @@ impl Controller {
                         ],
                     )
                     .critical()
-                    .sheet(&self.host.borrow().window);
+                    // On the popover itself, as its file picker is: on the
+                    // editor it took key from the popover, which closed, and
+                    // the person had to open it again to send (PM-507).
+                    .sheet(&on);
+                    self.builtins.agent_picking = true;
                     let runtime = runtime.clone();
-                    cx.spawn(async move |_, cx| {
+                    cx.spawn(async move |this, cx| {
                         let accepted = rx.recv().await == Ok(Some(true));
+                        let _ = this.update(cx, |v, _| v.builtins.agent_picking = false);
                         let _ = cx
                             .background_executor()
                             .spawn(async move { runtime.agent_consent(effect, accepted) })
@@ -2426,11 +2585,9 @@ impl Controller {
                 }
                 "settings.scroll" => {
                     if let Some(section) = request.input["section"].as_str()
-                        && let Some(view) = self.builtins.views.get("settings")
+                        && let Some(form) = &mut self.builtins.settings_form
                     {
-                        view.update(cx, |v, cx| {
-                            v.scroll_semantic(&format!("settings.section.{section}"), cx)
-                        });
+                        form.reveal(section);
                     }
                     Ok(Value::Null)
                 }
@@ -2678,6 +2835,10 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
                 cx.notify();
             }
             E::Seek(time) => v.seek(time),
+            // The empty composition's buttons: the app's own commands.
+            E::Run(name) => v.host.borrow().send_command(&name, vec![]),
+            // Import… from the timeline: File › Import…, at the playhead.
+            E::Import { .. } => v.host.borrow().send_command("import", vec![]),
             E::TogglePlayback => v.host.borrow().send_command("play", vec![]),
             E::FrameComposition => v.host.borrow().send_command("viewer.fit", vec![]),
             E::OpenComposition(id) => v.open_builtin_composition(&id, cx),
@@ -2713,10 +2874,9 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         }
     }
     fn report(&self, message: String, cx: &mut App) {
-        let _ = self.0.update(cx, |v, cx| {
-            v.message = message;
-            cx.notify();
-        });
+        // A passing note: it clears once its moment is over (PM-476 kept a
+        // timeline view write's failure in the status line for good).
+        let _ = self.0.update(cx, |v, cx| v.note(message, cx));
     }
     fn command(&self, name: &str, cx: &mut App) {
         crate::timeline_surface::Delegate::run(self, name, vec![], cx);
@@ -2888,6 +3048,9 @@ impl crate::gizmo::Host for ControllerDelegate {
         cx: &mut App,
     ) {
         let _ = self.0.update(cx, |v, _| v.set_gizmos(lines, at));
+    }
+    fn marks(&self, marks: Vec<crate::gizmo_layer::Mark>, cx: &mut App) {
+        let _ = self.0.update(cx, |v, _| v.gizmo_marks = marks);
     }
     fn pick_surface(
         &self,
@@ -3244,19 +3407,14 @@ impl Render for SurfaceWindow {
         let popover = self.panel == "agent";
         // Export is a sheet: no title bar band (its window fits its content).
         let sheet = self.panel == "export";
-        // Settings' page is under AppKit's toolbar, on the page's ground;
-        // its chrome follows the appearance as it changes.
-        let settings = self.panel == "settings";
-        if let Some(chrome) = &self.chrome {
-            let (dark, ground) =
-                crate::settings_window::scheme(&self.owner.read(cx).host.borrow().tokens);
-            chrome.set_scheme(dark, ground);
+        if panel == "settings" {
+            return div().into_any_element();
         }
         if popover || sheet {
             // A focused control that went away leaves nothing focused.
             self.keys.claim(window, cx);
         }
-        let (mut fill, mut band) = (0, 0.);
+        let (mut fill, mut band, mut head_h) = (0, 0., 0.);
         let (head, body) = self.owner.update(cx, |v, cx| {
             let (header, colour, titlebar) = {
                 let t = &v.host.borrow().tokens;
@@ -3264,20 +3422,15 @@ impl Render for SurfaceWindow {
                 // `floating` inside the glass frame (agent-panel.md §8).
                 let colour = if popover {
                     t.colors.floating
-                } else if settings {
-                    t.colors.panel_secondary
                 } else {
                     t.colors.panel
                 };
                 (t.metrics.header, colour, t.metrics.titlebar)
             };
             fill = colour;
+            head_h = header;
             // Windows with a transparent title bar keep their content below it.
-            band = if popover || sheet || settings {
-                0.
-            } else {
-                titlebar
-            };
+            band = if popover || sheet { 0. } else { titlebar };
             // A panel's header row is the dock's; the popover has no dock, so
             // it shows the panel's header (Thread, New Thread, Pin) itself.
             let rect = pm_shell::layout::Rect {
@@ -3339,8 +3492,17 @@ impl Render for SurfaceWindow {
                         }
                         let panel = this.panel.clone();
                         let view = this.owner.read(cx).builtins.views.get(&panel).cloned();
-                        if let Some(view) = view {
-                            view.update(cx, |v, cx| v.root_key_down(e, window, cx));
+                        let heard = view
+                            .is_some_and(|view| view.update(cx, |v, cx| v.root_key_down(e, window, cx)));
+                        // Escape closes every sheet: one whose panel has no
+                        // keys of its own (nothing in it yet) is closed here
+                        // (PM-472).
+                        if !heard && PopoverKeys::dismisses(e) {
+                            cx.stop_propagation();
+                            let owner = this.owner.clone();
+                            cx.defer(move |cx| {
+                                let _ = owner.update(cx, |v, cx| v.close_export_sheet(cx));
+                            });
                         }
                     },
                 ))
@@ -3351,8 +3513,15 @@ impl Render for SurfaceWindow {
             .bg(rgb(fill))
             // The popover's header is its handle (popover_drag).
             .children(head.map(|head| {
+                // Its own row, as tall as a header: the cached header has no
+                // height of its own, so the conversation started under it
+                // and covered Thread, New Thread and Pin (PM-507).
                 div()
                     .id("agent-popover-handle")
+                    .w_full()
+                    .h(px(head_h))
+                    .flex_shrink_0()
+                    .bg(rgb(fill))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, window, cx| {
@@ -3402,6 +3571,7 @@ impl Render for SurfaceWindow {
                     .size_full(),
                 )
             })
+            .into_any_element()
     }
 }
 
@@ -3430,8 +3600,25 @@ pub(crate) fn returns_to_popover(was_docked: bool, docked: bool, parked: bool) -
 }
 /// The popover gave up key: it closes when its own editor took it (a press
 /// outside the popover), never for another window or app.
+/// Where the full-access question stands: the Agent popover when the panel is
+/// shown there, else the window that asked, else the editor.
+fn consent_window<W>(popover: Option<W>, asking: Option<W>, editor: W) -> W {
+    popover.or(asking).unwrap_or(editor)
+}
 fn agent_dismisses(open: bool, editor_took_key: bool) -> bool {
     open && editor_took_key
+}
+#[cfg(test)]
+mod consent_window_tests {
+    /// PM-507 / run 29: the full-access question stood on the editor (the
+    /// request comes through its window) and answering it closed the
+    /// popover. With the popover open it stands on the popover.
+    #[test]
+    fn the_full_access_question_stands_on_the_popover_when_it_is_open() {
+        assert_eq!(super::consent_window(Some("popover"), Some("editor"), "host"), "popover");
+        assert_eq!(super::consent_window(None, Some("editor"), "host"), "editor", "docked");
+        assert_eq!(super::consent_window::<&str>(None, None, "host"), "host");
+    }
 }
 #[cfg(test)]
 mod popover_keys_tests {
@@ -3888,7 +4075,7 @@ mod project_view_tests {
 
 impl Controller {
     /// The open project's asset names, by id (what the Project shows).
-    fn asset_names(&self) -> std::collections::HashMap<String, String> {
+    pub(crate) fn asset_names(&self) -> std::collections::HashMap<String, String> {
         let Some(published) = &self.published else {
             return Default::default();
         };

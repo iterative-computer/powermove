@@ -188,6 +188,7 @@ viewer, timeline or Project does the same. Types: `.glb`, `.gltf`, `.obj` (with 
 | Large model | status capsule (§3) | `Preparing {n} triangles` |
 | Empty composition | One Undo adds the model on the floor, a framing camera, the three softboxes and the seamless set | undo name `Import {file}` |
 | Composition already has a camera or light | Adds the model only | undo name `Import {file}` |
+| Composition has 2D layers, no camera or light | Adds the model and the key softbox; the sky lights it without showing, and there's no floor or set, so it composites with the 2D layers in stack order over a clear background (a new shape from Add 3D Layer does the same) | undo name `Import {file}` |
 | Splat | Stands upright and is framed on its dense core. No Studio prep | as above |
 
 Limits: GLB 512 MB; 10 million triangles; 65,536 parts; 16 million splats.

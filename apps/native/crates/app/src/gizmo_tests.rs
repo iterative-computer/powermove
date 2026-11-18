@@ -22,12 +22,17 @@ use std::{
 struct Recorder {
     canvas_focuses: Cell<usize>,
     lines: RefCell<Vec<OverlayLine>>,
+    /// The marks sent with them (handles, knob, anchor rings, keyline).
+    marks: RefCell<Vec<crate::gizmo_layer::Mark>>,
     reports: RefCell<Vec<String>>,
     tool: Cell<Option<Tool>>,
     navigation: RefCell<Vec<Navigate>>,
     menus: Cell<usize>,
     commands: RefCell<Vec<String>>,
     input: RefCell<Option<Rc<FakeInput>>>,
+    /// The text editor takes the keyboard a present after it is asked to
+    /// (AppKit), not at once.
+    late_focus: Cell<bool>,
     variant: RefCell<Option<String>>,
     /// Input times drag steps stamped for the viewer trace.
     stamps: RefCell<Vec<f64>>,
@@ -55,6 +60,10 @@ pub(crate) struct FakeInput {
     events: RefCell<Vec<TextEvent>>,
     wake: RefCell<Option<Rc<dyn Fn()>>>,
     focused: Cell<bool>,
+    late_focus: Cell<bool>,
+    /// Typed but not yet handed to the editor (the window's key queue
+    /// behind a busy frame): it arrives when asked, or after the edit.
+    pending: RefCell<String>,
 }
 impl FakeInput {
     fn send(&self, event: TextEvent) {
@@ -72,6 +81,10 @@ impl FakeInput {
     }
     fn key(&self, key: &'static str) {
         self.send(TextEvent::Key(key));
+    }
+    /// Keys typed faster than they are handed over: still on their way.
+    fn type_queued(&self, text: &str) {
+        self.pending.borrow_mut().push_str(text);
     }
 }
 impl TextInput for FakeInput {
@@ -95,7 +108,9 @@ impl TextInput for FakeInput {
         self.focused.get()
     }
     fn focus(&self) {
-        self.focused.set(true);
+        if !self.late_focus.get() {
+            self.focused.set(true);
+        }
     }
     fn set_font(&self, _: &str, _: f64) {}
     fn misspelled(&self) -> Vec<(usize, usize)> {
@@ -113,6 +128,12 @@ impl TextInput for FakeInput {
     }
     fn on_event(&self, wake: Rc<dyn Fn()>) {
         *self.wake.borrow_mut() = Some(wake);
+    }
+    fn take_pending(&self) {
+        let queued = std::mem::take(&mut *self.pending.borrow_mut());
+        if !queued.is_empty() {
+            self.type_text(&queued);
+        }
     }
 }
 struct Recording(Rc<Recorder>);
@@ -155,6 +176,9 @@ impl Host for Recording {
         *self.0.lines.borrow_mut() = lines;
         self.0.placements.borrow_mut().push(at);
     }
+    fn marks(&self, marks: Vec<crate::gizmo_layer::Mark>, _: &mut App) {
+        *self.0.marks.borrow_mut() = marks;
+    }
     fn navigate(&self, change: Navigate, _: &mut App) {
         self.0.navigation.borrow_mut().push(change);
     }
@@ -196,6 +220,7 @@ impl Host for Recording {
         _: &mut App,
     ) -> Option<Rc<dyn TextInput>> {
         let input = Rc::new(FakeInput::default());
+        input.late_focus.set(self.0.late_focus.get());
         *input.value.borrow_mut() = initial.into();
         *self.0.input.borrow_mut() = Some(input.clone());
         Some(input)
@@ -359,10 +384,30 @@ impl Stage {
 }
 #[gpui::test]
 fn the_engine_receives_a_box_and_handles_for_the_selection(cx: &mut TestAppContext) {
+    use crate::gizmo_layer::Shape;
     let s = stage(cx);
     let lines = s.recorder.lines.borrow();
-    assert!(lines.len() >= 4 + 8 * 4, "{} lines", lines.len());
+    assert!(lines.len() >= 4, "{} lines", lines.len());
     assert!(lines.iter().all(|l| l.ends.iter().all(|v| v.is_finite())));
+    // viewer-chrome.md: eight accent-filled handles keylined dark, a round
+    // knob on the dark with an accent ring, the anchor's rings, and the
+    // box's dark keyline drawn under its accent line.
+    let marks = s.recorder.marks.borrow();
+    let t = tokens();
+    let accent = {
+        let c = t.colors.accent;
+        [((c >> 16) & 255) as f32 / 255., ((c >> 8) & 255) as f32 / 255., (c & 255) as f32 / 255., 1.]
+    };
+    let squares: Vec<_> = marks.iter().filter(|m| m.shape == Shape::Square).collect();
+    assert_eq!(squares.len(), 8);
+    assert!(squares.iter().all(|m| m.fill == Some(accent) && m.stroke.is_some() && !m.under));
+    assert!(squares.iter().all(|m| m.size == t.metrics.gizmo_handle));
+    let circles: Vec<_> = marks.iter().filter(|m| m.shape == Shape::Circle).collect();
+    assert_eq!(circles.len(), 3, "the knob and the anchor's two rings");
+    assert!(circles.iter().any(|m| m.fill.is_some() && m.stroke == Some(accent)), "the knob");
+    let keylines = marks.iter().filter(|m| matches!(m.shape, Shape::To(_))).count();
+    assert_eq!(keylines, 4);
+    assert!(marks.iter().filter(|m| matches!(m.shape, Shape::To(_))).all(|m| m.under));
 }
 #[gpui::test]
 fn dragging_the_body_moves_the_layer_and_undo_restores_it(cx: &mut TestAppContext) {
@@ -478,6 +523,31 @@ fn the_rotate_handle_turns_about_the_anchor_and_undo_restores_it(cx: &mut TestAp
     assert!(s.pose().rotation > before.rotation, "{}", s.pose().rotation);
     s.undo(cx);
     assert_eq!(s.pose().rotation, before.rotation);
+}
+/// A turn and then a move are two undo steps: each Cmd-Z undoes exactly one
+/// (PM-433: two presses once undid only one).
+#[gpui::test]
+fn a_turn_then_a_move_undo_one_step_each(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let start = s.pose();
+    let (.., rotate) = s.points();
+    let at = s.point_of(rotate);
+    s.drag(cx, at, point(px(60.), px(20.)), Modifiers::none());
+    let turned = s.pose();
+    assert!(turned.rotation != start.rotation);
+    let (body, ..) = s.points();
+    let at = s.point_of(body);
+    s.drag(cx, at, point(px(40.), px(-10.)), Modifiers::none());
+    let moved = s.pose();
+    assert_ne!(moved.position, turned.position);
+    s.undo(cx);
+    let once = s.pose();
+    assert_eq!(once.position, turned.position, "the first undo undoes the move");
+    assert_eq!(once.rotation, turned.rotation, "and only the move");
+    s.undo(cx);
+    let twice = s.pose();
+    assert_eq!(twice.rotation, start.rotation, "the second undoes the turn");
+    assert_eq!(twice.position, start.position);
 }
 /// While the rotate handle is held the box is already turned with the layer
 /// (it does not wait for the kernel's read-back), and it is the box the
@@ -801,6 +871,11 @@ struct Owner {
     surface: Option<Entity<GizmoSurface>>,
     overlays: usize,
 }
+impl gpui::Render for Owner {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        gpui::div()
+    }
+}
 struct OwnerHost(gpui::WeakEntity<Owner>);
 impl Host for OwnerHost {
     fn time(&self, cx: &App) -> f64 {
@@ -828,6 +903,67 @@ impl Host for OwnerHost {
     fn navigate(&self, _: Navigate, _: &mut App) {}
     fn layer_menu(&self, _: Option<String>, _: &mut gpui::Window, _: &mut App) {}
     fn report(&self, _: String, _: &mut App) {}
+    fn pause(&self, cx: &mut App) {
+        // As the app's: it reads the owner to reach the viewer.
+        if let Some(o) = self.0.upgrade() {
+            o.read(cx);
+        }
+    }
+}
+/// Acceptance run 26 (PM-480, 2 of 2): Return with a text layer selected,
+/// from the controller's own command. The edit reads the controller (the
+/// time, pausing playback) through the host: run inside the owner's update
+/// it aborted the app; it starts once that update is over.
+#[gpui::test]
+fn return_on_a_selected_text_during_the_owners_update_never_reads_it_while_leased(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig_project(
+        "viewer",
+        &project_of("text").replace(r#""d":{"w":100,"h":100}"#, r#""d":{"text":"Hi"}"#),
+    );
+    let select = SelectionCall::Layers {
+        ids: vec!["l0".into()],
+        add: false,
+    };
+    rig.kernel
+        .call(PROJECT, Request::new(Caller::native(), select))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let kernel = rig.kernel.clone();
+    cx.executor().allow_parking();
+    let (owner, vcx) = cx.add_window_view(|_, _| Owner {
+        surface: None,
+        overlays: 0,
+    });
+    let weak = owner.downgrade();
+    let surface = vcx.new(|_| {
+        GizmoSurface::new(kernel, PROJECT.into(), tokens(), Rc::new(OwnerHost(weak)))
+    });
+    owner.update(vcx, |o, _| o.surface = Some(surface.clone()));
+    // Controller::command("text.editSelected"), under the owner's lease.
+    let edits = owner.update_in(vcx, |o, window, cx| {
+        let surface = o.surface.clone().unwrap();
+        crate::gizmo::text::edit_selected_text_after(surface, window, cx)
+    });
+    assert!(edits, "one unlocked text layer is selected");
+    vcx.run_until_parked();
+    let open = surface.clone();
+    settle(cx, move |cx| open.read_with(cx, |g, _| g.text_open().is_some()));
+}
+/// Acceptance run 26 (PM-480): digits typed for a number field that did not
+/// take the click turned the view 3D (0) and orbited it. View ▸ 3D's keys
+/// act only while the 3D view has the keyboard, in Free View; elsewhere
+/// digits do what v1's did. Fly Navigation's key is not a digit.
+#[test]
+fn digits_reach_the_3d_view_only_while_it_has_the_keyboard_in_free_view() {
+    assert!(!crate::gizmo::studio_key("nav", true, true, false));
+    assert!(!crate::gizmo::studio_key("look", true, true, false), "0 never turns 3D on by key");
+    assert!(!crate::gizmo::studio_key("nav", false, true, true), "the 3D view has no keyboard");
+    assert!(crate::gizmo::studio_key("nav", true, true, true));
+    assert!(crate::gizmo::studio_key("look", true, true, true), "0 leaves Free View");
+    assert!(crate::gizmo::studio_key("fly", true, true, false));
 }
 #[gpui::test]
 fn refreshing_during_the_owners_update_never_reads_it_while_leased(cx: &mut TestAppContext) {
@@ -1048,18 +1184,41 @@ fn channel(layer: &pm_model::Value, mask: bool, key: &str) -> Option<f64> {
     };
     owner.get("p")?.get(key)?.get("v")?.as_f64()
 }
-/// Shape tool over a selected shape layer: the drag draws a new shape layer
-/// whose Scale is the drawn size, selected, in one undo step.
+/// Shape tool with nothing selected: the drag draws a new shape layer of
+/// the drawn size at Scale 100% (After Effects; v1 drew a 100 px shape
+/// scaled to it, which stretched strokes and corners), selected, in one
+/// undo step.
 #[gpui::test]
 fn the_shape_tool_draws_a_shape_layer_from_a_drag(cx: &mut TestAppContext) {
     let mut s = stage_on(cx, &project_of("shape"));
     let before_selection = s.rig.kernel.published(PROJECT).unwrap().selection.clone();
+    let none = SelectionCall::Layers {
+        ids: vec![],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), none))
+        .wait()
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
     s.recorder.tool.set(Some(Tool::Shape));
     let at = s.point_of([300., 200.]);
-    s.drag(cx, at, point(px(60.), px(40.)), Modifiers::none());
+    // The stage's drag waits for a selected layer's box; there is none yet.
+    let m = Modifiers::none();
+    s.vcx.simulate_mouse_down(at, MouseButton::Left, m);
+    for step in 1..=3 {
+        let by = step as f32 / 3.;
+        s.vcx
+            .simulate_mouse_move(at + point(px(60. * by), px(40. * by)), MouseButton::Left, m);
+        cx.run_until_parked();
+    }
+    s.vcx
+        .simulate_mouse_up(at + point(px(60.), px(40.)), MouseButton::Left, m);
     let kernel = s.rig.kernel.clone();
     settle(cx, move |_| {
-        kernel.published(PROJECT).unwrap().selection.layers() != ["l0"]
+        !kernel.published(PROJECT).unwrap().selection.layers().is_empty()
     });
     let p = s.rig.kernel.published(PROJECT).unwrap();
     let id = p.selection.layers()[0].clone();
@@ -1070,8 +1229,13 @@ fn the_shape_tool_draws_a_shape_layer_from_a_drag(cx: &mut TestAppContext) {
     );
     assert_eq!(channel(&layer, false, "position.x"), Some(330.));
     assert_eq!(channel(&layer, false, "position.y"), Some(220.));
-    assert_eq!(channel(&layer, false, "scale.x"), Some(60.));
-    assert_eq!(channel(&layer, false, "scale.y"), Some(40.));
+    assert_eq!(channel(&layer, false, "scale.x").unwrap_or(100.), 100.);
+    assert_eq!(channel(&layer, false, "scale.y").unwrap_or(100.), 100.);
+    let content = |key: &str| layer.get("d")?.get(key)?.as_f64();
+    assert_eq!((content("w"), content("h")), (Some(60.), Some(40.)));
+    s.refresh(cx);
+    let corners = s.pose().corners;
+    assert_eq!((corners[0], corners[2]), ([300., 200.], [360., 240.]), "where it was drawn");
     let undo = Request::new(Caller::native(), Call::History(HistoryCall::Undo));
     s.rig.kernel.call(PROJECT, undo).wait().unwrap().unwrap();
     assert!(layer_value(&s.rig.kernel, &id).is_none(), "one undo step");
@@ -1090,6 +1254,20 @@ fn the_shape_tool_draws_a_shape_layer_from_a_drag(cx: &mut TestAppContext) {
         s.rig.kernel.published(PROJECT).unwrap().selection.layers(),
         [id]
     );
+}
+/// A shape v1 drew (a 100 px source scaled to the drawn size) opens and
+/// stands exactly where it did: only newly drawn shapes changed.
+#[gpui::test]
+fn a_shape_v1_drew_stands_where_it_did(cx: &mut TestAppContext) {
+    let v1 = project_of("shape")
+        .replace(r#""position.x":{"v":200,"#, r#""position.x":{"v":330,"#)
+        .replace(r#""position.y":{"v":150,"#, r#""position.y":{"v":220,"#)
+        .replace(r#""scale.x":{"v":100,"#, r#""scale.x":{"v":60,"#)
+        .replace(r#""scale.y":{"v":100,"#, r#""scale.y":{"v":40,"#);
+    let s = stage_on(cx, &v1);
+    let pose = s.pose();
+    assert_eq!(pose.scale, [60., 40.]);
+    assert_eq!((pose.corners[0], pose.corners[2]), ([300., 200.], [360., 240.]));
 }
 /// With a maskable layer selected the drawn box becomes a mask on it.
 #[gpui::test]
@@ -1110,8 +1288,48 @@ fn the_shape_tool_draws_a_mask_on_a_selected_image(cx: &mut TestAppContext) {
     assert_eq!(p.selection.layers(), ["l0".to_string()]);
 }
 
+/// Acceptance run 27 (PM-502): with a shape layer selected the Shape tool
+/// draws a mask on it, as over any other layer (After Effects), not a new
+/// layer as v1 did.
+#[gpui::test]
+fn the_shape_tool_draws_a_mask_on_a_selected_shape_layer(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &project_of("shape"));
+    s.recorder.tool.set(Some(Tool::Shape));
+    let at = s.point_of([300., 200.]);
+    s.drag(cx, at, point(px(60.), px(40.)), Modifiers::none());
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        layer_value(&kernel, "l0").is_some_and(|l| channel(&l, true, "w").is_some())
+    });
+    let layer = layer_value(&s.rig.kernel, "l0").unwrap();
+    assert_eq!(channel(&layer, true, "w"), Some(60.));
+    assert_eq!(channel(&layer, true, "h"), Some(40.));
+    let p = s.rig.kernel.published(PROJECT).unwrap();
+    assert_eq!(p.selection.layers(), ["l0".to_string()], "no new layer");
+}
 fn text_of(layer: &pm_model::Value) -> Option<String> {
     layer.get("d")?.get("text")?.as_str().map(str::to_owned)
+}
+#[gpui::test]
+fn the_text_tool_keeps_the_key_typed_until_its_text_has_the_keyboard(cx: &mut TestAppContext) {
+    // Acceptance run 25: Command-T, a click, a key, 20 times under load; the
+    // first ones made nothing. The key typed after the click is held for
+    // the text; it was handed over when the editor was only asked for the
+    // keyboard, which AppKit moves a present later, so it ran as a shortcut
+    // and the empty text left nothing (PM-465).
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Text));
+    s.recorder.late_focus.set(true);
+    let at = s.point_of([400., 300.]);
+    s.vcx.simulate_click(at, Modifiers::none());
+    let recorder = s.recorder.clone();
+    settle(cx, move |_| recorder.input.borrow().is_some());
+    let input = s.recorder.input.borrow().clone().unwrap();
+    cx.run_until_parked();
+    assert!(!input.focused());
+    assert!(pm_shell::typing::expecting(), "still waiting: the editor has no keyboard yet");
+    input.focused.set(true);
+    settle(cx, |_| !pm_shell::typing::expecting());
 }
 /// The Text tool's click makes a layer inside one gesture: typing writes it,
 /// Command-Return commits, the layer is named after its text, the tool goes
@@ -1162,6 +1380,84 @@ fn the_text_tool_types_a_new_layer_in_one_undo_step(cx: &mut TestAppContext) {
     s.rig.kernel.call(PROJECT, undo).wait().unwrap().unwrap();
     assert!(layer_value(&s.rig.kernel, &id).is_none(), "one undo step");
     assert!(layer_value(&s.rig.kernel, "l0").is_some());
+}
+/// How a fast typist ends a text edit.
+#[derive(Clone, Copy, Debug)]
+enum Ending {
+    /// Escape, which the window's key handling sends ahead of queued keys.
+    Escape,
+    /// Command-Return in the text.
+    CommandReturn,
+    /// A click on the canvas away from the text.
+    ClickOutside,
+    /// Another tool from the toolbar: the text loses the keyboard.
+    ToolSwitch,
+}
+/// Types "Hello", then " there" faster than it is handed to the editor (it
+/// is still on its way when the edit ends), ends the edit `ending`'s way and
+/// returns what the layer holds.
+fn fast_typing_then(cx: &mut TestAppContext, ending: Ending) -> Option<String> {
+    let mut s = stage(cx);
+    s.recorder.tool.set(Some(Tool::Text));
+    let at = s.point_of([400., 300.]);
+    s.vcx.simulate_click(at, Modifiers::none());
+    let recorder = s.recorder.clone();
+    settle(cx, move |_| recorder.input.borrow().is_some());
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() != ["l0"]
+    });
+    let id = s.rig.kernel.published(PROJECT).unwrap().selection.layers()[0].clone();
+    let input = s.recorder.input.borrow().clone().unwrap();
+    input.type_text("Hello");
+    cx.run_until_parked();
+    input.type_queued(" there");
+    match ending {
+        Ending::Escape => {
+            assert!(s.surface.update(&mut s.vcx, |g, cx| g.cancel(cx)));
+        }
+        Ending::CommandReturn => input.key("commit"),
+        Ending::ClickOutside => {
+            let away = s.point_of([40., 40.]);
+            s.vcx.simulate_click(away, Modifiers::none());
+        }
+        Ending::ToolSwitch => {
+            s.recorder.tool.set(Some(Tool::Hand));
+            input.focused.set(false);
+            input.send(TextEvent::Blurred);
+        }
+    }
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.text_open().is_none()));
+    assert!(input.pending.borrow().is_empty(), "{ending:?}: a key was left over");
+    layer_value(&s.rig.kernel, &id).and_then(|l| text_of(&l))
+}
+// PM-459: typing fast and ending the edit at once keeps every key typed before the
+// end, however it ends; none is left to land on the canvas as a shortcut.
+#[gpui::test]
+fn fast_typing_then_escape_keeps_every_key(cx: &mut TestAppContext) {
+    assert_eq!(fast_typing_then(cx, Ending::Escape).as_deref(), Some("Hello there"));
+}
+#[gpui::test]
+fn fast_typing_then_command_return_keeps_every_key(cx: &mut TestAppContext) {
+    assert_eq!(
+        fast_typing_then(cx, Ending::CommandReturn).as_deref(),
+        Some("Hello there")
+    );
+}
+#[gpui::test]
+fn fast_typing_then_a_click_outside_keeps_every_key(cx: &mut TestAppContext) {
+    assert_eq!(
+        fast_typing_then(cx, Ending::ClickOutside).as_deref(),
+        Some("Hello there")
+    );
+}
+#[gpui::test]
+fn fast_typing_then_another_tool_keeps_every_key(cx: &mut TestAppContext) {
+    assert_eq!(
+        fast_typing_then(cx, Ending::ToolSwitch).as_deref(),
+        Some("Hello there")
+    );
 }
 /// Leaving a fresh layer empty leaves no layer and no history entry.
 #[gpui::test]
@@ -1428,7 +1724,51 @@ fn a_marquee_selects_the_layers_it_encloses(cx: &mut TestAppContext) {
         ["l0"]
     );
 }
-
+/// A marquee whose release the viewer never hears (the button came up over
+/// another view) ends when the window reports the release: the rectangle is
+/// gone and it selects what it encloses, as a heard release does.
+#[gpui::test]
+fn a_marquee_whose_release_the_viewer_never_hears_still_ends(cx: &mut TestAppContext) {
+    let mut s = stage_on(cx, &pair());
+    let clear = SelectionCall::Layers {
+        ids: vec![],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), clear))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    cx.run_until_parked();
+    let from = s.point_of([120., 80.]);
+    s.vcx
+        .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    for step in 1..=4 {
+        let at = from + point(px(40. * step as f32), px(35. * step as f32));
+        s.vcx
+            .simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+    assert!(s.surface.read_with(&s.vcx, |g, _| g.marquee_drawn()));
+    let surface = s.surface.clone();
+    s.vcx.update(|window, cx| {
+        surface.update(cx, |g, cx| assert!(g.release_unheard(window, cx)));
+    });
+    assert!(!s.surface.read_with(&s.vcx, |g, _| g.marquee_drawn()));
+    let kernel = s.rig.kernel.clone();
+    settle(cx, move |_| {
+        kernel.published(PROJECT).unwrap().selection.layers() == ["l0"]
+    });
+    // A second report changes nothing.
+    let surface = s.surface.clone();
+    s.vcx.update(|window, cx| {
+        surface.update(cx, |g, cx| assert!(!g.release_unheard(window, cx)));
+    });
+}
 /// A move that brings the box's right edge within 8 points of the
 /// composition's centre snaps onto it; Command moves freely.
 #[gpui::test]
@@ -1694,7 +2034,123 @@ fn the_first_pen_click_makes_a_path_layer_in_one_undo_step(cx: &mut TestAppConte
         .unwrap();
     assert_eq!(s.rig.kernel.published(PROJECT).unwrap().selection, created);
 }
-
+/// Quick clicks with the Pen, each before the last one's edit has landed,
+/// are four corner vertices on one new path layer: none is lost, none makes
+/// a layer of its own, and no tangent follows the pointer afterwards.
+#[gpui::test]
+fn quick_pen_clicks_each_place_a_corner_vertex(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let clear = SelectionCall::Layers {
+        ids: vec![],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), clear))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.recorder.tool.set(Some(Tool::Pen));
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    cx.run_until_parked();
+    let count = |kernel: &pm_kernel::KernelHandle| {
+        let p = kernel.published(PROJECT).unwrap();
+        pm_kernel::model::list_layers(p.snapshot.root().unwrap(), None).len()
+    };
+    let before = count(&s.rig.kernel);
+    for at in [[300., 100.], [400., 100.], [400., 250.], [300., 250.]] {
+        let p = s.point_of(at);
+        s.vcx.simulate_click(p, Modifiers::none());
+    }
+    let kernel = s.rig.kernel.clone();
+    let vertices = move |kernel: &pm_kernel::KernelHandle| {
+        let p = kernel.published(PROJECT).unwrap();
+        let id = p.selection.layers().first().cloned()?;
+        let layer = layer_value(kernel, &id)?;
+        let paths = layer.get("d")?.get("paths")?.as_array()?.clone();
+        Some(
+            paths
+                .iter()
+                .map(|path| path.get("vertices").and_then(|v| v.as_array()).cloned())
+                .collect::<Option<Vec<_>>>()?,
+        )
+    };
+    let surface = s.surface.clone();
+    settle(cx, move |cx| {
+        surface.read_with(cx, |g, _| g.idle())
+            && vertices(&kernel).is_some_and(|paths| paths.len() == 1 && paths[0].len() == 4)
+    });
+    assert_eq!(count(&s.rig.kernel), before + 1, "one new path layer");
+    let paths = vertices(&s.rig.kernel).unwrap();
+    for v in &paths[0] {
+        for k in ["inX", "inY", "outX", "outY"] {
+            assert_eq!(
+                v.get("p").and_then(|p| p.get(k)?.get("v")?.as_f64()),
+                Some(0.),
+                "a click is a corner: {k}"
+            );
+        }
+    }
+}
+/// A read that lands while the first Pen click is still held (its vertex
+/// added, its new layer not yet selected) keeps the open path: the next
+/// click adds to it instead of starting a second path.
+#[gpui::test]
+fn a_read_during_a_held_pen_click_keeps_the_open_path(cx: &mut TestAppContext) {
+    let mut s = stage(cx);
+    let clear = SelectionCall::Layers {
+        ids: vec![],
+        add: false,
+    };
+    s.rig
+        .kernel
+        .call(PROJECT, Request::new(Caller::native(), clear))
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.recorder.tool.set(Some(Tool::Pen));
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    cx.run_until_parked();
+    let first = s.point_of([300., 100.]);
+    s.vcx
+        .simulate_mouse_down(first, MouseButton::Left, Modifiers::none());
+    // Held: its vertex lands, then a read lands before the release, as a
+    // document change makes one in the app.
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    for _ in 0..40 {
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    s.vcx
+        .simulate_mouse_up(first, MouseButton::Left, Modifiers::none());
+    let surface = s.surface.clone();
+    settle(cx, move |cx| surface.read_with(cx, |g, _| g.idle()));
+    s.surface.update(&mut s.vcx, |g, cx| g.refresh(cx));
+    cx.run_until_parked();
+    let second = s.point_of([400., 100.]);
+    s.vcx.simulate_click(second, Modifiers::none());
+    let kernel = s.rig.kernel.clone();
+    let paths = move |kernel: &pm_kernel::KernelHandle| {
+        let p = kernel.published(PROJECT).unwrap();
+        let id = p.selection.layers().first().cloned()?;
+        let layer = layer_value(kernel, &id)?;
+        let paths = layer.get("d")?.get("paths")?.as_array()?.clone();
+        Some(
+            paths
+                .iter()
+                .map(|path| path.get("vertices").and_then(|v| v.as_array()).map(Vec::len))
+                .collect::<Option<Vec<_>>>()?,
+        )
+    };
+    let surface = s.surface.clone();
+    settle(cx, move |cx| {
+        surface.read_with(cx, |g, _| g.idle())
+            && paths(&kernel).is_some_and(|p| p.iter().sum::<usize>() == 2)
+    });
+    assert_eq!(paths(&s.rig.kernel), Some(vec![2]), "one path, both vertices");
+}
 /// A new path layer's path closes on a click on its first vertex, as a
 /// mask path does.
 #[gpui::test]

@@ -84,6 +84,7 @@ const sectionActions: Record<SectionAction, string> = {
   "time-remap": "Time Remap",
   "freeze-frame": "Freeze Frame",
   reverse: "Reverse",
+  "remove-transition": "Remove Transition",
 };
 const sectionSymbols: Partial<Record<SectionAction, string>> = {
   "refresh-fonts": "arrow.clockwise",
@@ -93,12 +94,14 @@ const sectionSymbols: Partial<Record<SectionAction, string>> = {
   "time-remap": "",
   "freeze-frame": "",
   reverse: "",
+  "remove-transition": "",
 };
 /** What a heading action shows when its full name would not fit. */
 const sectionShort: Partial<Record<SectionAction, string>> = {
   "time-remap": "Remap",
   "freeze-frame": "Freeze",
   reverse: "Reverse",
+  "remove-transition": "Remove",
 };
 export const alignmentButtons: {
   id: Alignment;
@@ -218,9 +221,15 @@ function AlignmentStrip({
       focusRequest={focusRequest}
       style={{
         ...horizontal,
+        // In a dock too narrow for its three wells a well moves to a second
+        // line, which the row's one-line height hides, instead of standing
+        // over the next (each cell keeps the pointer's least target;
+        // distribute is also in the palette).
+        flexWrap: "wrap",
         gap: token("metrics.gap"),
         height: token("metrics.row"),
         minHeight: token("metrics.row"),
+        overflow: "hidden",
         paddingLeft: token("metrics.inset"),
         paddingRight: token("metrics.inset"),
       }}
@@ -247,6 +256,9 @@ function AlignmentStrip({
               ...horizontal,
               ...well,
               flexGrow: 1,
+              // Never narrower than its three cells: a narrower dock wraps
+              // the strip instead.
+              minWidth: token("metrics.align_well"),
               // Cells keep the pointer's least target, so the strip's
               // wells are that high.
               height: token("metrics.hit"),
@@ -531,12 +543,20 @@ function Property({
                   row.animation === "static" ? "colors.muted" : "colors.accent",
                 ),
               }}
+              // Option-click adds (or edits) an expression, as Option-click
+              // on After Effects' stopwatch does (PM-502).
               onActivate={(event) =>
-                session.send({
-                  type: "key",
-                  row: row.id,
-                  removeAnimation: !!event.altKey,
-                })
+                event.altKey
+                  ? session.send({
+                      type: "row-action",
+                      row: row.id,
+                      action: "edit-expression",
+                    })
+                  : session.send({
+                      type: "key",
+                      row: row.id,
+                      removeAnimation: false,
+                    })
               }
             />
           ) : (

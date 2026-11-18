@@ -77,7 +77,7 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
         rows: [
           {
             id: "account.chatgpt",
-            section: "accounts",
+            section: "agents",
             group: "Subscriptions",
             label: "ChatGPT",
             control: "status",
@@ -90,7 +90,7 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
   [
     "selected",
     (model) => {
-      model.select("accounts");
+      model.select("agents");
     },
   ],
   // Hover and rings are system-owned. No fabricated JSX hover/focus styling.
@@ -105,7 +105,7 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
         rows: [
           {
             id: "account.key",
-            section: "accounts",
+            section: "agents",
             group: "API or Local Model",
             label: "API Key",
             control: "secure",
@@ -126,7 +126,7 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
         rows: [
           {
             id: "account.status",
-            section: "accounts",
+            section: "agents",
             group: "API or Local Model",
             label: "Status",
             control: "status",
@@ -185,7 +185,7 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
         revision: 2,
         project: { id: "p", name: "Fixture" },
       });
-      model.show();
+      model.show("project");
     },
   ],
   [
@@ -350,9 +350,9 @@ test("the window's native search and sidebar reach the model; its shortcuts stay
   expect(model.visibleSections).toEqual(["general"]);
   await model.search("");
   await render();
-  model.select("accounts");
+  model.select("agents");
   await render();
-  expect(model.active).toBe("accounts");
+  expect(model.active).toBe("agents");
   await event(root, find(root, "Settings").id, "keydown", {
     key: "f",
     metaKey: true,
@@ -403,7 +403,11 @@ test("extension row enters details, back returns without clearing search, Delete
   const render = () =>
     root.render(<SettingsPanel model={f.model} bindings={bindings} />);
   await render();
-  await event(root, find(root, "Fixture 0", "list-item").id, "click");
+  await event(
+    root,
+    find(root, "Details for Fixture 0", "push-button").id,
+    "click",
+  );
   expect(f.model.detailId).toBe("fixture-0");
   await render();
   await event(root, find(root, "Delete…", "push-button").id, "click");
@@ -411,14 +415,40 @@ test("extension row enters details, back returns without clearing search, Delete
   expect(f.actions).toEqual([{ type: "extension.archive", id: "fixture-0" }]);
   await f.model.search("Fixture");
   await render();
-  await event(root, find(root, "Extensions", "toolbar-item").id, "click");
+  await event(root, find(root, "Extensions", "push-button").id, "click");
   expect(f.model.detailId).toBeUndefined();
   expect(f.model.query).toBe("Fixture");
   replay(commits);
   root.dispose();
   f.model.dispose();
 });
-test("AX contract has labelled groups, selected neutral sidebar, search/list first focus and no secrets", async () => {
+test("an extension's row turns it on or off with its own switch, without opening its page", async () => {
+  const f = fixture({
+    extensions: [
+      {
+        ...extension(),
+        type: "Effects",
+        binding: "test-lease.extension.fixture-0",
+      },
+    ],
+  });
+  f.model.show();
+  f.model.select("extensions");
+  f.model.viewport(0, 10);
+  const { root } = recorder();
+  await root.render(<SettingsPanel model={f.model} bindings={bindings} />);
+  const toggle = find(root, "Fixture 0", "switch");
+  expect(toggle.props["aria-checked"]).toBe(true);
+  await event(root, toggle.id, "change", { value: false });
+  await Promise.resolve();
+  expect(f.actions).toEqual([
+    { type: "extension.enabled", id: "fixture-0", enabled: false },
+  ]);
+  expect(f.model.detailId).toBeUndefined();
+  root.dispose();
+  f.model.dispose();
+});
+test("AX contract has labelled groups, native sidebar, search/list first focus and no secrets", async () => {
   const f = fixture();
   f.model.show();
   const { root, commits } = recorder();
@@ -521,7 +551,7 @@ test("AX help/count requirements remain declared for the native projection", asy
     rows: [
       {
         id: "account.url",
-        section: "accounts",
+        section: "agents",
         group: "API or Local Model",
         label: "API Base URL",
         control: "text",
@@ -532,7 +562,7 @@ test("AX help/count requirements remain declared for the native projection", asy
     ],
   });
   f.model.show();
-  f.model.select("accounts");
+  f.model.select("agents");
   f.model.viewport(0, 1);
   const { root, commits } = recorder();
   await root.render(<SettingsPanel model={f.model} bindings={bindings} />);

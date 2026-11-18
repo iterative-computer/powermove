@@ -45,6 +45,37 @@ fn open_edit(p: Option<&Published>, opening: bool, asking: bool) -> Option<Strin
     }
     p?.entry.as_ref().map(|e| e.label.clone())
 }
+/// The window's status line when its close is held by something only the
+/// person can end: a question on screen, or an open the window is busy with.
+fn held_note(intent: Intent, asking: bool) -> &'static str {
+    match (intent, asking) {
+        (Intent::Quit, true) => "Powermove didn’t quit: answer this window’s question, then quit again.",
+        (Intent::Quit, false) => "Powermove didn’t quit: finish what this window is doing, then quit again.",
+        _ => "Finish the active edit, open or recovery decision before closing.",
+    }
+}
+/// What a quit's blocker is called: a file chooser (an open or save panel,
+/// wherever it is), the Recover question or the Export sheet on an editor, or
+/// any other question.
+fn blocker_name(file_chooser: bool, recovering: bool, export_open: bool) -> &'static str {
+    if file_chooser {
+        "a file chooser"
+    } else if recovering {
+        "the Recover question"
+    } else if export_open {
+        "the Export sheet"
+    } else {
+        "a question"
+    }
+}
+/// The status line of an editor whose sheet or question stopped a quit.
+fn held_by(what: &str) -> String {
+    format!("Powermove didn’t quit: {what} is open. Answer or close it, then quit again.")
+}
+/// The status line while a quit already under way waits on its question.
+fn quit_waits_on(what: &str) -> String {
+    format!("Powermove quits once {what} is answered.")
+}
 /// What a Quit waits for at a window that cannot close this moment, when
 /// that is work which ends on its own: a save in flight, a project still
 /// opening, another project operation. The quit goes on when it has ended
@@ -79,12 +110,57 @@ fn last_frame_keep(intent: Intent, signal: bool) -> Option<Option<std::time::Dur
         _ => Some(None),
     }
 }
-/// The longest a quit signal keeps the process running.
-const SIGNAL_QUIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Whether a quit has begun and was not cancelled: its questions may be up
+/// (the running-export one comes before the quit starts), or it may be
+/// waiting on a stage (Keep Waiting keeps it going).
+pub(crate) fn quitting(cx: &App) -> bool {
+    cx.try_global::<QuitCoordinator>()
+        .is_some_and(|q| q.quitting || q.asking_exports)
+}
+/// The quits run so far: each start and each cancel moves to a new
+/// generation, so a window's close that finishes after its quit was cancelled
+/// (another window's close failed meanwhile) is told apart and does nothing
+/// for a quit that is over (Sol w57).
+#[derive(Debug, Default)]
+struct QuitRun {
+    generation: u64,
+    active: bool,
+}
+impl QuitRun {
+    fn start(&mut self) -> u64 {
+        self.generation += 1;
+        self.active = true;
+        self.generation
+    }
+    fn cancel(&mut self) {
+        self.generation += 1;
+        self.active = false;
+    }
+    /// Whether a close begun in `generation` still belongs to a running quit.
+    fn current(&self, generation: u64) -> bool {
+        self.active && self.generation == generation
+    }
+}
 struct QuitCoordinator {
     _delegate: objc2::rc::Retained<crate::platform::QuitDelegate>,
+    /// The viewers' last pictures still being written: a quit waits for
+    /// them once, at its end, not window by window (each answers by its
+    /// own deadline, `LAST_FRAME_WAIT`).
+    frames: Vec<async_channel::Receiver<()>>,
+    /// The stage the quit is in and its bound, renewed after Keep Waiting.
+    stage: Option<(&'static str, std::time::Duration)>,
     controllers: Vec<gpui::WeakEntity<Controller>>,
     queue: Vec<gpui::WeakEntity<Controller>>,
+    /// Windows a quit asked to close at once (none asks anything), until
+    /// each has let go of its project.
+    closing: Vec<gpui::WeakEntity<Controller>>,
+    /// The app was hidden for the quit (its windows gone at once); a
+    /// cancelled quit shows it again.
+    hidden: bool,
+    /// The library's last writing has begun: once only.
+    finishing: bool,
+    /// Which quit a window's close belongs to ([`QuitRun`]).
+    run: QuitRun,
     quitting: bool,
     /// The person chose Discard Changes for every project at once.
     discard: bool,
@@ -107,7 +183,14 @@ pub fn allow_quit(cx: &App) {
     delegate.allow();
     delegate.resolve_quit_events(false);
 }
+/// Bounds the quit's stage `name` (`quit_limit`): one that makes no
+/// progress in `bound` asks the person, never ends the quit itself.
+fn arm(cx: &mut App, name: &'static str, bound: std::time::Duration) {
+    cx.global_mut::<QuitCoordinator>().stage = Some((name, bound));
+    crate::quit_limit::stage(name, bound);
+}
 fn cancel_quit(cx: &mut App) {
+    crate::quit_limit::cancel();
     pm_shell::session::set_quitting(false);
     crate::diag::line(serde_json::json!({"quit":"cancelled"}));
     crate::recent_work::quit_cancelled();
@@ -121,6 +204,15 @@ fn cancel_quit(cx: &mut App) {
         q.terminating = false;
         q.asking_now = None;
         q.queue.clear();
+        q.closing.clear();
+        q.finishing = false;
+        q.run.cancel();
+        let hidden = std::mem::take(&mut q.hidden);
+        if hidden {
+            show_app();
+        }
+        q.frames.clear();
+        q.stage = None;
         q.host.closing.store(false, Ordering::Release);
         q.controllers.clone()
     };
@@ -131,6 +223,12 @@ fn cancel_quit(cx: &mut App) {
         for weak in controllers {
             let _ = weak.update(cx, |v, cx| {
                 if v.closing_note.take().is_some() {
+                    cx.notify();
+                }
+                // Let go of its project for the quit that is now cancelled:
+                // no project, not closing (a later quit is not held by it).
+                if v.closed_for_quit {
+                    v.show_no_project(cx);
                     cx.notify();
                 }
                 if v.extensions.stopped_for_quit {
@@ -190,22 +288,122 @@ fn export_quit_alert(titles: &[String]) -> crate::alert::Alert<bool> {
         ],
     )
 }
+/// Where a Quit goes.
+#[derive(Debug, PartialEq)]
+enum QuitEntry {
+    /// A quit signal: never held, never asks.
+    Signal,
+    /// A sheet or question is on screen: its window comes forward and says
+    /// so. `cancel`: no quit was under way yet, so this one ends here; a quit
+    /// already asking (its Save or Review Changes question, the running
+    /// export question) goes on once that is answered.
+    Hold { cancel: bool },
+    /// A quit is under way: offer to quit now (the Quit Now sheet's own
+    /// question is the answer while it is up).
+    QuitNow,
+    /// Nothing holds it: the quit starts.
+    Start,
+}
+fn quit_entry(terminating: bool, quitting: bool, asking_now: bool, blocked: bool) -> QuitEntry {
+    if terminating {
+        QuitEntry::Signal
+    } else if asking_now {
+        QuitEntry::QuitNow
+    } else if blocked {
+        QuitEntry::Hold { cancel: !quitting }
+    } else if quitting {
+        QuitEntry::QuitNow
+    } else {
+        QuitEntry::Start
+    }
+}
+/// What holds a quit: the window a sheet covers anywhere in the app (an
+/// editor, a popover, Settings, the Store, a pop-out viewer), the editor it
+/// belongs to when there is one, and what to call it.
+struct Blocker {
+    window: objc2::rc::Retained<objc2_app_kit::NSWindow>,
+    owner: Option<Entity<Controller>>,
+    what: &'static str,
+}
+fn find_blocker(cx: &mut App) -> Option<Blocker> {
+    let mtm = objc2::MainThreadMarker::new()?;
+    // Notices that ask nothing go first; a quit never stops at one.
+    for window in objc2_app_kit::NSApplication::sharedApplication(mtm).windows().iter() {
+        if !window.isSheet() {
+            crate::alert::dismiss_notice(&window);
+        }
+    }
+    let (window, sheet) = pm_shell::quit_blocker_window()?;
+    let mut top = objc2::Message::retain(&*window);
+    while let Some(parent) = top.parentWindow() {
+        top = parent;
+    }
+    let owner = cx
+        .global::<QuitCoordinator>()
+        .controllers
+        .clone()
+        .into_iter()
+        .filter_map(|weak| weak.upgrade())
+        .find(|c| *c.read(cx).host.borrow().window == *top);
+    let on_editor = owner
+        .as_ref()
+        .is_some_and(|c| *c.read(cx).host.borrow().window == *window);
+    let what = blocker_name(
+        objc2_foundation::NSObjectProtocol::isKindOfClass(&*sheet, <objc2_app_kit::NSSavePanel as objc2::ClassType>::class()),
+        on_editor && owner.as_ref().is_some_and(|c| c.read(cx).recovery_pending),
+        on_editor && owner.as_ref().is_some_and(|c| c.read(cx).builtins.windows.contains_key("export")),
+    );
+    Some(Blocker { window, owner, what })
+}
+/// Brings the blocking window forward and says so in its editor.
+fn hold_quit(blocker: Blocker, quitting: bool, cx: &mut App) {
+    crate::diag::line(serde_json::json!({"quit":"held", "by":blocker.what, "quitting":quitting}));
+    if let Some(owner) = &blocker.owner {
+        owner.update(cx, |v, cx| {
+            v.message = if quitting { quit_waits_on(blocker.what) } else { held_by(blocker.what) };
+            cx.notify();
+        });
+    }
+    bring_forward(&blocker.window);
+}
+/// `pm_shell::bring_forward`, except a development lane launched in the
+/// background, which takes no focus.
+fn bring_forward(window: &objc2_app_kit::NSWindow) {
+    if !gpui_macos::child_window::would_hold() {
+        pm_shell::bring_forward(window);
+    }
+}
 pub fn begin_quit(cx: &mut App) {
     crate::diag::line(serde_json::json!({"quit":"begin"}));
-    let q = cx.global_mut::<QuitCoordinator>();
-    if q.terminating {
-        if !q.quitting {
-            start_quit(cx);
+    let q = cx.global::<QuitCoordinator>();
+    let (terminating, asking_now) = (q.terminating, q.asking_now.is_some());
+    // The running-export question belongs to a quit already asking.
+    let quitting = q.quitting || q.asking_exports;
+    // A sheet or question on screen holds the quit before anything closes:
+    // closing other windows first left them closed when it then stopped
+    // (PM-464), and a second Quit during the quit's own question went
+    // unanswered (Sol, w55).
+    let blocker = (!terminating && !asking_now).then(|| find_blocker(cx)).flatten();
+    match quit_entry(terminating, quitting, asking_now, blocker.is_some()) {
+        QuitEntry::Signal => {
+            if !cx.global::<QuitCoordinator>().quitting {
+                start_quit(cx);
+            }
         }
-        return;
+        QuitEntry::Hold { cancel } => {
+            hold_quit(blocker.expect("held by a blocker"), !cancel, cx);
+            if cancel {
+                cancel_quit(cx);
+            }
+        }
+        QuitEntry::QuitNow => ask_quit_now(cx),
+        QuitEntry::Start => ask_exports_then_start(cx),
     }
-    if q.quitting {
-        return ask_quit_now(cx);
-    }
-    if q.asking_exports {
-        return;
-    }
-    // An export that is running is asked about before anything closes.
+}
+/// An export that is running is asked about before anything closes; then
+/// the quit starts.
+fn ask_exports_then_start(cx: &mut App) {
+    let q = cx.global::<QuitCoordinator>();
     let exporting = running_exports(&crate::export_coordinator::tasks().lock().unwrap().all());
     let window = q
         .controllers
@@ -268,6 +466,7 @@ fn start_quit(cx: &mut App) {
     pm_shell::session::set_quitting(true);
     let q = cx.global_mut::<QuitCoordinator>();
     q.quitting = true;
+    q.run.start();
     q.queue = q.controllers.clone();
     q.host.closing.store(true, Ordering::Release);
     let controllers = q.controllers.clone();
@@ -310,14 +509,60 @@ fn questions_first<T>(windows: Vec<T>, unsaved: impl Fn(&T) -> bool) -> Vec<T> {
     clean.into_iter().chain(asked).collect()
 }
 fn next_quit(cx: &mut App) {
-    while let Some(weak) = cx.global_mut::<QuitCoordinator>().queue.pop() {
-        if weak
-            .update(cx, |v, cx| v.request_close(Intent::Quit, cx))
-            .is_ok()
-        {
-            return;
+    // No quit running (cancelled meanwhile): nothing to arm, hide or close.
+    if !cx.global::<QuitCoordinator>().quitting {
+        return;
+    }
+    // Once no window left asks anything (unsaved ones go first), the quit is
+    // bounded: each window that closes renews it, so only a quit that stops
+    // making progress ends early (`quit_limit`).
+    let asks = {
+        let q = cx.global::<QuitCoordinator>();
+        !q.discard
+            && !q.terminating
+            && q.queue
+                .iter()
+                .filter_map(|weak| weak.upgrade())
+                .any(|c| c.read(cx).dirty())
+    };
+    if cx.global::<QuitCoordinator>().finishing {
+        return;
+    }
+    if asks {
+        // One window at a time while one may ask a question.
+        while let Some(weak) = cx.global_mut::<QuitCoordinator>().queue.pop() {
+            if weak
+                .update(cx, |v, cx| v.request_close(Intent::Quit, cx))
+                .is_ok()
+            {
+                return;
+            }
+        }
+    } else {
+        arm(cx, "windows", crate::quit_limit::WINDOWS);
+        // Nothing is asked any more: the windows go at once (the app hides),
+        // and every one left closes together, not one after another (nine
+        // tabs took 6 s, run 24). Their writing finishes behind.
+        hide_for_quit(cx);
+        let rest = std::mem::take(&mut cx.global_mut::<QuitCoordinator>().queue);
+        for weak in rest.into_iter().rev() {
+            cx.global_mut::<QuitCoordinator>().closing.push(weak.clone());
+            let _ = weak.update(cx, |v, cx| v.request_close(Intent::Quit, cx));
         }
     }
+    // A window still closing calls this again once it has let go.
+    let closing = cx.global::<QuitCoordinator>().closing.clone();
+    if closing
+        .iter()
+        .filter_map(|weak| weak.upgrade())
+        .any(|c| !c.read(cx).closed_for_quit)
+    {
+        return;
+    }
+    if !cx.global::<QuitCoordinator>().quitting {
+        return;
+    }
+    cx.global_mut::<QuitCoordinator>().finishing = true;
     // The window session's queued writes land first; a failed one is asked
     // about while the library is still held, so Cancel leaves all as it was.
     cx.spawn(async move |cx| {
@@ -331,6 +576,25 @@ fn next_quit(cx: &mut App) {
         });
     })
     .detach();
+}
+/// Hides the app for a quit that asks nothing more: its windows are gone at
+/// once while the projects close behind. Never for a quit signal (nobody is
+/// watching) or a development lane in the background.
+fn hide_for_quit(cx: &mut App) {
+    let q = cx.global_mut::<QuitCoordinator>();
+    if q.hidden || q.terminating || gpui_macos::child_window::would_hold() {
+        return;
+    }
+    q.hidden = true;
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        objc2_app_kit::NSApplication::sharedApplication(mtm).hide(None);
+    }
+}
+/// The app shown again after a quit hid it (cancelled, or about to ask).
+fn show_app() {
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        objc2_app_kit::NSApplication::sharedApplication(mtm).unhide(None);
+    }
 }
 /// What a second Quit does while the first one runs.
 #[derive(Debug, PartialEq)]
@@ -385,32 +649,69 @@ fn ask_quit_now(cx: &mut App) {
     else {
         return;
     };
+    // Nobody is hurried while asked: the bound waits for the answer.
+    crate::quit_limit::cancel();
+    if std::mem::take(&mut cx.global_mut::<QuitCoordinator>().hidden) {
+        show_app();
+    }
     let mut sheet = None;
     let answer = quit_now_alert(&note).sheet_with(&window, |alert| sheet = Some(alert.window()));
     cx.global_mut::<QuitCoordinator>().asking_now = sheet.map(|sheet| (window, sheet));
     cx.spawn(async move |cx| {
         let now = answer.recv().await.ok().flatten() == Some(true);
-        let kernel = cx.update(|cx| {
+        let quit_now = cx.update(|cx| {
             let q = cx.global_mut::<QuitCoordinator>();
             q.asking_now = None;
-            (now && q.quitting).then(|| q.host.kernel.clone())
+            // Keep Waiting: the stage is bounded again from now.
+            if !now
+                && q.quitting
+                && let Some((name, bound)) = q.stage
+            {
+                crate::quit_limit::stage(name, bound);
+            }
+            now && q.quitting
         });
-        let Some(kernel) = kernel else {
-            return;
-        };
-        quit_as_is(kernel, note, cx).await;
+        if quit_now {
+            quit_as_is(note, cx).await;
+        }
     })
     .detach();
+}
+/// A stage of a chosen quit made no progress in its bound: the person is
+/// asked whether to keep waiting or quit now. Never while a window saves or
+/// asks something (that is waited for, and the stage bounded again).
+fn ask_stalled(stall: crate::quit_limit::Stall, cx: &mut App) {
+    let q = cx.global::<QuitCoordinator>();
+    if !q.quitting || q.terminating || !stall.current() {
+        return;
+    }
+    let busy = q.asking_now.is_some()
+        || q.controllers
+            .iter()
+            .filter_map(|weak| weak.upgrade())
+            .any(|c| {
+                let c = c.read(cx);
+                c.save_pending || c.host.borrow().window.attachedSheet().is_some()
+            });
+    if busy {
+        if let Some((name, bound)) = q.stage {
+            crate::quit_limit::stage(name, bound);
+        }
+        return;
+    }
+    crate::diag::line(serde_json::json!({"quit":"ask_stalled","stage":stall.stage}));
+    ask_quit_now(cx);
 }
 /// Quits without the work the quit was waiting for, leaving everything as a
 /// crash would: every edit the kernel acknowledged is already written to its
 /// journal and is made durable here without waiting for the busy kernel.
 /// Saves journal their save point before replacing a file, so the journal
 /// replays onto whatever the disk holds, and the next open offers it.
-async fn quit_as_is(kernel: KernelHandle, note: String, cx: &mut gpui::AsyncApp) {
-    let synced = cx
+async fn quit_as_is(note: String, cx: &mut gpui::AsyncApp) {
+    crate::diag::line(serde_json::json!({"quit":"securing"}));
+    let secured = cx
         .background_executor()
-        .spawn(async move { kernel.sync_journals() })
+        .spawn(async { crate::quit_limit::secure(crate::quit_limit::SECURE) })
         .await;
     cx.update(|cx| {
         let q = cx.global_mut::<QuitCoordinator>();
@@ -418,13 +719,43 @@ async fn quit_as_is(kernel: KernelHandle, note: String, cx: &mut gpui::AsyncApp)
         if !q.quitting {
             return;
         }
-        q._delegate.resolve_quit_events(false);
-        if let Err(e) = synced {
-            eprintln!("Quit Now: the journal could not be flushed to disk: {e}");
+        match secured {
+            // The unsaved work is durable in the journals: the next open
+            // offers it back.
+            Ok(()) => {
+                q._delegate.resolve_quit_events(false);
+                crate::diag::line(serde_json::json!({"quit":"quit_now","note":note}));
+                crate::quit_limit::stop_jobs_and_exit(0);
+            }
+            // Not durable: ending now could lose it, so the app stays.
+            Err(reason) => cannot_quit_now(&reason, cx),
         }
-        eprintln!("Quit Now: {note}");
-        std::process::exit(0);
     });
+}
+/// Quit Now could not make the unsaved work durable: says so, and the app
+/// keeps running with every window it still has.
+fn cannot_quit_now(reason: &str, cx: &mut App) {
+    use crate::alert::{Alert, Button, Key};
+    crate::error_log::shared(cx)
+        .borrow_mut()
+        .push("Quit", &format!("Quit Now stopped: {reason}"));
+    let window = cx
+        .global::<QuitCoordinator>()
+        .controllers
+        .iter()
+        .find_map(|weak| weak.upgrade())
+        .map(|c| c.read(cx).host.borrow().window.clone());
+    cancel_quit(cx);
+    if let Some(window) = window {
+        let _ = Alert::new(
+            "Powermove couldn’t make your unsaved changes safe, so it didn’t quit.",
+            format!(
+                "Quitting now could lose them: {reason}. Reconnect or free up the disk, then quit again. Window ▸ Error Log has the details."
+            ),
+            vec![Button::new("OK", true).default().key(Key::Escape)],
+        )
+        .sheet(&window);
+    }
 }
 /// The quit alert when the project library could not be written or released.
 /// Nothing in a window can fix it by then (every project's own close was
@@ -457,6 +788,10 @@ fn session_failed_alert(error: &str) -> crate::alert::Alert<bool> {
     )
 }
 fn ask_session_failed(error: &str, cx: &mut App) {
+    crate::quit_limit::cancel();
+    if std::mem::take(&mut cx.global_mut::<QuitCoordinator>().hidden) {
+        show_app();
+    }
     let window = cx
         .global::<QuitCoordinator>()
         .controllers
@@ -497,8 +832,10 @@ fn quit_call(signal: bool) -> ShellCall {
 /// library, then quits.
 fn finish_quit(cx: &mut App) {
     crate::diag::line(serde_json::json!({"quit":"prepare_library"}));
+    arm(cx, "library", crate::quit_limit::LIBRARY);
     let host = cx.global::<QuitCoordinator>().host.clone();
     let signal = cx.global::<QuitCoordinator>().terminating;
+    let frames = std::mem::take(&mut cx.global_mut::<QuitCoordinator>().frames);
     for weak in cx.global::<QuitCoordinator>().controllers.clone() {
         let _ = weak.update(cx, |v, cx| {
             v.closing_note = Some("Quitting: writing the project library…".into());
@@ -528,6 +865,11 @@ fn finish_quit(cx: &mut App) {
             crate::error_log::session_ended(signal).await;
         }
         crate::diag::line(serde_json::json!({"quit":"session_ended"}));
+        // The windows' last pictures, written meanwhile; each is bounded.
+        for frame in frames {
+            let _ = frame.recv().await;
+        }
+        crate::diag::line(serde_json::json!({"quit":"frames_kept"}));
         cx.update(|cx| match result {
             // Recovery copies are durable library entries; they show in the
             // library next launch, so they never hold the quit.
@@ -549,9 +891,19 @@ fn finish_quit(cx: &mut App) {
                 }
                 // Restart and Bring In: Powermove opens again once this ends.
                 crate::recent_work::relaunch_if_requested();
+                // Everything is written and released: what is left is the
+                // app's own teardown, with no window left to ask from.
+                crate::quit_limit::cancel();
                 cx.quit();
             }
             other => {
+                // A question follows: nobody is hurried while asked, and the
+                // app the quit hid is shown to ask it.
+                crate::quit_limit::cancel();
+                if std::mem::take(&mut cx.global_mut::<QuitCoordinator>().hidden) {
+                    show_app();
+                }
+                cx.global_mut::<QuitCoordinator>().finishing = false;
                 let reason = reason(other);
                 eprintln!("Couldn’t quit: {reason}. Your work is kept.");
                 crate::error_log::shared(cx).borrow_mut().push(
@@ -559,7 +911,6 @@ fn finish_quit(cx: &mut App) {
                     &format!("The project library couldn’t be written before quitting: {reason}"),
                 );
                 let q = cx.global::<QuitCoordinator>();
-                let kernel = q.host.kernel.clone();
                 let window = q
                     .controllers
                     .iter()
@@ -571,7 +922,7 @@ fn finish_quit(cx: &mut App) {
                 let answer = quit_failed_alert(&reason).sheet(&window);
                 cx.spawn(async move |cx| {
                     if answer.recv().await.ok().flatten() == Some(true) {
-                        quit_as_is(kernel, format!("Quitting: {reason}"), cx).await;
+                        quit_as_is(format!("Quitting: {reason}"), cx).await;
                     } else {
                         cx.update(cancel_quit);
                     }
@@ -585,11 +936,28 @@ fn finish_quit(cx: &mut App) {
 pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
     if cx.try_global::<QuitCoordinator>().is_none() {
         let (delegate, rx) = crate::platform::quit_guard();
+        // The Quit item and Cmd-Q come here from now on.
+        let chosen = delegate.clone();
+        pm_shell::set_quit_hook(move || chosen.chosen());
         let host = entity.read(cx).mcp.clone();
+        crate::quit_limit::set_kernel(host.kernel.clone());
+        let stalls = crate::quit_limit::stalls();
+        cx.spawn(async move |cx| {
+            while let Ok(stall) = stalls.recv().await {
+                cx.update(|cx| ask_stalled(stall, cx));
+            }
+        })
+        .detach();
         cx.set_global(QuitCoordinator {
             _delegate: delegate,
+            frames: Vec::new(),
+            stage: None,
             controllers: Vec::new(),
             queue: Vec::new(),
+            closing: Vec::new(),
+            hidden: false,
+            finishing: false,
+            run: QuitRun::default(),
             quitting: false,
             discard: false,
             asking_exports: false,
@@ -606,37 +974,16 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
         // SIGTERM (kill, logout, a shutdown script) quits like Quit does.
         let terminations = crate::platform::terminations();
         cx.spawn(async move |cx| {
+            // The orderly signal quit ends the process itself within a
+            // second or two; the thread that heard the signal bounds it
+            // (`quit_limit::signalled`) if a step is still busy (a long open,
+            // a large save) or the main thread is held, so a logout never
+            // waits on Powermove. The journals hold the work.
             while terminations.recv().await.is_ok() {
-                let first = cx.update(|cx| {
-                    let first = !cx.global::<QuitCoordinator>().terminating;
+                cx.update(|cx| {
                     cx.global_mut::<QuitCoordinator>().terminating = true;
                     begin_quit(cx);
-                    first
                 });
-                if first {
-                    // The orderly signal quit ends the process itself within
-                    // a second or two; this bounds it if a kernel step is
-                    // still busy (a long open, a large save), so a logout
-                    // never waits on Powermove. The journals hold the work.
-                    let timer = cx.background_executor().timer(SIGNAL_QUIT_LIMIT);
-                    cx.background_executor()
-                        .spawn(async move {
-                            timer.await;
-                            crate::diag::line(serde_json::json!({"quit":"limit"}));
-                            // `exit` runs no drops: stop the engine jobs this
-                            // app started (its process group, when it leads
-                            // one, as a launched app does) before ending.
-                            // SAFETY: plain process calls; this process
-                            // ignores the SIGTERM it sends itself (blocked).
-                            unsafe {
-                                if libc::getpgrp() == libc::getpid() {
-                                    libc::killpg(libc::getpgrp(), libc::SIGTERM);
-                                }
-                            }
-                            std::process::exit(0);
-                        })
-                        .detach();
-                }
             }
         })
         .detach();
@@ -650,7 +997,8 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
             if !window.is_window_active()
                 && let Some(g) = v.builtins.gizmos.clone()
             {
-                g.update(cx, |g, cx| g.studio_fly_end(false, cx));
+                // It draws, which reads the controller: after this update.
+                cx.defer(move |cx| g.update(cx, |g, cx| g.studio_fly_end(false, cx)));
             }
             // The key window is where MCP acts.
             if window.is_window_active() {
@@ -677,6 +1025,21 @@ pub fn install(entity: &Entity<Controller>, window: &mut Window, cx: &mut App) {
         })
         .detach();
     });
+    // A project's viewer draws only while its window can be seen: a tab
+    // behind another gives its drawing (and, idle, its memory) up and takes
+    // it back when selected, so any number of tabs can be open.
+    let watched = entity.downgrade();
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(250))
+                .await;
+            if watched.update(cx, |v, cx| v.follow_shown(cx)).is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
     let weak = entity.downgrade();
     window.on_window_should_close(cx, move |_, cx| {
         let _ = weak.update(cx, |v, cx| v.request_close(Intent::Window, cx));
@@ -821,6 +1184,11 @@ impl Controller {
             });
         }
     }
+    /// A quit stopped at a question in this window: the app comes forward
+    /// (unhidden, active) with this window key and its tab chosen, and beeps.
+    fn bring_forward(&self) {
+        bring_forward(&self.host.borrow().window.clone());
+    }
     /// A close or quit met an edit the kernel still holds open (`label`):
     /// the person finishes it (sealed as one step they can undo, then the
     /// close goes on, asking about unsaved changes as usual) or cancels. A
@@ -828,6 +1196,7 @@ impl Controller {
     /// the recovery journal stays until a save succeeds.
     fn ask_finish_edit(&mut self, intent: Intent, label: String, cx: &mut Context<Self>) {
         use crate::alert::{Alert, Button, Key};
+        crate::quit_limit::cancel();
         let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
             return;
         };
@@ -905,9 +1274,21 @@ impl Controller {
             self.complete_close(intent, cx);
             return;
         }
+        if intent == Intent::Quit && self.closed_for_quit {
+            // Already released for this quit: the quit goes on past it.
+            cx.defer(next_quit);
+            return;
+        }
         if self.close_pending {
             if intent == Intent::Quit {
+                // This window's close is asking (Save, Don't Save) or still
+                // finishing: the quit stops, and says so where it stopped.
+                let asking = self.host.borrow().window.attachedSheet().is_some();
+                self.message = held_note(intent, asking).into();
+                crate::diag::line(serde_json::json!({"quit":"held", "intent":"Quit", "asking":asking, "closing":true}));
+                self.bring_forward();
                 cancel_quit(cx);
+                cx.notify();
             }
             return;
         }
@@ -980,11 +1361,22 @@ impl Controller {
         // A quit is not refused because of work that ends on its own: it
         // waits (saying what for) and goes on when the work has ended.
         crate::diag::line(serde_json::json!({"quit":"close_state", "state":format!("{state:?}"), "opening":self.opening, "asking":asking, "operation":self.mcp.operation_in_progress()}));
+        // The quit's own windows closing together (nothing asks any more)
+        // are not fenced by each other's operation: agents are already
+        // refused while quitting (`Host::closing`), and each close holding
+        // the one operation made nine tabs close one at a time (run 24).
+        let together = intent == Intent::Quit
+            && !cx.global::<QuitCoordinator>().closing.is_empty();
         let fenced = matches!(state, CloseState::Dirty | CloseState::Clean)
-            && self.mcp.operation_in_progress();
+            && self.mcp.operation_in_progress()
+            && !together;
         if intent == Intent::Quit
             && let Some(work) = quit_waits_for(state, self.opening, asking, fenced)
         {
+            // A save someone chose finishes, however long it takes.
+            if state == CloseState::Saving {
+                crate::quit_limit::cancel();
+            }
             self.closing_note = Some(closing(Intent::Quit, work));
             cx.notify();
             cx.spawn(async move |this, cx| {
@@ -1021,24 +1413,36 @@ impl Controller {
                 return;
             }
             CloseState::Busy => {
-                self.message =
-                    "Finish the active edit, open or recovery decision before closing.".into();
-                // What holds the close is in this window: show it.
-                self.show_window();
+                self.message = held_note(intent, asking).into();
+                crate::diag::line(serde_json::json!({"quit":"held", "intent":format!("{intent:?}"), "asking":asking}));
+                // What holds the close is in this window: show it. A quit can
+                // come while the app is behind another (the Dock, a script):
+                // the app comes forward too, with this window's tab chosen,
+                // and the beep says the quit stopped.
+                if intent == Intent::Quit {
+                    self.bring_forward();
+                } else {
+                    self.show_window();
+                }
                 cancel_quit(cx);
                 cx.notify();
                 return;
             }
             _ => {}
         }
-        let Some(operation) = self.mcp.try_operation() else {
-            self.message =
-                "A project operation is in progress. Try closing again when it finishes.".into();
-            cancel_quit(cx);
-            cx.notify();
-            return;
+        let operation = match self.mcp.try_operation() {
+            Some(operation) => Some(operation),
+            None if together => None,
+            None => {
+                self.message =
+                    "A project operation is in progress. Try closing again when it finishes."
+                        .into();
+                cancel_quit(cx);
+                cx.notify();
+                return;
+            }
         };
-        self.close_operation = Some(operation);
+        self.close_operation = operation;
         self.close_pending = true;
         self.mcp.closing.store(true, Ordering::Release);
         if state == CloseState::Stopped || p.as_ref().is_none_or(|p| !p.dirty) {
@@ -1060,6 +1464,8 @@ impl Controller {
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| "Untitled".into());
+        // Nobody is hurried while asked: the quit's bound waits for the answer.
+        crate::quit_limit::cancel();
         let rx = unsaved(&name).sheet(&self.host.borrow().window);
         cx.spawn(async move |this, cx| {
             let choice = rx.recv().await.ok().flatten();
@@ -1081,6 +1487,18 @@ impl Controller {
             return;
         };
         let kernel = self.kernel.clone();
+        if intent == Intent::Quit {
+            // Don't Save is answered: archiving the changes is bounded too,
+            // and the windows go at once while it finishes behind (it took
+            // a second and more on a large project); the quit still waits
+            // for it before the process ends, and a failure shows the app.
+            arm(cx, "windows", crate::quit_limit::WINDOWS);
+            if cx.global::<QuitCoordinator>().queue.iter().all(|w| {
+                w.upgrade().is_none_or(|c| !c.read(cx).dirty())
+            }) {
+                hide_for_quit(cx);
+            }
+        }
         self.closing_note = Some(closing(intent, "archiving changes"));
         cx.spawn(async move |this, cx| {
             let result = discard_close(&kernel, session).await;
@@ -1106,21 +1524,53 @@ impl Controller {
         })
         .detach();
     }
+    /// The window after its project closed and nothing replaced it: no
+    /// project, not closing.
+    fn show_no_project(&mut self, cx: &mut Context<Self>) {
+        self.mcp.closing.store(false, Ordering::Release);
+        self.close_pending = false;
+        self.closed_for_quit = false;
+        self.closing_note = None;
+        self.home = false;
+        self.start_builtins(cx);
+        let layer = metal::MetalLayer::new();
+        if pm_engine_service::layers::configure_layer(
+            objc2::MainThreadMarker::new().unwrap(),
+            &layer,
+            &self.engine.metal_device(),
+        )
+        .is_ok()
+        {
+            self.host.borrow_mut().replace_viewer_layer(layer);
+            self.main_output.set(None);
+        }
+        self.message = "No project".into();
+        if let Some(shell) = self.shell.as_ref().and_then(gpui::WeakEntity::upgrade) {
+            shell.update(cx, |s, _| s.bind_project("shell-untitled".into()));
+        }
+    }
     pub fn complete_close(&mut self, intent: Intent, cx: &mut Context<Self>) {
         if let Some(g) = self.builtins.gizmos.clone() {
-            g.update(cx, |g, cx| g.studio_fly_end(false, cx));
+            // It draws, which reads the controller: after this update.
+            cx.defer(move |cx| g.update(cx, |g, cx| g.studio_fly_end(false, cx)));
         }
         let kernel = self.kernel.clone();
         let session = self.session.clone();
         // A discarded close has already released its session; its project
         // is still published here until the close finishes.
         let had_project = session.is_some() || self.published.is_some();
+        if intent == Intent::Quit {
+            // This window's questions are answered: its close is bounded.
+            arm(cx, "windows", crate::quit_limit::WINDOWS);
+        }
         self.closing_note = Some(closing(intent, "finishing save and recovery data"));
         // The picture the viewer shows now is what the next launch shows
         // until its first frame: copied before the project goes; a chosen
         // quit waits for the file (`last_frame_keep`), a quit signal keeps
         // only the one already kept.
         let signal = cx.global::<QuitCoordinator>().terminating;
+        // The quit this close belongs to (a later one does not adopt it).
+        let generation = cx.global::<QuitCoordinator>().run.generation;
         let last_frame = session
             .is_some()
             .then(|| last_frame_keep(intent, signal))
@@ -1129,14 +1579,42 @@ impl Controller {
                 let written = self.keep_last_frame(wait, cx);
                 written.filter(|_| wait.is_some())
             });
+        // A quit's windows close without waiting for their pictures: the quit
+        // waits for them all at once before it ends (`finish_quit`).
+        let last_frame = match last_frame {
+            Some(stored) if intent == Intent::Quit => {
+                cx.global_mut::<QuitCoordinator>().frames.push(stored);
+                None
+            }
+            other => other,
+        };
+        #[cfg(debug_assertions)]
+        let stalled_last = cx.global::<QuitCoordinator>().queue.is_empty();
         cx.spawn(async move |this, cx| {
             let result = async {
+                let started = std::time::Instant::now();
                 if let Some(stored) = last_frame {
                     let _ = stored.recv().await;
+                }
+                let framed = started.elapsed();
+                // A development build can hold the last window's close, as a
+                // close the kernel never answers does, to try the quit's
+                // stall question by hand (PM-425).
+                #[cfg(debug_assertions)]
+                if intent == Intent::Quit
+                    && std::env::var_os("PM_QUIT_TEST_STALL").is_some()
+                    && stalled_last
+                {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(60))
+                        .await;
                 }
                 if let Some(session) = session {
                     expect_closed(kernel.shell(ShellCall::Close(session)).await)?;
                 }
+                crate::diag::line(serde_json::json!({"quit":"window_closed",
+                    "last_frame_ms": framed.as_secs_f64() * 1000.,
+                    "kernel_ms": (started.elapsed() - framed).as_secs_f64() * 1000.}));
                 if intent != Intent::Quit {
                     match kernel.shell(ShellCall::DurabilityBarrier).await {
                         Some(Ok(ShellReply::Durable)) => {}
@@ -1197,7 +1675,18 @@ impl Controller {
                         }
                     })
                     .detach();
-                    if intent == Intent::Quit {
+                    if intent == Intent::Quit
+                        && !cx.global::<QuitCoordinator>().run.current(generation)
+                    {
+                        // Its quit was cancelled while this close went on
+                        // (another window's close failed): no project here
+                        // now, not "closing" for a quit that is over.
+                        crate::diag::line(serde_json::json!({"quit":"late_release"}));
+                        v.show_no_project(cx);
+                        cx.notify();
+                    } else if intent == Intent::Quit {
+                        crate::diag::line(serde_json::json!({"quit":"window_released"}));
+                        v.closed_for_quit = true;
                         v.closing_note = Some(closing(Intent::Quit, "finishing up"));
                         cx.defer(next_quit);
                     } else if intent == Intent::Project
@@ -1205,26 +1694,7 @@ impl Controller {
                     {
                         // v1: closing the last project shows Home; the
                         // window stays, its session forgets the project.
-                        v.mcp.closing.store(false, Ordering::Release);
-                        v.close_pending = false;
-                        v.closing_note = None;
-                        v.home = false;
-                        v.start_builtins(cx);
-                        let layer = metal::MetalLayer::new();
-                        if pm_engine_service::layers::configure_layer(
-                            objc2::MainThreadMarker::new().unwrap(),
-                            &layer,
-                            &v.engine.metal_device(),
-                        )
-                        .is_ok()
-                        {
-                            v.host.borrow_mut().replace_viewer_layer(layer);
-                            v.main_output.set(None);
-                        }
-                        v.message = "No project".into();
-                        if let Some(shell) = v.shell.as_ref().and_then(gpui::WeakEntity::upgrade) {
-                            shell.update(cx, |s, _| s.bind_project("shell-untitled".into()));
-                        }
+                        v.show_no_project(cx);
                         // The project this one gave way to opens here.
                         if let Some(next) = v.replace_with.take() {
                             v.apply_pending(next, cx);
@@ -1330,6 +1800,57 @@ mod tests {
         assert!(alert.buttons[0].default && !alert.buttons[0].action);
         assert!(alert.buttons[1].action);
         assert!(alert.informative.contains("Unsupported window session"));
+    }
+    /// Two windows closing together; the first one's close fails and the
+    /// quit is cancelled; the second's success arrives after: it belongs to
+    /// no running quit, so it does nothing for it. A quit started again later
+    /// does not adopt it either.
+    #[test]
+    fn a_close_finishing_after_its_quit_was_cancelled_is_late() {
+        let mut run = QuitRun::default();
+        let quit = run.start();
+        let (first, second) = (quit, quit);
+        assert!(run.current(first) && run.current(second));
+        // The first window's close fails: the quit is cancelled.
+        run.cancel();
+        assert!(!run.current(second), "the second close's success is late");
+        // A new quit: the old close is still not one of its own.
+        let again = run.start();
+        assert!(!run.current(second) && run.current(again));
+    }
+    /// What holds a quit is named: a file chooser anywhere, the Recover
+    /// question and the Export sheet on an editor, any other question.
+    #[test]
+    fn a_quit_names_the_sheet_that_holds_it() {
+        assert_eq!(blocker_name(true, true, true), "a file chooser");
+        assert_eq!(blocker_name(false, true, true), "the Recover question");
+        assert_eq!(blocker_name(false, false, true), "the Export sheet");
+        assert_eq!(blocker_name(false, false, false), "a question");
+        assert!(held_by("the Export sheet").starts_with("Powermove didn’t quit: the Export sheet"));
+    }
+    /// A sheet on screen holds every chosen Quit before anything closes,
+    /// the second Quit of a quit asking its own question included (it goes on
+    /// after the answer, not cancelled); the Quit Now sheet answers a second
+    /// Quit itself; a signal is never held.
+    #[test]
+    fn a_sheet_holds_a_quit_before_anything_closes() {
+        assert_eq!(quit_entry(false, false, false, true), QuitEntry::Hold { cancel: true });
+        assert_eq!(quit_entry(false, true, false, true), QuitEntry::Hold { cancel: false });
+        assert_eq!(quit_entry(false, true, true, true), QuitEntry::QuitNow);
+        assert_eq!(quit_entry(true, false, false, true), QuitEntry::Signal);
+        assert_eq!(quit_entry(false, true, false, false), QuitEntry::QuitNow);
+        assert_eq!(quit_entry(false, false, false, false), QuitEntry::Start);
+    }
+    /// A quit a question stops says so in that window, by name: never the
+    /// generic close note, never nothing.
+    #[test]
+    fn a_quit_held_by_a_question_says_so() {
+        assert!(held_note(Intent::Quit, true).starts_with("Powermove didn’t quit"));
+        assert!(held_note(Intent::Quit, true).contains("question"));
+        assert!(held_note(Intent::Quit, false).starts_with("Powermove didn’t quit"));
+        assert!(!held_note(Intent::Window, true).contains("quit"));
+        // A question is not work that ends on its own: the quit stops at it.
+        assert_eq!(quit_waits_for(CloseState::Busy, true, true, true), None);
     }
     /// A Quit at a window that is opening a project, saving, or behind
     /// another project operation waits for it; one at a window that asks

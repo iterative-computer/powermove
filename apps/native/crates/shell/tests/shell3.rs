@@ -337,6 +337,44 @@ fn panel_headers_share_the_38_pt_header_metric() {
     );
 }
 
+/// An extension asks its panel back before it has registered it (launch):
+/// no "Unknown panel" in the status bar; once the extensions are ready a
+/// panel that still is not there stays away quietly.
+#[test]
+fn a_panel_asked_back_before_it_registers_is_never_an_error() {
+    let mut cx = HeadlessAppContext::with_platform(
+        Arc::new(gpui_parley::ParleyTextSystem::new(
+            gpui_parley::SystemFonts::Load,
+        )),
+        Arc::new(()),
+        || None,
+    );
+    let t = tokens();
+    let window = cx
+        .open_window(size(px(1440.), px(900.)), |_, cx| {
+            cx.new(|cx| {
+                let mut v = pm_shell::view::Editor::new(t, None, cx);
+                v.layout = Layout::preset("design");
+                v
+            })
+        })
+        .unwrap();
+    window
+        .update(&mut cx, |v, _, cx| {
+            assert!(v.run_shell_command("panels:waiting", cx));
+            assert!(v.run_shell_command("panel:restore:extension.not-yet", cx));
+            assert_eq!(v.status, "", "a restore waits for its panel");
+            assert!(v.layout.find("extension.not-yet").is_none());
+            assert!(v.run_shell_command("panels:ready", cx));
+            assert_eq!(v.status, "", "one that never came stays away quietly");
+            assert!(v.layout.find("extension.not-yet").is_none());
+            // A known panel still comes back as before.
+            assert!(v.run_shell_command("panel:park:inspector", cx));
+            assert!(v.run_shell_command("panel:restore:inspector", cx));
+            assert!(v.layout.find("inspector").is_some());
+        })
+        .unwrap();
+}
 #[test]
 fn a_parked_panel_comes_back_where_it_was() {
     let mut cx = HeadlessAppContext::with_platform(

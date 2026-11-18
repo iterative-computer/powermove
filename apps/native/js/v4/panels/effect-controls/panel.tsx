@@ -1,7 +1,7 @@
 import { useLayoutEffect, useState } from "preact/hooks";
 import * as UI from "../../src/components";
 import type { SurfaceEvent } from "../../src/protocol";
-import { EffectsController } from "./controller";
+import { EffectsController, pointBinding } from "./controller";
 import {
   PANEL_ID,
   PANEL_TITLE,
@@ -9,6 +9,9 @@ import {
   type EffectHeader,
   type ParameterRow,
   type SummaryRow,
+  type RampRow,
+  type PointRow,
+  type MoreRow,
   type Intent,
 } from "./contract";
 const t = UI.token;
@@ -290,8 +293,10 @@ export function EffectControls(props: PanelProps) {
                 overscanViewports: 1,
                 anchor: p.rows[0]?.id ?? null,
               }}
-              onRangeChange={(e: SurfaceEvent) => {
-                if (e.range) {
+              onRangeChange={(e) => {
+                // A list laid out with no height shows no rows: it asks
+                // for none rather than emptying the window it has.
+                if (e.range && e.range[1] > e.range[0]) {
                   const [start, end] = e.range,
                     length = end - start;
                   c.send({
@@ -318,6 +323,29 @@ export function EffectControls(props: PanelProps) {
                         index: row.index,
                       });
                     }}
+                  />
+                ) : row.kind === "spacer" ? (
+                  // Under a point row: its pad reaches down into it.
+                  <div
+                    key={row.id}
+                    role="presentation"
+                    style={{ height: t("metrics.row"), flexShrink: 0 }}
+                  />
+                ) : row.kind === "ramp" ? (
+                  <RampView key={row.id} row={row} locked={p.locked} />
+                ) : row.kind === "point" ? (
+                  <PointView
+                    key={row.id}
+                    row={row}
+                    locked={p.locked}
+                    controller={c}
+                  />
+                ) : row.kind === "more" ? (
+                  <MoreView
+                    key={row.id}
+                    row={row}
+                    locked={p.locked}
+                    send={send}
                   />
                 ) : row.kind === "summary" ? (
                   <SummaryView
@@ -597,6 +625,285 @@ export function EffectControls(props: PanelProps) {
 }
 /** Read-only text for a value without a registry control (design review T4). */
 /** A channel value as a colourist reads it: two places, a true minus. */
+/** v1's gradient bar: the effect's start colour to its end colour, above
+ * their own rows. */
+function RampView({
+  row,
+  locked,
+}: {
+  key?: string;
+  row: RampRow;
+  locked: boolean;
+}) {
+  const [start, end, midpoint] = row.parameters;
+  const muted = locked || !row.enabled;
+  return (
+    <div role="group" label={`${row.effectLabel}, ${row.label}`}>
+      <UI.InspectorRow
+        label={row.label}
+        metadata={{
+          indentToken: "metrics.tree_indent",
+          valueColumn: "panel",
+          valueMostToken: "metrics.value_column_most",
+        }}
+        style={{ color: t(muted ? "colors.muted" : "colors.secondary") }}
+        leading={<div role="presentation" style={hit} />}
+      >
+        <UI.GradientBar
+          id={`${PANEL_ID}:ramp:${row.id}`}
+          label={`${row.label}, ${scalar(start.value) ?? "start"} to ${scalar(end.value) ?? "end"}${midpoint ? `, midpoint ${scalar(midpoint.value)}` : ""}`}
+          start={String(start.value)}
+          end={String(end.value)}
+          {...(midpoint
+            ? {
+                binding: midpoint.binding,
+                value: midpoint.value as number,
+                min: midpoint.min ?? 0,
+                max: midpoint.max ?? 100,
+              }
+            : {})}
+          disabled={locked || !!midpoint?.readonly}
+          style={{ opacity: muted ? 0.5 : 1 }}
+          onKeyDown={stop}
+        />
+      </UI.InspectorRow>
+    </div>
+  );
+}
+/** v1's point: X and Y side by side in one row, one keyframe mark for both. */
+function PointView({
+  row,
+  locked,
+  controller: c,
+}: {
+  key?: string;
+  row: PointRow;
+  locked: boolean;
+  controller: EffectsController;
+}) {
+  const axes = row.parameters;
+  const disabled = locked || axes.some((p) => p.readonly);
+  const key = axes.some((p) => p.keyAtPlayhead);
+  const animated = axes.some((p) => p.animated);
+  const state = key
+    ? "keyframe at playhead"
+    : animated
+      ? "animated"
+      : "not animated";
+  return (
+    <div
+      role="group"
+      label={row.effectLabel}
+      onClick={stop}
+      onKeyDown={stop}
+      onPointerDown={(e) => {
+        if (e.button !== 2) return;
+        stop(e);
+        void c.parameterMenu(row.id).catch((error) => c.platform.report(error));
+      }}
+    >
+      <UI.InspectorRow
+        label={row.label}
+        metadata={{
+          parameter: axes[0].id,
+          indentToken: "metrics.tree_indent",
+          valueColumn: "panel",
+          valueMostToken: "metrics.value_column_most",
+        }}
+        style={{
+          color: t(
+            locked || !row.enabled ? "colors.muted" : "colors.secondary",
+          ),
+        }}
+        leading={
+          <UI.ToolbarItem
+            label={`Keyframe, ${row.label}`}
+            title={state}
+            disabled={disabled}
+            aria-pressed={key}
+            attr={{
+              symbol: key
+                ? "diamond.fill"
+                : animated
+                  ? "diamond.lefthalf.filled"
+                  : "diamond",
+              value: state,
+            }}
+            onClick={(e) => {
+              stop(e);
+              if (disabled) return;
+              for (const p of axes)
+                c.send({
+                  type: "parameter",
+                  id: p.id,
+                  action: e.altKey ? "stopwatch" : "diamond",
+                });
+            }}
+            style={{
+              ...hit,
+              color: t(animated ? "colors.accent" : "colors.muted"),
+              symbolSize: t("metrics.symbol_inline"),
+            }}
+          />
+        }
+      >
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            // One row high and from its top: the pad and the X over Y
+            // reach down into the room the spacer row under it leaves.
+            alignItems: "flex-start",
+            height: t("metrics.row"),
+            paddingTop: t("metrics.border"),
+            gap: t("metrics.gap"),
+            flexGrow: 1,
+          }}
+        >
+          {/* v1's point: the pad, and its X over its Y. */}
+          <UI.PointPad
+            id={`${PANEL_ID}:pad:${row.id}`}
+            label={`${row.label}, ${axes.map((p, i) => `${i ? "Y" : "X"} ${scalar(p.value)}`).join(", ")}`}
+            binding={pointBinding(row)}
+            value={[axes[0].value as number, axes[1].value as number]}
+            min={[axes[0].min ?? -100, axes[1].min ?? -100]}
+            max={[axes[0].max ?? 100, axes[1].max ?? 100]}
+            disabled={disabled}
+            onKeyDown={stop}
+          />
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: t("metrics.border"),
+              flexGrow: 1,
+              flexBasis: 0,
+            }}
+          >
+            {axes.map((p, i) => (
+              <div
+                key={p.id}
+                style={{
+                  display: "flex",
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: t("metrics.border"),
+                }}
+              >
+                <text
+                  style={{
+                    color: t("colors.muted"),
+                    fontSize: t("typography.label"),
+                  }}
+                >
+                  {i ? "Y" : "X"}
+                </text>
+                <UI.NumberField
+                  id={`${PANEL_ID}:field:${row.id}:${i}`}
+                  label={p.label}
+                  binding={p.binding}
+                  disabled={disabled || p.readonly}
+                  mixed={p.mixed}
+                  value={p.value as number}
+                  step={p.step}
+                  min={p.min}
+                  max={p.max}
+                  precision={p.precision}
+                  unit={p.unit}
+                  onKeyDown={stop}
+                  onClick={stop}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      </UI.InspectorRow>
+    </div>
+  );
+}
+/** An effect's More: its rarely used parameters, closed until opened, with
+ * a dot when one of them is not at its default (v1's disclosure). */
+function MoreView({
+  row,
+  locked,
+  send,
+}: {
+  key?: string;
+  row: MoreRow;
+  locked: boolean;
+  send: (intent: Intent) => void;
+}) {
+  const toggle = (e: SurfaceEvent) => {
+    stop(e);
+    send({ type: "disclose", id: row.id, open: !row.open });
+  };
+  return (
+    <div
+      role="group"
+      label={`${row.effectLabel}, More, ${row.count} ${row.count === 1 ? "parameter" : "parameters"}${row.changed ? ", changed" : ""}`}
+      onClick={toggle}
+    >
+      <UI.InspectorRow
+        label="More"
+        metadata={{
+          indentToken: "metrics.tree_indent",
+          valueColumn: "panel",
+          valueMostToken: "metrics.value_column_most",
+        }}
+        style={{
+          color: t(
+            locked || !row.enabled ? "colors.muted" : "colors.secondary",
+          ),
+        }}
+        leading={
+          <UI.ToolbarItem
+            label={`${row.open ? "Hide" : "Show"} more ${row.effectLabel} parameters`}
+            aria-expanded={row.open}
+            attr={{
+              symbol: row.open ? "chevron.down" : "chevron.right",
+              expanded: row.open,
+            }}
+            onClick={toggle}
+            style={{
+              ...hit,
+              color: t("colors.muted"),
+              symbolSize: t("metrics.symbol_inline"),
+            }}
+          />
+        }
+      >
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            gap: t("metrics.gap"),
+          }}
+        >
+          <text
+            style={{
+              color: t("colors.muted"),
+              fontSize: t("typography.label"),
+            }}
+          >
+            {String(row.count)}
+          </text>
+          {row.changed && !row.open ? (
+            <div
+              role="presentation"
+              style={{
+                width: t("metrics.status_dot"),
+                height: t("metrics.status_dot"),
+                borderRadius: t("metrics.status_dot"),
+                background: t("colors.accent"),
+              }}
+            />
+          ) : null}
+        </div>
+      </UI.InspectorRow>
+    </div>
+  );
+}
 function signed(v: unknown) {
   return typeof v === "number" && Number.isFinite(v)
     ? v.toFixed(2).replace("-", "\u2212")
@@ -639,6 +946,7 @@ function SummaryView({
         metadata={{
           indentToken: "metrics.tree_indent",
           valueColumn: "panel",
+          valueMostToken: "metrics.value_column_most",
         }}
         style={{ color: t(muted ? "colors.muted" : "colors.secondary") }}
         leading={<div role="presentation" style={hit} />}
@@ -699,21 +1007,41 @@ function SummaryView({
               {value}
             </text>
           ) : (
-            (["channel_red", "channel_green", "channel_blue"] as const).map(
-              (ink, i) => (
-                <text
-                  key={ink}
-                  style={{
-                    color: t(muted ? "colors.muted" : `colors.${ink}`),
-                    fontSize: t("typography.caption"),
-                    fontVariantNumeric: "tabular-nums",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {signed(channels[i]?.value)}
-                </text>
-              ),
-            )
+            // R, G and B keep their own widths a gap apart. In a column too
+            // narrow for all three, a value that does not fit wraps onto a
+            // second line the group's one-line height hides: whole values
+            // only, none run into the next or under the Color button.
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "row",
+                flexWrap: "wrap",
+                alignItems: "center",
+                gap: t("metrics.gap"),
+                height: t("metrics.field"),
+                flexGrow: 1,
+                flexShrink: 1,
+                minWidth: 0,
+                overflow: "hidden",
+              }}
+            >
+              {(["channel_red", "channel_green", "channel_blue"] as const).map(
+                (ink, i) => (
+                  <text
+                    key={ink}
+                    style={{
+                      color: t(muted ? "colors.muted" : `colors.${ink}`),
+                      fontSize: t("typography.caption"),
+                      fontVariantNumeric: "tabular-nums",
+                      whiteSpace: "nowrap",
+                      flexShrink: 0,
+                    }}
+                  >
+                    {signed(channels[i]?.value)}
+                  </text>
+                ),
+              )}
+            </div>
           )}
         </div>
       </UI.InspectorRow>
@@ -807,6 +1135,7 @@ function ParameterView({
           parameter: p.id,
           indentToken: "metrics.tree_indent",
           valueColumn: "panel",
+          valueMostToken: "metrics.value_column_most",
         }}
         style={{
           color: t(

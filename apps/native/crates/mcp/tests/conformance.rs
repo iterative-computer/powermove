@@ -265,6 +265,20 @@ fn disconnect_rolls_back_and_removes_workspace() {
         f.host.lock().unwrap().read_document(&id).unwrap()["layers"],
         json!([])
     );
+    // PM-507: the session says its close rolled the run's edits back, once.
+    assert!(s.take_rolled_back());
+    assert!(!s.take_rolled_back());
+}
+#[test]
+fn a_kept_session_reports_no_rollback() {
+    let f = Fixture::new();
+    f.create();
+    let mut s = f.session();
+    start(&mut s);
+    add(&mut s, "L-kept");
+    let _ = s.call("finish_session", json!({"commit":true}));
+    s.close().unwrap();
+    assert!(!s.take_rolled_back());
 }
 #[test]
 fn interleaved_edits_refuse_rollback_and_do_not_squash() {

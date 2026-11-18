@@ -187,7 +187,7 @@ mod cull;
 
 /// A number field's value after an arrow key: the typed text (else the
 /// field's value) one step up or down, ten with Shift, within its limits.
-fn arrow_step(typed: &str, facts: crate::v4_compile::NumberFacts, key: &str) -> f64 {
+pub(crate) fn arrow_step(typed: &str, facts: crate::v4_compile::NumberFacts, key: &str) -> f64 {
     let current = typed
         .trim()
         .parse::<f64>()
@@ -208,6 +208,10 @@ fn arrow_step(typed: &str, facts: crate::v4_compile::NumberFacts, key: &str) -> 
     ((next * scale).round() / scale).clamp(facts.min, facts.max)
 }
 
+/// How long a body's scroll rests before its controls are themselves again:
+/// the scroll layer's settle (P-SCROLL-LAYER).
+const PICTURE_REST: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// A press on a number field: a click edits, a drag scrubs (language.md §9).
 /// A press on a grading control (`grade`) drags it through the same gesture.
 struct ScrubDrag {
@@ -219,8 +223,29 @@ struct ScrubDrag {
     active: bool,
     grade: Option<grade::GradeDrag>,
 }
+/// An undo step's name from a control's label: the label without the
+/// accessibility suffix a colour control carries.
+fn undo_name_of(label: &str) -> Option<String> {
+    let name = label
+        .strip_suffix(" colour")
+        .or_else(|| label.strip_suffix(" color"))
+        .unwrap_or(label)
+        .trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+#[cfg(test)]
+mod undo_name_tests {
+    #[test]
+    fn a_colour_drag_undoes_by_its_controls_name() {
+        assert_eq!(super::undo_name_of("Lift colour").as_deref(), Some("Lift"));
+        assert_eq!(super::undo_name_of("Curve").as_deref(), Some("Curve"));
+        assert_eq!(super::undo_name_of("Temperature").as_deref(), Some("Temperature"));
+        assert_eq!(super::undo_name_of(" "), None);
+    }
+}
 enum ScrubOp {
-    Begin,
+    /// The undo step's name: the control's (Lift, Curve, Temperature).
+    Begin(Option<String>),
     Value(SharedString, Value),
     Finish(bool),
 }
@@ -267,6 +292,11 @@ pub struct SurfaceView {
     fields: BTreeMap<Id, Entity<TextField>>,
     colour: Option<(Id, Entity<crate::colour_picker::Picker>, Subscription)>,
     controls: BTreeMap<Id, Entity<crate::v4_control::NativeControl>>,
+    /// While the body scrolls, the controls show as pictures of themselves
+    /// (P-SLOT-PICTURE); `pictures_at` counts the scroll's steps, so only
+    /// the last one's rest lets them go.
+    pictures: pm_shell::picture::PictureHold,
+    pictures_at: u64,
     /// Rows of a long scroller left out of a frame (`v4_cull`).
     cull: cull::Cull,
     /// Pop-ups whose rows the host lists, by the source they were given.
@@ -368,6 +398,59 @@ pub struct SurfaceView {
     number_edit_request: Option<Id>,
     pub error: Option<String>,
 }
+/// The height of a scroller's content: where its last child ends below its
+/// top, in layout (which its offset does not move, nor its own height).
+fn content_height(scroll: &ScrollHandle) -> f32 {
+    let top = scroll.bounds().top();
+    let mut bottom = top;
+    for ix in 0.. {
+        let Some(child) = scroll.bounds_for_item(ix) else {
+            break;
+        };
+        bottom = bottom.max(child.bottom());
+    }
+    f32::from(bottom - top)
+}
+
+/// Fades over a scroller's viewport where content runs past its top or
+/// bottom edge, into `ground` (the colour under it), a row tall: a region
+/// that draws no scroller still shows there is more. Drawn over the content
+/// in the viewport's own place, whatever the scroll.
+fn scroll_edges(scroll: ScrollHandle, ground: u32, t: &pm_design::Tokens) -> AnyElement {
+    let depth = px(t.metrics.form_row);
+    canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            let view = scroll.bounds();
+            let (offset, max) = (-scroll.offset().y, scroll.max_offset().y);
+            if max <= px(0.) || view.size.height <= depth * 2. {
+                return;
+            }
+            let fade = |top: bool| {
+                let (from, to) = if top { (1., 0.) } else { (0., 1.) };
+                gpui::linear_gradient(
+                    180.,
+                    gpui::linear_color_stop(pm_shell::kit::ink(ground, from), 0.),
+                    gpui::linear_color_stop(pm_shell::kit::ink(ground, to), 1.),
+                )
+            };
+            if offset > px(1.) {
+                let band = Bounds::new(view.origin, size(view.size.width, depth));
+                window.paint_quad(gpui::fill(band, fade(true)));
+            }
+            if offset < max - px(1.) {
+                let band = Bounds::new(
+                    point(view.origin.x, view.bottom() - depth),
+                    size(view.size.width, depth),
+                );
+                window.paint_quad(gpui::fill(band, fade(false)));
+            }
+        },
+    )
+    .absolute()
+    .size_0()
+    .into_any_element()
+}
 impl SurfaceView {
     /// Seed a synthetic hover for headless captures without OS input.
     #[cfg(test)]
@@ -407,6 +490,8 @@ impl SurfaceView {
             fields: BTreeMap::new(),
             colour: None,
             controls: BTreeMap::new(),
+            pictures: Default::default(),
+            pictures_at: 0,
             cull: Default::default(),
             row_sources: HashMap::new(),
             disclosures: HashMap::new(),
@@ -918,10 +1003,7 @@ impl SurfaceView {
                         );
                     }
                 }
-                // A native control is a Tab stop too: the panel draws its
-                // focus ring and forwards its keys (Full Keyboard Access).
-                // A search field and a segmented control take no forwarded
-                // keys (`NativeControl::key`), so Tab passes them.
+                // Segmented controls own their Tab stop in the kit.
                 if !view.disabled
                     && view.tab_index.is_none_or(|t| t >= 0)
                     && !matches!(
@@ -989,6 +1071,11 @@ impl SurfaceView {
                 "fields": mounts.2, "fields_ms": mounts.3.as_secs_f64() * 1000.}),
             );
         }
+    }
+    /// A drag's undo step, named for its control: its label without the
+    /// accessibility suffix ("Lift colour" undoes as "Lift").
+    pub(super) fn undo_name(&self, id: Id) -> Option<String> {
+        undo_name_of(self.publication.surface.node(id)?.props.get("label")?.as_str()?)
     }
     /// Whether a disclosure button shows its group open: the press not yet
     /// published, else the publication.
@@ -1130,6 +1217,10 @@ impl SurfaceView {
         let id = view.id;
         let segmented = matches!(kind, crate::v4_control::Kind::Segmented)
             .then(|| segments(&self.publication.surface, node));
+        // A segmented control in the panel's header is its mode switch, at
+        // the header's size; elsewhere the system's regular size.
+        let header_switch = matches!(kind, crate::v4_control::Kind::Segmented)
+            && (self.in_header(id) || crate::v4_compile::variant(node) == Some("glass"));
         let value = match &segmented {
             Some((_, selected, _)) => json!(selected),
             None => node.props.get("value").cloned().unwrap_or(Value::Null),
@@ -1143,7 +1234,10 @@ impl SurfaceView {
             .and_then(Value::as_str)
             .map(str::to_owned);
         if let Some(control) = self.controls.get(&id) {
-            control.update(cx, |v, _| v.display(display.as_deref()));
+            control.update(cx, |v, _| {
+                v.display(display.as_deref());
+                v.set_tab_index(view.tab_index.unwrap_or(0));
+            });
             if matches!(kind, crate::v4_control::Kind::Push)
                 && let Some(label) = node.props.get("label").and_then(Value::as_str)
             {
@@ -1207,7 +1301,7 @@ impl SurfaceView {
         let tokens = self.table.tokens.clone();
         let disabled = view.disabled;
         let control = cx.new(|cx| {
-            crate::v4_control::NativeControl::new(
+            let mut control = crate::v4_control::NativeControl::new(
                 crate::v4_control::ControlSpec {
                     kind,
                     label,
@@ -1228,15 +1322,16 @@ impl SurfaceView {
                     tint: None,
                     symbol: None,
                     // Every segmented control is the kit's one: the system's
-                    // Liquid Glass capsule at the large size (PM-409).
-                    // Settings keeps the plain AppKit control of its pages.
-                    glass: matches!(kind, crate::v4_control::Kind::Segmented)
-                        && self.publication.panel != "settings",
+                    // Liquid Glass capsule (PM-409); large as a header's mode
+                    // switch, small in a row's value well.
+                    glass: header_switch,
                 },
                 &tokens,
                 window,
                 cx,
-            )
+            );
+            control.set_tab_index(view.tab_index.unwrap_or(0));
+            control
         });
         let generation = self.publication.generation;
         self.subscriptions.entry(id).or_default().push(cx.subscribe(
@@ -1302,6 +1397,11 @@ impl SurfaceView {
         }
         if let Some(placeholder) = placeholder {
             control.read(cx).placeholder(&placeholder);
+        }
+        // The header stays put while the body scrolls: its controls are
+        // never pictured.
+        if !self.in_header(id) {
+            control.update(cx, |v, _| v.picture_with(&self.pictures));
         }
         self.controls.insert(id, control);
     }
@@ -1575,6 +1675,9 @@ impl SurfaceView {
                 f.begin_editing_selecting_all(cx);
             });
         }
+        if !self.in_header(id) {
+            field.update(cx, |f, _| f.picture_with(&self.pictures));
+        }
         self.fields.insert(id, field);
     }
     #[cfg(test)]
@@ -1599,7 +1702,7 @@ impl SurfaceView {
             && self.requested != Some(rows)
         {
             self.requested = Some(rows);
-            self.send(
+            self.pointer(
                 id,
                 "rangechange",
                 EventDetail {
@@ -2054,6 +2157,55 @@ impl SurfaceView {
         }
         false
     }
+    /// A step of the body's scroll: its controls show as pictures of
+    /// themselves until the scroll has rested `PICTURE_REST` (the scroll
+    /// layer's settle), then as themselves again (P-SLOT-PICTURE).
+    pub fn scroll_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.controls.is_empty() && self.fields.is_empty() {
+            return;
+        }
+        self.pictures_at += 1;
+        if self.pictures.set(true) {
+            self.hold_changed(cx);
+        }
+        let at = self.pictures_at;
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(PICTURE_REST).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.pictures_at == at && v.pictures.set(false) {
+                    v.hold_changed(cx);
+                }
+            });
+        })
+        .detach();
+    }
+    /// Whether a node is the panel's header or inside it.
+    fn in_header(&self, mut id: Id) -> bool {
+        let Some(header) = self.prepared.header else {
+            return false;
+        };
+        loop {
+            if id == header {
+                return true;
+            }
+            match self.prepared.node(id).and_then(|n| n.parent) {
+                Some(parent) => id = parent,
+                None => return false,
+            }
+        }
+    }
+    fn hold_changed(&self, cx: &mut Context<Self>) {
+        for control in self.controls.values() {
+            control.update(cx, |c, cx| c.hold_changed(cx));
+        }
+        for field in self.fields.values() {
+            field.update(cx, |f, cx| f.hold_changed(cx));
+        }
+    }
+    /// Whether the controls show as pictures (a scroll is moving).
+    pub fn pictures_held(&self) -> bool {
+        self.pictures.held()
+    }
     /// Re-stage AppKit slots whose cached paint did not run this frame (a
     /// slot inside a scroll layer follows the layer's offset).
     pub fn keep_native_slots(&self, window: &Window, cx: &App) {
@@ -2167,6 +2319,10 @@ impl SurfaceView {
     }
     /// Pointer stream events address the current tree: a publication landing
     /// mid-drag must not lose the release. Moves coalesce to one in flight.
+    /// A list's rows and width (`rangechange`) go the same way: the list is
+    /// republished with every page, so an older tree's report would be
+    /// refused, and one that is lost anyway is sent again on the next frame
+    /// (a grid that never hears its width draws one column; PM-447).
     fn pointer(
         &mut self,
         id: Id,
@@ -2197,8 +2353,15 @@ impl SurfaceView {
                 Err(error) => Err(error),
             };
             let _ = this.update(cx, |v, cx| {
-                if let Err(error) = result {
-                    v.error = Some(error.to_string());
+                match result {
+                    // Asked again by the next frame (a refusal comes from a
+                    // newer publication, which draws one).
+                    Err(_) if event == "rangechange" => {
+                        v.sent_ranges.remove(&id);
+                        v.requested = None;
+                    }
+                    Err(error) => v.error = Some(error.to_string()),
+                    Ok(()) => {}
                 }
                 if event == "pointermove" {
                     v.move_busy = false;
@@ -2561,6 +2724,7 @@ impl SurfaceView {
             return self.grade_move(event, cx);
         }
         let threshold = self.table.tokens.metrics.drag_threshold;
+        let name = self.scrub.as_ref().and_then(|d| self.undo_name(d.id));
         let Some(drag) = &mut self.scrub else {
             return;
         };
@@ -2583,7 +2747,7 @@ impl SurfaceView {
         if !drag.active {
             drag.active = true;
             if drag.binding.is_some() {
-                self.scrub_ops.push_back(ScrubOp::Begin);
+                self.scrub_ops.push_back(ScrubOp::Begin(name));
             }
         }
         let id = drag.id;
@@ -2660,7 +2824,7 @@ impl SurfaceView {
                 .background_executor()
                 .spawn(async move {
                     let pending = match (op, gesture) {
-                        (ScrubOp::Begin, _) => runtime.scrub_begin(&panel),
+                        (ScrubOp::Begin(label), _) => runtime.scrub_begin(&panel, label.as_deref()),
                         (ScrubOp::Value(handle, value), Some(gesture)) => {
                             runtime.scrub_step(&panel, &handle, gesture, value)
                         }
@@ -2673,7 +2837,7 @@ impl SurfaceView {
                     pending
                         .await
                         .ok_or("Kernel closed")?
-                        .map_err(|e| format!("{e:?}"))
+                        .map_err(|e| e.to_string())
                 })
                 .await;
             let _ = this.update(cx, |v, cx| {
@@ -3118,14 +3282,81 @@ impl SurfaceView {
         cx: &mut Context<Self>,
         skip: Option<Id>,
     ) -> AnyElement {
-        if skip == Some(id) {
-            return div().into_any_element();
-        }
+        // The render recurses here once per level of the tree: this frame
+        // holds only the children loop. What a node is before and after its
+        // children is built in frames of their own (`element_open`,
+        // `element_close`): in one frame, a debug build gave each level
+        // 180 KB, and ten levels with a symbol drawn under them overflowed a
+        // 2 MB thread.
+        let (element, mut children, shown) = match self.element_open(id, window, cx, skip) {
+            Ok(open) => open,
+            Err(done) => return done,
+        };
         let Some(node) = self.prepared.node(id) else {
             return div().into_any_element();
         };
+        // A standalone surface has no native timeline scene to supply a range.
+        let retained_rows = if node.outline_retained {
+            self.natives.outline.scene.borrow().as_ref().map(|scene| {
+                let (start, end) = self.natives.outline.rows.get();
+                (start..end).filter_map(|index| scene.span(index))
+                    .map(|(row, _, _)| row.id.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+        } else { None };
+        for child in node.children.iter().take(shown).filter(|child| {
+            retained_rows.as_ref().is_none_or(|rows| {
+                self.prepared.node(**child).and_then(|node| node.semantic.as_ref())
+                    .and_then(|id| id.strip_prefix("timeline:row:"))
+                    .is_some_and(|id| rows.contains(id))
+            })
+        }) {
+            if let Some(stand_in) = self.cull.stand_in(*child) {
+                children.push(stand_in);
+                continue;
+            }
+            match self.prepared.node(*child) {
+                Some(c) if c.is_plain_text => {
+                    if let Some(text) = &c.text {
+                        children.push(self.plain_or_quote_text(c.id, text));
+                    }
+                }
+                _ if node.fixed_items => {
+                    let size = node.virtual_window.map_or(0., |g| g.item_size) as f32;
+                    children.push(
+                        div()
+                            .flex_none()
+                            .h(px(size))
+                            .flex()
+                            .flex_col()
+                            .child(self.element(*child, window, cx, skip))
+                            .into_any_element(),
+                    );
+                }
+                _ => children.push(self.element(*child, window, cx, skip)),
+            }
+        }
+        self.element_close(id, element, children, window, cx)
+    }
+    /// A node's element up to its children, and the children that come
+    /// before them; `Err` when the node is all there is (a control, a field,
+    /// nothing).
+    #[inline(never)]
+    fn element_open(
+        &self,
+        id: Id,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        skip: Option<Id>,
+    ) -> Result<(Box<Stateful<Div>>, Vec<AnyElement>, usize), AnyElement> {
+        if skip == Some(id) {
+            return Err(div().into_any_element());
+        }
+        let Some(node) = self.prepared.node(id) else {
+            return Err(div().into_any_element());
+        };
         if node.hidden {
-            return div().into_any_element();
+            return Err(div().into_any_element());
         }
         if let Some(control) = self.controls.get(&id) {
             // A control whose node may shrink gives way (and truncates)
@@ -3197,13 +3428,13 @@ impl SurfaceView {
             } else {
                 control.clone().into_any_element()
             };
-            return slot
+            return Err(slot
                 .child(child)
                 .children(self.probe(id))
-                .into_any_element();
+                .into_any_element());
         }
         if let Some(field) = self.fields.get(&id) {
-            return self.field_element(node, field, cx);
+            return Err(self.field_element(node, field, cx));
         }
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
@@ -3271,6 +3502,22 @@ impl SurfaceView {
                 .width;
             element = element.min_w(width);
         }
+        if let Some((labels, room)) = &node.fits_labels {
+            let mut text = window.text_style();
+            text.refine(&node.style.text);
+            let size = text.font_size.to_pixels(window.rem_size());
+            let widest = labels
+                .iter()
+                .map(|label| {
+                    let run = text.to_run(label.len());
+                    window
+                        .text_system()
+                        .shape_line(label.clone(), size, &[run])
+                        .width
+                })
+                .fold(px(0.), |a, b| a.max(b));
+            element = element.min_w(widest + px(*room)).flex_shrink_0();
+        }
         if node.outline_column && self.natives.outline.column.get() > 0. {
             element = element.w(px(self.natives.outline.column.get()));
         }
@@ -3298,15 +3545,7 @@ impl SurfaceView {
             // A scroller may shrink to nothing unless its panel asks to keep
             // some rows (`metadata.rowFloor`, Effect Controls' effects): a
             // panel body shorter than those rows scrolls instead.
-            let floor = self
-                .publication
-                .surface
-                .node(id)
-                .and_then(|n| n.props.get("metadata"))
-                .and_then(|m| m.get("rowFloor"))
-                .and_then(Value::as_f64)
-                .filter(|rows| rows.is_finite() && *rows > 0.)
-                .map_or(0., |rows| rows as f32 * self.table.tokens.metrics.row);
+            let floor = self.row_floor(id);
             // A scroll region with a max height (a sheet body) keeps its
             // content height up to that cap; panel scrollers fill their dock.
             element = if node.style.max_size.height.is_some() {
@@ -3350,7 +3589,7 @@ impl SurfaceView {
                 .scrolls
                 .get(&id)
                 .is_some_and(|s| s.max_offset().y <= px(0.));
-            if &*self.publication.panel == pm_builtins::PROJECT_PANEL
+            if self.layered()
                 && !self.holds_native(id)
                 && !(fits && self.culls_in(id))
             {
@@ -3712,47 +3951,22 @@ impl SurfaceView {
         } else {
             usize::MAX
         };
-        // A standalone surface has no native timeline scene to supply a range.
-        let retained_rows = if node.outline_retained {
-            self.natives.outline.scene.borrow().as_ref().map(|scene| {
-                let (start, end) = self.natives.outline.rows.get();
-                (start..end).filter_map(|index| scene.span(index))
-                    .map(|(row, _, _)| row.id.clone())
-                    .collect::<std::collections::BTreeSet<_>>()
-            })
-        } else { None };
-        for child in node.children.iter().take(shown).filter(|child| {
-            retained_rows.as_ref().is_none_or(|rows| {
-                self.prepared.node(**child).and_then(|node| node.semantic.as_ref())
-                    .and_then(|id| id.strip_prefix("timeline:row:"))
-                    .is_some_and(|id| rows.contains(id))
-            })
-        }) {
-            if let Some(stand_in) = self.cull.stand_in(*child) {
-                children.push(stand_in);
-                continue;
-            }
-            match self.prepared.node(*child) {
-                Some(c) if c.is_plain_text => {
-                    if let Some(text) = &c.text {
-                        children.push(self.plain_or_quote_text(c.id, text));
-                    }
-                }
-                _ if node.fixed_items => {
-                    let size = node.virtual_window.map_or(0., |g| g.item_size) as f32;
-                    children.push(
-                        div()
-                            .flex_none()
-                            .h(px(size))
-                            .flex()
-                            .flex_col()
-                            .child(self.element(*child, window, cx, skip))
-                            .into_any_element(),
-                    );
-                }
-                _ => children.push(self.element(*child, window, cx, skip)),
-            }
-        }
+        Ok((Box::new(element), children, shown))
+    }
+    /// A node's element with its children: the edges, the probe, the sheet
+    /// and its place in the panel.
+    #[inline(never)]
+    fn element_close(
+        &self,
+        id: Id,
+        element: Box<Stateful<Div>>,
+        mut children: Vec<AnyElement>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(node) = self.prepared.node(id) else {
+            return element.into_any_element();
+        };
         if let Some(geometry) = node.virtual_window {
             let (_, after) = geometry.spacers();
             children.push(div().flex_none().h(px(after as f32)).into_any_element());
@@ -3767,7 +3981,13 @@ impl SurfaceView {
                     .into_any_element(),
             );
         }
-        let mut element = element.children(children).children(self.probe(node.id));
+        let mut element = (*element).children(children).children(self.probe(node.id));
+        // Over the content, last: where it runs past the scroller's edges.
+        if let Some(ground) = node.scroll_edge.filter(|_| node.scroll_y)
+            && let Some(scroll) = self.scrolls.get(&id)
+        {
+            element = element.child(scroll_edges(scroll.clone(), ground, &self.table.tokens));
+        }
         if self.fitted_sheet(node, window) {
             // The sheet is its window's height: its actions stay on the bottom
             // edge while the body between gives way.
@@ -4097,6 +4317,7 @@ impl SurfaceView {
                         | Component::ColourWell
                 )
             );
+        let opens_field = node.opens_field;
         if !disabled && (clickable || events.double_click) {
             let node_layer_drag = node.timeline_layer_drag.is_some();
             element = element.on_click(cx.listener(move |v, event: &ClickEvent, window, cx| {
@@ -4108,6 +4329,12 @@ impl SurfaceView {
                 {
                     cx.stop_propagation();
                     return;
+                }
+                // A click that opens a field (a layer's rename, the typed
+                // time): ⌘A, digits and Return typed from now on are the
+                // field's, even before it has the keyboard (pm_shell::typing).
+                if opens_field.is_some_and(|clicks| event.click_count() >= clicks) {
+                    pm_shell::typing::expect();
                 }
                 // A node that only takes double-clicks (a layer's name) leaves
                 // a single click to what it sits in (its row selects).
@@ -4488,7 +4715,7 @@ impl SurfaceView {
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let root = self
             .publication
             .surface
@@ -4498,7 +4725,9 @@ impl SurfaceView {
             && self.prepared.has_keydown
         {
             self.key_down(root, event, window, cx);
+            return true;
         }
+        false
     }
     fn key_down(
         &mut self,
@@ -4695,7 +4924,11 @@ impl SurfaceView {
                 }
             }
             // Drawn with their own canvas (`grade_canvas`).
-            Kit::Wheel { .. } | Kit::Curve { .. } | Kit::Ease { .. } => {}
+            Kit::Wheel { .. }
+            | Kit::Curve { .. }
+            | Kit::Ease { .. }
+            | Kit::Pad { .. }
+            | Kit::Ramp { .. } => {}
             Kit::Disclosure(published) => {
                 let open = &self
                     .disclosures
@@ -4723,6 +4956,14 @@ impl SurfaceView {
             }
             Kit::Secure | Kit::Anchored { .. } | Kit::None => {}
         }
+        // A symbol leading a line of text stands in the text's leading
+        // inset, level with its first line; the words keep the width and
+        // wrap under themselves (a row would keep them on one line).
+        if node.symbol_leads {
+            element = element
+                .relative()
+                .pl(px(node.symbol_size + t.metrics.gap / 2.));
+        }
         if let Some(symbol) = &node.symbol {
             // The glyph takes the colour the panel declared (an active toggle's
             // accent, a keyframe state); disabled is always `muted`.
@@ -4735,13 +4976,18 @@ impl SurfaceView {
                     (byte(c.red) << 16) | (byte(c.green) << 8) | byte(c.blue)
                 })
             };
-            element = element.child(pm_shell::symbol::symbol(
+            let glyph = pm_shell::symbol::symbol(
                 symbol,
                 node.symbol_size,
                 pm_shell::symbol::Weight::Regular,
                 ink,
                 window,
-            ));
+            );
+            element = if node.symbol_leads {
+                element.child(div().absolute().left_0().top_0().child(glyph))
+            } else {
+                element.child(glyph)
+            };
         }
         // A picture the host made (a Project thumbnail): it fills the node,
         // cropped to its shape; until it exists the node shows its fill.
@@ -4755,7 +5001,11 @@ impl SurfaceView {
                     .absolute()
                     .inset_0()
                     .size_full()
-                    .object_fit(ObjectFit::Cover),
+                    .object_fit(if node.contain {
+                        ObjectFit::Contain
+                    } else {
+                        ObjectFit::Cover
+                    }),
             );
         }
         if let Some(text) = &node.text {
@@ -4942,7 +5192,7 @@ impl SurfaceView {
             if self.sent_ranges.insert(id, sent) == Some(sent) {
                 return;
             }
-            self.send(
+            self.pointer(
                 id,
                 "rangechange",
                 EventDetail {
@@ -5025,18 +5275,59 @@ impl Render for SurfaceView {
             // Measured each frame: a change resizes the body's content.
             let natural = self.natural.clone();
             let column_natural = self.column_natural.clone();
-            let scrolls: Vec<_> = self.scrolls.values().cloned().collect();
+            let scrolls: Vec<(Id, ScrollHandle)> =
+                self.scrolls.iter().map(|(id, h)| (*id, h.clone())).collect();
+            // The vertical scrollers shown, with their floors: each fills what
+            // the panel leaves it (`element`), so the panel's height is
+            // measured without what they stretched past their floor.
+            let fillers: Vec<(Id, ScrollHandle, f32)> = self
+                .prepared
+                .nodes
+                .values()
+                .filter(|n| n.scroll_y && !n.hidden && !self.left_out(n.id))
+                .filter_map(|n| {
+                    Some((n.id, self.scrolls.get(&n.id)?.clone(), self.row_floor(n.id)))
+                })
+                .collect();
             let origin = self.origin.clone();
+            let (panel, fit) = (self.publication.panel.clone(), self.fit.get());
             root.min_h(px(self.fit.get()))
                 .on_children_prepainted(move |children, window, _| {
-                    let height = children.first().map_or(0., |b| f32::from(b.size.height));
-                    let demand = scrolls.iter().fold(height, |height, scroll| {
-                        height.max(f32::from(
-                            scroll.bounds().bottom() - origin.get().y + scroll.max_offset().y,
-                        ))
+                    // Measured as painted, the panel would keep whatever height
+                    // it was given once (a scroller fills it, and is measured
+                    // filling it): its content then never grows past that old
+                    // height, nor shrinks back. Without the stretch it is the
+                    // content's own height; the scroller scrolls the rest.
+                    let painted = children.first().map_or(0., |b| f32::from(b.size.height));
+                    let stretch = fillers.iter().fold(0f32, |most, (_, scroll, floor)| {
+                        most.max(f32::from(scroll.bounds().size.height) - floor)
+                    });
+                    let height = (painted - stretch).max(0.);
+                    // What the panel asks of its dock: that height with each
+                    // scroller's content in full, measured from where its
+                    // children end (their layout, which a viewport stretched
+                    // or squeezed does not move), so a block added or folded
+                    // changes it both ways. Lists of their own (a floor) keep
+                    // what they ask.
+                    let pages = fillers.iter().fold(0f32, |most, (_, scroll, floor)| {
+                        most.max(content_height(scroll) - floor)
+                    });
+                    let demand = scrolls.iter().fold(height + pages, |height, (id, scroll)| {
+                        if fillers.iter().all(|(page, ..)| page != id) {
+                            height.max(f32::from(
+                                scroll.bounds().bottom() - origin.get().y + scroll.max_offset().y,
+                            ))
+                        } else {
+                            height
+                        }
                     });
                     let changed = (natural.replace(height) - height).abs() > 0.5;
                     let column_changed = (column_natural.replace(demand) - demand).abs() > 0.5;
+                    if (changed || column_changed) && crate::diag::enabled() {
+                        crate::diag::line(serde_json::json!({"ui": "natural",
+                            "panel": panel.as_str(), "painted": painted, "stretch": stretch,
+                            "natural": height, "demand": demand, "fit": fit}));
+                    }
                     if changed || column_changed {
                         window.refresh();
                     }
@@ -5217,13 +5508,12 @@ fn segments(surface: &pm_surface::Surface, node: &pm_surface::Node) -> (Vec<Valu
         if child.props.get("aria-checked") == Some(&Value::Bool(true)) {
             selected = ids.len() as i64;
         }
-        let label = child.props.get("label").cloned().unwrap_or(Value::Null);
-        options.push(
-            match child.props.get("attr").and_then(|a| a.get("symbol")) {
-                Some(symbol) => json!({"label": label, "symbol": symbol}),
-                None => json!({"label": label}),
-            },
-        );
+        options.push(json!({
+            "label": child.props.get("label"),
+            "symbol": child.props.get("attr").and_then(|a| a.get("symbol")),
+            "tip": child.props.get("title"),
+            "disabled": child.props.get("disabled"),
+        }));
         ids.push(child.id);
     }
     (options, selected, ids)
@@ -5442,13 +5732,24 @@ impl SurfaceView {
 impl Render for HeaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tabbed = self.tabbed;
-        self.view.update(cx, |v, cx| match v.prepared.header {
+        let header = self.view.update(cx, |v, cx| match v.prepared.header {
             Some(id) => {
                 let skip = if tabbed { v.header_title(id) } else { None };
                 v.element(id, window, cx, skip)
             }
             None => div().into_any_element(),
-        })
+        });
+        // A cached view lays its element out as a root of its own, which a
+        // root with no width sizes to its content: the header then never had
+        // its row's width, and groups meant to share the row (the viewer
+        // bar's leading and trailing ones) shrank to less than what cannot
+        // give way in them, so the 2D | 3D control stood over the title and
+        // the pop-ups (PM-463). Alone in its row, the header takes the row.
+        if tabbed {
+            header
+        } else {
+            div().size_full().child(header).into_any_element()
+        }
     }
 }
 
@@ -5632,6 +5933,28 @@ fn button_held() -> bool {
 }
 
 impl SurfaceView {
+    /// The height a scroller keeps however short its panel's body
+    /// (`metadata.rowFloor` rows; Effect Controls' effects); 0 for one that
+    /// may shrink to nothing.
+    fn row_floor(&self, id: Id) -> f32 {
+        let Some(node) = self.prepared.node(id) else {
+            return 0.;
+        };
+        self.publication
+            .surface
+            .node(id)
+            .and_then(|n| n.props.get("metadata"))
+            .and_then(|m| m.get("rowFloor"))
+            .and_then(Value::as_f64)
+            .filter(|rows| rows.is_finite() && *rows > 0.)
+            .map_or(0., |rows| {
+                // Rows of a virtual list are its own height.
+                let row = node
+                    .virtual_window
+                    .map_or(self.table.tokens.metrics.row, |w| w.item_size as f32);
+                rows as f32 * row
+            })
+    }
     /// Natural content demand includes inner lists before they are clipped.
     pub(crate) fn natural_body_height(&self) -> f32 {
         self.natural.get().max(self.column_natural.get())

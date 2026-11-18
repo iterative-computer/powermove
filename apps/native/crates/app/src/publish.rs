@@ -265,6 +265,8 @@ pub fn healthy(kernel: &dyn pm_compat_runner::StoreAuthority, id: &str) -> bool 
 }
 /// Reads the folder, the account and the Store's page for this extension.
 /// `healthy`: the extension built and activated in this app.
+/// Publishing while signed out: the Store shows it with a Sign In button.
+pub const SIGN_IN: &str = "Sign in to publish.";
 pub fn prepare(
     http: &mut Http,
     profile: &Path,
@@ -288,7 +290,7 @@ pub fn prepare(
     }
     let me = http
         .call("GET", "/v1/me", None, true)
-        .map_err(|_| "Sign in to publish.".to_owned())?;
+        .map_err(|_| SIGN_IN.to_owned())?;
     let (Some(handle), Some(publisher_id)) = (
         me["publisher"]["handle"].as_str(),
         me["publisher"]["id"].as_str(),

@@ -21,6 +21,15 @@ const reading = {
   fontSize: t("typography.reading"),
 };
 const line = { display: "flex", flexDirection: "row", alignItems: "center" };
+/** v1's empty composition offers these, in this order (Command / Shift /
+ * Option shown as on the menus). */
+const EMPTY_ACTIONS = [
+  ["Text", "newText", "⌘T"],
+  ["Shape", "newShape", "⇧⌘Y"],
+  ["Solid", "newSolid", "⌘Y"],
+  ["Null", "newNull", "⌥⇧⌘Y"],
+  ["Import…", "import", "⌘I"],
+] as const;
 /** Leading cluster + trailing cluster: replaces the flexible-spacer placeholder
  * (design review 2026-11-01; the validator accepts space-between). */
 const split = { ...line, justifyContent: "space-between" };
@@ -340,7 +349,7 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             title={`Current time (${f.frameRate})`}
             value={f.spokenTime}
             onClick={action(send, { type: "timeEdit" })}
-            metadata={{ fixedWidthSample: "00:00:00:00" }}
+            metadata={{ fixedWidthSample: "00:00:00:00", opensField: "click" }}
             style={{
               color: t("colors.text"),
               fontSize: t("typography.timecode"),
@@ -614,7 +623,10 @@ function Layer({
             title={row.label}
             // v1: dragging a name reorders the layer (the native surface
             // takes the gesture past its threshold; a click still selects).
-            metadata={{ timelineLayerDrag: { layer: row.layer } }}
+            metadata={{
+              timelineLayerDrag: { layer: row.layer },
+              opensField: "doubleClick",
+            }}
             style={{
               ...text,
               ...(lit ? { color: t("colors.accent_text") } : {}),
@@ -638,7 +650,19 @@ function Layer({
               id={`timeline:${item.name}:${row.id}`}
               label={item.label}
               symbol={item.symbol}
-              tint={lit ? "colors.accent_text" : undefined}
+              tint={
+                lit
+                  ? "colors.accent_text"
+                  : // Solo and shy show their state in ink: solo's dot
+                    // takes the accent while on, both are dim while off.
+                    item.name === "solo" || item.name === "shy"
+                    ? item.on
+                      ? item.name === "solo"
+                        ? "colors.accent"
+                        : undefined
+                      : "colors.muted"
+                    : undefined
+              }
               active={item.active}
               tabIndex={-1}
               send={send}
@@ -1155,6 +1179,37 @@ export function TimelinePanel({
                       overflow: "hidden",
                     }}
                   >
+                    {/* v1's empty composition: what to add first, each
+                        with its shortcut (in the button's help), then the
+                        drop. */}
+                    <text
+                      style={{
+                        ...text,
+                        textAlign: "center",
+                        whiteSpace: "normal",
+                      }}
+                    >
+                      This composition is empty
+                    </text>
+                    <div
+                      style={{
+                        ...line,
+                        flexWrap: "wrap",
+                        justifyContent: "center",
+                        gap: t("metrics.gap"),
+                      }}
+                    >
+                      {EMPTY_ACTIONS.map(([label, command, keys]) => (
+                        <UI.PushButton
+                          key={command}
+                          id={`timeline:empty:${command}`}
+                          label={label}
+                          title={`${label.replace("…", "")} (${keys})`}
+                          tabIndex={-1}
+                          onClick={action(send, { type: "run", command })}
+                        />
+                      ))}
+                    </div>
                     <text
                       style={{
                         ...reading,
@@ -1162,14 +1217,8 @@ export function TimelinePanel({
                         whiteSpace: "normal",
                       }}
                     >
-                      Drag media here or import from your computer.
+                      or drop media here
                     </text>
-                    <UI.PushButton
-                      id="timeline:import"
-                      label="Import…"
-                      tabIndex={-1}
-                      onClick={action(send, { type: "import" })}
-                    />
                   </div>
                 )}
               </div>

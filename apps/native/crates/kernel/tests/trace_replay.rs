@@ -255,6 +255,7 @@ fn command(v: &J) -> Option<Command> {
             visible: None,
             shy: None,
             collapsed: None,
+            track: None,
             time: 0.0,
         }))
         .into()

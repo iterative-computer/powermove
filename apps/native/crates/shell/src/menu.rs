@@ -72,6 +72,8 @@ impl Item {
         }
     }
 }
+/// The Quit item's action, answered by the app's quit delegate.
+pub const QUIT_ACTION: &str = "pmQuit:";
 /// Menus (and submenus, by their item command) whose key equivalents are shown
 /// but never matched by AppKit. Their shortcuts come from the W1 registry and are
 /// resolved only by the shell's ordered key resolver, so a declined key replays
@@ -240,6 +242,16 @@ pub fn new3d() -> Vec<Item> {
     .map(|(l, k)| item(l, k))
     .collect()
 }
+/// The key the menu bar shows for `command` (the person's own once they
+/// record one), for a context menu's row of the same command to show it
+/// too. `None` when the menu bar has no row for it or the row has no key.
+pub fn chord_for(command: &str) -> Option<String> {
+    menus()
+        .into_iter()
+        .flat_map(|(_, items)| items)
+        .find(|i| i.command == command && i.args.is_empty() && !i.chord.is_empty())
+        .map(|i| i.chord)
+}
 pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
     let eq = equivalents();
     // The menu bar matches these keys itself: the person's key, once they
@@ -276,7 +288,12 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 Item::role("Hide Others", "hideOtherApplications:", "Command+Alt+H"),
                 Item::role("Show All", "unhideAllApplications:", ""),
                 sep(),
-                Item::role("Quit Powermove", "terminate:", "Command+Q"),
+                // Not `terminate:`: AppKit drops that while any window shows
+                // a sheet, so Quit did nothing with the Export sheet (or any
+                // question) up (PM-464). The app's quit delegate answers this
+                // action at the end of the responder chain and hands it to the
+                // quit coordinator, which says what holds the quit.
+                Item::role("Quit Powermove", QUIT_ACTION, "Command+Q"),
             ],
         ),
         (
@@ -429,9 +446,12 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 r_args("Move Ten Frames Earlier", "nudgeLayerTime", json!([-10])),
                 r_args("Move Ten Frames Later", "nudgeLayerTime", json!([10])),
                 sep(),
+                r("Speed/Duration…", "speedDuration"),
                 r("Enable Time Remapping", "timeRemapLayers"),
                 r("Time-Reverse Layer", "reverseLayers"),
                 r("Freeze Frame", "freezeFrame"),
+                sep(),
+                r("Add Default Transition", "addDefaultTransition"),
                 sep(),
                 r("Center Anchor Point", "centerAnchor"),
                 r("Edit Text", "text.editSelected"),
@@ -881,5 +901,19 @@ mod every_menu_tests {
             let (key, _) = accelerator(&e.accelerator);
             assert!(!key.is_empty(), "{} ({})", e.command, e.accelerator);
         }
+    }
+}
+
+#[cfg(test)]
+mod chord_tests {
+    /// A context menu's row shows the key the menu bar shows for its
+    /// command (Duplicate's ⌘D), and none for a command the bar lacks.
+    #[test]
+    fn context_rows_show_the_menu_bar_key() {
+        let duplicate = super::chord_for("duplicate").expect("Duplicate has a key");
+        let (key, flags) = super::accelerator(&duplicate);
+        assert_eq!(key, "d");
+        assert_ne!(flags, 0);
+        assert_eq!(super::chord_for("noSuchCommand"), None);
     }
 }

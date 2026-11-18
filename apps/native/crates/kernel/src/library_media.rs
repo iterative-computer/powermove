@@ -84,7 +84,12 @@ pub(crate) fn history_assets(history: &crate::History, mut f: impl FnMut(&str, &
         }
     }
     for record in history.records() {
-        for op in record.forward.iter().chain(record.inverse.iter()) {
+        // Only operations whose text names a media key are decoded.
+        let ops = [&record.forward, &record.inverse]
+            .into_iter()
+            .filter(|ops| ops.may_name_media())
+            .flat_map(|ops| ops.iter());
+        for op in ops {
             match op {
                 Op::Leaf(patch) => {
                     let id = match patch.path.as_slice() {
@@ -176,10 +181,12 @@ pub(crate) fn is_stored(entry: &MediaEntry, store: &Path) -> bool {
         return false;
     };
     let identity = (stamp.ino(), stamp.mtime(), stamp.mtime_nsec());
+    /// The key folder, its stamp, and the (source, length) keys it held.
+    type LinkIndex = (PathBuf, (u64, i64, i64), HashSet<(PathBuf, u64)>);
     thread_local! {
         // Atomic key publication changes the directory stamp. Cache the index,
         // not source availability, to avoid rereading every key for every asset.
-        static LINKS: std::cell::RefCell<Option<(PathBuf, (u64, i64, i64), HashSet<(PathBuf, u64)>)>> = const { std::cell::RefCell::new(None) };
+        static LINKS: std::cell::RefCell<Option<LinkIndex>> = const { std::cell::RefCell::new(None) };
     }
     let linked = LINKS.with(|cache| {
         let mut cache = cache.borrow_mut();

@@ -177,6 +177,19 @@ impl Placeholder {
 fn placeholder_kept(shown: Option<u64>, staged: bool, doc: Option<u64>) -> bool {
     !staged && shown.is_some() && shown == doc
 }
+impl Placeholder {
+    fn show(&self, on: bool) {
+        unsafe {
+            let hidden: bool = msg_send![&*self.layer, isHidden];
+            if hidden == on {
+                let _: () = msg_send![objc2::class!(CATransaction), begin];
+                let _: () = msg_send![objc2::class!(CATransaction), setDisableActions: true];
+                let _: () = msg_send![&*self.layer, setHidden: !on];
+                let _: () = msg_send![objc2::class!(CATransaction), commit];
+            }
+        }
+    }
+}
 impl Drop for Placeholder {
     fn drop(&mut self) {
         unsafe {
@@ -330,6 +343,12 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 if status.frame.as_ref().is_some_and(|f| v.published.as_ref().is_some_and(|p| f.stamp.doc_id == p.snapshot.doc_id) && f.gpu_ok && f.completion_host_seconds.is_some()) { v.pro_media.first_frame_ready(); }
                 if status.frame.as_ref().is_some_and(|frame| frame.gpu_ok && !frame.stand_ins && viewer.stamp().is_some_and(|stamp| frame.stamp.generation == stamp.generation && frame.stamp.revision == stamp.revision && frame.stamp.doc_id == stamp.doc_id)) {
                     host.borrow_mut().reveal_viewer_raster();
+                }
+                // Shown only once the viewer's ghost is gone: while the panel
+                // shows its ghost (with the same picture, at its own size),
+                // both would show, or neither when the ghost's went early.
+                if let Some(p) = &placeholder {
+                    p.show(!crate::panels::ghost_shows(v, "viewer"));
                 }
                 let next_studio_status=(status.refine_progress,status.export_estimate.clone());
                 if studio_status.as_ref()!=Some(&next_studio_status) {

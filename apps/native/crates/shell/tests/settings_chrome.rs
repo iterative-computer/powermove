@@ -8,11 +8,12 @@
 fn main() {
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColorSpace,
+        NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+        NSApplicationActivationPolicy, NSBackingStoreType, NSBox, NSColorSpace,
         NSSplitViewController, NSSplitViewItemBehavior, NSView, NSWindow, NSWindowStyleMask,
     };
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
-    use pm_shell::settings_window::SettingsChrome;
+    use pm_shell::settings_window::{SettingsChrome, form_background};
 
     let mtm = MainThreadMarker::new().expect("runs on the main thread (harness = false)");
     let app = NSApplication::sharedApplication(mtm);
@@ -89,7 +90,9 @@ fn main() {
         }
         assert!(items.objectAtIndex(1).automaticallyAdjustsSafeAreaInsets(), "the detail runs under the sidebar");
         assert!(glass, "the sidebar is the system's glass");
-        let page = gpui.convertRect_toView(gpui.bounds(), None);
+        let page = chrome
+            .page()
+            .convertRect_toView(chrome.page().bounds(), None);
         assert!(
             page.origin.x >= pm_shell::settings_window::SIDEBAR_WIDTH - 1.,
             "the page starts beside the sidebar, at {}",
@@ -101,7 +104,8 @@ fn main() {
     // the sidebar's glass is painted (the window, the detail), so it shows
     // what is behind the window. (Acceptance found it a flat fill when the
     // ground was on the detail, which runs under the sidebar.)
-    chrome.set_scheme(true, 0x1e1e20);
+    chrome.update_sidebar_appearance();
+    assert!(gpui.isHidden(), "settings does not render a GPUI page");
     assert!(alpha(&window.backgroundColor()) < 0.01, "a scheme leaves the window clear");
     let detail = items.objectAtIndex(1).viewController(mtm).view();
     assert!(std::ptr::eq(&*detail, &*host), "GPUI's host view is the detail");
@@ -121,7 +125,7 @@ fn main() {
     let grounds: Vec<_> = detail
         .subviews()
         .iter()
-        .filter(|v| painted(v).is_some_and(|c| c.alphaComponent() > 0.99))
+        .filter_map(|v| v.downcast::<NSBox>().ok())
         .collect();
     assert_eq!(grounds.len(), 1, "one view carries the page's ground");
     let ground = &grounds[0];
@@ -133,11 +137,22 @@ fn main() {
         at.origin.x
     );
     assert!(at.origin.y + at.size.height >= top - 1., "the ground runs up under the toolbar");
-    let c = painted(ground).unwrap();
-    let rgb = [c.redComponent(), c.greenComponent(), c.blueComponent()];
-    let want = [0x1e as f64 / 255., 0x1e as f64 / 255., 0x20 as f64 / 255.];
-    for (got, want) in rgb.iter().zip(want) {
-        assert!((got - want).abs() < 0.01, "ground {rgb:?}");
+    let group = form_background(true);
+    let page = ground.fillColor();
+    for name in unsafe { [NSAppearanceNameAqua, NSAppearanceNameDarkAqua] } {
+        let appearance = NSAppearance::appearanceNamed(name).unwrap();
+        appearance.performAsCurrentDrawingAppearance(&block2::RcBlock::new(|| {
+            let page = page
+                .colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())
+                .unwrap();
+            let group = group
+                .colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())
+                .unwrap();
+            assert!(
+                group.redComponent() > page.redComponent(),
+                "the group is lighter than the page in {name}"
+            );
+        }));
     }
     // The report a release bundle writes (PM_NATIVE_SETTINGS_PROBE) says the same.
     let report = chrome.report();

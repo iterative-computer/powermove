@@ -24,6 +24,8 @@ pub(crate) struct Recorder {
     pub skims: RefCell<Vec<Option<f64>>>,
     /// Ruler scrubs starting (`true`) and ending, as the app hears them.
     pub scrubs: RefCell<Vec<bool>>,
+    /// For each seek, whether a ruler scrub was under way.
+    pub seeks_in_scrub: RefCell<Vec<bool>>,
     /// The kernel the layer menu reads its rows from.
     pub published: RefCell<Option<pm_kernel::KernelHandle>>,
     pub skimming: std::cell::Cell<bool>,
@@ -45,6 +47,8 @@ impl Delegate for Recording {
     fn seek(&self, seconds: f64, _: &mut App) {
         *self.0.time.borrow_mut() = seconds;
         self.0.seeks.borrow_mut().push(seconds);
+        let scrubbing = self.0.scrubs.borrow().last() == Some(&true);
+        self.0.seeks_in_scrub.borrow_mut().push(scrubbing);
     }
     fn effect(&self, effect: HostEffect, _: &mut App) {
         self.0.effects.borrow_mut().push(effect);
@@ -571,7 +575,7 @@ fn a_property_rows_name_offers_its_lane_menu(cx: &mut TestAppContext) {
                 .collect()
         })
         .unwrap_or_default();
-    for label in ["Add Keyframe", "Paste Keyframes", "Separate Dimensions"] {
+    for label in ["Add Keyframe Here", "Paste Keyframes Here", "Separate Dimensions"] {
         assert!(labels.iter().any(|l| l == label), "{labels:?}");
     }
 }
@@ -595,7 +599,8 @@ fn the_timeline_shows_v1s_pointers(cx: &mut TestAppContext) {
         gpui::CursorStyle::ResizeLeftRight
     );
     let key = op_center(&mut s, "key:");
-    assert_eq!(cursor(&mut s, key, cx), gpui::CursorStyle::PointingHand);
+    // The owner's rule: no pointing hand; a key keeps the arrow.
+    assert_eq!(cursor(&mut s, key, cx), gpui::CursorStyle::Arrow);
     let body = s.at(1, 1.5);
     assert_eq!(cursor(&mut s, body, cx), gpui::CursorStyle::OpenHand);
 }
@@ -2597,7 +2602,7 @@ fn right_click_runs_a_native_menu_action_on_the_kernel(cx: &mut TestAppContext) 
     assert!(
         s.recorder.menus.borrow()[0]
             .iter()
-            .any(|i| i["label"] == "Add Marker")
+            .any(|i| i["label"] == "Add Marker Here")
     );
     s.undo(cx);
     assert_eq!(markers(&s), 0);
@@ -2688,6 +2693,10 @@ fn clicking_a_layer_name_selects_it_and_a_double_click_renames(cx: &mut TestAppC
             click_count,
         });
     }
+    assert!(
+        pm_shell::typing::expecting(),
+        "typed from the double-click on, ⌘A and letters wait for the name field"
+    );
     s.idle(cx);
     s.idle(cx);
     assert!(
@@ -2924,6 +2933,13 @@ fn hovering_the_tracks_skims_and_a_click_moves_the_playhead_there(cx: &mut TestA
         None,
         "leaving clears it"
     );
+    // A click moves the playhead to the skimmer in Tracks mode (Final Cut);
+    // in the Layers timeline a click only selects (see
+    // a_press_moves_the_playhead_to_the_skimmer_only_in_tracks_mode).
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.mode:tracks", 0., None, false, cx)
+    });
+    s.idle(cx);
     let at = s.at(1, 2.5);
     hover(&mut s, cx, at);
     s.vcx.simulate_click(at, Modifiers::none());
@@ -2933,6 +2949,32 @@ fn hovering_the_tracks_skims_and_a_click_moves_the_playhead_there(cx: &mut TestA
         near(seeks.first().copied(), 2.5),
         "a click puts the playhead at the skimmer: {seeks:?}"
     );
+}
+/// A press on the ruler with the skimmer showing scrubs from the time under
+/// the pointer: every seek is the scrub's (whose time is written once, as
+/// it ends), never a seek to the skimmer before it (which wrote the time at
+/// once and had every panel take the write as the drag began).
+#[gpui::test]
+fn a_ruler_press_with_the_skimmer_showing_seeks_only_within_the_scrub(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    s.recorder.skimming.set(true);
+    let tracks = s.at(0, 1.5);
+    s.vcx.simulate_mouse_move(tracks, None, Modifiers::none());
+    s.idle(cx);
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    let ruler = s.origin() + point(px(column + 100.), px(tokens().metrics.ruler / 2.));
+    s.vcx.simulate_mouse_move(ruler, None, Modifiers::none());
+    s.idle(cx);
+    assert!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some(), "the skimmer shows");
+    s.drag(cx, ruler, ruler + point(px(40.), px(0.)), Modifiers::none());
+    let seeks = s.recorder.seeks.borrow().clone();
+    assert!(seeks.len() >= 2, "{seeks:?}");
+    assert!(
+        s.recorder.seeks_in_scrub.borrow().iter().all(|&s| s),
+        "a seek outside the scrub: {:?}",
+        s.recorder.seeks_in_scrub.borrow()
+    );
+    assert_eq!(*s.recorder.scrubs.borrow(), [true, false]);
 }
 /// PM-388: a wheel scroll under a resting pointer starts no skim, in rows
 /// or in time (the viewer keeps the playhead's picture), nor does a move
@@ -3192,6 +3234,8 @@ fn an_effect_dropped_on_a_layers_bar_goes_to_that_layer(cx: &mut TestAppContext)
             definition: "gaussianBlur".into(),
             label: "Gaussian Blur".into(),
             layer: Some(layer),
+            edge: None,
+            across: None,
         }]
     );
 }
@@ -3315,6 +3359,10 @@ fn clicking_an_axis_value_opens_its_editor_without_an_edit(cx: &mut TestAppConte
     s.idle(cx);
     assert_eq!(&*s.recorder.commands.borrow(), &["timeline.propertyEdit"]);
     assert!(s.recorder.reports.borrow().is_empty());
+    // What is typed from the click on (⌘A, digits, Return) waits for the
+    // field it opens, never selecting every layer on the way.
+    assert!(pm_shell::typing::expecting(), "the click arms the typing hold");
+    assert!(pm_shell::typing::for_field("a", true, "cmd+a"));
 }
 
 #[gpui::test]
@@ -3802,4 +3850,211 @@ fn retained_names_stay_beside_tracks_after_a_large_wheel_jump(cx: &mut TestAppCo
     let expected = origin + (top - scroll) as f32;
     assert!((f32::from(header.origin.y) - expected).abs() < 0.75,
         "name {id} at {:?}, its track at {expected}", header.origin.y);
+}
+
+#[gpui::test]
+/// v1's ruler menu ends with what its extensions added: New Composition…,
+/// Import Captions…, Add 3D Layer; each runs its command.
+#[gpui::test]
+fn the_ruler_menu_offers_v1s_creation_items(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    let at = s.origin() + point(px(column + 90.), px(tokens().metrics.ruler / 2.));
+    *s.recorder.choice.borrow_mut() = Some("New Composition…".into());
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    assert_eq!(*s.recorder.commands.borrow(), ["newComposition"]);
+    let menus = s.recorder.menus.borrow();
+    let labels: Vec<&str> = menus[0].iter().filter_map(|r| r["label"].as_str()).collect();
+    assert!(labels.ends_with(&["New Composition…", "Import Captions…", "Add 3D Layer"]), "{labels:?}");
+}
+/// A clip's menu is headed by its layer's name (v1's layer menu) and ends
+/// with the creation items; the layer's own rows still run their commands.
+#[gpui::test]
+fn a_clips_menu_names_its_layer_and_offers_the_creation_items(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    *s.recorder.choice.borrow_mut() = Some("Import Captions…".into());
+    let at = s.origin() + point(px(100.), s.at(1, 0.).y - s.origin().y);
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    assert_eq!(*s.recorder.commands.borrow(), ["importCaptions"]);
+    let menus = s.recorder.menus.borrow();
+    assert_eq!(menus[0][0]["header"], true);
+    assert!(!menus[0][0]["label"].as_str().unwrap_or_default().is_empty());
+    drop(menus);
+    *s.recorder.choice.borrow_mut() = Some("duplicate".into());
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    assert_eq!(*s.recorder.commands.borrow(), ["importCaptions", "duplicate"]);
+}
+/// The first key on a property row (opacity revealed), in window space.
+fn property_key(s: &mut Stage, cx: &mut TestAppContext) -> Point<Pixels> {
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.revealProperty:t", 0., None, false, cx)
+    });
+    s.idle(cx);
+    let origin = s.origin();
+    let frame = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+    let op = frame
+        .ops
+        .iter()
+        .find(|o| o.id.starts_with("key:") && o.id.contains("property"))
+        .expect("a key on the opacity row");
+    origin
+        + point(
+            px((op.bounds.x + op.bounds.width / 2.) as f32),
+            px((op.bounds.y + op.bounds.height / 2.) as f32),
+        )
+}
+/// v1's reach for a key (keyDown: 6 points across): a press 9 points
+/// beside it starts a marquee and moves no key; one within reach takes it.
+#[gpui::test]
+fn a_press_beside_a_key_starts_a_marquee_and_moves_no_key(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 3.]);
+    let key = property_key(&mut s, cx);
+    let before: Vec<f64> = ids.iter().map(|id| key_time(&s, id)).collect();
+    s.drag(cx, key + point(px(9.), px(0.)), key + point(px(49.), px(0.)), Modifiers::none());
+    let after: Vec<f64> = ids.iter().map(|id| key_time(&s, id)).collect();
+    assert_eq!(after, before, "a marquee beside a key moved it");
+    s.drag(cx, key + point(px(4.), px(0.)), key + point(px(44.), px(0.)), Modifiers::none());
+    let moved: Vec<f64> = ids.iter().map(|id| key_time(&s, id)).collect();
+    assert_ne!(moved, before, "a press within reach takes the key");
+}
+/// v1's marks: a hold key is a square, read from what the file stores.
+#[gpui::test]
+fn a_hold_key_draws_as_a_square(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let ids = keyed(&mut s, cx, &[0.5, 1.]);
+    property_key(&mut s, cx);
+    let shapes = |s: &Stage| -> Vec<&'static str> {
+        let frame = s.surface.read_with(&s.vcx, |t, _| t.frame().unwrap());
+        frame
+            .ops
+            .iter()
+            .filter(|o| o.id.starts_with("key:") && o.id.contains("property"))
+            .map(|o| o.shape)
+            .collect()
+    };
+    assert!(!shapes(&s).contains(&"square"), "{:?}", shapes(&s));
+    s.rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: None,
+                    body: pm_kernel::WriteBody::Commands(vec![pm_kernel::Command::Keyframe(
+                        pm_kernel::KeyframeCommand::SetHold { key_ids: vec![ids[0].clone()], hold: true },
+                    )]),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
+    s.idle(cx);
+    assert!(shapes(&s).contains(&"square"), "{:?}", shapes(&s));
+}
+/// v1's marker tooltip: its name, its time and how to remove it.
+#[gpui::test]
+fn a_marker_shows_its_name_and_time_in_a_tooltip(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 1);
+    let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
+    let at = s.origin() + point(px(column + 90.), px(tokens().metrics.ruler / 2.));
+    *s.recorder.choice.borrow_mut() = Some("marker.add".into());
+    s.vcx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
+        position: at,
+        modifiers: Modifiers::none(),
+        click_count: 1,
+        first_mouse: false,
+    });
+    s.idle(cx);
+    let marker = op_center(&mut s, "marker:");
+    s.vcx.simulate_mouse_move(marker, None, Modifiers::none());
+    s.idle(cx);
+    let tip = s.surface.read_with(&s.vcx, |t, _| t.marker_tip_for_test(marker));
+    let tip = tip.expect("a tooltip over the marker");
+    assert!(tip.contains(" · 00:00:00:") && tip.ends_with(" · Right-click to remove"), "{tip}");
+}
+
+/// The ruler menu's "Switch to Track Timeline" and the Layers | Tracks
+/// control drive one state: the published view (the header's control and the
+/// layer column draw from it) follows the menu both ways.
+#[gpui::test]
+fn the_ruler_menus_mode_switch_reaches_the_published_view(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    let mode = |s: &Stage| {
+        let p = s.rig.kernel.published(PROJECT).unwrap();
+        p.ui_state
+            .timeline
+            .get("mode")
+            .and_then(|m| m.as_str())
+            .map(str::to_owned)
+    };
+    for (action, want) in [("mode.tracks", "tracks"), ("mode.layers", "layers")] {
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.choose_menu(
+                pm_panel_timeline::Context::Ruler { time: 0. },
+                action,
+                cx,
+            )
+        });
+        s.idle(cx);
+        assert_eq!(mode(&s).as_deref(), Some(want), "{action}");
+    }
+}
+/// Run 27: in the Layers timeline a press on a layer selects it and never
+/// moves the playhead, skimming on or off (v1 and After Effects: only the
+/// ruler does). In Tracks mode with skimming on, a press moves the playhead
+/// to the skimmer, as Final Cut does.
+#[gpui::test]
+fn a_press_moves_the_playhead_to_the_skimmer_only_in_tracks_mode(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 3);
+    s.recorder.skimming.set(true);
+    let press = |s: &mut Stage, cx: &mut TestAppContext| {
+        let at = s.at(0, 1.0);
+        s.vcx.simulate_mouse_move(at, None, Modifiers::none());
+        s.idle(cx);
+        s.vcx
+            .simulate_mouse_move(at + point(px(4.), px(0.)), None, Modifiers::none());
+        s.idle(cx);
+        assert!(
+            s.surface.read_with(&s.vcx, |t, _| t.skimmer()).is_some(),
+            "the pointer skims"
+        );
+        s.vcx
+            .simulate_click(at + point(px(4.), px(0.)), Modifiers::none());
+        s.idle(cx);
+    };
+    press(&mut s, cx);
+    assert!(s.recorder.seeks.borrow().is_empty(), "Layers: no seek");
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.command("timeline.mode:tracks", 0., None, false, cx)
+    });
+    s.idle(cx);
+    press(&mut s, cx);
+    assert_eq!(s.recorder.seeks.borrow().len(), 1, "Tracks: the press seeks");
 }

@@ -44,6 +44,55 @@ const V4_THEME: &str = "extension.v4theme:";
 /// `extension.choice:<token>:<index>`: a built-in row of a menu that also
 /// carries extension items; its own callback runs.
 const CHOICE: &str = "extension.choice:";
+/// Runs the row chosen from a menu (`target`: `token:index`) once the
+/// update that heard it returns: what a row does may read the entity that
+/// heard it (the timeline asks the Controller for the time), and reading an
+/// entity inside its own update is a double lease, a panic in any build.
+pub(crate) fn run_choice<T: 'static>(
+    pending: &mut Option<(u64, crate::timeline_surface::Choose)>,
+    target: &str,
+    cx: &mut Context<T>,
+) {
+    if let Some((token, index)) = target.split_once(':')
+        && let (Ok(token), Ok(index)) = (token.parse::<u64>(), index.parse::<usize>())
+        && let Some((_, choose)) = pending.take_if(|(waiting, _)| *waiting == token)
+    {
+        cx.defer(move |cx| choose(Some(index), cx));
+    }
+}
+#[cfg(test)]
+mod choice_tests {
+    use gpui::{AppContext, TestAppContext};
+    use std::{cell::Cell, rc::Rc};
+    struct Holder {
+        pending: Option<(u64, crate::timeline_surface::Choose)>,
+    }
+    /// A row chosen while the entity that holds the menu is updating runs
+    /// after that update: the row reads the entity (the timeline's rows ask
+    /// the Controller for the time), which inside its update panicked.
+    #[gpui::test]
+    fn a_chosen_row_may_read_the_entity_that_heard_it(cx: &mut TestAppContext) {
+        let holder = cx.new(|_| Holder { pending: None });
+        let ran = Rc::new(Cell::new(None));
+        let (weak, seen) = (holder.downgrade(), ran.clone());
+        holder.update(cx, |h, _| {
+            h.pending = Some((
+                7,
+                Box::new(move |index, cx| {
+                    // Reads the holder, as the timeline's rows read the Controller.
+                    let waiting = weak.upgrade().map(|h| h.read(cx).pending.is_some());
+                    seen.set(Some((index, waiting)));
+                }),
+            ));
+        });
+        holder.update(cx, |h, cx| super::run_choice(&mut h.pending, "7:2", cx));
+        cx.run_until_parked();
+        assert_eq!(ran.get(), Some((Some(2), Some(false))));
+        // Another menu's token runs nothing.
+        holder.update(cx, |h, cx| super::run_choice(&mut h.pending, "8:0", cx));
+        assert_eq!(ran.get(), Some((Some(2), Some(false))));
+    }
+}
 /// `extension.v4menu:<panel>:<key>`: a v4 extension's context-menu item.
 const V4_MENU: &str = "extension.v4menu:";
 thread_local! {
@@ -201,6 +250,10 @@ pub struct Extensions {
     faces: Vec<pm_compat_host::PageFace>,
     /// Faces asked for, resolved or not: each is resolved once.
     face_keys: BTreeSet<(String, u16, bool)>,
+    /// Every face given to this window's pages: a page made again gets them.
+    page_faces: Vec<pm_compat_host::PageFace>,
+    /// When the window's page was last made again after it stopped.
+    page_rebuilds: Vec<std::time::Instant>,
     /// Contributed definitions, pinned per generation for viewers and exports.
     pub resources: Arc<ResourceSnapshot>,
     /// Where the realm's viewer stage shows the page over the viewer, once an
@@ -271,6 +324,8 @@ impl Default for Extensions {
             v4_themes_seen: 0,
             faces: vec![],
             face_keys: BTreeSet::new(),
+            page_faces: Vec::new(),
+            page_rebuilds: Vec::new(),
             surfaces: BTreeMap::new(),
             forks: BTreeMap::new(),
             mounted_once: BTreeSet::new(),
@@ -428,6 +483,7 @@ pub(crate) fn unavailable(
                 id: id.clone(),
                 name: name.clone(),
                 why: why.clone(),
+                provides: publication.provides.get(id).cloned().unwrap_or_default(),
             },
         )
         .collect()
@@ -704,7 +760,7 @@ impl Controller {
         for request in requests {
             self.extension_request(request, cx);
         }
-        self.present_page();
+        self.present_page(cx);
     }
     /// The realm's questions for AppKit. Each answer returns through the inbox.
     fn extension_request(&mut self, request: Value, cx: &mut Context<Self>) {
@@ -771,7 +827,7 @@ impl Controller {
                     return;
                 };
                 let restart = "You can wait for it to finish, or stop it and restart extensions. Open extension panels lose what they haven’t saved.";
-                let (title, body) = match request["name"].as_str() {
+                let (title, mut body) = match request["name"].as_str() {
                     Some(name) if request["disables"] == true => (
                         format!("“{name}” isn’t responding"),
                         format!(
@@ -779,12 +835,33 @@ impl Controller {
                         ),
                     ),
                     Some(name) => (format!("“{name}” isn’t responding"), restart.to_owned()),
+                    // No extension's code was running: the extension host's
+                    // own work (a project change, its answers) ran long.
                     None => (
-                        "An extension isn’t responding".to_owned(),
+                        "Powermove’s extension host isn’t responding".to_owned(),
                         restart.to_owned(),
                     ),
                 };
+                // What it was doing, and for how long.
+                let busy = request["seconds"].as_f64().map(|s| format!("{s:.0} s"));
+                let place = request["where"].as_str();
+                if busy.is_some() || place.is_some() {
+                    body.push_str(&format!(
+                        "\n\nBusy{}{}.",
+                        busy.as_deref().map_or_else(String::new, |b| format!(" for {b}")),
+                        place.map_or_else(String::new, |p| format!(" in {p}"))
+                    ));
+                }
+                crate::diag::line(serde_json::json!({"unresponsive": request["name"],
+                    "where": request["where"], "seconds": request["seconds"]}));
                 let shell = self.host.borrow();
+                // A tab behind asks unseen: its tab is marked until the
+                // question is answered, and the window in front says so
+                // (PM-490: the window jumped to the asking project's tab).
+                let hidden = !shell.tab_shown();
+                if hidden {
+                    shell.set_attention(true);
+                }
                 use crate::alert::{Alert, Button};
                 let answer = Alert::new(
                     title,
@@ -797,9 +874,14 @@ impl Controller {
                 .sheet(&shell.window);
                 drop(shell);
                 self.extensions.unresponsive = Some(execution);
+                if hidden {
+                    let (asking, name) = (cx.entity_id(), self.project_name());
+                    cx.defer(move |cx| crate::session::tell_front_waiting(asking, &name, cx));
+                }
                 cx.spawn(async move |this, cx| {
                     let stop = answer.recv().await == Ok(Some(true));
                     let _ = this.update(cx, |v, _| {
+                        v.host.borrow().set_attention(false);
                         if v.extensions.unresponsive == Some(execution) {
                             v.extensions.unresponsive = None;
                         }
@@ -1046,6 +1128,12 @@ impl Controller {
                         return MenuEntry::separator();
                     }
                     let label = row["label"].as_str().unwrap_or_default();
+                    if row["separator"] == true {
+                        return MenuEntry::separator();
+                    }
+                    if row["header"] == true {
+                        return MenuEntry::header(label);
+                    }
                     let mut entry = match row["children"].as_array() {
                         Some(children) if !children.is_empty() => {
                             MenuEntry::submenu(label, entries(children, token, next))
@@ -1054,6 +1142,7 @@ impl Controller {
                     }
                     .checked(row["checked"] == true);
                     entry.enabled &= row["disabled"] != true;
+                    entry.shortcut = row["id"].as_str().filter(|c| !c.is_empty()).and_then(pm_shell::menu::chord_for);
                     entry
                 })
                 .collect()
@@ -1591,15 +1680,7 @@ impl Controller {
             return true;
         }
         if let Some(target) = cmd.name.strip_prefix(CHOICE) {
-            if let Some((token, index)) = target.split_once(':')
-                && let (Ok(token), Ok(index)) = (token.parse::<u64>(), index.parse::<usize>())
-                && let Some((_, choose)) = self
-                    .extensions
-                    .choice
-                    .take_if(|(pending, _)| *pending == token)
-            {
-                choose(Some(index), cx);
-            }
+            run_choice(&mut self.extensions.choice, target, cx);
             return true;
         }
         if let Some(target) = cmd.name.strip_prefix(V4_MENU) {
@@ -1613,7 +1694,7 @@ impl Controller {
                         .spawn(async move {
                             runtime
                                 .run_menu(&panel, &key)
-                                .map_err(|e| format!("{e:?}"))
+                                .map_err(|e| e.to_string())
                                 .and_then(|ticket| {
                                     wait_ticket(
                                         ticket,
@@ -1965,6 +2046,7 @@ impl Controller {
                 for page in v.extensions.views.borrow().values() {
                     let _ = page.borrow_mut().add_fonts(&faces);
                 }
+                v.extensions.page_faces.extend(faces.iter().cloned());
                 // A face the registry could not give is settled now: no page
                 // will load it, and whoever waits for it stops waiting.
                 let unresolved: Vec<Value> = keys
@@ -2240,7 +2322,7 @@ impl Controller {
         });
         cx.spawn(async move |this, cx| {
             while wake_rx.recv().await.is_ok() {
-                if this.update(cx, |v, _| v.present_page()).is_err() {
+                if this.update(cx, |v, cx| v.present_page(cx)).is_err() {
                     break;
                 }
             }
@@ -2379,10 +2461,12 @@ impl Controller {
             host.set_panel(id, false);
         }
     }
-    fn present_page(&mut self) {
+    fn present_page(&mut self, cx: &mut Context<Self>) {
         let Some(host) = &self.extensions.host else {
             return;
         };
+        // The window's page that stopped applying, or whose process went.
+        let mut stopped = None;
         for (key, page) in &mut self.extensions.pages {
             for event in page.events.events.borrow_mut().drain(..) {
                 match event {
@@ -2400,8 +2484,20 @@ impl Controller {
                         .send_command(&format!("dockReveal:{id}"), vec![json!(top), json!(height)]),
                     HostEvent::GeometryChanged => (),
                     HostEvent::Ready { .. } => page.ready = true,
-                    HostEvent::ProcessTerminated => page.ready = false,
-                    HostEvent::Failure(code) => eprintln!("extension page: {code}"),
+                    HostEvent::ProcessTerminated => {
+                        eprintln!("extension page: its process ended");
+                        page.ready = false;
+                        if key.is_empty() {
+                            stopped = Some(page.view);
+                        }
+                    }
+                    HostEvent::Failure(code) => {
+                        eprintln!("extension page: {code}");
+                        if key.is_empty() && STOPS_PAGE.contains(&code) {
+                            page.ready = false;
+                            stopped = Some(page.view);
+                        }
+                    }
                     HostEvent::FontsLoaded(keys) => host.fonts_loaded(key, keys.into()),
                 }
             }
@@ -2436,8 +2532,44 @@ impl Controller {
                 host.return_store_batches(key, page.view, batches);
             }
         }
+        if let Some(view) = stopped {
+            self.rebuild_page(view, cx);
+        }
+    }
+    /// The window's page stopped applying the realm's document, or its
+    /// process went: every extension panel in the window would stay blank
+    /// until extensions restarted (PM-509). A new page takes its place, gets
+    /// the faces the old one had, and the realm sends it its whole document
+    /// and every canvas. A page that keeps stopping is made again at most
+    /// `PAGE_REBUILDS` times a minute.
+    fn rebuild_page(&mut self, view: u64, cx: &mut Context<Self>) {
+        let now = std::time::Instant::now();
+        let rebuilds = &mut self.extensions.page_rebuilds;
+        rebuilds.retain(|at| now.duration_since(*at) < std::time::Duration::from_secs(60));
+        if rebuilds.len() >= PAGE_REBUILDS {
+            eprintln!("extension page: stopped again; not made again for a minute");
+            return;
+        }
+        rebuilds.push(now);
+        if self.extensions.host.as_ref().map(|h| h.view()) != Some(view) {
+            return;
+        }
+        eprintln!("extension page: made again, its panels replayed");
+        self.open_page(String::new(), view, cx);
+        if let Some(page) = self.extensions.views.borrow().get("") {
+            let _ = page.borrow_mut().add_fonts(&self.extensions.page_faces);
+        }
+        if let Some(host) = &self.extensions.host {
+            host.replay_page(view);
+        }
+        self.sync_viewport();
+        cx.notify();
     }
 }
+/// The page events that mean the window's page applies nothing more.
+const STOPS_PAGE: &[&str] = &["compat_applier_stopped"];
+/// How often a minute a stopped page is made again.
+const PAGE_REBUILDS: usize = 3;
 
 /// How long the realm's page may take to move a panel's content after the
 /// shell placed it (it hears through the realm, on a worker).
@@ -2551,6 +2683,7 @@ mod tests {
             settled: false,
             loading: vec![("b-slow".into(), "Slow".into())],
             unavailable: vec![],
+            provides: Default::default(),
         };
         // The host settles (with the late effect) before the window pins.
         let late = Publication {
@@ -2561,6 +2694,7 @@ mod tests {
             settled: true,
             loading: vec![],
             unavailable: vec![],
+            provides: Default::default(),
         };
         let start = ResourceSnapshot {
             pending: true,
@@ -2760,7 +2894,7 @@ fn wait_ticket(
     crate::ticket::answer(ticket, deadline)
         .ok_or_else(|| "The extension didn't answer in time.".to_owned())?
         .map(|e| e.value)
-        .map_err(|e| format!("{e:?}"))
+        .map_err(|e| e.to_string())
 }
 /// Every v4 extension's items for a menu, as native entries (off the main
 /// thread). Realms gather in parallel, each giving its contributions 100 ms;

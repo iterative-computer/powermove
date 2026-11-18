@@ -3,7 +3,7 @@ export interface EffectItem {
   readonly id: string;
   readonly label: string;
   readonly group: string;
-  readonly kind: "effect" | "preset";
+  readonly kind: "effect" | "preset" | "transition";
   readonly installed: boolean;
   readonly failed?: boolean;
 }
@@ -455,7 +455,12 @@ export class EffectsModel {
   drag(id: string) {
     const item = this.byId.get(id);
     return item && !item.failed
-      ? { kind: item.kind, id: item.id, label: item.label }
+      ? {
+          // A transition drops on a clip's edge (v1's timeline drop).
+          kind: item.kind,
+          id: item.id,
+          label: item.label,
+        }
       : null;
   }
   context(id: string) {

@@ -160,6 +160,14 @@ const ROLES: &[(&str, &str)] = &[
         "Least width of an inspector row's value column",
     ),
     (
+        "metrics.align_well",
+        "Least width of an alignment well: three cells at the least hit target",
+    ),
+    (
+        "metrics.value_column_most",
+        "Most width of a capped inspector row's value column (Effect Controls)",
+    ),
+    (
         "metrics.label_column",
         "Most an inspector row's label takes before its value",
     ),
@@ -235,7 +243,8 @@ const ROLES: &[(&str, &str)] = &[
     ("metrics.grade_wheel", "A colour wheel's least diameter"),
     ("metrics.grade_wheel_max", "A colour wheel's greatest diameter in a wide panel"),
     ("metrics.grade_pair", "Least width of two colour wheels side by side on their plates"),
-    ("metrics.grade_field", "A colour wheel's master field under the wheel"),
+    ("metrics.grade_pair_max", "Most width of two colour wheel plates side by side"),
+    ("metrics.grade_field", "Room for a colour wheel master's number beside its strip"),
     ("metrics.curve_editor", "The curve editor's least graph height"),
     ("metrics.curve_editor_max", "The curve editor's greatest graph height in a wide panel"),
     ("metrics.curve_editor_wide", "The curve editor's greatest width in a wide panel"),
@@ -574,6 +583,10 @@ const ROLES: &[(&str, &str)] = &[
     (
         "metrics.sheet_body_max",
         "Tallest sheet option body before it scrolls",
+    ),
+    (
+        "metrics.export_preview",
+        "Export progress sheet's picture of the frame last encoded",
     ),
     (
         "metrics.segment_radius",

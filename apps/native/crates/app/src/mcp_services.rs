@@ -967,30 +967,7 @@ fn media_type(path: &Path) -> Option<(&'static str, String)> {
     };
     Some(("model", mime.into()))
 }
-/// Main's identity: stable across renames, sampled so it never reads a whole file.
-fn fingerprint(path: &Path, size: u64) -> std::io::Result<String> {
-    use sha2::{Digest, Sha256};
-    use std::io::{Read, Seek, SeekFrom};
-    const SAMPLE: u64 = 64 << 10;
-    let sample = SAMPLE.min(size);
-    let mut digest = Sha256::new();
-    digest.update(format!("powermove-media-v2\n{size}\n"));
-    let mut file = std::fs::File::open(path)?;
-    let mut offsets = vec![0, (size - sample) / 2, size - sample];
-    offsets.dedup();
-    let mut buffer = vec![0; sample as usize];
-    for offset in offsets {
-        file.seek(SeekFrom::Start(offset))?;
-        file.read_exact(&mut buffer)?;
-        digest.update(&buffer);
-    }
-    let hex = digest
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    Ok(format!("v2:{size}:{hex}"))
-}
+use pm_kernel::media_archive::sampled_fingerprint as fingerprint;
 impl MediaImporter for EngineJobs {
     fn import(&self, request: &MediaImport) -> Result<ImportedMedia> {
         let path = &request.path;

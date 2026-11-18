@@ -682,6 +682,7 @@ fn menu_actions_are_semantic_and_disable_illegal_composition_actions() {
         MenuCommand::NewCompFromAsset("a".into()),
         MenuCommand::Replace("a".into()),
         MenuCommand::Reveal("a".into()),
+        MenuCommand::InterpretFootage("a".into()),
         MenuCommand::DeleteAssets,
     ] {
         assert!(m.entries.contains(&MenuEntry {
@@ -1560,6 +1561,30 @@ fn menu_cannot_nest_self_or_make_comp_from_audio_or_model() {
             Error::InvalidTarget
         );
     }
+}
+
+/// Interpret Footage is on video and images (PM-495), not audio or models.
+#[test]
+fn interpret_footage_is_offered_on_video_and_images() {
+    let (c, mut p, r) = setup();
+    let offered = |p: &mut MediaPanel, id: &str| {
+        p.menu(&c, &r, Some(asset(id)))
+            .unwrap()
+            .entries
+            .iter()
+            .any(|e| e.command == MenuCommand::InterpretFootage(id.into()))
+    };
+    assert!(offered(&mut p, "a") && offered(&mut p, "c"));
+    assert!(!offered(&mut p, "b") && !offered(&mut p, "d"));
+    let o = p
+        .dispatch(&c, &r, Input::Invoke(MenuCommand::InterpretFootage("a".into())))
+        .unwrap();
+    assert!(o.effects.contains(&Effect::InterpretFootage("a".into())));
+    assert_eq!(
+        p.dispatch(&c, &r, Input::Invoke(MenuCommand::InterpretFootage("b".into())))
+            .unwrap_err(),
+        Error::InvalidTarget
+    );
 }
 
 #[test]

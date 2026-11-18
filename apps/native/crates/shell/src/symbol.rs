@@ -70,6 +70,14 @@ fn draw(
     color: u32,
     scale: f32,
 ) -> Option<Arc<RenderImage>> {
+    // A vendored glyph that stands for this symbol (`crate::icons`): drawn
+    // from its SVG on the same square, in the same tint.
+    if let Some(glyph) = crate::icons::glyph(name) {
+        let side = (points * scale).ceil().max(1.) as u32;
+        let pixels = crate::icons::tinted_bgra(glyph, side, color)?;
+        let buffer = image::RgbaImage::from_raw(side, side, pixels)?;
+        return Some(Arc::new(RenderImage::new([image::Frame::new(buffer)])));
+    }
     let symbol = NSImage::imageWithSystemSymbolName_accessibilityDescription(
         &NSString::from_str(name),
         None,
@@ -216,4 +224,15 @@ mod panel_symbol_tests {
             "rectangle.on.rectangle"
         );
     }
+}
+
+/// A picture already decoded (straight RGBA, `width` × `height`) as GPUI
+/// draws it: shown from the first frame it is laid out in, where a path
+/// loads after it.
+pub fn picture(width: u32, height: u32, mut rgba: Vec<u8>) -> Option<Arc<RenderImage>> {
+    for p in rgba.chunks_exact_mut(4) {
+        p.swap(0, 2);
+    }
+    let buffer = image::RgbaImage::from_raw(width, height, rgba)?;
+    Some(Arc::new(RenderImage::new([image::Frame::new(buffer)])))
 }
