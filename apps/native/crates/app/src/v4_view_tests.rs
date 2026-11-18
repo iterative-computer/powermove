@@ -2032,8 +2032,21 @@ fn project_virtual_page_keeps_rows_and_offset_after_refresh(cx: &mut TestAppCont
     let _ = publication(&rig);
     let page = || {
         let mut ops = node_ops(1, 0, "virtual-list", json!({"id":"virtual-viewport","count":30,"range":[10,20],"itemSize":160,"metadata":{"fixedItems":true},"style":{"width":240,"height":400,"lineHeight":20}}), &[]);
+        let mut next = 2;
         for i in 10..20 {
-            ops.extend(node_ops(i + 2, 1, "div", json!({"id":format!("card-row-{i}"),"style":{"height":160,"flexShrink":0}}), &[]));
+            let row = next;
+            next += 1;
+            ops.extend(node_ops(row, 1, "div", json!({"id":format!("card-row-{i}"),"style":{"height":160,"flexShrink":0,"display":"flex","flexDirection":"row"}}), &[]));
+            for column in 0..2 {
+                let item = i * 2 + column;
+                let card = next;
+                next += 1;
+                ops.extend(node_ops(card, row, "div", json!({"id":format!("card-item-{item}"),"style":{"width":120,"height":160,"flexShrink":0}}), &[]));
+                let text = next;
+                next += 1;
+                ops.extend(node_ops(text, card, "text", json!({}), &[]));
+                ops.push(Op::SetText { id: text, text: format!("Item {item}") });
+            }
         }
         let mut p = synthetic(&rig, ops);
         p.panel = pm_builtins::PROJECT_PANEL.into();
@@ -2056,6 +2069,25 @@ fn project_virtual_page_keeps_rows_and_offset_after_refresh(cx: &mut TestAppCont
     settle(cx, |cx| !view.read_with(cx, |v, _| v.compiling()));
     vcx.run_until_parked();
     let viewport = bounds(&mut vcx, "virtual-viewport");
+    let assert_sequence = |vcx: &mut VisualTestContext| {
+        let offset = -view.read_with(vcx, |v, _| f32::from(v.test_scroll_offset(1).unwrap().y));
+        let mut painted = Vec::new();
+        for item in 0..60 {
+            let name = format!("card-item-{item}");
+            if let Some(b) = vcx.debug_bounds(Box::leak(name.clone().into_boxed_str())) {
+                if b.bottom() > viewport.top() && b.top() < viewport.bottom() {
+                    painted.push((b.origin.y, b.origin.x, name));
+                }
+            }
+        }
+        painted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.partial_cmp(&b.1).unwrap()));
+        let painted: Vec<_> = painted.into_iter().map(|(_, _, id)| id).collect();
+        let first = (offset / 160.).floor() as usize * 2;
+        let last = ((offset + f32::from(viewport.size.height)) / 160.).ceil() as usize * 2;
+        let model: Vec<_> = (0..60).map(|i| format!("card-item-{i}")).collect();
+        crate::project_capture_tests::assert_project_grid_contiguous(&model, first, last, &painted);
+    };
+    assert_sequence(&mut vcx);
     let visible = (f32::from(viewport.size.height) / 160.).ceil() as usize;
     for index in 0..visible {
         let row = bounds(&mut vcx, &format!("card-row-{}", 10 + index));
@@ -2081,6 +2113,7 @@ fn project_virtual_page_keeps_rows_and_offset_after_refresh(cx: &mut TestAppCont
         vcx.update(|window, _| window.refresh());
         vcx.run_until_parked();
         expected += delta;
+        assert_sequence(&mut vcx);
         let actual = f32::from(bounds(&mut vcx, "card-row-10").origin.y - viewport.origin.y);
         let offset = view.read_with(&vcx, |v, _| f32::from(v.test_scroll_offset(1).unwrap().y));
         assert!((offset + 1600. - expected).abs() < 0.01, "delta={delta}, phase={phase:?}: offset={offset}, expected {}", expected - 1600.);
@@ -2096,6 +2129,7 @@ fn project_virtual_page_keeps_rows_and_offset_after_refresh(cx: &mut TestAppCont
     });
     vcx.update(|window, _| window.refresh());
     vcx.run_until_parked();
+    assert_sequence(&mut vcx);
     let actual = f32::from(bounds(&mut vcx, "card-row-10").origin.y - viewport.origin.y);
     let offset = view.read_with(&vcx, |v, _| f32::from(v.test_scroll_offset(1).unwrap().y));
     assert!((offset + 1600. - (expected - line)).abs() < 0.01, "line delta: offset={offset}, expected {}", expected - line - 1600.);

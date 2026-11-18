@@ -359,10 +359,117 @@ fn capture_project_panel() {
                 image
                     .save(format!("{dir}/{tag}-{view}-{name}.png"))
                     .unwrap();
+                if std::env::var_os("PM_CAPTURE_VERIFY_GRID").is_some() {
+                    assert_eq!(view, "grid");
+                    let published = r.kernel.published(crate::v4_view_tests::PROJECT).unwrap();
+                    let catalog = pm_panel_media::Catalog::published(&published).unwrap();
+                    let observed = pm_panel_media::readiness::ObservedRuntime::new(catalog.stamp.clone(), states(true));
+                    let mut model = pm_panel_media::MediaPanel::default();
+                    model.refresh(&catalog, &observed);
+                    let page = model.page(&catalog, &observed, 0, 4096).unwrap();
+                    assert_eq!(page.rows.len(), page.total, "audit needs the complete synthetic model");
+                    let order: Vec<_> = page.rows.iter().enumerate().map(|(index, row)| {
+                        let name = match &row.data {
+                            pm_panel_media::RowData::Asset(a, _) => &a.name,
+                            pm_panel_media::RowData::Composition(c) => &c.name,
+                            pm_panel_media::RowData::Folder(f) => &f.name,
+                        };
+                        (serde_json::to_string(&row.id).unwrap(), name.to_string(), index)
+                    }).collect();
+                    let report = audit_project_grid(&mut cx, window.into(), &surface, &order);
+                    std::fs::write(format!("{dir}/{tag}-{view}-{name}-grid-order.json"),
+                        serde_json::to_string_pretty(&report).unwrap()).unwrap();
+                    println!("PROJECT_GRID_ORDER {}", report);
+                }
                 drop(r);
             });
         }
     }
+}
+
+pub(crate) fn assert_project_grid_contiguous(model: &[String], first: usize, end: usize, painted: &[String]) {
+    assert!(first <= end && end <= model.len(), "painted range outside model");
+    assert_eq!(painted, &model[first..end], "painted cards must be the contiguous model slice at this scroll offset");
+}
+
+#[test]
+#[should_panic(expected = "painted cards must be the contiguous model slice")]
+fn project_grid_contiguity_rejects_a_skipped_card() {
+    assert_project_grid_contiguous(&["a".into(), "b".into(), "c".into()], 0, 3, &["a".into(), "c".into()]);
+}
+
+#[test]
+#[should_panic(expected = "painted cards must be the contiguous model slice")]
+fn project_grid_contiguity_rejects_a_card_at_the_wrong_position() {
+    assert_project_grid_contiguous(&["a".into(), "b".into(), "c".into()], 1, 3, &["c".into(), "b".into()]);
+}
+
+fn audit_project_grid(
+    cx: &mut HeadlessAppContext,
+    window: gpui::AnyWindowHandle,
+    surface: &gpui::Entity<SurfaceView>,
+    model: &[(String, String, usize)],
+) -> serde_json::Value {
+    let prepared = cx.update(|cx| surface.read(cx).prepared.clone());
+    let lists: Vec<_> = prepared.nodes.values().filter(|n| n.virtual_window.is_some()).collect();
+    assert_eq!(lists.len(), 1);
+    let list = lists[0];
+    let geometry = list.virtual_window.unwrap();
+    let (offset, viewport, max_offset) = cx.update(|cx| surface.read(cx).test_scroll_state(list.id).unwrap());
+    let columns = model.len().div_ceil(geometry.count);
+    assert_eq!(columns, 2, "this audit reproduces the two-column fixture");
+    let scroll = -f32::from(offset.y);
+    let first = ((f64::from(scroll) / geometry.item_size).floor() as usize).min(geometry.count);
+    let end = (((f64::from(scroll) + f64::from(f32::from(viewport.size.height))) / geometry.item_size).ceil() as usize).min(geometry.count);
+    let mut rows = Vec::new();
+    for (index, id) in list.children.iter().enumerate() {
+        let row = &prepared.nodes[id];
+        let Some(bounds) = cx.debug_bounds(window, &format!("n{id}")).unwrap() else { continue };
+        if bounds.bottom() <= viewport.top() || bounds.top() >= viewport.bottom() { continue; }
+        let logical = geometry.range.0 + index;
+        let mut cards = Vec::new();
+        for child in &row.children {
+            let card = &prepared.nodes[child];
+            let Some(semantic) = card.semantic.as_deref() else { continue };
+            let Some(item) = semantic.strip_prefix("media:") else { continue };
+            let bounds = cx.debug_bounds(window, semantic).unwrap().expect("published card must be painted");
+            assert!(bounds.bottom() > viewport.top() && bounds.top() < viewport.bottom());
+            let expected = model.iter().find(|(id, _, _)| id == item).expect("painted card must belong to the model");
+            let mut pending = vec![*child];
+            let mut text = Vec::new();
+            while let Some(id) = pending.pop() {
+                let n = &prepared.nodes[&id];
+                if let Some(t) = &n.text { text.push(t.to_string()); }
+                pending.extend(n.children.iter().copied());
+            }
+            assert!(text.contains(&expected.1), "card {item} paints the wrong name: {text:?}");
+            cards.push((f32::from(bounds.left()), serde_json::json!({
+                "id": item, "name": expected.1, "model_index": expected.2,
+                "bounds": [f32::from(bounds.left()), f32::from(bounds.top()), f32::from(bounds.size.width), f32::from(bounds.size.height)],
+                "painted_text": text,
+            })));
+        }
+        cards.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert_eq!(cards.len(), (model.len() - logical * columns).min(columns), "painted row must have every expected column");
+        for (column, (_, card)) in cards.iter().enumerate() {
+            assert_eq!(card["model_index"].as_u64().unwrap() as usize, logical * columns + column, "card must occupy its model row and column");
+        }
+        rows.push((f32::from(bounds.top()), logical, cards.into_iter().map(|(_, c)| c).collect::<Vec<_>>()));
+    }
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    assert_eq!(rows.iter().map(|(_, index, _)| *index).collect::<Vec<_>>(), (first..end).collect::<Vec<_>>(), "painted row indices must cover the viewport without gaps");
+    let painted: Vec<_> = rows.iter().flat_map(|(_, _, cards)| cards.iter().map(|c| c["id"].as_str().unwrap().to_owned())).collect();
+    let ids: Vec<_> = model.iter().map(|(id, _, _)| id.clone()).collect();
+    assert_project_grid_contiguous(&ids, first * columns, (end * columns).min(model.len()), &painted);
+    serde_json::json!({
+        "gpui_offset": [f32::from(offset.x), f32::from(offset.y)], "scroll_offset": scroll,
+        "max_offset": [f32::from(max_offset.x), f32::from(max_offset.y)],
+        "viewport": [f32::from(viewport.left()), f32::from(viewport.top()), f32::from(viewport.size.width), f32::from(viewport.size.height)],
+        "row_height": geometry.item_size, "columns": columns, "published_range": geometry.range,
+        "first_painted_row": first, "last_painted_row": end - 1, "contiguous": true,
+        "model_order": model.iter().map(|(id, name, index)| serde_json::json!({"id":id,"name":name,"index":index,"row":index / columns,"column":index % columns})).collect::<Vec<_>>(),
+        "painted_rows": rows.into_iter().map(|(y, index, cards)| serde_json::json!({"row":index,"y":y,"cards":cards})).collect::<Vec<_>>(),
+    })
 }
 
 // Match the app's media refresh: updating observations alone does not ask

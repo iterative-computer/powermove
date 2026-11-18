@@ -1474,6 +1474,10 @@ impl SurfaceView {
         self.scrolls.get(&id).map(|scroll| scroll.offset())
     }
     #[cfg(test)]
+    pub(crate) fn test_scroll_state(&self, id: Id) -> Option<(Point<Pixels>, Bounds<Pixels>, Point<Pixels>)> {
+        self.scrolls.get(&id).map(|s| (s.offset(), s.bounds(), s.max_offset()))
+    }
+    #[cfg(test)]
     pub fn click_semantic(&mut self, semantic: &str, cx: &mut Context<Self>) {
         let id = self.prepared.semantics[semantic];
         self.send(id, "click", EventDetail::default(), cx);
