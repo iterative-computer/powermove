@@ -25,6 +25,7 @@ pub(crate) async fn take_fence(host: &Host, executor: &gpui::BackgroundExecutor)
 /// The app's own way to the agent's render path, for a still the person
 /// selects (the composer's Select part of the screen).
 static STILLS: std::sync::OnceLock<Arc<Mutex<Automation>>> = std::sync::OnceLock::new();
+static COMPLETION_HOST: std::sync::OnceLock<Arc<Host>> = std::sync::OnceLock::new();
 /// A PNG of `project`'s composition at `time`, at most `width` pixels wide,
 /// rendered as the agent's render_frames renders. Off the main thread.
 pub fn still(project: &str, time: f64, width: u32) -> std::result::Result<Vec<u8>, String> {
@@ -51,6 +52,7 @@ impl Tools {
     /// Lets `still` render through this host (once, at startup).
     pub fn keep_for_stills(&self) {
         let _ = STILLS.set(self.automation.clone());
+        let _ = COMPLETION_HOST.set(self.host.clone());
     }
     pub fn new(host: Arc<Host>, exports: PathBuf) -> Self {
         Self {
@@ -161,3 +163,46 @@ pub fn attach(kernel: &KernelHandle, profile: &std::path::Path) -> anyhow::Resul
 #[cfg(test)]
 #[path = "mcp_tests.rs"]
 mod tests;
+
+/// Host-owned run completion and result actions, on the panel worker.
+pub fn completion(
+    operation: &str,
+    project: &str,
+    run: &str,
+    payload: &Value,
+) -> std::result::Result<Value, String> {
+    completion_on(
+        COMPLETION_HOST
+            .get()
+            .ok_or("Completion host is not ready")?,
+        STILLS.get().ok_or("Completion host is not ready")?,
+        operation,
+        project,
+        run,
+        payload,
+    )
+}
+fn completion_on(
+    host: &Host,
+    automation: &Mutex<Automation>,
+    operation: &str,
+    project: &str,
+    run: &str,
+    payload: &Value,
+) -> std::result::Result<Value, String> {
+    // MCP thread/delegation calls already hold this lease. Read-only checks
+    // and private receipt bookkeeping must not reacquire it recursively.
+    let _operation = if matches!(operation, "apply" | "undo" | "openPanel") {
+        Some(
+            host.try_operation()
+                .ok_or("The project is changing. Try this action again.")?,
+        )
+    } else {
+        None
+    };
+    automation
+        .lock()
+        .map_err(|_| "Completion host stopped")?
+        .completion_action(operation, project, run, payload)
+        .map_err(|e| e.to_string())
+}

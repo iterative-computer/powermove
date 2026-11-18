@@ -68,6 +68,8 @@ pub struct ProviderRuns {
     ended: Vec<(String, RunResult)>,
     settled: Vec<(String, RunResult)>,
     notices: Vec<Notice>,
+    finalizing: Vec<String>,
+    completion_gate: bool,
 }
 impl ProviderRuns {
     pub fn len(&self) -> usize {
@@ -129,7 +131,7 @@ impl ProviderRuns {
             pending: None,
             action: None,
             finished: false,
-            orchestrated: false,
+            orchestrated: self.completion_gate,
             held: None,
             release: false,
             injected: VecDeque::new(),
@@ -174,7 +176,34 @@ impl ProviderRuns {
             .any(|r| r.held.is_some() && r.target.run.as_deref() == Some(run))
     }
     /// Deliver the held completion: the run settles as its last turn said.
+    pub fn completion_gate(&mut self) {
+        self.completion_gate = true;
+    }
     pub fn release(&mut self, run: &str) {
+        if !self.completion_gate {
+            self.complete(run);
+            return;
+        }
+        if !self.finalizing.iter().any(|id| id == run) {
+            self.finalizing.push(run.into());
+        }
+    }
+    pub fn take_finalizing(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.finalizing)
+    }
+    pub fn held_success(&self, run: &str) -> bool {
+        self.runs.iter().any(|r| {
+            r.target.run.as_deref() == Some(run)
+                && matches!(
+                    r.held,
+                    Some(Event::Completed {
+                        result: RunResult::Success { .. },
+                        ..
+                    })
+                )
+        })
+    }
+    pub fn complete(&mut self, run: &str) {
         if let Some(running) = self.live_mut(run).filter(|r| r.held.is_some()) {
             running.release = true;
         }

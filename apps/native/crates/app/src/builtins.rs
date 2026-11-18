@@ -450,6 +450,7 @@ impl Controller {
             }
             Ok(png)
         }));
+        runtime.set_agent_completion(Arc::new(crate::mcp::completion));
         runtime.set_agent_notices(crate::notifications::sink(self.window_key));
         crate::media_thumbs::set_agent_cache(self.profile.join("caches").join("agent-thumbnails"));
         runtime.share_effect_clipboard(crate::extensions::effect_clipboard());

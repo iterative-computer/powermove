@@ -190,6 +190,8 @@ pub struct Automation {
     pub creative: Arc<dyn crate::creative::CreativeInspection>,
     /// Extension authoring: staging, publication, forks and rebases.
     pub extensions: Option<Arc<dyn crate::extensions::ExtensionHost>>,
+    pub(crate) completions: HashMap<String, crate::completion::Receipt>,
+    pub(crate) completion_owners: HashMap<String, String>,
 }
 impl Automation {
     /// `profile` must be an explicit, isolated native destination, never the
@@ -253,6 +255,8 @@ impl Automation {
             export_child: Arc::new(crate::services::NativeExportChild),
             store_reads: None,
             extensions: None,
+            completions: Default::default(),
+            completion_owners: Default::default(),
             creative: Arc::new(crate::creative::CreativeReader::default()),
         }
     }

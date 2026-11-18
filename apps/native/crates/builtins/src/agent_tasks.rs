@@ -1325,6 +1325,16 @@ pub(crate) fn call(
                 let child = request["id"].as_str().unwrap_or_default().to_owned();
                 Tasks::emit(runs, &root, task.clone());
                 let thread = request["threadId"].as_str().unwrap_or_default().to_owned();
+                if let Some(service) = link.completion.shared().clone() {
+                    // Missing recovery services must not disable delegation.
+                    // The root's completion reports unavailable verification.
+                    let _ = service(
+                        "bindChild",
+                        &tasks.roots[&root].project,
+                        &child,
+                        &json!({"rootRunId":root}),
+                    );
+                }
                 match tasks.launch_child(&root, request, role) {
                     Ok(()) => {
                         let child_request = &tasks.children.last().expect("started child").request;

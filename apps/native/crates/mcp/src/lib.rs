@@ -8,6 +8,7 @@ pub mod automation;
 pub mod catalog;
 pub mod commands;
 pub mod coedit;
+pub mod completion;
 pub mod creative;
 pub mod effect;
 pub mod export_jobs;

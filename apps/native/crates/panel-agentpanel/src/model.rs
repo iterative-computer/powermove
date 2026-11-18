@@ -40,12 +40,14 @@ pub struct Target {
     pub thread: String,
     pub run: Option<String>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub provider: Provider,
     pub model: String,
     pub effort: String,
     pub access: Access,
+    #[serde(rename = "approvalMode")]
     pub approval: ApprovalMode,
     pub scope: String,
     pub auto_apply_panels: bool,
@@ -102,6 +104,9 @@ pub struct Session {
     pub plan: Option<Value>,
     pub result: Option<Value>,
     result_message: Option<String>,
+    admitted_request: Option<Value>,
+    recovery: Option<Value>,
+    resume_request: Option<Value>,
     pub stop_error: Option<String>,
     pub disclosures: HashMap<String, bool>,
     pub(crate) questions: HashMap<String, QuestionDraft>,
@@ -184,6 +189,9 @@ impl Session {
             plan: None,
             result: None,
             result_message: None,
+            admitted_request: v.get("nativeRunRequest").filter(|v| v.is_object()).cloned(),
+            recovery: (v["lastRunStatus"] == "interrupted").then(|| recovery::notice(v)),
+            resume_request: None,
             stop_error: None,
             disclosures: HashMap::new(),
             questions: HashMap::new(),
@@ -251,7 +259,7 @@ impl Session {
             } else {
                 Vec::new()
             };
-            let archived = self.append(json!({"role":"trace","steps":self.trace.rows.values().collect::<Vec<_>>(),"steering":steering,"durationMs":duration}))?;
+            let archived = self.append(json!({"role":"trace","steps":self.trace.rows.values().collect::<Vec<_>>(),"steering":steering,"durationMs":duration,"runId":self.run.as_ref().map(|r| r.id.as_str()).or_else(|| self.recovery.as_ref().and_then(|v| v["runId"].as_str()))}))?;
             if live_quotes {
                 let mut quotes = self.draft.citations().to_vec();
                 for quote in &mut quotes {
@@ -270,12 +278,23 @@ impl Session {
     }
     fn archive_result(&mut self) -> Result<()> {
         if let Some(result) = self.result.clone() {
+            let text = [
+                result["summary"].as_str().unwrap_or("Agent result"),
+                result["verificationError"].as_str().unwrap_or(""),
+            ]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
             if let Some(id) = &self.result_message {
-                self.conversation
-                    .update(id, |v| v["nativeResult"] = result)?;
+                self.conversation.update(id, |v| {
+                    v["nativeResult"] = result;
+                    v["text"] = json!(text);
+                })?;
             } else {
-                self.result_message =
-                    Some(self.append(json!({"role":"assistant","nativeResult":result}))?);
+                self.result_message = Some(
+                    self.append(json!({"role":"assistant","text":text,"nativeResult":result}))?,
+                );
             }
         }
         Ok(())
@@ -558,6 +577,7 @@ impl Panel {
         let conversation = s.conversation.values().cloned().collect::<Vec<_>>();
         let trace = s.trace.rows.values().cloned().collect::<Vec<_>>();
         let run = s.run.as_ref().map(|r| r.id.clone());
+        let admitted_request = s.admitted_request.clone();
         let settings = s.settings.clone();
         let settings_dirty = s.settings_dirty;
         let s_access_dirty = s.access_dirty;
@@ -575,6 +595,7 @@ impl Panel {
         record["attachments"] = json!(attachments);
         record["conversation"] = json!(conversation);
         record["nativeLiveTrace"] = json!(trace);
+        record["nativeRunRequest"] = admitted_request.unwrap_or(Value::Null);
         if settings_dirty {
             record["provider"] = json!(settings.provider.name());
             record["model"] = json!(settings.model);
@@ -1112,8 +1133,8 @@ impl Panel {
         }
         // Archive steering checkpoints before the next user turn, retaining all
         // reasoning and work. Tool updates can still find archived step ids.
-        if steer {
-            session.archive_trace(now, true)?;
+        if steer || session.recovery.is_some() {
+            session.archive_trace(now, steer)?;
         }
         let citations = session.draft.citations().to_vec();
         let provider_text = pm_agents::citations::context(&text, &citations);
@@ -1124,6 +1145,9 @@ impl Panel {
         session.result = None;
         session.result_message = None;
         if !steer {
+            session.recovery = None;
+            session.admitted_request = None;
+            session.resume_request = None;
             session.last_run = Some(run_id.into());
             session.run = Some(Run {
                 id: run_id.into(),
@@ -1232,6 +1256,11 @@ impl Panel {
                 error,
                 cancelled,
             } => {
+                let recovery_record = if error && s.resume_request.is_some() {
+                    json!({"lastRunId":run_id,"nativeRunRequest":s.admitted_request,"nativeLiveTrace":s.trace.rows.values().cloned().collect::<Vec<_>>(),"conversation":s.conversation.values().cloned().collect::<Vec<_>>()})
+                } else {
+                    Value::Null
+                };
                 // The reply is shown once: a run that streamed it (the app
                 // server) already has it in its trail; a run that only
                 // returns it at the end (Codex exec in Auto/Supervised) has
@@ -1279,8 +1308,14 @@ impl Panel {
                     Phase::Prompt
                 };
                 s.stop_error = None;
+                if error && s.resume_request.is_some() {
+                    s.recovery = Some(recovery::notice(&recovery_record));
+                }
+                s.resume_request = None;
                 let record = self.archive.thread_mut(id).expect("session record");
-                record["lastRunStatus"] = json!(if cancelled {
+                record["lastRunStatus"] = json!(if s.recovery.is_some() {
+                    "interrupted"
+                } else if cancelled {
                     "cancelled"
                 } else if error {
                     "failed"
@@ -1535,11 +1570,14 @@ impl Panel {
                     Phase::Preview
                 };
             }
-            Pending::Undo(_) if accepted => {
-                s.archive_result()?;
-                s.result_message = None;
-                s.result = None;
-                s.phase = Phase::Prompt;
+            Pending::Undo(_) => {
+                s.applying = false;
+                if accepted {
+                    s.archive_result()?;
+                    s.result_message = None;
+                    s.result = None;
+                    s.phase = Phase::Prompt;
+                }
             }
             Pending::Import { path, .. } => {
                 if let Some(result) = &mut s.result
@@ -1678,8 +1716,15 @@ impl Panel {
     }
     pub fn apply_plan(&mut self, thread: &str) -> Result<Effect> {
         self.no_apply()?;
-        let target = self.target(thread)?;
+        let mut target = self.target(thread)?;
+        target.run = self.session(thread)?.last_run().map(str::to_owned);
         let s = self.sessions.get_mut(thread).expect("validated");
+        if s.run.is_some() || s.archiving {
+            return Err(Error::Busy);
+        }
+        if s.phase != Phase::Preview {
+            return Err(Error::Stale);
+        }
         let plan = s.plan.clone().ok_or(Error::Stale)?;
         s.applying = true;
         let effect = self.effect(target.clone(), EffectKind::ApplyPlan(plan));
@@ -1702,11 +1747,61 @@ impl Panel {
         };
         Ok(())
     }
+    /// Verification limits are readable even when no result receipt was available.
+    pub fn host_notice(&mut self, thread: &str, run: &str, text: &str) -> Result<()> {
+        let s = self.sessions.get_mut(thread).ok_or(Error::Stale)?;
+        if s.last_run.as_deref() != Some(run) {
+            return Err(Error::Stale);
+        }
+        s.append(json!({"role":"assistant","text":text}))?;
+        Ok(())
+    }
+    /// A native preview is bound to the originating run and document publication.
+    pub fn host_plan(&mut self, thread: &str, run: &str, plan: Value) -> Result<()> {
+        let s = self.sessions.get_mut(thread).ok_or(Error::Stale)?;
+        if s.run
+            .as_ref()
+            .map(|r| r.id.as_str())
+            .or(s.last_run.as_deref())
+            != Some(run)
+        {
+            return Err(Error::Stale);
+        }
+        s.plan = Some(plan);
+        s.phase = Phase::Preview;
+        Ok(())
+    }
+    /// A host receipt is bound to this thread's exact current or last run.
+    pub fn host_result(&mut self, thread: &str, run: &str, result: Value) -> Result<()> {
+        let s = self.sessions.get_mut(thread).ok_or(Error::Stale)?;
+        if s.run
+            .as_ref()
+            .map(|r| r.id.as_str())
+            .or(s.last_run.as_deref())
+            != Some(run)
+        {
+            return Err(Error::Stale);
+        }
+        s.archive_result()?;
+        s.result_message = None;
+        s.result = Some(result);
+        if s.run.is_none() {
+            s.phase = Phase::Result;
+        }
+        Ok(())
+    }
     pub fn keep_result(&mut self, thread: &str) -> Result<()> {
+        self.no_apply()?;
         let s = self
             .sessions
             .get_mut(thread)
             .ok_or_else(|| Error::UnknownId(thread.into()))?;
+        if s.run.is_some() || s.archiving {
+            return Err(Error::Busy);
+        }
+        if s.phase != Phase::Result || s.result.is_none() {
+            return Err(Error::Stale);
+        }
         s.archive_result()?;
         s.result = None;
         s.result_message = None;
@@ -1718,8 +1813,18 @@ impl Panel {
         Ok(())
     }
     pub fn undo_result(&mut self, thread: &str) -> Result<Effect> {
-        let target = self.target(thread)?;
-        let result = self.session(thread)?.result.clone().ok_or(Error::Stale)?;
+        self.no_apply()?;
+        let mut target = self.target(thread)?;
+        target.run = self.session(thread)?.last_run().map(str::to_owned);
+        let s = self.session(thread)?;
+        if s.run.is_some() || s.archiving {
+            return Err(Error::Busy);
+        }
+        if s.phase != Phase::Result {
+            return Err(Error::Stale);
+        }
+        let result = s.result.clone().ok_or(Error::Stale)?;
+        self.sessions.get_mut(thread).expect("validated").applying = true;
         let effect = self.effect(target.clone(), EffectKind::UndoResult(result));
         self.pending.insert(effect.id, Pending::Undo(target));
         Ok(effect)
@@ -2111,3 +2216,6 @@ mod consent_tests {
         ));
     }
 }
+
+#[path = "recovery.rs"]
+mod recovery;

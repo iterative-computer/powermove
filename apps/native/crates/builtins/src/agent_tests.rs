@@ -77,6 +77,11 @@ impl Agent {
                 Ok(())
             }),
         );
+        // Text-only peers never edit a project. Supply the new host seam as
+        // a fake too; completion-specific tests replace it with their checks.
+        panels.set_agent_completion(std::sync::Arc::new(|_, _, _, _| {
+            Ok(json!({"changed":false,"errors":[],"images":[]}))
+        }));
         finish(panels.mount("agent").unwrap());
         finish(panels.show("agent").unwrap());
         let mut panel = Self {
@@ -109,6 +114,11 @@ impl Agent {
         let panels = Builtins::application(actor.handle(), || {}, carry).unwrap();
         panels.set_agent_environment(environment, std::sync::Arc::new(|_| Ok(())));
         let mut panels = panels;
+        // Text-only peers never edit a project. Supply the new host seam as
+        // a fake too; completion-specific tests replace it with their checks.
+        panels.set_agent_completion(std::sync::Arc::new(|_, _, _, _| {
+            Ok(json!({"changed":false,"errors":[],"images":[]}))
+        }));
         finish(panels.mount("agent").unwrap());
         finish(panels.show("agent").unwrap());
         let mut panel = Self {
@@ -431,7 +441,11 @@ fn steering_a_held_run_reaches_the_provider_and_the_conversation() {
             .unwrap()
             .conversation
             .values()
-            .any(|m| m["role"] == "user" && m["text"] == "Steer: use blue instead" && m["steering"] == true)
+            .any(|m| {
+                m["role"] == "user"
+                    && m["text"] == "Steer: use blue instead"
+                    && m["steering"] == true
+            })
     });
     let deadline = Instant::now() + Duration::from_secs(10);
     while !std::fs::read_to_string(&log).unwrap_or_default().contains("steer Steer: use blue instead") {
@@ -2711,5 +2725,239 @@ fn child_composer_directions_and_attachments_route_to_the_task_owned_run() {
         assert!(archived.iter().any(|r| r["id"] == parent_thread));
         assert!(archived.iter().any(|r| r["id"] == child_thread));
     }
+    panel.panels.close();
+}
+
+#[test]
+fn completion_verifies_before_settling_and_bounds_failed_repairs() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    panel.panels.set_agent_completion(std::sync::Arc::new(move |operation, _, _, _| {
+        recorded.lock().unwrap().push(operation.to_owned());
+        Ok(json!({"changed":true,"revision":1,"errors":["Synthetic capture failure"],"images":[]}))
+    }));
+    panel.send("Synthetic completion request");
+    panel.wait(idle);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.first().map(String::as_str), Some("begin"));
+    assert_eq!(
+        calls.iter().filter(|op| *op == "verify").count(),
+        4,
+        "initial verification plus three bounded repair turns"
+    );
+    let shared = panel.agent();
+    let state = shared.lock().unwrap();
+    let session = state.panel.session(state.panel.active_id()).unwrap();
+    assert!(
+        session.result.as_ref().unwrap()["verificationError"]
+            .as_str()
+            .unwrap()
+            .contains("three-pass")
+    );
+    drop(state);
+    panel.panels.close();
+}
+
+#[test]
+fn completion_result_actions_reach_the_native_service_and_keep_preserves_history() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = calls.clone();
+    let fail_undo = std::sync::atomic::AtomicBool::new(true);
+    panel
+        .panels
+        .set_agent_completion(std::sync::Arc::new(move |operation, _, _, _| {
+            recorded.lock().unwrap().push(operation.to_owned());
+            if operation == "undo" && fail_undo.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                return Err("Synthetic later human edit: nothing was restored.".into());
+            }
+            Ok(json!({"changed":false,"revision":1,"errors":[],"images":[]}))
+        }));
+    panel.send("Synthetic native plan");
+    panel.wait(idle);
+    let shared = panel.agent();
+    let thread = thread_id(&shared);
+    let run = shared
+        .lock()
+        .unwrap()
+        .panel
+        .session(&thread)
+        .unwrap()
+        .last_run()
+        .unwrap()
+        .to_owned();
+    {
+        let mut state = shared.lock().unwrap();
+        state
+            .panel
+            .host_plan(&thread, &run, json!({"revision":0,"commands":[]}))
+            .unwrap();
+    }
+    let backend = panel
+        .panels
+        .broker
+        .entry("agent")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .backend
+        .clone();
+    let dispatch = |kind: &str| {
+        backend.lock().unwrap().native_command(
+            "panel.agent.dispatch",
+            &json!({
+                "target":{"project":"synthetic","thread":thread,"run":null},
+                "action":{"type":kind}
+            }),
+        )
+    };
+    dispatch("applyPlan").unwrap();
+    panel.wait(|state| !state.panel.session(&thread).unwrap().applying);
+    dispatch("undoResult").unwrap();
+    panel.wait(|state| !state.panel.session(&thread).unwrap().applying);
+    {
+        let state = shared.lock().unwrap();
+        let session = state.panel.session(&thread).unwrap();
+        assert!(session.result.is_some());
+        assert!(!session.applying);
+        assert!(session.conversation.values().any(|row| {
+            row["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("nothing was restored"))
+        }));
+    }
+    dispatch("undoResult").unwrap();
+    panel.wait(|state| !state.panel.session(&thread).unwrap().applying);
+    assert!(
+        shared
+            .lock()
+            .unwrap()
+            .panel
+            .session(&thread)
+            .unwrap()
+            .result
+            .is_none()
+    );
+    shared
+        .lock()
+        .unwrap()
+        .panel
+        .host_result(
+            &thread,
+            &run,
+            json!({"summary":"Keep fixture","changed":true}),
+        )
+        .unwrap();
+    let keeps_before = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|op| *op == "keep")
+        .count();
+    dispatch("keepResult").unwrap();
+    panel.wait(|_| {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|op| *op == "keep")
+            .count()
+            > keeps_before
+    });
+    let calls = calls.lock().unwrap();
+    assert!(calls.iter().any(|op| op == "apply"));
+    assert!(calls.iter().any(|op| op == "undo"));
+    assert!(calls.iter().any(|op| op == "keep"));
+    drop(calls);
+    panel.panels.close();
+}
+
+#[test]
+fn completion_does_not_restore_revoked_computer_consent() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    let shared = panel.agent();
+    let thread = thread_id(&shared);
+    {
+        let mut state = shared.lock().unwrap();
+        let consent = state.panel.set_access(&thread, "full").unwrap().unwrap();
+        state.panel.acknowledge(consent.id, true).unwrap();
+    }
+    let (started, observed) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let resume = std::sync::Mutex::new(resume);
+    let checks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = checks.clone();
+    panel
+        .panels
+        .set_agent_completion(std::sync::Arc::new(move |operation, _, _, _| {
+            if operation == "verify" {
+                counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = started.send(());
+                resume
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10))
+                    .unwrap();
+            }
+            Ok(json!({"changed":true,"revision":1,"errors":[],"images":[]}))
+        }));
+    panel.send("Synthetic Full Access completion");
+    observed.recv_timeout(Duration::from_secs(10)).unwrap();
+    // A check does not hold the panel lock, and revocation remains authoritative.
+    {
+        let mut state = shared.lock().unwrap();
+        assert!(
+            state.panel.session(&thread).unwrap().run.is_some(),
+            "verification must precede terminal completion"
+        );
+        state.panel.set_access(&thread, "editor").unwrap();
+    }
+    release.send(()).unwrap();
+    panel.wait(idle);
+    let state = shared.lock().unwrap();
+    let session = state.panel.session(&thread).unwrap();
+    assert!(!session.computer_consent);
+    assert!(
+        session.result.as_ref().unwrap()["verificationError"]
+            .as_str()
+            .unwrap()
+            .contains("consent was revoked")
+    );
+    assert_eq!(checks.load(std::sync::atomic::Ordering::Relaxed), 1);
+    drop(state);
+    panel.panels.close();
+}
+
+#[test]
+fn completion_service_unavailability_is_a_readable_limit_not_lost_reply() {
+    let root = tempfile::tempdir().unwrap();
+    let actor = actor();
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    panel.connected(Provider::Chatgpt);
+    *panel.panels.broker.agent.completion.lock().unwrap() = None;
+    panel.send("Synthetic service gap");
+    panel.wait(idle);
+    let shared = panel.agent();
+    let state = shared.lock().unwrap();
+    let session = state.panel.session(state.panel.active_id()).unwrap();
+    let text = session
+        .conversation
+        .values()
+        .map(|row| row.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Saw: Synthetic service gap"), "{text}");
+    assert!(text.contains("Final verification is unavailable"), "{text}");
+    drop(state);
     panel.panels.close();
 }

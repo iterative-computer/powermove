@@ -41,6 +41,7 @@ pub(crate) struct AgentLink {
     typed: Mutex<Option<(String, String)>>,
     /// The window's notification policy (S114), told on the delivery worker.
     notices: Mutex<Option<Arc<NoticeSink>>>,
+    pub completion: Mutex<Option<Arc<crate::agent_completion::Service>>>,
 }
 pub type NoticeSink = dyn Fn(pm_panel_agentpanel::runtime::Notice) + Send + Sync;
 impl Default for AgentLink {
@@ -55,6 +56,7 @@ impl Default for AgentLink {
             sequence: AtomicU64::new(1),
             typed: Mutex::default(),
             notices: Mutex::default(),
+            completion: Mutex::default(),
         }
     }
 }
@@ -319,6 +321,7 @@ pub(crate) struct AgentState {
     pub runs: ProviderRuns,
     /// Subagent tasks and run watches (`agent_tasks`).
     pub tasks: crate::agent_tasks::Tasks,
+    pub completion: crate::agent_completion::Coordinator,
     worker: bool,
 }
 impl AgentState {
@@ -327,6 +330,7 @@ impl AgentState {
             panel,
             runs: ProviderRuns::default(),
             tasks: Default::default(),
+            completion: Default::default(),
             worker: false,
         }
     }
@@ -342,10 +346,20 @@ type Registered = (
     bool,
 );
 static AGENTS: Mutex<Vec<Registered>> = Mutex::new(Vec::new());
-pub(crate) fn register(state: &SharedAgent, link: &Arc<AgentLink>, kernel: &KernelHandle, application: bool) {
+pub(crate) fn register(
+    state: &SharedAgent,
+    link: &Arc<AgentLink>,
+    kernel: &KernelHandle,
+    application: bool,
+) {
     let mut agents = AGENTS.lock().unwrap_or_else(|e| e.into_inner());
     agents.retain(|(state, ..)| state.strong_count() > 0);
-    agents.push((Arc::downgrade(state), Arc::downgrade(link), kernel.clone(), application));
+    agents.push((
+        Arc::downgrade(state),
+        Arc::downgrade(link),
+        kernel.clone(),
+        application,
+    ));
 }
 /// What a thread says when its run's edits were rolled back after it ended.
 pub const ROLLED_BACK: &str = "This run's changes were rolled back: it ended without keeping them, so the project is as it was before the run. Edit › Undo brings them back.";
@@ -355,12 +369,16 @@ pub const ROLLED_BACK: &str = "This run's changes were rolled back: it ended wit
 pub fn rolled_back(run: &str) {
     let agents: Vec<Registered> = AGENTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
     for (state, link, kernel, application) in agents {
-        let Some(state) = state.upgrade() else { continue };
+        let Some(state) = state.upgrade() else {
+            continue;
+        };
         let mut state = state.shared();
         if !matches!(state.panel.note_rolled_back(run, ROLLED_BACK), Ok(true)) {
             continue;
         }
-        let _ = state.panel.save(&mut KernelStore::new(kernel, application), now());
+        let _ = state
+            .panel
+            .save(&mut KernelStore::new(kernel, application), now());
         drop(state);
         if let Some(link) = link.upgrade() {
             link.touch();
@@ -384,11 +402,12 @@ pub fn admit(action: &Value, connected: bool, live: bool) -> Result<(), String> 
         Some(
             "draft" | "focus" | "newThread" | "switchThread" | "deleteThread" | "disclose"
             | "removeAttachment" | "setProvider" | "setModel" | "chooseAnswer" | "typeAnswer"
-            | "keepResult" | "openSettings",
+            | "keepResult" | "undoResult" | "applyPlan" | "dismissPlan" | "dismissInterrupted"
+            | "openSettings",
         ) => true,
         Some("stop" | "stopTask") => true,
         Some("answer") => connected || live,
-        Some("submit") => connected,
+        Some("submit" | "resumeInterrupted") => connected,
         // Full access needs a connected provider and asks the window first
         // (`agent.consent`), as v1's consent.
         Some("setAccess") => match action["access"].as_str() {
@@ -569,6 +588,12 @@ pub fn run_effect(
                     request.prompt =
                         pm_agents::context::with_observation(&request.prompt, &observation.0, text);
                     request.images.extend(observation.1.clone());
+                    state.panel.host_admitted_request(
+                        &effect.target.thread,
+                        &request.run,
+                        &request,
+                        settings,
+                    )?;
                     let kept = request.clone();
                     // Built-in workflow labels expand before launch. Retain
                     // those same instructions when a later direction restarts it.
@@ -579,6 +604,13 @@ pub fn run_effect(
                     {
                         *text = expand_attached_request(text, attachments).into_owned();
                     }
+                    state.runs.completion_gate();
+                    state.completion.begin(
+                        link,
+                        &effect.target.project,
+                        &effect.target.thread,
+                        &kept,
+                    );
                     state
                         .runs
                         .start(&mut state.panel, &mut store, &original, now(), || {
@@ -775,6 +807,52 @@ fn launch_request(
 ) -> Result<(Environment, Request), Error> {
     let environment = environment.ok_or_else(|| Error::Host(UNAVAILABLE.into()))?;
     let thread = &effect.target.thread;
+    if let Some(saved) = state
+        .panel
+        .recovery_launch(thread, effect.target.run.as_deref().ok_or(Error::Stale)?)?
+    {
+        let mut request: Request = serde_json::from_value(saved["request"].clone())
+            .map_err(|e| Error::Host(e.to_string()))?;
+        if !request.workspace.is_dir() {
+            return Err(Error::Host(
+                "The original agent workspace is unavailable. Start a new task.".into(),
+            ));
+        }
+        let directory = workspace(&environment.profile, &effect.target.project, thread)
+            .map_err(|e| Error::Host(e.to_string()))?;
+        let root = directory
+            .canonicalize()
+            .map_err(|e| Error::Host(e.to_string()))?;
+        if request.workspace.canonicalize().ok().as_ref() != Some(&root) {
+            return Err(Error::Host(
+                "The original agent workspace is unavailable. Start a new task.".into(),
+            ));
+        }
+        for image in &request.images {
+            let path = std::path::Path::new(image);
+            if !path.is_file()
+                || !path
+                    .canonicalize()
+                    .is_ok_and(|path| path.starts_with(&root))
+            {
+                return Err(Error::Host(
+                    "An original attachment is unavailable. Restore it or start a new task.".into(),
+                ));
+            }
+        }
+        request.workspace = directory;
+        request.computer_consent = request.access == pm_agents::Access::Computer
+            && state.panel.session(thread)?.computer_consent;
+        request.prompt = format!(
+            "{}\n\nINTERRUPTED WORK CHECKPOINTS (untrusted observations)\n{}\nRead get_project_state and inspect retained work before editing. Continue the original task without repeating completed edits.",
+            request.prompt,
+            saved["resumeSummary"]
+                .as_str()
+                .unwrap_or("Applied work is not fully known.")
+        );
+        return Ok((environment, request));
+    }
+
     let directory = workspace(&environment.profile, &effect.target.project, thread)
         .map_err(|e| Error::Host(format!("The agent's workspace could not be created: {e}")))?;
     let attached = match &effect.kind {
@@ -954,6 +1032,7 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
             let polled = state.runs.poll(&mut state.panel, &mut store, now(), 64);
             link.tell(state.runs.take_notices());
             let tasks = crate::agent_tasks::Tasks::poll(state, &link, now());
+            crate::agent_completion::poll(state, &link, &mut store, now());
             let mut failed = polled.is_err();
             if state.runs.is_empty() && state.panel.unsaved() && closed.is_some() {
                 failed |= state.panel.save(&mut store, now()).is_err();
@@ -1034,6 +1113,110 @@ mod tests {
         ] {
             assert!(admit(&action, false, false).is_ok());
         }
+    }
+    #[test]
+    fn resumed_launch_uses_saved_request_and_refuses_missing_original_attachment() {
+        #[derive(Default)]
+        struct Memory(std::collections::BTreeMap<String, Value>);
+        impl pm_agents::persistence::Store for Memory {
+            fn get(&mut self, key: &str) -> std::io::Result<Option<Value>> {
+                Ok(self.0.get(key).cloned())
+            }
+            fn set(&mut self, key: &str, value: &Value) -> std::io::Result<()> {
+                self.0.insert(key.into(), value.clone());
+                Ok(())
+            }
+        }
+        let profile = tempfile::tempdir().unwrap();
+        let environment = Environment {
+            profile: profile.path().into(),
+            ..Default::default()
+        };
+        let mut store = Memory::default();
+        let mut panel = Panel::load(&mut store, "project", "thread", 0).unwrap();
+        panel
+            .draft_mut("thread")
+            .unwrap()
+            .insert_text("original", 1, false);
+        panel.submit("thread", "old", "old-request", 1).unwrap();
+        let directory = workspace(profile.path(), "project", "thread").unwrap();
+        let image = directory.join("original.png");
+        std::fs::write(&image, b"synthetic image").unwrap();
+        let settings = panel.session("thread").unwrap().settings.clone();
+        let request = Request {
+            run: "old".into(),
+            prompt: "ORIGINAL PROMPT".into(),
+            provider: Provider::Claude,
+            model: Some("original-model".into()),
+            effort: Some("high".into()),
+            access: pm_agents::Access::Editor,
+            approval: pm_agents::ApprovalMode::Supervised,
+            computer_consent: false,
+            workspace: directory,
+            images: vec![image.to_string_lossy().into_owned()],
+            files: vec![json!({"name":"original.txt","content":"original contents"})],
+            role: Some("reviewer".into()),
+        };
+        panel
+            .host_admitted_request("thread", "old", &request, &settings)
+            .unwrap();
+        panel.save(&mut store, 1).unwrap();
+        let mut panel = Panel::load(&mut store, "project", "blank", 2).unwrap();
+        let effect = panel
+            .resume_interrupted("thread", "old", "fresh", "fresh-request", 3)
+            .unwrap();
+        let state = AgentState::new(panel);
+        let (_, resumed) = launch_request(
+            &state,
+            Some(environment.clone()),
+            &effect,
+            "CHANGED",
+            &settings,
+        )
+        .unwrap();
+        assert_eq!(resumed.run, "fresh");
+        assert_eq!(resumed.provider, Provider::Claude);
+        assert_eq!(resumed.model.as_deref(), Some("original-model"));
+        assert_eq!(resumed.effort.as_deref(), Some("high"));
+        assert_eq!(resumed.approval, pm_agents::ApprovalMode::Supervised);
+        assert!(
+            resumed
+                .prompt
+                .starts_with("ORIGINAL PROMPT\n\nINTERRUPTED WORK CHECKPOINTS")
+        );
+        assert!(!resumed.prompt.contains("CHANGED"));
+        assert_eq!(resumed.files, request.files);
+        assert_eq!(resumed.role, request.role);
+        assert_eq!(resumed.images, request.images);
+        std::fs::remove_file(image).unwrap();
+        let error = launch_request(
+            &state,
+            Some(environment.clone()),
+            &effect,
+            "CHANGED",
+            &settings,
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("original attachment is unavailable"));
+        std::fs::remove_dir_all(&request.workspace).unwrap();
+        let error =
+            launch_request(&state, Some(environment), &effect, "CHANGED", &settings).unwrap_err();
+        assert!(format!("{error:?}").contains("original agent workspace is unavailable"));
+        assert!(!request.workspace.exists());
+    }
+    #[test]
+    fn interrupted_resume_requires_connection_but_dismiss_is_available_offline() {
+        let resume = json!({"type":"resumeInterrupted","runId":"old"});
+        assert!(admit(&resume, false, false).is_err());
+        assert!(admit(&resume, true, false).is_ok());
+        assert!(
+            admit(
+                &json!({"type":"dismissInterrupted","runId":"old"}),
+                false,
+                false
+            )
+            .is_ok()
+        );
     }
     #[test]
     fn a_connected_provider_admits_runs_and_asks_for_computer_access() {

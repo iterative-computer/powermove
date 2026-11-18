@@ -2,6 +2,7 @@
 //! the only document writer. GPUI consumes immutable accepted surfaces.
 #![cfg_attr(test, recursion_limit = "512")]
 mod agent_context;
+pub mod agent_completion;
 mod agent_host;
 mod presets;
 /// A run's tool session rolled its edits back after it ended (PM-507).
@@ -1567,6 +1568,10 @@ impl Builtins {
     }
     pub fn set_agent_focus(&self, focus: Value) {
         self.broker.agent.set_focus(focus);
+    }
+    /// Host-owned final verification and result recovery on workers.
+    pub fn set_agent_completion(&self, service: std::sync::Arc<agent_completion::Service>) {
+        *self.broker.agent.completion.shared() = Some(service);
     }
     /// Who hears that an agent run was sent, finished or asked a question.
     pub fn set_agent_notices(&self, sink: std::sync::Arc<NoticeSink>) {

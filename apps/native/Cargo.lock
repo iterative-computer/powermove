@@ -5114,6 +5114,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
 ]
 
 [[package]]
@@ -5339,6 +5340,7 @@ dependencies = [
  "pm-kernel",
  "pm-model",
  "pm-surface",
+ "serde",
  "serde_json",
 ]
 

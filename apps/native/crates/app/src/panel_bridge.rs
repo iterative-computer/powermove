@@ -995,6 +995,17 @@ fn workspace(
             Some(json!({"id":id,"name":name,"active":Some(&id) == active.as_ref()}))
         })
         .collect();
+    let layout = live_layout(editor, cx);
+    let extension_panels = this
+        .extensions
+        .result_panels()
+        .into_iter()
+        .filter(|pair| {
+            layout["registeredPanels"]
+                .as_array()
+                .is_some_and(|panels| panels.iter().any(|panel| panel["id"] == pair["panelId"]))
+        })
+        .collect::<Vec<_>>();
     let viewport = window.viewport_size();
     let errors: Vec<Value> = this
         .errors
@@ -1009,10 +1020,12 @@ fn workspace(
         "project": {"unsaved": this.published.as_ref().map(|p| p.dirty)},
         "openProjects": open,
         "projectsScreenOpen": this.session.is_none(),
-        "layout": live_layout(editor, cx),
+        "layout": layout,
+        "extensionPanels": extension_panels,
         "viewport": {"width": f32::from(viewport.width), "height": f32::from(viewport.height),
             "devicePixelRatio": window.scale_factor()},
         "errors": errors,
+        "extensions": this.extensions.host.as_ref().map(|host| host.records()),
     })
 }
 

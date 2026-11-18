@@ -2114,6 +2114,45 @@ impl Backend {
                         ));
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
+                    if action["type"] == "openResultPanel" {
+                        let extension = action["extensionId"]
+                            .as_str()
+                            .ok_or("Missing extension id")?;
+                        let panel = action["panelId"]
+                            .as_str()
+                            .ok_or("Missing contributed panel id")?;
+                        let published = session
+                            .result
+                            .iter()
+                            .chain(
+                                session
+                                    .conversation
+                                    .values()
+                                    .filter_map(|row| row.get("nativeResult")),
+                            )
+                            .flat_map(|result| {
+                                result["extensions"].as_array().into_iter().flatten()
+                            })
+                            .any(|row| {
+                                row["extensionId"] == extension
+                                    && row["panelId"] == panel
+                                    && row["status"] == "ready"
+                            });
+                        if !published {
+                            return Err(
+                                "This panel was not published by a result in this thread.".into()
+                            );
+                        }
+                        let project = state.panel.project().to_owned();
+                        let service = link
+                            .completion
+                            .shared()
+                            .clone()
+                            .ok_or("Completion service is unavailable")?;
+                        drop(state);
+                        service("openPanel", &project, "", action)?;
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
                     if action["type"] == "openVisual" {
                         // A saved reply is checked again before it's shown (main's
                         // readVisualReply); the window opens its own viewer.
@@ -2131,7 +2170,40 @@ impl Backend {
                         ));
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
-                    crate::agent_host::admit(action, link.available(provider), live)?;
+                    let kept_run = (action["type"] == "keepResult"
+                        && session.run.is_none()
+                        && session.result.is_some())
+                    .then(|| session.last_run().map(str::to_owned))
+                    .flatten();
+                    let admission_provider = if action["type"] == "resumeInterrupted" {
+                        if state.runs.active() >= 8 {
+                            return Err(
+                                "Eight agents are already running. Wait for one to finish.".into(),
+                            );
+                        }
+                        state
+                            .panel
+                            .recovery_provider(&thread)
+                            .map_err(|e| e.to_string())?
+                    } else if action["type"] == "setAccess" && action["access"] == "full" {
+                        let recovery = state
+                            .panel
+                            .interrupted_snapshot(&thread)
+                            .map_err(|e| e.to_string())?;
+                        if recovery["requestAvailable"] == true
+                            && recovery["requiresComputerConsent"] == true
+                        {
+                            state
+                                .panel
+                                .recovery_provider(&thread)
+                                .map_err(|e| e.to_string())?
+                        } else {
+                            provider
+                        }
+                    } else {
+                        provider
+                    };
+                    crate::agent_host::admit(action, link.available(admission_provider), live)?;
                     if crate::agent_host::sends(action) {
                         crate::agent_host::admit_send(&state, &thread)?;
                     }
@@ -2149,6 +2221,8 @@ impl Backend {
                     let request = new_id("request");
                     let new_thread = new_id("thread");
                     let catalogs = |provider| link.catalog(provider);
+                    let recovery_before =
+                        (action["type"] == "resumeInterrupted").then(|| state.panel.clone());
                     let effect = pm_panel_agentpanel::v4::dispatch_at(
                         &mut state.panel,
                         sequence,
@@ -2175,6 +2249,15 @@ impl Backend {
                     if effect.is_none() && matches!(action["type"].as_str(), Some("draft" | "key"))
                     {
                         state.panel.defer_save(now);
+                    } else if let Some(before) = recovery_before {
+                        state
+                            .panel
+                            .save_recovery_admission(
+                                &mut KernelStore::new(self.kernel.clone(), self.application),
+                                before,
+                                now,
+                            )
+                            .map_err(|e| format!("{e:?}"))?;
                     } else {
                         state
                             .panel
@@ -2183,6 +2266,9 @@ impl Backend {
                                 now,
                             )
                             .map_err(|e| format!("{e:?}"))?;
+                    }
+                    if let Some(run) = kept_run {
+                        crate::agent_completion::keep(&link, state.panel.project(), &run);
                     }
                     effect
                 };
@@ -2209,6 +2295,16 @@ impl Backend {
                         | EffectKind::Answer { .. }
                         | EffectKind::StopTask { .. } => {
                             crate::agent_host::run_effect(
+                                &agent,
+                                &link,
+                                &self.kernel,
+                                self.application,
+                                &effect,
+                            )?;
+                            None
+                        }
+                        EffectKind::ApplyPlan(_) | EffectKind::UndoResult(_) => {
+                            crate::agent_completion::dispatch_action(
                                 &agent,
                                 &link,
                                 &self.kernel,

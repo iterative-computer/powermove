@@ -88,6 +88,7 @@ struct Active {
     stage: Option<crate::extensions::Stage>,
     run: String,
     publications: u32,
+    owner: Option<String>,
     committed: bool,
     external_actions: bool,
     /// Panel controls ran during this run (main's `panelActions`): their own
@@ -393,7 +394,7 @@ impl McpSession {
                 .clone()
                 .ok_or_else(|| Error::unavailable(catalog::backing(name)))?;
             drop(host);
-            return publish(session, extensions.as_ref(), args);
+            return publish(session, extensions.as_ref(), args, &self.host);
         }
         if name == "import_media_to_timeline"
             && (session.access == "editor" || session.context == "app")
@@ -1308,6 +1309,9 @@ impl McpSession {
                 // Folded foreign gestures retain their own normal undo entry.
                 tx.interleaved |= ack.folded.is_some();
                 observe_foreign(session, &host, &id);
+                if let Some(owner) = &session.owner {
+                    host.completion_edit(owner, revision, ack.revision, tx.interleaved);
+                }
                 let message = if name == "edit_video" && ack.revision == revision {
                     "No source changes"
                 } else {
@@ -1519,6 +1523,7 @@ impl McpSession {
             transaction: None,
             workspace,
             stage,
+            owner: agent(self.agent_token.as_deref(), &host).map(|(run, _)| run),
             run: run_id,
             publications: 1,
             committed: false,
@@ -1555,6 +1560,12 @@ impl McpSession {
             host.presence(&id, &session.run, crate::presence::Kind::RunEnd, None);
             if self.agent_token.is_some() {
                 host.agent_turn(&id, self.writer, false)?;
+            }
+            if let Some(owner) = &session.owner
+                && let Some(receipt) = host.completion_receipt_mut(owner)
+            {
+                receipt.unsafe_undo |= session.external_actions || session.panel_actions;
+                receipt.changed |= session.external_actions || session.panel_actions;
             }
             let Some(tx) = session.transaction.as_ref() else {
                 return Ok(json!({"changed":session.committed}));
@@ -1873,6 +1884,7 @@ fn publish(
     session: &mut Active,
     extensions: &dyn crate::extensions::ExtensionHost,
     args: &Value,
+    receipts: &Arc<Mutex<Automation>>,
 ) -> Result<Value> {
     let stage = session
         .stage
@@ -1880,6 +1892,36 @@ fn publish(
         .ok_or_else(|| Error::invalid("Extension staging requires project access"))?;
     let declared = args["extensions"].as_array().cloned().unwrap_or_default();
     let record = crate::extensions::publish(extensions, stage, &declared)?;
+    // Promotion is committed now. Record it before renewing staging: a
+    // subsequent staging/disk failure must not lose result recovery.
+    if let (Some(owner), Some(id)) = (
+        &session.owner,
+        record.as_ref().and_then(|record| record["id"].as_str()),
+    ) {
+        let mut host = receipts
+            .lock()
+            .map_err(|_| Error::unavailable("Extension recovery receipts"))?;
+        if let Some(receipt) = host.completion_receipt_mut(owner) {
+            receipt.extensions.push(id.into());
+            receipt
+                .extension_projects
+                .insert(id.into(), stage.project.clone());
+            for change in &declared {
+                if let Some(id) = change["id"].as_str() {
+                    let action = change["action"].as_str().unwrap_or("updated");
+                    if !(receipt.changes.get(id).is_some_and(|old| old == "created")
+                        && action == "updated")
+                    {
+                        receipt.changes.insert(id.into(), action.into());
+                    }
+                    receipt.health_ids.retain(|old| old != id);
+                    if action != "removed" {
+                        receipt.health_ids.push(id.into());
+                    }
+                }
+            }
+        }
+    }
     session.publications += 1;
     let run = format!("{}-{}", session.run, session.publications);
     let next = crate::extensions::prepare(extensions, &stage.staging, &stage.project, &run)?;

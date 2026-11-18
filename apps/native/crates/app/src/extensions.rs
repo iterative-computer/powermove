@@ -384,6 +384,22 @@ impl Extensions {
             .cloned()
             .collect()
     }
+    pub(crate) fn result_panels(&self) -> Vec<Value> {
+        let mut pairs = BTreeSet::new();
+        for (panel, (extension, _)) in &self.stores {
+            pairs.insert((extension.clone(), panel.clone()));
+        }
+        for panel in self.surfaces.keys() {
+            pairs.insert((panel.clone(), panel.clone()));
+        }
+        for (extension, (panel, _)) in &self.forks {
+            pairs.insert((extension.clone(), panel.clone()));
+        }
+        pairs
+            .into_iter()
+            .map(|(extension, panel)| json!({"extensionId":extension,"panelId":panel}))
+            .collect()
+    }
     pub fn owns_panel(&self, id: &str) -> bool {
         self.known_panels.contains(id)
     }

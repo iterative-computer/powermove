@@ -486,6 +486,22 @@ fn plan_apply_blocks_switches_but_failure_preserves_preview_and_draft() {
         11,
     )
     .unwrap();
+    assert!(
+        p.apply_plan("t").is_err(),
+        "active runs cannot apply a preview"
+    );
+    p.receive(
+        "t",
+        "run1",
+        2,
+        Update::Complete {
+            text: String::new(),
+            error: false,
+            cancelled: false,
+        },
+        12,
+    )
+    .unwrap();
     let effect = p.apply_plan("t").unwrap();
     assert!(p.new_thread("new", 12).is_err());
     assert!(p.draft_mut("t").is_err());
