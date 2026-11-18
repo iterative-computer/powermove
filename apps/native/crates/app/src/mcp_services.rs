@@ -1403,7 +1403,7 @@ fn describe_thread(thread: &Value) -> Value {
     let status = thread["lastRunStatus"].as_str().unwrap_or("idle");
     json!({"threadId":thread["id"],"title":thread["title"],"updatedAt":thread["updatedAt"],
         "provider":settings("provider"),"model":settings("model"),
-        "reasoningEffort":settings("reasoningEffort"),"access":thread["access"].as_str().unwrap_or("editor"),
+        "reasoningEffort":settings("reasoningEffort"),"access":thread["access"].as_str().unwrap_or("project"),
         "busy":matches!(status, "queued" | "running" | "waiting"),"runId":thread["lastRunId"],
         "status":status,"summary":thread_summary(thread)})
 }

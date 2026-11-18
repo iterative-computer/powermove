@@ -27,8 +27,9 @@ pub struct Options {
     pub ask_outside_sandbox: bool,
 }
 const PROJECT_TOOLS: &str = "Read,Glob,Grep,Bash,WebSearch,WebFetch,Skill,Agent,Task";
-const EDITOR_TOOLS: &str = "Read,Glob,Grep,Skill,Agent,Task";
-const DISALLOWED: &str = "Bash,Monitor,PowerShell,Write,Edit,NotebookEdit";
+const EDITOR_TOOLS: &str = "Skill,Agent,Task";
+const DISALLOWED: &str =
+    "Bash,Monitor,PowerShell,Read,Glob,Grep,Write,Edit,NotebookEdit,WebSearch,WebFetch";
 const ASKING: &str = "APPROVALS\nThe sandbox confines writes to this workspace. When a command genuinely needs to run outside it, such as installing a font or writing to the user's home folder, retry that one command with dangerouslyDisableSandbox: true and a clear description. Powermove asks the user to approve it; if they decline, do not retry it.";
 const AUTO: &str = "APPROVALS\nThe sandbox confines writes to this workspace. When a command genuinely needs to run outside it, such as installing a font or writing to the user's home folder, retry that one command with dangerouslyDisableSandbox: true and a clear description. An automatic reviewer approves routine requests and may ask the user; if a request is declined, do not retry it.";
 impl Options {
@@ -42,6 +43,9 @@ impl Options {
             .cloned()
             .ok_or("Invalid external MCP servers")?;
         external.remove("powermove");
+        if authority.access == Access::Editor {
+            external.clear();
+        }
         let external_tools = external
             .keys()
             .map(|n| format!("mcp__{n}__*"))
@@ -136,7 +140,7 @@ impl Options {
                 "--settings".into(),
                 json!({"sandbox":sandbox}).to_string(),
                 "--tools".into(),
-                "default".into(),
+                if editor { EDITOR_TOOLS } else { "default" }.into(),
                 "--allowedTools".into(),
                 tools,
             ]);

@@ -102,7 +102,7 @@ fn lifecycle(name: &str) -> Check {
                 &mut f,
                 name,
                 json!(null),
-                "This planning run can only inspect the project.",
+                "This connection can only inspect the project.",
             )?;
         }
         f.call("finish_session", json!({"commit":true}))?;

@@ -529,7 +529,10 @@ impl Builtins {
             return describe(&thread_arg, json!({}));
         }
         if self.broker.application && caller == "editor" {
-            return Err("Start an app thread with Project access. Planning threads need an attached project.".into());
+            return Err(
+                "Start an app thread with Project access. Editor threads need an attached project."
+                    .into(),
+            );
         }
         // A retried request returns its first answer; a reused id refuses.
         let target = &args["target"];

@@ -79,6 +79,8 @@ struct Active {
     document: Option<u64>,
     access: String,
     context: String,
+    /// Only a live host-issued Agent-panel grant enables internal editing.
+    internal: bool,
     baseline: u64,
     transaction: Option<Transaction>,
     workspace: Option<PathBuf>,
@@ -102,6 +104,15 @@ struct Active {
     observed_revision: u64,
     steer_epoch: u64,
 }
+impl Active {
+    fn editor_permits(&self, name: &str) -> bool {
+        if self.internal {
+            catalog::composition_names().iter().any(|tool| tool == name)
+        } else {
+            catalog::permits("inspection", name)
+        }
+    }
+}
 /// One connection owns one session and workspace. No session credential is
 /// exposed in MCP results. Drop/disconnect attempts guarded rollback.
 pub struct McpSession {
@@ -109,7 +120,7 @@ pub struct McpSession {
     active: Option<Active>,
     /// The grant token of the provider run that launched this connection
     /// (`--agent-run`), resolved through the host on every use: a token that
-    /// doesn't resolve (forged, or its run ended) acts as no run.
+    /// doesn't resolve (forged, or its run ended) refuses further calls.
     agent_token: Option<String>,
     writer: u32,
     closed: bool,
@@ -238,6 +249,7 @@ impl McpSession {
     /// first, and a JavaScript slice's lone surrogate is kept (tests/wave4.rs,
     /// tests/main_memory.rs).
     fn project_memory(&mut self, args: &Value) -> Result<pm_model::Value> {
+        self.check_agent_grant()?;
         if self.closed {
             return Err(Error::invalid("This MCP connection is closed."));
         }
@@ -246,9 +258,9 @@ impl McpSession {
             .active
             .as_ref()
             .ok_or_else(|| Error::invalid("Call start_session before using Powermove tools."))?;
-        if session.access == "editor" && !catalog::permits("inspection", "project_memory") {
+        if session.access == "editor" && !session.editor_permits("project_memory") {
             return Err(Error::invalid(
-                "This planning run can only inspect the project.",
+                "This connection can only inspect the project.",
             ));
         }
         if session.context == "app" && !catalog::permits("app", "project_memory") {
@@ -298,7 +310,21 @@ impl McpSession {
         }
         Ok(())
     }
+
+    fn check_agent_grant(&self) -> Result<()> {
+        if let Some(token) = self.agent_token.as_deref() {
+            let host = self
+                .host
+                .lock()
+                .map_err(|_| Error::unavailable("headless host stopped"))?;
+            if agent(Some(token), &host).is_none() {
+                return Err(Error::invalid("This agent run is no longer active."));
+            }
+        }
+        Ok(())
+    }
     pub fn dispatch(&mut self, name: &str, args: &Value) -> Result<Value> {
+        self.check_agent_grant()?;
         if !self.take_hold(name == "finish_session")? {
             return Ok(
                 json!({"status":"held","reason":"Your previous write is still waiting; do not retry it."}),
@@ -355,8 +381,10 @@ impl McpSession {
             .as_mut()
             .ok_or_else(|| Error::invalid("Call start_session before using Powermove tools."))?;
         // External-session gates run before the bridge and body parsers in the tag.
-        if name == "publish_extensions" && session.access == "editor" {
-            return Err(Error::invalid("Planning access cannot publish extensions."));
+        if name == "publish_extensions" && session.access == "editor" && !session.internal {
+            return Err(Error::invalid(
+                "This connection can only inspect the project.",
+            ));
         }
         if name == "publish_extensions" {
             crate::validation::extensions(args)?;
@@ -377,9 +405,9 @@ impl McpSession {
         if catalog::spec(name).is_none() {
             return Err(Error::invalid(format!("Unknown Powermove tool: {name}")));
         }
-        if session.access == "editor" && !catalog::permits("inspection", name) {
+        if session.access == "editor" && !session.editor_permits(name) {
             return Err(Error::invalid(
-                "This planning run can only inspect the project.",
+                "This connection can only inspect the project.",
             ));
         }
         if session.context == "app" && !catalog::permits("app", name) {
@@ -1344,7 +1372,7 @@ impl McpSession {
             .unwrap_or("project");
         if granted.as_deref() == Some("editor") && access != "editor" {
             return Err(Error::invalid(
-                "This run has planning access: start the session with access \"editor\".",
+                "This run has Editor access: start the session with access \"editor\".",
             ));
         }
         let context = args["context"].as_str().unwrap_or("project");
@@ -1369,7 +1397,7 @@ impl McpSession {
             .transpose()?;
         let run_id = format!("mcp-{}", pm_kernel::new_id("run"));
         let mut result = json!({"runId":run_id,"projectId":project.as_deref().unwrap_or("powermove-global"),"access":access});
-        let workspace = if access == "editor" {
+        let workspace = if access == "editor" && granted.is_none() {
             None
         } else {
             let root = host.profile.join("mcp-runs").join(&run_id);
@@ -1468,6 +1496,7 @@ impl McpSession {
             document,
             access: access.into(),
             context: context.into(),
+            internal: granted.is_some(),
             baseline,
             transaction: None,
             workspace,

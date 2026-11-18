@@ -525,6 +525,39 @@ mod tests {
     fn panel() -> Panel {
         Panel::load(&mut Memory::default(), "synthetic-project", "thread", 0).unwrap()
     }
+    #[test]
+    fn access_picker_matches_loaded_authority_and_v1_default() {
+        let mut p = panel();
+        assert_eq!(
+            p.session("thread").unwrap().settings.access,
+            Access::Project
+        );
+        assert_eq!(
+            p.session("thread").unwrap().settings.approval,
+            ApprovalMode::Auto
+        );
+        assert_eq!(snapshot(&p)["settings"]["access"], "auto");
+        p.set_access("thread", "editor").unwrap();
+        assert_eq!(
+            p.session("thread").unwrap().settings.approval,
+            ApprovalMode::Auto
+        );
+        assert_eq!(snapshot(&p)["settings"]["access"], "editor");
+        let mut store = Memory::default();
+        p.save(&mut store, 1).unwrap();
+        let restored = Panel::load(&mut store, "synthetic-project", "unused", 2).unwrap();
+        assert_eq!(snapshot(&restored)["settings"]["access"], "editor");
+        assert_eq!(
+            restored.session("thread").unwrap().settings.access,
+            Access::Editor
+        );
+        p.set_access("thread", "auto").unwrap();
+        assert_eq!(
+            p.session("thread").unwrap().settings.access,
+            Access::Project
+        );
+        assert_eq!(snapshot(&p)["settings"]["access"], "auto");
+    }
     fn act(p: &mut Panel, v: Value) -> Result<Option<Effect>> {
         dispatch(
             p,

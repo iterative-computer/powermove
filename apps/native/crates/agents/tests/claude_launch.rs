@@ -1,7 +1,7 @@
 use pm_agents::{Access, ApprovalMode, approvals::Authority, claude, claude_launch::Options};
 use serde_json::Value;
 #[test]
-fn all_native_claude_permission_profiles_match_executed_main_arguments() {
+fn native_claude_profiles_preserve_project_arguments_and_confine_editor_tools() {
     let fixture: Value =
         serde_json::from_str(include_str!("../fixtures/main-claude-launch.json")).unwrap();
     assert_eq!(
@@ -16,7 +16,39 @@ fn all_native_claude_permission_profiles_match_executed_main_arguments() {
         let approval: ApprovalMode = serde_json::from_value(case["approval"].clone()).unwrap();
         let authority = Authority::new(access, approval, access == Access::Computer).unwrap();
         let actual = options.argv(&authority).unwrap();
-        let expected: Vec<String> = serde_json::from_value(case["argv"].clone()).unwrap();
+        let mut expected: Vec<String> = serde_json::from_value(case["argv"].clone()).unwrap();
+        // Native internal Editor authority has no provider filesystem, shell,
+        // web or unrelated MCP tools. Preserve the pinned v1 evidence on disk.
+        if access == Access::Editor {
+            for flag in [
+                "--tools",
+                "--allowedTools",
+                "--disallowedTools",
+                "--mcp-config",
+            ] {
+                let i = expected.iter().position(|s| s == flag).unwrap() + 1;
+                expected[i] = match flag {
+                    "--tools" => "Skill,Agent,Task".into(),
+                    "--allowedTools" => {
+                        let native = if options.native_tools.is_some() {
+                            options.inspection_tool_names.clone()
+                        } else {
+                            vec![]
+                        };
+                        std::iter::once("Skill,Agent,Task".to_owned())
+                            .chain(native)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    },
+                    "--disallowedTools" => "Bash,Monitor,PowerShell,Read,Glob,Grep,Write,Edit,NotebookEdit,WebSearch,WebFetch".into(),
+                    _ => {
+                        let mut config: Value = serde_json::from_str(&expected[i]).unwrap();
+                        config["mcpServers"].as_object_mut().unwrap().retain(|name, _| name == "powermove");
+                        config.to_string()
+                    }
+                };
+            }
+        }
         // These CLI values are parsed as JSON; property order has no meaning.
         // All flag/value positions and other bytes are compared exactly.
         assert_eq!(actual.len(), expected.len());

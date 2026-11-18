@@ -33,37 +33,74 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn all_tool_session_gates_and_parser_precedence_match_213_main_refusals() {
-    let oracle: Value = serde_json::from_str(include_str!(
-        "../fixtures/error-precedence-main-c7f46a056.json"
-    ))
-    .unwrap();
-    assert_eq!(oracle["tag"], "main");
-    let f = Fixture::new();
-    let mut covered = std::collections::HashSet::new();
-    for test in oracle["cases"].as_array().unwrap() {
-        let mut session = f.session();
-        let state = test["state"].as_str().unwrap();
-        if state == "closed" {
-            session.close().unwrap();
-        } else if state != "none" {
-            assert_eq!(session.call("start_session",json!({"prompt":"Synthetic gates","access":if state=="editor" {"editor"}else{"project"},"context":if state=="app"{"app"}else{"project"}}))["isError"],false);
+fn external_session_gates_preserve_shared_legacy_and_213_main_refusals() {
+    for (source, tag, count) in [
+        (
+            include_str!("../fixtures/error-precedence-main-c7f46a056.json"),
+            "main",
+            213,
+        ),
+        (
+            include_str!("../fixtures/error-precedence-v1.2.0.json"),
+            "v1.2.0",
+            209,
+        ),
+    ] {
+        let oracle: Value = serde_json::from_str(source).unwrap();
+        assert_eq!(oracle["tag"], tag);
+        assert_eq!(oracle["cases"].as_array().unwrap().len(), count);
+        let f = Fixture::new();
+        let mut covered = std::collections::HashSet::new();
+        let mut superseded_memory_cases = 0;
+        for test in oracle["cases"].as_array().unwrap() {
+            // project_memory was implemented after v1.2.0. Its three old
+            // "unknown tool" bodies are superseded by the main memory contract;
+            // replay every session gate and every other legacy body unchanged.
+            if tag == "v1.2.0"
+                && test["tool"] == "project_memory"
+                && test["error"] == "Unknown Powermove tool: project_memory"
+            {
+                superseded_memory_cases += 1;
+                continue;
+            }
+            let mut session = f.session();
+            let state = test["state"].as_str().unwrap();
+            if state == "closed" {
+                session.close().unwrap();
+            } else if state != "none" {
+                assert_eq!(session.call("start_session",json!({"prompt":"Synthetic gates","access":if state=="editor" {"editor"}else{"project"},"context":if state=="app"{"app"}else{"project"}}))["isError"],false);
+            }
+            let tool = test["tool"].as_str().unwrap();
+            let args = if test["recipe"] == "oversized-prompt" {
+                json!({"prompt":"😀".repeat(200001)})
+            } else {
+                test["args"].clone()
+            };
+            // Keep frozen external admission evidence; only the refusal wording
+            // changes so outside clients are not told they chose a plan mode.
+            let expected = match test["error"].as_str().unwrap() {
+                "This planning run can only inspect the project."
+                | "Planning access cannot publish extensions." => {
+                    "This connection can only inspect the project."
+                }
+                message => message,
+            };
+            assert_eq!(
+                session.call(tool, args),
+                json!({"isError":true,"content":[{"type":"text","text":expected}]}),
+                "{state} {tool}: {test}"
+            );
+            covered.insert(tool.to_owned());
         }
-        let tool = test["tool"].as_str().unwrap();
-        let args = if test["recipe"] == "oversized-prompt" {
-            json!({"prompt":"😀".repeat(200001)})
+        assert_eq!(superseded_memory_cases, if tag == "main" { 0 } else { 3 });
+        let tools = if tag == "main" {
+            catalog::catalog()
         } else {
-            test["args"].clone()
+            catalog::legacy_catalog()
         };
-        assert_eq!(
-            session.call(tool, args),
-            json!({"isError":true,"content":[{"type":"text","text":test["error"]}]}),
-            "{state} {tool}: {test}"
-        );
-        covered.insert(tool.to_owned());
-    }
-    for tool in catalog::tools() {
-        assert!(covered.contains(tool["name"].as_str().unwrap()));
+        for tool in tools["tools"].as_array().unwrap() {
+            assert!(covered.contains(tool["name"].as_str().unwrap()));
+        }
     }
 }
 
