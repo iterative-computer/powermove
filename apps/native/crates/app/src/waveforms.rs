@@ -231,16 +231,15 @@ mod timing_tests {
             r#"{"trim":2,"speed":2}"#,
             r#"{"trim":{"v":2,"kf":[]},"speed":{"v":2,"kf":[]}}"#,
         ] {
-            let doc = pm_model::Document::new(
-                Some(
-                    pm_model::json::parse(&format!(
-                        r#"{{"compId":"c","layers":[{{"id":"a","type":"audio","d":{content}}}]}}"#
-                    ))
-                    .unwrap(),
-                ),
-                1,
-            );
-            assert_eq!(layer_timing(doc.root().unwrap(), "a"), Some((2., 2.)));
+            let layers = format!(r#"[{{"id":"a","type":"audio","d":{content}}}]"#);
+            for project in [
+                format!(r#"{{"layers":{layers}}}"#),
+                format!(r#"{{"compId":"c","comps":{{"c":{{"layers":{layers}}}}}}}"#),
+            ] {
+                let doc =
+                    pm_model::Document::new(Some(pm_model::json::parse(&project).unwrap()), 1);
+                assert_eq!(layer_timing(doc.root().unwrap(), "a"), Some((2., 2.)));
+            }
         }
     }
 }

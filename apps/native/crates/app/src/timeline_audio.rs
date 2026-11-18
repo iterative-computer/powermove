@@ -115,6 +115,34 @@ fn dragged_gain(initial: f64, dy: f64, fine: bool) -> f64 {
     let db = ((db - dy * step) / step).round() * step;
     10f64.powf(db.clamp(-60., 12.) / 20.).min(4.)
 }
+/// Content channels use evP; evaluate() addresses only transform properties.
+fn content_value(q: &mut pm_kernel::QueryContext, id: &str, path: &str, time: f64) -> Option<f64> {
+    let root = q.document().root()?;
+    let at = pm_kernel::model::find_layer(root, id)?;
+    let layer = pm_kernel::model::layer_at(root, &at)?;
+    let raw = layer.get("d")?.get(path.strip_prefix("c.")?)?.to_value();
+    if raw.as_f64().is_some() {
+        return raw.as_f64();
+    }
+    let open = pm_kernel::model::open_comp_id(root);
+    let mut request = pm_model::Map::new();
+    request.insert("op", pm_model::Value::from("evP"));
+    request.insert(
+        "comp",
+        at.comp_id
+            .or(open.clone())
+            .map_or(pm_model::Value::Null, pm_model::Value::from),
+    );
+    request.insert(
+        "open",
+        open.map_or(pm_model::Value::Null, pm_model::Value::from),
+    );
+    request.insert("layer", pm_model::Value::Number(at.index as f64));
+    request.insert("t", pm_model::Value::Number(time));
+    request.insert("key", pm_model::Value::from(path));
+    request.insert("prop", raw);
+    q.query(&pm_model::Value::Object(request)).ok()?.as_f64()
+}
 fn edit(layer: &str, path: &str, time: f64, value: f64, key: bool, revision: u64) -> Plan {
     let mut set = pm_kernel::commands::properties::SetProperty::new(
         layer,
@@ -248,9 +276,7 @@ impl TimelineSurface {
                 };
                 let value =
                     |q: &mut pm_kernel::QueryContext, path: &str, at: f64, fallback: f64| {
-                        q.evaluate(self.model.index.comp_id.as_deref(), id, path, at)
-                            .ok()
-                            .and_then(|v| v.as_f64())
+                        content_value(q, id, path, at)
                             .filter(|v| v.is_finite())
                             .unwrap_or(fallback)
                     };
@@ -597,11 +623,7 @@ impl TimelineSurface {
                 .kernel
                 .published(&self.project)
                 .and_then(|published| {
-                    QueryMirror::new(&published)
-                        .queries()
-                        .evaluate(self.model.index.comp_id.as_deref(), id, path, at)
-                        .ok()
-                        .and_then(|v| v.as_f64())
+                    content_value(QueryMirror::new(&published).queries(), id, path, at)
                 })
                 .unwrap_or(gain);
             self.queue.push_back(Job::Apply(edit(
@@ -676,12 +698,12 @@ impl TimelineSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
+    #[::core::prelude::v1::test]
     fn level_drag_has_db_steps_and_fine_shift() {
         assert!((20. * dragged_gain(1., 12., false).log10() + 6.).abs() < 1e-9);
         assert!((20. * dragged_gain(1., 12., true).log10() + 1.2).abs() < 1e-9);
     }
-    #[test]
+    #[::core::prelude::v1::test]
     fn output_meter_full_and_half_scale() {
         let mut m = Meter::default();
         m.step(1., 0., 0.033).unwrap();
@@ -693,7 +715,7 @@ mod tests {
         m.step(0.5, 0., 0.033).unwrap();
         assert!((m.peak_db + 6.0206).abs() < 0.001);
     }
-    #[test]
+    #[::core::prelude::v1::test]
     fn edits_are_one_transaction_and_cmd_click_forces_key() {
         for key in [false, true] {
             let p = edit("audio", "c.gain", 1., 0.5, key, 7);
@@ -711,21 +733,22 @@ mod kernel_tests {
     }
     fn value(r: &crate::v4_view_tests::Rig, path: &str, time: f64) -> f64 {
         let published = r.kernel.published(PROJECT).unwrap();
-        QueryMirror::new(&published)
-            .queries()
-            .evaluate(None, "audio", path, time)
-            .unwrap()
-            .as_f64()
-            .unwrap()
+        content_value(QueryMirror::new(&published).queries(), "audio", path, time).unwrap()
     }
     fn apply(r: &crate::v4_view_tests::Rig, path: &str, time: f64, v: f64, key: bool) {
         let revision = r.kernel.published(PROJECT).unwrap().revision();
         for call in edit("audio", path, time, v, key, revision).calls {
-            r.kernel
+            let ack = r
+                .kernel
                 .call(PROJECT, pm_kernel::Request::new(Caller::native(), call))
                 .wait()
                 .unwrap()
                 .unwrap();
+            assert!(
+                !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+                "{:?}",
+                ack.reply
+            );
         }
     }
     fn undo(r: &crate::v4_view_tests::Rig) {
@@ -741,7 +764,7 @@ mod kernel_tests {
             .unwrap()
             .unwrap();
     }
-    #[test]
+    #[::core::prelude::v1::test]
     fn audio_level_release_is_one_undo_step() {
         let r = rig_project("timeline", &fixture());
         apply(&r, "c.gain", 2., dragged_gain(1., 12., false), false);
@@ -749,20 +772,24 @@ mod kernel_tests {
         undo(&r);
         assert_eq!(value(&r, "c.gain", 2.), 1.);
     }
-    #[test]
+    #[::core::prelude::v1::test]
     fn audio_command_click_adds_gain_key_at_clicked_time() {
         let r = rig_project("timeline", &fixture());
         apply(&r, "c.gain", 2., 0.5, true);
         let p = r.kernel.published(PROJECT).unwrap();
-        let text = pm_model::json::to_canonical_string(&p.snapshot.root().unwrap().to_value());
+        let root = p.snapshot.root().unwrap();
+        let at = pm_kernel::model::find_layer(root, "audio").unwrap();
+        let text = pm_model::json::to_canonical_string(
+            &pm_kernel::model::layer_at(root, &at).unwrap().to_value(),
+        );
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let keys = v["layers"][0]["d"]["gain"]["kf"].as_array().unwrap();
+        let keys = v["d"]["gain"]["kf"].as_array().unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0]["t"], 2.);
         undo(&r);
         assert_eq!(value(&r, "c.gain", 2.), 1.);
     }
-    #[test]
+    #[::core::prelude::v1::test]
     fn audio_fade_release_sets_duration_and_undoes_once() {
         let r = rig_project("timeline", &fixture());
         for path in ["c.fadeIn", "c.fadeOut"] {
@@ -781,7 +808,7 @@ mod captures {
     use crate::v4_view_tests::{PROJECT, publication, rig_project};
     /// Uses HeadlessAppContext's TestPlatform, with focus(false), show(false).
     /// A real Playback on a simulated device supplies output-mix meter taps.
-    #[test]
+    #[::core::prelude::v1::test]
     #[ignore = "writes headless audio playback review crops; set PM_AUDIO_CAPTURE and PM_AUDIO_CAPTURE_SOURCE"]
     fn capture_timeline_audio_light_dark() {
         let dir = std::env::var("PM_AUDIO_CAPTURE").unwrap();
@@ -999,6 +1026,9 @@ mod captures {
 #[cfg(test)]
 mod gesture_tests {
     use super::*;
+    // GPUI's attribute expands to #[test]; keep that name bound to Rust's
+    // built-in attribute rather than the glob-imported GPUI macro.
+    use ::core::prelude::v1::test;
     #[gpui::test]
     fn audio_level_pointer_drag_commits_on_release_and_undo_restores(cx: &mut TestAppContext) {
         let project = r##"{"id":"integration","compId":"c","w":640,"h":360,"fps":30,"dur":8,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"audio","name":"Music","type":"audio","from":0,"dur":8,"on":true,"d":{"gain":1,"fadeIn":0,"fadeOut":0},"p":{},"fx":[]}]}"##;
@@ -1039,11 +1069,12 @@ mod gesture_tests {
             .published(crate::v4_view_tests::PROJECT)
             .unwrap();
         assert_eq!(
-            QueryMirror::new(&published)
-                .queries()
-                .evaluate(None, "audio", "c.gain", 0.)
-                .unwrap()
-                .as_f64(),
+            content_value(
+                QueryMirror::new(&published).queries(),
+                "audio",
+                "c.gain",
+                0.
+            ),
             Some(1.)
         );
         s.surface.update(&mut s.vcx, |surface, cx| {
@@ -1056,12 +1087,7 @@ mod gesture_tests {
             .published(crate::v4_view_tests::PROJECT)
             .unwrap();
         assert!(
-            (QueryMirror::new(&p)
-                .queries()
-                .evaluate(None, "audio", "c.gain", 0.)
-                .unwrap()
-                .as_f64()
-                .unwrap()
+            (content_value(QueryMirror::new(&p).queries(), "audio", "c.gain", 0.).unwrap()
                 - 10f64.powf(-6. / 20.))
             .abs()
                 < 1e-9
@@ -1073,11 +1099,7 @@ mod gesture_tests {
             .published(crate::v4_view_tests::PROJECT)
             .unwrap();
         assert_eq!(
-            QueryMirror::new(&p)
-                .queries()
-                .evaluate(None, "audio", "c.gain", 0.)
-                .unwrap()
-                .as_f64(),
+            content_value(QueryMirror::new(&p).queries(), "audio", "c.gain", 0.),
             Some(1.)
         );
     }
@@ -1096,12 +1118,7 @@ mod gesture_tests {
             .kernel
             .published(crate::v4_view_tests::PROJECT)
             .unwrap();
-        QueryMirror::new(&p)
-            .queries()
-            .evaluate(None, "audio", path, 0.)
-            .unwrap()
-            .as_f64()
-            .unwrap()
+        content_value(QueryMirror::new(&p).queries(), "audio", path, 0.).unwrap()
     }
     fn gain_key_count(s: &crate::timeline_tests::Stage) -> usize {
         let p = s
@@ -1109,13 +1126,13 @@ mod gesture_tests {
             .kernel
             .published(crate::v4_view_tests::PROJECT)
             .unwrap();
+        let node = p.snapshot.root().unwrap();
+        let at = pm_kernel::model::find_layer(node, "audio").unwrap();
         let root: serde_json::Value = serde_json::from_str(&pm_model::json::to_canonical_string(
-            &p.snapshot.root().unwrap().to_value(),
+            &pm_kernel::model::layer_at(node, &at).unwrap().to_value(),
         ))
         .unwrap();
-        root["layers"][0]["d"]["gain"]["kf"]
-            .as_array()
-            .map_or(0, Vec::len)
+        root["d"]["gain"]["kf"].as_array().map_or(0, Vec::len)
     }
     #[gpui::test]
     fn command_click_on_level_line_adds_one_gain_key(cx: &mut TestAppContext) {
@@ -1200,7 +1217,7 @@ mod gesture_tests {
 #[cfg(test)]
 mod mix_tap_tests {
     use super::*;
-    #[test]
+    #[::core::prelude::v1::test]
     fn output_mix_tap_reads_full_scale_and_half_scale_test_tone() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("tone.wav");
@@ -1263,7 +1280,7 @@ mod mix_tap_tests {
 #[cfg(test)]
 mod tap_tests {
     use super::*;
-    #[test]
+    #[::core::prelude::v1::test]
     fn repeated_paused_scrub_at_same_time_is_fresh_after_silence() {
         let start = Instant::now();
         let half = Some(([0.5, 0.5], 10, false));
@@ -1278,7 +1295,7 @@ mod tap_tests {
             Some([0.5, 0.5])
         );
     }
-    #[test]
+    #[::core::prelude::v1::test]
     fn paused_stale_tap_expires_and_silence_goes_to_floor() {
         let start = Instant::now();
         let mut tap = TapAge::default();
