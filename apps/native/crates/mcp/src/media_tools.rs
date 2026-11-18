@@ -1,5 +1,5 @@
-//! Native result adapters for the tagged media tools. Decoder pixels, measured
-//! loudness, media resolution and evaluated retiming come from the engine host.
+//! Native media-tool adapters. Pixels, loudness and original resolution come
+//! from the engine host; clip timing is evaluated from the frozen composition.
 use crate::services::{Image, MediaOperation, MediaRequest, ToolOutput};
 use crate::{EngineHook, Error, Result};
 use serde_json::{Value, json};
@@ -22,6 +22,22 @@ pub struct MediaSource {
     pub duration: Option<f64>,
     pub proxy: bool,
     pub layer: Option<LayerTiming>,
+}
+/// Evaluate the frozen clip through the same core timing used by all media tools.
+fn evaluated_layer(r: &MediaRequest, duration: Option<f64>) -> Result<Option<LayerTiming>> {
+    if let Some(layer) = &r.layer {
+        let index = r.snapshot.project["layers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .position(|l| l["id"] == layer["id"])
+            .ok_or_else(|| Error::invalid("Layer not in frozen composition"))?;
+        Ok(Some(
+            crate::inspection::Evaluation::new(&r.snapshot.project).timing(index, duration)?,
+        ))
+    } else {
+        Ok(None)
+    }
 }
 #[derive(Clone, Debug)]
 pub struct Probe {
@@ -449,20 +465,7 @@ pub fn run<E: EngineHook + ?Sized>(engine: &E, r: &MediaRequest) -> Result<ToolO
         });
     }
     let mut source = engine.resolve_media(r)?;
-    if let Some(layer) = &r.layer {
-        let index = r.snapshot.project["layers"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .position(|l| l["id"] == layer["id"])
-            .ok_or_else(|| Error::invalid("Layer not in frozen composition"))?;
-        source.layer = Some(
-            crate::inspection::Evaluation::new(&r.snapshot.project)
-                .timing(index, source.duration)?,
-        );
-    } else {
-        source.layer = None;
-    }
+    source.layer = evaluated_layer(r, source.duration)?;
     if r.asset
         .as_ref()
         .is_some_and(|a| a["id"] != source.asset["id"])
@@ -757,4 +760,93 @@ pub fn run<E: EngineHook + ?Sized>(engine: &E, r: &MediaRequest) -> Result<ToolO
         value: result,
         images,
     })
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::*;
+    use crate::services::FrozenProject;
+
+    struct WaveFixture;
+    impl EngineHook for WaveFixture {
+        fn capture(&self, _: &crate::CaptureRequest) -> Result<Value> {
+            unreachable!()
+        }
+        fn resolve_media(&self, r: &MediaRequest) -> Result<MediaSource> {
+            Ok(MediaSource {
+                asset: r.asset.clone().unwrap(),
+                duration: Some(30.),
+                proxy: false,
+                layer: None,
+            })
+        }
+        fn probe(&self, _: &MediaRequest, _: &MediaSource) -> Result<Probe> {
+            Ok(Probe {
+                format: None,
+                duration: Some(30.),
+                start: 0.,
+                bitrate_kbps: None,
+                video: vec![],
+                audio: vec![json!({"channels":2})],
+                other_streams: 0,
+            })
+        }
+        fn waveform(&self, r: &WaveformRequest) -> Result<Waveform> {
+            assert_eq!((r.start, r.end), (5., 9.));
+            Ok(Waveform {
+                loudness: json!({}),
+                silences: vec![[7., 8.]],
+                image: None,
+            })
+        }
+    }
+
+    #[test]
+    fn trimmed_retimed_clip_maps_samples_and_silences_between_time_bases() {
+        let project = json!({"id":"p","compId":"c","w":640,"h":360,"fps":30,"dur":20,"comps":{},
+            "assets":{"a":{"id":"a","kind":"video","w":640,"h":360,"fps":30,"dur":30}},
+            "layers":[{"id":"l","type":"video","name":"Clip","from":5,"dur":4,"p":{},
+                "d":{"asset":"a","trim":{"v":3,"kf":[],"expr":null},"speed":{"v":2,"kf":[],"expr":null}}}]});
+        let r = MediaRequest {
+            operation: MediaOperation::SampleFrames,
+            snapshot: FrozenProject {
+                project_id: "p".into(),
+                document_id: 1,
+                revision: 0,
+                project: project.clone(),
+            },
+            arguments: json!({"times":[5,6,8]}),
+            asset: Some(project["assets"]["a"].clone()),
+            layer: Some(project["layers"][0].clone()),
+        };
+        let mut wave = r.clone();
+        wave.operation = MediaOperation::Waveform;
+        wave.arguments = json!({"start":6,"end":8,"image":false});
+        let result = run(&WaveFixture, &wave).unwrap().value;
+        assert_eq!(result["window"], json!({"start":5.,"end":9.}));
+        assert_eq!(result["silences"], json!([[7., 8.]]));
+        assert_eq!(result["compositionSilences"], json!([[7., 7.5]]));
+        let timing = evaluated_layer(&r, Some(30.)).unwrap().unwrap();
+        assert_eq!(timing.samples.first().copied(), Some([5., 3.]));
+        assert_eq!(timing.samples.last().copied(), Some([9., 11.]));
+        let source = MediaSource {
+            asset: r.asset.clone().unwrap(),
+            duration: Some(30.),
+            proxy: false,
+            layer: Some(timing),
+        };
+        let picks = frames(&source, 30., 30., &r.arguments, 3).unwrap();
+        assert_eq!(
+            picks
+                .iter()
+                .map(|f| (f.source, f.composition.unwrap()))
+                .collect::<Vec<_>>(),
+            vec![(3., 5.), (5., 6.), (9., 8.)]
+        );
+        let samples = &source.layer.unwrap().samples;
+        assert_eq!(to_source(samples, 6.), Some(5.));
+        assert_eq!(to_source(samples, 8.), Some(9.));
+        assert_eq!(to_comp(samples, 7.), Some(7.));
+        assert_eq!(to_comp(samples, 8.), Some(7.5));
+    }
 }

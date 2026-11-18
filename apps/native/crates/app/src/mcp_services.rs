@@ -1549,11 +1549,6 @@ impl EngineHook for EngineJobs {
         Ok(json!({"times":request.times,"images":images}))
     }
     fn resolve_media(&self, request: &MediaRequest) -> Result<MediaSource> {
-        if request.layer.is_some() {
-            return Err(Error::unavailable(
-                "evaluated clip timing for layer targets; pass the assetId instead",
-            ));
-        }
         let path = self.original(request)?;
         let timing = pm_media::probe::probe_timing(&path).map_err(failed)?;
         Ok(MediaSource {
@@ -2165,6 +2160,78 @@ mod relink_tests {
 
     const RATE: usize = 48_000;
     const CLICKS: [usize; 3] = [4_800, 24_000, 14_400];
+
+    #[test]
+    fn layer_media_resolves_original_with_trim_offset_and_retime() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = clip(&root, "clip.mkv", &[]);
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let asset = json!({"id":"a","name":"clip.mkv","kind":"video","format":"mkv","w":64,"h":64,"fps":25,"dur":1,"timing":2,"sourcePath":path});
+        let layer = json!({"id":"l","name":"Trimmed","type":"video","from":5,"dur":0.3,
+            "p":{},"d":{"asset":"a","trim":{"v":0.2,"kf":[],"expr":null},"speed":{"v":2,"kf":[],"expr":null}}});
+        let project = json!({"id":"p","compId":"c","w":64,"h":64,"fps":25,"dur":8,
+            "layers":[layer],"assets":{"a":asset},"comps":{}});
+        kernel
+            .open(
+                "p",
+                pm_kernel::OpenSource::Untitled(
+                    pm_model::json::parse(&project.to_string()).unwrap(),
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        let jobs = EngineJobs::new(
+            kernel.clone(),
+            PathBuf::new(),
+            Default::default(),
+            root,
+            OverrideWindows::default(),
+        );
+        let (published, _) = root_of(&kernel);
+        // MCP freezes the realized composition, not the kernel's canonical storage.
+        let project: Value = serde_json::from_str(&to_canonical_string(
+            &pm_model::canonical::realize_project(published.snapshot.document.to_value().unwrap()),
+        ))
+        .unwrap();
+        let request = MediaRequest {
+            operation: pm_mcp::services::MediaOperation::Probe,
+            snapshot: FrozenProject {
+                project_id: "p".into(),
+                document_id: published.snapshot.doc_id,
+                revision: published.snapshot.revision,
+                project: project.clone(),
+            },
+            asset: Some(project["assets"]["a"].clone()),
+            layer: Some(project["layers"][0].clone()),
+            arguments: json!({}),
+        };
+        let result = pm_mcp::media_tools::run(jobs.as_ref(), &request)
+            .unwrap()
+            .value;
+        assert_eq!(result["asset"]["id"], "a");
+        assert_eq!(result["layer"]["id"], "l");
+        assert_eq!(result["layer"]["from"], json!(5.));
+        assert_eq!(result["layer"]["duration"], json!(0.3));
+        assert_eq!(result["layer"]["sourceStart"], json!(0.2));
+        assert_eq!(result["layer"]["sourceEnd"], json!(0.8));
+        assert_eq!(
+            result["layer"]["from"].as_f64().unwrap()
+                + result["layer"]["duration"].as_f64().unwrap(),
+            5.3
+        );
+        // Asset inspection still uses source time and has no clip metadata.
+        let mut asset_request = request.clone();
+        asset_request.layer = None;
+        let asset_result = pm_mcp::media_tools::run(jobs.as_ref(), &asset_request)
+            .unwrap()
+            .value;
+        assert_eq!(asset_result["asset"]["id"], "a");
+        assert!(asset_result.get("layer").is_none());
+        actor.shutdown();
+    }
 
     fn ffmpeg_path() -> PathBuf {
         std::env::var_os("PM_FFMPEG_DIR")
