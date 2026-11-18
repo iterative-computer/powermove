@@ -8,8 +8,9 @@
 fn main() {
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBox, NSColor, NSColorSpace,
-        NSSplitViewController, NSSplitViewItemBehavior, NSView, NSWindow, NSWindowStyleMask,
+        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBox, NSColor,
+        NSColorSpace, NSSplitViewController, NSSplitViewItemBehavior, NSView, NSWindow,
+        NSWindowStyleMask,
     };
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
     use pm_shell::settings_window::SettingsChrome;
@@ -89,7 +90,9 @@ fn main() {
         }
         assert!(items.objectAtIndex(1).automaticallyAdjustsSafeAreaInsets(), "the detail runs under the sidebar");
         assert!(glass, "the sidebar is the system's glass");
-        let page = chrome.page().convertRect_toView(chrome.page().bounds(), None);
+        let page = chrome
+            .page()
+            .convertRect_toView(chrome.page().bounds(), None);
         assert!(
             page.origin.x >= pm_shell::settings_window::SIDEBAR_WIDTH - 1.,
             "the page starts beside the sidebar, at {}",

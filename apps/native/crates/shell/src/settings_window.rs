@@ -555,10 +555,8 @@ impl SettingsChrome {
             && outline.selectedRow() != row as NSInteger
         {
             state.quiet.set(true);
-            outline.selectRowIndexes_byExtendingSelection(
-                &NSIndexSet::indexSetWithIndex(row),
-                false,
-            );
+            outline
+                .selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(row), false);
             state.quiet.set(false);
         }
         if let Some(title) = sections.iter().find(|s| s.id == active).map(|s| &s.title) {

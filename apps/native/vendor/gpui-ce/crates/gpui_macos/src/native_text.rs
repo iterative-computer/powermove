@@ -560,11 +560,19 @@ impl NativeTextSlot {
     /// The form field and its optional stepper, installed by an AppKit
     /// container with Auto Layout instead of by the GPUI compositor.
     pub fn new_form(
-        owner: &NSView, label: &str, initial: &str, number: bool, stepper: bool,
+        owner: &NSView,
+        label: &str,
+        initial: &str,
+        number: bool,
+        stepper: bool,
     ) -> Self {
         use objc2_app_kit::{NSFocusRingType, NSLayoutConstraint};
         use objc2_foundation::NSArray;
-        let kind = if number { TextKind::FormNumber } else { TextKind::Form };
+        let kind = if number {
+            TextKind::FormNumber
+        } else {
+            TextKind::Form
+        };
         let slot = Self::new_inner(owner, kind, label, initial, true);
         slot.set_stepper(stepper);
         slot.set_escape_cancels(true);
@@ -573,20 +581,36 @@ impl NativeTextSlot {
         field.setTranslatesAutoresizingMaskIntoConstraints(false);
         let wrapper = &slot.state.wrapper;
         let mut constraints = vec![
-            field.leadingAnchor().constraintEqualToAnchor(&wrapper.leadingAnchor()),
-            field.topAnchor().constraintEqualToAnchor(&wrapper.topAnchor()),
-            field.bottomAnchor().constraintEqualToAnchor(&wrapper.bottomAnchor()),
+            field
+                .leadingAnchor()
+                .constraintEqualToAnchor(&wrapper.leadingAnchor()),
+            field
+                .topAnchor()
+                .constraintEqualToAnchor(&wrapper.topAnchor()),
+            field
+                .bottomAnchor()
+                .constraintEqualToAnchor(&wrapper.bottomAnchor()),
         ];
         if let Some(stepper) = slot.state.stepper.borrow().as_ref() {
             stepper.setTranslatesAutoresizingMaskIntoConstraints(false);
             stepper.setAccessibilityLabel(Some(&NSString::from_str(label)));
             constraints.extend([
-                stepper.leadingAnchor().constraintEqualToAnchor_constant(&field.trailingAnchor(), 5.),
-                stepper.trailingAnchor().constraintEqualToAnchor(&wrapper.trailingAnchor()),
-                stepper.centerYAnchor().constraintEqualToAnchor(&field.centerYAnchor()),
+                stepper
+                    .leadingAnchor()
+                    .constraintEqualToAnchor_constant(&field.trailingAnchor(), 5.),
+                stepper
+                    .trailingAnchor()
+                    .constraintEqualToAnchor(&wrapper.trailingAnchor()),
+                stepper
+                    .centerYAnchor()
+                    .constraintEqualToAnchor(&field.centerYAnchor()),
             ]);
         } else {
-            constraints.push(field.trailingAnchor().constraintEqualToAnchor(&wrapper.trailingAnchor()));
+            constraints.push(
+                field
+                    .trailingAnchor()
+                    .constraintEqualToAnchor(&wrapper.trailingAnchor()),
+            );
         }
         NSLayoutConstraint::activateConstraints(&NSArray::from_retained_slice(&constraints));
         slot
@@ -594,7 +618,13 @@ impl NativeTextSlot {
     pub fn form_view(&self) -> &NSView {
         &self.state.wrapper
     }
-    fn new_inner(gpui: &NSView, kind: TextKind, label: &str, initial: &str, standalone: bool) -> Self {
+    fn new_inner(
+        gpui: &NSView,
+        kind: TextKind,
+        label: &str,
+        initial: &str,
+        standalone: bool,
+    ) -> Self {
         let mtm = MainThreadMarker::new().expect("text slots require the main thread");
         let mut canvas = None;
         let mut composer = None;

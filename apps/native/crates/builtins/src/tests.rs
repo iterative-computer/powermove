@@ -4725,7 +4725,11 @@ fn media_and_playback_rows_show_without_a_project_and_follow_their_fact() {
     let import = row("media.importToTimeline");
     assert_eq!(import["control"], "switch");
     assert_eq!(import["value"], true);
-    assert!(import["binding"].as_str().is_some_and(|binding| !binding.is_empty()));
+    assert!(
+        import["binding"]
+            .as_str()
+            .is_some_and(|binding| !binding.is_empty())
+    );
     let playback = row("media.backgroundRender");
     assert_eq!(
         (

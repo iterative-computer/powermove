@@ -1689,11 +1689,14 @@ impl Controller {
                             .detach();
                         }
                         if panel == "settings" {
-                            cx.observe_window_appearance(window, |this: &mut SurfaceWindow, _, _| {
-                                if let Some(chrome) = &this.chrome {
-                                    chrome.update_sidebar_appearance();
-                                }
-                            })
+                            cx.observe_window_appearance(
+                                window,
+                                |this: &mut SurfaceWindow, _, _| {
+                                    if let Some(chrome) = &this.chrome {
+                                        chrome.update_sidebar_appearance();
+                                    }
+                                },
+                            )
                             .detach();
                         }
                         SurfaceWindow {
@@ -3174,11 +3177,7 @@ impl Render for SurfaceWindow {
             fill = colour;
             head_h = header;
             // Windows with a transparent title bar keep their content below it.
-            band = if popover || sheet {
-                0.
-            } else {
-                titlebar
-            };
+            band = if popover || sheet { 0. } else { titlebar };
             // A panel's header row is the dock's; the popover has no dock, so
             // it shows the panel's header (Thread, New Thread, Pin) itself.
             let rect = pm_shell::layout::Rect {
