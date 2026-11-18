@@ -1083,7 +1083,7 @@ impl NativeControl {
         }
     }
 
-    /// Uses the same native search as panels, in the kit's header well.
+    /// A native search with the same height as the kit's header buttons.
     pub fn header_search(
         label: &str,
         id: &str,
@@ -1114,29 +1114,22 @@ impl NativeControl {
             window,
             cx,
         );
-        control.use_header_well();
         if let Control::Search(field) = &control.control {
             let mtm = MainThreadMarker::new().expect("main thread");
-            add_search_hint(field, "⌘F", t.typography.body, f64::from(t.space.sm), mtm);
+            field.setControlSize(NSControlSize::Large);
+            field.setFocusRingType(NSFocusRingType::Default);
+            field.sizeToFit();
+            control.height = field.fittingSize().height as f32;
+            add_search_hint(field, "⌘F", t.typography.body, f64::from(t.space.md), mtm);
             search_hint(field, value.is_empty());
         }
         control
     }
-    /// Lets the kit draw the well while AppKit still draws and handles the
-    /// search cell or pull-down. Keep their regular-size native baselines.
+    /// Lets the kit draw the header well around the native pull-down.
     pub fn use_header_well(&mut self) {
-        match &self.control {
-            Control::Search(v) => {
-                self.height = v.fittingSize().height as f32;
-                v.setBezeled(false);
-                v.setBordered(false);
-                v.setDrawsBackground(false);
-            }
-            Control::Popup(v) => {
-                self.height = v.fittingSize().height as f32;
-                v.setBordered(false);
-            }
-            _ => {}
+        if let Control::Popup(popup) = &self.control {
+            self.height = popup.fittingSize().height as f32;
+            popup.setBordered(false);
         }
     }
     /// A text the view's host set (a filter applied from outside) replaces

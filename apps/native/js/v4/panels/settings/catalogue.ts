@@ -2,15 +2,16 @@ import type { Json } from "../../src/protocol";
 import type { Option } from "../../src/components";
 
 export const sections = [
-  "project",
-  "memory",
+  "account",
   "general",
-  "shortcuts",
+  "project",
   "media",
-  "storage",
-  "accounts",
+  "shortcuts",
   "transcription",
+  "storage",
+  "agents",
   "extensions",
+  "about",
 ] as const;
 export type Section = (typeof sections)[number];
 export const sectionCopy: Record<
@@ -18,12 +19,6 @@ export const sectionCopy: Record<
   { title: string; description: string; symbol: string }
 > = {
   project: { title: "Project", description: "", symbol: "doc.richtext" },
-  memory: {
-    title: "Memory",
-    description:
-      "Notes agents keep about this project: what the video is for, and why it looks the way it does.",
-    symbol: "list.bullet",
-  },
   general: {
     title: "General",
     description: "How Powermove looks and works on this Mac.",
@@ -47,12 +42,13 @@ export const sectionCopy: Record<
       "What Powermove and the app you used before keep on this Mac, and what you can remove.",
     symbol: "internaldrive",
   },
-  accounts: {
-    title: "Accounts",
-    description:
-      "Your Powermove account, and the models your agent works with.",
+  account: {
+    title: "Account",
+    description: "",
     symbol: "person.crop.circle",
   },
+  agents: { title: "Agents", description: "", symbol: "sparkles" },
+  about: { title: "About", description: "", symbol: "info.circle" },
   transcription: {
     title: "Transcription",
     description:
@@ -149,8 +145,8 @@ export function generalRows(multiWindow: boolean): Row[] {
     },
     {
       id: "cloud-media",
-      section: "general",
-      group: "Media",
+      section: "media",
+      group: "Import",
       label: "Automatically Download Cloud Media",
       control: "switch",
       value: false,
@@ -336,7 +332,7 @@ export function accountRows(): Row[] {
     detail?: string,
   ): Row => ({
     id: `account.${id}`,
-    section: "accounts",
+    section: "agents",
     group,
     label,
     control,
@@ -352,23 +348,28 @@ export function accountRows(): Row[] {
         "action",
         "Remember installs and publish to the Store.",
       ),
+      section: "account",
       action: "account.sign-in",
       actionLabel: "Sign In…",
     },
-    row(
-      "remember",
-      "Powermove Account",
-      "Remember Installs on This Account",
-      "switch",
-    ),
+    {
+      ...row(
+        "remember",
+        "Powermove Account",
+        "Remember Installs on This Account",
+        "switch",
+      ),
+      section: "account",
+    },
     {
       ...row(
         "bring-sign-ins",
-        "Powermove Account",
+        "Sign-Ins",
         "Sign-Ins from the Original App",
         "action",
         "Copies your extension secrets and sign-ins, with one macOS Keychain request.",
       ),
+      section: "extensions",
       action: "account.bring-sign-ins",
       actionLabel: "Bring Sign-Ins from the Original App…",
       disabled: false,

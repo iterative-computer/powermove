@@ -1885,14 +1885,10 @@ impl StoreWindow {
             title.role(Role::Heading).aria_label("Store")
         };
         let width = f32::from(window.viewport_size().width);
-        let search = self
-            .search
-            .clone()
-            .map_or_else(
-                || kit.search(None, Some("⌘F")),
-                |field| kit.header_well(field),
-            )
-            .w(px(SEARCH.min(width - SEARCH_ROOM).max(SEARCH_LEAST)));
+        let search = div()
+            .flex_none()
+            .w(px(SEARCH.min(width - SEARCH_ROOM).max(SEARCH_LEAST)))
+            .children(self.search.clone());
         // v1.2.0's head: the title, then one toolbar: Discover · Library
         // where you are, then search and Publish at the far edge.
         div()

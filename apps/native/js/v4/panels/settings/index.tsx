@@ -1096,7 +1096,7 @@ function SectionContent({
         </Group>
       ))}
       <More count={listed.length - rows.length} title={copy.title} />
-      {section === "memory" && <MemoryNotes model={model} />}
+      {section === "project" && <MemoryNotes model={model} />}
       {section === "transcription" && speech.length > 0 && (
         <Group title="Models">
           {speech.map((item) => (
