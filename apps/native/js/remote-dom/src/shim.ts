@@ -64,6 +64,44 @@ function patchDOM() {
     });
   }
   const ep = DOM.Element.prototype as N;
+  // LinkeDOM only reports creation of a style attribute through its observer.
+  // Later CSSOM writes update it directly, so queue those writes for the wire.
+  const originalStyle = Object.getOwnPropertyDescriptor(ep, 'style')!;
+  const styles = new WeakMap<object, CSSStyleDeclaration>();
+  Object.defineProperty(ep, 'style', {
+    ...originalStyle,
+    get() {
+      const element = this;
+      const style = originalStyle.get!.call(element);
+      let observed = styles.get(style);
+      if (!observed) {
+        const changed = () => owner(element)?.inlineStyleChanged(element);
+        const setProperty = (name: string, value: string, priority?: string) => {
+          style.setProperty(name, value, priority);
+          changed();
+        };
+        const removeProperty = (name: string) => {
+          const previous = style.removeProperty(name);
+          changed();
+          return previous;
+        };
+        observed = new Proxy<CSSStyleDeclaration>(style, {
+          get(target, key) {
+            if (key === 'setProperty') return setProperty;
+            if (key === 'removeProperty') return removeProperty;
+            return Reflect.get(target, key);
+          },
+          set(target, key, value) {
+            const written = Reflect.set(target, key, value);
+            if (written && key !== 'cssText') changed();
+            return written;
+          }
+        });
+        styles.set(style, observed);
+      }
+      return observed;
+    }
+  });
   for (const prototype of new Set([
     ep,
     DOM.HTMLElement.prototype,
@@ -667,6 +705,9 @@ export class RemoteDOM {
         if (oldParent) this.dirty.add(this.node(oldParent));
       }
     }
+  }
+  inlineStyleChanged(node: N) {
+    this.mark(node);
   }
   listenerChanged(node: N, _type: string) {
     this.mark(node);
