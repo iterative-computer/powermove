@@ -34,7 +34,12 @@ pub(crate) fn composition_region(
 }
 
 /// `rgba`'s pixels (`width` wide) inside `x, y, w, h`, clamped to the image.
-pub(crate) fn crop(rgba: &[u8], width: u32, height: u32, (x, y, w, h): (u32, u32, u32, u32)) -> (u32, u32, Vec<u8>) {
+pub(crate) fn crop(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    (x, y, w, h): (u32, u32, u32, u32),
+) -> (u32, u32, Vec<u8>) {
     let (x, y) = (x.min(width), y.min(height));
     let (w, h) = (w.min(width - x), h.min(height - y));
     let mut out = Vec::with_capacity((w * h * 4) as usize);
@@ -109,6 +114,44 @@ impl Controller {
         })
     }
 
+    fn region_target_context(
+        &self,
+        rect: (f64, f64, f64, f64),
+        region: Option<(u32, u32, u32, u32)>,
+        cx: &App,
+    ) -> serde_json::Value {
+        use serde_json::json;
+        let mut panels = vec![];
+        if let Some(shell) = self.shell.as_ref().and_then(|s| s.upgrade()) {
+            let shell = shell.read(cx);
+            let digest = shell.layout_digest(cx);
+            if let Some(docks) = digest["docks"].as_array() {
+                for panel in docks
+                    .iter()
+                    .filter_map(|d| d["panels"].as_array())
+                    .flatten()
+                {
+                    let Some(id) = panel["id"].as_str() else {
+                        continue;
+                    };
+                    let Some(b) = shell.panel_rect(id) else {
+                        continue;
+                    };
+                    let (x, y, w, h) = rect;
+                    if x <= (b.x + b.w) as f64
+                        && x + w >= b.x as f64
+                        && y <= (b.y + b.h) as f64
+                        && y + h >= b.y as f64
+                    {
+                        panels.push(
+                            json!({"panelId":id,"title":panel["title"],"area":[b.x,b.y,b.w,b.h]}),
+                        );
+                    }
+                }
+            }
+        }
+        json!({"projectId":self.session.as_ref().map(|s| &s.project),"documentId":self.published.as_ref().map(|p| p.snapshot.doc_id),"revision":self.published.as_ref().map(|p|p.revision()),"windowId":self.window_key,"compositionId":self.published.as_ref().map(|p|p.snapshot.render_comp().as_str().to_owned()),"time":self.time(),"panelId":if region.is_some(){Some("viewer")}else{None},"panels":panels,"coordinateSpace":if region.is_some(){"composition-pixels"}else{"window-points"},"area":region.map(|(x,y,w,h)|[x,y,w,h]),"windowArea":[rect.0,rect.1,rect.2,rect.3],"selection":self.published.as_ref().map(|p|p.selection.layers()),"layersUnderBox":[],"layerHitMethod":"transformed-bounds intersection","unavailableLayerBounds":[]})
+    }
     /// The box the person selected, captured and attached to the visible
     /// thread (errors are told in the Agent's own place).
     pub(crate) fn attach_region(
@@ -125,14 +168,26 @@ impl Controller {
                 f.size,
             )
         });
-        let folder = self.profile.join("caches").join("agent-picks");
+        let captured_time = self.time();
+        let mut target_context = self.region_target_context(rect, region, cx);
+        target_context["time"] = serde_json::json!(captured_time);
+        target_context["compositionTime"] = serde_json::json!(captured_time);
+        let captured_publication = self.published.clone();
+        let capture_kernel = self.kernel.clone();
+        // Repeated picks at one playhead can share a visible filename. Keep
+        // their bytes immutable until attachment_records pairs them with metadata.
+        let folder = self
+            .profile
+            .join("caches")
+            .join("agent-picks")
+            .join(pm_kernel::new_id("pick"));
         let runtime = self.builtins.runtime.clone();
         let job: Box<dyn FnOnce() -> Result<(String, Vec<u8>), String> + Send> = match region {
             Some(region) => {
                 let Some(project) = self.session.as_ref().map(|s| s.project.clone()) else {
                     return;
                 };
-                let (time, size) = (self.time(), self.dimensions);
+                let (time, size) = (captured_time, self.dimensions);
                 let shown = self.shown_picture(time);
                 Box::new(move || {
                     // At most 1280 wide; the region scales with it. The
@@ -147,7 +202,17 @@ impl Controller {
                     let k = w as f64 / size[0];
                     let at = |v: u32| (v as f64 * k).round() as u32;
                     let whole = region == (0, 0, size[0].round() as u32, size[1].round() as u32);
-                    let (cw, ch, cut) = crop(&rgba, w, h, (at(region.0), at(region.1), at(region.2).max(1), at(region.3).max(1)));
+                    let (cw, ch, cut) = crop(
+                        &rgba,
+                        w,
+                        h,
+                        (
+                            at(region.0),
+                            at(region.1),
+                            at(region.2).max(1),
+                            at(region.3).max(1),
+                        ),
+                    );
                     let name = if whole {
                         format!("Frame {}.png", clock(time))
                     } else {
@@ -171,6 +236,12 @@ impl Controller {
                     let s = |v: f64| (v * scale).round().max(0.) as u32;
                     (s(x), s(y), s(w).max(1), s(h).max(1))
                 };
+                target_context["area"] = serde_json::json!([
+                    region.0.min(fw) as f64 / scale,
+                    region.1.min(fh) as f64 / scale,
+                    region.2.min(fw.saturating_sub(region.0)) as f64 / scale,
+                    region.3.min(fh.saturating_sub(region.1)) as f64 / scale,
+                ]);
                 let rgba = frame.into_raw();
                 Box::new(move || {
                     let (cw, ch, cut) = crop(&rgba, fw, fh, region);
@@ -182,11 +253,40 @@ impl Controller {
             let outcome = cx
                 .background_executor()
                 .spawn(async move {
+                    let current_capture = || {
+                        captured_publication.as_ref().is_none_or(|p| {
+                            capture_kernel.published(&p.project).is_some_and(|now| {
+                                now.snapshot.doc_id == p.snapshot.doc_id
+                                    && now.revision() == p.revision()
+                                    && now.snapshot.open_comp() == p.snapshot.open_comp()
+                            })
+                        })
+                    };
+                    if !current_capture() {
+                        return Err(
+                            "The document changed before region capture. Select the region again."
+                                .into(),
+                        );
+                    }
+                    if let Some(p) = &captured_publication {
+                        let (layers, unavailable) = region_layers(&p, region, captured_time);
+                        target_context["layersUnderBox"] = serde_json::json!(layers);
+                        target_context["unavailableLayerBounds"] = serde_json::json!(unavailable);
+                    }
                     let (name, png) = job()?;
+                    if !current_capture() {
+                        return Err(
+                            "The document changed during region capture. Select the region again."
+                                .into(),
+                        );
+                    }
                     std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
                     let path = folder.join(&name);
                     std::fs::write(&path, png).map_err(|e| e.to_string())?;
-                    let records = crate::media::attachment_records(&[path])?;
+                    let mut records = crate::media::attachment_records(&[path])?;
+                    for record in &mut records {
+                        record["targetContext"] = target_context.clone();
+                    }
                     match runtime {
                         Some(runtime) => runtime.agent_attach(records),
                         None => Err("The Agent panel closed.".into()),
@@ -206,7 +306,17 @@ impl Controller {
 
 #[cfg(test)]
 mod tests {
-    use super::{composition_region, crop, decode_png, encode_png};
+    use super::{composition_region, crop, decode_png, encode_png, region_layers};
+
+    #[test]
+    fn region_metadata_finds_transformed_layers_and_excludes_distant_layers() {
+        let source = pm_model::json::parse(r##"{"id":"region-context-fixture","w":640,"h":360,"fps":30,"dur":10,"layers":[{"id":"near","name":"Near","type":"solid","from":0,"dur":10,"on":true,"p":{"position.x":{"v":100,"kf":[]},"position.y":{"v":100,"kf":[]}},"d":{"w":20,"h":20,"color":"#ffffff"}},{"id":"far","name":"Far","type":"solid","from":0,"dur":10,"on":true,"p":{"position.x":{"v":500,"kf":[]},"position.y":{"v":300,"kf":[]}},"d":{"w":20,"h":20,"color":"#ffffff"}}]}"##).unwrap();
+        let p = pm_kernel::detached_publication("region-context-fixture", source);
+        let (layers, unavailable) = region_layers(&p, Some((80, 80, 40, 40)), 1.);
+        assert_eq!(layers, vec![serde_json::json!("near")]);
+        assert!(unavailable.is_empty(), "{unavailable:?}");
+        assert!(region_layers(&p, None, 1.).0.is_empty());
+    }
 
     /// A frame drawn at (100, 50), half size, of a 1920×1080 composition.
     const ORIGIN: (f64, f64) = (100., 50.);
@@ -226,12 +336,21 @@ mod tests {
     }
     #[test]
     fn a_box_off_the_picture_is_the_window() {
-        assert_eq!(composition_region((0., 0., 90., 40.), ORIGIN, 0.5, SIZE), None);
+        assert_eq!(
+            composition_region((0., 0., 90., 40.), ORIGIN, 0.5, SIZE),
+            None
+        );
     }
     #[test]
     fn a_click_on_the_picture_is_the_whole_frame_and_off_it_the_window() {
-        assert_eq!(composition_region((200., 100., 0., 0.), ORIGIN, 0.5, SIZE), Some((0, 0, 1920, 1080)));
-        assert_eq!(composition_region((20., 20., 0., 0.), ORIGIN, 0.5, SIZE), None);
+        assert_eq!(
+            composition_region((200., 100., 0., 0.), ORIGIN, 0.5, SIZE),
+            Some((0, 0, 1920, 1080))
+        );
+        assert_eq!(
+            composition_region((20., 20., 0., 0.), ORIGIN, 0.5, SIZE),
+            None
+        );
     }
     #[test]
     fn a_crop_keeps_its_pixels_and_stays_inside_the_image() {
@@ -239,7 +358,10 @@ mod tests {
         let rgba: Vec<u8> = (0..8u8).flat_map(|i| [i, i, i, 255]).collect();
         let (w, h, cut) = crop(&rgba, 4, 2, (1, 0, 2, 2));
         assert_eq!((w, h), (2, 2));
-        assert_eq!(cut.chunks(4).map(|p| p[0]).collect::<Vec<_>>(), vec![1, 2, 5, 6]);
+        assert_eq!(
+            cut.chunks(4).map(|p| p[0]).collect::<Vec<_>>(),
+            vec![1, 2, 5, 6]
+        );
         let (w, h, _) = crop(&rgba, 4, 2, (3, 1, 9, 9));
         assert_eq!((w, h), (1, 1));
     }
@@ -249,4 +371,51 @@ mod tests {
         let png = encode_png(4, 4, &rgba).unwrap();
         assert_eq!(decode_png(&png).unwrap(), (4, 4, rgba));
     }
+}
+
+fn region_layers(
+    p: &pm_kernel::Published,
+    region: Option<(u32, u32, u32, u32)>,
+    time: f64,
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    use serde_json::json;
+    let mut layers = vec![];
+    let mut unavailable = vec![];
+    if let Some((x, y, w, h)) = region {
+        let mut mirror = pm_kernel::QueryMirror::new(p);
+        for layer in pm_kernel::model::list_layers(
+            p.snapshot.root().unwrap(),
+            p.snapshot.open_comp().as_deref(),
+        ) {
+            let outcome = crate::text_host::query(p, |q| q.bounds(None, &layer.id, time));
+            match (
+                outcome,
+                mirror.queries().world_matrix(None, &layer.id, time),
+            ) {
+                (Ok(Some(b)), Ok(m)) => {
+                    let points = [[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]]
+                        .map(|[x, y]| [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]]);
+                    let min =
+                        |axis: usize| points.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min);
+                    let max = |axis: usize| {
+                        points
+                            .iter()
+                            .map(|p| p[axis])
+                            .fold(f64::NEG_INFINITY, f64::max)
+                    };
+                    if min(0) <= (x + w) as f64
+                        && max(0) >= x as f64
+                        && min(1) <= (y + h) as f64
+                        && max(1) >= y as f64
+                    {
+                        layers.push(json!(layer.id));
+                    }
+                }
+                (Ok(None), _) => {}
+                _ => unavailable.push(json!(layer.id)),
+            }
+        }
+    }
+
+    (layers, unavailable)
 }

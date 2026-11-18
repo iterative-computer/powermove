@@ -61,6 +61,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         prompt = next((m['content'] for m in messages if m.get('role') == 'user'), '')
         if isinstance(prompt, list):
             prompt = ' '.join(p.get('text', '') for p in prompt if isinstance(p, dict))
+        # Guidance and live context may mention tools; only the latest brief
+        # selects this synthetic provider's response mode.
+        brief = prompt.rsplit('USER REQUEST\n', 1)[-1]
         events, delay = [], 0.02
         if last.get('role') == 'tool':
             said = json.loads(last['content'])
@@ -68,19 +71,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for part in ['Tool ', 'said: ', text]:
                 events.append(chunk({"content": part}))
             events.append(chunk({}, 'stop'))
-        elif 'slow' in prompt:
+        elif 'slow' in brief:
             delay = 1.0
             for n in range(60):
                 events.append(chunk({"content": f"token{n} "}))
             events.append(chunk({}, 'stop'))
-        elif 'tool' in prompt and request.get('tools'):
+        elif 'tool' in brief and request.get('tools'):
             name = request['tools'][0]['function']['name']
             events.append(chunk({"tool_calls": [{"index": 0, "id": "call_1", "type": "function",
                                                   "function": {"name": name, "arguments": ""}}]}))
             events.append(chunk({"tool_calls": [{"index": 0, "function": {"arguments": "{}"}}]}))
             events.append(chunk({}, 'tool_calls'))
         else:
-            words = ('Saw: ' + prompt.split('USER REQUEST\n')[-1]).split(' ')
+            words = ('Saw: ' + brief).split(' ')
             for i, word in enumerate(words):
                 events.append(chunk({"content": word if i == 0 else ' ' + word}))
             events.append(chunk({}, 'stop'))

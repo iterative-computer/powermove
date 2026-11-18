@@ -597,6 +597,12 @@ impl pm_shell::integration::Integration for Bridge {
             .owns_panel(&self.native_panel_id(id, cx))
     }
     fn panel_focused(&self, id: &str, focused: bool, cx: &mut App) {
+        if focused && id != "agent" {
+            let v = self.0.read(cx);
+            if let Some(runtime) = &v.builtins.runtime {
+                runtime.set_agent_focus(serde_json::json!({"panelId":id,"projectId":v.session.as_ref().map(|s| &s.project),"windowId":v.window_key}));
+            }
+        }
         if id != "timeline" {
             return;
         }

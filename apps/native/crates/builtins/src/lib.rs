@@ -1,6 +1,7 @@
 //! Application v4 embedding. JavaScript owns presentation; the kernel remains
 //! the only document writer. GPUI consumes immutable accepted surfaces.
 #![cfg_attr(test, recursion_limit = "512")]
+mod agent_context;
 mod agent_host;
 mod presets;
 /// A run's tool session rolled its edits back after it ended (PM-507).
@@ -1494,6 +1495,12 @@ impl Builtins {
         open: std::sync::Arc<pm_agents::account::Opener>,
     ) {
         self.broker.agent.set_environment(environment, open);
+    }
+    pub fn set_agent_capture(&self, capture: std::sync::Arc<agent_context::FrameCapture>) {
+        self.broker.agent.set_capture(capture);
+    }
+    pub fn set_agent_focus(&self, focus: Value) {
+        self.broker.agent.set_focus(focus);
     }
     /// Who hears that an agent run was sent, finished or asked a question.
     pub fn set_agent_notices(&self, sink: std::sync::Arc<NoticeSink>) {

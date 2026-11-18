@@ -30,6 +30,8 @@ use std::{
 /// Everything the panel shares with its window, without locking a Backend.
 pub(crate) struct AgentLink {
     environment: Mutex<Option<Environment>>,
+    capture: Mutex<Option<Arc<crate::agent_context::FrameCapture>>>,
+    focus: Mutex<Value>,
     accounts: Mutex<Option<Arc<Accounts>>>,
     realms: Mutex<Vec<Realm>>,
     closing: AtomicBool,
@@ -45,6 +47,8 @@ impl Default for AgentLink {
     fn default() -> Self {
         Self {
             environment: Mutex::default(),
+            capture: Mutex::default(),
+            focus: Mutex::default(),
             accounts: Mutex::default(),
             realms: Mutex::default(),
             closing: AtomicBool::new(false),
@@ -55,6 +59,13 @@ impl Default for AgentLink {
     }
 }
 impl AgentLink {
+    pub fn set_capture(&self, capture: Arc<crate::agent_context::FrameCapture>) {
+        *self.capture.shared() = Some(capture);
+    }
+    pub fn set_focus(&self, focus: Value) {
+        *self.focus.shared() = focus;
+    }
+
     /// Reads who is signed in on workers; the panel updates when they answer.
     pub fn set_environment(self: &Arc<Self>, environment: Environment, open: Arc<Opener>) {
         let weak = Arc::downgrade(self);
@@ -486,6 +497,40 @@ pub fn run_effect(
     effect: &Effect,
 ) -> Result<(), String> {
     let mut store = KernelStore::new(kernel.clone(), application);
+    // Rendering can wait on the engine. Never hold the conversation or focus
+    // mutex while collecting its read-only launch observation.
+    let mut observation = (String::new(), Vec::new());
+    let observation_environment = link.environment.shared().clone();
+    if let EffectKind::Send {
+        text,
+        attachments,
+        steer: false,
+        ..
+    } = &effect.kind
+        && let Some(environment) = observation_environment
+        && let Some(run) = &effect.target.run
+        && let Ok(directory) = workspace(
+            &environment.profile,
+            &effect.target.project,
+            &effect.target.thread,
+        )
+    {
+        let capture = link.capture.shared().clone();
+        let focus = link.focus.shared().clone();
+        crate::agent_context::append(
+            kernel,
+            &effect.target.project,
+            text,
+            &mut observation.0,
+            &mut observation.1,
+            attachments,
+            &directory
+                .join("observation")
+                .join(format!("{}-{}", safe(run), effect.id)),
+            capture.as_deref(),
+            &focus,
+        );
+    }
     let mut guard = shared.shared();
     let state = &mut *guard;
     let result = match &effect.kind {
@@ -497,7 +542,10 @@ pub fn run_effect(
         } => {
             let environment = link.environment.shared().clone();
             launch_request(state, environment, effect, text, settings).and_then(
-                |(environment, request)| {
+                |(environment, mut request)| {
+                    request.prompt =
+                        pm_agents::context::with_observation(&request.prompt, &observation.0, text);
+                    request.images.extend(observation.1.clone());
                     let kept = request.clone();
                     state
                         .runs

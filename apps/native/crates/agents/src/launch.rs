@@ -303,6 +303,7 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
             Value::Array(request.files.clone())
         );
     }
+    request.prompt = crate::context::assemble(&request.prompt);
     let authority = Authority::new(request.access, request.approval, request.computer_consent)?;
     let grant = grants::issue(&request.run, request.access)
         .map_err(|e| format!("The agent's tool access couldn't be prepared: {e}"))?;
