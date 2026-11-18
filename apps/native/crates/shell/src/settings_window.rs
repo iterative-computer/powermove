@@ -27,6 +27,7 @@ pub const DEFAULT_SIZE: (f64, f64) = (820., 640.);
 pub const MIN_SIZE: (f64, f64) = (720., 520.);
 const ROW_HEIGHT: f64 = 30.;
 const ROW_SPACING: f64 = 2.;
+const LABEL_SIZE: f64 = 13.;
 /// The space between the project's sections and the app's.
 const GROUP_GAP: f64 = 14.;
 /// The tile's side in a sidebar row.
@@ -34,6 +35,7 @@ const TILE: f64 = 20.;
 const FRAME_NAME: &str = "PMSettingsWindow";
 /// The Settings window's identifier (its title is the section's name).
 const IDENTIFIER: &str = "pm.settings";
+const NAV: &str = "pm.settings.navigation";
 
 /// Whether `window` is the Settings window.
 pub fn is_settings(window: &NSWindow) -> bool {
@@ -41,7 +43,30 @@ pub fn is_settings(window: &NSWindow) -> bool {
         .identifier()
         .is_some_and(|id| id.to_string() == IDENTIFIER)
 }
-const NAV: &str = "pm.settings.navigation";
+
+/// The AppKit surface shades that give a Settings group a lighter face.
+pub fn form_background(group: bool) -> Retained<NSColor> {
+    let window = NSColor::windowBackgroundColor();
+    let under_page = NSColor::underPageBackgroundColor();
+    let provider = block2::RcBlock::new(move |appearance: std::ptr::NonNull<NSAppearance>| {
+        // Under-page is the softer ground in Aqua and the raised shade in Dark Aqua.
+        let color: &NSColor = if is_dark(unsafe { appearance.as_ref() }) == group {
+            &under_page
+        } else {
+            &window
+        };
+        // The block retains both system colours for its lifetime.
+        std::ptr::NonNull::from(color)
+    });
+    unsafe { NSColor::colorWithName_dynamicProvider(None, &provider) }
+}
+
+fn is_dark(appearance: &NSAppearance) -> bool {
+    let names = unsafe { [NSAppearanceNameAqua, NSAppearanceNameDarkAqua] };
+    appearance
+        .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&names))
+        .is_some_and(|name| &*name == names[1])
+}
 
 /// What a section's glyph is drawn from: the drawn glyph on the glass tile,
 /// or a real SF Symbol on the same tile. One switch for the whole family;
@@ -335,6 +360,8 @@ impl SettingsChrome {
         // The sidebar: the search field over the source list.
         let sidebar = NSView::new(mtm);
         let search = NSSearchField::new(mtm);
+        search.setControlSize(NSControlSize::Regular);
+        search.setFont(Some(&NSFont::systemFontOfSize(LABEL_SIZE)));
         search.setPlaceholderString(Some(ns_string!("Search")));
         search.setSendsSearchStringImmediately(true);
         unsafe {
@@ -397,7 +424,7 @@ impl SettingsChrome {
         ground.setBoxType(NSBoxType::Custom);
         ground.setTitlePosition(NSTitlePosition::NoTitle);
         ground.setBorderWidth(0.);
-        ground.setFillColor(&NSColor::windowBackgroundColor());
+        ground.setFillColor(&form_background(false));
         ground.setTranslatesAutoresizingMaskIntoConstraints(false);
         content.addSubview(&ground);
         let page = NSScrollView::new(mtm);
@@ -621,12 +648,7 @@ impl SettingsChrome {
     }
     pub fn update_sidebar_appearance(&self) {
         let state = self.chrome.ivars();
-        let names = unsafe { [NSAppearanceNameAqua, NSAppearanceNameDarkAqua] };
-        let dark = self
-            .window
-            .effectiveAppearance()
-            .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&names))
-            .is_some_and(|name| &*name == names[1]);
+        let dark = is_dark(&self.window.effectiveAppearance());
         if state.dark.replace(dark) != dark
             && let Some(outline) = state.outline.borrow().as_ref()
         {
@@ -687,7 +709,7 @@ fn cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retained<NSView
     }
     icon.setImageScaling(NSImageScaling::ScaleNone);
     let label = NSTextField::labelWithString(&NSString::from_str(&section.title), mtm);
-    label.setFont(Some(&NSFont::systemFontOfSize(NSFont::systemFontSize())));
+    label.setFont(Some(&NSFont::systemFontOfSize(LABEL_SIZE)));
     label.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
     if section.dim {
         label.setTextColor(Some(&NSColor::tertiaryLabelColor()));

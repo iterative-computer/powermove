@@ -507,11 +507,7 @@ fn make_control(
         glass,
         well,
     } = *spec;
-    let body_size = if form {
-        NSFont::systemFontSize()
-    } else {
-        t.typography.body as f64
-    };
+    let body_size = if form { 13. } else { t.typography.body as f64 };
     let glass = !form && glass && objc2::runtime::AnyClass::get(c"NSGlassEffectView").is_some();
     let mtm = MainThreadMarker::new().unwrap();
 
@@ -799,6 +795,9 @@ fn make_control(
             Control::Switch(v)
         }
     };
+    if form && let Some(view) = control.view().downcast_ref::<NSControl>() {
+        view.setControlSize(NSControlSize::Regular);
+    }
     control
         .view()
         .setAccessibilityLabel(Some(&NSString::from_str(label)));

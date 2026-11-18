@@ -8,12 +8,12 @@
 fn main() {
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBox, NSColor,
-        NSColorSpace, NSSplitViewController, NSSplitViewItemBehavior, NSView, NSWindow,
-        NSWindowStyleMask,
+        NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+        NSApplicationActivationPolicy, NSBackingStoreType, NSBox, NSColorSpace,
+        NSSplitViewController, NSSplitViewItemBehavior, NSView, NSWindow, NSWindowStyleMask,
     };
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
-    use pm_shell::settings_window::SettingsChrome;
+    use pm_shell::settings_window::{SettingsChrome, form_background};
 
     let mtm = MainThreadMarker::new().expect("runs on the main thread (harness = false)");
     let app = NSApplication::sharedApplication(mtm);
@@ -137,7 +137,23 @@ fn main() {
         at.origin.x
     );
     assert!(at.origin.y + at.size.height >= top - 1., "the ground runs up under the toolbar");
-    assert_eq!(ground.fillColor(), NSColor::windowBackgroundColor());
+    let group = form_background(true);
+    let page = ground.fillColor();
+    for name in unsafe { [NSAppearanceNameAqua, NSAppearanceNameDarkAqua] } {
+        let appearance = NSAppearance::appearanceNamed(name).unwrap();
+        appearance.performAsCurrentDrawingAppearance(&block2::RcBlock::new(|| {
+            let page = page
+                .colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())
+                .unwrap();
+            let group = group
+                .colorUsingColorSpace(&NSColorSpace::sRGBColorSpace())
+                .unwrap();
+            assert!(
+                group.redComponent() > page.redComponent(),
+                "the group is lighter than the page in {name}"
+            );
+        }));
+    }
     // The report a release bundle writes (PM_NATIVE_SETTINGS_PROBE) says the same.
     let report = chrome.report();
     assert_eq!(report["opaque"], false, "{report}");

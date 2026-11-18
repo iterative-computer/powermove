@@ -243,12 +243,14 @@ function Group({
 }) {
   return (
     <div role="group" label={title} metadata={{ settingsLayout: "group" }}>
-      <text
-        role="heading"
-        metadata={{ settingsLayout: muted ? "mutedHeading" : "heading" }}
-      >
-        {title}
-      </text>
+      <div metadata={{ settingsLayout: "headingLine" }}>
+        <text
+          role="heading"
+          metadata={{ settingsLayout: muted ? "mutedHeading" : "heading" }}
+        >
+          {title}
+        </text>
+      </div>
       <UI.FormGroup label={title}>{children}</UI.FormGroup>
     </div>
   );
@@ -794,8 +796,6 @@ function ShareRow({ model }: { model: SettingsModel; key?: string }) {
     </div>
   );
 }
-/** A shortcut's keys as keycaps (the build note's custom piece): each
- * modifier its own cap, then the key. */
 function ShortcutKeys({
   row,
   onRecord,
@@ -818,24 +818,22 @@ function ShortcutKeys({
       </text>
     );
   return (
-    <Button
-      label={keys || "None"}
-      accessibilityLabel={`Change the shortcut for ${row.label}`}
+    <UI.PushButton
+      label={
+        row.recording
+          ? "Type a shortcut. Escape cancels."
+          : `Change the shortcut for ${row.label}`
+      }
+      metadata={{
+        settingsLayout: row.recording ? "shortcutRecorder" : "shortcutButton",
+      }}
       onClick={onRecord}
-    />
+    >
+      {row.recording ? "Type a shortcut…" : keys || "None"}
+    </UI.PushButton>
   );
 }
-
-function Recording({ onCancel }: { onCancel: () => void }) {
-  return (
-    <Button
-      label="Type a shortcut…"
-      accessibilityLabel="Type a shortcut. Escape cancels."
-      onClick={onCancel}
-    />
-  );
-}
-/** Settings › Shortcuts: every command with its keys as keycaps, grouped by
+/** Settings › Shortcuts: every command with its keys, grouped by
  * its menu, filtered by Search Commands. Pressing a command's keys takes
  * the next key; a key another command has asks first ("press it again to
  * move it here"); Delete takes the key away, Escape keeps the old one. */
@@ -887,7 +885,7 @@ function Shortcuts({
     void model.perform({ type: "shortcut", op, id });
   };
   const disabled = (id: string) => !model.services || model.pending.has(id);
-  const commandRow = (row: import("./model").ShortcutRow) => [
+  const commandRow = (row: import("./model").ShortcutRow) => (
     <div
       key={row.id}
       id={`settings.shortcut.${row.id}`}
@@ -918,29 +916,21 @@ function Shortcuts({
             onClick={() => act("reset", row.id)}
           />
         ) : null}
-        {row.recording ? (
-          <Recording onCancel={() => act("record", row.id)} />
-        ) : (
-          <ShortcutKeys row={row} onRecord={() => act("record", row.id)} />
-        )}
+        <ShortcutKeys row={row} onRecord={() => act("record", row.id)} />
       </div>
-    </div>,
-    row.recording && row.asked ? (
-      <div
-        key={`${row.id}.asked`}
-        role="status"
-        label="Shortcut in use"
-        metadata={{
-          settingsLayout: "error",
-          symbol: "exclamationmark.triangle.fill",
-        }}
-      >
-        {row.asked.menu
-          ? `${row.asked.keys} belongs to ${row.asked.other} in the menu bar. Type another, or Esc to cancel.`
-          : `${row.asked.keys} is used by ${row.asked.other}. Press it again to move it here, or Esc to cancel.`}
-      </div>
-    ) : null,
-  ];
+      {row.recording && row.asked && (
+        <div
+          role="status"
+          label="Shortcut in use"
+          metadata={{ settingsLayout: "error" }}
+        >
+          {row.asked.menu
+            ? `${row.asked.keys} belongs to ${row.asked.other} in the menu bar. Type another, or Esc to cancel.`
+            : `${row.asked.keys} is used by ${row.asked.other}. Press it again to move it here, or Esc to cancel.`}
+        </div>
+      )}
+    </div>
+  );
   return (
     <>
       {/* The first group's header carries Search Commands; it keeps one key
@@ -957,22 +947,20 @@ function Shortcuts({
           <div metadata={{ settingsLayout: "headingLine" }}>
             <text role="heading">{menu ?? "No Matching Commands"}</text>
             {i === 0 && bindings.commandSearch ? (
-              <div>
-                <UI.TextField
-                  label="Search Commands"
-                  binding={bindings.commandSearch}
-                  value={filter}
-                  metadata={{ placeholder: "Search Commands", search: true }}
-                  onInput={(event) => {
-                    if (typeof event.value === "string") setFilter(event.value);
-                  }}
-                />
-              </div>
+              <UI.TextField
+                label="Search Commands"
+                binding={bindings.commandSearch}
+                value={filter}
+                metadata={{ placeholder: "Search Commands", search: true }}
+                onInput={(event) => {
+                  if (typeof event.value === "string") setFilter(event.value);
+                }}
+              />
             ) : null}
           </div>
           {menu === null ? null : (
             <UI.FormGroup label={menu}>
-              {rows.filter((row) => row.menu === menu).flatMap(commandRow)}
+              {rows.filter((row) => row.menu === menu).map(commandRow)}
             </UI.FormGroup>
           )}
         </div>

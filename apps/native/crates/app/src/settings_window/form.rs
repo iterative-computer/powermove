@@ -22,10 +22,14 @@ use std::{
 };
 
 const PAGE_INSET: f64 = 20.;
-const SECTION_SPACING: f64 = 18.;
-const ROW_INSET: f64 = 12.;
-const ROW_HEIGHT: f64 = 36.;
-const GROUP_RADIUS: f64 = 10.;
+const PAGE_MAX_WIDTH: f64 = 640.;
+const SECTION_SPACING: f64 = 20.;
+const ROW_INSET: f64 = 18.;
+const ROW_PADDING: f64 = 8.;
+const ROW_HEIGHT: f64 = 44.;
+const GROUP_RADIUS: f64 = 12.;
+const LABEL_SIZE: f64 = 13.;
+const FOOTER_SIZE: f64 = 11.;
 const LIST_ROW_HEIGHT: f64 = ROW_HEIGHT + 1.;
 const LIST_ROWS: usize = 40;
 
@@ -35,18 +39,55 @@ pub(crate) struct Form {
     widgets: HashMap<Id, Widget>,
     publication: Option<Publication>,
     reveal: Option<String>,
+    recorder: Option<Id>,
 }
 
 impl Form {
     pub(super) fn new(scroll: &NSScrollView) -> Self {
-        let document = Pile::new(scroll.mtm(), false, SECTION_SPACING, PAGE_INSET, PAGE_INSET);
-        set_document(scroll, &document.stack);
+        let mtm = scroll.mtm();
+        let wrapper: Retained<SettingsDocument> =
+            unsafe { msg_send![SettingsDocument::alloc(mtm), init] };
+        wrapper.setTranslatesAutoresizingMaskIntoConstraints(false);
+        set_document(scroll, &wrapper);
+        let document = Pile::new(mtm, false, SECTION_SPACING, 0., PAGE_INSET);
+        wrapper.addSubview(&document.stack);
+        let available = -2. * PAGE_INSET;
+        let fill = document
+            .stack
+            .widthAnchor()
+            .constraintEqualToAnchor_constant(&wrapper.widthAnchor(), available);
+        // Fit the column to the window's size without steering window resizing.
+        fill.setPriority(NSLayoutPriorityDragThatCannotResizeWindow);
+        constraints(&[
+            fill,
+            document
+                .stack
+                .topAnchor()
+                .constraintEqualToAnchor(&wrapper.topAnchor()),
+            document
+                .stack
+                .bottomAnchor()
+                .constraintEqualToAnchor(&wrapper.bottomAnchor()),
+            document
+                .stack
+                .centerXAnchor()
+                .constraintEqualToAnchor(&wrapper.centerXAnchor()),
+            document
+                .stack
+                .widthAnchor()
+                .constraintLessThanOrEqualToAnchor_constant(&wrapper.widthAnchor(), available),
+            document
+                .stack
+                .widthAnchor()
+                .constraintLessThanOrEqualToConstant(PAGE_MAX_WIDTH),
+        ]);
         Self {
             scroll: scroll.retain(),
             document,
             widgets: HashMap::new(),
             publication: None,
             reveal: None,
+            recorder: None,
         }
     }
 
@@ -55,6 +96,7 @@ impl Form {
         self.document.set(&[]);
         self.widgets.clear();
         self.publication = None;
+        self.recorder = None;
     }
 
     pub(crate) fn take_publication(&mut self) -> Option<Publication> {
@@ -87,6 +129,7 @@ impl Form {
             seen: HashSet::new(),
             scroll: &self.scroll,
             generation: publication.generation,
+            recorder: None,
             tokens,
             cx,
         };
@@ -94,10 +137,17 @@ impl Form {
             .map(|node| render.children(&node.children))
             .unwrap_or_default();
         self.document.set(&views);
-        let seen = render.seen;
+        let Render { seen, recorder, .. } = render;
         self.widgets.retain(|id, _| seen.contains(id));
         self.publication = Some(publication);
         self.apply_reveal();
+        if self.recorder != recorder
+            && let Some(widget) = recorder.and_then(|id| self.widgets.get(&id))
+            && let Some(window) = self.scroll.window().filter(|window| window.isKeyWindow())
+        {
+            window.makeFirstResponder(Some(widget.view()));
+        }
+        self.recorder = recorder;
     }
 
     pub(crate) fn reveal(&mut self, section: &str) {
@@ -160,7 +210,7 @@ fn constraints(items: &[Retained<NSLayoutConstraint>]) {
     NSLayoutConstraint::activateConstraints(&NSArray::from_retained_slice(items));
 }
 
-fn set_document(scroll: &NSScrollView, document: &NSStackView) {
+fn set_document(scroll: &NSScrollView, document: &NSView) {
     scroll.setAutomaticallyAdjustsContentInsets(false);
     scroll.setDocumentView(Some(document));
     let clip = scroll.contentView();
@@ -176,6 +226,18 @@ fn set_document(scroll: &NSScrollView, document: &NSStackView) {
             .constraintEqualToAnchor(&clip.widthAnchor()),
     ]);
 }
+
+define_class!(
+    #[unsafe(super(NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMSettingsDocument"]
+    struct SettingsDocument;
+
+    impl SettingsDocument {
+        #[unsafe(method(isFlipped))]
+        fn flipped(&self) -> bool { true }
+    }
+);
 
 define_class!(
     #[unsafe(super(NSStackView, NSView, NSResponder, NSObject))]
@@ -275,7 +337,7 @@ impl Group {
         box_view.setTitlePosition(NSTitlePosition::NoTitle);
         box_view.setBorderWidth(0.);
         box_view.setCornerRadius(GROUP_RADIUS);
-        box_view.setFillColor(&NSColor::quaternarySystemFillColor());
+        box_view.setFillColor(&pm_shell::settings_window::form_background(true));
         box_view.setTranslatesAutoresizingMaskIntoConstraints(false);
         let rows = Pile::new(mtm, false, 0., 0., 0.);
         let content = box_view.contentView().expect("NSBox has a content view");
@@ -354,12 +416,12 @@ struct Row {
 
 impl Row {
     fn new(mtm: objc2::MainThreadMarker) -> Self {
-        let body = Pile::new(mtm, false, 2., ROW_INSET, 6.);
-        body.stack
-            .heightAnchor()
-            .constraintGreaterThanOrEqualToConstant(ROW_HEIGHT)
-            .setActive(true);
+        let body = Pile::new(mtm, false, 2., ROW_INSET, ROW_PADDING);
         let line = Pile::new(mtm, true, 8., 0., 0.);
+        line.stack
+            .heightAnchor()
+            .constraintGreaterThanOrEqualToConstant(ROW_HEIGHT - 2. * ROW_PADDING)
+            .setActive(true);
         Self {
             body,
             line,
@@ -376,7 +438,7 @@ impl Row {
         let mut views = Vec::new();
         if let Some(leading) = leading {
             leading.setContentCompressionResistancePriority_forOrientation(
-                NSLayoutPriorityDefaultHigh + 1.,
+                NSLayoutPriorityDefaultHigh - 1.,
                 NSLayoutConstraintOrientation::Horizontal,
             );
             views.push(leading);
@@ -528,7 +590,7 @@ impl Drop for VirtualList {
 enum Widget {
     Pile(Pile),
     Group(Group),
-    Header(Pile, Retained<NSView>),
+    Header(Pile, Retained<NSView>, usize),
     Row(Row),
     Virtual(VirtualList),
     Control(FormControl),
@@ -549,7 +611,7 @@ enum Widget {
 impl Widget {
     fn view(&self) -> &NSView {
         match self {
-            Self::Pile(value) | Self::Header(value, _) => &value.stack,
+            Self::Pile(value) | Self::Header(value, ..) => &value.stack,
             Self::Group(value) => &value.box_view,
             Self::Row(value) => &value.body.stack,
             Self::Virtual(value) => &value.scroll,
@@ -570,6 +632,7 @@ struct Render<'a, 'cx> {
     seen: HashSet<Id>,
     scroll: &'a NSScrollView,
     generation: u64,
+    recorder: Option<Id>,
     tokens: &'a pm_design::Tokens,
     cx: &'a mut Context<'cx, Controller>,
 }
@@ -605,16 +668,17 @@ impl Render<'_, '_> {
                             footers.extend(contents);
                         }
                         "nameButton" => leading = self.node(child.id),
+                        "error" => footers.extend(self.node(child.id)),
                         _ => trailing.extend(self.node(child.id)),
                     }
                 }
                 row.set(leading, trailing, footers);
             }
             Widget::Pile(pile) => pile.set(&self.children(&node.children)),
-            Widget::Header(pile, space) => {
+            Widget::Header(pile, space, leading) => {
                 let mut views = self.children(&node.children);
-                if views.len() > 2 {
-                    views.insert(2, space.clone());
+                if views.len() > *leading {
+                    views.insert(*leading, space.clone());
                 }
                 pile.set(&views);
             }
@@ -624,6 +688,14 @@ impl Render<'_, '_> {
                 if matches!(kind, Some(Kind::Push)) {
                     let title = button_title(self.surface, node);
                     control.set_title(&title);
+                }
+                if matches!(layout, "shortcutButton" | "shortcutRecorder") {
+                    control
+                        .view()
+                        .setAccessibilityLabel(Some(&NSString::from_str(label(node))));
+                    if layout == "shortcutRecorder" {
+                        self.recorder = Some(id);
+                    }
                 }
             }
             Widget::Text { slot: field, .. } => {
@@ -724,6 +796,8 @@ impl Render<'_, '_> {
             }
             Some(Component::SecureField) => {
                 let field = NSSecureTextField::new(mtm);
+                field.setControlSize(NSControlSize::Regular);
+                field.setFont(Some(&NSFont::systemFontOfSize(LABEL_SIZE)));
                 field.setAccessibilityLabel(Some(&NSString::from_str(label(node))));
                 field.setTranslatesAutoresizingMaskIntoConstraints(false);
                 field
@@ -735,7 +809,7 @@ impl Render<'_, '_> {
             Some(Component::ProgressRow) => {
                 let progress = NSProgressIndicator::new(mtm);
                 progress.setTranslatesAutoresizingMaskIntoConstraints(false);
-                progress.setControlSize(NSControlSize::Small);
+                progress.setControlSize(NSControlSize::Regular);
                 progress.setStyle(NSProgressIndicatorStyle::Bar);
                 progress.setMinValue(0.);
                 progress.setMaxValue(1.);
@@ -757,10 +831,15 @@ impl Render<'_, '_> {
             "header" => Widget::Header(
                 Pile::new(mtm, true, ROW_INSET, ROW_INSET, ROW_INSET),
                 flexible_space(mtm),
+                2,
             ),
-            "headingLine" => Widget::Pile(Pile::new(mtm, true, ROW_INSET, ROW_INSET, 0.)),
+            "headingLine" => Widget::Header(
+                Pile::new(mtm, true, ROW_INSET, ROW_INSET, 0.),
+                flexible_space(mtm),
+                1,
+            ),
             "line" => Widget::Pile(Pile::new(mtm, true, 6., 0., 0.)),
-            "group" => Widget::Pile(Pile::new(mtm, false, 5., 0., 0.)),
+            "group" => Widget::Pile(Pile::new(mtm, false, 8., 0., 0.)),
             "section" => Widget::Pile(Pile::new(mtm, false, SECTION_SPACING, 0., 0.)),
             "note" => Widget::Pile(Pile::new(mtm, false, 3., ROW_INSET, 8.)),
             "path" => {
@@ -768,7 +847,7 @@ impl Render<'_, '_> {
                 path.setTranslatesAutoresizingMaskIntoConstraints(false);
                 path.setPathStyle(NSPathStyle::PopUp);
                 path.setEditable(false);
-                path.setControlSize(NSControlSize::Small);
+                path.setControlSize(NSControlSize::Regular);
                 path.setAccessibilityLabel(Some(&NSString::from_str("Location")));
                 path.widthAnchor()
                     .constraintLessThanOrEqualToConstant(210.)
@@ -860,6 +939,10 @@ impl Render<'_, '_> {
             view.widthAnchor()
                 .constraintEqualToConstant(175.)
                 .setActive(true);
+        } else if matches!(layout(node), "shortcutButton" | "shortcutRecorder") {
+            view.widthAnchor()
+                .constraintGreaterThanOrEqualToConstant(88.)
+                .setActive(true);
         }
         let (id, generation) = (node.id, self.generation);
         self.cx
@@ -922,9 +1005,7 @@ impl Render<'_, '_> {
         let container = if let Some(unit) = node.props.get("unit").and_then(Value::as_str) {
             let label = NSTextField::labelWithString(&NSString::from_str(unit), field.mtm());
             label.setTranslatesAutoresizingMaskIntoConstraints(false);
-            label.setFont(Some(&NSFont::systemFontOfSize(
-                NSFont::smallSystemFontSize(),
-            )));
+            label.setFont(Some(&NSFont::systemFontOfSize(FOOTER_SIZE)));
             label.setTextColor(Some(&NSColor::secondaryLabelColor()));
             let with_unit = Pile::new(field.mtm(), true, 5., 0., 0.);
             with_unit.set(&[field.retain(), (label.as_ref() as &NSView).retain()]);
@@ -1010,14 +1091,16 @@ fn text_label(mtm: objc2::MainThreadMarker, node: &Node) -> Retained<NSTextField
     let field = NSTextField::wrappingLabelWithString(&NSString::from_str(&node.text), mtm);
     field.setTranslatesAutoresizingMaskIntoConstraints(false);
     if heading {
-        field.setFont(Some(&NSFont::systemFontOfSize_weight(
-            NSFont::systemFontSize(),
-            unsafe { NSFontWeightSemibold },
-        )));
-    } else if matches!(style, "footer" | "secondary" | "error") {
-        field.setFont(Some(&NSFont::systemFontOfSize(
-            NSFont::smallSystemFontSize(),
-        )));
+        field.setFont(Some(&NSFont::systemFontOfSize_weight(LABEL_SIZE, unsafe {
+            NSFontWeightSemibold
+        })));
+    } else {
+        let size = if matches!(style, "footer" | "secondary" | "error") {
+            FOOTER_SIZE
+        } else {
+            LABEL_SIZE
+        };
+        field.setFont(Some(&NSFont::systemFontOfSize(size)));
     }
     if style == "error" {
         field.setTextColor(Some(&NSColor::systemRedColor()));

@@ -6,8 +6,9 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          text heading
-            text "Appearance"
+          div
+            text heading
+              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -18,8 +19,9 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
                     text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
-          text heading
-            text "Workspace"
+          div
+            text heading
+              text "Workspace"
           div group label="Workspace"
             div form-group group label="Workspace"
               div group settings.row.workspace label="After Effects Workspace"
@@ -32,8 +34,9 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
                   button push-button label="Bring My Workspace…"
                     text "Bring My Workspace…"
         div group label="Playback"
-          text heading
-            text "Playback"
+          div
+            text heading
+              text "Playback"
           div group label="Playback"
             div form-group group label="Playback"
               div group settings.row.preview-memory label="Preview Memory Limit"
@@ -44,8 +47,9 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
                     text "Frames kept in memory so replays are instant."
                 div
         div group label="Media"
-          text heading
-            text "Media"
+          div
+            text heading
+              text "Media"
           div group label="Media"
             div form-group group label="Media"
               div group settings.row.cloud-media label="Automatically Download Cloud Media"
@@ -57,8 +61,9 @@ exports[`empty: six-op tree snapshot passes the real Rust wire and kit validator
                 div
                   button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
-          text heading
-            text "Windows"
+          div
+            text heading
+              text "Windows"
           div group label="Windows"
             div form-group group label="Windows"
               div group settings.row.open-projects-in label="Open Projects In"
@@ -85,8 +90,9 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          text heading
-            text "Appearance"
+          div
+            text heading
+              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -97,8 +103,9 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
                     text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
-          text heading
-            text "Workspace"
+          div
+            text heading
+              text "Workspace"
           div group label="Workspace"
             div form-group group label="Workspace"
               div group settings.row.workspace label="After Effects Workspace"
@@ -111,8 +118,9 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
                   button push-button label="Bring My Workspace…"
                     text "Bring My Workspace…"
         div group label="Playback"
-          text heading
-            text "Playback"
+          div
+            text heading
+              text "Playback"
           div group label="Playback"
             div form-group group label="Playback"
               div group settings.row.preview-memory label="Preview Memory Limit"
@@ -123,8 +131,9 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
                     text "Frames kept in memory so replays are instant."
                 div
         div group label="Media"
-          text heading
-            text "Media"
+          div
+            text heading
+              text "Media"
           div group label="Media"
             div form-group group label="Media"
               div group settings.row.cloud-media label="Automatically Download Cloud Media"
@@ -136,8 +145,9 @@ exports[`loading: six-op tree snapshot passes the real Rust wire and kit validat
                 div
                   button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
-          text heading
-            text "Windows"
+          div
+            text heading
+              text "Windows"
           div group label="Windows"
             div form-group group label="Windows"
               div group settings.row.open-projects-in label="Open Projects In"
@@ -164,8 +174,9 @@ exports[`selected: six-op tree snapshot passes the real Rust wire and kit valida
     scroll group settings.detail label="Accounts"
       div group settings.section.accounts label="Accounts"
         div group label="Powermove Account"
-          text heading
-            text "Powermove Account"
+          div
+            text heading
+              text "Powermove Account"
           div group label="Powermove Account"
             div form-group group label="Powermove Account"
               div group settings.row.account.sign-in label="Powermove Account"
@@ -192,8 +203,9 @@ exports[`selected: six-op tree snapshot passes the real Rust wire and kit valida
                   button push-button label="Bring Sign-Ins from the Original App…"
                     text "Bring Sign-Ins from the Original App…"
         div group label="Subscriptions"
-          text heading
-            text "Subscriptions"
+          div
+            text heading
+              text "Subscriptions"
           div group label="Subscriptions"
             div form-group group label="Subscriptions"
               div group settings.row.account.chatgpt label="ChatGPT"
@@ -211,8 +223,9 @@ exports[`selected: six-op tree snapshot passes the real Rust wire and kit valida
                   text
                     text
         div group label="API or Local Model"
-          text heading
-            text "API or Local Model"
+          div
+            text heading
+              text "API or Local Model"
           div group label="API or Local Model"
             div form-group group label="API or Local Model"
               div group settings.row.account.provider label="Connection Type"
@@ -266,8 +279,9 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          text heading
-            text "Appearance"
+          div
+            text heading
+              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -278,8 +292,9 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
                     text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
-          text heading
-            text "Workspace"
+          div
+            text heading
+              text "Workspace"
           div group label="Workspace"
             div form-group group label="Workspace"
               div group settings.row.workspace label="After Effects Workspace"
@@ -292,8 +307,9 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
                   button push-button label="Bring My Workspace…"
                     text "Bring My Workspace…"
         div group label="Playback"
-          text heading
-            text "Playback"
+          div
+            text heading
+              text "Playback"
           div group label="Playback"
             div form-group group label="Playback"
               div group settings.row.preview-memory label="Preview Memory Limit"
@@ -304,8 +320,9 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
                     text "Frames kept in memory so replays are instant."
                 div
         div group label="Media"
-          text heading
-            text "Media"
+          div
+            text heading
+              text "Media"
           div group label="Media"
             div form-group group label="Media"
               div group settings.row.cloud-media label="Automatically Download Cloud Media"
@@ -317,8 +334,9 @@ exports[`hover-system-controls: six-op tree snapshot passes the real Rust wire a
                 div
                   button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
-          text heading
-            text "Windows"
+          div
+            text heading
+              text "Windows"
           div group label="Windows"
             div form-group group label="Windows"
               div group settings.row.open-projects-in label="Open Projects In"
@@ -345,8 +363,9 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          text heading
-            text "Appearance"
+          div
+            text heading
+              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -357,8 +376,9 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
                     text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
-          text heading
-            text "Workspace"
+          div
+            text heading
+              text "Workspace"
           div group label="Workspace"
             div form-group group label="Workspace"
               div group settings.row.workspace label="After Effects Workspace"
@@ -371,8 +391,9 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
                   button push-button label="Bring My Workspace…"
                     text "Bring My Workspace…"
         div group label="Playback"
-          text heading
-            text "Playback"
+          div
+            text heading
+              text "Playback"
           div group label="Playback"
             div form-group group label="Playback"
               div group settings.row.preview-memory label="Preview Memory Limit"
@@ -383,8 +404,9 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
                     text "Frames kept in memory so replays are instant."
                 div
         div group label="Media"
-          text heading
-            text "Media"
+          div
+            text heading
+              text "Media"
           div group label="Media"
             div form-group group label="Media"
               div group settings.row.cloud-media label="Automatically Download Cloud Media"
@@ -396,8 +418,9 @@ exports[`focus-system-rings: six-op tree snapshot passes the real Rust wire and 
                 div
                   button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
-          text heading
-            text "Windows"
+          div
+            text heading
+              text "Windows"
           div group label="Windows"
             div form-group group label="Windows"
               div group settings.row.open-projects-in label="Open Projects In"
@@ -424,8 +447,9 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          text heading
-            text "Appearance"
+          div
+            text heading
+              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -436,8 +460,9 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
                     text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
-          text heading
-            text "Workspace"
+          div
+            text heading
+              text "Workspace"
           div group label="Workspace"
             div form-group group label="Workspace"
               div group settings.row.workspace label="After Effects Workspace"
@@ -450,8 +475,9 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
                   button push-button label="Bring My Workspace…"
                     text "Bring My Workspace…"
         div group label="Playback"
-          text heading
-            text "Playback"
+          div
+            text heading
+              text "Playback"
           div group label="Playback"
             div form-group group label="Playback"
               div group settings.row.preview-memory label="Preview Memory Limit"
@@ -462,8 +488,9 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
                     text "Frames kept in memory so replays are instant."
                 div
         div group label="Media"
-          text heading
-            text "Media"
+          div
+            text heading
+              text "Media"
           div group label="Media"
             div form-group group label="Media"
               div group settings.row.cloud-media label="Automatically Download Cloud Media"
@@ -475,8 +502,9 @@ exports[`disabled: six-op tree snapshot passes the real Rust wire and kit valida
                 div
                   button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
-          text heading
-            text "Windows"
+          div
+            text heading
+              text "Windows"
           div group label="Windows"
             div form-group group label="Windows"
               div group settings.row.open-projects-in label="Open Projects In"
@@ -503,8 +531,9 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          text heading
-            text "Appearance"
+          div
+            text heading
+              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -515,8 +544,9 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
                     text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
-          text heading
-            text "Workspace"
+          div
+            text heading
+              text "Workspace"
           div group label="Workspace"
             div form-group group label="Workspace"
               div group settings.row.workspace label="After Effects Workspace"
@@ -529,8 +559,9 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
                   button push-button label="Bring My Workspace…"
                     text "Bring My Workspace…"
         div group label="Playback"
-          text heading
-            text "Playback"
+          div
+            text heading
+              text "Playback"
           div group label="Playback"
             div form-group group label="Playback"
               div group settings.row.preview-memory label="Preview Memory Limit"
@@ -541,8 +572,9 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
                     text "Frames kept in memory so replays are instant."
                 div
         div group label="Media"
-          text heading
-            text "Media"
+          div
+            text heading
+              text "Media"
           div group label="Media"
             div form-group group label="Media"
               div group settings.row.cloud-media label="Automatically Download Cloud Media"
@@ -554,8 +586,9 @@ exports[`error: six-op tree snapshot passes the real Rust wire and kit validator
                 div
                   button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
-          text heading
-            text "Windows"
+          div
+            text heading
+              text "Windows"
           div group label="Windows"
             div form-group group label="Windows"
               div group settings.row.open-projects-in label="Open Projects In"
@@ -582,8 +615,9 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          text heading
-            text "Appearance"
+          div
+            text heading
+              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -594,8 +628,9 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
                     text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
-          text heading
-            text "Workspace"
+          div
+            text heading
+              text "Workspace"
           div group label="Workspace"
             div form-group group label="Workspace"
               div group settings.row.workspace label="After Effects Workspace"
@@ -608,8 +643,9 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
                   button push-button label="Bring My Workspace…"
                     text "Bring My Workspace…"
         div group label="Playback"
-          text heading
-            text "Playback"
+          div
+            text heading
+              text "Playback"
           div group label="Playback"
             div form-group group label="Playback"
               div group settings.row.preview-memory label="Preview Memory Limit"
@@ -620,8 +656,9 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
                     text "Frames kept in memory so replays are instant."
                 div
         div group label="Media"
-          text heading
-            text "Media"
+          div
+            text heading
+              text "Media"
           div group label="Media"
             div form-group group label="Media"
               div group settings.row.cloud-media label="Automatically Download Cloud Media"
@@ -633,8 +670,9 @@ exports[`unavailable: six-op tree snapshot passes the real Rust wire and kit val
                 div
                   button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
-          text heading
-            text "Windows"
+          div
+            text heading
+              text "Windows"
           div group label="Windows"
             div form-group group label="Windows"
               div group settings.row.open-projects-in label="Open Projects In"
@@ -673,8 +711,9 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          text heading
-            text "Appearance"
+          div
+            text heading
+              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -685,8 +724,9 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
                     text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
-          text heading
-            text "Workspace"
+          div
+            text heading
+              text "Workspace"
           div group label="Workspace"
             div form-group group label="Workspace"
               div group settings.row.workspace label="After Effects Workspace"
@@ -699,8 +739,9 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
                   button push-button label="Bring My Workspace…"
                     text "Bring My Workspace…"
         div group label="Playback"
-          text heading
-            text "Playback"
+          div
+            text heading
+              text "Playback"
           div group label="Playback"
             div form-group group label="Playback"
               div group settings.row.preview-memory label="Preview Memory Limit"
@@ -711,8 +752,9 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
                     text "Frames kept in memory so replays are instant."
                 div
         div group label="Media"
-          text heading
-            text "Media"
+          div
+            text heading
+              text "Media"
           div group label="Media"
             div form-group group label="Media"
               div group settings.row.cloud-media label="Automatically Download Cloud Media"
@@ -724,8 +766,9 @@ exports[`extension-detail: six-op tree snapshot passes the real Rust wire and ki
                 div
                   button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
-          text heading
-            text "Windows"
+          div
+            text heading
+              text "Windows"
           div group label="Windows"
             div form-group group label="Windows"
               div group settings.row.open-projects-in label="Open Projects In"
@@ -752,8 +795,9 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          text heading
-            text "Appearance"
+          div
+            text heading
+              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -764,8 +808,9 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
                     text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
-          text heading
-            text "Workspace"
+          div
+            text heading
+              text "Workspace"
           div group label="Workspace"
             div form-group group label="Workspace"
               div group settings.row.workspace label="After Effects Workspace"
@@ -778,8 +823,9 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
                   button push-button label="Bring My Workspace…"
                     text "Bring My Workspace…"
         div group label="Playback"
-          text heading
-            text "Playback"
+          div
+            text heading
+              text "Playback"
           div group label="Playback"
             div form-group group label="Playback"
               div group settings.row.preview-memory label="Preview Memory Limit"
@@ -790,8 +836,9 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
                     text "Frames kept in memory so replays are instant."
                 div
         div group label="Media"
-          text heading
-            text "Media"
+          div
+            text heading
+              text "Media"
           div group label="Media"
             div form-group group label="Media"
               div group settings.row.cloud-media label="Automatically Download Cloud Media"
@@ -803,8 +850,9 @@ exports[`drag-drop-not-applicable: six-op tree snapshot passes the real Rust wir
                 div
                   button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
-          text heading
-            text "Windows"
+          div
+            text heading
+              text "Windows"
           div group label="Windows"
             div form-group group label="Windows"
               div group settings.row.open-projects-in label="Open Projects In"
@@ -831,8 +879,9 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
     scroll group settings.detail label="General"
       div group settings.section.general label="General"
         div group label="Appearance"
-          text heading
-            text "Appearance"
+          div
+            text heading
+              text "Appearance"
           div group label="Appearance"
             div form-group group label="Appearance"
               div group settings.row.appearance label="Appearance"
@@ -843,8 +892,9 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
                     text "Follow your system setting, or pick a light or dark theme."
                 div
         div group label="Workspace"
-          text heading
-            text "Workspace"
+          div
+            text heading
+              text "Workspace"
           div group label="Workspace"
             div form-group group label="Workspace"
               div group settings.row.workspace label="After Effects Workspace"
@@ -857,8 +907,9 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
                   button push-button label="Bring My Workspace…"
                     text "Bring My Workspace…"
         div group label="Playback"
-          text heading
-            text "Playback"
+          div
+            text heading
+              text "Playback"
           div group label="Playback"
             div form-group group label="Playback"
               div group settings.row.preview-memory label="Preview Memory Limit"
@@ -869,8 +920,9 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
                     text "Frames kept in memory so replays are instant."
                 div
         div group label="Media"
-          text heading
-            text "Media"
+          div
+            text heading
+              text "Media"
           div group label="Media"
             div form-group group label="Media"
               div group settings.row.cloud-media label="Automatically Download Cloud Media"
@@ -882,8 +934,9 @@ exports[`multi-select-not-applicable: six-op tree snapshot passes the real Rust 
                 div
                   button switch switch label="Automatically Download Cloud Media" value=false disabled
         div group label="Windows"
-          text heading
-            text "Windows"
+          div
+            text heading
+              text "Windows"
           div group label="Windows"
             div form-group group label="Windows"
               div group settings.row.open-projects-in label="Open Projects In"
@@ -913,8 +966,9 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
           input text-field label="Filter extensions" value=""
           button pop-up-button label="Extension Type" value="All Types"
         div group label="Installed"
-          text heading
-            text "Installed"
+          div
+            text heading
+              text "Installed"
           div group label="Installed"
             div form-group group label="Installed"
               div
@@ -1400,8 +1454,9 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
                       button push-button label="Details for Fixture 30039"
                         text "Details"
         div group label="Store"
-          text heading
-            text "Store"
+          div
+            text heading
+              text "Store"
           div group label="Store"
             div form-group group label="Store"
               div group label="Powermove Store"
@@ -1422,8 +1477,9 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
     scroll group settings.detail label="Project"
       div group settings.section.project label="Project"
         div group label="Project"
-          text heading
-            text "Project"
+          div
+            text heading
+              text "Project"
           div group label="Project"
             div form-group group label="Project"
               div group settings.row.project.name label="Name"
@@ -1434,8 +1490,9 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
                     text "Shown in the title bar and used for exported file names."
                 div
         div group label="Composition"
-          text heading
-            text "Composition"
+          div
+            text heading
+              text "Composition"
           div group label="Composition"
             div form-group group label="Composition"
               div group settings.row.project.size label="Size"
@@ -1482,8 +1539,9 @@ exports[`project-open: six-op tree snapshot passes the real Rust wire and kit va
                     text "Precision per color channel. Applies to every composition in this project."
                 div
         div group label="Export defaults"
-          text heading
-            text "Export defaults"
+          div
+            text heading
+              text "Export defaults"
           div group label="Export defaults"
             div form-group group label="Export defaults"
               div group settings.row.project.format label="Format"
@@ -1554,8 +1612,7 @@ exports[`shortcuts: six-op tree snapshot passes the real Rust wire and kit valid
           div
             text heading
               text "Layer"
-            div
-              input text-field label="Search Commands" value=""
+            input text-field label="Search Commands" value=""
           div group label="Layer"
             div form-group group label="Layer"
               div group settings.shortcut.rippleTrimIn label="Ripple Trim In Point to Playhead"
@@ -1598,8 +1655,9 @@ exports[`shortcuts: six-op tree snapshot passes the real Rust wire and kit valid
                   button push-button label="Change the shortcut for Previous Edge"
                     text "None"
         div group label="Shared Keys"
-          text heading
-            text "Shared Keys"
+          div
+            text heading
+              text "Shared Keys"
           div group label="Shared Keys"
             div form-group group label="Shared Keys"
               div group settings.shared.alt+shift+s label="⌥⇧S"
@@ -1620,8 +1678,7 @@ exports[`shortcuts-asked: six-op tree snapshot passes the real Rust wire and kit
           div
             text heading
               text "Layer"
-            div
-              input text-field label="Search Commands" value=""
+            input text-field label="Search Commands" value=""
           div group label="Layer"
             div form-group group label="Layer"
               div group settings.shortcut.rippleTrimIn label="Ripple Trim In Point to Playhead"
@@ -1636,18 +1693,20 @@ exports[`shortcuts-asked: six-op tree snapshot passes the real Rust wire and kit
                 div
                   button push-button label="Type a shortcut. Escape cancels."
                     text "Type a shortcut…"
-              div status label="Shortcut in use"
-                text "Q is used by Ripple Trim In Point to Playhead. Press it again to move it here, or Esc to cancel."
+                div status label="Shortcut in use"
+                  text "Q is used by Ripple Trim In Point to Playhead. Press it again to move it here, or Esc to cancel."
 Focus: ["Search Commands","Change the shortcut for Ripple Trim In Point to Playhead","Type a shortcut. Escape cancels."]"
 `;
+
 exports[`transcription available wire/AX state 1`] = `
 "root
   div group settings label="Settings"
     scroll group settings.detail label="Transcription"
       div group settings.section.transcription label="Transcription"
         div group label="Models"
-          text heading
-            text "Models"
+          div
+            text heading
+              text "Models"
           div group label="Models"
             div form-group group label="Models"
               div group label="Fixture speech"
@@ -1668,8 +1727,9 @@ exports[`transcription downloading wire/AX state 1`] = `
     scroll group settings.detail label="Transcription"
       div group settings.section.transcription label="Transcription"
         div group label="Models"
-          text heading
-            text "Models"
+          div
+            text heading
+              text "Models"
           div group label="Models"
             div form-group group label="Models"
               div group label="Fixture speech"
@@ -1692,8 +1752,9 @@ exports[`transcription installed wire/AX state 1`] = `
     scroll group settings.detail label="Transcription"
       div group settings.section.transcription label="Transcription"
         div group label="Models"
-          text heading
-            text "Models"
+          div
+            text heading
+              text "Models"
           div group label="Models"
             div form-group group label="Models"
               div group label="Fixture speech"
@@ -1716,8 +1777,9 @@ exports[`transcription error wire/AX state 1`] = `
     scroll group settings.detail label="Transcription"
       div group settings.section.transcription label="Transcription"
         div group label="Models"
-          text heading
-            text "Models"
+          div
+            text heading
+              text "Models"
           div group label="Models"
             div form-group group label="Models"
               div group label="Fixture speech"

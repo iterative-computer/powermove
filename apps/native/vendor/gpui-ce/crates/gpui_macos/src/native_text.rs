@@ -538,6 +538,7 @@ impl NativeTextSlot {
             return;
         };
         let stepper = NSStepper::initWithFrame(NSStepper::alloc(mtm), NSRect::ZERO);
+        stepper.setControlSize(objc2_app_kit::NSControlSize::Regular);
         stepper.setMinValue(0.);
         stepper.setMaxValue(2.);
         stepper.setIncrement(1.);
@@ -698,6 +699,7 @@ impl NativeTextSlot {
             if kind.form() {
                 // AppKit's own rounded field; no accent focus ring (owner
                 // rule), the field's caret shows it has the keyboard.
+                v.setControlSize(objc2_app_kit::NSControlSize::Regular);
                 v.setBezeled(true);
                 v.setBezelStyle(NSTextFieldBezelStyle::RoundedBezel);
                 v.setDrawsBackground(true);
