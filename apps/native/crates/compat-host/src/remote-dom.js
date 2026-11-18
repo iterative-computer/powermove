@@ -265,12 +265,31 @@
   document.fonts?.ready.then(measureContributions);
   measureContributions();
   // End contribution content measurement.
+  // The realm still sends its fallback inline placement. Once the host owns
+  // a root's bounds, restore them during that style mutation, before layout
+  // feedback or the next frame can observe the realm's previous width.
+  const contributionBounds = new WeakMap();
+  const applyContributionBounds = (root, rect) => {
+    const bounds = {
+      position: 'fixed', left: rect.x + 'px', top: rect.y + 'px',
+      width: rect.w + 'px', height: rect.h + 'px', 'box-sizing': 'border-box',
+      'min-width': '0', 'min-height': '0',
+      'max-width': rect.w + 'px', 'max-height': rect.h + 'px',
+      'clip-path': 'inset(0)',
+    };
+    for (const [key, value] of Object.entries(bounds))
+      root.style.setProperty(key, value, 'important');
+  };
+  const restoreContributionBounds = (root) => {
+    const rect = contributionBounds.get(root);
+    if (rect) applyContributionBounds(root, rect);
+  };
   const panelLayouts = new PMPanelLayout((frame) => requestAnimationFrame(frame), ({ id, rect }) => {
     const root = [...document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])')]
       .find((node) => node.getAttribute('data-pm-contribution') === id);
     if (!root) return false;
-    for (const [key, value] of Object.entries({position:'fixed', left:rect.x+'px', top:rect.y+'px', width:rect.w+'px', height:rect.h+'px', 'box-sizing':'border-box', 'min-width':'0', 'min-height':'0', 'max-width':rect.w+'px', 'max-height':rect.h+'px', 'clip-path':'inset(0)'}))
-      root.style.setProperty(key, value, 'important');
+    contributionBounds.set(root, rect);
+    applyContributionBounds(root, rect);
   }, (placement) => {
     const root = [...document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])')]
       .find((node) => node.getAttribute('data-pm-contribution') === placement.id);
@@ -339,6 +358,7 @@
           applier = new PMRemoteDOM.PageApplier({
             document,
             session: batch.session,
+            inlineStyleChanged: restoreContributionBounds,
             send: (payload) => {
               try {
                 return call({ kind: "remote_dom", panel, payload });

@@ -50,6 +50,7 @@ pub fn stylesheet(light: &Tokens, dark: &Tokens) -> String {
         write!(css, "--pm-fs-title:{}px;", t.typography.title).unwrap();
         write!(css, "--pm-fs-heading:{}px;", t.typography.heading).unwrap();
         write!(css, "--pm-r-control:{}px;", t.metrics.control_radius).unwrap();
+        write!(css, "--pm-r-check:{}px;", t.radius.xs).unwrap();
         write!(css, "--pm-r-card:{}px;", t.radius.md).unwrap();
         write!(css, "--pm-r-capsule:{}px;", t.metrics.capsule_radius).unwrap();
         write!(css, "--pm-row-h:{}px;", t.metrics.row).unwrap();
@@ -94,7 +95,9 @@ pub fn stylesheet(light: &Tokens, dark: &Tokens) -> String {
         css.push_str("--pm-font:-apple-system,system-ui;--pm-font-mono:ui-monospace,'SF Mono';--pm-ease:cubic-bezier(.22,1,.36,1);");
         css.push_str("--bg-panel:var(--pm-ground);");
         css.push_str("--bg-panel-2:var(--pm-ground-2);");
-        css.push_str("--bg-sunken:var(--pm-ground-2);");
+        // Legacy sunken surfaces include empty meter tracks. Use the deeper
+        // window tone so they remain distinct from the native panel backing.
+        css.push_str("--bg-sunken:var(--pm-window);");
         css.push_str("--bg-window:var(--pm-window);");
         css.push_str("--bg-field:var(--pm-fill);");
         css.push_str("--line:var(--pm-hairline);");
