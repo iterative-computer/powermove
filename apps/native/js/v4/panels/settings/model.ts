@@ -14,7 +14,7 @@ export interface Extension {
   id: string;
   name: string;
   type: Exclude<ExtensionType, "All Types">;
-  source: "Built in" | "Installed" | "AI-created" | "Custom";
+  source: "Built in" | "Installed" | "AI-created" | "Custom" | `From project ${string}`;
   enabled: boolean;
   about: string;
   includes: string[];

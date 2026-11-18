@@ -1,6 +1,6 @@
 //! Consent and installation for the inert packages in a portable project.
 use gpui::{
-    App, AppContext, AsyncApp, Bounds, WindowBounds, WindowKind, WindowOptions, point, px, size,
+    AppContext, AsyncApp, Bounds, WindowBounds, WindowKind, WindowOptions, point, px, size,
 };
 use pm_compat_runner::host::ProjectScope;
 use pm_mcp::project_extensions::{Bundle, Entry, Status, installed};
@@ -316,32 +316,28 @@ pub fn sheet(
         ))),
         ..WindowOptions::new().kind(WindowKind::Dialog)
     };
-    cx.update(|cx: &mut App| {
-        cx.open_window(options, move |window, cx| {
-            let cancel = tx.clone();
-            window.on_window_should_close(cx, move |_, _| {
-                let _ = cancel.try_send(Choice::Without);
-                true
-            });
-            let handle = window.window_handle();
-            let action: pm_shell::welcome_view::OnAction = Rc::new(move |id, cx| {
-                let choice = match id {
-                    "project" => Choice::Project,
-                    "library" => Choice::Library,
-                    _ => Choice::Without,
-                };
-                if tx.try_send(choice).is_ok() {
-                    let _ = cx.update_window(handle, |_, window, _| window.remove_window());
-                }
-            });
-            let view =
-                cx.new(|cx| pm_shell::welcome_view::WelcomeView::new(tokens, frame, action, cx));
-            let focus = view.read(cx).focus_handle();
-            focus.focus(window, cx);
-            view
-        })
+    cx.open_window(options, move |window, cx| {
+        let cancel = tx.clone();
+        window.on_window_should_close(cx, move |_, _| {
+            let _ = cancel.try_send(Choice::Without);
+            true
+        });
+        let handle = window.window_handle();
+        let action: pm_shell::welcome_view::OnAction = Rc::new(move |id, cx| {
+            let choice = match id {
+                "project" => Choice::Project,
+                "library" => Choice::Library,
+                _ => Choice::Without,
+            };
+            if tx.try_send(choice).is_ok() {
+                let _ = cx.update_window(handle, |_, window, _| window.remove_window());
+            }
+        });
+        let view = cx.new(|cx| pm_shell::welcome_view::WelcomeView::new(tokens, frame, action, cx));
+        let focus = view.read(cx).focus_handle();
+        focus.focus(window, cx);
+        view
     })
-    .ok()?
     .ok()?;
     Some(rx)
 }
