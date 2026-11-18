@@ -3,7 +3,7 @@
 use super::*;
 use gpui::{AppContext, HeadlessAppContext, TouchPhase, size};
 use pm_design::{Accessibility, Scheme};
-use std::sync::Arc;
+use std::{cell::Cell, sync::Arc};
 
 const PANELS: [&str; 5] = ["ext.logos", "fxbrowser", "easing", "ext.pixel", "ext.notes"];
 type Probe = (String, Bounds<Pixels>, Bounds<Pixels>);
@@ -212,4 +212,69 @@ fn dock_render_follows_wheel_and_momentum() {
         header_overlaps.is_empty(),
         "control paints over a sticky header: {header_overlaps:?}"
     );
+}
+
+struct BodyFadeProbe {
+    scroll: ScrollHandle,
+    fade: Rc<Cell<[f64; 2]>>,
+}
+
+impl Render for BodyFadeProbe {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let fade = self.fade.clone();
+        div()
+            .id("scrolling-panel-body")
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .scroll_edge_fade_y(px(pm_design::DOCK_SCROLL_FADE))
+            .child(
+                div().w_full().h(px(300.)).child(
+                    canvas(
+                        |_, _, _| (),
+                        move |_, _, w, _| {
+                            fade.set(crate::layer_stage::vertical_fade(w.content_mask()))
+                        },
+                    )
+                    .absolute()
+                    .inset_0(),
+                ),
+            )
+    }
+}
+
+#[::core::prelude::v1::test]
+fn dock_render_body_fades_only_edges_with_more_content() {
+    let mut cx = HeadlessAppContext::with_platform(
+        Arc::new(gpui_parley::ParleyTextSystem::new(
+            gpui_parley::SystemFonts::Load,
+        )),
+        Arc::new(()),
+        || {
+            Some(Box::new(
+                gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+            ))
+        },
+    );
+    let scroll = ScrollHandle::new();
+    let fade = Rc::new(Cell::new([0., 0.]));
+    let window = cx
+        .open_window(size(px(160.), px(100.)), |_, cx| {
+            cx.new(|_| BodyFadeProbe {
+                scroll: scroll.clone(),
+                fade: fade.clone(),
+            })
+        })
+        .unwrap();
+    for (offset, expected) in [(0., [0., 28.]), (56., [28., 28.]), (200., [28., 0.])] {
+        window
+            .update(&mut cx, |_, w, _| {
+                scroll.set_offset(point(px(0.), px(-offset)));
+                w.refresh();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.capture_screenshot(window.into()).unwrap();
+        assert_eq!(fade.get(), expected);
+    }
 }

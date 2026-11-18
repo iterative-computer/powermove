@@ -276,16 +276,34 @@
       .find((node) => node.getAttribute('data-pm-contribution') === placement.id);
     if (!root) return;
     const box = root.getBoundingClientRect();
+    const body = root.querySelector('[data-pm-panel-body]');
+    if (body) updatePanelScrollEdges(body);
     call({kind:'panel_layout_applied', panel:0, payload:{...placement,
       rect:{x:box.x,y:box.y,w:box.width,h:box.height}}});
   }, (active) => {
     for (const root of document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])'))
       root.style.setProperty('visibility', active.has(root.getAttribute('data-pm-contribution')) ? 'visible' : 'hidden', 'important');
   });
+  // The same linear 28px edge mask as the side dock, inside the shared view.
+  const updatePanelScrollEdges = (node) => {
+    if (!node?.hasAttribute?.('data-pm-panel-body') &&
+        !['auto', 'scroll'].includes(getComputedStyle(node).overflowY)) return;
+    const remaining = node.scrollHeight - node.clientHeight;
+    const edges = [
+      remaining > 1 && node.scrollTop > 1,
+      remaining > 1 && remaining - node.scrollTop > 1,
+    ];
+    const value = edges.map(on => on ? '1' : '0').join('');
+    if (node.getAttribute('data-pm-scroll-edges') !== value)
+      node.setAttribute('data-pm-scroll-edges', value);
+  };
   document.addEventListener('scroll', (event) => {
     if (event.target.closest?.('[data-pm-overscan]')) return;
     const root = event.target.closest?.('[data-pm-contribution]');
-    if (root) call({kind:'overscan_dirty',panel:0,payload:{id:root.getAttribute('data-pm-contribution')}});
+    if (root) {
+      updatePanelScrollEdges(event.target);
+      call({kind:'overscan_dirty',panel:0,payload:{id:root.getAttribute('data-pm-contribution')}});
+    }
   }, true);
   const apply = async (event) => {
     if (event.kind === "overscan_clear") {

@@ -942,3 +942,18 @@ body,
   box-shadow: none !important;
   margin: 0 !important;
 }
+
+/* The v1 dock fades only edges with hidden content. */
+@property --pm-scroll-top { syntax: '<length>'; inherits: false; initial-value: 0px; }
+@property --pm-scroll-bottom { syntax: '<length>'; inherits: false; initial-value: 0px; }
+:where([data-pm-scroll-edges]) {
+  mask-image: linear-gradient(to bottom, transparent 0,
+    #000 var(--pm-scroll-top), #000 calc(100% - var(--pm-scroll-bottom)), transparent 100%);
+  transition: --pm-scroll-top 100ms cubic-bezier(.22,1,.36,1),
+    --pm-scroll-bottom 100ms cubic-bezier(.22,1,.36,1);
+}
+:where([data-pm-scroll-edges^="1"]) { --pm-scroll-top: 28px; }
+:where([data-pm-scroll-edges$="1"]) { --pm-scroll-bottom: 28px; }
+@media (prefers-reduced-motion: reduce) {
+  :where([data-pm-scroll-edges]) { transition: none; }
+}

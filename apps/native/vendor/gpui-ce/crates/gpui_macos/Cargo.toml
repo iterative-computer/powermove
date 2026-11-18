@@ -60,9 +60,9 @@ mach2.workspace = true
 media.workspace = true
 metal.workspace = true
 objc2.workspace = true
-objc2-app-kit.workspace = true
+objc2-app-kit = { workspace = true, features = ["NSColor"] }
 objc2-foundation.workspace = true
-objc2-quartz-core = { workspace = true, features = ["CAFrameRateRange"] }
+objc2-quartz-core = { workspace = true, features = ["CAFrameRateRange", "CAGradientLayer", "objc2-core-foundation"] }
 objc2-core-media.workspace = true
 objc2-screen-capture-kit.workspace = true
 objc2-user-notifications.workspace = true

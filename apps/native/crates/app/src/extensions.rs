@@ -2178,6 +2178,7 @@ impl Controller {
         let mut shell = self.host.borrow_mut();
         let bodies = shell.native_panels.clone();
         let clips = shell.native_panel_clips.clone();
+        let fades = shell.native_panel_fades.clone();
         let stage = self.extensions.stage.clone();
         let sent = self.extensions.sent.clone();
         // Native panel over native window tint, over the shared material.
@@ -2253,6 +2254,15 @@ impl Controller {
                 });
                 let _ = host.set_regions_with_transparent_overlays(panel_regions, overlay_regions);
                 host.set_corner_radius(corner);
+                let fades = fades.borrow();
+                host.set_body_fades(
+                    mine.iter()
+                        .filter_map(|(id, rect)| {
+                            let (_, fade) = fades.iter().find(|(key, _)| key == *id)?;
+                            Some((clipped(id, *rect), *fade))
+                        })
+                        .collect(),
+                );
                 let _ = host.set_content_regions(content);
                 host.set_bodies(
                     mine.iter()

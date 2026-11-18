@@ -3,7 +3,7 @@ use block2::DynBlock;
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
     rc::Retained,
-    runtime::{Bool, ProtocolObject},
+    runtime::{AnyObject, Bool, ProtocolObject},
     sel,
 };
 use objc2_app_kit::*;
@@ -796,24 +796,66 @@ impl SlotView {
     }
     /// Shows the page only within `rects` (window points from the top), each
     /// with continuous bottom corners of `radius` (a panel body's corners).
-    fn clip(&self, rects: Vec<Rect>, radius: f64) {
+    fn clip(&self, rects: Vec<Rect>, radius: f64, fades: &[(Rect, [f64; 2])]) {
+        use objc2_quartz_core::{CAGradientLayer, CALayer, CAShapeLayer};
         let path = CGMutablePath::new();
+        let group = CALayer::new();
+        group.setFrame(self.bounds());
         let h = self.bounds().size.height;
         for r in &rects {
-            add_bottom_rounded(
-                &path,
-                NSRect::new(NSPoint::new(r.x, h - r.y - r.h), NSSize::new(r.w, r.h)),
-                radius,
-            );
+            let frame = NSRect::new(NSPoint::new(r.x, h - r.y - r.h), NSSize::new(r.w, r.h));
+            let fade = fades
+                .iter()
+                .find(|(rect, distances)| rect == r && *distances != [0., 0.]);
+            if let Some((_, [top, bottom])) = fade {
+                if r.h <= 0. || r.w <= 0. {
+                    continue;
+                }
+                let gradient = CAGradientLayer::new();
+                let stop = |alpha: f64| {
+                    let color =
+                        NSColor::colorWithSRGBRed_green_blue_alpha(0., 0., 0., alpha).CGColor();
+                    unsafe { Retained::retain(&*color as *const _ as *mut AnyObject).unwrap() }
+                };
+                let top_edge = (*top / r.h).min(1.);
+                let bottom_edge = (1. - *bottom / r.h).max(top_edge);
+                let colors = [
+                    if *top > 0. { 0. } else { 1. },
+                    1.,
+                    1.,
+                    if *bottom > 0. { 0. } else { 1. },
+                ]
+                .map(stop);
+                unsafe {
+                    gradient.setColors(Some(&NSArray::from_retained_slice(&colors)));
+                }
+                gradient.setLocations(Some(&NSArray::from_retained_slice(
+                    &[0., top_edge, bottom_edge, 1.].map(NSNumber::new_f64),
+                )));
+                gradient.setStartPoint(NSPoint::new(0.5, 1.));
+                gradient.setEndPoint(NSPoint::new(0.5, 0.));
+                gradient.setFrame(frame);
+                let shape = CAShapeLayer::new();
+                shape.setFrame(gradient.bounds());
+                let rounded = CGMutablePath::new();
+                add_bottom_rounded(&rounded, gradient.bounds(), radius);
+                shape.setPath(Some(&rounded));
+                unsafe {
+                    gradient.setMask(Some(&shape));
+                }
+                group.addSublayer(&gradient);
+            } else {
+                add_bottom_rounded(&path, frame, radius);
+            }
         }
         *self.ivars().borrow_mut() = rects;
         self.setWantsLayer(true);
-        let mask = objc2_quartz_core::CAShapeLayer::new();
-        // A mask is drawn within its own bounds; without a frame it hides everything.
+        let mask = CAShapeLayer::new();
         mask.setFrame(self.bounds());
         mask.setPath(Some(&path));
+        group.addSublayer(&mask);
         if let Some(layer) = self.layer() {
-            unsafe { layer.setMask(Some(&mask)) }
+            unsafe { layer.setMask(Some(&group)) }
         }
     }
 }
@@ -864,6 +906,7 @@ pub struct MacDomHost {
     /// The panels shown and their bodies (`set_bodies`); `None`: unknown,
     /// a press is judged by the regions alone.
     bodies: Option<Vec<(String, Rect)>>,
+    body_fades: Vec<(Rect, [f64; 2])>,
     /// The panel last pressed, whose field the caret is in.
     caret_panel: Option<String>,
     activity: Option<Activity>,
@@ -1016,6 +1059,7 @@ impl MacDomHost {
             web,
             pressed,
             bodies: None,
+            body_fades: Vec::new(),
             caret_panel: None,
             slot,
             ground,
@@ -1330,6 +1374,12 @@ impl MacDomHost {
     /// press is known by its panel: a tab beside it shows in the same body.
     pub fn set_bodies(&mut self, bodies: Vec<(String, Rect)>) {
         self.bodies = Some(bodies);
+    }
+    pub fn set_body_fades(&mut self, fades: Vec<(Rect, [f64; 2])>) {
+        if self.body_fades != fades {
+            self.body_fades = fades;
+            self.shared.geometry_dirty.set(true);
+        }
     }
     /// Whether the panel last pressed stopped showing (PM-294).
     fn caret_left(&mut self) -> bool {
@@ -1704,8 +1754,11 @@ impl MacDomHost {
             NSPoint::ZERO,
             NSSize::new(viewport.w, viewport.h),
         ));
-        self.slot
-            .clip(self.shared.panels.borrow().visible(), self.corner_radius);
+        self.slot.clip(
+            self.shared.panels.borrow().visible(),
+            self.corner_radius,
+            &self.body_fades,
+        );
         // The panel the page's caret is in stopped showing (another tab,
         // closed, a layout without it): the editor takes the keyboard back,
         // or keys and the input-source badge stay with a hidden field

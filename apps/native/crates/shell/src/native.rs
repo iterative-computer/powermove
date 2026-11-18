@@ -3478,6 +3478,7 @@ pub struct Host {
     /// Rectangles of panel bodies a native surface below GPUI draws.
     pub native_panels: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
     pub native_panel_clips: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
+    pub native_panel_fades: Rc<RefCell<Vec<(String, [f64; 2])>>>,
     /// Keeps web panels in sync with resolved appearance and accessibility.
     pub native_style: Option<Rc<dyn Fn(&Tokens)>>,
     /// Runs inside the composition transaction, with the window size.
@@ -3687,6 +3688,7 @@ impl Host {
             contributed_choices: vec![],
             native_panels: Rc::default(),
             native_panel_clips: Rc::default(),
+            native_panel_fades: Rc::default(),
             native_style: None,
             native_present: None,
             native_accessibility: vec![],

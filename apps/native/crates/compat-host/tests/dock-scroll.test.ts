@@ -38,3 +38,26 @@ test('focus forwards panel-relative bounds for native reveal',()=>{
  const h=setup();h.listeners.focusin({target:h.inner});
  expect(h.sent[0]).toEqual({kind:'dock_reveal',panel:0,payload:{id:'notes',top:350,height:24}});
 });
+
+test("the shared page enables each mask only if content remains beyond it", () => {
+  const source = readFileSync(new URL("../src/remote-dom.js", import.meta.url), "utf8");
+  const start = source.indexOf("  const updatePanelScrollEdges =");
+  const end = source.indexOf("  document.addEventListener('scroll'", start);
+  const context: any = {};
+  runInNewContext(source.slice(start, end) + ";globalThis.update = updatePanelScrollEdges;", context);
+  let edges = "";
+  const body = {
+    scrollTop: 0, scrollHeight: 300, clientHeight: 120,
+    hasAttribute: () => true,
+    getAttribute: () => edges,
+    setAttribute: (_: string, value: string) => { edges = value; },
+  };
+  for (const [position, expected] of [[0, "01"], [80, "11"], [180, "10"]] as const) {
+    body.scrollTop = position;
+    context.update(body);
+    expect(edges).toBe(expected);
+  }
+  body.scrollHeight = body.clientHeight;
+  context.update(body);
+  expect(edges).toBe("00");
+});

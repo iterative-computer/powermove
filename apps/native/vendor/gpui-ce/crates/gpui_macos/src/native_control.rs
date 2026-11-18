@@ -15,6 +15,7 @@ struct State {
     /// What a paint staged, with that paint's number: placed by the present
     /// that follows that paint, and by no later one.
     geometry: Cell<Option<(u64, NSRect, NSRect)>>,
+    scroll_fade: crate::scroll_fade::ScrollFade,
     staged: Cell<Option<(NSRect, NSRect)>>,
     alpha: Cell<Option<(u64, f64)>>,
     staged_alpha: Cell<f64>,
@@ -50,6 +51,17 @@ impl State {
             .get()
             .filter(|(paint, ..)| Some(*paint) == last)
             .map(|(_, bounds, clip)| (bounds, clip))
+    }
+    fn place_fade(&self, frame: NSRect, apply: bool) -> bool {
+        let Some((_, clip)) = self.placed() else {
+            return false;
+        };
+        let g = self.gpui.frame();
+        let visible = NSRect::new(
+            NSPoint::new(frame.origin.x - g.origin.x, g.origin.y + g.size.height - frame.origin.y - frame.size.height),
+            frame.size,
+        );
+        self.scroll_fade.place(&self.wrapper, visible, clip, apply)
     }
     /// The wrapper's frame, the control's frame inside it and whether the
     /// wrapper is hidden, for what the last paint staged.
@@ -106,6 +118,7 @@ impl NativeControlSlot {
             wrapper,
             control,
             geometry: Cell::new(None),
+            scroll_fade: Default::default(),
             staged: Cell::new(None),
             alpha: Cell::new(None),
             staged_alpha: Cell::new(1.),
@@ -119,8 +132,12 @@ impl NativeControlSlot {
         Self { state }
     }
     pub fn stage(&self, bounds: NSRect, clip: NSRect) {
+        self.stage_with_scroll_fade(bounds, clip, [0., 0.]);
+    }
+    pub fn stage_with_scroll_fade(&self, bounds: NSRect, clip: NSRect, fade: [f64; 2]) {
         self.state.stage(Some((bounds, clip)));
         self.state.staged.set(Some((bounds, clip)));
+        self.state.scroll_fade.stage(fade);
     }
     pub fn stage_alpha(&self, alpha: f64) {
         let alpha = alpha.clamp(0., 1.);
@@ -282,6 +299,7 @@ pub(crate) fn pending(key: usize) -> bool {
                 state.wrapper.frame() != frame
                     || state.control.frame() != local
                     || state.wrapper.isHidden() != hidden
+                    || (!hidden && state.place_fade(frame, false))
                     || state.alpha.get().is_some_and(|(paint, alpha)| {
                         Some(paint) == crate::composition::last_paint(key)
                             && state.control.alphaValue() != alpha
@@ -294,8 +312,8 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
     let mut moved = false;
     for state in slots.into_iter().filter_map(|s| s.upgrade()) {
         let target = state.target();
-        state.geometry.set(None);
         let Some((frame, local, hidden)) = target else {
+            state.geometry.set(None);
             if !state.wrapper.isHidden() {
                 state.wrapper.setHidden(true);
                 moved = true;
@@ -321,6 +339,10 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
                 moved = true;
             }
         }
+        if !hidden {
+            moved |= state.place_fade(frame, true);
+        }
+        state.geometry.set(None);
         if !hidden && unsafe { state.wrapper.superview() }.is_none() {
             state.attach();
         }
