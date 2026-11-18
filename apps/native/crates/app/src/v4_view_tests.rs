@@ -2135,3 +2135,473 @@ fn a_side_panels_reach_follows_its_content_as_it_grows_and_shrinks(cx: &mut Test
     assert_eq!(edges(&mut vcx), (0., 30.), "the shrunk page does not scroll");
     let _ = scroll;
 }
+
+/// The Settings body, built with the same retained view as its own window.
+struct SettingsScrollFrame {
+    child: Entity<SurfaceView>,
+    fill: u32,
+    thumb: std::rc::Rc<crate::builtins::SettingsThumb>,
+}
+
+struct CountRenders(usize);
+
+impl Render for CountRenders {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.0 += 1;
+        div()
+    }
+}
+
+impl Render for SettingsScrollFrame {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = self.child.read(cx);
+        let thumb = view.settings_scroll().map(|(id, scroll)| {
+            crate::builtins::settings_scroll_thumb(
+                id,
+                scroll,
+                self.thumb.clone(),
+                view.tokens(),
+                cx.should_auto_hide_scrollbars(),
+            )
+        });
+        div()
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .bg(gpui::rgb(self.fill))
+            .child(crate::builtins::fixed_body_view("settings", &self.child))
+            .children(thumb)
+    }
+}
+
+fn settings_test_options(w: f32, h: f32) -> gpui::WindowOptions {
+    use gpui::{WindowBounds, WindowOptions};
+    WindowOptions::new()
+        .show(false)
+        .focus(false)
+        .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
+            point(px(0.), px(0.)),
+            size(px(w), px(h)),
+        ))))
+}
+
+#[gpui::test]
+fn settings_scroll_wheels_each_page_without_waking_the_editor(cx: &mut TestAppContext) {
+    use gpui::TouchPhase;
+    cx.executor().allow_parking();
+    let rig = rig("settings", 1);
+    rig.runtime.update_facts(json!({
+        "shortcuts": {
+            "preset": "fixture", "changed": false, "conflicts": [],
+            "rows": (0..160).map(|i| json!({
+                "id": format!("c{i}"), "menu": "Edit", "label": format!("Command {i}"),
+                "keys": ["⌘K"], "chords": ["cmd+k"], "changed": false,
+                "fixed": false, "recording": false
+            })).collect::<Vec<_>>()
+        }
+    }));
+    // Change the kernel revision so a host publication carries the fixture
+    // shortcuts and installed extensions to the already mounted panel.
+    use pm_kernel::state::{ExtensionEntry, StateOp, StateTransaction};
+    rig.kernel
+        .state_transaction(StateTransaction {
+            expected_revision: None,
+            ops: (0..86)
+                .map(|i| {
+                    StateOp::Extension(ExtensionEntry {
+                        id: format!("extension-{i:03}"),
+                        installed: true,
+                        enabled: true,
+                        version: "1.0.0".into(),
+                        source: pm_model::json::parse("{}").unwrap(),
+                    })
+                })
+                .collect(),
+        })
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in rig.runtime.publish() {
+        let ticket = ticket.unwrap();
+        settle(cx, |_| {
+            ticket.try_take().is_some_and(|r| {
+                r.unwrap();
+                true
+            })
+        });
+    }
+    let editor_window = cx.update(|cx| {
+        cx.open_window(settings_test_options(640., 480.), |_, cx| {
+            cx.new(|_| CountRenders(0))
+        })
+        .unwrap()
+    });
+    let editor = editor_window.root(cx).unwrap();
+    let editor_cx = VisualTestContext::from_window(editor_window.into(), cx);
+    let sections = [
+        ("general", "settings.section.general"),
+        ("accounts", "settings.section.accounts"),
+        ("media", "settings.section.media"),
+        ("storage", "settings.section.storage"),
+        ("project", "settings.section.project"),
+        ("memory", "settings.section.memory"),
+        ("transcription", "settings.section.transcription"),
+        ("extensions", "settings.section.extensions"),
+        ("shortcuts", "settings.section.shortcuts"),
+    ];
+    let _ = rig.runtime.take_publications();
+    let mut problems = Vec::new();
+    for (section, selector) in sections {
+        let ticket = rig.runtime.show_section("settings", section).unwrap();
+        settle(cx, |_| {
+            ticket.try_take().is_some_and(|r| {
+                r.unwrap();
+                true
+            })
+        });
+        let mut first = publication(&rig);
+        // Shortcuts arrives in bounded commits. Measure after its final
+        // command is present so before and after use the same row count.
+        if section == "shortcuts" {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !first.surface.nodes().values().any(|node| {
+                node.props.get("id").and_then(Value::as_str) == Some("settings.shortcut.c159")
+            }) {
+                assert!(Instant::now() < deadline, "shortcuts fixture never filled");
+                std::thread::sleep(Duration::from_millis(1));
+                if let Some(next) = rig.runtime.take_publications().pop() {
+                    first = next;
+                }
+            }
+        }
+        let refresh = first.clone();
+        let runtime = rig.runtime.clone();
+        let window = cx.update(|cx| {
+            cx.open_window(settings_test_options(620., 330.), |window, cx| {
+                let child = cx.new(|cx| {
+                    SurfaceView::new(runtime, first, tokens(), Natives::default(), window, cx)
+                });
+                cx.new(|_| SettingsScrollFrame {
+                    child,
+                    fill: tokens().colors.panel_secondary,
+                    thumb: Default::default(),
+                })
+            })
+            .unwrap()
+        });
+        let root = window.root(cx).unwrap();
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        let child = root.read_with(&vcx, |root, _| root.child.clone());
+        vcx.run_until_parked();
+        let start = bounds(&mut vcx, selector).origin.y;
+        let position = point(px(310.), px(150.));
+        vcx.simulate_mouse_move(position, None, Modifiers::none());
+        let before = child.read_with(&vcx, |v, _| v.renders);
+        let editor_before = editor.read_with(&editor_cx, |v, _| v.0);
+        let mut samples = Vec::new();
+        for (delta, touch_phase) in [
+            (ScrollDelta::Lines(point(0., -2.)), TouchPhase::Moved),
+            (
+                ScrollDelta::Pixels(point(px(0.), px(-8.))),
+                TouchPhase::Started,
+            ),
+            (
+                ScrollDelta::Pixels(point(px(0.), px(-31.))),
+                TouchPhase::Moved,
+            ),
+            (
+                ScrollDelta::Pixels(point(px(0.), px(-17.))),
+                TouchPhase::Moved,
+            ),
+            (
+                ScrollDelta::Pixels(point(px(0.), px(-7.))),
+                TouchPhase::Ended,
+            ),
+            (
+                ScrollDelta::Pixels(point(px(0.), px(-3.))),
+                TouchPhase::Moved,
+            ),
+            (
+                ScrollDelta::Pixels(point(px(0.), px(16.))),
+                TouchPhase::Started,
+            ),
+        ] {
+            let at = Instant::now();
+            vcx.simulate_event(ScrollWheelEvent {
+                position,
+                delta,
+                touch_phase,
+                ..Default::default()
+            });
+            samples.push(at.elapsed().as_secs_f64() * 1000.);
+        }
+        let end = bounds(&mut vcx, selector).origin.y;
+        let frames = child.read_with(&vcx, |v, _| v.renders) - before;
+        let editor_frames = editor.read_with(&editor_cx, |v, _| v.0) - editor_before;
+        samples.sort_by(f64::total_cmp);
+        eprintln!(
+            "{section}: y {start:?} -> {end:?}, panel renders={frames}, editor renders={editor_frames}, median={:.3} ms, max={:.3} ms",
+            samples[3], samples[6]
+        );
+        if editor_frames > 0 || (section == "shortcuts" && frames >= samples.len()) {
+            problems.push((section, frames, editor_frames));
+        }
+        let detail = child
+            .read_with(&vcx, |v, _| v.test_scroll_handle("settings.detail"))
+            .unwrap();
+        let after_wheel = detail.offset().y;
+        child.update(&mut vcx, |v, cx| v.publish(refresh, cx));
+        settle(cx, |cx| !child.read_with(cx, |v, _| v.compiling()));
+        assert_eq!(
+            detail.offset().y,
+            after_wheel,
+            "{section} jumped on refresh"
+        );
+
+        if detail.max_offset().y > px(0.) {
+            vcx.simulate_event(ScrollWheelEvent {
+                position: point(px(6.), px(150.)),
+                delta: ScrollDelta::Pixels(point(px(0.), px(-100_000.))),
+                ..Default::default()
+            });
+            // This may replay a layer. Read layout probes only after a fresh
+            // layout with that same input offset.
+            child.update(&mut vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+            let viewport = detail.bounds();
+            assert_eq!(detail.offset().y, -detail.max_offset().y, "{section}");
+            assert!(
+                bounds(&mut vcx, selector).bottom() <= viewport.bottom() + px(1.),
+                "{section} clipped at the bottom"
+            );
+            if section == "shortcuts" {
+                let last = bounds(&mut vcx, "settings.shortcut.c159");
+                assert!(last.top() >= viewport.top() && last.bottom() < viewport.bottom());
+            }
+        }
+        vcx.update(|window, _| window.remove_window());
+        editor_cx.run_until_parked();
+    }
+    assert!(
+        problems.is_empty(),
+        "wheel input rebuilt views: {problems:?}"
+    );
+}
+
+/// The range from Settings' installed list already contains a leading spacer.
+#[gpui::test]
+fn settings_scroll_virtual_rows_keep_their_place_after_publication(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let page = || {
+        let mut ops = node_ops(
+            1,
+            0,
+            "virtual-list",
+            json!({"id":"settings.extensions","count":240,"range":[120,160],"itemSize":40,"style":{"width":300,"height":320}}),
+            &[],
+        );
+        for i in 120..160 {
+            ops.extend(node_ops(
+                i + 2, 1, "div",
+                json!({"id":format!("settings.extension.e{i}"),"style":{"height":40,"flexShrink":0}}),
+                &[],
+            ));
+        }
+        let mut p = synthetic(&rig, ops);
+        p.panel = "settings".into();
+        p
+    };
+    let runtime = rig.runtime.clone();
+    let first = page();
+    cx.executor().allow_parking();
+    let window = cx.update(|cx| {
+        cx.open_window(settings_test_options(620., 330.), |window, cx| {
+            cx.new(|cx| SurfaceView::new(runtime, first, tokens(), Natives::default(), window, cx))
+        })
+        .unwrap()
+    });
+    let view = window.root(cx).unwrap();
+    let mut vcx = VisualTestContext::from_window(window.into(), cx);
+    vcx.run_until_parked();
+    let handle = view
+        .read_with(&vcx, |v, _| v.test_scroll_handle("settings.extensions"))
+        .unwrap();
+    vcx.update(|_, cx| {
+        handle.set_offset(point(px(0.), px(-4800.)));
+        view.update(cx, |_, cx| cx.notify());
+    });
+    view.update(&mut vcx, |v, cx| v.publish(page(), cx));
+    settle(cx, |cx| !view.read_with(cx, |v, _| v.compiling()));
+    assert_eq!(handle.offset().y, px(-4800.));
+    let viewport = bounds(&mut vcx, "settings.extensions");
+    let first = bounds(&mut vcx, "settings.extension.e120");
+    let last = bounds(&mut vcx, "settings.extension.e127");
+    assert_eq!(first.top(), viewport.top());
+    assert_eq!(last.bottom(), viewport.top() + px(320.));
+}
+
+#[gpui::test]
+fn settings_scroll_a_large_extension_list_yields_the_remaining_wheel_step(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1,
+        0,
+        "scroll",
+        json!({"id":"settings.detail","style":{"display":"flex","flexDirection":"column"}}),
+        &[],
+    );
+    ops.extend(node_ops(
+        2,
+        1,
+        "virtual-list",
+        json!({"id":"settings.extensions","count":40,"range":[0,40],"itemSize":40,
+            "metadata":{"rowFloor":4},"style":{"maxHeight":160,"width":300}}),
+        &[],
+    ));
+    for i in 0..40 {
+        ops.extend(node_ops(
+            3 + i,
+            2,
+            "div",
+            json!({"style":{"height":40,"flexShrink":0}}),
+            &[],
+        ));
+    }
+    ops.extend(node_ops(
+        43,
+        1,
+        "div",
+        json!({"style":{"height":800,"flexShrink":0}}),
+        &[],
+    ));
+    let mut first = synthetic(&rig, ops);
+    first.panel = "settings".into();
+    let runtime = rig.runtime.clone();
+    let window = cx.update(|cx| {
+        cx.open_window(settings_test_options(620., 330.), |window, cx| {
+            cx.new(|cx| SurfaceView::new(runtime, first, tokens(), Natives::default(), window, cx))
+        })
+        .unwrap()
+    });
+    let view = window.root(cx).unwrap();
+    let mut vcx = VisualTestContext::from_window(window.into(), cx);
+    vcx.run_until_parked();
+    let handle = |name| {
+        view.read_with(&vcx, |v, _| v.test_scroll_handle(name))
+            .unwrap()
+    };
+    let detail = handle("settings.detail");
+    let list = handle("settings.extensions");
+    let max = list.max_offset().y;
+    assert!(max > px(20.) && detail.max_offset().y > px(30.));
+    list.set_offset(point(px(0.), px(20.) - max));
+    view.update(&mut vcx, |_, cx| cx.notify());
+    vcx.run_until_parked();
+    let position = point(px(100.), px(80.));
+    vcx.simulate_event(ScrollWheelEvent {
+        position,
+        delta: ScrollDelta::Pixels(point(px(0.), px(-50.))),
+        ..Default::default()
+    });
+    assert_eq!(list.offset().y, -max);
+    assert_eq!(
+        detail.offset().y,
+        px(-30.),
+        "the list used twenty of fifty points"
+    );
+    list.set_offset(point(px(0.), px(-10.)));
+    view.update(&mut vcx, |_, cx| cx.notify());
+    vcx.run_until_parked();
+    vcx.simulate_event(ScrollWheelEvent {
+        position,
+        delta: ScrollDelta::Pixels(point(px(0.), px(50.))),
+        ..Default::default()
+    });
+    assert_eq!(list.offset().y, px(0.));
+    assert_eq!(
+        detail.offset().y,
+        px(0.),
+        "reversing also hands off the remainder"
+    );
+}
+
+// Settings detail only. HeadlessAppContext backs this window with a Metal
+// texture and never orders or focuses it on the desktop.
+#[::core::prelude::v1::test]
+fn settings_scroll_capture_if_requested() {
+    use gpui::{HeadlessAppContext, InputEvent};
+    let Some(dir) = std::env::var_os("PM_SETTINGS_SCROLL_CAPTURES") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rig = rig("settings", 1);
+    let _ = rig.runtime.take_publications();
+    let ticket = rig.runtime.show_section("settings", "general").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(result) = ticket.try_take() {
+            result.unwrap();
+            break;
+        }
+        assert!(Instant::now() < deadline, "General did not open");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let first = publication(&rig);
+    for (theme, scheme) in [
+        ("dark", pm_design::Scheme::Dark),
+        ("light", pm_design::Scheme::Light),
+    ] {
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_parley::ParleyTextSystem::new(
+                gpui_parley::SystemFonts::Load,
+            )),
+            Arc::new(()),
+            || {
+                Some(Box::new(
+                    gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                ))
+            },
+        );
+        let tokens = pm_design::Tokens::new(scheme, Default::default());
+        let fill = tokens.colors.panel_secondary;
+        let first = first.clone();
+        let runtime = rig.runtime.clone();
+        let window = cx
+            .open_window(size(px(620.), px(330.)), |window, cx| {
+                let child = cx.new(|cx| {
+                    SurfaceView::new(runtime, first, tokens, Natives::default(), window, cx)
+                });
+                cx.new(|_| SettingsScrollFrame {
+                    child,
+                    fill,
+                    thumb: Default::default(),
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.capture_screenshot(window.into())
+            .unwrap()
+            .save(dir.join(format!("general-top-{theme}.png")))
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.dispatch_event(
+                ScrollWheelEvent {
+                    position: point(px(310.), px(150.)),
+                    delta: ScrollDelta::Pixels(point(px(0.), px(-115.))),
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.capture_screenshot(window.into())
+            .unwrap()
+            .save(dir.join(format!("general-scroll-{theme}.png")))
+            .unwrap();
+    }
+}

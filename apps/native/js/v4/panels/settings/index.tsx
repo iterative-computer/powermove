@@ -634,6 +634,7 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
             // API GAP: structural virtual-list is the existing wire primitive; the kit
             // has no VirtualList/source-list component or AXRowCount projection yet.
             <virtual-list
+              key={JSON.stringify([model.extensionQuery, model.extensionType])}
               id="settings.extensions"
               role="list"
               label="Extensions"
@@ -1490,6 +1491,9 @@ export function SettingsPanel({ model, bindings, window }: SettingsPanelProps) {
   const [, update] = useState(0);
   useLayoutEffect(() => model.subscribe(() => update((n) => n + 1)), [model]);
   if (!model.open) return null;
+  const query = model.query.trim();
+  // A new page starts at its top. Publications of that page keep its handle.
+  const scrollKey = query ? `search:${query}` : model.active;
   return (
     <div
       id="settings"
@@ -1515,6 +1519,7 @@ export function SettingsPanel({ model, bindings, window }: SettingsPanelProps) {
     >
       <div style={{ display: "flex", flexGrow: 1, flexShrink: 1 }}>
         <scroll
+          key={scrollKey}
           id="settings.detail"
           role="group"
           label={sectionCopy[model.active].title}

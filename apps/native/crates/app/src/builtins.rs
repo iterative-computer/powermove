@@ -5,6 +5,7 @@ use gpui::{prelude::*, *};
 use pm_builtins::{BUILTIN_PANELS, Builtins, PlatformRequest, Publication};
 use serde_json::{Value, json};
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet, VecDeque},
     rc::Rc,
     sync::Arc,
@@ -27,6 +28,11 @@ pub(crate) fn fixed_body_view(id: &str, view: &Entity<SurfaceView>) -> AnyElemen
     }
 }
 
+/// These panels own their scroll within the viewport they are given.
+pub(crate) fn panel_fits_body(id: &str) -> bool {
+    matches!(id, "viewer" | "timeline" | "settings")
+}
+
 /// How long a panel's scroll thumb stays after the last scroll.
 const SCROLL_THUMB_HOLD: std::time::Duration = std::time::Duration::from_millis(900);
 /// The original app's scrollbar: 9 pt across, its thumb inset 2 pt within it.
@@ -41,26 +47,108 @@ fn scroll_thumb(
     height: f32,
     t: &pm_design::Tokens,
 ) -> Option<AnyElement> {
+    let thumb = scroll_thumb_bounds(handle, width, height, &t.metrics)?;
+    Some(
+        div()
+            .absolute()
+            .top(thumb.origin.y)
+            .left(thumb.origin.x)
+            .w(thumb.size.width)
+            .h(thumb.size.height)
+            .rounded(thumb.size.width / 2.)
+            .bg(pm_shell::kit::ink(
+                t.colors.text,
+                t.translucency.faint * 0.8,
+            ))
+            .into_any_element(),
+    )
+}
+
+fn scroll_thumb_bounds(
+    handle: &ScrollHandle,
+    width: f32,
+    height: f32,
+    metrics: &pm_design::Metrics,
+) -> Option<Bounds<Pixels>> {
     let max = f32::from(handle.max_offset().y);
     if max <= 0.5 || height <= 0. {
         return None;
     }
-    let content = height + max;
-    let length = (height * height / content).max(t.metrics.hit);
+    let length = (height * height / (height + max)).max(metrics.hit);
     let offset = (-f32::from(handle.offset().y)).clamp(0., max);
     let top = (height - length) * offset / max;
     let thick = SCROLL_BAR - SCROLL_THUMB_INSET * 2.;
-    Some(
-        div()
-            .absolute()
-            .top(px(top + SCROLL_THUMB_INSET))
-            .left(px(width - thick - SCROLL_THUMB_INSET - t.metrics.border * 2.))
-            .w(px(thick))
-            .h(px((length - SCROLL_THUMB_INSET * 2.).max(thick)))
-            .rounded(px(thick / 2.))
-            .bg(pm_shell::kit::ink(t.colors.text, t.translucency.faint * 0.8))
-            .into_any_element(),
+    Some(Bounds::new(
+        point(
+            px(width - thick - SCROLL_THUMB_INSET - metrics.border * 2.),
+            px(top + SCROLL_THUMB_INSET),
+        ),
+        size(px(thick), px((length - SCROLL_THUMB_INSET * 2.).max(thick))),
+    ))
+}
+
+#[derive(Default)]
+pub(crate) struct SettingsThumb {
+    offset: Cell<Option<(pm_surface::Id, Pixels)>>,
+    last_move: Cell<Option<std::time::Instant>>,
+}
+
+pub(crate) fn settings_scroll_thumb(
+    id: pm_surface::Id,
+    scroll: ScrollHandle,
+    state: Rc<SettingsThumb>,
+    t: &pm_design::Tokens,
+    auto_hide: bool,
+) -> AnyElement {
+    let metrics = t.metrics.clone();
+    let ink = pm_shell::kit::ink(t.colors.text, t.translucency.faint * 0.8);
+    // The wrapper paints on offset-only frames too. Draw the thumb from the
+    // live handle without invalidating the page or its editor owner.
+    canvas(
+        |_, _, _| (),
+        move |area, _, window, cx| {
+            let offset = scroll.offset().y;
+            match state.offset.replace(Some((id, offset))) {
+                Some((previous, y)) if previous == id && y != offset => {
+                    let now = std::time::Instant::now();
+                    state.last_move.set(Some(now));
+                    if auto_hide {
+                        let state = state.clone();
+                        window
+                            .spawn(cx, async move |cx| {
+                                cx.background_executor().timer(SCROLL_THUMB_HOLD).await;
+                                if state.last_move.get() == Some(now) {
+                                    state.last_move.set(None);
+                                    let _ = cx.update(|window, _| window.refresh());
+                                }
+                            })
+                            .detach();
+                    }
+                }
+                Some((previous, _)) if previous == id => {}
+                _ => state.last_move.set(None),
+            }
+            if auto_hide && state.last_move.get().is_none() {
+                return;
+            }
+            if let Some(mut thumb) = scroll_thumb_bounds(
+                &scroll,
+                f32::from(area.size.width),
+                f32::from(area.size.height),
+                &metrics,
+            ) {
+                thumb.origin = thumb.origin + area.origin;
+                window.paint_quad(
+                    PaintQuad::new(thumb)
+                        .corner_radii(thumb.size.width / 2.)
+                        .background(ink),
+                );
+            }
+        },
     )
+    .absolute()
+    .inset_0()
+    .into_any_element()
 }
 /// Rows the font picker lists at once; typing narrows the rest.
 const FONT_PAGE: usize = 80;
@@ -1095,7 +1183,7 @@ impl Controller {
                 cx.new(|cx| SurfaceView::new(runtime, publication, tokens, natives, window, cx));
             // Side panels' bodies scroll (`panel_body`): the panel grows
             // with its content. The viewer and the timeline fit their slot.
-            if !matches!(id, "viewer" | "timeline") {
+            if !panel_fits_body(id) {
                 view.update(cx, |v, _| v.grows = true);
             }
             if id == "timeline" {
@@ -1196,10 +1284,10 @@ impl Controller {
             .absolute()
             .size_0()
         };
-        // The viewer and the timeline lay out to their slot and scroll their
-        // own way; every other panel's body scrolls when its content is
-        // taller than its slot, where it was left across splitter drags.
-        if matches!(id, "viewer" | "timeline") {
+        // Settings, viewer and timeline own their viewport. In particular,
+        // a Settings wheel step never goes through the editor's dock listener
+        // and its notification, even when the page is at an edge.
+        if panel_fits_body(id) {
             return Some(
                 div()
                     .w_full()
@@ -1683,6 +1771,7 @@ impl Controller {
                             drag: None,
                             editor: parent,
                             chrome: None,
+                            settings_thumb: Default::default(),
                         }
                     })
                 },
@@ -2960,6 +3049,7 @@ struct SurfaceWindow {
     editor: Option<AnyWindowHandle>,
     /// Settings' AppKit chrome (the owner holds it too, to update it).
     chrome: Option<std::rc::Rc<pm_shell::settings_window::SettingsChrome>>,
+    settings_thumb: Rc<SettingsThumb>,
 }
 impl SurfaceWindow {
     /// A press on the popover's header: a drag begins once the pointer
@@ -3146,7 +3236,8 @@ impl Render for SurfaceWindow {
             self.keys.claim(window, cx);
         }
         let (mut fill, mut band, mut head_h) = (0, 0., 0.);
-        let (head, body) = self.owner.update(cx, |v, cx| {
+        let thumb_state = self.settings_thumb.clone();
+        let (head, body, thumb) = self.owner.update(cx, |v, cx| {
             let (header, colour, titlebar) = {
                 let t = &v.host.borrow().tokens;
                 // The popover's content, its header too, is on solid
@@ -3179,7 +3270,20 @@ impl Render for SurfaceWindow {
             let head = popover
                 .then(|| v.builtin_header(&panel, rect, false, window, cx))
                 .flatten();
-            (head, v.builtin_panel(&panel, rect, window, cx))
+            let body = v.builtin_panel(&panel, rect, window, cx);
+            let thumb = settings
+                .then(|| v.builtins.views.get("settings")?.read(cx).settings_scroll())
+                .flatten()
+                .map(|(id, scroll)| {
+                    settings_scroll_thumb(
+                        id,
+                        scroll,
+                        thumb_state,
+                        &v.host.borrow().tokens,
+                        cx.should_auto_hide_scrollbars(),
+                    )
+                });
+            (head, body, thumb)
         });
         // The agent popover's frame is native glass with its content on
         // solid `floating`; other panel windows paint the panel colour.
@@ -3268,6 +3372,7 @@ impl Render for SurfaceWindow {
                     .child(head)
             }))
             .children(body)
+            .children(thumb)
             // While a drag is held: every move and the release are the
             // popover's, never the header's controls' or anything else's.
             .when(self.drag.is_some(), |d| {

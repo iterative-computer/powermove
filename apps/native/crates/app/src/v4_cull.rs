@@ -140,7 +140,10 @@ impl SurfaceView {
                 .prepared
                 .nodes
                 .values()
-                .filter(|n| n.scroll_y && !n.hidden)
+                // A virtual list's visible window and its spacers already
+                // decide which rows exist. Starting its rows at zero here
+                // would ignore the leading spacer after a publication.
+                .filter(|n| n.scroll_y && !n.hidden && n.virtual_window.is_none())
                 .filter_map(|n| self.scrolls.get(&n.id).map(|h| (n.id, h.clone())))
                 .collect();
             let window_height = f32::from(window.viewport_size().height);
@@ -150,9 +153,8 @@ impl SurfaceView {
                     continue;
                 }
                 // What shows of the scroller's content: its part inside the
-                // window. A panel whose body scrolls around it (Settings in
-                // a panel) moves the scroller itself; its own offset moves
-                // its content.
+                // window. A panel's scrolling dock body moves the scroller
+                // itself; its own offset moves its content.
                 // Where the scroller is now: where the last layout left it,
                 // moved by the steps of a body around the panel since.
                 // Offsets as the layout will clamp them: a step can leave one
@@ -164,14 +166,10 @@ impl SurfaceView {
                 let from = top.max(0.) - top - offset;
                 let to = (top + f32::from(bounds.size.height)).min(window_height) - top - offset;
                 let shown = (to - from).max(0.);
-                // A viewport kept on either side where a scroll layer moves
-                // the rows (the Project panel): never less than what it
-                // records past its edges (`scroll_layer::REACH`, one
-                // viewport), so a step it replays shows only rows built, and
-                // a step past it draws the panel again. Elsewhere each step
-                // draws the panel at its new offset, and a quarter of one
-                // covers rows not measured yet; a fast wheel on Settings ›
-                // Shortcuts built three viewports of rows a frame.
+                // A layer records one extra viewport on either side, so
+                // keep those rows ready for replay. Other scrollers lay out
+                // on each step and only need spare rows around the edges
+                // for content still being measured.
                 let margin = if self.layered() { shown } else { shown * NEAR };
                 let near = (from - margin, to + margin);
                 let mut budget = MEASURE_PER_FRAME;
@@ -352,10 +350,9 @@ impl SurfaceView {
     pub(super) fn cull_large(&self) -> bool {
         self.prepared.nodes.len() > LARGE
     }
-    /// Whether this panel's scrollers move their rows with a scroll layer
-    /// (`v4_view`, next to its `.scroll_layer()`).
+    /// Whether the panel supports replaying wheel steps on a scroll layer.
     pub(super) fn layered(&self) -> bool {
-        &*self.publication.panel == pm_builtins::PROJECT_PANEL
+        matches!(&*self.publication.panel, pm_builtins::PROJECT_PANEL | "settings")
     }
     /// Whether the last frame left rows out: a body that scrolls around the
     /// panel draws it again on each step, so rows come back as they near.

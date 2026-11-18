@@ -653,6 +653,7 @@ impl SurfaceView {
     fn restart(&mut self) {
         self.disclosures.clear();
         self.sent_ranges.clear();
+        self.list_widths.clear();
         self.controls.clear();
         self.fields.clear();
         self.scrolls.clear();
@@ -677,6 +678,8 @@ impl SurfaceView {
         self.cull.retain(|id| live(id));
         self.row_sources.retain(|id, _| live(id));
         self.scrolls.retain(|id, _| live(id));
+        self.sent_ranges.retain(|id, _| live(id));
+        self.list_widths.retain(|id, _| live(id));
         self.subscriptions.retain(|id, _| live(id));
         self.fields.retain(|id, _| live(id));
         self.focus.retain(|id, _| live(id));
@@ -2009,6 +2012,14 @@ impl SurfaceView {
         })
         .detach();
     }
+    pub(crate) fn settings_scroll(&self) -> Option<(Id, ScrollHandle)> {
+        let id = *self.prepared.semantics.get("settings.detail")?;
+        Some((id, self.scrolls.get(&id)?.clone()))
+    }
+    #[cfg(test)]
+    pub(crate) fn test_scroll_handle(&self, semantic: &str) -> Option<ScrollHandle> {
+        self.scrolls.get(self.prepared.semantics.get(semantic)?).cloned()
+    }
     /// Where an anchor node was last drawn (window points).
     pub fn anchor_bounds(&self, id: Id) -> Option<Bounds<Pixels>> {
         self.anchors.borrow().get(&id).copied()
@@ -2679,21 +2690,16 @@ impl SurfaceView {
             if node.scroll_y {
                 element = element.overflow_y_scroll();
             }
-            // A wheel step only moves the content, in the Project panel: the
-            // one long list the layer made faster (PM-311). Elsewhere it gained
-            // nothing measurable and held hover and AppKit controls a frame
-            // behind the content (PM-389, PM-390). A native view inside draws
-            // on its own and keeps the full redraw. Nor does one whose content
-            // fits it while it leaves rows out (`v4_cull`: a page in a body
-            // that scrolls around it): a step the layer replays carries its
-            // offset past its range until the next layout, showing rows that
-            // are not built. A scroller that scrolls keeps the layer: what it
-            // records past its edges (one viewport) is what the culling builds.
+            // Project and the Settings detail can replay wheel steps within
+            // one viewport of their last layout. A virtual list inside
+            // Settings still repaints when its own range changes.
             let fits = self
                 .scrolls
                 .get(&id)
                 .is_some_and(|s| s.max_offset().y <= px(0.));
             if self.layered()
+                && (self.publication.panel != "settings"
+                    || node.semantic.as_deref() == Some("settings.detail"))
                 && !self.holds_native(id)
                 && !(fits && self.culls_in(id))
             {

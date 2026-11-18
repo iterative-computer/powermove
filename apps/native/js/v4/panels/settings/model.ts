@@ -281,15 +281,18 @@ export class SettingsModel {
   }
   show(target?: Section) {
     if (!this.alive) return;
-    this.open = true;
-    this.query = "";
-    this.reindex();
-    this.active =
+    const section =
       target && this.availableSections.includes(target)
         ? target
         : this.publication.project
           ? "project"
           : "general";
+    if (!this.open || this.query.trim() || section !== this.active)
+      this.resetExtensionViewport();
+    this.open = true;
+    this.query = "";
+    this.active = section;
+    this.reindex();
     this.window.present(this.active);
     this.window.scrollTo(this.active, { reduceMotion: true });
     this.changed();
@@ -302,6 +305,8 @@ export class SettingsModel {
   }
   select(section: Section) {
     if (!this.alive || !this.visibleSections.includes(section)) return;
+    if (section === "extensions" && section !== this.active && !this.query.trim())
+      this.resetExtensionViewport();
     this.active = section;
     this.window.title(section);
     this.window.scrollTo(section, { reduceMotion: this.reduceMotion });
@@ -356,6 +361,7 @@ export class SettingsModel {
     return true;
   }
   async search(query: string) {
+    if (query.trim() !== this.query.trim()) this.resetExtensionViewport();
     this.query = query;
     this.searching = true;
     const epoch = ++this.searchEpoch;
@@ -372,10 +378,17 @@ export class SettingsModel {
     this.changed();
   }
   filterExtensions(query: string, type: ExtensionType = this.extensionType) {
+    if (query === this.extensionQuery && type === this.extensionType) return;
+    this.resetExtensionViewport();
     this.extensionQuery = query;
     this.extensionType = type;
     this.reindex();
     this.changed();
+  }
+  private resetExtensionViewport() {
+    this.viewportFirst = 0;
+    this.anchorId = undefined;
+    this.range = [0, Math.min(this.filtered.length, this.viewportCount * 2)];
   }
   private reindex() {
     const query = this.query.trim().toLocaleLowerCase();
@@ -470,7 +483,14 @@ export class SettingsModel {
     if (this.anchorId) {
       const at = this.filtered.findIndex((e) => e.id === this.anchorId);
       if (at >= 0) this.viewportFirst = at;
+      else this.anchorId = undefined;
     }
+    // A refresh can remove the visible row and shrink the scroll range.
+    // Prime the last reachable viewport before the host lays out the list.
+    this.viewportFirst = Math.min(
+      this.viewportFirst,
+      Math.max(0, this.filtered.length - this.viewportCount),
+    );
     this.range = [
       Math.max(0, this.viewportFirst - this.viewportCount),
       Math.min(

@@ -744,3 +744,21 @@ test("every command on Shortcuts arrives in commits the host's 1 MiB argument qu
   root.dispose();
   model.dispose();
 });
+
+test("the detail scroll identity survives refresh but changes on navigation", async () => {
+  const { model } = fixture();
+  const { root } = recorder();
+  model.show("general");
+  await root.render(<SettingsPanel model={model} bindings={bindings} />);
+  const detailId = () => root.inspect().nodes.find((n) => n.props.id === "settings.detail")?.id;
+  const general = detailId();
+  expect(general).toBeDefined();
+  model.publish({ ...model.publication, revision: 2 });
+  await root.flush();
+  expect(detailId()).toBe(general);
+  model.select("accounts");
+  await root.flush();
+  expect(detailId()).not.toBe(general);
+  root.dispose();
+  model.dispose();
+});

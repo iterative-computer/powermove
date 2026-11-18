@@ -551,3 +551,33 @@ test("Shortcuts: found by command, menu or key, and its rows send their actions"
   ]);
   model.dispose();
 });
+
+test("a filter whose results exclude the first visible extension shows rows from the top", () => {
+  const extensions = Array.from({ length: 160 }, (_, i) => extension(i));
+  const { model } = fixture({ extensions });
+  model.viewport(90, 40);
+  model.filterExtensions("Fixture 12");
+  expect(model.visibleExtensions.map((item) => item.id)).toEqual(
+    model.extensions.map((item) => item.id),
+  );
+  expect(model.visibleExtensions.length).toBeGreaterThan(0);
+});
+
+test("a refresh that removes the visible extension still supplies the last reachable rows", () => {
+  const extensions = Array.from({ length: 160 }, (_, i) => extension(i));
+  const { model } = fixture({ extensions });
+  model.viewport(90, 40);
+  model.publish(publication({ revision: 2, extensions: extensions.slice(0, 55) }));
+  expect(model.visibleExtensions.at(-1)?.id).toBe("fixture-54");
+  expect(model.visibleExtensions.length).toBeGreaterThanOrEqual(40);
+});
+
+test("returning to Extensions supplies rows for the new page at the top", () => {
+  const extensions = Array.from({ length: 160 }, (_, i) => extension(i));
+  const { model } = fixture({ extensions });
+  model.show("extensions");
+  model.viewport(90, 40);
+  model.select("general");
+  model.select("extensions");
+  expect(model.visibleExtensions[0]?.id).toBe("fixture-0");
+});
