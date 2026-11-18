@@ -346,8 +346,7 @@ pub(crate) fn rows(generated: Option<u64>, original_running: bool) -> Vec<Value>
     if let Some(generated) = generated {
         rows.push(
             json!({"id":"storage.native.generated","section":"storage","group":"Powermove",
-            "label":"Generated Media","control":"action","action":"media.clear",
-            "actionLabel":"Clear…","value":bytes(generated),
+            "label":"Generated Media","control":"status","value":bytes(generated),
             "detail":"Proxies, optimized media and renders. Powermove can make them again."}),
         );
     }
