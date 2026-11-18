@@ -750,19 +750,13 @@ impl Render<'_, '_> {
             "path" => {
                 let path = NSPathControl::new(mtm);
                 path.setTranslatesAutoresizingMaskIntoConstraints(false);
-                path.setPathStyle(NSPathStyle::Standard);
+                path.setPathStyle(NSPathStyle::PopUp);
+                path.setEditable(false);
                 path.setControlSize(NSControlSize::Small);
                 path.setAccessibilityLabel(Some(&NSString::from_str("Location")));
                 path.widthAnchor()
-                    .constraintLessThanOrEqualToConstant(230.)
+                    .constraintLessThanOrEqualToConstant(210.)
                     .setActive(true);
-                path.setContentCompressionResistancePriority_forOrientation(
-                    NSLayoutPriorityDefaultLow,
-                    NSLayoutConstraintOrientation::Horizontal,
-                );
-                let width = path.widthAnchor().constraintEqualToConstant(210.);
-                width.setPriority(NSLayoutPriorityDefaultLow);
-                width.setActive(true);
                 Widget::Path(path)
             }
             _ if layout(node) == "poster" || node.r#type == "img" => Widget::Image {
