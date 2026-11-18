@@ -697,7 +697,7 @@ test("attachments open and remove by id; the armed one is marked", async () => {
   await root.render(
     <AgentView publication={p} send={(a) => actions.push(a)} />,
   );
-  for (const label of ["Authored.png, attachment", "Remove Authored.png"]) {
+  for (const label of ["Open Authored.png", "Remove Authored.png"]) {
     const n = root
       .inspect()
       .nodes.find((n) =>
@@ -1003,5 +1003,355 @@ test("composer sends direction with a draft during a run", async () => {
   expect(byId(root, "agent-send").props.disabled).toBe(false);
   await root.drive(byId(root, "agent-send").id, "click");
   expect(actions).toEqual([{ type: "submit" }]);
+});
+
+test("each attachment kind has its tile, and file drops route to native attachment input", async () => {
+  const { root } = mount();
+  const p = fixture();
+  const actions: Action[] = [];
+  p.snapshot.attachments = [
+    "frame.png",
+    "clip.mov",
+    "sound.wav",
+    "notes.pdf",
+    "Frame 0:02 selection.png",
+  ].map((name, i) => ({
+    id: String(i),
+    name,
+    type: "",
+    payloadAvailable: true,
+  }));
+  await root.render(
+    <AgentView publication={p} send={(a) => actions.push(a)} />,
+  );
+  expect(
+    root
+      .inspect()
+      .nodes.filter((n) => (n.props.metadata as any)?.kind)
+      .map((n) => (n.props.metadata as any).kind),
+  ).toEqual(["image", "video", "audio", "document", "pick"]);
+  await root.drive(byId(root, "agent-composer").id, "dragover", {});
+  await root.drive(byId(root, "agent-composer").id, "drop", {
+    drag: {
+      types: ["public.file-url"],
+      data: { "public.file-url": ["/synthetic/frame.png"] },
+      effect: "copy",
+    },
+  });
+  expect(actions.at(-1)).toEqual({
+    type: "attachInput",
+    paths: ["/synthetic/frame.png"],
+  });
+  p.snapshot.attachments.push({
+    id: "6",
+    name: "six.txt",
+    type: "text/plain",
+    payloadAvailable: true,
+  });
+  await root.render(
+    <AgentView publication={p} send={(a) => actions.push(a)} />,
+  );
+  expect(byId(root, "agent-attach").props.disabled).toBe(true);
+  expect(byId(root, "agent-pick-region").props.title).toContain("six");
+  root.dispose();
+});
+
+test("full or disabled composers reject drops and clear their accepting highlight", async () => {
+  const { root } = mount();
+  const p = fixture();
+  const actions: Action[] = [];
+  const render = () =>
+    root.render(<AgentView publication={p} send={(a) => actions.push(a)} />);
+  p.native.dropTarget = true;
+  p.snapshot.draft.text = "Keep the composer visible";
+  await render();
+  expect(byId(root, "agent-composer").props.state).toMatchObject({
+    dropTarget: true,
+  });
+  for (const blocked of ["full", "disabled", "offline"]) {
+    p.snapshot.attachments =
+      blocked === "full"
+        ? Array.from({ length: 6 }, (_, i) => ({
+            id: String(i),
+            name: "file.txt",
+            type: "text/plain",
+            payloadAvailable: true,
+          }))
+        : [];
+    p.snapshot.composerDisabled = blocked === "disabled";
+    p.native.connection = blocked === "offline" ? "unavailable" : "connected";
+    await render();
+    expect(byId(root, "agent-composer").props.state).toMatchObject({
+      dropTarget: false,
+    });
+    await root.drive(byId(root, "agent-composer").id, "drop", {
+      drag: {
+        types: ["public.file-url"],
+        data: { "public.file-url": ["/synthetic/file.txt"] },
+        effect: "copy",
+      },
+    });
+  }
+  expect(actions.filter((a) => a.type === "attachInput")).toEqual([]);
+  root.dispose();
+});
+
+test("borderless attachment tiles expose remove on hover and keep the armed wash", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.attachments = [
+    {
+      id: "image",
+      name: "Image.png",
+      type: "image/png",
+      payloadAvailable: true,
+      thumbnail: "synthetic-thumb",
+    },
+  ];
+  await root.render(<AgentView publication={p} send={() => {}} />);
+  expect(has(root, "Remove Image.png")).toBe(false);
+  const group = byLabel(root, "Image.png, attachment");
+  const tile = byLabel(root, "Open Image.png");
+  expect((tile.props.style as any).width).toEqual({
+    token: "metrics.agent_attachment",
+  });
+  expect((tile.props.style as any).borderWidth).toBeUndefined();
+  await root.drive(group.id, "pointerenter");
+  expect(has(root, "Remove Image.png")).toBe(true);
+  await root.drive(group.id, "pointerleave");
+  expect(has(root, "Remove Image.png")).toBe(false);
+  await root.drive(tile.id, "focus");
+  expect(has(root, "Remove Image.png")).toBe(true);
+  await root.drive(tile.id, "blur");
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  expect(has(root, "Remove Image.png")).toBe(false);
+  p.snapshot.draft.armed = "image";
+  await root.render(<AgentView publication={p} send={() => {}} />);
+  expect(
+    (byLabel(root, "Open Image.png").props.style as any).background,
+  ).toEqual({ token: "colors.selected_fill" });
+  expect(has(root, "Remove Image.png")).toBe(true);
+  expect(
+    (byLabel(root, "Image.png, attachment").props.metadata as any).armed,
+  ).toBe(true);
+  root.dispose();
+});
+
+test("kit pop-up triggers stay pressed and open while their searchable menu is up", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.catalog.models = [["opus", "Opus 5.5 (1M context)"]];
+  p.snapshot.settings.model = "opus";
+  let close: (value: unknown) => void = () => {};
+  const requests: Parameters<Menu>[0][] = [];
+  const menu: Menu = (request) => {
+    requests.push(request);
+    return new Promise((resolve) => {
+      close = resolve;
+    });
+  };
+  await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
+  const model = byId(root, "agent-model");
+  expect(model.props["data-pm-component"]).toBe("pop-up-button");
+  expect(model.props.role).toBe("button");
+  expect(model.props.tabIndex).toBe(0);
+  expect((model.props.metadata as any).pmKit.display).toBe("Opus 5.5");
+  await root.drive(model.id, "click");
+  expect(byId(root, "agent-model").props.open).toBe(true);
+  expect(byId(root, "agent-model").props["aria-expanded"]).toBe(true);
+  expect((byId(root, "agent-model").props.style as any).background).toEqual({
+    token: "colors.selected_fill",
+  });
+  expect(
+    requests[0]!.options.find((o) => o.value === "model:opus"),
+  ).toMatchObject({ label: "Opus 5.5", detail: "1M context" });
+  close(null);
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+  expect(byId(root, "agent-model").props.open).toBe(false);
+  p.snapshot.runId = "busy";
+  await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
+  for (const id of ["agent-model", "agent-effort", "agent-access"])
+    expect(byId(root, id).props.disabled).toBe(true);
+  root.dispose();
+});
+
+test("L2 fields are optional; only a current typed native plan can Apply", async () => {
+  const { root } = mount();
+  const p = fixture();
+  const actions: Action[] = [];
+  const render = () =>
+    root.render(<AgentView publication={p} send={(a) => actions.push(a)} />);
+  await render();
+  expect(has(root, "Apply change")).toBe(false);
+  p.snapshot.phase = "preview";
+  p.snapshot.plan = {
+    revision: 4,
+    commands: [{ type: "add_layer", id: "title", layerType: "text" }],
+    summary: "Add a title",
+  };
+  await render();
+  expect(has(root, "Apply change")).toBe(false);
+  p.snapshot.resultActions = { apply: true, keep: false, undo: false };
+  await render();
+  await root.drive(byLabel(root, "Apply change").id, "click");
+  expect(actions).toEqual([{ type: "applyPlan" }]);
+  p.snapshot.runId = "active";
+  await render();
+  expect(has(root, "Apply change")).toBe(false);
+  p.snapshot.runId = null;
+  p.snapshot.plan = {
+    kind: "scene",
+    sceneEdit: { label: "Legacy scene proposal", commands: [] },
+    revision: 4,
+    commands: [],
+  };
+  await render();
+  expect(has(root, "Apply change")).toBe(false);
+  expect(
+    root.inspect().nodes.some((n) => n.text?.includes("Legacy scene proposal")),
+  ).toBe(true);
+  root.dispose();
+});
+
+test("L2 result actions belong to the current settled run and extensions use published panel pairs", async () => {
+  const { root } = mount();
+  const result = {
+    runId: "settled",
+    summary: "Created tools",
+    changed: true,
+    verificationError: "Preview verification was unavailable.",
+    extensions: [
+      {
+        extensionId: "published-extension",
+        panelId: "contributed-panel",
+        name: "Tools",
+        action: "created",
+        status: "ready",
+      },
+      {
+        extensionId: "no-panel",
+        panelId: null,
+        name: "Commands",
+        action: "updated",
+        status: "ready",
+      },
+      {
+        extensionId: "failed",
+        panelId: "bad-panel",
+        name: "Failed",
+        action: "updated",
+        status: "error",
+      },
+      {
+        extensionId: "removed",
+        panelId: "old-panel",
+        name: "Removed",
+        action: "removed",
+        status: "ready",
+      },
+    ],
+  } as const;
+  const row: Row = {
+    id: "result-row",
+    commandId: "",
+    chosen: {},
+    open: false,
+    value: {
+      role: "assistant",
+      text: "Created tools",
+      nativeResult: result as any,
+    },
+  };
+  const p = withRows([row]);
+  p.snapshot.phase = "result";
+  p.snapshot.result = structuredClone(result) as any;
+  p.snapshot.resultActions = { apply: false, keep: true, undo: true };
+  const actions: Action[] = [];
+  const render = () =>
+    root.render(<AgentView publication={p} send={(a) => actions.push(a)} />);
+  await render();
+  for (const label of ["Keep Change", "Undo Change", "Open panel, Tools"])
+    await root.drive(byLabel(root, label).id, "click");
+  expect(actions).toEqual([
+    { type: "keepResult" },
+    { type: "undoResult" },
+    {
+      type: "openResultPanel",
+      extensionId: "published-extension",
+      panelId: "contributed-panel",
+    },
+  ]);
+  for (const name of ["Commands", "Failed", "Removed"])
+    expect(has(root, `Open panel, ${name}`)).toBe(false);
+  expect(
+    root
+      .inspect()
+      .nodes.some((n) => n.text?.includes(result.verificationError)),
+  ).toBe(true);
+  p.snapshot.resultActions = { apply: false, keep: false, undo: false };
+  await render();
+  expect(has(root, "Keep Change")).toBe(false);
+  expect(has(root, "Undo Change")).toBe(false);
+  p.snapshot.resultActions = { apply: false, keep: true, undo: true };
+  p.snapshot.result!.runId = "newer-result";
+  await render();
+  expect(has(root, "Keep Change")).toBe(false);
+  expect(has(root, "Undo Change")).toBe(false);
+  p.snapshot.result = undefined;
+  p.snapshot.resultActions = undefined;
+  await render();
+  expect(has(root, "Undo Change")).toBe(false);
+  expect(has(root, "Rendered result")).toBe(true);
+  root.dispose();
+});
+
+test("child thread menus nest under their parent and the path returns to each ancestor", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.threadId = "grandchild";
+  p.snapshot.threads = [
+    {
+      id: "grandchild",
+      parentId: "child",
+      kind: "subagent",
+      title: "Polish",
+      busy: true,
+      updatedAt: 3,
+    },
+    { id: "root", title: "Title card", busy: true, updatedAt: 1 },
+    {
+      id: "child",
+      parentId: "root",
+      kind: "subagent",
+      title: "Layout",
+      busy: true,
+      updatedAt: 2,
+    },
+  ];
+  const actions: Action[] = [];
+  let request: Parameters<Menu>[0] | undefined;
+  await root.render(
+    <AgentView
+      publication={p}
+      send={(a) => actions.push(a)}
+      menu={async (r) => {
+        request = r;
+        return null;
+      }}
+    />,
+  );
+  expect(has(root, "Thread path")).toBe(true);
+  await root.drive(byLabel(root, "Back to Layout").id, "click");
+  expect(actions).toEqual([{ type: "switchThread", id: "child" }]);
+  await root.drive(byId(root, "agent-threads").id, "click");
+  expect(
+    request!.options
+      .filter((o) => String(o.value).startsWith("thread:"))
+      .map((o) => o.label),
+  ).toEqual([
+    "Title card · Working…",
+    "  ↳ Layout · Working…",
+    "    ↳ Polish · Working…",
+  ]);
   root.dispose();
 });

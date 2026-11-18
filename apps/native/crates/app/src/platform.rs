@@ -145,7 +145,9 @@ pub fn end_all_sheets() {
     for window in app.windows().iter() {
         // Nested sheets (a save panel over the Export sheet) end innermost first.
         for _ in 0..4 {
-            let Some(host) = window.attachedSheet() else { break };
+            let Some(host) = window.attachedSheet() else {
+                break;
+            };
             let host = sheet_host(&host);
             let parent = unsafe { host.sheetParent() }.unwrap_or_else(|| window.clone());
             parent.endSheet_returnCode(&host, objc2_app_kit::NSModalResponseAbort);
@@ -324,6 +326,14 @@ pub enum PastedMedia {
 /// in Finder also carries its icon as a picture.
 pub fn pasteboard_media() -> Option<PastedMedia> {
     read_media(&paste_board())
+}
+/// Agent paste accepts copied pictures/files and existing textual file paths.
+pub fn agent_pasteboard() -> Option<PastedMedia> {
+    let board = paste_board();
+    read_media(&board).or_else(|| {
+        let text = board.stringForType(unsafe { NSPasteboardTypeString })?;
+        crate::media::agent_pasted_path(&text.to_string()).map(|p| PastedMedia::Files(vec![p]))
+    })
 }
 fn read_media(board: &NSPasteboard) -> Option<PastedMedia> {
     let files: Vec<PathBuf> = board

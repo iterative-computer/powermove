@@ -44,7 +44,7 @@ impl TokenTable {
             .and_then(Value::as_str)
             .map_or(value, |name| self.values.get(name).unwrap_or(&Value::Null))
     }
-    fn number(&self, value: &Value) -> Option<f32> {
+    pub(crate) fn number(&self, value: &Value) -> Option<f32> {
         self.resolve(value).as_f64().map(|n| n as f32)
     }
     fn color(&self, value: &Value) -> Option<u32> {
@@ -277,6 +277,24 @@ pub struct NodeView {
 pub struct Rich {
     pub text: SharedString,
     pub runs: Arc<Vec<(std::ops::Range<usize>, u8)>>,
+    pub links: Arc<Vec<(std::ops::Range<usize>, String)>>,
+}
+fn safe_prose_link(href: &str) -> bool {
+    url::Url::parse(href).is_ok_and(|u| matches!(u.scheme(), "https" | "http" | "mailto"))
+}
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn prose_links_only_open_web_and_mail_addresses() {
+    assert!(safe_prose_link("https://example.com/help"));
+    assert!(safe_prose_link("mailto:help@example.com"));
+    for bad in [
+        "file:///private/file",
+        "javascript:alert(1)",
+        "powermove://run",
+        "relative/path",
+    ] {
+        assert!(!safe_prose_link(bad));
+    }
 }
 impl Rich {
     pub const BOLD: u8 = 1;
@@ -287,7 +305,7 @@ impl Rich {
     /// node text, so a runaway reply stays bounded.
     fn of(node: &Node) -> Option<Self> {
         let runs = node.props.get("metadata")?.get("runs")?.as_array()?;
-        let (mut text, mut styled) = (String::new(), vec![]);
+        let (mut text, mut styled, mut links) = (String::new(), vec![], vec![]);
         for run in runs.iter().take(4096) {
             let Some(part) = run.get("t").and_then(Value::as_str) else {
                 continue;
@@ -302,6 +320,13 @@ impl Rich {
                 | u8::from(on("a")) * Self::LINK;
             let start = text.len();
             text.push_str(part);
+            if let Some(href) = run
+                .get("href")
+                .and_then(Value::as_str)
+                .filter(|h| safe_prose_link(h))
+            {
+                links.push((start..text.len(), href.to_owned()));
+            }
             if bits != 0 && !part.is_empty() {
                 styled.push((start..text.len(), bits));
             }
@@ -309,6 +334,7 @@ impl Rich {
         (!text.is_empty()).then(|| Self {
             text: text.into(),
             runs: Arc::new(styled),
+            links: Arc::new(links),
         })
     }
 }
@@ -960,7 +986,10 @@ fn compile(
                     .filter_map(Value::as_str)
                     .map(|label| SharedString::from(label.to_owned()))
                     .collect();
-                (Arc::new(labels), side("paddingLeft") + side("paddingRight") + inset)
+                (
+                    Arc::new(labels),
+                    side("paddingLeft") + side("paddingRight") + inset,
+                )
             }),
         local_change: node.listeners.contains_key("change"),
         commit_on_release: node.listeners.contains_key("input")
@@ -1258,18 +1287,30 @@ fn kit(node: &Node, component: Option<Component>, panel: &Panel, table: &TokenTa
             }
         }
         Some(component @ (Component::PointPad | Component::GradientBar)) => {
-            let option = |key: &str| node.props.get("metadata").and_then(|m| m.get("pmKit")).and_then(|k| k.get(key));
-            let number = |key: &str, default: f64| option(key).and_then(Value::as_f64).unwrap_or(default);
+            let option = |key: &str| {
+                node.props
+                    .get("metadata")
+                    .and_then(|m| m.get("pmKit"))
+                    .and_then(|k| k.get(key))
+            };
+            let number =
+                |key: &str, default: f64| option(key).and_then(Value::as_f64).unwrap_or(default);
             if component == Component::PointPad {
                 let n = numbers(value);
                 Kit::Pad {
-                    point: [n.first().copied().unwrap_or(0.), n.get(1).copied().unwrap_or(0.)],
+                    point: [
+                        n.first().copied().unwrap_or(0.),
+                        n.get(1).copied().unwrap_or(0.),
+                    ],
                     min: [number("minX", -100.), number("minY", -100.)],
                     max: [number("maxX", 100.), number("maxY", 100.)],
                 }
             } else {
                 let colour = |key: &str, default: u32| {
-                    option(key).and_then(Value::as_str).and_then(parse_hex).unwrap_or(default)
+                    option(key)
+                        .and_then(Value::as_str)
+                        .and_then(parse_hex)
+                        .unwrap_or(default)
                 };
                 Kit::Ramp {
                     start: colour("start", 0x000000),
@@ -1648,6 +1689,19 @@ mod tests {
         let mut control = authored.as_object().unwrap().clone();
         native_panel_root(&mut control, false);
         assert_eq!(control, authored.as_object().unwrap().clone());
+    }
+    #[::core::prelude::v1::test]
+    fn agent_popup_titles_show_the_published_display_then_the_selected_option() {
+        let mut node = Node {
+            id: 1, r#type: "button".into(), parent: None, children: vec![],
+            props: json!({"value":"opus","options":[{"v":"opus","label":"Opus 5.5 (1M context)"}],"metadata":{"pmKit":{"display":"Opus 5.5"}}}).as_object().unwrap().clone(),
+            text: String::new(), listeners: Default::default(), input: None,
+        };
+        assert_eq!(popup_title(&node).as_deref(), Some("Opus 5.5"));
+        node.props.remove("metadata");
+        assert_eq!(popup_title(&node).as_deref(), Some("Opus 5.5 (1M context)"));
+        node.props.remove("options");
+        assert_eq!(popup_title(&node).as_deref(), Some("opus"));
     }
     use super::*;
     use serde_json::json;

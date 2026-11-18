@@ -312,6 +312,9 @@ fn capture_agent_states() {
     };
     let dir = std::env::var("PM_PANEL_CAPTURE").unwrap_or_else(|_| "/tmp/pm-shots/panels".into());
     std::fs::create_dir_all(&dir).unwrap();
+    if let Ok(path) = std::env::var("PM_AGENT_CAPTURE_THUMBNAIL") {
+        crate::media_thumbs::register("agent-capture", path.into());
+    }
     let panel = std::env::var("PM_CAPTURE_STATE_PANEL").or_else(|_| std::env::var("PM_CAPTURE_PANEL")).unwrap_or_else(|_| "agent".into());
     let r = rig(&panel, 1);
     let mut files: Vec<_> = std::fs::read_dir(&states)
@@ -389,9 +392,16 @@ fn capture_agent_states() {
                         cx.new(|_| Frame { view, fill })
                     })
                     .unwrap();
-                for _ in 0..20 {
+                for _ in 0..30 {
+                    window.update(&mut cx, |_, window, _| window.refresh()).unwrap();
                     cx.run_until_parked();
                     std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                if std::env::var_os("PM_AGENT_CAPTURE_THUMBNAIL").is_some()
+                    && surface.nodes().values().any(|n| n.props.get("resource").and_then(serde_json::Value::as_str) == Some("agent-capture"))
+                {
+                    let pictures = window.update(&mut cx, |_, window, _| window.rendered_primitive_counts().3).unwrap();
+                    assert!(pictures > 0, "{name}/{scheme_name}: attachment image was not painted");
                 }
                 let image = cx.capture_screenshot(window.into()).unwrap();
                 image

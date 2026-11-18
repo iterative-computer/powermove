@@ -241,6 +241,8 @@ mod variant_click_tests {
 #[derive(Clone, Copy)]
 pub enum Kind {
     Popup,
+    /// A kit pop-up bezel whose searchable menu is supplied by its panel.
+    PopupTrigger,
     Checkbox,
     /// One radio button; its group is the caller's.
     Radio,
@@ -360,7 +362,7 @@ define_class!(
                 Kind::Checkbox|Kind::Radio|Kind::Switch=>{let state:isize=unsafe{msg_send![sender,state]};json!(state!=0)},
                 Kind::Segmented=>{let index:isize=unsafe{msg_send![sender,selectedSegment]};json!(index)},
                 Kind::Slider=>{let position:f64=unsafe{msg_send![sender,doubleValue]};json!(Range::of(&self.ivars().options.borrow()).value(position))},
-                Kind::Push=>Value::Null,
+                Kind::Push|Kind::PopupTrigger=>Value::Null,
                 Kind::Well=>sender.downcast_ref::<NSColorWell>().map_or(Value::Null,|w|json!(colour_hex(&w.color()))),
                 Kind::Search=>{let text:Retained<NSString>=unsafe{msg_send![sender,stringValue]};let text=text.to_string();if let Some(field)=sender.downcast_ref::<NSView>(){search_hint(field,text.is_empty());}json!(text)},
             };
@@ -413,6 +415,42 @@ define_class!(
         }
     }
 );
+define_class!(
+    #[unsafe(super(NSPopUpButton, NSButton, NSControl, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PMSearchablePopupTrigger"]
+    #[ivars = ()]
+    struct SearchablePopupTrigger;
+    unsafe impl NSObjectProtocol for SearchablePopupTrigger {}
+    impl SearchablePopupTrigger {
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _: &NSEvent) { self.fire(); }
+        #[unsafe(method(performClick:))]
+        fn perform_click(&self, _: Option<&AnyObject>) { self.fire(); }
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            if matches!(event.keyCode(), 0x31 | 0x24 | 0x4c | 0x7d | 0x7e) {
+                self.fire();
+            } else {
+                unsafe { let _: () = msg_send![super(self), keyDown: event]; }
+            }
+        }
+    }
+);
+impl SearchablePopupTrigger {
+    fn fire(&self) {
+        if !self.isEnabled() {
+            return;
+        }
+        let target: *mut AnyObject = unsafe { msg_send![self, target] };
+        if !target.is_null() {
+            unsafe {
+                let _: () = msg_send![target, act: self];
+            }
+        }
+    }
+}
+
 enum Control {
     Popup(Retained<NSPopUpButton>),
     Button(Retained<NSButton>),
@@ -706,6 +744,7 @@ pub struct NativeControl {
     tab_subscription: Option<Subscription>,
     /// The last text the view's host set (`host_text`).
     host_revision: Option<u64>,
+    menu_open: bool,
     /// A search field's last value from its view. The view's value can lag
     /// what is typed (an echo of the typing commits nothing), so only a new
     /// value replaces the field's text; an unchanged one is left alone
@@ -927,12 +966,19 @@ fn make_control(
         ]
     };
     let control = match kind {
-        Kind::Popup => {
-            let v = NSPopUpButton::initWithFrame_pullsDown(
-                NSPopUpButton::alloc(mtm),
-                NSRect::ZERO,
-                pull,
-            );
+        Kind::Popup | Kind::PopupTrigger => {
+            let v = if matches!(kind, Kind::PopupTrigger) {
+                let trigger: Retained<SearchablePopupTrigger> = unsafe {
+                    msg_send![super(SearchablePopupTrigger::alloc(mtm).set_ivars(())), initWithFrame: NSRect::ZERO, pullsDown: pull]
+                };
+                Retained::into_super(trigger)
+            } else {
+                NSPopUpButton::initWithFrame_pullsDown(
+                    NSPopUpButton::alloc(mtm),
+                    NSRect::ZERO,
+                    pull,
+                )
+            };
             add_items(&v, options);
             unsafe {
                 v.setTarget(Some(&target));
@@ -1214,12 +1260,12 @@ impl NativeControl {
                 sized.setFrameSize(frame);
                 fitting
             }
-            None if well && matches!(kind, Kind::Popup) => {
+            None if well && matches!(kind, Kind::Popup | Kind::PopupTrigger) => {
                 NSSize::new(t.metrics.value_column as f64, t.metrics.field as f64)
             }
             None => control.view().fittingSize(),
         };
-        let width = if matches!(kind, Kind::Popup) && !inline {
+        let width = if matches!(kind, Kind::Popup | Kind::PopupTrigger) && !inline {
             t.metrics.value_column.max(intrinsic.width as f32)
         } else if matches!(kind, Kind::Slider | Kind::Search) {
             t.metrics.value_column
@@ -1251,18 +1297,19 @@ impl NativeControl {
             width,
             height,
             inline,
-            least: if matches!(kind, Kind::Popup) && !inline {
+            least: if matches!(kind, Kind::Popup | Kind::PopupTrigger) && !inline {
                 t.metrics.value_column
             } else {
                 0.
             },
             // A search field is as wide as the place it is given.
             fill: matches!(kind, Kind::Search),
-            stretch: well && matches!(kind, Kind::Popup),
+            stretch: well && matches!(kind, Kind::Popup | Kind::PopupTrigger),
             focus: Rc::default(),
             tab_focus: matches!(kind, Kind::Segmented).then(|| cx.focus_handle().tab_stop(true)),
             tab_subscription: None,
             host_revision: None,
+            menu_open: false,
             search_value: None,
             layer: Rc::default(),
             picture: Default::default(),
@@ -1514,6 +1561,24 @@ impl NativeControl {
     }
     /// A pop-up's own title, shown instead of its selected row; the row
     /// keeps its checkmark. `None` shows the selected row.
+    /// The panel keeps a custom searchable menu's trigger pressed until it closes.
+    pub fn popup_width(&mut self, width: Option<f32>, minimum: Option<f32>) {
+        if let Control::Popup(v) = &self.control {
+            self.width = width
+                .unwrap_or(v.fittingSize().width as f32)
+                .max(minimum.unwrap_or(0.))
+                .max(self.height);
+        }
+    }
+    pub fn menu_open(&mut self, open: bool) {
+        if self.menu_open != open {
+            self.menu_open = open;
+            self.picture.go_live();
+            if let Control::Popup(v) = &self.control {
+                v.highlight(open);
+            }
+        }
+    }
     pub fn display(&mut self, title: Option<&str>) {
         let Control::Popup(v) = &self.control else {
             return;

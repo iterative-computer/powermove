@@ -358,6 +358,9 @@ impl TextField {
         self.picture.hold_changed();
         cx.notify();
     }
+    pub fn set_paste_handler(&mut self, handler: Rc<dyn Fn() -> bool>) {
+        self.slot.set_paste_handler(handler);
+    }
     pub fn set_placeholder(&mut self, text: &str) {
         if self.placeholder != text {
             self.slot.set_placeholder(text);

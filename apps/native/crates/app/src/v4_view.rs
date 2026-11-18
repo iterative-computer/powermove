@@ -1242,10 +1242,17 @@ impl SurfaceView {
             .and_then(|m| m.get("display"))
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let authored_style = node.props.get("style").unwrap_or(&Value::Null);
+        let popup_width = self.table.number(&authored_style["width"]);
+        let popup_minimum = self.table.number(&authored_style["minWidth"]);
         if let Some(control) = self.controls.get(&id) {
             control.update(cx, |v, _| {
                 v.display(display.as_deref());
                 v.set_tab_index(view.tab_index.unwrap_or(0));
+                if matches!(kind, crate::v4_control::Kind::PopupTrigger) {
+                    v.menu_open(node.props.get("open") == Some(&Value::Bool(true)));
+                    v.popup_width(popup_width, popup_minimum);
+                }
             });
             if matches!(kind, crate::v4_control::Kind::Push)
                 && let Some(label) = node.props.get("label").and_then(Value::as_str)
@@ -1351,7 +1358,10 @@ impl SurfaceView {
                 if v.publication.generation != generation || v.leases.get(&id) != Some(&lease) {
                     return;
                 }
-                if matches!(kind, crate::v4_control::Kind::Push) {
+                if matches!(
+                    kind,
+                    crate::v4_control::Kind::Push | crate::v4_control::Kind::PopupTrigger
+                ) {
                     v.send(id, "click", EventDetail::default(), cx);
                 } else if matches!(kind, crate::v4_control::Kind::Segmented) {
                     // Choosing a segment is a press on that segment's node.
@@ -1393,7 +1403,13 @@ impl SurfaceView {
                 }
             },
         ));
-        control.update(cx, |v, _| v.display(display.as_deref()));
+        control.update(cx, |v, _| {
+            v.display(display.as_deref());
+            if matches!(kind, crate::v4_control::Kind::PopupTrigger) {
+                v.menu_open(node.props.get("open") == Some(&Value::Bool(true)));
+                v.popup_width(popup_width, popup_minimum);
+            }
+        });
         // A search field starts with its node's text at the host's revision
         // of it, so only a newer host value replaces what is typed: a first
         // update that came after the first keystroke emptied the field.
@@ -1515,6 +1531,53 @@ impl SurfaceView {
             field.set_stepper(stepper);
             field
         });
+        if kind == TextKind::Composer
+            && node.props.get("id").and_then(Value::as_str) == Some("agent-composer-text")
+        {
+            let project = meta
+                .and_then(|m| m.get("attachmentProject"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let thread = meta
+                .and_then(|m| m.get("attachmentThread"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let (tx, rx) = async_channel::unbounded();
+            field.update(cx, |f, _| {
+                f.set_paste_handler(std::rc::Rc::new(move || {
+                    let Some(media) = crate::platform::agent_pasteboard() else {
+                        return false;
+                    };
+                    tx.try_send(media).is_ok()
+                }))
+            });
+            let runtime = self.runtime.clone();
+            cx.spawn(async move |this, cx| {
+                while let Ok(media) = rx.recv().await {
+                    let runtime = runtime.clone();
+                    let (project, thread) = (project.clone(), thread.clone());
+                    let outcome = cx
+                        .background_executor()
+                        .spawn(async move {
+                            runtime.agent_attach_for(
+                                &project,
+                                &thread,
+                                crate::media::agent_pasted_records(media)?,
+                            )
+                        })
+                        .await;
+                    if let Err(error) = outcome {
+                        let _ = this.update(cx, |v, cx| {
+                            v.error = Some(error);
+                            cx.notify();
+                        });
+                    }
+                }
+            })
+            .detach();
+        }
         self.subscriptions
             .entry(id)
             .or_default()
@@ -1613,7 +1676,7 @@ impl SurfaceView {
                         }
                         // Escape in a composer reaches its panel as the key
                         // (the Agent's shortcuts menu, then its popover).
-                        TextEvent::Key("escape") => {
+                        TextEvent::Key(key @ ("escape" | "backspace")) => {
                             if this
                                 .publication
                                 .surface
@@ -1621,7 +1684,7 @@ impl SurfaceView {
                                 .is_some_and(|n| n.listeners.contains_key("keydown"))
                             {
                                 let detail = EventDetail {
-                                    key: Some("Escape".into()),
+                                    key: Some(if *key == "escape" { "Escape" } else { key }.into()),
                                     ..Default::default()
                                 };
                                 this.send(id, "keydown", detail, cx);
@@ -2516,6 +2579,12 @@ impl SurfaceView {
                 ),
                 cx,
             ),
+            Some(Component::PopUpButton)
+                if node.props.get("metadata").and_then(|m| m.get("manualMenu"))
+                    == Some(&Value::Bool(true)) =>
+            {
+                self.send(id, "click", detail, cx);
+            }
             Some(Component::PopUpButton) if self.appkit => {
                 let options = self
                     .offered_rows(id)
@@ -3285,6 +3354,22 @@ impl SurfaceView {
             text.clone().into_any_element()
         }
     }
+    fn quote_link(&self, owner: Id, position: Point<Pixels>) -> Option<String> {
+        let selection = self.quote_selection.borrow();
+        selection
+            .blocks
+            .iter()
+            .filter(|(_, block)| block.owner == owner)
+            .find_map(|(id, block)| {
+                let rich = self.prepared.node(*id)?.rich.as_ref()?;
+                let at = block.layout.index_for_position(position).ok()?;
+                rich.links
+                    .iter()
+                    .find(|(range, _)| range.contains(&at))
+                    .map(|(_, href)| href.clone())
+            })
+    }
+
     fn quote_text(&self, id: Id, mut text: StyledText, plain: String) -> AnyElement {
         let Some(owner) = self.quote_owner(id) else {
             return text.into_any_element();
@@ -3555,6 +3640,14 @@ impl SurfaceView {
                 div().flex_none()
             };
             let mut slot = slot.id(("v4-control", id));
+            if self.publication.surface.node(id).is_some_and(|n| {
+                n.props
+                    .get("metadata")
+                    .is_some_and(|m| m["manualMenu"] == true)
+            }) {
+                slot.style().size.width = node.style.size.width.clone();
+                slot.style().min_size.width = node.style.min_size.width.clone();
+            }
             if let Some(focus) = self.focus.get(&id) {
                 // No focus ring on a control's slot (owner decision,
                 // 2026-11-14): a field keeps its own caret and selection.
@@ -3873,7 +3966,11 @@ impl SurfaceView {
             && amount < 1.
         {
             let t = &self.table.tokens;
-            let rise = (1. - amount) * (1. - t.motion.start_scale as f32) * 160.;
+            let rise = if node.resource.is_some() {
+                0.
+            } else {
+                (1. - amount) * (1. - t.motion.start_scale as f32) * 160.
+            };
             element = element.opacity(amount).mt(px(rise));
         }
         element = self.accessible(element, node);
@@ -3990,8 +4087,19 @@ impl SurfaceView {
                 }))
                 .on_mouse_up(
                     MouseButton::Left,
-                    cx.listener(move |v, _, _, cx| {
-                        v.quote_selection.borrow_mut().dragging = false;
+                    cx.listener(move |v, event: &MouseUpEvent, _, cx| {
+                        let click = {
+                            let mut selection = v.quote_selection.borrow_mut();
+                            let click = selection.dragging
+                                && selection.owner == Some(id)
+                                && selection.range().is_empty()
+                                && selection.hit(id, event.position) == Some(selection.anchor);
+                            selection.dragging = false;
+                            click
+                        };
+                        if click && let Some(href) = v.quote_link(id, event.position) {
+                            crate::platform::open_url(&href);
+                        }
                         cx.notify();
                     }),
                 )
@@ -5199,7 +5307,8 @@ impl SurfaceView {
         }
         if let Some(text) = &node.text {
             if node.component == Some(Component::PopUpButton) {
-                // The AppKit slot returns before decoration.
+                // Native slots return before decoration. This is the kit's
+                // real non-AppKit rendering, using the same published title.
                 element = element
                     .gap(px(t.metrics.gap))
                     .child(div().flex_1().min_w(px(0.)).truncate().child(text.clone()))
@@ -5215,11 +5324,22 @@ impl SurfaceView {
             }
         }
         if let Some(rich) = &node.rich {
-            element = element.child(self.quote_text(
-                node.id,
-                rich_text(rich, t, self.quote_range(node.id)),
-                rich.text.to_string(),
-            ));
+            let text = rich_text(rich, t, self.quote_range(node.id));
+            if self.quote_owner(node.id).is_some() || rich.links.is_empty() {
+                element = element.child(self.quote_text(node.id, text, rich.text.to_string()));
+            } else {
+                let links = rich.links.clone();
+                element = element.child(
+                    InteractiveText::new(("prose-link", node.id), text).on_click(
+                        links.iter().map(|(range, _)| range.clone()).collect(),
+                        move |index, _, _| {
+                            if let Some((_, href)) = links.get(index) {
+                                crate::platform::open_url(href);
+                            }
+                        },
+                    ),
+                );
+            }
         }
         if let Some(number) = node.number.filter(|_| self.draws_number(node)) {
             let shown = self
@@ -5773,6 +5893,12 @@ fn control_options(kind: crate::v4_control::Kind, node: &pm_surface::Node) -> Ve
 fn control_kind(panel: &str, node: &pm_surface::Node) -> Option<crate::v4_control::Kind> {
     use crate::v4_control::Kind;
     match Component::of(node) {
+        Some(Component::PopUpButton)
+            if node.props.get("metadata").and_then(|m| m.get("manualMenu"))
+                == Some(&Value::Bool(true)) =>
+        {
+            Some(Kind::PopupTrigger)
+        }
         Some(Component::PopUpButton) => Some(Kind::Popup),
         Some(Component::Checkbox | Component::Toggle) => Some(Kind::Checkbox),
         Some(Component::Switch) => Some(Kind::Switch),

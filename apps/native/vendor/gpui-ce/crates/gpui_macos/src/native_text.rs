@@ -121,6 +121,7 @@ struct State {
     original: RefCell<String>,
     events: RefCell<Vec<TextEvent>>,
     wake: RefCell<Option<Rc<dyn Fn()>>>,
+    paste: RefCell<Option<Rc<dyn Fn() -> bool>>>,
     /// What a paint staged, with that paint's number: placed by the present
     /// that follows that paint, and by no later one.
     geometry: Cell<Option<(u64, NSRect, NSRect)>>,
@@ -280,6 +281,13 @@ define_class!(
     struct ComposerTextView;
     unsafe impl NSObjectProtocol for ComposerTextView {}
     impl ComposerTextView {
+        #[unsafe(method(paste:))]
+        fn paste(&self, sender: Option<&AnyObject>) {
+            let claimed = self.ivars().borrow().upgrade().is_some_and(|s| {
+                s.paste.borrow().as_ref().is_some_and(|paste| paste())
+            });
+            if !claimed { unsafe { let _: () = msg_send![super(self), paste: sender]; } }
+        }
         #[unsafe(method(becomeFirstResponder))]
         fn become_first_responder(&self) -> bool {
             if self.wanted() {
@@ -476,6 +484,7 @@ impl TextDelegate {
             return true;
         }
         if command == objc2::sel!(insertNewline:) && self.ivars().kind == TextKind::Composer {
+            if NSApplication::sharedApplication(MainThreadMarker::from(self)).currentEvent().is_some_and(|event| event.r#type() == NSEventType::KeyDown && event.isARepeat()) { return true; }
             let flags = objc2_app_kit::NSApplication::sharedApplication(MainThreadMarker::from(self))
                 .currentEvent()
                 .map(|e| e.modifierFlags())
@@ -491,13 +500,23 @@ impl TextDelegate {
             s.emit(TextEvent::Submitted(s.editor.value()));
             return true;
         }
+        if self.ivars().kind == TextKind::Composer
+            && self.ivars().editor.value().is_empty()
+            && command == objc2::sel!(deleteBackward:)
+        {
+            // Holding Backspace must not arm and then delete a file in one press.
+            let repeat = NSApplication::sharedApplication(MainThreadMarker::from(self))
+                .currentEvent().is_some_and(|event| event.r#type() == NSEventType::KeyDown && event.isARepeat());
+            if !repeat { self.ivars().emit(TextEvent::Key("backspace")); }
+            return true;
+        }
         // Escape in a composer belongs to its host (close a menu, then the
         // popover around it); AppKit's own cancelOperation: does nothing here.
         if command == objc2::sel!(cancelOperation:) && self.ivars().kind == TextKind::Composer {
             self.ivars().emit(TextEvent::Key("escape"));
             return true;
         }
-        if self.ivars().kind == TextKind::Multiline
+        if matches!(self.ivars().kind, TextKind::Multiline | TextKind::Composer)
             && !self.ivars().tab_inserts.get()
             && (command == objc2::sel!(insertTab:) || command == objc2::sel!(insertBacktab:))
         {
@@ -788,6 +807,7 @@ impl NativeTextSlot {
             original: RefCell::new(initial.into()),
             events: RefCell::new(Vec::new()),
             wake: RefCell::new(None),
+            paste: RefCell::new(None),
             geometry: Cell::new(None),
             scroll_fade: Default::default(),
             staged: Cell::new(None),
@@ -882,6 +902,10 @@ impl NativeTextSlot {
         if let Editor::Field(v) = &self.state.editor {
             v.setTag(if cancels { ESCAPE_CANCELS } else { 0 });
         }
+    }
+    /// Claims supported non-text paste payloads; false keeps AppKit text paste.
+    pub fn set_paste_handler(&self, handler: Rc<dyn Fn() -> bool>) {
+        *self.state.paste.borrow_mut() = Some(handler);
     }
     pub fn set_placeholder(&self, text: &str) {
         if let Editor::Field(v) = &self.state.editor {

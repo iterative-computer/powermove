@@ -451,6 +451,7 @@ impl Controller {
             Ok(png)
         }));
         runtime.set_agent_notices(crate::notifications::sink(self.window_key));
+        crate::media_thumbs::set_agent_cache(self.profile.join("caches").join("agent-thumbnails"));
         runtime.share_effect_clipboard(crate::extensions::effect_clipboard());
         let mut tickets = vec![];
         for panel in BUILTIN_PANELS.iter() {
@@ -1016,6 +1017,9 @@ impl Controller {
                 );
                 if let Some(category) = o["category"].as_str() {
                     c = c.within(category);
+                }
+                if let Some(detail) = o["detail"].as_str() {
+                    c = c.detail(detail);
                 }
                 if let Some(on) = o["checked"].as_bool() {
                     c = c.checked(on);
@@ -2481,6 +2485,62 @@ impl Controller {
                     .detach();
                     Ok(Value::Null)
                 }
+                "agent.previewAttachment" => {
+                    let record = request.input.clone();
+                    let name = record["name"].as_str().unwrap_or("Attachment").to_owned();
+                    cx.spawn(async move |this, cx| {
+                        let file = cx
+                            .background_executor()
+                            .spawn(async move { crate::media::attachment_preview_path(&record) })
+                            .await;
+                        let _ = this.update(cx, |v, cx| match file {
+                            Ok(path) => crate::quick_look::toggle(vec![(path, name)]),
+                            Err(message) => {
+                                v.errors.borrow_mut().tell("Agent", &message);
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                    Ok(Value::Null)
+                }
+                "agent.attachInput" => {
+                    let paths: Vec<std::path::PathBuf> = request.input["paths"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(Into::into)
+                        .collect();
+                    let project = request.input["project"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let thread = request.input["thread"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let runtime = self.builtins.runtime.clone();
+                    cx.spawn(async move |this, cx| {
+                        let outcome = cx
+                            .background_executor()
+                            .spawn(async move {
+                                let records = crate::media::attachment_records(&paths)?;
+                                runtime
+                                    .ok_or("The Agent panel closed.")?
+                                    .agent_attach_for(&project, &thread, records)
+                            })
+                            .await;
+                        if let Err(message) = outcome {
+                            let _ = this.update(cx, |v, cx| {
+                                v.errors.borrow_mut().tell("Agent", &message);
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .detach();
+                    Ok(Value::Null)
+                }
                 "agent.attach" => {
                     let target = crate::platform::ns_window(window)
                         .unwrap_or_else(|| self.host.borrow().window.clone());
@@ -2622,6 +2682,11 @@ impl Controller {
                         "This stops its run and removes the thread’s history. This cannot be undone."
                     } else {
                         "This removes the thread’s history. This cannot be undone."
+                    };
+                    let detail = if request.input["subthreads"].as_u64().unwrap_or(0) > 0 {
+                        format!("{detail} This includes its subthreads.")
+                    } else {
+                        detail.to_owned()
                     };
                     use crate::alert::{Alert, Button};
                     let rx = Alert::new(

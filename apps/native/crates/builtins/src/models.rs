@@ -2070,6 +2070,19 @@ impl Backend {
                         link.touch();
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
+                    if action["type"] == "attachInput" {
+                        if args["target"]["project"].as_str() != Some(state.panel.project())
+                            || args["target"]["thread"].as_str() != Some(&thread)
+                        {
+                            return Err("The attachment's thread changed.".into());
+                        }
+                        let input = json!({"paths":action["paths"], "project":state.panel.project(), "thread":thread});
+                        drop(state);
+                        self.native
+                            .platform
+                            .push(("agent.attachInput".into(), input));
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
+                    }
                     if action["type"] == "attach" {
                         // The window shows its file picker; chosen files come back
                         // through `Builtins::agent_attach`.
@@ -2188,6 +2201,9 @@ impl Backend {
                         // its dock's Close, which returns it to the popover).
                         EffectKind::Shell(ShellAction::Pin) => Some(("agent.pin", Value::Null)),
                         EffectKind::ChooseFiles => Some(("agent.attach", Value::Null)),
+                        EffectKind::OpenAttachment { attachment, .. } => {
+                            Some(("agent.previewAttachment", attachment.clone()))
+                        }
                         EffectKind::Send { .. }
                         | EffectKind::Stop
                         | EffectKind::Answer { .. }
@@ -2246,11 +2262,20 @@ impl Backend {
                             let thread = effect.target.thread.clone();
                             let summary =
                                 state.panel.summaries().into_iter().find(|t| t.id == thread);
+                            let subtree = state
+                                .panel
+                                .thread_subtree(&thread)
+                                .map_err(|e| format!("{e:?}"))?;
+                            let busy = state
+                                .panel
+                                .summaries()
+                                .iter()
+                                .any(|t| subtree.contains(&t.id) && t.busy);
                             Some((
                                 "agent.delete",
                                 json!({"thread":thread,
                                     "title":summary.as_ref().map(|t| t.title.clone()),
-                                    "busy":summary.is_some_and(|t| t.busy)}),
+                                    "busy":busy,"subthreads":subtree.len().saturating_sub(1)}),
                             ))
                         }
                         // Full access asks first (language §9); the answer comes

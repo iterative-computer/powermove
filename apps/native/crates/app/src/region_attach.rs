@@ -50,7 +50,7 @@ pub(crate) fn crop(
     (w, h, out)
 }
 
-fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     let mut bytes = vec![];
     let mut encoder = png::Encoder::new(&mut bytes, w, h);
     encoder.set_color(png::ColorType::Rgba);
@@ -61,7 +61,7 @@ fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+pub(crate) fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::ALPHA);
     let mut reader = decoder.read_info().map_err(|e| e.to_string())?;
@@ -181,6 +181,11 @@ impl Controller {
             .join("caches")
             .join("agent-picks")
             .join(pm_kernel::new_id("pick"));
+        let caption = if region.is_some() {
+            format!("Viewer · {}", clock(captured_time))
+        } else {
+            "Powermove".into()
+        };
         let runtime = self.builtins.runtime.clone();
         let job: Box<dyn FnOnce() -> Result<(String, Vec<u8>), String> + Send> = match region {
             Some(region) => {
@@ -286,6 +291,13 @@ impl Controller {
                     let mut records = crate::media::attachment_records(&[path])?;
                     for record in &mut records {
                         record["targetContext"] = target_context.clone();
+                        record["screenPick"] = true.into();
+                        record["caption"] = caption.clone().into();
+                        record["promptNote"] = format!(
+                            "Screen selection: {}",
+                            record["caption"].as_str().unwrap_or(&name)
+                        )
+                        .into();
                     }
                     match runtime {
                         Some(runtime) => runtime.agent_attach(records),

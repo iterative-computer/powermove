@@ -1603,3 +1603,102 @@ fn hidden_background_failures_win_over_unread_success_without_switching_threads(
     p.mark_toolbar_seen();
     assert_eq!(p.toolbar_notice(), (false, false));
 }
+
+#[test]
+fn sent_attachment_tiles_still_open_the_archived_payload() {
+    let mut p = panel();
+    p.add_attachments("t", vec![Attachment::from_record(json!({"id":"sent-image","name":"Frame.png","type":"image/png","dataUrl":"data:image/png;base64,AA=="})).unwrap()], 1).unwrap();
+    p.submit("t", "run1", "request1", 2).unwrap();
+    assert_eq!(
+        p.inspect("t").unwrap()["attachments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert!(
+        matches!(p.open_attachment("t", "sent-image").unwrap().kind, EffectKind::OpenAttachment { attachment, .. } if attachment["dataUrl"] == "data:image/png;base64,AA==")
+    );
+    assert!(matches!(
+        p.open_attachment("t", "not-in-this-thread"),
+        Err(Error::UnknownId(_))
+    ));
+}
+
+#[test]
+fn subthreads_preserve_parent_drafts_target_live_children_and_start_new_turns_when_idle() {
+    let mut p = panel();
+    p.draft_mut("t")
+        .unwrap()
+        .insert_text("parent draft", 1, false);
+    let settings = p.session("t").unwrap().settings.clone();
+    p.start_subthread(
+        "child",
+        "t",
+        "Layout",
+        "Make a layout",
+        settings,
+        "task-run",
+        2,
+    )
+    .unwrap();
+    assert_eq!(p.active_id(), "t");
+    assert_eq!(p.session("t").unwrap().draft.request_text(), "parent draft");
+    let record = p.raw_archive()["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "child")
+        .unwrap();
+    assert_eq!(record["parentId"], "t");
+    assert_eq!(record["kind"], "subagent");
+    assert_eq!(p.thread_subtree("t").unwrap(), ["t", "child"]);
+    p.switch("child").unwrap();
+    p.draft_mut("child")
+        .unwrap()
+        .insert_text("Move it left", 3, false);
+    p.add_attachments(
+        "child",
+        vec![
+            Attachment::from_record(
+                json!({"id":"direction-file","name":"Notes.txt","content":"A note"}),
+            )
+            .unwrap(),
+        ],
+        3,
+    )
+    .unwrap();
+    let effect = p.submit("child", "task-run", "direction", 4).unwrap();
+    assert_eq!(effect.target.thread, "child");
+    assert_eq!(effect.target.run.as_deref(), Some("task-run"));
+    assert!(
+        matches!(effect.kind, EffectKind::Send {steer: true, attachments, ..} if attachments.len() == 1)
+    );
+    assert!(
+        p.observe_subthread("child", "another-run", Update::Progress("stale".into()), 5)
+            .is_err()
+    );
+    p.observe_subthread(
+        "child",
+        "task-run",
+        Update::Complete {
+            text: "Done".into(),
+            error: false,
+            cancelled: false,
+        },
+        6,
+    )
+    .unwrap();
+    assert!(p.session("child").unwrap().run.is_none());
+    p.draft_mut("child")
+        .unwrap()
+        .insert_text("Another round", 7, false);
+    let effect = p.submit("child", "fresh-run", "fresh-request", 8).unwrap();
+    assert_eq!(effect.target.run.as_deref(), Some("fresh-run"));
+    assert!(matches!(effect.kind, EffectKind::Send { steer: false, .. }));
+    assert_eq!(p.session("t").unwrap().draft.request_text(), "parent draft");
+    let mut store = Memory::default();
+    p.save(&mut store, 9).unwrap();
+    let restored = Panel::load(&mut store, "p", "unused", 10).unwrap();
+    assert_eq!(restored.raw_archive()["threads"][0]["parentId"], "t");
+}

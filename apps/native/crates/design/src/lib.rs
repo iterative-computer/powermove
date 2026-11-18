@@ -379,6 +379,13 @@ pub struct Metrics {
     pub popover_radius: f32,
     pub sheet_width: f32,
     pub agent_width: f32,
+    /// Agent attachment and pop-up geometry, shared by light and dark themes.
+    pub agent_attachment: f32,
+    /// Half the remove control sits outside the thumbnail corner.
+    pub agent_remove_offset: f32,
+    pub agent_attachment_sent: f32,
+    pub agent_model_min: f32,
+    pub agent_effort_width: f32,
     /// The Agent popover's height when the window has room (the original
     /// app's 680 pt conversation).
     pub agent_height: f32,
@@ -932,6 +939,11 @@ impl Tokens {
                 // The original app's popover: room for a reply beside a
                 // tool group's mono chips without wrapping every line.
                 agent_width: 440.,
+                agent_attachment: 56.,
+                agent_remove_offset: -12.,
+                agent_attachment_sent: 40.,
+                agent_model_min: 96.,
+                agent_effort_width: 72.,
                 agent_height: 680.,
                 agent_gap: space.xl,
                 tree_indent: 16.,
@@ -1128,6 +1140,8 @@ impl Tokens {
         metrics.control_radius: size, metrics.inner_radius: size, metrics.header: size,
         metrics.tab: size, metrics.pill_radius: size, metrics.pill_inset: size,
         metrics.segment_radius: size,
+        metrics.agent_attachment: size, metrics.agent_attachment_sent: size,
+        metrics.agent_model_min: size, metrics.agent_effort_width: size,
         metrics.row: size, metrics.control: size, metrics.field: size,
         metrics.value_column: size, metrics.border: size, metrics.track_row: size,
         typography.minimum: size, typography.body: size, typography.label: size,

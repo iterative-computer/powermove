@@ -584,12 +584,136 @@ mod tests {
     }
 }
 
+/// Only a whole, existing media/document path claims a textual paste.
+pub fn agent_pasted_path(text: &str) -> Option<std::path::PathBuf> {
+    let text = text.trim();
+    let file_url = text
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"));
+    let path = if file_url {
+        url::Url::parse(text).ok()?.to_file_path().ok()?
+    } else {
+        std::path::PathBuf::from(text)
+    };
+    if !path.is_absolute() || !path.is_file() {
+        return None;
+    }
+    if file_url {
+        return Some(path);
+    }
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    (matches!(
+        ext.as_str(),
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "heic"
+            | "webp"
+            | "gif"
+            | "mov"
+            | "mp4"
+            | "webm"
+            | "m4v"
+            | "wav"
+            | "mp3"
+            | "m4a"
+            | "aiff"
+            | "flac"
+            | "pdf"
+            | "txt"
+            | "md"
+            | "rtf"
+            | "doc"
+            | "docx"
+            | "csv"
+            | "xls"
+            | "xlsx"
+            | "json"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "html"
+            | "css"
+            | "py"
+            | "rs"
+    ))
+    .then_some(path)
+}
+
+pub fn agent_pasted_records(
+    media: crate::platform::PastedMedia,
+) -> Result<Vec<serde_json::Value>, String> {
+    match media {
+        crate::platform::PastedMedia::Files(paths) => attachment_records(&paths),
+        crate::platform::PastedMedia::Image { data, png } => {
+            let (hold, path) = crate::media_import::stage_pasted_image(data, png)
+                .ok_or("The pasted image could not be read")?;
+            let result = attachment_records(&[path]);
+            drop(hold);
+            result
+        }
+    }
+}
+
+/// Quick Look's file, held in an app-lifetime temporary cache (never the user's project).
+pub fn attachment_preview_path(record: &serde_json::Value) -> Result<std::path::PathBuf, String> {
+    use base64::Engine;
+    let name = record["name"].as_str().unwrap_or("Attachment");
+    let read_error = || format!("“{name}” could not be opened.");
+    let bytes = if let Some(data) = record["dataUrl"].as_str() {
+        base64::engine::general_purpose::STANDARD
+            .decode(data.split_once(',').ok_or_else(read_error)?.1)
+            .map_err(|_| read_error())?
+    } else if let Some(data) = record["dataBase64"].as_str() {
+        base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|_| read_error())?
+    } else if let Some(text) = record["content"].as_str() {
+        text.as_bytes().to_vec()
+    } else if let Some(path) = record["sourcePath"]
+        .as_str()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute() && p.is_file())
+    {
+        return Ok(path);
+    } else {
+        return Err(read_error());
+    };
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<tempfile::TempDir>>> =
+        std::sync::OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| read_error())?;
+    if cache.is_none() {
+        *cache = Some(tempfile::tempdir().map_err(|_| read_error())?);
+    }
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| e.chars().all(|c| c.is_ascii_alphanumeric()))
+        .unwrap_or("bin");
+    let path =
+        cache
+            .as_ref()
+            .unwrap()
+            .path()
+            .join(format!("{}.{}", blake3::hash(&bytes).to_hex(), ext));
+    if !path.is_file() {
+        std::fs::write(&path, bytes).map_err(|_| read_error())?;
+    }
+    Ok(path)
+}
+
 /// The Agent panel's attachment records for chosen files, as main keeps them:
 /// images as data URLs, text as content, anything else as base64. Files over
 /// 20 MB are refused by name.
 pub fn attachment_records(paths: &[std::path::PathBuf]) -> Result<Vec<serde_json::Value>, String> {
     use base64::Engine;
     const LIMIT: u64 = 20 * 1024 * 1024;
+    if paths.len() > 6 {
+        return Err("A message can carry six attachments.".into());
+    }
     let mut records = vec![];
     for path in paths {
         let name = path
@@ -614,6 +738,7 @@ pub fn attachment_records(paths: &[std::path::PathBuf]) -> Result<Vec<serde_json
             "jpg" | "jpeg" => Some("image/jpeg"),
             "gif" => Some("image/gif"),
             "webp" => Some("image/webp"),
+            "heic" => Some("image/heic"),
             _ => None,
         };
         let mut record =
@@ -631,6 +756,51 @@ pub fn attachment_records(paths: &[std::path::PathBuf]) -> Result<Vec<serde_json
             (None, Err(_)) => {
                 record["type"] = "application/octet-stream".into();
                 record["dataBase64"] = encoded().into();
+            }
+        }
+        let kind = if image.is_some() {
+            "image"
+        } else if matches!(extension.as_str(), "mov" | "mp4" | "webm" | "m4v") {
+            "video"
+        } else if matches!(extension.as_str(), "wav" | "mp3" | "m4a" | "aiff" | "flac") {
+            "audio"
+        } else {
+            "document"
+        };
+        let mime = match extension.as_str() {
+            "mov" => Some("video/quicktime"),
+            "mp4" | "m4v" => Some("video/mp4"),
+            "webm" => Some("video/webm"),
+            "mp3" => Some("audio/mpeg"),
+            "wav" => Some("audio/wav"),
+            "m4a" => Some("audio/mp4"),
+            "aiff" => Some("audio/aiff"),
+            "flac" => Some("audio/flac"),
+            "pdf" => Some("application/pdf"),
+            _ => None,
+        };
+        if let Some(mime) = mime {
+            record["type"] = mime.into();
+        }
+        if kind == "audio" || kind == "video" {
+            if let Some(us) = pm_media::probe::probe(path)
+                .ok()
+                .and_then(|p| p.probe.duration_us)
+            {
+                let seconds = us.max(0) / 1_000_000;
+                record["duration"] = format!("{}:{:02}", seconds / 60, seconds % 60).into();
+            }
+        }
+        if kind == "image" || kind == "video" {
+            if let Some((key, file)) = crate::media_thumbs::make_attachment(
+                path,
+                kind == "video",
+                crate::pro_media::ffmpeg()
+                    .as_ref()
+                    .map(|(p, _)| p.as_path()),
+            ) {
+                crate::media_thumbs::register(&key, file);
+                record["thumbnail"] = key.into();
             }
         }
         records.push(record);
@@ -667,6 +837,80 @@ mod attachment_tests {
                 .iter()
                 .all(|r| r["id"].is_string() && r["size"].is_u64())
         );
+    }
+
+    #[test]
+    fn attachment_previews_keep_original_bytes_and_report_missing_payloads() {
+        let record = serde_json::json!({"id":"preview","name":"Notes.txt","content":"hello"});
+        let file = super::attachment_preview_path(&record).unwrap();
+        assert_eq!(std::fs::read(file).unwrap(), b"hello");
+        let missing = serde_json::json!({"name":"Missing.png"});
+        assert!(
+            super::attachment_preview_path(&missing)
+                .unwrap_err()
+                .contains("Missing.png")
+        );
+        assert!(
+            super::attachment_preview_path(
+                &serde_json::json!({"name":"Bad.png","dataBase64":"%%%"})
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn agent_paste_paths_claim_only_whole_existing_supported_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("with space.PNG");
+        std::fs::write(&path, b"image").unwrap();
+        assert_eq!(
+            super::agent_pasted_path(path.to_str().unwrap()),
+            Some(path.clone())
+        );
+        assert_eq!(
+            super::agent_pasted_path(url::Url::from_file_path(&path).unwrap().as_str()),
+            Some(path.clone())
+        );
+        assert!(
+            super::agent_pasted_path(dir.path().join("missing.png").to_str().unwrap()).is_none()
+        );
+        assert!(super::agent_pasted_path(&format!("look at {}", path.display())).is_none());
+        let binary = dir.path().join("file.bin");
+        std::fs::write(&binary, [0, 255]).unwrap();
+        assert!(super::agent_pasted_path(binary.to_str().unwrap()).is_none());
+        assert_eq!(
+            super::agent_pasted_path(url::Url::from_file_path(&binary).unwrap().as_str()),
+            Some(binary)
+        );
+        assert!(super::agent_pasted_path(dir.path().to_str().unwrap()).is_none());
+    }
+    #[test]
+    fn agent_clipboard_image_and_file_drop_keep_bytes_and_make_a_thumbnail() {
+        let png = crate::region_attach::encode_png(2, 2, &[255; 16]).unwrap();
+        let pasted = super::agent_pasted_records(crate::platform::PastedMedia::Image {
+            data: png.clone(),
+            png: true,
+        })
+        .unwrap();
+        assert_eq!(pasted[0]["type"], "image/png");
+        let thumbnail = pasted[0]["thumbnail"]
+            .as_str()
+            .and_then(crate::media_thumbs::resolve)
+            .unwrap();
+        let (width, height, _) =
+            crate::region_attach::decode_png(&std::fs::read(thumbnail).unwrap()).unwrap();
+        assert_eq!((width, height), (112, 112));
+        assert!(
+            pasted[0]["thumbnail"]
+                .as_str()
+                .and_then(crate::media_thumbs::resolve)
+                .is_some()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drop.png");
+        std::fs::write(&path, png).unwrap();
+        let dropped =
+            super::agent_pasted_records(crate::platform::PastedMedia::Files(vec![path])).unwrap();
+        assert_eq!(dropped[0]["dataUrl"], pasted[0]["dataUrl"]);
     }
 
     #[test]

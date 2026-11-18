@@ -175,7 +175,9 @@ fn sheet_up() -> bool {
     let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
     app.keyWindow()
         .is_some_and(|k| k.isSheet() || k.attachedSheet().is_some())
-        || app.mainWindow().is_some_and(|m| m.attachedSheet().is_some())
+        || app
+            .mainWindow()
+            .is_some_and(|m| m.attachedSheet().is_some())
         || editor_window_number()
             .and_then(|n| app.windowWithWindowNumber(n))
             .is_some_and(|w| w.attachedSheet().is_some())
@@ -1268,7 +1270,10 @@ fn select_in_background(window: &NSWindow) {
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
-    let tabs: Vec<isize> = tab_windows(window).iter().map(|w| w.windowNumber()).collect();
+    let tabs: Vec<isize> = tab_windows(window)
+        .iter()
+        .map(|w| w.windowNumber())
+        .collect();
     // Only the app's editor windows count: a pop-up or helper window can
     // stand above other apps' windows, and going above it would too.
     let front = app.orderedWindows().to_vec().into_iter().find(|w| {
@@ -2348,7 +2353,11 @@ fn foreign_page(tag: isize) -> Option<(isize, usize)> {
 fn route(number: isize, name: String) {
     ROUTES.with(|r| {
         if let Some(tx) = r.borrow().get(&number) {
-            let _ = tx.try_send(Command { name, args: vec![], token: None });
+            let _ = tx.try_send(Command {
+                name,
+                args: vec![],
+                token: None,
+            });
         }
     });
 }
@@ -2495,7 +2504,13 @@ fn tab_label(tab: &Tab, tabs: &[Tab]) -> (String, bool) {
             .map(|s| s.to_string_lossy().into_owned())
     };
     let hint = match stem(tab) {
-        Some(own) if twins.iter().all(|t| stem(t).as_deref() != Some(own.as_str())) => Some(own),
+        Some(own)
+            if twins
+                .iter()
+                .all(|t| stem(t).as_deref() != Some(own.as_str())) =>
+        {
+            Some(own)
+        }
         _ => folder(tab).filter(|own| {
             twins
                 .iter()
@@ -2562,7 +2577,13 @@ fn distinct_title(title: &str, tabs: &[Tab]) -> Option<String> {
     let shared = tabs
         .iter()
         .filter(|t| t.title != title && alike_ends(&t.title, tabs))
-        .map(|t| chars.iter().zip(t.title.chars()).take_while(|(a, b)| **a == *b).count())
+        .map(|t| {
+            chars
+                .iter()
+                .zip(t.title.chars())
+                .take_while(|(a, b)| **a == *b)
+                .count()
+        })
         .max()?;
     // Back to the start of the word where they part.
     let start = chars[..shared.min(chars.len())]
@@ -2710,7 +2731,9 @@ fn toolbar_ids() -> Retained<NSArray<NSString>> {
     let v: Vec<_> = TOOLBAR_ORDER
         .iter()
         .map(|s| match *s {
-            FLEXIBLE => NSString::from_str(&unsafe { NSToolbarFlexibleSpaceItemIdentifier }.to_string()),
+            FLEXIBLE => {
+                NSString::from_str(&unsafe { NSToolbarFlexibleSpaceItemIdentifier }.to_string())
+            }
             SPACE => NSString::from_str(&unsafe { NSToolbarSpaceItemIdentifier }.to_string()),
             name => NSString::from_str(name),
         })
@@ -3577,7 +3600,11 @@ impl Host {
             row.setEnabled(false);
             row
         };
-        menu.addItem(&line(if shown.finished { "Done" } else { shown.title.as_str() }));
+        menu.addItem(&line(if shown.finished {
+            "Done"
+        } else {
+            shown.title.as_str()
+        }));
         if !shown.detail.is_empty() && !shown.finished {
             menu.addItem(&line(&shown.detail));
         }
@@ -3587,9 +3614,8 @@ impl Host {
             unsafe { row.setTarget(Some(&self._target)) };
             menu.addItem(&row);
         }
-        let turning = !shown.finished
-            && shown.progress.is_none()
-            && !tokens.accessibility.reduce_motion;
+        let turning =
+            !shown.finished && shown.progress.is_none() && !tokens.accessibility.reduce_motion;
         if !turning {
             if let Some(timer) = self.task_timer.take() {
                 timer.invalidate();
@@ -6253,7 +6279,10 @@ impl Host {
             // panel's less that.
             let m = &self.tokens.metrics;
             let radius = f64::from((m.panel_radius - m.border).max(0.));
-            let corners = self.viewer_corners.get().map(|on| if on { radius } else { 0. });
+            let corners = self
+                .viewer_corners
+                .get()
+                .map(|on| if on { radius } else { 0. });
             SlotGeometry {
                 frame: rect(r, h),
                 layer,
@@ -6388,7 +6417,12 @@ impl Host {
     /// window is a non-leading tab.
     /// The pages open in this window's strip, by id.
     pub fn page_ids(&self) -> Vec<String> {
-        self.pages.borrow().0.iter().map(|(id, _)| id.clone()).collect()
+        self.pages
+            .borrow()
+            .0
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect()
     }
     /// This window's place in its tab group's strip (0 when alone).
     pub fn tab_index(&self) -> usize {
@@ -7929,9 +7963,15 @@ impl Popup {
                     y += shape.heading as f64;
                 }
             }
+            let item_h = row_h
+                + if c.detail.is_empty() {
+                    0.
+                } else {
+                    caption as f64 + t.space.xs as f64
+                };
             let rect = NSRect::new(
                 NSPoint::new(inset, y),
-                NSSize::new(width - inset * 2., row_h),
+                NSSize::new(width - inset * 2., item_h),
             );
             let mut trailing = rect.origin.x + rect.size.width - t.space.md as f64;
             if let Some(glyphs) = self.shortcuts.get(&c.command) {
@@ -7973,6 +8013,19 @@ impl Popup {
                 title.setFont(Some(&face));
             }
             centred(&title, lead, y, row_h, (trailing - lead).max(0.));
+            if !c.detail.is_empty() {
+                let detail = popup_label(&c.detail, caption, t.colors.secondary, mtm);
+                centred(
+                    &detail,
+                    lead,
+                    y + row_h - t.space.xs as f64,
+                    item_h - row_h,
+                    (trailing - lead).max(0.),
+                );
+                self.list.addSubview(&detail);
+                self.parts
+                    .push(Retained::into_super(Retained::into_super(detail)));
+            }
             self.list.addSubview(&title);
             self.parts
                 .push(Retained::into_super(Retained::into_super(title)));
@@ -8002,7 +8055,7 @@ impl Popup {
                 rect,
                 button,
             });
-            y += row_h;
+            y += item_h;
         }
         if let Some(rest) = more_rows {
             let note = popup_label(
@@ -9237,7 +9290,10 @@ mod tab_layout_tests {
             distinct_title("Accept — Recovered — Native", &tabs).as_deref(),
             Some("…Recovered — Native")
         );
-        assert_eq!(distinct_title("Accept — Native", &tabs).as_deref(), Some("…Native"));
+        assert_eq!(
+            distinct_title("Accept — Native", &tabs).as_deref(),
+            Some("…Native")
+        );
         assert_eq!(distinct_title("Paper", &tabs), None);
         // The same name twice: each leads with its file's name, or its
         // folder's when the file names match too; the tooltip says where.

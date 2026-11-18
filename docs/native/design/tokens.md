@@ -68,8 +68,13 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `colors.viewer_guide` | Ruler guides over the viewer's picture | `#0097BC` | `#2CCCEB` | `#0097BC` | `#2CCCEB` |
 | `colors.warning` | Warnings, missing-but-recoverable states | `#A15C01` | `#F59E0A` | `#A15C01` | `#F59E0A` |
 | `colors.window` | Window ground behind panels, toolbar band and status bar | `#EEEEF1` | `#0C0A09` | `#EEEEF1` | `#0C0A09` |
+| `metrics.agent_attachment` | Square draft attachment thumbnail edge | 56 | 56 | 56 | 56 |
+| `metrics.agent_attachment_sent` | Square sent attachment thumbnail edge | 40 | 40 | 40 | 40 |
+| `metrics.agent_effort_width` | Fixed composer effort pop-up width | 72 | 72 | 72 | 72 |
 | `metrics.agent_gap` | Space between turns in the Agent conversation | 16 | 16 | 16 | 16 |
 | `metrics.agent_height` | Agent popover height when the window has room | 680 | 680 | 680 | 680 |
+| `metrics.agent_model_min` | Minimum composer model pop-up width | 96 | 96 | 96 | 96 |
+| `metrics.agent_remove_offset` | Remove control outset at an attachment corner | -12 | -12 | -12 | -12 |
 | `metrics.agent_width` | Default agent panel width | 440 | 440 | 440 | 440 |
 | `metrics.align_well` | Least width of an alignment well: three cells at the least hit target | 72 | 72 | 72 | 72 |
 | `metrics.anchor_mark` | Anchor point crosshair circle | 11 | 11 | 11 | 11 |

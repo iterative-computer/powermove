@@ -154,3 +154,23 @@ fn oversized_attachment_refuses_before_any_store_write() {
     assert!(t.save(&mut s).is_err());
     assert!(s.writes.is_empty());
 }
+
+#[test]
+fn child_threads_never_reuse_a_blank_draft_or_move_the_active_thread() {
+    let mut store = Memory::default();
+    let mut threads = Threads::load(&mut store, "p", "parent", 1).unwrap();
+    threads.create_child("child", "parent", 2).unwrap();
+    assert_eq!(threads.active_id(), "parent");
+    assert_eq!(threads.thread("parent").unwrap()["composerDraft"], "");
+    assert_eq!(threads.thread("child").unwrap()["parentId"], "parent");
+    threads.create_child("grandchild", "child", 3).unwrap();
+    assert!(threads.create_child("child", "parent", 4).is_err());
+    assert!(
+        threads
+            .create_child("missing-parent-child", "missing", 4)
+            .is_err()
+    );
+    threads.save(&mut store).unwrap();
+    let restored = Threads::load(&mut store, "p", "unused", 5).unwrap();
+    assert_eq!(restored.thread("grandchild").unwrap()["parentId"], "child");
+}

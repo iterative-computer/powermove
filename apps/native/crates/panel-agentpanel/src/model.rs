@@ -805,6 +805,63 @@ impl Panel {
         self.follow.switch_thread();
         Ok(())
     }
+    /// Project a task-owned run without transferring ownership to ProviderRuns.
+    pub fn start_subthread(
+        &mut self,
+        id: &str,
+        parent: &str,
+        title: &str,
+        prompt: &str,
+        settings: Settings,
+        run: &str,
+        now: u64,
+    ) -> Result<()> {
+        if self.sessions.contains_key(id) {
+            return Err(Error::Invalid("duplicate child thread"));
+        }
+        let catalog = self.session(parent)?.catalog.clone();
+        let record = self
+            .archive
+            .create_child(id, parent, now)
+            .map_err(host)?
+            .clone();
+        let mut session = Session::from_record(&record)?;
+        session.settings = settings;
+        session.settings_dirty = true;
+        session.catalog = catalog;
+        session.run = Some(Run {
+            id: run.into(),
+            request_id: run.into(),
+            started_at: now,
+            sequence: 0,
+            stopping: false,
+        });
+        session.phase = Phase::Running;
+        session.append(json!({"role":"user","text":prompt}))?;
+        self.sessions.insert(id.into(), session);
+        self.archive.thread_mut(id).unwrap()["title"] = json!(title);
+        self.defer_save(now);
+        Ok(())
+    }
+    pub fn observe_subthread(
+        &mut self,
+        id: &str,
+        run: &str,
+        update: Update,
+        now: u64,
+    ) -> Result<()> {
+        let sequence = self
+            .session(id)?
+            .run
+            .as_ref()
+            .filter(|r| r.id == run)
+            .ok_or(Error::Stale)?
+            .sequence
+            + 1;
+        self.receive(id, run, sequence, update, now)?;
+        self.defer_save(now);
+        Ok(())
+    }
     pub fn new_thread(&mut self, id: &str, now: u64) -> Result<String> {
         self.no_apply()?;
         let active = self.session(self.active_id())?;
@@ -875,6 +932,31 @@ impl Panel {
         for session in self.sessions.values_mut() {
             session.toolbar_notice = None;
         }
+    }
+
+    /// Root first, each descendant once, including malformed cyclic legacy records.
+    pub fn thread_subtree(&self, root: &str) -> Result<Vec<String>> {
+        self.session(root)?;
+        let mut ids = vec![root.to_owned()];
+        let mut seen = HashSet::from([root.to_owned()]);
+        let mut cursor = 0;
+        while cursor < ids.len() {
+            for record in self.archive.raw()["threads"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                if record["parentId"].as_str() == Some(ids[cursor].as_str()) {
+                    if let Some(id) = record["id"].as_str() {
+                        if seen.insert(id.to_owned()) {
+                            ids.push(id.to_owned());
+                        }
+                    }
+                }
+            }
+            cursor += 1;
+        }
+        Ok(ids)
     }
     pub fn background_runs(&self) -> usize {
         self.sessions
@@ -1732,10 +1814,18 @@ impl Panel {
     }
     pub fn open_attachment(&mut self, thread: &str, id: &str) -> Result<Effect> {
         let target = self.target(thread)?;
-        let file = self
-            .session(thread)?
+        let session = self.session(thread)?;
+        let archived = session
+            .conversation
+            .values()
+            .flat_map(|r| r["attachments"].as_array().into_iter().flatten())
+            .find(|a| a["id"].as_str() == Some(id))
+            .cloned()
+            .and_then(|a| crate::composer::Attachment::from_record(a).ok());
+        let file = session
             .draft
             .attachment(id)
+            .or(archived.as_ref())
             .ok_or_else(|| Error::UnknownId(id.into()))?;
         if !file.previewable()
             && !file.payload_available()
@@ -1846,7 +1936,7 @@ impl Panel {
     pub fn inspect(&self, thread: &str) -> Result<Value> {
         let s = self.session(thread)?;
         Ok(
-            json!({"projectId":self.project,"threadId":thread,"phase":format!("{:?}",s.phase).to_lowercase(),"runId":s.run.as_ref().map(|r|&r.id),"messageCount":s.conversation.len(),"liveRowCount":s.trace.rows.len(),"backgroundRuns":self.background_runs(),"sendable":s.draft.sendable(),"composerDisabled":s.composer_disabled(),"applying":s.applying,"archiving":s.archiving,"stopError":s.stop_error,"saveError":self.save_error,"attachments":s.draft.attachments().map(|a|json!({"id":a.id(),"name":a.name(),"type":a.record()["type"],"payloadAvailable":a.payload_available()})).collect::<Vec<_>>()}),
+            json!({"projectId":self.project,"threadId":thread,"phase":format!("{:?}",s.phase).to_lowercase(),"runId":s.run.as_ref().map(|r|&r.id),"messageCount":s.conversation.len(),"liveRowCount":s.trace.rows.len(),"backgroundRuns":self.background_runs(),"sendable":s.draft.sendable(),"composerDisabled":s.composer_disabled(),"applying":s.applying,"archiving":s.archiving,"stopError":s.stop_error,"saveError":self.save_error,"attachments":s.draft.attachments().map(|a|json!({"id":a.id(),"name":a.name(),"type":a.record()["type"],"payloadAvailable":a.payload_available(),"thumbnail":a.record()["thumbnail"],"duration":a.record()["duration"],"screenPick":a.record()["screenPick"],"caption":a.record()["caption"]})).collect::<Vec<_>>()}),
         )
     }
     /// Source: spatial.ts:710–727, threads.ts:100–108. An old asynchronous title
