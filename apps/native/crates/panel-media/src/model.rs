@@ -238,7 +238,7 @@ pub struct MediaPanel {
     pub folder: Option<String>,
     pub filter: Filter,
     pub preview: Preview,
-    pub renaming: Option<String>,
+    pub renaming: Option<ItemId>,
     pub drag: Option<Drag>,
     pub drop_target: Option<Option<String>>,
     pub(crate) stamp: Option<Stamp>,
@@ -287,7 +287,7 @@ impl MediaPanel {
                 self.folder = folder.parent.clone();
                 effects.extend(self.refresh(c, r));
                 self.select_exclusive(ItemId::Folder(id.clone()), &mut effects);
-                self.renaming = Some(id.clone());
+                self.renaming = Some(ItemId::Folder(id.clone()));
             } else if c.compositions.contains_key(id) {
                 self.select_exclusive(ItemId::Composition(id.clone()), &mut effects);
             }
@@ -486,7 +486,7 @@ impl MediaPanel {
         if self
             .renaming
             .as_ref()
-            .is_some_and(|id| !c.folders.contains_key(id))
+            .is_some_and(|id| !c.contains(id))
         {
             self.renaming = None;
         }

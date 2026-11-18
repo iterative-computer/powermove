@@ -129,6 +129,23 @@ impl HeadlessAppContext {
         )
     }
 
+    /// Changes a fake window's backing scale for native 1x/2x capture checks.
+    pub fn simulate_scale_change(&mut self, window: AnyWindowHandle, scale: f32) {
+        assert!(scale.is_finite() && scale > 0.);
+        let mut platform = self.app.borrow_mut().windows.get_mut(window.id)
+            .unwrap().as_deref_mut().unwrap().platform_window.as_test().unwrap().clone();
+        platform.simulate_scale_change(scale);
+        self.run_until_parked();
+    }
+
+    /// Delivers an input event to a fake window, without operating-system input.
+    pub fn simulate_event<E: crate::InputEvent>(&mut self, window: AnyWindowHandle, event: E) {
+        self.update_window(window, |_, window, cx| {
+            window.dispatch_event(event.to_platform_input(), cx);
+        }).unwrap();
+        self.run_until_parked();
+    }
+
     /// Runs all pending tasks until parked.
     pub fn run_until_parked(&self) {
         self.dispatcher.run_until_parked();

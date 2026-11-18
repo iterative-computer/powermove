@@ -4,6 +4,12 @@ import { fileURLToPath } from "node:url";
 let cached: { model: string; inspect: string } | undefined;
 export function binaries() {
   if (cached) return cached;
+  if (process.env.PM_PROJECT_MODEL_HOST && process.env.PM_PROJECT_INSPECT_WIRE) {
+    return (cached = {
+      model: process.env.PM_PROJECT_MODEL_HOST,
+      inspect: process.env.PM_PROJECT_INSPECT_WIRE,
+    });
+  }
   const manifest = fileURLToPath(
     new URL("../native/Cargo.toml", import.meta.url),
   );

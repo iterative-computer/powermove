@@ -1,5 +1,5 @@
 use crate::ValueMut;
-use crate::{Catalog, Error, Stamp, object, text};
+use crate::{Catalog, Error, ItemId, Stamp, object, text};
 use pm_kernel::{
     Call, Caller, Command, CompCommand, DocumentStore, KernelHandle, Origin, Pending, Request,
 };
@@ -9,6 +9,7 @@ use std::collections::HashSet;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Edit {
+    RenameItem { id: ItemId, name: String },
     CreateFolder {
         id: String,
         name: String,
@@ -144,7 +145,33 @@ impl Catalog {
         let mut next = (*self.root).clone();
         let mut created = None;
         let mut removed_layers = vec![];
+        let mut rename_label = None;
         let label = match edit {
+            Edit::RenameItem { id, name } => {
+                let old = self.item_name(&id).ok_or(Error::MissingItem)?;
+                let name = pm_model::json::js_trim(&name);
+                if name.is_empty() || name == old { return Err(Error::InvalidTarget); }
+                rename_label = Some(format!("Rename {old} to {name}"));
+                if let ItemId::Composition(comp_id) = &id {
+                    next = self.command_next(Command::Comp(CompCommand::Settings {
+                        comp_id: comp_id.clone(),
+                        settings: pm_kernel::commands::comps::NewComp { name: Some(name.into()), ..Default::default() },
+                    }))?;
+                    if let Some(actual) = next.get("comps").and_then(|v| v.get(comp_id)).and_then(|v| text(v, "name")) {
+                        rename_label = Some(format!("Rename {old} to {actual}"));
+                    }
+                } else if let ItemId::Asset(asset_id) = &id {
+                    next = self.command_next(Command::Media(pm_kernel::MediaCommand::RenameAsset { asset_id: asset_id.clone(), name: name.into() }))?;
+                } else {
+                    let value = match &id {
+                        ItemId::Asset(_) => unreachable!(),
+                        ItemId::Folder(id) => field_mut(&mut next, "assetFolders", id)?,
+                        ItemId::Composition(_) => unreachable!(),
+                    };
+                    value.as_object_mut().ok_or(Error::InvalidMedia)?.insert("name", Value::from(name));
+                }
+                "Rename"
+            }
             Edit::CreateFolder { id, name, parent } => {
                 if id.is_empty()
                     || self.folders.contains_key(&id)
@@ -279,7 +306,7 @@ impl Catalog {
         };
         Ok(PreparedEdit {
             stamp: self.stamp.clone(),
-            label: label.into(),
+            label: rename_label.unwrap_or_else(|| label.into()),
             delete_message,
             next,
             created,

@@ -77,9 +77,9 @@ pub enum Input {
     OpenFolder(Option<String>),
     Filter(Filter),
     Invoke(MenuCommand),
-    BeginRename(String),
+    BeginRename(ItemId),
     CommitRename {
-        folder: String,
+        id: ItemId,
         value: String,
     },
     CancelRename,
@@ -265,21 +265,15 @@ impl MediaPanel {
             }
             Input::Invoke(command) => self.invoke(c, r, command, &mut out)?,
             Input::BeginRename(id) => {
-                if !c.folders.contains_key(&id) {
-                    return Err(Error::MissingItem);
-                }
+                if !c.contains(&id) { return Err(Error::MissingItem); }
                 self.renaming = Some(id);
             }
-            Input::CommitRename { folder, value } => {
-                if self.renaming.as_ref() == Some(&folder) {
+            Input::CommitRename { id, value } => {
+                if self.renaming.as_ref() == Some(&id) {
                     self.renaming = None;
                     let value = pm_model::json::js_trim(&value).to_owned();
-                    if !value.is_empty() && c.folders.get(&folder).is_some_and(|f| f.name != value)
-                    {
-                        out.edit = Some(Edit::RenameFolder {
-                            id: folder,
-                            name: value,
-                        });
+                    if !value.is_empty() && c.item_name(&id).is_some_and(|old| old != value) {
+                        out.edit = Some(Edit::RenameItem { id, name: value });
                     }
                 }
             }
@@ -333,7 +327,7 @@ impl MediaPanel {
                         )
                     }
                     ItemId::Folder(id) => {
-                        if self.renaming.as_ref() == Some(id) {
+                        if self.renaming.as_ref() == Some(&ItemId::Folder(id.clone())) {
                             return Ok(Outcome::default());
                         }
                         self.select_exclusive(ItemId::Folder(id.clone()), &mut out.effects);
@@ -894,7 +888,7 @@ impl MediaPanel {
                 if !c.folders.contains_key(&id) {
                     return Err(Error::MissingItem);
                 }
-                self.renaming = Some(id);
+                self.renaming = Some(ItemId::Folder(id));
             }
             DeleteFolder(id) => out.edit = Some(Edit::DeleteFolder { id }),
             MoveOut(item) => {

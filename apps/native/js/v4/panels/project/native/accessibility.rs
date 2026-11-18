@@ -22,7 +22,7 @@ fn commands(row: &Row, composition_count: usize) -> Vec<(&'static str, Input)> {
     match &row.data {
         RowData::Folder(f) => vec![
             ("Open", Input::OpenFolder(Some(f.id.clone()))),
-            ("Rename", Input::BeginRename(f.id.clone())),
+            ("Rename", Input::BeginRename(ItemId::Folder(f.id.clone()))),
             ("Delete", invoke(MenuCommand::DeleteFolder(f.id.clone()))),
         ],
         RowData::Composition(c) => {

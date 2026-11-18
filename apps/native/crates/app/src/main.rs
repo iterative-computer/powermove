@@ -11,6 +11,9 @@
 
 mod action_toast;
 mod access;
+#[cfg(test)]
+#[path = "../../../vendor/gpui-ce/crates/gpui_macos/src/native_text_selection.rs"]
+mod native_text_selection;
 mod after_open;
 mod agent_coedit;
 mod agent_clients;

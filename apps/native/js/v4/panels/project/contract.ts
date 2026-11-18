@@ -163,8 +163,8 @@ export type Input =
   | { Invoke: Command }
   | { OpenFolder: string | null }
   | { DeleteAsset: string }
-  | { BeginRename: string }
-  | { CommitRename: { folder: string; value: string } }
+  | { BeginRename: ItemId }
+  | { CommitRename: { id: ItemId; value: string } }
   | {
       Filter: {
         query: string;
@@ -207,7 +207,7 @@ export interface Projection {
   crumbs: Folder[];
   selected_count: number;
   focused: ItemId | null;
-  renaming: string | null;
+  renaming: ItemId | null;
   drag: Json;
   drop_target: null | { folder: string | null };
   external_drag: boolean;

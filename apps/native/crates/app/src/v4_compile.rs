@@ -516,6 +516,8 @@ fn compile(
 ) -> NodeView {
     let t = &table.tokens;
     let component = Component::of(node);
+    let inline_rename = component == Some(Component::TextField)
+        && node.props.get("metadata").and_then(|m| m.get("inlineRename")) == Some(&Value::Bool(true));
     let mut style = surface.computed_style(node.id).unwrap_or_default();
     native_panel_root(&mut style, node.id == 0 || node.parent == Some(0));
     let hidden = style.get("display").and_then(Value::as_str) == Some("none");
@@ -569,6 +571,9 @@ fn compile(
                 .min_w(px(recipe.hit))
                 .min_h(px(recipe.hit))
                 .rounded(px(radius)),
+            // An inline name occupies the text's rectangle, without a
+            // field well or the inset used by standalone form controls.
+            Some(Component::TextField) if inline_rename => sheet.flex_row().items_center(),
             Some(
                 Component::PopUpButton
                 | Component::NumberField
@@ -864,7 +869,7 @@ fn compile(
     }
     let selected = node.props.get("aria-selected") == Some(&Value::Bool(true))
         || node.props.get("state").and_then(|s| s.get("selected")) == Some(&Value::Bool(true));
-    if selected {
+    if selected && node.props.get("metadata").and_then(|m| m.get("selectionRingOnly")) != Some(&Value::Bool(true)) {
         compiled.sheet = compiled.sheet.bg(rgb(t.colors.selected_fill));
     }
     let header_id = node.props.get("id").and_then(Value::as_str);
@@ -927,7 +932,7 @@ fn compile(
                 component,
                 Some(Component::PopUpButton | Component::SegmentedControl)
             ),
-        bare: in_colour && component == Some(Component::TextField),
+        bare: inline_rename || (component == Some(Component::TextField) && in_colour),
         code: meta.and_then(|m| m.get("code")) == Some(&Value::Bool(true)),
         sheet_body: slot == Some("body"),
         fixed_width: meta
@@ -1016,6 +1021,7 @@ fn compile(
         hidden,
         // The native timeline scrolls its outline; a nested scroller would double it.
         scroll_y: meta.and_then(|m| m.get("nativeFirstRow")).is_none()
+            && meta.and_then(|m| m.get("scrollOwner")).and_then(Value::as_str) != Some("child")
             && (compiled.scroll_y
                 || matches!(component, Some(Component::List | Component::Tree))
                 || matches!(node.r#type.as_str(), "scroll" | "virtual-list")),

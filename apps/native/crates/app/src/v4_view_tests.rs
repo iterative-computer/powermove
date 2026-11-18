@@ -2746,3 +2746,152 @@ fn easing_handle_release_is_one_real_undo_step(cx: &mut TestAppContext) {
         "handle preview must not create intermediate undo entries"
     );
 }
+
+/// A second culler must not measure a virtual page from zero: its leading
+/// spacer is not a surface node. Republishing must keep the offset and rows.
+#[gpui::test]
+fn project_virtual_page_keeps_rows_and_offset_after_refresh(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let page = || {
+        let mut ops = node_ops(1, 0, "virtual-list", json!({"id":"virtual-viewport","count":30,"range":[10,20],"itemSize":160,"metadata":{"fixedItems":true},"style":{"width":240,"height":400,"lineHeight":20}}), &[]);
+        let mut next = 2;
+        for i in 10..20 {
+            let row = next;
+            next += 1;
+            ops.extend(node_ops(row, 1, "div", json!({"id":format!("card-row-{i}"),"style":{"height":160,"flexShrink":0,"display":"flex","flexDirection":"row"}}), &[]));
+            for column in 0..2 {
+                let item = i * 2 + column;
+                let card = next;
+                next += 1;
+                ops.extend(node_ops(card, row, "div", json!({"id":format!("card-item-{item}"),"style":{"width":120,"height":160,"flexShrink":0}}), &[]));
+                let text = next;
+                next += 1;
+                ops.extend(node_ops(text, card, "text", json!({}), &[]));
+                ops.push(Op::SetText { id: text, text: format!("Item {item}") });
+            }
+        }
+        let mut p = synthetic(&rig, ops);
+        p.panel = pm_builtins::PROJECT_PANEL.into();
+        p
+    };
+    let surface = page();
+    let runtime = rig.runtime.clone();
+    cx.executor().allow_parking();
+    let (root, vcx) = cx.add_window_view(|window, cx| Slot {
+        child: cx.new(|cx| SurfaceView::new(runtime, surface, tokens(), Default::default(), window, cx)),
+    });
+    let mut vcx = vcx.clone();
+    vcx.run_until_parked();
+    let view = root.read_with(&vcx, |r, _| r.child.clone());
+    view.update(&mut vcx, |v, cx| {
+        v.review_scroll_to(1600., cx);
+    });
+    vcx.run_until_parked();
+    view.update(&mut vcx, |v, cx| v.publish(page(), cx));
+    settle(cx, |cx| !view.read_with(cx, |v, _| v.compiling()));
+    vcx.run_until_parked();
+    let viewport = bounds(&mut vcx, "virtual-viewport");
+    let assert_sequence = |vcx: &mut VisualTestContext| {
+        let offset = -view.read_with(vcx, |v, _| f32::from(v.test_scroll_offset(1).unwrap().y));
+        let mut painted = Vec::new();
+        for item in 0..60 {
+            let name = format!("card-item-{item}");
+            if let Some(b) = vcx.debug_bounds(Box::leak(name.clone().into_boxed_str())) {
+                if b.bottom() > viewport.top() && b.top() < viewport.bottom() {
+                    painted.push((b.origin.y, b.origin.x, name));
+                }
+            }
+        }
+        painted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.partial_cmp(&b.1).unwrap()));
+        let painted: Vec<_> = painted.into_iter().map(|(_, _, id)| id).collect();
+        let first = (offset / 160.).floor() as usize * 2;
+        let last = ((offset + f32::from(viewport.size.height)) / 160.).ceil() as usize * 2;
+        let model: Vec<_> = (0..60).map(|i| format!("card-item-{i}")).collect();
+        crate::project_capture_tests::assert_project_grid_contiguous(&model, first, last, &painted);
+    };
+    assert_sequence(&mut vcx);
+    let visible = (f32::from(viewport.size.height) / 160.).ceil() as usize;
+    for index in 0..visible {
+        let row = bounds(&mut vcx, &format!("card-row-{}", 10 + index));
+        assert_eq!(row.origin.y, viewport.origin.y + px(index as f32 * 160.));
+        assert_eq!(row.size.height, px(160.));
+    }
+    assert!(bounds(&mut vcx, &format!("card-row-{}", 9 + visible)).bottom() >= viewport.bottom());
+    // Fractional wheel steps and a decaying trackpad/momentum burst use the
+    // same offset, without rounding, multiplying or restarting the page.
+    vcx.simulate_mouse_move(point(px(50.), px(50.)), None, Modifiers::none());
+    vcx.run_until_parked();
+    let mut expected = 0_f32;
+    for (delta, phase) in [(-1.25, gpui::TouchPhase::Started), (-32., gpui::TouchPhase::Moved),
+        (-18.5, gpui::TouchPhase::Moved), (-7.25, gpui::TouchPhase::Moved), (-0.5, gpui::TouchPhase::Moved), (0., gpui::TouchPhase::Ended)] {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: point(px(50.), px(50.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(delta))),
+            touch_phase: phase,
+            ..Default::default()
+        });
+        // Scroll layers replay without laying out; refresh before reading
+        // layout debug bounds, keeping the offset set by GPUI's wheel handler.
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        expected += delta;
+        assert_sequence(&mut vcx);
+        let actual = f32::from(bounds(&mut vcx, "card-row-10").origin.y - viewport.origin.y);
+        let offset = view.read_with(&vcx, |v, _| f32::from(v.test_scroll_offset(1).unwrap().y));
+        assert!((offset + 1600. - expected).abs() < 0.01, "delta={delta}, phase={phase:?}: offset={offset}, expected {}", expected - 1600.);
+        // Layout aligns painted rows to pixels, while the handle retains
+        // every fractional delta for the next event.
+        assert!((actual - expected).abs() <= 1., "painted row={actual}, expected {expected} within one pixel");
+    }
+    let line = 20.; // The scroller's authored line height.
+    vcx.simulate_event(ScrollWheelEvent {
+        position: point(px(50.), px(50.)),
+        delta: ScrollDelta::Lines(point(0., -1.)),
+        ..Default::default()
+    });
+    vcx.update(|window, _| window.refresh());
+    vcx.run_until_parked();
+    assert_sequence(&mut vcx);
+    let actual = f32::from(bounds(&mut vcx, "card-row-10").origin.y - viewport.origin.y);
+    let offset = view.read_with(&vcx, |v, _| f32::from(v.test_scroll_offset(1).unwrap().y));
+    assert!((offset + 1600. - (expected - line)).abs() < 0.01, "line delta: offset={offset}, expected {}", expected - line - 1600.);
+    assert!((actual - (expected - line)).abs() <= 1., "painted row={actual}, expected {} within one pixel", expected - line);
+}
+
+#[gpui::test]
+fn project_text_tooltip_follows_measured_truncation_after_resize(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let title = "Composition with a long name";
+    let tree = |width| {
+        let mut ops = node_ops(1, 0, "text", json!({"title":title,"metadata":{"tooltipWhenTruncated":true},"style":{"width":width,"height":24,"fontSize":13,"whiteSpace":"nowrap","overflow":"hidden","textOverflow":"ellipsis"}}), &[]);
+        ops.push(Op::SetText { id: 1, text: title.into() });
+        synthetic(&rig, ops)
+    };
+    let (view, mut vcx) = window(cx, &rig, tree(40), Default::default());
+    vcx.run_until_parked();
+    assert_eq!(view.read_with(&vcx, |v, _| v.tooltip_title(1).map(|t| t.to_string())), Some(title.into()));
+    view.update(&mut vcx, |v, cx| v.publish(tree(500), cx));
+    settle(cx, |cx| !view.read_with(cx, |v, _| v.compiling()));
+    vcx.run_until_parked();
+    assert_eq!(view.read_with(&vcx, |v, _| v.tooltip_title(1)), None);
+}
+
+#[gpui::test]
+fn project_inline_rename_uses_text_geometry(cx: &mut TestAppContext) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(1, 0, "div", json!({}), &[]);
+    ops.extend(node_ops(2, 1, "input", json!({"data-pm-component":"text-field","control":"text","value":"Main 2","metadata":{"inlineRename":true}}), &[]));
+    let (view, vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    view.read_with(&vcx, |v, _| {
+        let field = &v.prepared.nodes[&2];
+        assert!(field.bare);
+        assert!(field.style.background.is_none());
+        assert!(field.style.size.height.is_none());
+        assert!(field.style.padding.left.is_none());
+        assert!(field.style.padding.right.is_none());
+    });
+}

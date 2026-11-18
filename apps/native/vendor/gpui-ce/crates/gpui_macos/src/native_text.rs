@@ -12,6 +12,8 @@ use std::{
     collections::HashMap,
     rc::{Rc, Weak},
 };
+#[path = "native_text_selection.rs"]
+mod selection;
 
 /// The tag of a field in which Escape cancels the edit; see
 /// `NativeTextSlot::set_escape_cancels`.
@@ -110,6 +112,7 @@ struct State {
     tab_inserts: Cell<bool>,
     host_navigation: Cell<bool>,
     focus_pending: Cell<bool>,
+    selection_pending: Cell<Option<(usize, usize)>>,
     /// A composer takes the keyboard only when the person asked for it: a
     /// press on it, Tab to it, or the host beginning to edit it (an explicit
     /// open). Never AppKit handing a window's keyboard to the first text
@@ -780,6 +783,7 @@ impl NativeTextSlot {
             tab_inserts: Cell::new(false),
             host_navigation: Cell::new(false),
             focus_pending: Cell::new(false),
+            selection_pending: Cell::new(None),
             armed: Cell::new(false),
             original: RefCell::new(initial.into()),
             events: RefCell::new(Vec::new()),
@@ -969,6 +973,7 @@ impl NativeTextSlot {
     /// press elsewhere do.
     pub fn blur(&self) {
         self.state.focus_pending.set(false);
+        self.state.selection_pending.set(None);
         self.state.armed.set(false);
         let view: Retained<NSView> = match &self.state.editor {
             Editor::Field(v) => Retained::into_super(Retained::into_super(v.clone())),
@@ -1019,13 +1024,24 @@ impl NativeTextSlot {
     pub fn selection(&self) -> (usize, usize) {
         self.state.selection()
     }
-    /// Canvas: select a UTF-16 range (clamped to the text).
+    /// Select a UTF-16 range (clamped to the text), after focus if needed.
     pub fn set_selection(&self, start: usize, end: usize) {
-        if let Editor::Multiline(v) = &self.state.editor {
-            let length = v.string().length();
-            let (start, end) = (start.min(length), end.min(length));
-            let (start, end) = (start.min(end), start.max(end));
-            v.setSelectedRange(NSRange::new(start, end - start));
+        match &self.state.editor {
+            Editor::Multiline(v) => {
+                v.setSelectedRange(selection_range(start, end, v.string().length()));
+            }
+            Editor::Field(v) => {
+                // The shared field editor exists only after focus is applied.
+                // selectText selects everything, so apply a requested prefix
+                // afterwards (a filename's stem, leaving its extension).
+                self.state.selection_pending.set(Some((start, end)));
+                if !self.state.focus_pending.get() {
+                    if let Some(ed) = v.currentEditor() {
+                        ed.setSelectedRange(selection_range(start, end, ed.string().length()));
+                        self.state.selection_pending.set(None);
+                    }
+                }
+            }
         }
     }
     /// Replaces the text even while editing (a composer clearing after its
@@ -1376,6 +1392,9 @@ fn place(key: usize, apply: bool) -> bool {
                     }
                     if let Some(ed) = v.currentEditor() {
                         configure_editor(&ed, !state.kind.number());
+                        if let Some((start, end)) = state.selection_pending.take() {
+                            ed.setSelectedRange(selection_range(start, end, ed.string().length()));
+                        }
                     }
                 }
             }
@@ -1436,4 +1455,10 @@ fn configure_editor(editor: &NSText, spell: bool) {
             let _: () = msg_send![editor,setWritingToolsBehavior:0isize];
         }
     }
+}
+
+// AppKit ranges count UTF-16 code units, as JavaScript string lengths do.
+fn selection_range(start: usize, end: usize, length: usize) -> NSRange {
+    let (location, length) = selection::selection_range(start, end, length);
+    NSRange::new(location, length)
 }

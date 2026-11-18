@@ -33,7 +33,7 @@ dropping.external_drag = true;
 const folderDrop = projection([folder()]);
 folderDrop.drop_target = { folder: "f" };
 const rename = projection([folder()]);
-rename.renaming = "f";
+rename.renaming = { Folder: "f" };
 const drag = projection([selected]);
 drag.drag = {
   primary: { Asset: "a" },
@@ -435,8 +435,8 @@ test("F2 requests folder rename; a composing field cannot commit", async () => {
     );
   await render();
   await event(root, find(root, "Project media").id, "keydown", { key: "F2" });
-  expect(inputs.at(-1)).toEqual({ BeginRename: "f" });
-  view = { ...view, renaming: "f" };
+  expect(inputs.at(-1)).toEqual({ BeginRename: { Folder: "f" } });
+  view = { ...view, renaming: { Folder: "f" } };
   await render();
   const field = root
     .inspect()
@@ -823,5 +823,138 @@ test("readiness refresh keeps an existing poster unchanged in grid and list", as
     expect(await draw("Ready")).toEqual(ready);
     for (const report of replay(commits)) expect(report.accepted).toBe(true);
     await root.dispose();
+  }
+});
+
+test("virtual project viewport has a single scroll owner across thumbnail refreshes", async () => {
+  const { root } = recorder();
+  let previous: number | undefined;
+  for (const status of ["Loading", "Ready"] as const) {
+    await root.render(
+      <ProjectView
+        view={projection([asset("a", status), asset("b")])}
+        input={() => {}}
+        menu={() => {}}
+        page={() => {}}
+        native={native}
+        layout={layout}
+      />,
+    );
+    const list = root.inspect().nodes.find((n) => n.type === "virtual-list")!;
+    const outer = find(root, "Project media");
+    expect(outer.props.metadata?.scrollOwner).toBe("child");
+    expect(list.props.metadata?.fixedItems).toBe(true);
+    if (previous !== undefined) expect(list.id).toBe(previous);
+    previous = list.id;
+  }
+  await root.dispose();
+});
+
+test("grid selection uses a clipped ring and text-only truncation tooltips", async () => {
+  const { root } = recorder();
+  const row = { ...comp(), selected: true };
+  await root.render(
+    <ProjectView
+      view={projection([row])}
+      input={() => {}}
+      menu={() => {}}
+      page={() => {}}
+      native={native}
+      layout={{
+        ...layout,
+        cardGeometry: {
+          radius: 10,
+          frameRadius: 2,
+          smallRadius: 6,
+          dotInset: 11,
+        },
+      }}
+    />,
+  );
+  const nodes = root.inspect().nodes;
+  const cell = nodes.find((n) => n.props.role === "cell")!;
+  expect(cell.props.title).toBeUndefined();
+  expect(cell.props.metadata?.selectionRingOnly).toBe(true);
+  expect(cell.props.style?.borderRadius).toBe(10);
+  const dot = find(root, "Open in the timeline");
+  expect(dot.props.style?.right).toBe(11);
+  expect(dot.props.style?.bottom).toBe(11);
+  expect(
+    nodes.filter((n) => n.props.metadata?.tooltipWhenTruncated).length,
+  ).toBe(2);
+  await root.dispose();
+});
+
+test("all media kinds rename inline in grid and list without opening the tile", async () => {
+  for (const row of [asset(), comp(), folder()]) {
+    for (const viewMode of ["grid", "list"] as const) {
+      const { root, commits } = recorder();
+      const inputs: Input[] = [];
+      let view = projection([{ ...row, focused: true }]);
+      const render = () =>
+        root.render(
+          <ProjectView
+            view={view}
+            input={(i) => inputs.push(i)}
+            menu={() => {}}
+            page={() => {}}
+            native={native}
+            layout={layout}
+            viewMode={viewMode}
+          />,
+        );
+      await render();
+      for (const key of ["F2", "Enter"]) {
+        await event(root, find(root, "Project media").id, "keydown", { key });
+        expect(inputs.at(-1)).toEqual({ BeginRename: row.id });
+      }
+      const name = root
+        .inspect()
+        .nodes.find(
+          (n) =>
+            n.props.metadata?.tooltipWhenTruncated &&
+            n.props.title ===
+              ("Asset" in row.data
+                ? row.data.Asset[0].name
+                : "Composition" in row.data
+                  ? row.data.Composition.name
+                  : row.data.Folder.name),
+        )!;
+      inputs.length = 0;
+      await event(root, name.id, "doubleclick");
+      expect(inputs).toEqual([{ BeginRename: row.id }]);
+      view = { ...view, renaming: row.id };
+      await render();
+      // The first published field must contain the name: native focus
+      // selects its prefix before a later value update could fill it.
+      for (const report of replay(commits, view)) {
+        for (const node of Object.values(report.nodes) as any[]) {
+          if (node.props.metadata?.inlineRename)
+            expect(node.props.value).toBe(name.props.title);
+        }
+      }
+      const field = root
+        .inspect()
+        .nodes.find(
+          (n) => n.type === "input" && n.props.metadata?.inlineRename,
+        )!;
+      expect(field).toBeDefined();
+      expect(field.props.metadata?.cancelChange).toBe(true);
+      expect(field.props.value).toBe(name.props.title);
+      await event(root, field.id, "input", { value: "Draft name" });
+      view = structuredClone(view); // A thumbnail/projection publication.
+      await render();
+      expect(
+        root.inspect().nodes.find((n) => n.id === field.id)?.props.value,
+      ).toBe("Draft name");
+      if ("Asset" in row.id) expect(field.props.metadata?.selectionEnd).toBe(1);
+      await event(root, field.id, "change", { value: "New name" });
+      expect(inputs.at(-1)).toEqual({
+        CommitRename: { id: row.id, value: "New name" },
+      });
+      await event(root, field.id, "keydown", { key: "Escape" });
+      expect(inputs.at(-1)).toBe("CancelRename");
+      await root.dispose();
+    }
   }
 });
