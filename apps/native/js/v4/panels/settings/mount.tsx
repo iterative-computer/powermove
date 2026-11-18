@@ -1,7 +1,13 @@
 import { SettingsPanel, SettingsModel, type Publication } from "./index";
-import { generalRows, sectionCopy, sections, type Section } from "./catalogue";
+import { generalRows, sectionCopy, sections } from "./catalogue";
 import type { BuiltinEnv, Mounted } from "../../src/builtin";
 import type { Json } from "../../src/protocol";
+
+function settingsSection(value?: string) {
+  const page =
+    value === "accounts" ? "account" : value === "memory" ? "project" : value;
+  return sections.find((section) => section === page);
+}
 
 export async function mount(env: BuiltinEnv): Promise<Mounted> {
   const { platform, host, command, fields, report, root } = env;
@@ -120,7 +126,7 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
     await dispose();
   };
   mounted.show = async (target?: string) => {
-    model.show(sections.find((s) => s === target));
+    model.show(settingsSection(target));
     await r.flush();
   };
   // The window's sidebar and search field are AppKit's: they act on the
@@ -137,8 +143,8 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
       tell?: boolean;
       escape?: boolean;
     };
-    const section = sections.find((s) => s === select);
-    if (section) model.select(section as Section);
+    const section = settingsSection(select);
+    if (section) model.select(section);
     if (escape) model.key({ key: "Escape" });
     if (typeof search === "string") await model.search(search);
     // A window that just opened asks for what to show.
@@ -156,9 +162,9 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
       sections: model.availableSections.map((id) => ({
         id,
         title: sectionCopy[id].title,
-        project: id === "project" || id === "memory",
         dim: !!query && !model.matches.sections.has(id),
       })),
+      accountName: model.publication.accountName,
       active: model.active,
       query: model.query,
     };

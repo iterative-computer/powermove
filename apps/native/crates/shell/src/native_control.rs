@@ -15,29 +15,28 @@ use objc2::{
     runtime::AnyObject, sel,
 };
 use objc2_app_kit::*;
-use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSDate, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use serde_json::{Value, json};
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc};
 define_class!(
     #[unsafe(super(NSSegmentedControl))]
     #[thread_kind = MainThreadOnly]
     #[name = "PMSegmentedControl"]
+    #[ivars = Cell<bool>]
     pub(crate) struct SegmentedControl;
 
     impl SegmentedControl {
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             let secondary = event.modifierFlags().contains(NSEventModifierFlags::Control);
-            if !self.open_variant_menu(event, secondary) {
-                // AppKit handles ordinary selection and press-and-hold
-                // on any segment with an attached menu.
+            if !self.track_toolbar_variant(event, secondary) {
                 unsafe { let _: () = msg_send![super(self), mouseDown: event]; }
             }
         }
 
         #[unsafe(method(rightMouseDown:))]
         fn right_mouse_down(&self, event: &NSEvent) {
-            if !self.open_variant_menu(event, true) {
+            if !self.track_toolbar_variant(event, true) {
                 unsafe { let _: () = msg_send![super(self), rightMouseDown: event]; }
             }
         }
@@ -48,8 +47,17 @@ impl SegmentedControl {
     /// AppKit supplies the bezel, selection and tracking in every context.
     pub(crate) fn new(mtm: MainThreadMarker, size: NSControlSize, count: usize) -> Retained<Self> {
         let control: Retained<Self> = unsafe {
-            msg_send![super(Self::alloc(mtm).set_ivars(())), initWithFrame: NSRect::ZERO]
+            msg_send![super(Self::alloc(mtm).set_ivars(Cell::new(false))), initWithFrame: NSRect::ZERO]
         };
+        // macOS 27's Tabs role gives AppKit's neutral selection and the
+        // tracking lens. The automatic value-selection role uses the accent.
+        // objc2's AppKit bindings predate the role property.
+        const TABS_ROLE: isize = 1; // NSSegmentedControlRoleTabs
+        if control.respondsToSelector(sel!(setRole:)) {
+            unsafe {
+                let _: () = msg_send![&*control, setRole: TABS_ROLE];
+            }
+        }
         control.setSegmentCount(count as isize);
         control.setTrackingMode(NSSegmentSwitchTracking::SelectOne);
         control.setControlSize(size);
@@ -61,47 +69,103 @@ impl SegmentedControl {
 
     /// Adds a native hold menu and chevron to a fixed-width toolbar segment.
     pub(crate) fn set_variants(&self, index: isize, menu: &NSMenu) {
+        self.ivars().set(true);
         self.setMenu_forSegment(Some(menu), index);
         self.setShowsMenuIndicator_forSegment(true, index);
     }
 
-    fn open_variant_menu(&self, event: &NSEvent, secondary: bool) -> bool {
-        if !self.isEnabled() {
-            return false;
+    /// Use AppKit's laid-out segment frames, which include inter-segment
+    /// padding and can be wider than each cell's configured width.
+    fn variant_at(&self, at: NSPoint) -> Option<(isize, NSRect, Retained<NSMenu>)> {
+        if !self.ivars().get() || !self.isEnabled() || !self.mouse_inRect(at, self.bounds()) {
+            return None;
         }
-        let at = self.convertPoint_fromView(event.locationInWindow(), None);
-        let bounds = self.bounds();
-        if !self.mouse_inRect(at, bounds) {
-            return false;
-        }
-        let mut start = bounds.origin.x;
-        for index in 0..self.segmentCount() {
-            let width = self.widthForSegment(index);
-            if let Some(menu) = self.menuForSegment(index)
-                && self.isEnabledForSegment(index)
-                && opens_variant_menu(
-                    at.x - start,
-                    width,
-                    self.selectedSegment() == index,
-                    self.showsMenuIndicatorForSegment(index),
-                    secondary,
-                )
-            {
-                let below = if self.isFlipped() {
-                    bounds.size.height + 2.
-                } else {
-                    -2.
-                };
-                menu.popUpMenuPositioningItem_atLocation_inView(
-                    None,
-                    NSPoint::new(start, below),
-                    Some(self),
-                );
-                return true;
+        let window = self.window()?;
+        // The control exposes its cell as a child, and the cell exposes
+        // each segment. Use the full frame AppKit reports for each segment.
+        let cell = self.cell()?;
+        let segments = NSAccessibility::accessibilityChildren(&*cell)?;
+        for (index, segment) in segments.to_vec().into_iter().enumerate() {
+            let index = index as isize;
+            if index >= self.segmentCount() || !self.isEnabledForSegment(index) {
+                continue;
             }
-            start += width;
+            let Some(menu) = self.menuForSegment(index) else {
+                continue;
+            };
+            let has_frame: objc2::runtime::Bool =
+                unsafe { msg_send![&*segment, respondsToSelector: sel!(accessibilityFrame)] };
+            if !has_frame.as_bool() {
+                continue;
+            }
+            let rect: NSRect = unsafe { msg_send![&*segment, accessibilityFrame] };
+            let rect = self.convertRect_fromView(window.convertRectFromScreen(rect), None);
+            if self.mouse_inRect(at, rect) {
+                return Some((index, rect, menu));
+            }
         }
-        false
+        None
+    }
+
+    fn track_toolbar_variant(&self, event: &NSEvent, secondary: bool) -> bool {
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        let Some((index, rect, menu)) = self.variant_at(at) else {
+            return false;
+        };
+        if !secondary {
+            let Some(window) = self.window() else {
+                return false;
+            };
+            let show_on_click = opens_variant_menu(
+                at.x - rect.origin.x,
+                rect.size.width,
+                self.selectedSegment() == index,
+                self.showsMenuIndicatorForSegment(index),
+                false,
+            );
+            // The native cell has a narrower press area than its laid-out
+            // frame. Include padding when tracking the variant button.
+            const HOLD_SECONDS: f64 = 0.45;
+            let deadline = NSDate::dateWithTimeIntervalSinceNow(HOLD_SECONDS);
+            let mask = NSEventMask::LeftMouseUp | NSEventMask::LeftMouseDragged;
+            while let Some(next) = window.nextEventMatchingMask_untilDate_inMode_dequeue(
+                mask,
+                Some(&deadline),
+                unsafe { NSEventTrackingRunLoopMode },
+                true,
+            ) {
+                let location = self.convertPoint_fromView(next.locationInWindow(), None);
+                let inside = self.mouse_inRect(location, rect);
+                if next.r#type() == NSEventType::LeftMouseUp {
+                    if !inside {
+                        return true;
+                    }
+                    if show_on_click {
+                        break;
+                    }
+                    self.setSelectedSegment(index);
+                    unsafe { self.sendAction_to(self.action(), self.target().as_deref()) };
+                    return true;
+                }
+                if !inside {
+                    // Give a drag between tools back to AppKit's cell.
+                    window.postEvent_atStart(&next, true);
+                    unsafe { let _: () = msg_send![super(self), mouseDown: event]; }
+                    return true;
+                }
+            }
+        }
+        let y = if self.isFlipped() {
+            rect.origin.y + rect.size.height + 2.
+        } else {
+            rect.origin.y - 2.
+        };
+        menu.popUpMenuPositioningItem_atLocation_inView(
+            None,
+            NSPoint::new(rect.origin.x, y),
+            Some(self),
+        );
+        true
     }
 
     pub(crate) fn set_segment_image(&self, index: isize, image: &NSImage, title: &str) {
@@ -122,37 +186,54 @@ fn opens_variant_menu(
     indicator: bool,
     secondary: bool,
 ) -> bool {
-    (0. ..width).contains(&x)
-        && (secondary || selected || (indicator && x >= width - SEGMENT_MENU_INDICATOR))
+    // The toolbar's chevron sits inside the trailing padding. The
+    // padding outside the chevron is still part of the tool button.
+    const INDICATOR_INSET: f64 = 14.;
+    let center = width - INDICATOR_INSET;
+    let on_indicator = indicator && (x - center).abs() <= SEGMENT_MENU_INDICATOR / 2.;
+    (0. ..width).contains(&x) && (secondary || selected || on_indicator)
 }
 
 #[cfg(test)]
 mod variant_click_tests {
     use super::opens_variant_menu;
 
+    const WIDTH: f64 = 51.;
+    const POINTS: [f64; 5] = [0.5, 16., 27., 37., 50.5];
+
     #[test]
-    fn primary_click_selects_an_inactive_tool_and_keeps_appkit_hold_tracking() {
-        assert!(!opens_variant_menu(16., 46., false, true, false));
+    fn inactive_primary_only_opens_the_chevron() {
+        assert_eq!(
+            POINTS.map(|x| opens_variant_menu(x, WIDTH, false, true, false)),
+            [false, false, false, true, false],
+        );
     }
 
     #[test]
-    fn primary_click_reopens_the_active_tools_variants() {
-        assert!(opens_variant_menu(16., 46., true, true, false));
+    fn active_primary_opens_the_menu_across_the_whole_segment() {
+        assert!(
+            POINTS
+                .into_iter()
+                .all(|x| opens_variant_menu(x, WIDTH, true, true, false))
+        );
     }
 
     #[test]
-    fn secondary_click_opens_variants_with_either_selection() {
+    fn secondary_opens_the_menu_across_the_whole_segment_in_both_states() {
         for selected in [false, true] {
-            assert!(opens_variant_menu(16., 46., selected, true, true));
+            assert!(
+                POINTS
+                    .into_iter()
+                    .all(|x| opens_variant_menu(x, WIDTH, selected, true, true))
+            );
         }
     }
 
     #[test]
-    fn indicator_opens_variants_and_does_not_extend_into_the_next_tool() {
-        assert!(opens_variant_menu(40., 46., false, true, false));
-        assert!(!opens_variant_menu(40., 46., false, false, false));
-        assert!(!opens_variant_menu(46., 46., true, true, true));
-        assert!(!opens_variant_menu(-1., 46., true, true, true));
+    fn the_menu_hit_area_stops_at_the_adjacent_segment() {
+        assert!(!opens_variant_menu(37., WIDTH, false, false, false));
+        assert!(!opens_variant_menu(WIDTH, WIDTH, true, true, true));
+        assert!(!opens_variant_menu(-1., WIDTH, true, true, true));
     }
 }
 
@@ -1083,7 +1164,7 @@ impl NativeControl {
         }
     }
 
-    /// Uses the same native search as panels, in the kit's header well.
+    /// A native search with the same height as the kit's header buttons.
     pub fn header_search(
         label: &str,
         id: &str,
@@ -1114,29 +1195,22 @@ impl NativeControl {
             window,
             cx,
         );
-        control.use_header_well();
         if let Control::Search(field) = &control.control {
             let mtm = MainThreadMarker::new().expect("main thread");
-            add_search_hint(field, "⌘F", t.typography.body, f64::from(t.space.sm), mtm);
+            field.setControlSize(NSControlSize::Large);
+            field.setFocusRingType(NSFocusRingType::Default);
+            field.sizeToFit();
+            control.height = field.fittingSize().height as f32;
+            add_search_hint(field, "⌘F", t.typography.body, f64::from(t.space.md), mtm);
             search_hint(field, value.is_empty());
         }
         control
     }
-    /// Lets the kit draw the well while AppKit still draws and handles the
-    /// search cell or pull-down. Keep their regular-size native baselines.
+    /// Lets the kit draw the header well around the native pull-down.
     pub fn use_header_well(&mut self) {
-        match &self.control {
-            Control::Search(v) => {
-                self.height = v.fittingSize().height as f32;
-                v.setBezeled(false);
-                v.setBordered(false);
-                v.setDrawsBackground(false);
-            }
-            Control::Popup(v) => {
-                self.height = v.fittingSize().height as f32;
-                v.setBordered(false);
-            }
-            _ => {}
+        if let Control::Popup(popup) = &self.control {
+            self.height = popup.fittingSize().height as f32;
+            popup.setBordered(false);
         }
     }
     /// A text the view's host set (a filter applied from outside) replaces

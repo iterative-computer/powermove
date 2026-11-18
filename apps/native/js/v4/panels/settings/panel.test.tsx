@@ -77,7 +77,7 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
         rows: [
           {
             id: "account.chatgpt",
-            section: "accounts",
+            section: "agents",
             group: "Subscriptions",
             label: "ChatGPT",
             control: "status",
@@ -90,7 +90,7 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
   [
     "selected",
     (model) => {
-      model.select("accounts");
+      model.select("agents");
     },
   ],
   // Hover and rings are system-owned. No fabricated JSX hover/focus styling.
@@ -105,7 +105,7 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
         rows: [
           {
             id: "account.key",
-            section: "accounts",
+            section: "agents",
             group: "API or Local Model",
             label: "API Key",
             control: "secure",
@@ -126,7 +126,7 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
         rows: [
           {
             id: "account.status",
-            section: "accounts",
+            section: "agents",
             group: "API or Local Model",
             label: "Status",
             control: "status",
@@ -185,7 +185,7 @@ const stateCases: [string, (model: SettingsModel) => void | Promise<void>][] = [
         revision: 2,
         project: { id: "p", name: "Fixture" },
       });
-      model.show();
+      model.show("project");
     },
   ],
   [
@@ -350,9 +350,9 @@ test("the window's native search and sidebar reach the model; its shortcuts stay
   expect(model.visibleSections).toEqual(["general"]);
   await model.search("");
   await render();
-  model.select("accounts");
+  model.select("agents");
   await render();
-  expect(model.active).toBe("accounts");
+  expect(model.active).toBe("agents");
   await event(root, find(root, "Settings").id, "keydown", {
     key: "f",
     metaKey: true,
@@ -551,7 +551,7 @@ test("AX help/count requirements remain declared for the native projection", asy
     rows: [
       {
         id: "account.url",
-        section: "accounts",
+        section: "agents",
         group: "API or Local Model",
         label: "API Base URL",
         control: "text",
@@ -562,7 +562,7 @@ test("AX help/count requirements remain declared for the native projection", asy
     ],
   });
   f.model.show();
-  f.model.select("accounts");
+  f.model.select("agents");
   f.model.viewport(0, 1);
   const { root, commits } = recorder();
   await root.render(<SettingsPanel model={f.model} bindings={bindings} />);

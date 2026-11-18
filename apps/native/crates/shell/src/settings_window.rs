@@ -28,8 +28,9 @@ pub const MIN_SIZE: (f64, f64) = (720., 520.);
 const ROW_HEIGHT: f64 = 30.;
 const ROW_SPACING: f64 = 2.;
 const LABEL_SIZE: f64 = 13.;
-/// The space between the project's sections and the app's.
-const GROUP_GAP: f64 = 14.;
+const SIDEBAR_INSET: f64 = 10.;
+const ACCOUNT_HEIGHT: f64 = 52.;
+const ACCOUNT_GAP: f64 = 10.;
 /// The tile's side in a sidebar row.
 const TILE: f64 = 20.;
 const FRAME_NAME: &str = "PMSettingsWindow";
@@ -90,9 +91,7 @@ fn glyphs() -> Glyphs {
 pub struct Section {
     pub id: String,
     pub title: String,
-    /// The project's own sections (Project, Memory) come first, set apart
-    /// from the app's by a gap.
-    pub project: bool,
+    pub account_name: Option<String>,
     /// A search is on and nothing in this section matches it.
     pub dim: bool,
 }
@@ -149,8 +148,8 @@ define_class!(
         #[unsafe(method(outlineView:heightOfRowByItem:))]
         fn height(&self, _: &NSOutlineView, item: *mut AnyObject) -> f64 {
             match self.row_of(item) {
-                // The gap row and the spacing on both its sides make the gap.
-                Some(None) => GROUP_GAP - 2. * ROW_SPACING,
+                Some(None) => ACCOUNT_GAP - 2. * ROW_SPACING,
+                Some(Some(section)) if section.id == "account" => ACCOUNT_HEIGHT,
                 _ => ROW_HEIGHT,
             }
         }
@@ -360,8 +359,7 @@ impl SettingsChrome {
         // The sidebar: the search field over the source list.
         let sidebar = NSView::new(mtm);
         let search = NSSearchField::new(mtm);
-        search.setControlSize(NSControlSize::Regular);
-        search.setFont(Some(&NSFont::systemFontOfSize(LABEL_SIZE)));
+        search.setControlSize(NSControlSize::Large);
         search.setPlaceholderString(Some(ns_string!("Search")));
         search.setSendsSearchStringImmediately(true);
         unsafe {
@@ -372,10 +370,14 @@ impl SettingsChrome {
         let outline = NSOutlineView::new(mtm);
         let column =
             NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), ns_string!("section"));
+        column.setResizingMask(NSTableColumnResizingOptions::AutoresizingMask);
         outline.addTableColumn(&column);
         unsafe { outline.setOutlineTableColumn(Some(&column)) };
         outline.setHeaderView(None);
         outline.setStyle(NSTableViewStyle::SourceList);
+        outline.setColumnAutoresizingStyle(
+            NSTableViewColumnAutoresizingStyle::UniformColumnAutoresizingStyle,
+        );
         outline.setRowSizeStyle(NSTableViewRowSizeStyle::Custom);
         outline.setIntercellSpacing(NSSize::new(0., ROW_SPACING));
         outline.setIndentationPerLevel(0.);
@@ -390,6 +392,7 @@ impl SettingsChrome {
         scroll.setDrawsBackground(false);
         scroll.setHasVerticalScroller(true);
         scroll.setAutohidesScrollers(true);
+        scroll.setScrollerStyle(NSScrollerStyle::Overlay);
         scroll.setTranslatesAutoresizingMaskIntoConstraints(false);
         sidebar.addSubview(&search);
         sidebar.addSubview(&scroll);
@@ -400,10 +403,10 @@ impl SettingsChrome {
                 .constraintEqualToAnchor(&guide.topAnchor()),
             search
                 .leadingAnchor()
-                .constraintEqualToAnchor_constant(&sidebar.leadingAnchor(), 10.),
+                .constraintEqualToAnchor_constant(&sidebar.leadingAnchor(), SIDEBAR_INSET),
             search
                 .trailingAnchor()
-                .constraintEqualToAnchor_constant(&sidebar.trailingAnchor(), -10.),
+                .constraintEqualToAnchor_constant(&sidebar.trailingAnchor(), -SIDEBAR_INSET),
             scroll
                 .topAnchor()
                 .constraintEqualToAnchor_constant(&search.bottomAnchor(), 12.),
@@ -557,7 +560,7 @@ impl SettingsChrome {
         if !same {
             let mut rows = vec![];
             for (i, s) in sections.iter().enumerate() {
-                if i > 0 && sections[i - 1].project && !s.project {
+                if i > 0 && sections[i - 1].id == "account" {
                     rows.push(Row {
                         section: None,
                         item: NSNumber::new_isize(-1),
@@ -644,6 +647,7 @@ impl SettingsChrome {
             "detailPainted": detail_painted,
             "groundX": ground.origin.x,
             "sidebarWidth": SIDEBAR_WIDTH,
+            "searchHeight": self.chrome.ivars().search.borrow().as_ref().map(|search| search.frame().size.height),
         })
     }
     pub fn update_sidebar_appearance(&self) {
@@ -702,6 +706,9 @@ fn symbol(name: &str, label: &str) -> Option<Retained<NSImage>> {
 
 /// A sidebar row: the section's icon and its name.
 fn cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retained<NSView> {
+    if section.id == "account" {
+        return account_cell(mtm, section);
+    }
     let view = NSTableCellView::new(mtm);
     let icon = NSImageView::new(mtm);
     if let Some(image) = icon_image(&section.id, dark) {
@@ -739,6 +746,89 @@ fn cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retained<NSView
     Retained::into_super(view)
 }
 
+fn account_cell(mtm: MainThreadMarker, section: &Section) -> Retained<NSView> {
+    let view = NSTableCellView::new(mtm);
+    let name = section.account_name.as_deref().unwrap_or("Sign In");
+    let title = NSTextField::labelWithString(&NSString::from_str(name), mtm);
+    title.setFont(Some(&NSFont::systemFontOfSize_weight(LABEL_SIZE, unsafe {
+        NSFontWeightSemibold
+    })));
+    title.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    let subtitle = NSTextField::labelWithString(ns_string!("Account"), mtm);
+    subtitle.setFont(Some(&NSFont::systemFontOfSize(
+        NSFont::smallSystemFontSize(),
+    )));
+    subtitle.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    let labels = NSStackView::new(mtm);
+    labels.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+    labels.setAlignment(NSLayoutAttribute::Leading);
+    labels.setSpacing(2.);
+    labels.addArrangedSubview(&title);
+    if section.account_name.is_some() {
+        labels.addArrangedSubview(&subtitle);
+    }
+    let avatar: Retained<NSView> = if let Some(initial) = section
+        .account_name
+        .as_deref()
+        .and_then(|name| name.chars().find(|letter| letter.is_alphanumeric()))
+    {
+        let badge = NSBox::new(mtm);
+        badge.setBoxType(NSBoxType::Custom);
+        badge.setTitlePosition(NSTitlePosition::NoTitle);
+        badge.setBorderWidth(0.);
+        badge.setCornerRadius(16.);
+        badge.setFillColor(&NSColor::controlAccentColor());
+        let letter = NSTextField::labelWithString(
+            &NSString::from_str(&initial.to_uppercase().to_string()),
+            mtm,
+        );
+        letter.setTextColor(Some(&NSColor::alternateSelectedControlTextColor()));
+        letter.setTranslatesAutoresizingMaskIntoConstraints(false);
+        badge.addSubview(&letter);
+        activate(&[
+            letter
+                .centerXAnchor()
+                .constraintEqualToAnchor(&badge.centerXAnchor()),
+            letter
+                .centerYAnchor()
+                .constraintEqualToAnchor(&badge.centerYAnchor()),
+        ]);
+        Retained::into_super(badge)
+    } else {
+        let icon = NSImageView::new(mtm);
+        icon.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+        icon.setImage(symbol("person.crop.circle.fill", "").as_deref());
+        icon.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+        Retained::into_super(Retained::into_super(icon))
+    };
+    avatar.setAccessibilityElement(false);
+    avatar.setTranslatesAutoresizingMaskIntoConstraints(false);
+    labels.setTranslatesAutoresizingMaskIntoConstraints(false);
+    view.addSubview(&avatar);
+    view.addSubview(&labels);
+    activate(&[
+        avatar
+            .leadingAnchor()
+            .constraintEqualToAnchor_constant(&view.leadingAnchor(), 7.),
+        avatar
+            .centerYAnchor()
+            .constraintEqualToAnchor(&view.centerYAnchor()),
+        avatar.widthAnchor().constraintEqualToConstant(32.),
+        avatar.heightAnchor().constraintEqualToConstant(32.),
+        labels
+            .leadingAnchor()
+            .constraintEqualToAnchor_constant(&avatar.trailingAnchor(), 8.),
+        labels
+            .trailingAnchor()
+            .constraintLessThanOrEqualToAnchor_constant(&view.trailingAnchor(), -7.),
+        labels
+            .centerYAnchor()
+            .constraintEqualToAnchor(&view.centerYAnchor()),
+    ]);
+    unsafe { view.setTextField(Some(&title)) };
+    Retained::into_super(view)
+}
+
 /// The SVGs' view box is the tile (0…100) with room for its shadow:
 /// −8…108 across, −6…114 down. In points at `TILE`: (left, top, right, bottom).
 const MARGIN: (f64, f64, f64, f64) = (8. * TILE / 100., 6. * TILE / 100., 8. * TILE / 100., 14. * TILE / 100.);
@@ -752,7 +842,7 @@ const SYMBOL_CENTRE: f64 = 0.49;
 /// One section's art in one appearance: dark is the glass slab, light its
 /// pastel variant (the owner's choices). Glyphs are placed alike in both.
 struct Art {
-    drawn: &'static str,
+    drawn: Option<&'static str>,
     tile: &'static str,
     symbol: &'static str,
     /// The fallback symbol's glyph, lit edge and deep copy (`#rrggbbaa`).
@@ -764,14 +854,14 @@ fn art(id: &str, dark: bool) -> Option<Art> {
         ($name:literal, $symbol:literal, [$($d:literal),*], [$($l:literal),*]) => {
             if dark {
                 Art {
-                    drawn: include_str!(concat!("../assets/settings/dark/", $name, ".svg")),
+                    drawn: Some(include_str!(concat!("../assets/settings/dark/", $name, ".svg"))),
                     tile: include_str!(concat!("../assets/settings/dark/tiles/", $name, ".svg")),
                     symbol: $symbol,
                     colours: [$($d),*],
                 }
             } else {
                 Art {
-                    drawn: include_str!(concat!("../assets/settings/light/", $name, ".svg")),
+                    drawn: Some(include_str!(concat!("../assets/settings/light/", $name, ".svg"))),
                     tile: include_str!(concat!("../assets/settings/light/tiles/", $name, ".svg")),
                     symbol: $symbol,
                     colours: [$($l),*],
@@ -780,24 +870,66 @@ fn art(id: &str, dark: bool) -> Option<Art> {
         };
     }
     Some(match id {
-        "project" => art!("project", "movieclapper.fill",
-            ["#ffeee2", "#ffe8d7", "#2606008c"], ["#c05621", "#ffffff", "#7232138c"]),
-        "memory" => art!("memory", "brain.head.profile.fill",
-            ["#f9f0ff", "#f8ebff", "#1709278c"], ["#8c61c3", "#ffffff", "#5238748c"]),
-        "general" => art!("general", "gearshape.fill",
-            ["#f7f5f3", "#f4f1ee", "#14110f8c"], ["#817971", "#ffffff", "#4c47428c"]),
-        "shortcuts" => art!("shortcuts", "command",
-            ["#f1f5fc", "#edf2fc", "#0e12198c"], ["#6d7b94", "#ffffff", "#3f48578c"]),
-        "media" => art!("media", "photo.on.rectangle.angled.fill",
-            ["#e6f7ff", "#dbf5ff", "#00122a8c"], ["#2f7dcb", "#ffffff", "#1b49798c"]),
-        "storage" => art!("storage", "externaldrive.fill",
-            ["#e5fcee", "#dbfbe7", "#0018088c"], ["#1b905c", "#ffffff", "#1155368c"]),
-        "accounts" => art!("accounts", "person.crop.circle.fill",
-            ["#e1faff", "#d4f9ff", "#0016218c"], ["#0089b0", "#ffffff", "#0051688c"]),
-        "transcription" => art!("transcription", "captions.bubble.fill",
-            ["#ffecf1", "#ffe5ec", "#25040d8c"], ["#be506a", "#ffffff", "#712e3e8c"]),
-        "extensions" => art!("extensions", "puzzlepiece.extension.fill",
-            ["#fff4de", "#fff0d0", "#1d0e008c"], ["#a17000", "#ffffff", "#6042008c"]),
+        "project" => art!(
+            "project",
+            "movieclapper.fill",
+            ["#ffeee2", "#ffe8d7", "#2606008c"],
+            ["#c05621", "#ffffff", "#7232138c"]
+        ),
+        "agents" => Art {
+            drawn: None,
+            ..art!(
+                "memory",
+                "sparkles",
+                ["#f9f0ff", "#f8ebff", "#1709278c"],
+                ["#8c61c3", "#ffffff", "#5238748c"]
+            )
+        },
+        "general" => art!(
+            "general",
+            "gearshape.fill",
+            ["#f7f5f3", "#f4f1ee", "#14110f8c"],
+            ["#817971", "#ffffff", "#4c47428c"]
+        ),
+        "shortcuts" => art!(
+            "shortcuts",
+            "command",
+            ["#f1f5fc", "#edf2fc", "#0e12198c"],
+            ["#6d7b94", "#ffffff", "#3f48578c"]
+        ),
+        "media" => art!(
+            "media",
+            "photo.on.rectangle.angled.fill",
+            ["#e6f7ff", "#dbf5ff", "#00122a8c"],
+            ["#2f7dcb", "#ffffff", "#1b49798c"]
+        ),
+        "storage" => art!(
+            "storage",
+            "externaldrive.fill",
+            ["#e5fcee", "#dbfbe7", "#0018088c"],
+            ["#1b905c", "#ffffff", "#1155368c"]
+        ),
+        "about" => Art {
+            drawn: None,
+            ..art!(
+                "general",
+                "info.circle",
+                ["#f7f5f3", "#f4f1ee", "#14110f8c"],
+                ["#817971", "#ffffff", "#4c47428c"]
+            )
+        },
+        "transcription" => art!(
+            "transcription",
+            "captions.bubble.fill",
+            ["#ffecf1", "#ffe5ec", "#25040d8c"],
+            ["#be506a", "#ffffff", "#712e3e8c"]
+        ),
+        "extensions" => art!(
+            "extensions",
+            "puzzlepiece.extension.fill",
+            ["#fff4de", "#fff0d0", "#1d0e008c"],
+            ["#a17000", "#ffffff", "#6042008c"]
+        ),
         _ => return None,
     })
 }
@@ -815,9 +947,9 @@ pub fn icon_image(id: &str, dark: bool) -> Option<Retained<NSImage>> {
     }
     let art = art(id, dark)?;
     let size = NSSize::new(ICON_SIZE.0, ICON_SIZE.1);
-    let image = match glyphs() {
-        Glyphs::Drawn => bitmaps(art.drawn, size)?,
-        Glyphs::Symbols => {
+    let image = match (glyphs(), art.drawn) {
+        (Glyphs::Drawn, Some(drawn)) => bitmaps(drawn, size)?,
+        _ => {
             let tile = bitmaps(art.tile, size)?;
             symbol_tile(tile, &art, size)?
         }
@@ -877,7 +1009,9 @@ fn symbol_tile(tile: Retained<NSImage>, art: &Art, size: NSSize) -> Option<Retai
     let name = NSString::from_str(art.symbol);
     let base = NSImage::imageWithSystemSymbolName_accessibilityDescription(&name, None)?;
     let tint = |hex: &str| {
-        let v = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0xffffffff);
+        let hex = hex.trim_start_matches('#');
+        let rgb = u32::from_str_radix(hex, 16).unwrap_or(u32::MAX);
+        let v = if hex.len() == 6 { (rgb << 8) | 0xff } else { rgb };
         let c = |shift: u32| f64::from((v >> shift) & 0xff) / 255.;
         NSColor::colorWithSRGBRed_green_blue_alpha(c(24), c(16), c(8), c(0))
     };

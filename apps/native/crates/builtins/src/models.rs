@@ -834,6 +834,7 @@ impl Backend {
             language["binding"] = fields["speech.language"].clone();
         }
         let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready",
+            "accountName":self.native.facts["cloud"]["identity"],
             "speech":speech.as_ref().map(crate::speech::models).unwrap_or_default(),
             // Settings › Shortcuts, built by the app from the keymap it uses.
             "shortcuts":self.native.facts["shortcuts"],
@@ -884,6 +885,17 @@ impl Backend {
             rows.extend(timeline_rows);
             rows.extend(shortcut_rows);
             rows.extend(storage_rows);
+            if let Some(version) = self.native.facts["settingsVersion"].as_str() {
+                rows.push(
+                    json!({"id":"about.version","section":"about","group":"Powermove",
+                    "label":"Version","control":"status","value":version}),
+                );
+                rows.push(
+                    json!({"id":"about.check-updates","section":"about","group":"Powermove",
+                    "label":"Software Updates","control":"action","action":"about.check-updates",
+                    "actionLabel":"Check for Updates…"}),
+                );
+            }
         }
         // Targets stay here: recorded for this revision, not published.
         let mut targets = serde_json::Map::new();
