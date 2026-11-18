@@ -825,7 +825,14 @@ impl Backend {
         });
         let accounts = self.account_rows();
         let speech = crate::speech::status();
-        let speech_rows = speech.as_ref().map(crate::speech::rows).unwrap_or_default();
+        let mut speech_rows = speech.as_ref().map(crate::speech::rows).unwrap_or_default();
+        if let Some(language) = speech_rows
+            .iter_mut()
+            .find(|row| row["id"] == "speech.language")
+        {
+            let fields = self.fields(&json!(["speech.language"]))?;
+            language["binding"] = fields["speech.language"].clone();
+        }
         let mut publication = json!({"revision":self.native.settings_sequence,"multiWindow":true,"rows":accounts,"extensions":extensions,"extensionsState":"ready",
             "speech":speech.as_ref().map(crate::speech::models).unwrap_or_default(),
             // Settings › Shortcuts, built by the app from the keymap it uses.

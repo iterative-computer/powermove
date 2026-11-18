@@ -143,6 +143,7 @@ pub struct Host {
     /// where its back and forward go (PM-375).
     pub settings_chrome: Option<std::rc::Rc<pm_shell::settings_window::SettingsChrome>>,
     pub(crate) settings_history: crate::settings_window::History,
+    pub(crate) settings_form: Option<crate::settings_window::form::Form>,
     /// This editor's entity while it hosts Settings (its picker lists the
     /// other editors' projects without reading this one, being updated).
     pub(crate) settings_me: Option<gpui::EntityId>,
@@ -205,8 +206,12 @@ impl Controller {
         let windows = std::mem::take(&mut self.builtins.windows);
         // The Settings window stays open across the restart: its chrome,
         // where its back and forward go, and that this editor hosts it.
+        if let Some(form) = &mut self.builtins.settings_form {
+            form.reset();
+        }
         let settings = (
             self.builtins.settings_chrome.take(),
+            self.builtins.settings_form.take(),
             std::mem::take(&mut self.builtins.settings_history),
             self.builtins.settings_me.take(),
             self.builtins.settings_watch.take(),
@@ -215,6 +220,7 @@ impl Controller {
         self.builtins.windows = windows;
         (
             self.builtins.settings_chrome,
+            self.builtins.settings_form,
             self.builtins.settings_history,
             self.builtins.settings_me,
             self.builtins.settings_watch,
@@ -1026,7 +1032,9 @@ impl Controller {
                 }
                 continue;
             }
-            if let Some(view) = self.builtins.views.get(&p.panel) {
+            if p.panel == "settings" && self.builtins.settings_form.is_some() {
+                self.publish_settings_form(p, cx);
+            } else if let Some(view) = self.builtins.views.get(&p.panel) {
                 view.update(cx, |v, cx| v.publish(p, cx));
             } else {
                 self.builtins.pending.insert(p.panel.clone(), p);
@@ -1065,6 +1073,26 @@ impl Controller {
             cx.notify();
         }
     }
+    pub(crate) fn mount_settings_form(&mut self, cx: &mut Context<Self>) {
+        if let Some(publication) = self.builtins.pending.remove("settings") {
+            self.publish_settings_form(publication, cx);
+        }
+    }
+
+    pub(crate) fn cache_closed_settings_form(&mut self) {
+        if let Some(mut form) = self.builtins.settings_form.take()
+            && let Some(publication) = form.take_publication()
+        {
+            self.builtins.pending.insert("settings".into(), publication);
+        }
+    }
+
+    fn publish_settings_form(&mut self, publication: Publication, cx: &mut Context<Self>) {
+        if let Some(form) = self.builtins.settings_form.as_mut() {
+            form.publish(publication, &self.host.borrow().tokens, cx);
+        }
+    }
+
     pub fn builtin_panel(
         &mut self,
         id: &str,
@@ -1660,20 +1688,15 @@ impl Controller {
                             })
                             .detach();
                         }
-                        // Settings follows the app's appearance: when its
-                        // window changes, it draws again once the editor
-                        // has rebuilt the tokens it is drawn with.
                         if panel == "settings" {
-                            cx.observe_window_appearance(window, |_: &mut SurfaceWindow, window, cx| {
-                                cx.notify();
-                                cx.spawn_in(window, async move |this, cx| {
-                                    cx.background_executor()
-                                        .timer(std::time::Duration::from_millis(120))
-                                        .await;
-                                    let _ = this.update(cx, |_, cx| cx.notify());
-                                })
-                                .detach();
-                            })
+                            cx.observe_window_appearance(
+                                window,
+                                |this: &mut SurfaceWindow, _, _| {
+                                    if let Some(chrome) = &this.chrome {
+                                        chrome.update_sidebar_appearance();
+                                    }
+                                },
+                            )
                             .detach();
                         }
                         SurfaceWindow {
@@ -2367,11 +2390,9 @@ impl Controller {
                 }
                 "settings.scroll" => {
                     if let Some(section) = request.input["section"].as_str()
-                        && let Some(view) = self.builtins.views.get("settings")
+                        && let Some(form) = &mut self.builtins.settings_form
                     {
-                        view.update(cx, |v, cx| {
-                            v.scroll_semantic(&format!("settings.section.{section}"), cx)
-                        });
+                        form.reveal(section);
                     }
                     Ok(Value::Null)
                 }
@@ -3133,13 +3154,8 @@ impl Render for SurfaceWindow {
         let popover = self.panel == "agent";
         // Export is a sheet: no title bar band (its window fits its content).
         let sheet = self.panel == "export";
-        // Settings' page is under AppKit's toolbar, on the page's ground;
-        // its chrome follows the appearance as it changes.
-        let settings = self.panel == "settings";
-        if let Some(chrome) = &self.chrome {
-            let (dark, ground) =
-                crate::settings_window::scheme(&self.owner.read(cx).host.borrow().tokens);
-            chrome.set_scheme(dark, ground);
+        if panel == "settings" {
+            return div().into_any_element();
         }
         if popover || sheet {
             // A focused control that went away leaves nothing focused.
@@ -3153,8 +3169,6 @@ impl Render for SurfaceWindow {
                 // `floating` inside the glass frame (agent-panel.md §8).
                 let colour = if popover {
                     t.colors.floating
-                } else if settings {
-                    t.colors.panel_secondary
                 } else {
                     t.colors.panel
                 };
@@ -3163,11 +3177,7 @@ impl Render for SurfaceWindow {
             fill = colour;
             head_h = header;
             // Windows with a transparent title bar keep their content below it.
-            band = if popover || sheet || settings {
-                0.
-            } else {
-                titlebar
-            };
+            band = if popover || sheet { 0. } else { titlebar };
             // A panel's header row is the dock's; the popover has no dock, so
             // it shows the panel's header (Thread, New Thread, Pin) itself.
             let rect = pm_shell::layout::Rect {
@@ -3308,6 +3318,7 @@ impl Render for SurfaceWindow {
                     .size_full(),
                 )
             })
+            .into_any_element()
     }
 }
 

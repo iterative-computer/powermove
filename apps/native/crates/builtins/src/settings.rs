@@ -185,7 +185,7 @@ impl Backend {
                 let or =
                     |key: &str, default: &str| r[key].as_str().map_or(json!(default), |v| json!(v));
                 json!({"id":r["id"],"section":or("section","media"),"group":or("group","Proxies"),
-                    "label":r["label"],"control":or("control","choice"),"value":r["value"],
+                    "label":r["label"],"control":or("control", if r["value"].is_boolean() { "switch" } else { "choice" }),"value":r["value"],
                     "options":r["options"],"detail":r["detail"],
                     "binding":leases[r["id"].as_str().unwrap_or_default()],"disabled":false})
             })
@@ -195,7 +195,7 @@ impl Backend {
             "Calculating storage…".to_owned()
         } else {
             format!(
-                "Proxies {} · Optimized Media {} · Renders {}",
+                "Proxies: {} · Optimized Media: {} · Renders: {}",
                 used["proxies"].as_str().unwrap_or(""),
                 used["optimized"].as_str().unwrap_or(""),
                 used["renders"].as_str().unwrap_or("")
@@ -206,7 +206,7 @@ impl Backend {
                 "control":"action","action":"media.location","actionLabel":"Change…",
                 "detail":media["location"]}),
             json!({"id":"media.used","section":"media","group":"Storage","label":"Space Used",
-                "control":"status","value":space}),
+                "control":"status","detail":space}),
             json!({"id":"media.clear","section":"media","group":"Storage",
                 "label":"Generated Media","control":"action","action":"media.clear",
                 "actionLabel":"Clear…",

@@ -5,6 +5,7 @@
 //! attention"). Every request runs on a worker; installs go through the same
 //! verified path the palette used, so a Store extension runs contained as
 //! before, and every window rescans when one lands.
+use crate::store_motion::{Skeleton, StoreMotion};
 use gpui::{prelude::*, *};
 use pm_compat_runner::{StoreAuthority, discovery, store_install};
 use pm_design::Text;
@@ -26,9 +27,10 @@ use pm_shell::{
     symbol::Weight,
 };
 use serde_json::{Value, json};
-use std::{path::PathBuf, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc, sync::Arc};
 
 pub type Client = StoreClient<Box<dyn StoreTransport + Send>>;
+type CardAnchors = Rc<RefCell<HashMap<String, Bounds<Pixels>>>>;
 /// What the window reaches outside itself; tests hand in a fixture Store.
 #[derive(Clone)]
 pub struct Services {
@@ -196,12 +198,18 @@ enum Reply {
 
 pub struct StoreWindow {
     motion: Motion<u64>,
+    transitions: StoreMotion,
+    scroll: ScrollHandle,
+    listing_scroll: Point<Pixels>,
+    discover_scroll: Point<Pixels>,
+    detail_origin: Option<Bounds<Pixels>>,
+    art_anchors: CardAnchors,
     frame_kit: Option<Kit>,
     services: Services,
     tokens: Tokens,
     pub page: Page,
     pub query: String,
-    search: Option<Entity<pm_shell::text::TextField>>,
+    search: Option<Entity<NativeControl>>,
     /// Discover · Library, the system's segmented control (a real window only).
     pages: Option<Entity<NativeControl>>,
     /// Publish, a pull-down of the extensions made on this Mac (v1.2.0's
@@ -232,10 +240,10 @@ pub struct StoreWindow {
     /// A Library card's open "…" menu (v1.2.0's card menu), each card's
     /// button where it was drawn, and the row the pointer lights.
     card_menu: Option<CardMenu>,
-    card_anchors: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Bounds<Pixels>>>>,
+    card_anchors: CardAnchors,
     card_lit: Option<usize>,
     /// Each installed card's real NSSwitch, by extension id.
-    switches: std::collections::HashMap<String, Entity<NativeControl>>,
+    switches: HashMap<String, Entity<NativeControl>>,
 }
 /// The Library card whose "…" menu is open.
 #[derive(Clone, Debug, PartialEq)]
@@ -281,6 +289,12 @@ impl StoreWindow {
         let shelves = cached_shelves(&services.profile).map_or(Load::Loading, Load::Ready);
         let mut window = Self {
             motion: Motion::default(),
+            transitions: StoreMotion::default(),
+            scroll: ScrollHandle::new(),
+            listing_scroll: Point::default(),
+            discover_scroll: Point::default(),
+            detail_origin: None,
+            art_anchors: Default::default(),
             frame_kit: None,
             services,
             tokens,
@@ -319,37 +333,30 @@ impl StoreWindow {
         if self.tokens == tokens {
             return;
         }
-        if let Some(search) = &self.search {
-            search.update(cx, |field, cx| {
-                field.set_tokens(tokens.clone());
-                cx.notify();
-            });
-        }
         self.tokens = tokens;
         cx.notify();
     }
     /// The native search field; only a real AppKit window can host one.
     pub fn attach_search(&mut self, window: &Window, cx: &mut Context<Self>) {
-        use pm_shell::text::{TextEvent, TextField, TextKind};
         let field = cx.new(|cx| {
-            let mut field = TextField::new(
-                TextKind::Primary,
-                "Search the Store",
-                "",
-                self.tokens.clone(),
+            NativeControl::header_search(
+                "Search extensions",
+                "store-search",
+                &self.query,
+                &self.tokens,
                 window,
                 cx,
-            );
-            field.set_placeholder("Search extensions");
-            field.set_bare(true);
-            field.set_escape_cancels(true);
-            field
+            )
         });
-        cx.subscribe(&field, |v, _, event: &TextEvent, cx| match event {
-            TextEvent::Changed(text) | TextEvent::Committed(text) | TextEvent::Submitted(text) => {
-                v.set_query(text, cx)
+        cx.subscribe(&field, |v, _, event: &Value, cx| {
+            if let Some(text) = event.as_str() {
+                v.set_query(text, cx);
+            } else if event["key"] == "Escape" {
+                if let Some(field) = &v.search {
+                    field.read(cx).clear_search();
+                }
+                v.set_query("", cx);
             }
-            _ => {}
         })
         .detach();
         self.search = Some(field);
@@ -395,7 +402,7 @@ impl StoreWindow {
         self.owner = crate::platform::ns_window(window);
         let (options, empty) = self.publish_rows();
         let publish = cx.new(|cx| {
-            NativeControl::new(
+            let mut control = NativeControl::new(
                 ControlSpec {
                     kind: Kind::Popup,
                     pull: true,
@@ -416,7 +423,9 @@ impl StoreWindow {
                 &tokens,
                 window,
                 cx,
-            )
+            );
+            control.use_header_well();
+            control
         });
         cx.subscribe(&publish, |v: &mut Self, _, value: &Value, cx| {
             if let Some(id) = value.as_str() {
@@ -558,6 +567,27 @@ impl StoreWindow {
         });
     }
     pub fn set_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.art_anchors.borrow_mut().clear();
+        let direction = match (self.page, page, self.detail.is_some()) {
+            (_, _, true) => -1.,
+            (Page::Discover, Page::Kind(_), false) => {
+                self.discover_scroll = self.scroll.offset();
+                1.
+            }
+            (Page::Kind(_), Page::Discover, false) => -1.,
+            _ => 0.,
+        };
+        let offset = if page == Page::Discover
+            && matches!(self.page, Page::Kind(_))
+            && self.query.trim().is_empty()
+        {
+            self.discover_scroll
+        } else {
+            Point::default()
+        };
+        self.scroll.set_offset(offset);
+        self.transitions
+            .navigate(direction, self.tokens.accessibility.reduce_motion);
         self.page = page;
         self.detail = None;
         self.message = None;
@@ -573,6 +603,12 @@ impl StoreWindow {
         if self.query == text {
             return;
         }
+        self.art_anchors.borrow_mut().clear();
+        if self.detail.is_some() || self.query.trim().is_empty() != text.trim().is_empty() {
+            self.transitions
+                .navigate(0., self.tokens.accessibility.reduce_motion);
+        }
+        self.scroll.set_offset(Point::default());
         self.query = text.to_owned();
         self.detail = None;
         self.message = None;
@@ -589,6 +625,13 @@ impl StoreWindow {
         cx.notify();
     }
     pub fn open_detail(&mut self, listing: Listing, cx: &mut Context<Self>) {
+        self.detail_origin = None;
+        if self.detail.is_none() {
+            self.listing_scroll = self.scroll.offset();
+        }
+        self.scroll.set_offset(Point::default());
+        self.transitions
+            .navigate(1., self.tokens.accessibility.reduce_motion);
         self.generation += 1;
         let generation = self.generation;
         let (handle, slug) = (listing.handle.clone(), listing.slug.clone());
@@ -603,8 +646,16 @@ impl StoreWindow {
         });
         cx.notify();
     }
+    fn open_card(&mut self, listing: Listing, id: &str, cx: &mut Context<Self>) {
+        let origin = self.art_anchors.borrow().get(id).copied();
+        self.open_detail(listing, cx);
+        self.detail_origin = origin;
+    }
     pub fn back(&mut self, cx: &mut Context<Self>) {
         if self.detail.take().is_some() {
+            self.transitions
+                .navigate(-1., self.tokens.accessibility.reduce_motion);
+            self.scroll.set_offset(self.listing_scroll);
             self.message = None;
             cx.notify();
         }
@@ -1037,7 +1088,7 @@ impl StoreWindow {
     fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         if event.keystroke.key == "f" && event.keystroke.modifiers.platform {
             if let Some(field) = &self.search {
-                field.update(cx, |f, cx| f.begin_editing(cx));
+                field.read(cx).focus();
             }
             return;
         }
@@ -1197,8 +1248,134 @@ impl StoreWindow {
             .debug_selector(move || id.to_string())
             .when(!enabled, |d| self.kit().disabled(d))
     }
-    fn loading(&self) -> Div {
-        self.kit().progress(None)
+    fn skeleton_block(&self, block: Div, corner: f32) -> Div {
+        let t = &self.tokens;
+        let base = ink(t.colors.text, t.translucency.hover);
+        block
+            .relative()
+            .overflow_hidden()
+            .corner(t, corner)
+            .bg(base)
+            .when(!t.accessibility.reduce_motion, |block| {
+                block.child(
+                    div()
+                        .absolute()
+                        .left(relative(self.transitions.phase() * 1.8 - 0.8))
+                        .w(relative(0.8))
+                        .h_full()
+                        .bg(linear_gradient(
+                            90.,
+                            linear_color_stop(base.opacity(0.), 0.),
+                            linear_color_stop(base.opacity(0.7), 1.),
+                        )),
+                )
+            })
+    }
+
+    fn skeleton(&self, kind: Skeleton, window: &Window) -> Div {
+        let t = &self.tokens;
+        let bar = |width: f32, height| {
+            self.skeleton_block(div().w(relative(width)).h(px(height)), t.radius.sm)
+        };
+        let heading = || bar(0.24, 16.).my(px(t.space.md));
+        let mut body = div().w_full().flex().flex_col().gap(px(t.space.md));
+        if kind == Skeleton::Detail {
+            let (width, across) = self.card_width(window);
+            let column = width * across as f32 + t.space.md * (across - 1) as f32;
+            let preview_height = (column - t.space.md).max(0.) * 9. / 32.;
+            return body
+                .child(bar(0.22, 16.))
+                .child(bar(0.9, 10.))
+                .child(bar(0.72, 10.))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(t.space.md))
+                        .pt(px(t.space.md))
+                        .children((0..2).map(|_| {
+                            self.skeleton_block(div().flex_1().h(px(preview_height)), t.radius.lg)
+                        })),
+                );
+        }
+
+        let (width, across) = self.card_width(window);
+        let card = || {
+            div()
+                .flex()
+                .items_center()
+                .flex_none()
+                .w(px(width))
+                .h(px(CARD_HEIGHT))
+                .p(px(CARD_PAD))
+                .gap(px(t.space.lg))
+                .corner(t, t.radius.lg)
+                .bg(rgb(t.colors.panel))
+                .child(self.skeleton_block(div().size(px(TILE)), t.radius.md))
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(px(t.space.sm))
+                        .child(bar(0.42, 12.))
+                        .child(bar(0.77, 10.)),
+                )
+        };
+        let rows = |count| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(t.space.md))
+                .children((0..count).map(|_| {
+                    div()
+                        .flex()
+                        .gap(px(t.space.md))
+                        .children((0..across).map(|_| card()))
+                }))
+        };
+        if kind != Skeleton::Catalogue {
+            body = body.child(heading());
+        }
+        body = body.child(rows(2));
+        if kind != Skeleton::Catalogue {
+            body = body.child(heading().mt(px(t.space.lg))).child(rows(1));
+        }
+        body
+    }
+
+    fn settling(
+        &self,
+        kind: Skeleton,
+        loading: bool,
+        content: impl IntoElement,
+        window: &Window,
+    ) -> Div {
+        let placeholder = || self.skeleton(kind, window);
+        if loading {
+            return div().child(
+                div()
+                    .id("store-loading")
+                    .debug_selector(|| "store-skeleton".into())
+                    .role(Role::Status)
+                    .aria_label("Loading extensions")
+                    .child(placeholder()),
+            );
+        }
+        let fade = self.transitions.fade();
+        div()
+            .relative()
+            .child(div().opacity(fade).child(content))
+            .when(self.transitions.placeholder() == Some(kind), |body| {
+                body.child(
+                    div()
+                        .id("store-loading-out")
+                        .aria_hidden()
+                        .absolute()
+                        .inset_0()
+                        .opacity(1. - fade)
+                        .child(placeholder()),
+                )
+            })
     }
     fn load_failed(&self, cx: &mut Context<Self>) -> Div {
         self.kit()
@@ -1240,69 +1417,85 @@ impl StoreWindow {
         let c = &t.colors;
         let Face { seed, name, line } = face;
         let (from, to) = art(seed);
+        let anchors = self.art_anchors.clone();
+        let art_id = id.to_owned();
+        // v1's 75 ms interaction response, on a critically damped spring.
+        let interaction = SpringConfig::new(14_400., 240., 1.);
         let card = div()
             .id(SharedString::from(id.to_owned()))
             .flex()
             .flex_none()
             .w(px(width))
+            .h(px(CARD_HEIGHT))
             .items_center()
             .gap(px(t.space.lg))
             .p(px(CARD_PAD))
             .corner(t, t.radius.lg)
-            .bg(rgb(c.panel));
-        self.kit()
-            .wash(card, kit::key(id), t.radius.lg)
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(TILE))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .corner(t, t.radius.md + t.space.hair)
-                    .bg(rgb(c.floating))
-                    .child(
-                        div()
-                            .size(px(ART))
-                            .corner(t, t.radius.md)
-                            .bg(linear_gradient(
-                                135.,
-                                linear_color_stop(rgb(from), 0.),
-                                linear_color_stop(rgb(to), 1.),
-                            )),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .truncate()
-                            .text_role(t, Text::Title)
-                            .child(name.to_owned()),
-                    )
-                    .children(line.map(|(text, ink)| {
-                        div()
-                            .truncate()
-                            .text_role(t, Text::Body)
-                            .text_color(rgb(ink))
-                            .child(text)
-                    }))
-                    .child(
-                        facts
-                            .flex()
-                            .items_center()
-                            .gap(px(t.space.xs))
-                            .min_w(px(0.))
-                            .pt(px(t.space.hair))
-                            .text_role(t, Text::Body)
-                            .text_color(rgb(c.faint)),
-                    ),
-            )
-            .child(action)
+            .bg(rgb(c.panel))
+            .hover_style(|style| style.bg(rgb(pm_design::mix(c.panel, c.text, t.translucency.hover))))
+            .when(!t.accessibility.reduce_motion, |card| {
+                card.transitions(|style| style.bg(interaction).w(interaction).h(interaction))
+            });
+        card.child(
+            div()
+                .flex_none()
+                .size(px(TILE))
+                .flex()
+                .items_center()
+                .justify_center()
+                .corner(t, t.radius.md + t.space.hair)
+                .bg(rgb(c.floating))
+                .child(
+                    div()
+                        .size(px(ART))
+                        .corner(t, t.radius.md)
+                        .bg(linear_gradient(
+                            135.,
+                            linear_color_stop(rgb(from), 0.),
+                            linear_color_stop(rgb(to), 1.),
+                        ))
+                        .child(
+                            canvas(
+                                move |bounds, _, _| {
+                                    anchors.borrow_mut().insert(art_id, bounds);
+                                },
+                                |_, _, _, _| (),
+                            )
+                            .size_full(),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .truncate()
+                        .text_role(t, Text::Title)
+                        .child(name.to_owned()),
+                )
+                .children(line.map(|(text, ink)| {
+                    div()
+                        .truncate()
+                        .text_role(t, Text::Body)
+                        .text_color(rgb(ink))
+                        .child(text)
+                }))
+                .child(
+                    facts
+                        .flex()
+                        .items_center()
+                        .gap(px(t.space.xs))
+                        .min_w(px(0.))
+                        .pt(px(t.space.hair))
+                        .text_role(t, Text::Body)
+                        .text_color(rgb(c.faint)),
+                ),
+        )
+        .child(action)
     }
     /// A listing's card: what it does, who made it, and a check when it is
     /// here or a plus that opens its page (where its access is shown before
@@ -1321,6 +1514,7 @@ impl StoreWindow {
         let slug = listing.slug.clone();
         let item = listing.clone();
         let open = item.clone();
+        let id = format!("store-{place}-{}", listing.repo_id);
         let symbol = |name: &str, color: u32| {
             pm_shell::symbol::symbol(name, m.symbol_inline, Weight::Semibold, color, window)
         };
@@ -1343,7 +1537,7 @@ impl StoreWindow {
                 .role(Role::Image)
                 .aria_label("Installed")
                 .flex_none()
-                .size(px(PLUS))
+                .size(px(m.control))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1358,32 +1552,23 @@ impl StoreWindow {
                 name: listing.name.clone(),
             });
             let direct = pick.filter(|_| self.services.source.is_some());
-            let key = kit::key(&action_id);
-            let hover = self.kit().hovered(key);
+            let origin = id.clone();
             self.kit()
-                .track_hover(
-                    div()
-                        .id(SharedString::from(action_id))
-                        .role(Role::Button)
-                        .aria_label(format!("Install: {}", listing.name))
-                        .flex_none()
-                        .size(px(PLUS))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .corner(t, t.metrics.control_radius)
-                        .bg(rgb(c.floating))
-                        .child(symbol("plus", if hover > 0.5 { c.text } else { c.secondary }))
-                        .when(self.busy.is_some(), |d| self.kit().disabled(d))
-                        .on_click(cx.listener(move |v, _, _, cx| {
-                            cx.stop_propagation();
-                            match direct.clone() {
-                                Some(pick) => v.install(pick, cx),
-                                None => v.open_detail(open.clone(), cx),
-                            }
-                        })),
-                    key,
+                .icon_button(
+                    action_id,
+                    "plus",
+                    format!("Install: {}", listing.name),
+                    false,
                 )
+                .bg(rgb(c.floating))
+                .when(self.busy.is_some(), |d| self.kit().disabled(d))
+                .on_click(cx.listener(move |v, _, _, cx| {
+                    cx.stop_propagation();
+                    match direct.clone() {
+                        Some(pick) => v.install(pick, cx),
+                        None => v.open_card(open.clone(), &origin, cx),
+                    }
+                }))
                 .into_any_element()
         };
         let facts = div()
@@ -1403,7 +1588,7 @@ impl StoreWindow {
             });
         // Keyed by repository: two makers' listings may share a slug.
         self.frame(
-            &format!("store-{place}-{}", listing.repo_id),
+            &id,
             width,
             Face {
                 seed: &listing.repo_id,
@@ -1413,8 +1598,13 @@ impl StoreWindow {
             facts,
             action,
         )
+        .role(Role::Button)
+        .aria_label(listing.name.clone())
+        .when(!t.accessibility.reduce_motion, |card| {
+            card.active_style(move |style| style.w(px(width * 0.985)).h(px(CARD_HEIGHT * 0.985)))
+        })
         .debug_selector(move || format!("store-row-{slug}"))
-        .on_click(cx.listener(move |v, _, _, cx| v.open_detail(item.clone(), cx)))
+        .on_click(cx.listener(move |v, _, _, cx| v.open_card(item.clone(), &id, cx)))
         .into_any_element()
     }
     /// How wide a card is and how many share a row: two (one when the
@@ -1422,24 +1612,37 @@ impl StoreWindow {
     fn card_width(&self, window: &Window) -> (f32, usize) {
         let t = &self.tokens;
         let column = (f32::from(window.viewport_size().width) - 2. * t.space.xxl)
-            .min(t.metrics.store_column);
+            .clamp(0., t.metrics.store_column);
         let across = if column < NARROW { 1 } else { 2 };
         let width = ((column - t.space.md * (across - 1) as f32) / across as f32).floor();
         (width, across)
     }
-    fn grid(&self, cards: Vec<AnyElement>, across: usize) -> AnyElement {
+    fn grid(&self, cards: Vec<(String, AnyElement)>, width: f32, across: usize) -> AnyElement {
         let gap = self.tokens.space.md;
-        let mut rows = div().flex().flex_col().gap(px(gap));
-        let mut cards = cards.into_iter().peekable();
-        while cards.peek().is_some() {
-            rows = rows.child(
+        let rows = cards.len().div_ceil(across);
+        div()
+            .relative()
+            .h(px(
+                rows as f32 * CARD_HEIGHT + rows.saturating_sub(1) as f32 * gap
+            ))
+            .children(cards.into_iter().enumerate().map(|(i, (key, card))| {
                 div()
+                    .id(SharedString::from(key))
+                    .absolute()
+                    .left(px((i % across) as f32 * (width + gap)))
+                    .top(px((i / across) as f32 * (CARD_HEIGHT + gap)))
+                    .w(px(width))
+                    .h(px(CARD_HEIGHT))
                     .flex()
-                    .gap(px(gap))
-                    .children(cards.by_ref().take(across)),
-            );
-        }
-        rows.into_any_element()
+                    .items_center()
+                    .justify_center()
+                    .when(!self.tokens.accessibility.reduce_motion, |d| {
+                        let layout = SpringConfig::new(420., 31., 1.);
+                        d.transitions(|style| style.left(layout).top(layout))
+                    })
+                    .child(card)
+            }))
+            .into_any_element()
     }
     fn cards(
         &self,
@@ -1451,9 +1654,14 @@ impl StoreWindow {
         let (width, across) = self.card_width(window);
         let cards = listings
             .iter()
-            .map(|listing| self.card(place, listing, width, window, cx))
+            .map(|listing| {
+                (
+                    format!("layout-{place}-{}", listing.repo_id),
+                    self.card(place, listing, width, window, cx),
+                )
+            })
             .collect();
-        self.grid(cards, across)
+        self.grid(cards, width, across)
     }
     fn status(&self, text: &str) -> Div {
         div()
@@ -1536,7 +1744,7 @@ impl StoreWindow {
         let searching = !self.query.trim().is_empty();
         match self.page {
             Page::Discover if !searching => match &self.shelves {
-                Load::Loading => out.push(self.loading().into_any_element()),
+                Load::Loading => {}
                 Load::Failed(_) => out.push(self.load_failed(cx).into_any_element()),
                 Load::Ready(shelves) if shelves.is_empty() => out.push(
                     self.kit()
@@ -1585,7 +1793,9 @@ impl StoreWindow {
                     body = body.child(self.cards("results", &items, window, cx));
                 }
                 match self.catalog.state {
-                    CatalogState::Loading => body = body.child(self.loading()),
+                    CatalogState::Loading => {
+                        body = body.child(self.skeleton(Skeleton::Catalogue, window))
+                    }
                     CatalogState::Failed(_) => body = body.child(self.load_failed(cx)),
                     CatalogState::Ready if items.is_empty() => {
                         body = body.child(if searching {
@@ -1625,85 +1835,64 @@ impl StoreWindow {
     }
     /// v1.2.0's head: the title (on a kind's page, the way back), then
     /// Discover · Library, search and Publish.
-    fn header(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn header(&self, label: Div, window: &Window, cx: &mut Context<Self>) -> Div {
         let t = &self.tokens;
-        let (c, m, tr) = (&t.colors, &t.metrics, &t.translucency);
+        let (c, m) = (&t.colors, &t.metrics);
         let kit = self.kit();
         let back = matches!(self.page, Page::Kind(_)) && self.query.trim().is_empty();
+        let reduced = t.accessibility.reduce_motion;
+        let arrow = pm_shell::motion::animate(
+            &self.motion.values,
+            kit::key("store-back-chevron"),
+            f32::from(back),
+            if reduced {
+                pm_design::motion::Spring::SNAP
+            } else {
+                pm_design::motion::Spring::settling(0.10)
+            },
+        )
+        .clamp(0., 1.);
+        let title = div()
+            .id(if back {
+                "store-title-back"
+            } else {
+                "store-heading"
+            })
+            .flex()
+            .flex_none()
+            .items_center()
+            .text_role(t, Text::Display)
+            .child(
+                div()
+                    .w(px(22. * arrow))
+                    .overflow_hidden()
+                    .opacity(arrow)
+                    .child(kit.symbol(
+                        "chevron.left",
+                        m.symbol_toolbar + 1.,
+                        Weight::Semibold,
+                        c.muted,
+                    )),
+            )
+            .child(label);
         let title = if back {
-            div()
-                .id("store-title-back")
+            title
                 .debug_selector(|| "store-title-back".into())
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(t.space.xs))
                 .role(Role::Button)
                 .aria_label("Back to Discover")
-                .child(kit.symbol(
-                    "chevron.left",
-                    m.symbol_toolbar + 1.,
-                    Weight::Semibold,
-                    c.muted,
-                ))
-                .child(div().text_role(t, Text::Display).child("Discover"))
                 .on_click(cx.listener(|v, _, _, cx| v.set_page(Page::Discover, cx)))
         } else {
-            div()
-                .id("store-heading")
-                .flex_none()
-                .role(Role::Heading)
-                .text_role(t, Text::Display)
-                .child("Store")
+            title.role(Role::Heading).aria_label("Store")
         };
         let width = f32::from(window.viewport_size().width);
-        let search_key = kit::key("store-search");
-        let search = kit.track_hover(
-            div()
-                .id("store-search")
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(t.space.md))
-                .w(px(SEARCH.min(width - SEARCH_ROOM).max(SEARCH_LEAST)))
-                .h(px(ACTION))
-                .px(px(t.space.md + t.space.hair))
-                .rounded(px(t.radius.md))
-                .bg(ink(
-                    c.text,
-                    tr.hover + (tr.selected - tr.hover) * kit.hovered(search_key),
-                ))
-                .child(kit.symbol(
-                    "magnifyingglass",
-                    m.symbol_toolbar + 1.,
-                    Weight::Regular,
-                    c.muted,
-                ))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .children(self.search.clone())
-                        .when(self.search.is_none(), |d| {
-                            d.text_color(rgb(c.faint)).child("Search")
-                        }),
-                )
-                .when(self.query.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .flex_none()
-                            .text_role(t, Text::Caption)
-                            .text_color(rgb(c.faint))
-                            .child("⌘F"),
-                    )
-                })
-                .on_click(cx.listener(|v, _, _, cx| {
-                    if let Some(field) = &v.search {
-                        field.update(cx, |f, cx| f.begin_editing(cx));
-                    }
-                })),
-            search_key,
-        );
+        let search = self
+            .search
+            .clone()
+            .map_or_else(
+                || kit.search(None, Some("⌘F")),
+                |field| kit.header_well(field),
+            )
+            .w(px(SEARCH.min(width - SEARCH_ROOM).max(SEARCH_LEAST)));
         // v1.2.0's head: the title, then one toolbar: Discover · Library
         // where you are, then search and Publish at the far edge.
         div()
@@ -1718,11 +1907,15 @@ impl StoreWindow {
                     .flex()
                     .items_center()
                     .gap(px(t.space.md))
-                    .h(px(ACTION))
+                    .min_h(px(m.control))
                     .children(self.pages.clone())
                     .child(div().flex_1())
                     .child(search)
-                    .children(self.publish_menu.clone()),
+                    .children(
+                        self.publish_menu
+                            .clone()
+                            .map(|control| kit.header_well(control)),
+                    ),
             )
     }
     /// Whether the extension runs: on, and not stopped for this run.
@@ -2022,7 +2215,7 @@ impl StoreWindow {
         let c = &t.colors;
         let items = match &self.library {
             Load::Ready(items) => items.clone(),
-            Load::Loading => return vec![self.loading().into_any_element()],
+            Load::Loading => return vec![],
             Load::Failed(_) => return vec![self.load_failed(cx).into_any_element()],
         };
         let (width, across) = self.card_width(window);
@@ -2078,19 +2271,24 @@ impl StoreWindow {
             } else {
                 "From the Store".to_owned()
             }));
-            self.frame(
-                &format!("store-installed-{id}"),
-                width,
-                Face {
-                    seed: item.repo.as_deref().unwrap_or(&item.id),
-                    name: &item.name,
-                    line: Some((line, ink)),
-                },
-                facts,
-                action,
-            )
-            .debug_selector(move || format!("store-installed-{id}"))
-            .into_any_element()
+            let card = self
+                .frame(
+                    &format!("store-installed-{id}"),
+                    width,
+                    Face {
+                        seed: item.repo.as_deref().unwrap_or(&item.id),
+                        name: &item.name,
+                        line: Some((line, ink)),
+                    },
+                    facts,
+                    action,
+                )
+                .debug_selector({
+                    let id = id.clone();
+                    move || format!("store-installed-{id}")
+                })
+                .into_any_element();
+            (format!("layout-installed-{id}"), card)
         };
         // Check for Updates heads the first Store section.
         let mut check = (!attention.is_empty() || !calm.is_empty()).then(|| {
@@ -2111,12 +2309,12 @@ impl StoreWindow {
                 .into_iter()
                 .map(|i| installed_card(i, cx))
                 .collect();
-            let grid = self.grid(cards, across);
+            let grid = self.grid(cards, width, across);
             out.push(self.section(self.heading("Needs Attention", check.take()), grid));
         }
         if !calm.is_empty() {
             let cards = calm.into_iter().map(|i| installed_card(i, cx)).collect();
-            let grid = self.grid(cards, across);
+            let grid = self.grid(cards, width, across);
             out.push(self.section(self.heading("Installed", check.take()), grid));
         } else if !needs_you {
             let empty = self.empty_card(
@@ -2146,8 +2344,9 @@ impl StoreWindow {
                 .clone()
                 .into_iter()
                 .map(|item| {
+                    let key = format!("layout-yours-{}", item.id);
                     if let Some(why) = &item.broken {
-                        return self.broken_card(&item, why, width, cx);
+                        return (key, self.broken_card(&item, why, width, cx));
                     }
                     let (status, label) = match &item.published {
                         Some(published) if *published == item.version => {
@@ -2189,21 +2388,23 @@ impl StoreWindow {
                         (!unchanged).then_some(publish),
                         cx,
                     );
-                    self.frame(
-                        &format!("store-yours-{id}"),
-                        width,
-                        Face {
-                            seed: &format!("local:{id}"),
-                            name: &item.name,
-                            line: Some((format!("Version {}", item.version), c.muted)),
-                        },
-                        div().child(div().truncate().child(status)),
-                        corner,
-                    )
-                    .into_any_element()
+                    let card = self
+                        .frame(
+                            &format!("store-yours-{id}"),
+                            width,
+                            Face {
+                                seed: &format!("local:{id}"),
+                                name: &item.name,
+                                line: Some((format!("Version {}", item.version), c.muted)),
+                            },
+                            div().child(div().truncate().child(status)),
+                            corner,
+                        )
+                        .into_any_element();
+                    (key, card)
                 })
                 .collect();
-            self.grid(cards, across)
+            self.grid(cards, width, across)
         };
         out.push(self.section(self.heading("Made by You", None), made));
         out
@@ -2261,13 +2462,19 @@ impl StoreWindow {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
+        let listing = match load {
+            Load::Ready(detail) => &detail.listing,
+            _ => listing,
+        };
         let t = &self.tokens;
         let (c, m) = (&t.colors, &t.metrics);
+        let shown = self.transitions.page().1;
         let back = div()
             .flex()
             .items_center()
             .gap(px(t.space.xs))
             .mb(px(t.space.xl))
+            .opacity(shown)
             .child(
                 self.kit()
                     .icon_button("store-back", "chevron.left", "Back", false)
@@ -2281,6 +2488,45 @@ impl StoreWindow {
                     .child(self.title_for_back()),
             );
         let (from, to) = art(&listing.repo_id);
+        let origin = self.detail_origin;
+        let corner = t.radius.xl + t.space.xs;
+        let small_corner = t.radius.md;
+        let smoothing = t.radius.smoothing;
+        let hero = canvas(
+            |_, _, _| (),
+            move |bounds, _, window, _| {
+                let (bounds, radius) = if let Some(start) = origin.filter(|_| shown < 1.) {
+                    let mix = |a: Pixels, b: Pixels| a + (b - a) * shown;
+                    (
+                        Bounds::new(
+                            point(
+                                mix(start.origin.x, bounds.origin.x),
+                                mix(start.origin.y, bounds.origin.y),
+                            ),
+                            size(
+                                mix(start.size.width, bounds.size.width),
+                                mix(start.size.height, bounds.size.height),
+                            ),
+                        ),
+                        small_corner + (corner - small_corner) * shown,
+                    )
+                } else {
+                    (bounds, corner)
+                };
+                window.paint_quad(
+                    PaintQuad::new(bounds)
+                        .corner_radii(px(radius))
+                        .corner_smoothing(smoothing)
+                        .background(linear_gradient(
+                            135.,
+                            linear_color_stop(rgb(from), 0.),
+                            linear_color_stop(rgb(to), 1.),
+                        )),
+                );
+            },
+        )
+        .flex_none()
+        .size(px(HERO));
         let seal = listing.verified.then(|| {
             div()
                 .id("store-detail-verified")
@@ -2301,6 +2547,7 @@ impl StoreWindow {
             .flex()
             .flex_col()
             .gap(px(t.space.hair))
+            .opacity(shown)
             .child(
                 div()
                     .text_role(t, Text::Display)
@@ -2328,31 +2575,29 @@ impl StoreWindow {
             .items_center()
             .gap(px(t.space.xl))
             .pb(px(t.space.xxl))
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(HERO))
-                    .corner(t, t.radius.xl + t.space.xs)
-                    .bg(linear_gradient(
-                        135.,
-                        linear_color_stop(rgb(from), 0.),
-                        linear_color_stop(rgb(to), 1.),
-                    )),
-            )
+            .child(hero)
             .child(copy);
         let detail = match load {
             Load::Loading => {
                 return vec![
                     back.into_any_element(),
-                    head.into_any_element(),
-                    self.loading().into_any_element(),
+                    head.child(self.skeleton_block(
+                        div().w(px(t.metrics.value_column)).h(px(m.control)),
+                        m.control_radius,
+                    ))
+                    .into_any_element(),
+                    self.settling(Skeleton::Detail, true, div(), window)
+                        .opacity(shown)
+                        .into_any_element(),
                 ];
             }
             Load::Failed(_) => {
                 return vec![
                     back.into_any_element(),
                     head.into_any_element(),
-                    self.load_failed(cx).into_any_element(),
+                    self.settling(Skeleton::Detail, false, self.load_failed(cx), window)
+                        .opacity(shown)
+                        .into_any_element(),
                 ];
             }
             Load::Ready(detail) => detail,
@@ -2407,8 +2652,8 @@ impl StoreWindow {
                     })),
             );
         }
-        head = head.child(actions);
-        let mut out = vec![back.into_any_element(), head.into_any_element()];
+        head = head.child(actions.opacity(self.transitions.fade() * shown));
+        let mut out = Vec::new();
         out.extend(self.message_line(cx).map(IntoElement::into_any_element));
         if primary && self.services.source.is_none() {
             out.push(
@@ -2614,7 +2859,18 @@ impl StoreWindow {
             out.push(block("Version History", versions.into_any_element()));
         }
         out.push(block("Details", details.into_any_element()));
-        out
+        vec![
+            back.into_any_element(),
+            head.into_any_element(),
+            self.settling(
+                Skeleton::Detail,
+                false,
+                div().flex().flex_col().children(out),
+                window,
+            )
+            .opacity(shown)
+            .into_any_element(),
+        ]
     }
     fn message_line(&self, cx: &mut Context<Self>) -> Option<Div> {
         let message = self.message.clone()?;
@@ -2656,6 +2912,20 @@ impl StoreWindow {
 impl Render for StoreWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.motion.frame(window);
+        let (kind, loading) = match (&self.detail, self.page, self.query.trim().is_empty()) {
+            (Some((_, state)), _, _) => (Skeleton::Detail, matches!(state, Load::Loading)),
+            (None, Page::Library, _) => (Skeleton::Library, matches!(self.library, Load::Loading)),
+            (None, Page::Discover, true) => {
+                (Skeleton::Discover, matches!(self.shelves, Load::Loading))
+            }
+            _ => (
+                Skeleton::Catalogue,
+                matches!(self.catalog.state, CatalogState::Loading)
+                    && self.catalog.items.is_empty(),
+            ),
+        };
+        self.transitions
+            .frame(loading.then_some(kind), &self.tokens, window);
         self.ensure_switches(window, cx);
         self.frame_kit = Some(Kit::new(
             &self.tokens,
@@ -2665,10 +2935,21 @@ impl Render for StoreWindow {
             cx,
         ));
         let t = self.tokens.clone();
-        let content = match self.detail.clone() {
-            Some((listing, load)) => self.detail_view(&listing, &load, window, cx),
-            None => self.list(window, cx),
+        let content = if let Some((listing, load)) = &self.detail {
+            div().children(self.detail_view(listing, load, window, cx))
+        } else {
+            let list = if loading {
+                vec![]
+            } else {
+                self.list(window, cx)
+            };
+            self.settling(kind, loading, div().children(list), window)
         };
+        let (x, opacity) = self.transitions.page();
+        let content = content
+            .relative()
+            .left(px(x))
+            .when(self.detail.is_none(), |d| d.opacity(opacity));
         // v1.2.0's Store column: a readable width centred however wide the
         // window grows. A list page says what happened under its header; a
         // detail page says it under its action (`detail_view`).
@@ -2679,8 +2960,19 @@ impl Render for StoreWindow {
             .min_w(px(0.))
             .max_w(px(t.metrics.store_column));
         if self.detail.is_none() {
+            let label = self.transitions.title.render(
+                if matches!(self.page, Page::Kind(_)) && self.query.trim().is_empty() {
+                    "Discover"
+                } else {
+                    "Store"
+                },
+                &t,
+                Text::Display,
+                t.colors.text,
+                window,
+            );
             column = column
-                .child(self.header(window, cx))
+                .child(self.header(label, window, cx))
                 .children(self.message_line(cx));
         }
         let body = div()
@@ -2688,6 +2980,7 @@ impl Render for StoreWindow {
             .flex_1()
             .min_h(px(0.))
             .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             // A window of its own keeps the toolbar's height for its buttons.
             // v1.2.0's page starts 48 pt down; a window of its own also
             // keeps the toolbar's height for its buttons.
@@ -2696,12 +2989,7 @@ impl Render for StoreWindow {
                 + if self.embedded { 0. } else { t.metrics.toolbar }))
             .pb(px(t.space.section * 2.))
             .px(px(t.space.xxl))
-            .child(
-                div()
-                    .flex()
-                    .justify_center()
-                    .child(column.children(content)),
-            );
+            .child(div().flex().justify_center().child(column.child(content)));
         div()
             .size_full()
             .flex()
@@ -2711,6 +2999,7 @@ impl Render for StoreWindow {
             .text_role(&t, Text::Body)
             .font_family(pm_design::TEXT_FONT)
             .child(body)
+            .child(self.kit().settle())
             .children(self.card_menu_overlay(cx))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
@@ -2722,8 +3011,6 @@ struct Face<'a> {
     name: &'a str,
     line: Option<(String, u32)>,
 }
-/// The header's controls stand this high (v1.2.0's toolbar).
-const ACTION: f32 = 32.;
 /// v1.2.0's search field: 280 pt, narrower in a narrow window.
 const SEARCH: f32 = 280.;
 const SEARCH_ROOM: f32 = 320.;
@@ -2731,11 +3018,10 @@ const SEARCH_LEAST: f32 = 160.;
 /// v1.2.0's card: 14 pt around a 44 pt tile holding 30 pt of art; one card
 /// to a row below 640 pt of column.
 const CARD_PAD: f32 = 14.;
+const CARD_HEIGHT: f32 = 84.;
 const TILE: f32 = 44.;
 const ART: f32 = 30.;
 const NARROW: f32 = 640.;
-/// The card's corner button (v1.2.0's 30 pt `st-plus`).
-const PLUS: f32 = 30.;
 /// An extension page's art, and the key column of its facts.
 const HERO: f32 = 80.;
 const FACT_KEY: f32 = 120.;

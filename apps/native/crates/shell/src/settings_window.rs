@@ -2,24 +2,20 @@
 //! sections in a real sidebar (`NSSplitViewItem(sidebarWithViewController:)`,
 //! a source-list `NSOutlineView` under an `NSSearchField`), back and forward
 //! as an `NSToolbarItemGroup` in a unified toolbar that shows the section's
-//! name as the window title, and the page (the Settings surface's GPUI view)
-//! in the detail item below the toolbar. Every material here is the
-//! system's; nothing is drawn to look like one.
+//! name as the window title, and an AppKit detail scroll view below the toolbar.
 //!
 //! The section icons are the one custom piece: a glass slab tile with its
 //! glyph as a layer that is either the drawn glyph or a real SF Symbol
 //! ([`GLYPHS`]), rendered once per backing scale.
 
 use objc2::{
-    AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
-    rc::Retained,
-    runtime::AnyObject,
-    sel,
+    AllocAnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class,
+    msg_send, rc::Retained, runtime::AnyObject, sel,
 };
 use objc2_app_kit::*;
 use objc2_foundation::{
-    NSArray, NSIndexSet, NSInteger, NSNotification, NSNumber, NSObject, NSObjectProtocol,
-    NSPoint, NSRect, NSSize, NSString, ns_string,
+    NSArray, NSIndexSet, NSInteger, NSNotification, NSNumber, NSObject, NSObjectProtocol, NSPoint,
+    NSRect, NSSize, NSString, ns_string,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::cell::{Cell, RefCell};
@@ -31,6 +27,7 @@ pub const DEFAULT_SIZE: (f64, f64) = (820., 640.);
 pub const MIN_SIZE: (f64, f64) = (720., 520.);
 const ROW_HEIGHT: f64 = 30.;
 const ROW_SPACING: f64 = 2.;
+const LABEL_SIZE: f64 = 13.;
 /// The space between the project's sections and the app's.
 const GROUP_GAP: f64 = 14.;
 /// The tile's side in a sidebar row.
@@ -38,6 +35,7 @@ const TILE: f64 = 20.;
 const FRAME_NAME: &str = "PMSettingsWindow";
 /// The Settings window's identifier (its title is the section's name).
 const IDENTIFIER: &str = "pm.settings";
+const NAV: &str = "pm.settings.navigation";
 
 /// Whether `window` is the Settings window.
 pub fn is_settings(window: &NSWindow) -> bool {
@@ -45,7 +43,30 @@ pub fn is_settings(window: &NSWindow) -> bool {
         .identifier()
         .is_some_and(|id| id.to_string() == IDENTIFIER)
 }
-const NAV: &str = "pm.settings.navigation";
+
+/// The AppKit surface shades that give a Settings group a lighter face.
+pub fn form_background(group: bool) -> Retained<NSColor> {
+    let window = NSColor::windowBackgroundColor();
+    let under_page = NSColor::underPageBackgroundColor();
+    let provider = block2::RcBlock::new(move |appearance: std::ptr::NonNull<NSAppearance>| {
+        // Under-page is the softer ground in Aqua and the raised shade in Dark Aqua.
+        let color: &NSColor = if is_dark(unsafe { appearance.as_ref() }) == group {
+            &under_page
+        } else {
+            &window
+        };
+        // The block retains both system colours for its lifetime.
+        std::ptr::NonNull::from(color)
+    });
+    unsafe { NSColor::colorWithName_dynamicProvider(None, &provider) }
+}
+
+fn is_dark(appearance: &NSAppearance) -> bool {
+    let names = unsafe { [NSAppearanceNameAqua, NSAppearanceNameDarkAqua] };
+    appearance
+        .bestMatchFromAppearancesWithNames(&NSArray::from_slice(&names))
+        .is_some_and(|name| &*name == names[1])
+}
 
 /// What a section's glyph is drawn from: the drawn glyph on the glass tile,
 /// or a real SF Symbol on the same tile. One switch for the whole family;
@@ -81,6 +102,7 @@ pub struct Section {
 pub enum Event {
     Select(String),
     Search(String),
+    Escape,
     Back,
     Forward,
 }
@@ -99,7 +121,6 @@ pub struct State {
     can: Cell<(bool, bool)>,
     /// The window's appearance: which icon set the rows show.
     dark: Cell<bool>,
-    ground: Cell<Option<u32>>,
     /// Set while the host changes the selection, so it is not sent back.
     quiet: Cell<bool>,
 }
@@ -141,12 +162,6 @@ define_class!(
         fn cell(&self, _: &NSOutlineView, _: *mut AnyObject, item: *mut AnyObject) -> Option<Retained<NSView>> {
             self.row_of(item).flatten().map(|section| cell(MainThreadMarker::from(self), &section, self.ivars().dark.get()))
         }
-        #[unsafe(method_id(outlineView:rowViewForItem:))]
-        fn row_view(&self, _: &NSOutlineView, _: *mut AnyObject) -> Option<Retained<NSTableRowView>> {
-            let mtm = MainThreadMarker::from(self);
-            let row: Retained<NeutralRow> = unsafe { msg_send![NeutralRow::alloc(mtm), init] };
-            Some(Retained::into_super(row))
-        }
         #[unsafe(method(outlineViewSelectionDidChange:))]
         fn selection_changed(&self, _: &NSNotification) {
             if self.ivars().quiet.get() { return; }
@@ -187,19 +202,6 @@ define_class!(
     }
 );
 
-define_class!(
-    /// A sidebar row whose selection is the system's neutral source-list
-    /// highlight, never the accent (the build note).
-    #[unsafe(super(NSTableRowView, NSView, NSResponder, NSObject))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "PMSettingsRowView"]
-    struct NeutralRow;
-    impl NeutralRow {
-        #[unsafe(method(isEmphasized))]
-        fn emphasized(&self) -> bool { false }
-    }
-);
-
 fn items() -> Retained<NSArray<NSString>> {
     let separator: &NSString = unsafe { NSToolbarSidebarTrackingSeparatorItemIdentifier };
     NSArray::from_slice(&[separator, &*NSString::from_str(NAV)])
@@ -224,7 +226,8 @@ pub struct SettingsChrome {
     window: Retained<NSWindow>,
     /// The page's ground, beside the sidebar (under the toolbar too): nothing
     /// opaque sits under the sidebar's glass.
-    ground: Retained<NSView>,
+    ground: Retained<NSBox>,
+    page: Retained<NSScrollView>,
     /// The window's own keys (⌘F, typing in the sidebar).
     monitor: Option<Retained<AnyObject>>,
 }
@@ -240,7 +243,12 @@ impl Drop for SettingsChrome {
 /// Settings' own keys, as System Settings has them: ⌘F goes to the search
 /// field, and typing while the sidebar has the keyboard starts a search
 /// with what was typed (never the source list's jump to a row by name).
-fn keys(window: &NSWindow, search: &NSSearchField, outline: &NSOutlineView) -> Option<Retained<AnyObject>> {
+fn keys(
+    window: &NSWindow,
+    search: &NSSearchField,
+    outline: &NSOutlineView,
+    sender: async_channel::Sender<Event>,
+) -> Option<Retained<AnyObject>> {
     let window = objc2::rc::Weak::from(window);
     let search = objc2::rc::Weak::from(search);
     let outline = objc2::rc::Weak::from(outline);
@@ -256,20 +264,44 @@ fn keys(window: &NSWindow, search: &NSSearchField, outline: &NSOutlineView) -> O
         }
         let flags = e.modifierFlags();
         let command = flags.contains(NSEventModifierFlags::Command);
-        let chars = e.charactersIgnoringModifiers().map(|c| c.to_string()).unwrap_or_default();
+        let chars = e
+            .charactersIgnoringModifiers()
+            .map(|c| c.to_string())
+            .unwrap_or_default();
         if command
             && chars == "f"
-            && !flags.intersects(NSEventModifierFlags::Shift | NSEventModifierFlags::Option | NSEventModifierFlags::Control)
+            && !flags.intersects(
+                NSEventModifierFlags::Shift
+                    | NSEventModifierFlags::Option
+                    | NSEventModifierFlags::Control,
+            )
         {
             window.makeFirstResponder(Some(&search));
             return std::ptr::null_mut();
         }
+        if e.keyCode() == 53
+            && !window
+                .firstResponder()
+                .is_some_and(|r| r.isKindOfClass(NSTextView::class()))
+        {
+            let _ = sender.try_send(Event::Escape);
+            return std::ptr::null_mut();
+        }
         let typed = e.characters().map(|c| c.to_string()).unwrap_or_default();
-        let sidebar = window
-            .firstResponder()
-            .is_some_and(|r| std::ptr::eq(Retained::as_ptr(&r).cast::<AnyObject>(), Retained::as_ptr(&outline).cast()));
-        let printable = !typed.is_empty() && typed.chars().all(|c| !c.is_control() && !('\u{f700}'..='\u{f8ff}').contains(&c));
-        if sidebar && printable && !flags.intersects(NSEventModifierFlags::Command | NSEventModifierFlags::Control) {
+        let sidebar = window.firstResponder().is_some_and(|r| {
+            std::ptr::eq(
+                Retained::as_ptr(&r).cast::<AnyObject>(),
+                Retained::as_ptr(&outline).cast(),
+            )
+        });
+        let printable = !typed.is_empty()
+            && typed
+                .chars()
+                .all(|c| !c.is_control() && !('\u{f700}'..='\u{f8ff}').contains(&c));
+        if sidebar
+            && printable
+            && !flags.intersects(NSEventModifierFlags::Command | NSEventModifierFlags::Control)
+        {
             window.makeFirstResponder(Some(&search));
             if let Some(editor) = search.currentEditor() {
                 unsafe { editor.insertText(&NSString::from_str(&typed)) };
@@ -304,7 +336,6 @@ impl SettingsChrome {
                 nav: RefCell::new(None),
                 can: Cell::new((false, false)),
                 dark: Cell::new(true),
-                ground: Cell::new(None),
                 quiet: Cell::new(false),
             });
             unsafe { msg_send![super(this), init] }
@@ -321,6 +352,7 @@ impl SettingsChrome {
                 | NSWindowStyleMask::FullSizeContentView,
         );
         window.setIdentifier(Some(&NSString::from_str(IDENTIFIER)));
+        window.setTabbingMode(NSWindowTabbingMode::Disallowed);
         window.setTitlebarAppearsTransparent(false);
         window.setTitleVisibility(NSWindowTitleVisibility::Visible);
         let frame = window.frame();
@@ -328,21 +360,18 @@ impl SettingsChrome {
         // The sidebar: the search field over the source list.
         let sidebar = NSView::new(mtm);
         let search = NSSearchField::new(mtm);
+        search.setControlSize(NSControlSize::Regular);
+        search.setFont(Some(&NSFont::systemFontOfSize(LABEL_SIZE)));
         search.setPlaceholderString(Some(ns_string!("Search")));
         search.setSendsSearchStringImmediately(true);
-        // No accent focus ring (owner rule); the field's own caret and
-        // fill show it has the keyboard.
-        search.setFocusRingType(NSFocusRingType::None);
         unsafe {
             search.setTarget(Some(&chrome));
             search.setAction(Some(sel!(searched:)));
         }
         search.setTranslatesAutoresizingMaskIntoConstraints(false);
         let outline = NSOutlineView::new(mtm);
-        let column = NSTableColumn::initWithIdentifier(
-            NSTableColumn::alloc(mtm),
-            ns_string!("section"),
-        );
+        let column =
+            NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), ns_string!("section"));
         outline.addTableColumn(&column);
         unsafe { outline.setOutlineTableColumn(Some(&column)) };
         outline.setHeaderView(None);
@@ -366,37 +395,65 @@ impl SettingsChrome {
         sidebar.addSubview(&scroll);
         let guide = sidebar.safeAreaLayoutGuide();
         activate(&[
-            search.topAnchor().constraintEqualToAnchor(&guide.topAnchor()),
-            search.leadingAnchor().constraintEqualToAnchor_constant(&sidebar.leadingAnchor(), 10.),
-            search.trailingAnchor().constraintEqualToAnchor_constant(&sidebar.trailingAnchor(), -10.),
-            scroll.topAnchor().constraintEqualToAnchor_constant(&search.bottomAnchor(), 12.),
-            scroll.leadingAnchor().constraintEqualToAnchor(&sidebar.leadingAnchor()),
-            scroll.trailingAnchor().constraintEqualToAnchor(&sidebar.trailingAnchor()),
-            scroll.bottomAnchor().constraintEqualToAnchor(&sidebar.bottomAnchor()),
+            search
+                .topAnchor()
+                .constraintEqualToAnchor(&guide.topAnchor()),
+            search
+                .leadingAnchor()
+                .constraintEqualToAnchor_constant(&sidebar.leadingAnchor(), 10.),
+            search
+                .trailingAnchor()
+                .constraintEqualToAnchor_constant(&sidebar.trailingAnchor(), -10.),
+            scroll
+                .topAnchor()
+                .constraintEqualToAnchor_constant(&search.bottomAnchor(), 12.),
+            scroll
+                .leadingAnchor()
+                .constraintEqualToAnchor(&sidebar.leadingAnchor()),
+            scroll
+                .trailingAnchor()
+                .constraintEqualToAnchor(&sidebar.trailingAnchor()),
+            scroll
+                .bottomAnchor()
+                .constraintEqualToAnchor(&sidebar.bottomAnchor()),
         ]);
 
-        // The detail: GPUI's view in the safe area, below the toolbar and
-        // beside the sidebar; the detail itself runs under both (below).
-        gpui.setTranslatesAutoresizingMaskIntoConstraints(false);
-        activate(&[
-            gpui.topAnchor().constraintEqualToAnchor(&content.safeAreaLayoutGuide().topAnchor()),
-            gpui.leadingAnchor().constraintEqualToAnchor(&content.safeAreaLayoutGuide().leadingAnchor()),
-            gpui.trailingAnchor().constraintEqualToAnchor(&content.trailingAnchor()),
-            gpui.bottomAnchor().constraintEqualToAnchor(&content.bottomAnchor()),
-        ]);
-        content.setWantsLayer(true);
-        // The page's ground: beside the sidebar and up under the toolbar,
-        // never under the sidebar (the detail runs under it, unpainted, so
-        // its glass shows what is behind the window).
-        let ground = NSView::new(mtm);
-        ground.setWantsLayer(true);
+        // GPUI still owns the window's lifetime. AppKit owns the whole detail.
+        gpui.setHidden(true);
+        let ground = NSBox::new(mtm);
+        ground.setBoxType(NSBoxType::Custom);
+        ground.setTitlePosition(NSTitlePosition::NoTitle);
+        ground.setBorderWidth(0.);
+        ground.setFillColor(&form_background(false));
         ground.setTranslatesAutoresizingMaskIntoConstraints(false);
-        content.addSubview_positioned_relativeTo(&ground, NSWindowOrderingMode::Below, Some(&gpui));
+        content.addSubview(&ground);
+        let page = NSScrollView::new(mtm);
+        page.setDrawsBackground(false);
+        page.setHasVerticalScroller(true);
+        page.setAutohidesScrollers(true);
+        page.setTranslatesAutoresizingMaskIntoConstraints(false);
+        content.addSubview(&page);
+        let safe = content.safeAreaLayoutGuide();
         activate(&[
-            ground.topAnchor().constraintEqualToAnchor(&content.topAnchor()),
-            ground.leadingAnchor().constraintEqualToAnchor(&content.safeAreaLayoutGuide().leadingAnchor()),
-            ground.trailingAnchor().constraintEqualToAnchor(&content.trailingAnchor()),
-            ground.bottomAnchor().constraintEqualToAnchor(&content.bottomAnchor()),
+            ground
+                .topAnchor()
+                .constraintEqualToAnchor(&content.topAnchor()),
+            ground
+                .leadingAnchor()
+                .constraintEqualToAnchor(&safe.leadingAnchor()),
+            ground
+                .trailingAnchor()
+                .constraintEqualToAnchor(&content.trailingAnchor()),
+            ground
+                .bottomAnchor()
+                .constraintEqualToAnchor(&content.bottomAnchor()),
+            page.topAnchor().constraintEqualToAnchor(&safe.topAnchor()),
+            page.leadingAnchor()
+                .constraintEqualToAnchor(&safe.leadingAnchor()),
+            page.trailingAnchor()
+                .constraintEqualToAnchor(&content.trailingAnchor()),
+            page.bottomAnchor()
+                .constraintEqualToAnchor(&content.bottomAnchor()),
         ]);
         // The sidebar is the system's own material, blended with what is
         // behind the window: GPUI made the window opaque with an opaque
@@ -451,7 +508,8 @@ impl SettingsChrome {
         nav.setNavigational(true);
         nav.setLabel(ns_string!("Back/Forward"));
         *chrome.ivars().nav.borrow_mut() = Some(nav);
-        let toolbar = NSToolbar::initWithIdentifier(NSToolbar::alloc(mtm), ns_string!("PMSettings"));
+        let toolbar =
+            NSToolbar::initWithIdentifier(NSToolbar::alloc(mtm), ns_string!("PMSettings"));
         unsafe {
             let _: () = msg_send![&toolbar, setDelegate: &*chrome];
         }
@@ -466,7 +524,7 @@ impl SettingsChrome {
         window.setFrameAutosaveName(&NSString::from_str(FRAME_NAME));
         window.setAutorecalculatesKeyViewLoop(true);
         window.makeFirstResponder(Some(&outline));
-        let monitor = keys(&window, &search, &outline);
+        let monitor = keys(&window, &search, &outline, chrome.ivars().sender.clone());
 
         *chrome.ivars().outline.borrow_mut() = Some(outline);
         *chrome.ivars().search.borrow_mut() = Some(search);
@@ -475,7 +533,13 @@ impl SettingsChrome {
         if let Some(content) = window.contentView() {
             content.layoutSubtreeIfNeeded();
         }
-        Some(SettingsChrome { chrome, window, ground, monitor })
+        Some(SettingsChrome {
+            chrome,
+            window,
+            ground,
+            page,
+            monitor,
+        })
     }
 
     /// The sidebar lists `sections` with `active` selected; the title names it.
@@ -486,15 +550,23 @@ impl SettingsChrome {
         };
         let same = {
             let rows = state.rows.borrow();
-            rows.iter().filter_map(|r| r.section.as_ref()).eq(sections.iter())
+            rows.iter()
+                .filter_map(|r| r.section.as_ref())
+                .eq(sections.iter())
         };
         if !same {
             let mut rows = vec![];
             for (i, s) in sections.iter().enumerate() {
                 if i > 0 && sections[i - 1].project && !s.project {
-                    rows.push(Row { section: None, item: NSNumber::new_isize(-1) });
+                    rows.push(Row {
+                        section: None,
+                        item: NSNumber::new_isize(-1),
+                    });
                 }
-                rows.push(Row { section: Some(s.clone()), item: NSNumber::new_isize(i as isize) });
+                rows.push(Row {
+                    section: Some(s.clone()),
+                    item: NSNumber::new_isize(i as isize),
+                });
             }
             *state.rows.borrow_mut() = rows;
             state.quiet.set(true);
@@ -510,10 +582,8 @@ impl SettingsChrome {
             && outline.selectedRow() != row as NSInteger
         {
             state.quiet.set(true);
-            outline.selectRowIndexes_byExtendingSelection(
-                &NSIndexSet::indexSetWithIndex(row as usize),
-                false,
-            );
+            outline
+                .selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(row), false);
             state.quiet.set(false);
         }
         if let Some(title) = sections.iter().find(|s| s.id == active).map(|s| &s.title) {
@@ -532,8 +602,10 @@ impl SettingsChrome {
         }
     }
 
-    /// The window's appearance (live): the rows' icon set, and the ground
-    /// the detail shows under the toolbar, as the page's own.
+    pub fn page(&self) -> &NSScrollView {
+        &self.page
+    }
+
     /// What the window is made of, for a check against any build (the test,
     /// and `PM_NATIVE_SETTINGS_PROBE=<file>` in a release bundle): whether
     /// the window is clear, whether the sidebar is inside the system's glass,
@@ -574,17 +646,12 @@ impl SettingsChrome {
             "sidebarWidth": SIDEBAR_WIDTH,
         })
     }
-    pub fn set_scheme(&self, dark: bool, ground: u32) {
+    pub fn update_sidebar_appearance(&self) {
         let state = self.chrome.ivars();
-        if state.ground.replace(Some(ground)) != Some(ground) {
-            if let Some(layer) = self.ground.layer() {
-                layer.setBackgroundColor(Some(&crate::native::native_color(ground).CGColor()));
-            }
-        }
-        if state.dark.replace(dark) == dark {
-            return;
-        }
-        if let Some(outline) = state.outline.borrow().clone() {
+        let dark = is_dark(&self.window.effectiveAppearance());
+        if state.dark.replace(dark) != dark
+            && let Some(outline) = state.outline.borrow().as_ref()
+        {
             let selected = outline.selectedRowIndexes();
             state.quiet.set(true);
             outline.reloadData();
@@ -642,7 +709,7 @@ fn cell(mtm: MainThreadMarker, section: &Section, dark: bool) -> Retained<NSView
     }
     icon.setImageScaling(NSImageScaling::ScaleNone);
     let label = NSTextField::labelWithString(&NSString::from_str(&section.title), mtm);
-    label.setFont(Some(&NSFont::systemFontOfSize(13.)));
+    label.setFont(Some(&NSFont::systemFontOfSize(LABEL_SIZE)));
     label.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
     if section.dim {
         label.setTextColor(Some(&NSColor::tertiaryLabelColor()));
