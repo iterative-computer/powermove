@@ -114,6 +114,7 @@ mod skimming;
 mod smoke;
 mod storage;
 mod pages;
+mod store_motion;
 mod store_window;
 #[cfg(test)]
 mod store_window_tests;
