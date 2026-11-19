@@ -68,13 +68,6 @@ export interface GridLayout {
   /** A grid card's thumbnail, in points (16:9 of its column). */
   thumbWidth?: number;
   thumbHeight?: number;
-  cardGeometry?: {
-    radius: number;
-    frameRadius: number;
-    frameInset?: number;
-    smallRadius: number;
-    dotInset: number;
-  };
 }
 /** The panel's two layouts: source-list rows, or a grid of thumbnails. */
 export type ViewMode = "list" | "grid";
@@ -395,7 +388,6 @@ export function ProjectView(props: ProjectViewProps) {
   /** A composition's frame on its tile (v1.2.0 `.comp-frame`): inset in
    * the tile, holding its thumbnail. A comp is the tile's 16:9 as a rule;
    * the frame takes the tile's shape inside its inset. */
-  const geometry = layout.cardGeometry;
   const compFrame = (poster: string | undefined) => (
     <div
       style={{
@@ -410,7 +402,7 @@ export function ProjectView(props: ProjectViewProps) {
           position: "relative",
           flexGrow: 1,
           overflow: "hidden",
-          borderRadius: geometry?.frameRadius ?? token("metrics.inner_radius"),
+          borderRadius: token("metrics.media_frame_radius"),
           borderWidth: token("metrics.border"),
           borderColor: token("colors.hairline"),
           background: token("colors.media_badge"),
@@ -449,9 +441,7 @@ export function ProjectView(props: ProjectViewProps) {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          borderRadius: small
-            ? (geometry?.smallRadius ?? token("metrics.inner_radius"))
-            : (geometry?.radius ?? token("metrics.control_radius")),
+          borderRadius: token(small ? "metrics.media_small_radius" : "metrics.control_radius"),
           background: token(
             dropTarget ? "colors.accent_wash" : "colors.fill",
           ),
@@ -491,11 +481,9 @@ export function ProjectView(props: ProjectViewProps) {
             alt={itemName(row)}
             style={{
               position: "absolute",
-              inset: small ? "fill" : (geometry?.frameInset ?? "fill"),
+              inset: small ? "fill" : token("metrics.media_comp_inset"),
               overflow: "hidden",
-              borderRadius: small
-                ? (geometry?.smallRadius ?? token("metrics.inner_radius"))
-                : (geometry?.frameRadius ?? token("metrics.inner_radius")),
+              borderRadius: token(small ? "metrics.media_small_radius" : "metrics.media_frame_radius"),
               // A readiness refresh keeps the last good picture unchanged.
               opacity: f.attention
                 ? token("metrics.media_offline_opacity")
@@ -524,9 +512,7 @@ export function ProjectView(props: ProjectViewProps) {
             style={{
               position: "absolute",
               inset: "fill",
-              borderRadius: small
-                ? (geometry?.smallRadius ?? token("metrics.inner_radius"))
-                : (geometry?.radius ?? token("metrics.control_radius")),
+              borderRadius: token(small ? "metrics.media_small_radius" : "metrics.control_radius"),
               borderWidth: token(
                 small ? "metrics.border" : "metrics.media_ring",
               ),
@@ -549,7 +535,7 @@ export function ProjectView(props: ProjectViewProps) {
                   paddingRight: token("metrics.media_inset"),
                   height: token("metrics.media_badge_height"),
                   background: token("colors.media_badge"),
-                  borderRadius: geometry?.smallRadius ?? token("metrics.inner_radius"),
+                  borderRadius: token("metrics.media_small_radius"),
                   fontSize: token("typography.minimum"),
                   color: token("colors.selected_text"),
                   fontVariantNumeric: "tabular-nums",
@@ -580,10 +566,8 @@ export function ProjectView(props: ProjectViewProps) {
                 label="Open in the timeline"
                 style={{
                   position: "absolute",
-                  right:
-                    geometry?.dotInset ?? token("metrics.media_comp_inset"),
-                  bottom:
-                    geometry?.dotInset ?? token("metrics.media_comp_inset"),
+                  right: token("metrics.media_open_dot_inset"),
+                  bottom: token("metrics.media_open_dot_inset"),
                   width: token("metrics.status_dot"),
                   height: token("metrics.status_dot"),
                   borderRadius: token("metrics.status_dot"),
@@ -791,7 +775,7 @@ export function ProjectView(props: ProjectViewProps) {
           flexBasis: token("metrics.thumbnail_min"),
           overflow: "hidden",
           paddingBottom: token("metrics.inset"),
-          borderRadius: geometry?.radius ?? token("metrics.control_radius"),
+          borderRadius: token("metrics.control_radius"),
         }}
         {...rowHandlers(row)}
       >

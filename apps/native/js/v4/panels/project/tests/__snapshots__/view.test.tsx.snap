@@ -1189,7 +1189,7 @@ exports[`linked-Synced-list: op tree, real validator and AX projection 1`] = `
                                   "token": "colors.fill",
                                 },
                                 "borderRadius": {
-                                  "token": "metrics.inner_radius",
+                                  "token": "metrics.media_small_radius",
                                 },
                                 "display": "flex",
                                 "flexShrink": 0,
@@ -2504,7 +2504,7 @@ exports[`linked-Syncing-list: op tree, real validator and AX projection 1`] = `
                                   "token": "colors.fill",
                                 },
                                 "borderRadius": {
-                                  "token": "metrics.inner_radius",
+                                  "token": "metrics.media_small_radius",
                                 },
                                 "display": "flex",
                                 "flexShrink": 0,
@@ -3819,7 +3819,7 @@ exports[`linked-NotFound-list: op tree, real validator and AX projection 1`] = `
                                   "token": "colors.fill",
                                 },
                                 "borderRadius": {
-                                  "token": "metrics.inner_radius",
+                                  "token": "metrics.media_small_radius",
                                 },
                                 "display": "flex",
                                 "flexShrink": 0,
@@ -7542,7 +7542,7 @@ exports[`importing-cards: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -8505,7 +8505,7 @@ exports[`selected: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -10314,7 +10314,7 @@ exports[`multi-select: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -10553,7 +10553,7 @@ exports[`multi-select: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -11404,7 +11404,7 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                                           "token": "colors.hairline",
                                         },
                                         "borderRadius": {
-                                          "token": "metrics.inner_radius",
+                                          "token": "metrics.media_frame_radius",
                                         },
                                         "borderWidth": {
                                           "token": "metrics.border",
@@ -11470,14 +11470,14 @@ exports[`disabled-composition: op tree, real validator and AX projection 1`] = `
                                       "token": "metrics.status_dot",
                                     },
                                     "bottom": {
-                                      "token": "metrics.media_comp_inset",
+                                      "token": "metrics.media_open_dot_inset",
                                     },
                                     "height": {
                                       "token": "metrics.status_dot",
                                     },
                                     "position": "absolute",
                                     "right": {
-                                      "token": "metrics.media_comp_inset",
+                                      "token": "metrics.media_open_dot_inset",
                                     },
                                     "width": {
                                       "token": "metrics.status_dot",
@@ -13698,7 +13698,7 @@ exports[`unknown-original: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -16065,7 +16065,7 @@ exports[`changed-source: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -19231,7 +19231,7 @@ exports[`drag-source: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -20299,7 +20299,7 @@ exports[`external-drop: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -23930,7 +23930,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -24149,7 +24149,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -24384,7 +24384,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -24603,7 +24603,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -24838,7 +24838,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -25057,7 +25057,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -25292,7 +25292,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -25511,7 +25511,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -25746,7 +25746,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -25965,7 +25965,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -26200,7 +26200,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
@@ -26419,7 +26419,7 @@ exports[`60000-items: op tree, real validator and AX projection 1`] = `
                                       "token": "colors.media_badge",
                                     },
                                     "borderRadius": {
-                                      "token": "metrics.inner_radius",
+                                      "token": "metrics.media_small_radius",
                                     },
                                     "color": {
                                       "token": "colors.selected_text",
