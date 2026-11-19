@@ -244,9 +244,7 @@ export function RenderQueue({
   watch: (p: Promise<unknown>) => void;
 }) {
   const jobs = model.state.queue ?? [];
-  const pending = jobs.filter(
-    (j) => j.status === "Pending" || j.status === "Rendering",
-  );
+  const pending = model.activeQueueJobs;
   const waiting = pending.filter((job) => job.status === "Pending");
   const firstWaiting = waiting[0]?.id;
   const lastWaiting = waiting.at(-1)?.id;
@@ -276,7 +274,7 @@ export function RenderQueue({
               marginBottom: t("space.xs"),
             }}
           >
-            <text style={sectionLabel}>{`Queue · ${pending.length}`}</text>
+            <text id="export.queue.pending-count" style={sectionLabel}>{`Queue · ${pending.length}`}</text>
             <UI.PushButton
               id="export.queue.render"
               label="Render Pending"

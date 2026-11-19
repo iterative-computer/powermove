@@ -774,7 +774,9 @@ test("settings open first with grouped output in order and actions outside the s
   ).toBe(true);
   for (const id of fields.slice(1))
     expect(inside(f.root, id, "export.options")).toBe(true);
-  expect(named(f.root, "export.queue.badge").textContent).toBe("3");
+  const count = named(f.root, "export.queue.badge").textContent;
+  expect(count).toBe("2");
+  expect(named(f.root, "export.queue.pending-count").textContent).toBe(`Queue · ${count}`);
   for (const id of ["export.queue.open", "export.queue.add", "export.start"]) {
     expect(inside(f.root, id, "export.footer")).toBe(true);
     expect(inside(f.root, id, "export.options")).toBe(false);
@@ -873,6 +875,9 @@ test("the active run shows progress and preview above the queue, then returns to
   expect(has(f.root, "export.queue.indicator")).toBe(true);
   expect(inside(f.root, "queue.job.1", "export.queue.rows")).toBe(true);
   expect(inside(f.root, "queue.job.2", "export.queue.rows")).toBe(true);
+  const count = named(f.root, "export.queue.badge").textContent;
+  expect(count).toBe("3");
+  expect(named(f.root, "export.queue.pending-count").textContent).toBe(`Queue · ${count}`);
   expect(has(f.root, "export.options")).toBe(false);
   const children = named(f.root, "export.sheet").children;
   expect(children.indexOf(current)).toBeLessThan(children.indexOf(named(f.root, "export.queue.rows")));

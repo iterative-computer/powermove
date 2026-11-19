@@ -438,6 +438,11 @@ export class ExportModel {
   get pending() {
     return this.busy;
   }
+  get activeQueueJobs() {
+    return (this.current.queue ?? []).filter(
+      (job) => job.status === "Pending" || job.status === "Rendering",
+    );
+  }
   get locked() {
     return (
       this.busy ||
