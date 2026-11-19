@@ -480,9 +480,16 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
             assert_eq!(tool, actual);
         }
     }
-    for field in ["inspection", "instructions", "commandFields", "easePresets"] {
+    for field in ["inspection", "instructions", "easePresets"] {
         assert_eq!(bare[field], expected[field]);
     }
+    // The native transition overlay adds exactly the pair and offset fields.
+    let mut command_fields = bare["commandFields"].clone();
+    command_fields["set_transition"]
+        .as_array_mut()
+        .unwrap()
+        .extend([serde_json::json!("pairedWith"), serde_json::json!("offset")]);
+    assert_eq!(command_fields, expected["commandFields"]);
     // The app subset adds exactly the native panel-authoring tools.
     let mut app = bare["app"].as_array().unwrap().clone();
     app.extend([
