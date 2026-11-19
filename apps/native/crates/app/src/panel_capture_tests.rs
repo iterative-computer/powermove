@@ -143,7 +143,8 @@ fn capture_builtin_panels() {
                         wait(r.runtime.observe_render_queue(serde_json::json!([
                             {"id":1,"name":"Opening","format":"mp4","path":"/Exports/Opening.mp4","status":"Rendering","progress":0.42,"error":""},
                             {"id":2,"name":"Logo","format":"prores","path":"/Exports/Logo.mov","status":"Pending","progress":0.,"error":""},
-                            {"id":3,"name":"Credits","format":"mp4","path":"/Exports/Credits.mp4","status":"Pending","progress":0.,"error":""}
+                            {"id":3,"name":"Credits","format":"mp4","path":"/Exports/Credits.mp4","status":"Pending","progress":0.,"error":""},
+                            {"id":4,"name":"Teaser","format":"mp4","path":"/Exports/Teaser.mp4","status":"Pending","progress":0.,"error":""}
                         ])).unwrap());
                     } else if export_view.as_deref() == Some("empty") {
                         wait(r.runtime.observe_render_queue(serde_json::json!([])).unwrap());
@@ -200,8 +201,14 @@ fn capture_builtin_panels() {
                     }
                 }
                 let mut first = publication(&r);
-                if panel == "export" && (std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some() || export_view.as_deref() == Some("queue")) {
-                    let target = first.surface.nodes().values().find(|n| n.props.get("id").and_then(serde_json::Value::as_str) == Some("queue.job.4")).unwrap().id;
+                let hovered_job = match export_view.as_deref() {
+                    Some("rendering") => Some("queue.job.3"),
+                    Some("queue") => Some("queue.job.4"),
+                    _ if std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some() => Some("queue.job.4"),
+                    _ => None,
+                };
+                if panel == "export" && let Some(hovered_job) = hovered_job {
+                    let target = first.surface.nodes().values().find(|n| n.props["id"] == hovered_job).unwrap().id;
                     let ticket = r.runtime.event("export", first.generation, first.surface.revision(), target, "pointerenter", Default::default()).unwrap();
                     while ticket.try_take().is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
                     first = r.runtime.take_publications().pop().unwrap_or(first);
