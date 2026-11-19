@@ -312,7 +312,7 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
         "generate_captions",
         "import_media_to_timeline",
     ];
-    let speed: Value = serde_json::from_str(include_str!(
+    let speed: serde_json::Value = serde_json::from_str(include_str!(
         "../../mcp/fixtures/mcp-speed-catalog.json"
     )).unwrap();
     for tool in bare["tools"].as_array().unwrap() {
