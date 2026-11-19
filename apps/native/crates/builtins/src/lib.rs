@@ -2974,7 +2974,11 @@ impl Broker {
     fn forget_overlay(&self, panel: &str) {
         let id = format!("{panel}{VIEWER_OVERLAY}");
         self.publications.shared().remove(&id);
-        self.overlays_cleared.shared().push(id);
+        // Realm disposal and unmount may both retire the same overlay before the UI drains it.
+        let mut cleared = self.overlays_cleared.shared();
+        if !cleared.contains(&id) {
+            cleared.push(id);
+        }
     }
     fn forget_themes(&self, panel: &str) {
         let mut themes = self.themes.shared();

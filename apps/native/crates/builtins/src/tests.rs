@@ -3126,6 +3126,7 @@ fn an_extension_draws_a_viewer_overlay_that_follows_the_frame() {
             .all(|p| p.panel != overlay)
     );
     panels.unmount_extension("synthetic-overlay");
+    panels.unmount_extension("synthetic-overlay");
     assert_eq!(panels.take_cleared_overlays(), vec![overlay.to_owned()]);
     panels.close();
     actor.shutdown();
