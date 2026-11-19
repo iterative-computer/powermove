@@ -499,6 +499,13 @@ pub(crate) enum Settled {
     Pending(Vec<CompatNeed>),
     Failed(anyhow::Error),
 }
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Presenter {
+    Layer(usize),
+    // Unlayered viewers have no Metal pointer to distinguish their pictures.
+    Headless(u64),
+}
+
 struct CachedFrame {
     key: crate::policy::CacheKey,
     composition: String,
@@ -555,7 +562,7 @@ pub struct Engine {
     /// asked to draw again presents it again instead of being drawn and
     /// settled a second time. Let go with the kept frames (a font or tone
     /// change, the idle release).
-    showing: Vec<(usize, CachedFrame)>,
+    showing: Vec<(Presenter, CachedFrame)>,
     /// The media of the scenes drawn lately ([`Engine::observed_inputs`]).
     media_seen: Vec<MediaSeen>,
     /// How long a look at the media stands (a test holds it open).
@@ -1199,6 +1206,7 @@ impl Engine {
     }
     /// A transient zoom surface must not leave a retained presentation cache.
     pub fn forget_presenter(&mut self, presenter: usize) {
+        let presenter = Presenter::Layer(presenter);
         self.showing.retain(|(owner, _)| *owner != presenter);
         debug_assert!(self.showing.iter().all(|(owner, _)| *owner != presenter));
     }
@@ -1737,7 +1745,9 @@ impl Engine {
         }
         // A settled picture handed over is shown by the frame of its key,
         // and stays its viewer's from then on.
-        let viewer = layer.map_or(0, |layer| layer.as_ptr() as usize);
+        let viewer = layer.map_or(Presenter::Headless(scene.content), |layer| {
+            Presenter::Layer(layer.as_ptr() as usize)
+        });
         if !spec.exact
             && let Some(handed) = self.settled.take_if(|c| of(c))
         {
