@@ -1,0 +1,7 @@
+# Powermove: the video editor you customize with AI.
+# Search engines and AI answer engines are welcome to read and cite this site.
+User-agent: *
+Content-Signal: search=yes, ai-input=yes
+Allow: /
+
+Sitemap: https://trypowermove.com/sitemap.xml

@@ -3,8 +3,12 @@
   import Hero from '$lib/Hero.svelte';
   import Footer from '$lib/Footer.svelte';
   import Features from '$lib/Features.svelte';
+  import Faq from '$lib/Faq.svelte';
+  import Seo from '$lib/Seo.svelte';
+  import { page } from '$app/state';
   import { resolveDownload } from '$lib/download.svelte';
-
+  import { HOME_FAQ } from '$lib/faq';
+  import { HOME_DESCRIPTION, HOME_TITLE, faqPage, organization, softwareApplication, website } from '$lib/site';
 
   $effect(() => { resolveDownload(); });
 
@@ -22,24 +26,12 @@
   });
 </script>
 
-<svelte:head>
-  <title>Powermove</title>
-  <meta name="description" content="Powermove is a video editing app that lets you shape the featureset. Simply connect an agent and ask." />
-  <link rel="canonical" href="https://trypowermove.com/" />
-  <meta property="og:type" content="website" />
-  <meta property="og:site_name" content="Powermove" />
-  <meta property="og:url" content="https://trypowermove.com/" />
-  <meta property="og:title" content="Powermove" />
-  <meta property="og:description" content="Powermove is a video editing app that lets you shape the featureset. Simply connect an agent and ask." />
-  <meta property="og:image" content="https://trypowermove.com/og.png?v=3" />
-  <meta property="og:image:width" content="1200" />
-  <meta property="og:image:height" content="630" />
-  <meta property="og:image:alt" content="Powermove, with the editor over a desert night background." />
-  <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Powermove" />
-  <meta name="twitter:description" content="Powermove is a video editing app that lets you shape the featureset. Simply connect an agent and ask." />
-  <meta name="twitter:image" content="https://trypowermove.com/og.png?v=3" />
-</svelte:head>
+<Seo
+  title={HOME_TITLE}
+  description={HOME_DESCRIPTION}
+  path="/"
+  graph={[organization(), website(), softwareApplication(page.data.download), faqPage(HOME_FAQ, '/')]}
+/>
 
 <Header onDark />
 
@@ -47,7 +39,7 @@
   <div class="top">
     <div class="top-glow" aria-hidden="true"></div>
     <section class="hero" aria-labelledby="headline">
-      <h1 id="headline" class="sr-only">Shape your video editor</h1>
+      <h1 id="headline" class="sr-only">Powermove: the video editor you customize with AI</h1>
       <Hero />
     </section>
     <figure class="stage-window">
@@ -68,6 +60,7 @@
 
     <Features />
 
+
     <article class="row" aria-labelledby="kernel-title">
       <div class="row-copy">
         <h3 id="kernel-title">A deliberately tiny kernel</h3>
@@ -84,6 +77,8 @@
       </div>
     </article>
   </section>
+
+  <Faq items={HOME_FAQ} lead="What Powermove is, and what malleable means." />
 </main>
 
 <Footer />

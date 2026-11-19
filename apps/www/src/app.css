@@ -154,6 +154,18 @@ main{overflow:clip}
   .slab:hover{transform:none}
 }
 
+/* ---- home additions ---- */
+.hero-description .strong{color:#fff;font-weight:500}
+
+/* ---- FAQ: question beside its answer, on the rows' 4/8 grid, hairlines between ---- */
+.faq{display:grid;gap:clamp(32px,4vw,48px);max-width:var(--col);margin:clamp(104px,12vw,152px) auto 0;padding-inline:24px;scroll-margin-top:32px}
+@media(max-width:640px){.faq{padding-inline:16px}}
+.faq-list{margin:0;border-top:1px solid var(--line-2)}
+.faq-item{display:grid;gap:8px;padding:22px 0;border-bottom:1px solid var(--line-2)}
+@media(min-width:900px){.faq-item{grid-template-columns:minmax(0,4fr) minmax(0,8fr);gap:48px}}
+.faq-item dt{font-size:17px;font-weight:500;line-height:1.4;letter-spacing:-.011em;color:var(--tx);text-wrap:balance}
+.faq-item dd{margin:0;max-width:60ch;font-size:17px;line-height:1.5;letter-spacing:-.011em;color:var(--tx-2);text-wrap:pretty}
+
 /* ---- footer ----
    The hero in reverse: paper warms through our orange and settles into
    near-black, so the page ends on the stage it opened on. Type stays at the

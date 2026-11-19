@@ -13,6 +13,7 @@
         { label: 'Agent', href: '/#agent' },
         { label: 'Extensions', href: '/#extensions' },
         { label: 'Export', href: '/#export' },
+        { label: 'FAQ', href: '/#faq' },
       ],
     },
     {
