@@ -600,7 +600,7 @@ fn transition_properties_duration_uses_a_real_selection_fenced_lease() {
         .unwrap()
         .iter()
         .flat_map(|s| s["rows"].as_array().unwrap())
-        .find(|r| r["id"] == "transition.in.angle")
+        .find(|r| r["id"] == "transition.in.p.angle")
         .unwrap();
     let handle = angle["control"]["axes"][0]["binding"]["handle"]
         .as_str()

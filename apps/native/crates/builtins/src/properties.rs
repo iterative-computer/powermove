@@ -49,18 +49,16 @@ pub struct RegisteredTransition {
     pub definition: pm_kernel::commands::effects::TransitionDefinition,
     pub labels: BTreeMap<String, String>,
 }
-/// The two transition fields, their slot names and section titles.
-const TRANSITION_EDGES: [(&str, &str, &str, pm_kernel::commands::effects::Edge); 2] = [
+/// The two transition fields and their slot names.
+const TRANSITION_EDGES: [(&str, &str, pm_kernel::commands::effects::Edge); 2] = [
     (
         "transitionIn",
         "in",
-        "Transition In",
         pm_kernel::commands::effects::Edge::In,
     ),
     (
         "transitionOut",
         "out",
-        "Transition Out",
         pm_kernel::commands::effects::Edge::Out,
     ),
 ];
@@ -210,7 +208,7 @@ impl Properties {
             // Failures are per layer: each layer reports only its own.
             target["first"]["error"] = json!(failure_copy(reason, studio.is_some()));
         }
-        let mut sections = self.transition_sections(model, time)?;
+        let mut sections = vec![];
         if let Some(layer) = model.primary().map(str::to_owned) {
             let audio = model
                 .layer(&layer)
@@ -218,6 +216,9 @@ impl Properties {
                 .get("type")
                 .and_then(pm_model::Value::as_str)
                 == Some("audio");
+            if model.selected_layers().len() == 1 && !audio {
+                sections.extend(self.transition_sections(model, &layer, time)?);
+            }
             let mut content = vec![];
             let mut layer_rows = vec![];
             let mut time_rows = vec![];
@@ -607,9 +608,6 @@ impl Properties {
                 if !rows.is_empty() {
                     sections.push(json!({"id":"transform","title":"Transform","collapsed":self.collapsed.get("transform").copied().unwrap_or(false),"rows":rows}));
                 }
-            }
-            if model.selected_layers().len() == 1 && !audio {
-                sections.extend(self.transition_sections(model, &layer, time)?);
             }
             if target["first"]["type"] == "text" {
                 let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
@@ -2222,6 +2220,22 @@ impl Properties {
             })
             .collect())
     }
+    fn transition_definition(&self, kind: &str) -> Option<RegisteredTransition> {
+        self.transitions
+            .iter()
+            .find(|transition| transition.id == kind)
+            .cloned()
+            .or_else(|| {
+                let spec = pm_kernel::commands::transition_edges::builtin_spec(kind)?;
+                Some(RegisteredTransition {
+                    id: kind.to_owned(),
+                    label: pm_surface::humanize(kind),
+                    definition: spec.definition,
+                    labels: BTreeMap::new(),
+                })
+            })
+    }
+
     /// A transition on the layer's In or Out (v1's "Transition in" and
     /// "Transition out" groups): its type, duration and parameters, with
     /// Remove on the heading.
@@ -2235,20 +2249,29 @@ impl Properties {
         let locked = !model.editable(layer);
         let span = record["dur"].as_f64().unwrap_or(600.).clamp(0.02, 600.);
         let mut sections = vec![];
-        for (field, slot, title, _) in TRANSITION_EDGES {
+        for (field, slot, edge) in TRANSITION_EDGES {
             let t = &record[field];
             let Some(kind) = t["type"].as_str() else {
                 continue;
             };
-            let missing = t["missing"] == true;
-            let registered = self.transitions.iter().find(|r| r.id == kind).cloned();
+            let registered = self.transition_definition(kind);
+            let missing = t["missing"] == true || registered.is_none();
+            let duration = t["dur"].as_f64().unwrap_or(0.5);
+            let paired = t["paired"].as_str().is_some();
+            let offset = t["offset"].as_f64().unwrap_or_else(|| {
+                if paired { -duration / 2. } else if slot == "in" { 0. } else { -duration }
+            });
             let mut options: Vec<Value> = self
                 .transitions
                 .iter()
                 .map(|r| json!({"v":r.id,"label":r.label}))
                 .collect();
-            if registered.is_none() {
-                options.push(json!({"v":kind,"label":format!("{kind} (missing)")}));
+            if !options.iter().any(|option| option["v"] == kind) {
+                let label = registered.as_ref().map_or_else(
+                    || format!("{kind} (missing)"),
+                    |definition| definition.label.clone(),
+                );
+                options.push(json!({"v":kind,"label":label}));
             }
             let mut rows = vec![];
             let lease = self.control_lease(&format!("transition.{slot}.type"));
@@ -2256,8 +2279,12 @@ impl Properties {
                 "control":{"kind":"choice","binding":lease,"value":kind,"options":options,"mixed":false}}));
             let lease = self.control_lease(&format!("transition.{slot}.duration"));
             rows.push(json!({"id":format!("transition.{slot}.duration"),"label":"Duration","locked":locked || missing,"animation":null,
-                "control":{"kind":"number","axes":[{"binding":lease,"value":t["dur"].as_f64().unwrap_or(0.5),
-                    "unit":"s","step":0.01,"precision":2,"min":0.02,"max":span,"mixed":false}]}}));
+                "control":{"kind":"number","axes":[{"binding":lease,"value":duration,
+                    "unit":"s","step":0.01,"precision":2,"min":0.02,"max":if paired { 600. } else { span },"mixed":false}]}}));
+            let lease = self.control_lease(&format!("transition.{slot}.offset"));
+            rows.push(json!({"id":format!("transition.{slot}.offset"),"label":"Offset","locked":locked || missing || !paired,"animation":null,
+                "control":{"kind":"number","axes":[{"binding":lease,"value":offset,
+                    "unit":"s","step":0.01,"precision":2,"min":-duration,"max":0.,"mixed":false}]}}));
             for param in registered.iter().flat_map(|r| r.definition.params.iter()) {
                 if missing || param.reference {
                     continue;
@@ -2300,7 +2327,7 @@ impl Properties {
                     .as_ref()
                     .and_then(|r| r.labels.get(&param.key))
                     .cloned()
-                    .unwrap_or_else(|| param.key.clone());
+                    .unwrap_or_else(|| pm_surface::humanize(&param.key));
                 let animation = if state.key_at_playhead {
                     "key-at-playhead"
                 } else if state.animated {
@@ -2310,80 +2337,159 @@ impl Properties {
                 };
                 rows.push(json!({"id":id,"label":label,"locked":locked,"animation":animation,"control":control}));
             }
-            let id = format!("transition.{slot}");
-            sections.push(json!({"id":id,"title":title,
+            let id = format!("transition-{slot}");
+            let name = registered.as_ref().map_or(kind, |definition| definition.label.as_str());
+            let title = format!("{name} · {}", if slot == "in" { "In" } else { "Out" });
+            let mut section = json!({"id":id,"title":title,
                 "collapsed":self.collapsed.get(&id).copied().unwrap_or(false),
-                "rows":rows,"action":"remove-transition"}));
+                "rows":rows,"action":"remove-transition"});
+            if paired {
+                let published = model.published();
+                let fitted = published.snapshot.root().and_then(|root| {
+                    let loc = pm_kernel::model::find_layer(root, layer)?;
+                    pm_kernel::commands::transition_edges::fitted_edge(
+                        root, pm_kernel::model::layer_at(root, &loc)?, edge,
+                    )
+                });
+                let actual = fitted.map_or(0., |edge| edge.duration);
+                if actual < duration - 1e-6 {
+                    let reason = pm_kernel::commands::transition_edges::SHORTENED_REASON;
+                    section["note"] = json!(if actual <= 0. {
+                        format!("{reason} · plain cut")
+                    } else {
+                        format!("{reason} · {actual:.2} s")
+                    });
+                }
+            }
+            sections.push(section);
         }
         Ok(sections)
     }
-    /// A transition's Type or Duration was set: the command for it.
+
     fn transition_write(
         &self,
-        model: &Inspector,
+        model: &mut Inspector,
         caller: Caller,
+        handle: &str,
         control: &str,
-        value: &pm_model::Value,
+        value: pm_model::Value,
+        time: f64,
     ) -> Result<Request, String> {
-        use pm_kernel::commands::effects::{EffectCommand, TransitionSpec, retime_transition};
+        use pm_kernel::commands::effects::{Edge, EffectCommand, TransitionSpec, retime_transition};
+        if self.document != Some(model.document_id())
+            || self.selection != model.selected_layers()
+            || self.selection.len() != 1
+        {
+            return Err("Transition selection changed".into());
+        }
         let (slot, what) = control.split_once('.').ok_or("Invalid transition field")?;
-        let (field, _, _, edge) = TRANSITION_EDGES
-            .into_iter()
-            .find(|(_, s, _, _)| *s == slot)
+        let (field, _, edge) = TRANSITION_EDGES.into_iter()
+            .find(|(_, candidate, _)| *candidate == slot)
             .ok_or("Invalid transition field")?;
         let layer = model.primary().ok_or("No selected layer")?.to_owned();
-        if model.selected_layers().len() != 1 || !model.editable(&layer) {
+        if !model.editable(&layer) {
             return Err("Select one unlocked layer".into());
         }
         let record = super::data::wire(&model.layer(&layer).map_err(|e| e.to_string())?);
-        let t = &record[field];
-        let kind = t["type"].as_str().ok_or("The transition was removed")?;
-        let duration = t["dur"].as_f64().unwrap_or(0.5);
-        let (label, command) = match what {
-            "duration" => {
-                if t["missing"] == true {
-                    return Err("Its extension is not installed".into());
-                }
-                let seconds = value.as_f64().ok_or("Expected a number")?;
-                let params: Vec<String> = t["p"]
-                    .as_object()
-                    .map(|p| p.keys().cloned().collect())
-                    .unwrap_or_default();
-                (
-                    "Transition Duration".to_owned(),
-                    retime_transition(&layer, edge, kind, &params, seconds),
-                )
-            }
-            "type" => {
-                let id = value.as_str().ok_or("Expected a transition")?;
-                let registered = self
-                    .transitions
-                    .iter()
-                    .find(|r| r.id == id)
-                    .ok_or("That transition is not installed")?;
-                (
-                    format!("Set {}", registered.label),
-                    EffectCommand::SetTransition {
-                        layer_id: layer.clone(),
-                        edge,
-                        transition: Some(Box::new(TransitionSpec {
-                            definition: registered.definition.clone(),
-                            duration: Some(duration),
-                            params: pm_model::Map::new(),
-                        })),
-                    },
-                )
-            }
-            _ => return Err("Invalid transition field".into()),
-        };
-        Ok(Request::new(
+        let transition = &record[field];
+        let kind = transition["type"].as_str().ok_or("The transition was removed")?;
+        let duration = transition["dur"].as_f64().unwrap_or(0.5);
+        let old_offset = transition["offset"].as_f64().unwrap_or(-duration / 2.);
+        let peer = transition["paired"].as_str();
+        let registered = self.transition_definition(kind);
+        let missing = transition["missing"] == true || registered.is_none();
+        if what != "type" && missing {
+            return Err("Its extension is not installed".into());
+        }
+        let revision = model.revision();
+        let make_request = |label, commands| Ok(Request::new(
             caller,
             pm_kernel::Call::Transact {
                 label: Some(label),
-                expected_revision: Some(model.revision()),
-                body: pm_kernel::WriteBody::Commands(vec![command.into()]),
+                expected_revision: Some(revision),
+                body: pm_kernel::WriteBody::Commands(commands),
             },
-        ))
+        ));
+        if let Some(param) = what.strip_prefix("p.") {
+            let param = param.strip_suffix("#hex").unwrap_or(param);
+            if registered.as_ref().is_none_or(|definition| {
+                !definition.definition.params.iter().any(|p| p.key == param && !p.reference)
+            }) {
+                return Err("Transition controls changed; select the transition again.".into());
+            }
+            if let Some(peer) = peer {
+                let other = if edge == Edge::In { "transitionOut" } else { "transitionIn" };
+                let commands = [(layer.as_str(), field), (peer, other)].into_iter()
+                    .map(|(clip, channel)| {
+                        pm_kernel::PropertyCommand::Set(
+                            pm_kernel::commands::properties::SetProperty::new(
+                                clip, format!("{channel}.p.{param}"), value.clone(), time,
+                            ),
+                        ).into()
+                    })
+                    .collect();
+                return make_request("Edit Transition".into(), commands);
+            }
+            return self.adapter.set(model, caller, handle, &[value], time)
+                .map_err(|error| error.to_string());
+        }
+        let seconds = || value.as_f64().filter(|n| n.is_finite()).ok_or("Expected a finite number");
+        let (label, definition, next_duration, offset) = match what {
+            "type" => {
+                let id = value.as_str().ok_or("Expected a transition")?;
+                let chosen = self.transition_definition(id).ok_or("That transition is not installed")?;
+                (format!("Set {}", chosen.label), chosen.definition, duration, old_offset)
+            }
+            "duration" => {
+                let next = seconds()?;
+                if !(0.02..=600.).contains(&next) {
+                    return Err("Transition duration must be between 0.02 and 600 seconds".into());
+                }
+                if peer.is_none() {
+                    let params = transition["p"].as_object()
+                        .map(|p| p.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
+                    return make_request(
+                        "Edit Transition".into(),
+                        vec![retime_transition(&layer, edge, kind, &params, next).into()],
+                    );
+                }
+                let offset = if (old_offset + duration / 2.).abs() <= 1e-6 {
+                    -next / 2.
+                } else {
+                    old_offset.clamp(-next, 0.)
+                };
+                ("Edit Transition".into(), registered.ok_or("Missing transition")?.definition, next, offset)
+            }
+            "offset" if peer.is_some() => {
+                ("Edit Transition".into(), registered.ok_or("Missing transition")?.definition, duration, seconds()?)
+            }
+            _ => return Err("Invalid transition field".into()),
+        };
+        let spec = Box::new(TransitionSpec {
+            definition,
+            duration: Some(next_duration),
+            params: pm_model::Map::new(),
+        });
+        let command = if let Some(peer) = peer {
+            let (left, right) = if edge == Edge::Out {
+                (layer, peer.to_owned())
+            } else {
+                (peer.to_owned(), layer)
+            };
+            EffectCommand::SetPairedTransition {
+                left,
+                right,
+                transition: Some(spec),
+                offset: Some(offset),
+            }
+        } else {
+            EffectCommand::SetTransition {
+                layer_id: layer,
+                edge,
+                transition: Some(spec),
+            }
+        };
+        make_request(label, vec![command.into()])
     }
     fn type_settings(
         &mut self,
@@ -2449,127 +2555,6 @@ impl Properties {
         }
         Ok(Some(section))
     }
-    fn transition_sections(
-        &mut self,
-        model: &mut Inspector,
-        time: f64,
-    ) -> Result<Vec<Value>, String> {
-        let Some(id) = model
-            .primary()
-            .filter(|_| model.selected_layers().len() == 1)
-            .map(str::to_owned)
-        else {
-            return Ok(vec![]);
-        };
-        let clip = model.layer(&id).map_err(|e| e.to_string())?;
-        let published = model.published().clone();
-        let mut sections = vec![];
-        for (field, edge) in [("transitionIn", "in"), ("transitionOut", "out")] {
-            let Some(transition) = clip.get(field) else {
-                continue;
-            };
-            let Some(kind) = transition.get("type").and_then(pm_model::Value::as_str) else {
-                continue;
-            };
-            let Some(spec) = pm_kernel::commands::transition_edges::builtin_spec(kind) else {
-                continue;
-            };
-            let mut controls = vec![(
-                "duration".to_owned(),
-                "Duration".to_owned(),
-                transition
-                    .get("dur")
-                    .and_then(pm_model::Value::as_f64)
-                    .unwrap_or(0.5),
-                Some(0.02),
-                Some(600.),
-            )];
-            let paired = transition.get("paired").and_then(pm_model::Value::as_str).is_some();
-            let duration = controls[0].2;
-            let offset = transition.get("offset").and_then(pm_model::Value::as_f64)
-                .unwrap_or(if paired { -duration / 2. } else if edge == "in" { 0. } else { -duration });
-            controls.push(("offset".into(), "Offset".into(), offset, Some(-duration), Some(0.)));
-            for param in &spec.definition.params {
-                let value = model
-                    .binding_state(
-                        &Binding::Property(PropertyId::new(
-                            &id,
-                            format!("{field}.p.{}", param.key),
-                        )),
-                        time,
-                    )
-                    .ok()
-                    .and_then(|state| state.value.as_f64())
-                    .or_else(|| param.default.as_f64());
-                if let Some(value) = value {
-                    controls.push((
-                        param.key.clone(),
-                        pm_surface::humanize(&param.key),
-                        value,
-                        param.min,
-                        param.max,
-                    ));
-                }
-            }
-            let mut rows = vec![];
-            for (key, label, value, min, max) in controls {
-                let path = format!("transition.{edge}.{key}");
-                let binding = self.lease(
-                    model,
-                    &path,
-                    Binding::Layer {
-                        layer: id.clone(),
-                        field: field.into(),
-                    },
-                )?;
-                rows.push(json!({"id":path,"label":label,"locked":!model.editable(&id) || key == "offset" && !paired,"control":{"kind":"number","axes":[{"binding":binding,"value":value,"step":0.01,"precision":2,"min":min,"max":max,"unit":if key == "duration" || key == "offset" {"s"} else {""}}]}}));
-            }
-            let name = match kind {
-                "crossfade" => "Crossfade",
-                "wipe" => "Wipe",
-                "slide" => "Slide",
-                "zoom" => "Zoom",
-                _ => kind,
-            };
-            let mut section = json!({"id":format!("transition-{edge}"),"title":format!("{name} · {}",if edge == "in" {"In"} else {"Out"}),"collapsed":false,"rows":rows});
-            if transition
-                .get("paired")
-                .and_then(pm_model::Value::as_str)
-                .is_some()
-            {
-                let fitted = published.snapshot.root().and_then(|root| {
-                    let loc = pm_kernel::model::find_layer(root, &id)?;
-                    pm_kernel::commands::transition_edges::fitted_edge(
-                        root,
-                        pm_kernel::model::layer_at(root, &loc)?,
-                        if edge == "in" {
-                            pm_kernel::commands::effects::Edge::In
-                        } else {
-                            pm_kernel::commands::effects::Edge::Out
-                        },
-                    )
-                });
-                let duration = fitted.map_or(0., |f| f.duration);
-                if duration
-                    < transition
-                        .get("dur")
-                        .and_then(pm_model::Value::as_f64)
-                        .unwrap_or(0.5)
-                        - 1e-6
-                {
-                    let reason = pm_kernel::commands::transition_edges::SHORTENED_REASON;
-                    section["note"] = json!(if duration <= 0. {
-                        format!("{reason} · plain cut")
-                    } else {
-                        format!("{reason} · {duration:.2} s")
-                    });
-                }
-            }
-            sections.push(section);
-        }
-        Ok(sections)
-    }
-
     pub fn write(
         &self,
         model: &mut Inspector,
@@ -2578,153 +2563,13 @@ impl Properties {
         value: pm_model::Value,
         time: f64,
     ) -> Result<Request, String> {
-        if let Some(path) = self
-            .handles
-            .iter()
-            .find(|(_, h)| *h == handle)
-            .map(|(p, _)| p)
-            .filter(|p| p.starts_with("transition."))
-        {
-            use pm_kernel::commands::effects::Edge;
-            use pm_kernel::{Call, Command, EffectCommand, WriteBody};
-            if self.document != Some(model.document_id())
-                || self.selection != model.selected_layers()
-                || self.selection.len() != 1
-            {
-                return Err("Transition selection changed".into());
-            }
-            let id = model.primary().ok_or("No selected clip")?;
-            if !model.editable(id) {
-                return Err("Clip is locked".into());
-            }
-            let mut parts = path.split('.');
-            parts.next();
-            let edge = parts.next().ok_or("Transition edge")?;
-            let key = parts.next().ok_or("Transition property")?;
-            let field = if edge == "in" {
-                "transitionIn"
-            } else {
-                "transitionOut"
-            };
-            let clip = model.layer(id).map_err(|e| e.to_string())?;
-            let transition = clip.get(field).ok_or("Transition removed")?;
-            let kind = transition
-                .get("type")
-                .and_then(pm_model::Value::as_str)
-                .ok_or("Transition type")?;
-            let mut spec = pm_kernel::commands::transition_edges::builtin_spec(kind)
-                .ok_or("Transition definition missing")?;
-            let value = value
-                .as_f64()
-                .filter(|v| v.is_finite())
-                .ok_or("Transition value must be finite")?;
-            if key == "offset"
-                && transition
-                    .get("paired")
-                    .and_then(pm_model::Value::as_str)
-                    .is_none()
-            {
-                return Err("Transition controls changed; select the transition again.".into());
-            }
-            if key != "duration" && key != "offset" {
-                if !spec.definition.params.iter().any(|param| param.key == key) {
-                    return Err("Transition controls changed; select the transition again.".into());
-                }
-                let mut targets = vec![(id, field)];
-                if let Some(peer) = transition.get("paired").and_then(pm_model::Value::as_str) {
-                    targets.push((
-                        peer,
-                        if edge == "in" {
-                            "transitionOut"
-                        } else {
-                            "transitionIn"
-                        },
-                    ));
-                }
-                let commands = targets
-                    .into_iter()
-                    .map(|(layer, field)| {
-                        pm_kernel::PropertyCommand::Set(
-                            pm_kernel::commands::properties::SetProperty::new(
-                                layer,
-                                format!("{field}.p.{key}"),
-                                value,
-                                time,
-                            ),
-                        )
-                        .into()
-                    })
-                    .collect();
-                return Ok(Request::new(
-                    caller,
-                    Call::Transact {
-                        label: Some("Edit Transition".into()),
-                        expected_revision: Some(model.revision()),
-                        body: WriteBody::Commands(commands),
-                    },
-                ));
-            }
-            spec.duration = transition.get("dur").and_then(pm_model::Value::as_f64);
-            if key == "duration" {
-                spec.duration = Some(value);
-            }
-            let command: Command =
-                if let Some(peer) = transition.get("paired").and_then(pm_model::Value::as_str) {
-                    let (left, right) = if edge == "out" {
-                        (id.to_owned(), peer.to_owned())
-                    } else {
-                        (peer.to_owned(), id.to_owned())
-                    };
-                    EffectCommand::SetPairedTransition {
-                        left,
-                        right,
-                        transition: Some(Box::new(spec)),
-                        offset: if key == "duration" {
-                            let old_duration = transition
-                                .get("dur")
-                                .and_then(pm_model::Value::as_f64)
-                                .unwrap_or(0.5);
-                            let old_offset = transition
-                                .get("offset")
-                                .and_then(pm_model::Value::as_f64)
-                                .unwrap_or(-old_duration / 2.);
-                            Some(if (old_offset + old_duration / 2.).abs() <= 1e-6 {
-                                -value / 2.
-                            } else {
-                                old_offset.clamp(-value, 0.)
-                            })
-                        } else if key == "offset" {
-                            Some(value)
-                        } else {
-                            transition.get("offset").and_then(pm_model::Value::as_f64)
-                        },
-                    }
-                    .into()
-                } else {
-                    EffectCommand::SetTransition {
-                        layer_id: id.into(),
-                        edge: if edge == "in" { Edge::In } else { Edge::Out },
-                        transition: Some(Box::new(spec)),
-                    }
-                    .into()
-                };
-            return Ok(Request::new(
-                caller,
-                Call::Transact {
-                    label: Some("Edit Transition".into()),
-                    expected_revision: Some(model.revision()),
-                    body: WriteBody::Commands(vec![command]),
-                },
-            ));
-        }
         if let Some(control) = self
             .handles
             .iter()
             .find(|(_, h)| *h == handle)
             .and_then(|(path, _)| path.strip_prefix("transition."))
-            .filter(|c| !c.contains(".p."))
         {
-            return self.transition_write(model, caller, control, &value);
+            return self.transition_write(model, caller, handle, control, value, time);
         }
         if let Some(control) = self
             .handles
@@ -3026,11 +2871,11 @@ impl Properties {
         if intent["type"] == "section-action" && intent["action"] == "remove-transition" {
             let slot = intent["section"]
                 .as_str()
-                .and_then(|s| s.strip_prefix("transition."))
+                .and_then(|s| s.strip_prefix("transition-"))
                 .ok_or("Transition section")?;
-            let (_, _, _, edge) = TRANSITION_EDGES
+            let (_, _, edge) = TRANSITION_EDGES
                 .into_iter()
-                .find(|(_, s, _, _)| *s == slot)
+                .find(|(_, s, _)| *s == slot)
                 .ok_or("Transition section")?;
             let layer_id = model.primary().ok_or("No selected layer")?.to_owned();
             if !model.editable(&layer_id) {
