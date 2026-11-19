@@ -9,6 +9,18 @@ use gpui::{AppContext, HeadlessAppContext, px, size};
 use pm_design::{Accessibility, Scheme, Tokens};
 use std::sync::Arc;
 
+fn wait_export_publication(ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if let Some(result) = ticket.try_take() {
+            result.unwrap();
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "export publication stalled");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 #[test]
 #[ignore = "writes PNGs; set PM_PANEL_CAPTURE"]
 fn capture_builtin_panels() {
@@ -125,31 +137,23 @@ fn capture_builtin_panels() {
                 let preview = tempfile::tempdir().unwrap();
                 let preview_key = "export-preview/capture-fixture";
                 if panel == "export" {
-                    let wait = |ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>| {
-                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-                        loop {
-                            if let Some(result) = ticket.try_take() { result.unwrap(); break; }
-                            assert!(std::time::Instant::now() < deadline, "export capture did not settle");
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                        }
-                    };
                     if matches!(export_view.as_deref(), Some("settings" | "settings-bottom" | "project")) {
                         // An idle sheet has a pending item and a finished export.
-                        wait(r.runtime.observe_render_queue(serde_json::json!([
+                        wait_export_publication(r.runtime.observe_render_queue(serde_json::json!([
                             {"id":2,"name":"Logo","format":"prores","path":"/Exports/Logo.mov","status":"Pending","progress":0.,"error":""},
                             {"id":3,"name":"Opening","format":"mp4","path":"/Exports/Opening.mp4","status":"Done","progress":1.,"error":"","finishedAt":1794686520}
                         ])).unwrap());
                     } else if export_view.as_deref() == Some("rendering") {
-                        wait(r.runtime.observe_render_queue(serde_json::json!([
+                        wait_export_publication(r.runtime.observe_render_queue(serde_json::json!([
                             {"id":1,"name":"Opening","format":"mp4","path":"/Exports/Opening.mp4","status":"Rendering","progress":0.42,"error":""},
                             {"id":2,"name":"Logo","format":"prores","path":"/Exports/Logo.mov","status":"Pending","progress":0.,"error":""},
                             {"id":3,"name":"Credits","format":"mp4","path":"/Exports/Credits.mp4","status":"Pending","progress":0.,"error":""},
                             {"id":4,"name":"Teaser","format":"mp4","path":"/Exports/Teaser.mp4","status":"Pending","progress":0.,"error":""}
                         ])).unwrap());
                     } else if export_view.as_deref() == Some("empty") {
-                        wait(r.runtime.observe_render_queue(serde_json::json!([])).unwrap());
+                        wait_export_publication(r.runtime.observe_render_queue(serde_json::json!([])).unwrap());
                     }
-                    wait(r.runtime.observe_export_destination(serde_json::json!({"path":"/Exports/Launch Film.mp4","format":"mp4"})).unwrap());
+                    wait_export_publication(r.runtime.observe_export_destination(serde_json::json!({"path":"/Exports/Launch Film.mp4","format":"mp4"})).unwrap());
                     if std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some()
                         || export_view.as_deref().is_some_and(|v|v == "rendering" || v == "queue") {
                         let image = preview.path().join("frame.png");
@@ -161,16 +165,16 @@ fn capture_builtin_panels() {
                             }
                         }).save(&image).unwrap();
                         crate::media_thumbs::register(preview_key, image);
-                        wait(r.runtime.observe_export(serde_json::json!({
+                        wait_export_publication(r.runtime.observe_export(serde_json::json!({
                             "phase":"rendering","frame":126,"total":300,
                             "elapsed":12.,"eta":17.,"preview":preview_key,
                         })).unwrap());
                     }
                     if std::env::var_os("PM_PANEL_CAPTURE_QUEUE").is_some()
                         || export_view.as_deref().is_some_and(|v|v == "queue" || v == "empty") {
-                        wait(r.runtime.show_section("export", "queue").unwrap());
+                        wait_export_publication(r.runtime.show_section("export", "queue").unwrap());
                     } else {
-                        wait(r.runtime.show("export").unwrap());
+                        wait_export_publication(r.runtime.show("export").unwrap());
                     }
                 }
                 let h = std::env::var("PM_PANEL_CAPTURE_HEIGHT")
@@ -224,6 +228,26 @@ fn capture_builtin_panels() {
                     }
                     first = r.runtime.take_publications().pop().unwrap();
                     assert!(first.surface.nodes().values().any(|n| n.props.get("id").and_then(serde_json::Value::as_str) == Some("export.project.editable")));
+                }
+                if panel == "export"
+                    && matches!(export_view.as_deref(), Some("settings" | "settings-bottom" | "project"))
+                {
+                    // Drive the same host wake that republishes completed encoder checks.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                    while !first.surface.nodes().values().any(|node| {
+                        node.props.get("id").and_then(serde_json::Value::as_str) == Some("export.summary")
+                            && node.props.get("label").and_then(serde_json::Value::as_str)
+                                == Some("300 frames · 10 s · 640×360")
+                    }) {
+                        if let Some(ticket) = r.runtime.publish_finished_checks().transpose().unwrap() {
+                            wait_export_publication(ticket);
+                        }
+                        if let Some(next) = r.runtime.take_publications().pop() {
+                            first = next;
+                        }
+                        assert!(std::time::Instant::now() < deadline, "export plan and encoder checks did not settle");
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
                 }
                 if panel == "export" && export_view.as_deref() == Some("rendering") {
                     assert!(first.surface.nodes().values().any(|node| {
