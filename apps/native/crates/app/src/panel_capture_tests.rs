@@ -17,7 +17,7 @@ fn capture_builtin_panels() {
     let only = std::env::var("PM_PANEL_CAPTURE_ONLY").ok();
     let export_view = std::env::var("PM_PANEL_CAPTURE_EXPORT_VIEW").ok();
     if let Some(view) = &export_view {
-        assert!(["settings", "project", "rendering", "queue", "empty"].contains(&view.as_str()), "unknown export capture view");
+        assert!(["settings", "settings-bottom", "project", "rendering", "queue", "empty"].contains(&view.as_str()), "unknown export capture view");
     }
     for (panel, w, h) in [
         ("timeline", 1100., 360.),
@@ -133,7 +133,7 @@ fn capture_builtin_panels() {
                             std::thread::sleep(std::time::Duration::from_millis(1));
                         }
                     };
-                    if matches!(export_view.as_deref(), Some("settings" | "project")) {
+                    if matches!(export_view.as_deref(), Some("settings" | "settings-bottom" | "project")) {
                         // An idle sheet has a pending item and a finished export.
                         wait(r.runtime.observe_render_queue(serde_json::json!([
                             {"id":2,"name":"Logo","format":"prores","path":"/Exports/Logo.mov","status":"Pending","progress":0.,"error":""},
@@ -208,21 +208,22 @@ fn capture_builtin_panels() {
                     _ => None,
                 };
                 if panel == "export" && let Some(hovered_job) = hovered_job {
-                    let target = first.surface.nodes().values().find(|n| n.props["id"] == hovered_job).unwrap().id;
+                    let target = first.surface.nodes().values().find(|n| n.props.get("id").and_then(serde_json::Value::as_str) == Some(hovered_job)).unwrap().id;
                     let ticket = r.runtime.event("export", first.generation, first.surface.revision(), target, "pointerenter", Default::default()).unwrap();
                     while ticket.try_take().is_none() { std::thread::sleep(std::time::Duration::from_millis(1)); }
                     first = r.runtime.take_publications().pop().unwrap_or(first);
                 }
                 if panel == "export" && export_view.as_deref() == Some("project") {
                     let target = first.surface.nodes().values().find(|n|
-                        n.props["role"] == "radio" && n.props["label"] == "Project"
+                        n.props.get("role").and_then(serde_json::Value::as_str) == Some("radio")
+                            && n.props.get("label").and_then(serde_json::Value::as_str) == Some("Project")
                     ).unwrap().id;
                     let ticket = r.runtime.event("export", first.generation, first.surface.revision(), target, "click", Default::default()).unwrap();
                     while ticket.try_take().is_none() {
                         std::thread::sleep(std::time::Duration::from_millis(1));
                     }
                     first = r.runtime.take_publications().pop().unwrap();
-                    assert!(first.surface.nodes().values().any(|n| n.props["id"] == "export.project.editable"));
+                    assert!(first.surface.nodes().values().any(|n| n.props.get("id").and_then(serde_json::Value::as_str) == Some("export.project.editable")));
                 }
                 let runtime = r.runtime.clone();
                 let mut cx = HeadlessAppContext::with_platform(
@@ -253,7 +254,9 @@ fn capture_builtin_panels() {
                     cx.run_until_parked();
                     std::thread::sleep(std::time::Duration::from_millis(25));
                 }
-                if std::env::var_os("PM_PANEL_CAPTURE_BOTTOM").is_some() {
+                if std::env::var_os("PM_PANEL_CAPTURE_BOTTOM").is_some()
+                    || panel == "export" && export_view.as_deref() == Some("settings-bottom")
+                {
                     window
                         .update(&mut cx, |frame, _, cx| {
                             frame
