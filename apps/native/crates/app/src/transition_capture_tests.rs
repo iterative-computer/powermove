@@ -23,6 +23,7 @@ fn g2_transition_crops() {
         std::env::var_os("PM_G2_CAPTURE_DIR").expect("capture output directory"),
     );
     std::fs::create_dir_all(&output).unwrap();
+    let wedge_review = std::env::var_os("PM_G2_WEDGE_REVIEW").is_some();
     let text = Arc::new(gpui_parley::ParleyTextSystem::new(
         gpui_parley::SystemFonts::Load,
     ));
@@ -101,11 +102,13 @@ fn g2_transition_crops() {
                 .unwrap();
             surface.update(cx, |s, cx| {
                 s.set_view(Some(220.), Some(0.), Some(0.), cx);
-                s.command("timeline.mode:tracks", 0., None, false, cx);
+                if !wedge_review {
+                    s.command("timeline.mode:tracks", 0., None, false, cx);
+                }
             });
             (handle, surface)
         });
-        if std::env::var_os("PM_G2_WEDGE_REVIEW").is_some() {
+        if wedge_review {
             use pm_kernel::commands::effects::{Edge, EffectCommand};
             capture_transact(&rig, vec![EffectCommand::SetTransition {
                 layer_id: "l0".into(),
@@ -140,7 +143,12 @@ fn g2_transition_crops() {
                             .update(cx, |_, window, cx| {
                                 window.refresh();
                                 window.draw(cx).clear(cx);
-                                let Some(frame) = surface.read(cx).frame() else { return false; };
+                                let timeline = surface.read(cx);
+                                assert_eq!(timeline.model().mode, pm_panel_timeline::TimelineMode::Layers);
+                                let Some(frame) = timeline.frame() else { return false; };
+                                let clip_row = |id| frame.ops.iter().find(|op| op.id == id).map(|op| op.bounds.y);
+                                let (Some(first), Some(second)) = (clip_row("clip:l0"), clip_row("clip:l1")) else { return false; };
+                                assert!(first < second, "wedge selection must preserve both layer rows");
                                 let Some(wedge) = frame.ops.iter().position(|o| o.id == "transition:in:l0" && o.shape == "wedge") else { return false; };
                                 let ring = frame.ops.iter().find(|o| o.id == "transition-selection:l0:in");
                                 if ring.is_some() != selected { return false; }
