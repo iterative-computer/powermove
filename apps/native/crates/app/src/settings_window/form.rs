@@ -317,10 +317,11 @@ fn capture_row_titles(form: &Form, surface: &Surface, fixture: &str, theme: &str
             let frame = field.frame();
             let hidden = field.isHiddenOrHasHiddenAncestor();
             let mut alpha = field.alphaValue();
-            let mut ancestor = field.superview();
+            // The retained view hierarchy stays on AppKit's main thread.
+            let mut ancestor = unsafe { field.superview() };
             while let Some(view) = ancestor {
                 alpha *= view.alphaValue();
-                ancestor = view.superview();
+                ancestor = unsafe { view.superview() };
             }
             record["stringValue"] = json!(value);
             record["frame"] = json!([frame.origin.x,frame.origin.y,frame.size.width,frame.size.height]);
