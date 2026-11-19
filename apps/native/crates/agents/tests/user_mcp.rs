@@ -100,18 +100,23 @@ for line in sys.stdin:
             let args = value.as_array().unwrap();
             let pos = args.iter().position(|v| v == "--mcp-config").unwrap();
             let config: Value = serde_json::from_str(args[pos + 1].as_str().unwrap()).unwrap();
-            assert_eq!(
-                config["mcpServers"]["fixture"]["command"],
-                "fixture-only-never-execute"
-            );
+            if access == Access::Editor {
+                assert!(config["mcpServers"].get("fixture").is_none());
+            } else {
+                assert_eq!(
+                    config["mcpServers"]["fixture"]["command"],
+                    "fixture-only-never-execute"
+                );
+            }
             assert_eq!(
                 config["mcpServers"]["powermove"]["command"],
                 "/fixture/powermove"
             );
             if access != Access::Computer {
-                assert!(
+                assert_eq!(
                     args.iter()
-                        .any(|v| v.as_str().is_some_and(|s| s.contains("mcp__fixture__*")))
+                        .any(|v| v.as_str().is_some_and(|s| s.contains("mcp__fixture__*"))),
+                    access == Access::Project
                 );
             }
         } else if access == Access::Editor {
