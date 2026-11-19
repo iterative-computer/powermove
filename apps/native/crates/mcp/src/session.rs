@@ -129,6 +129,25 @@ impl McpSession {
         self.agent_token = Some(token.to_owned());
     }
     pub fn call(&mut self, name: &str, args: Value) -> Value {
+        if std::env::var_os("PM_MCP_TIMING").as_deref() != Some(std::ffi::OsStr::new("1")) {
+            return self.call_tool(name, args);
+        }
+        let started = std::time::Instant::now();
+        let result = self.call_tool(name, args);
+        let elapsed = started.elapsed();
+        let bytes = serde_json::to_vec(&result).map_or(0, |buf| buf.len());
+        let tool = if catalog::spec(name).is_some() {
+            name
+        } else {
+            "unknown"
+        };
+        eprintln!(
+            "pm_mcp tool={tool} elapsed_us={} result_bytes={bytes}",
+            elapsed.as_micros()
+        );
+        result
+    }
+    fn call_tool(&mut self, name: &str, args: Value) -> Value {
         if name == "project_memory" {
             return match self.project_memory(&args) {
                 Ok(value) => crate::success_model(&value),
