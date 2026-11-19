@@ -12,4 +12,17 @@ interface CloudflareBindings {
   TURNSTILE_CLEARANCE_DAYS?: string;
   TURNSTILE_SITE_KEY?: string;
   TURNSTILE_SECRET_KEY?: string;
+  /* Aerolite. Secrets: set with `wrangler secret put`, never in wrangler.jsonc. */
+  AEROLITE_ANTHROPIC_API_KEY?: string;
+  AEROLITE_OPENAI_API_KEY?: string;
+  AEROLITE_ANTHROPIC_BASE_URL?: string;
+  AEROLITE_OPENAI_BASE_URL?: string;
+  /** Test hook: replaces fetch for upstream model calls. */
+  AEROLITE_UPSTREAM_FETCH?: typeof fetch;
+  STRIPE_SECRET_KEY?: string;
+  STRIPE_WEBHOOK_SECRET?: string;
+  STRIPE_PRICE_AEROLITE?: string;
+  STRIPE_PRICE_AERO?: string;
+  /** Test hook: replaces fetch for Stripe API calls. */
+  STRIPE_FETCH?: typeof fetch;
 }
