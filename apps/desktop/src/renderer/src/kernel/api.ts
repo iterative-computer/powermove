@@ -433,6 +433,8 @@ export interface Scene3DAPI {
   pickPart(layerId:string,x:number,y:number):string|null;
   getView():'camera'|'editor';
   setView(mode:'camera'|'editor'):void;
+  /** Restore Free View to the current active camera, without editing the shot. */
+  resetView():void;
   onViewChange(listener:(mode:'camera'|'editor')=>void):Disposable;
   getNavigationMode():'select'|'orbit'|'pan'|'dolly';
   setNavigationMode(mode:'select'|'orbit'|'pan'|'dolly'):void;
@@ -1030,7 +1032,7 @@ export interface ControlBindingOptions {
 }
 
 export interface ControlsAPI {
-  readonly Segmented: Component<{options:{id:string;label:string;title?:string}[];value:string;onChange:(id:string)=>void;label?:string}>;
+  readonly Segmented: Component<{options:{id:string;label:string;title?:string}[];value:string;onChange:(id:string,event?:MouseEvent)=>void;label?:string}>;
   /** Kernel-provided control components; props match src/renderer/src/controls — stable within apiVersion 1. */
   readonly NumField: ControlComponent;
   readonly ColorField: ControlComponent;

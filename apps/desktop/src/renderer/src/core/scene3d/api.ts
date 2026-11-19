@@ -5,7 +5,7 @@ import { createMaterialThumbnails } from './material-thumbnails';
 import { readMaterialProperties } from './material-properties';
 import {lightViewerState,lightPositionFromViewer,lightViewerGuides,nullViewerPosition,nullViewerState} from './light-view';
 import {canAssignMaterialMap,listModelMaterials,listValidMaterialCompositions,listEligibleMaterialLayers,materialLayerLinks} from './material-maps';
-import {getViewportMode,setViewportMode,onViewportChange} from './viewport';
+import {getViewportMode,setViewportMode,resetViewport,onViewportChange} from './viewport';
 import { createSceneGizmo,getGizmoMode,getGizmoSpace,setGizmoMode,setGizmoSpace,onGizmoState } from './gizmo';
 import { compositionRuntime } from './service';
 import { geometryBounds } from './geometry-bounds';
@@ -80,6 +80,7 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection'|'scene3d:m
     lightViewerGuides:(layerId,time,rect,view)=>lightViewerGuides(PM,layerId,time,rect,view),
     isGroup:layerId=>isModelGroup(PM,PM.L?.(layerId)),
     getView:()=>getViewportMode(PM),setView:mode=>{navigation?.cancel();if(mode==='camera')setNavigationMode(PM,'select');setViewportMode(PM,mode);},onViewChange:listener=>({dispose:onViewportChange(PM,listener)}),
+    resetView:()=>{navigation?.cancel();resetViewport(PM);},
     getNavigationMode:()=>getNavigationMode(PM),setNavigationMode:mode=>{navigation?.cancel();if(mode!=='select'&&getViewportMode(PM)==='camera'&&!activeCameraLayer(PM))setViewportMode(PM,'editor');setNavigationMode(PM,mode);},
     onNavigationChange:listener=>({dispose:onNavigationMode(PM,listener)}),
     getNavigationVariant:tool=>getNavigationVariant(PM,tool),setNavigationVariant:(tool,variant)=>{navigation?.cancel();setNavigationVariant(PM,tool,variant);},

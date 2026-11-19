@@ -967,9 +967,10 @@ V.attach = (stage: HTMLElement) => {
 
     }
     zoomControl.dataset.globalSpaceShortcut = '';
-    // Share the panel chrome row with its move handle, outside the clipped stage.
+    // The chrome moves this menu into the footer. Keep its source styles in flow
+    // so the host-generated select trigger cannot inherit the old top-right position.
     zoomHost.append(zoomControl);
-    zoomControl.style.cssText = 'position:absolute;right:8px;top:7px;z-index:6;width:110px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
+    zoomControl.style.cssText = 'position:relative;inset:auto;width:110px;height:24px;padding:0 26px 0 10px;border:0;border-radius:var(--r-sm);box-shadow:none;background-color:color-mix(in srgb,var(--tx) 5%,var(--bg-panel));color:var(--tx-2);font:var(--fs-md) var(--f-ui)';
     V.zoomControl = zoomControl;
     if(api.scene3d){
       /* The 3D transform tools sit in the panel header and the 3D view picker
@@ -1021,6 +1022,14 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
   const now = window.performance.now();
   if (gesture) { navigationUntil = now + 250; zoomGestureUntil = now + 100; }
   if (!V.el || !V.stage) return;
+  // Adopt the compositor-owned surface after a viewer extension replacement.
+  const liveCanvas = api.render.gl.context?.canvas;
+  if (liveCanvas instanceof HTMLCanvasElement && liveCanvas !== V.el) {
+    liveCanvas.id = "gl";
+    liveCanvas.style.cssText = V.el.style.cssText;
+    V.el.replaceWith(liveCanvas);
+    V.el = liveCanvas;
+  }
   if (V.qualityControl) V.qualityControl.value = api.transport.perf.auto ? 'auto' : String(api.transport.quality);
   const gl = V.el as HTMLCanvasElement;
   const p = api.project.get();

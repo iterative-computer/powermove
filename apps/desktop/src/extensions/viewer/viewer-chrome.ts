@@ -82,6 +82,7 @@ export const VIEWER_CHROME_STYLES = `
      so their corners run parallel to the panel's. */
   #viewer-foot{flex:none;height:var(--hdr-h);display:flex;align-items:center;gap:6px;padding:0 6px;border-top:1px solid var(--line)}
   #viewer-foot > :not(select){position:relative!important;inset:auto!important}
+  #viewer-foot > #composition-zoom{position:relative!important;inset:auto!important}
   #viewer-foot > .pm-select{width:auto!important;height:24px!important;gap:6px;padding:0 8px!important;border-radius:calc(var(--r-lg) - 6px)!important;background:var(--bg-field)!important;color:var(--tx-value)!important;font:11px/14px var(--f-ui)!important}
   #viewer-foot > #composition-zoom-trigger{font-family:var(--f-mono)!important}
   #viewer-foot > .pm-select .pm-select-chevron{position:static;width:8px;height:8px;margin:0;color:var(--tx-3)}
