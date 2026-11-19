@@ -3838,3 +3838,7 @@ fn retained_names_stay_beside_tracks_after_a_large_wheel_jump(cx: &mut TestAppCo
     assert!((f32::from(header.origin.y) - expected).abs() < 0.75,
         "name {id} at {:?}, its track at {expected}", header.origin.y);
 }
+
+// Headless measurements through mounted app objects and their kernel workers.
+#[path = "drag_latency_timeline_tests.rs"]
+mod drag_latency_metrics;

@@ -2066,7 +2066,7 @@ impl GizmoSurface {
         }
         let (kernel, project, gesture) = (self.kernel.clone(), self.project.clone(), self.gesture);
         let (started, kind) = (std::time::Instant::now(), job.kind());
-        cx.spawn(async move |this, cx| {
+        crate::interaction_work::submit!(cx, async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
