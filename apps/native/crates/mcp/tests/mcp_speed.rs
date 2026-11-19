@@ -156,7 +156,7 @@ fn standard_jobs() {
         let start = Instant::now();
         let delivery = server.text(
             "export_video",
-            json!({"format":"mp4","codec":"h264","range":"full","audio":false}),
+            json!({"format":"mp4","codec":"h264","range":"all","audio":false}),
         );
         let submit_ms = start.elapsed().as_millis() as u64;
         let output = PathBuf::from(delivery["path"].as_str().expect("export output path"));
