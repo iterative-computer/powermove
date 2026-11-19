@@ -118,6 +118,24 @@ impl Form {
         {
             self.reset();
         }
+        let recorder = self.layout(&publication, tokens, Some(cx));
+        self.publication = Some(publication);
+        self.apply_reveal();
+        if self.recorder != recorder
+            && let Some(widget) = recorder.and_then(|id| self.widgets.get(&id))
+            && let Some(window) = self.scroll.window().filter(|window| window.isKeyWindow())
+        {
+            window.makeFirstResponder(Some(widget.view()));
+        }
+        self.recorder = recorder;
+    }
+
+    fn layout(
+        &mut self,
+        publication: &Publication,
+        tokens: &pm_design::Tokens,
+        cx: Option<&mut Context<Controller>>,
+    ) -> Option<Id> {
         let surface = &publication.surface;
         let detail = surface
             .nodes()
@@ -139,15 +157,7 @@ impl Form {
         self.document.set(&views);
         let Render { seen, recorder, .. } = render;
         self.widgets.retain(|id, _| seen.contains(id));
-        self.publication = Some(publication);
-        self.apply_reveal();
-        if self.recorder != recorder
-            && let Some(widget) = recorder.and_then(|id| self.widgets.get(&id))
-            && let Some(window) = self.scroll.window().filter(|window| window.isKeyWindow())
-        {
-            window.makeFirstResponder(Some(widget.view()));
-        }
-        self.recorder = recorder;
+        recorder
     }
 
     pub(crate) fn reveal(&mut self, section: &str) {
@@ -178,6 +188,98 @@ impl Form {
         self.scroll.reflectScrolledClipView(&clip);
         self.reveal = None;
     }
+}
+
+/// Captures the Settings form from synthetic wire publications, offscreen.
+#[cfg(debug_assertions)]
+pub(crate) fn capture(inputs: &std::path::Path, output: &std::path::Path) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use objc2_foundation::{NSDictionary, NSRect};
+    use pm_design::{Accessibility, Scheme, Tokens};
+
+    let mtm = objc2::MainThreadMarker::new().context("Settings capture needs the main thread")?;
+    std::fs::create_dir_all(output)?;
+    for entry in std::fs::read_dir(inputs)? {
+        let file = entry?.path();
+        if file.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let commits: Vec<pm_surface::Commit> = serde_json::from_slice(&std::fs::read(&file)?)?;
+        let mut surface = Surface::default();
+        for commit in commits {
+            surface
+                .apply(commit)
+                .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        }
+        let publication = Publication {
+            panel: "settings".into(),
+            generation: 1,
+            surface: std::sync::Arc::new(surface),
+        };
+        for (theme, scheme, appearance_name) in [
+            ("light", Scheme::Light, unsafe { NSAppearanceNameAqua }),
+            ("dark", Scheme::Dark, unsafe { NSAppearanceNameDarkAqua }),
+        ] {
+            objc2::rc::autoreleasepool(|_| -> anyhow::Result<()> {
+                let appearance = NSAppearance::appearanceNamed(appearance_name)
+                    .context("Settings capture appearance")?;
+                let bounds = NSRect::new(
+                    NSPoint::new(0., 0.),
+                    NSSize::new(PAGE_MAX_WIDTH + 2. * PAGE_INSET, 870.),
+                );
+                let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), bounds);
+                scroll.setAppearance(Some(&appearance));
+                scroll.setDrawsBackground(true);
+                scroll.setBackgroundColor(&pm_shell::settings_window::form_background(false));
+                let form = std::cell::RefCell::new(Form::new(&scroll));
+                let tokens = Tokens::new(scheme, Accessibility::default());
+                appearance.performAsCurrentDrawingAppearance(&block2::StackBlock::new(|| {
+                    form.borrow_mut().layout(&publication, &tokens, None);
+                    scroll.layoutSubtreeIfNeeded();
+                }));
+                if let Some(filter) = publication.surface.nodes().values().find(|node| {
+                    label(node) == "Extension status"
+                        && Component::of(node) == Some(Component::SegmentedControl)
+                }) {
+                    let form = form.borrow();
+                    let control = form.widgets.get(&filter.id)
+                        .and_then(|widget| widget.view().downcast_ref::<NSSegmentedControl>())
+                        .context("Settings status filter needs the system segmented control")?;
+                    let (_, selected, _) = control_value(
+                        &publication.surface,
+                        filter,
+                        Some(Component::SegmentedControl),
+                    );
+                    anyhow::ensure!(
+                        selected.as_i64() == Some(control.selectedSegment() as i64),
+                        "Settings status filter lost its selected segment",
+                    );
+                }
+                let bitmap = scroll
+                    .bitmapImageRepForCachingDisplayInRect(bounds)
+                    .context("offscreen Settings bitmap")?;
+                appearance.performAsCurrentDrawingAppearance(&block2::StackBlock::new(|| {
+                    scroll.cacheDisplayInRect_toBitmapImageRep(bounds, &bitmap);
+                }));
+                let png = unsafe {
+                    bitmap.representationUsingType_properties(
+                        NSBitmapImageFileType::PNG,
+                        &NSDictionary::new(),
+                    )
+                }
+                .context("encode Settings bitmap")?;
+                let name = file
+                    .file_stem()
+                    .context("Settings fixture name")?
+                    .to_string_lossy();
+                std::fs::write(output.join(format!("settings-{name}-{theme}.png")), unsafe {
+                    png.as_bytes_unchecked()
+                })?;
+                Ok(())
+            })?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn semantic(node: &Node) -> Option<&str> {
@@ -634,7 +736,7 @@ struct Render<'a, 'cx> {
     generation: u64,
     recorder: Option<Id>,
     tokens: &'a pm_design::Tokens,
-    cx: &'a mut Context<'cx, Controller>,
+    cx: Option<&'a mut Context<'cx, Controller>>,
 }
 
 impl Render<'_, '_> {
@@ -735,9 +837,11 @@ impl Render<'_, '_> {
             Widget::Secure(field) => field.setEnabled(!disabled(node)),
             Widget::Image { view, resource } => {
                 let key = node.props.get("resource").and_then(Value::as_str);
-                if let Some(key) = key.filter(|key| resource.borrow().as_deref() != Some(*key)) {
+                if let Some(key) = key.filter(|key| resource.borrow().as_deref() != Some(*key))
+                    && let Some(cx) = self.cx.as_deref_mut()
+                {
                     *resource.borrow_mut() = Some(key.to_owned());
-                    load_poster(view, resource.clone(), key.to_owned(), self.cx);
+                    load_poster(view, resource.clone(), key.to_owned(), cx);
                 }
             }
         }
@@ -758,33 +862,35 @@ impl Render<'_, '_> {
         if node.r#type == "virtual-list" {
             let (tx, rx) = async_channel::unbounded();
             let (id, generation) = (node.id, self.generation);
-            self.cx
-                .spawn(async move |owner, cx| {
-                    while let Ok(mut range) = rx.recv().await {
-                        while let Ok(latest) = rx.try_recv() {
-                            range = latest;
+            if let Some(cx) = self.cx.as_deref_mut() {
+                cx
+                    .spawn(async move |owner, cx| {
+                        while let Ok(mut range) = rx.recv().await {
+                            while let Ok(latest) = rx.try_recv() {
+                                range = latest;
+                            }
+                            if owner
+                                .update(cx, |owner, cx| {
+                                    if owner.settings_node(generation, id).is_some() {
+                                        owner.settings_event(
+                                            id,
+                                            "rangechange",
+                                            EventDetail {
+                                                range: Some(range),
+                                                ..Default::default()
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
-                        if owner
-                            .update(cx, |owner, cx| {
-                                if owner.settings_node(generation, id).is_some() {
-                                    owner.settings_event(
-                                        id,
-                                        "rangechange",
-                                        EventDetail {
-                                            range: Some(range),
-                                            ..Default::default()
-                                        },
-                                        cx,
-                                    );
-                                }
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                })
-                .detach();
+                    })
+                    .detach();
+            }
             return Widget::Virtual(VirtualList::new(mtm, tx));
         }
         match component {
@@ -947,20 +1053,22 @@ impl Render<'_, '_> {
                 .setActive(true);
         }
         let (id, generation) = (node.id, self.generation);
-        self.cx
-            .spawn(async move |owner, cx| {
-                while let Ok(value) = rx.recv().await {
-                    if owner
-                        .update(cx, |owner, cx| {
-                            owner.settings_control(generation, id, kind, value, cx);
-                        })
-                        .is_err()
-                    {
-                        break;
+        if let Some(cx) = self.cx.as_deref_mut() {
+            cx
+                .spawn(async move |owner, cx| {
+                    while let Ok(value) = rx.recv().await {
+                        if owner
+                            .update(cx, |owner, cx| {
+                                owner.settings_control(generation, id, kind, value, cx);
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
-                }
-            })
-            .detach();
+                })
+                .detach();
+        }
         Widget::Control(control)
     }
 
@@ -987,23 +1095,25 @@ impl Render<'_, '_> {
         }));
         let weak = Rc::downgrade(&slot);
         let (id, generation) = (node.id, self.generation);
-        self.cx
-            .spawn(async move |owner, cx| {
-                while rx.recv().await.is_ok() {
-                    let Some(slot) = weak.upgrade() else { break };
-                    for event in slot.take_events() {
-                        if owner
-                            .update(cx, |owner, cx| {
-                                owner.settings_text(generation, id, &slot, event, cx);
-                            })
-                            .is_err()
-                        {
-                            return;
+        if let Some(cx) = self.cx.as_deref_mut() {
+            cx
+                .spawn(async move |owner, cx| {
+                    while rx.recv().await.is_ok() {
+                        let Some(slot) = weak.upgrade() else { break };
+                        for event in slot.take_events() {
+                            if owner
+                                .update(cx, |owner, cx| {
+                                    owner.settings_text(generation, id, &slot, event, cx);
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
                     }
-                }
-            })
-            .detach();
+                })
+                .detach();
+        }
         let container = if let Some(unit) = node.props.get("unit").and_then(Value::as_str) {
             let label = NSTextField::labelWithString(&NSString::from_str(unit), field.mtm());
             label.setTranslatesAutoresizingMaskIntoConstraints(false);
@@ -1090,7 +1200,25 @@ fn control_value(
 fn text_label(mtm: objc2::MainThreadMarker, node: &Node) -> Retained<NSTextField> {
     let heading = node.props.get("role").and_then(Value::as_str) == Some("heading");
     let style = layout(node);
-    let field = NSTextField::wrappingLabelWithString(&NSString::from_str(&node.text), mtm);
+    let title = NSString::from_str(&node.text);
+    let nowrap = node
+        .props
+        .get("style")
+        .and_then(|style| style.get("whiteSpace"))
+        .and_then(Value::as_str) == Some("nowrap");
+    let field = if nowrap {
+        let field = NSTextField::labelWithString(&title, mtm);
+        field.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        if style == "error" {
+            field.setContentCompressionResistancePriority_forOrientation(
+                NSLayoutPriorityDefaultHigh + 1.,
+                NSLayoutConstraintOrientation::Horizontal,
+            );
+        }
+        field
+    } else {
+        NSTextField::wrappingLabelWithString(&title, mtm)
+    };
     field.setTranslatesAutoresizingMaskIntoConstraints(false);
     if heading {
         field.setFont(Some(&NSFont::systemFontOfSize_weight(LABEL_SIZE, unsafe {

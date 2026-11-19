@@ -369,6 +369,19 @@ fn main() -> Result<()> {
             std::process::exit(64);
         }
     }
+    #[cfg(debug_assertions)]
+    if args.first().is_some_and(|a| a == "--capture-settings-form") {
+        let inputs = args
+            .get(1)
+            .context("Settings capture needs a fixture directory")?;
+        let output = args
+            .get(2)
+            .context("Settings capture needs an output directory")?;
+        return settings_window::form::capture(
+            std::path::Path::new(inputs),
+            std::path::Path::new(output),
+        );
+    }
     diag::mark_start();
     if args.first().is_some_and(|a| a == "--cold-playback-bench") {
         return pro_media::cold_playback_bench();

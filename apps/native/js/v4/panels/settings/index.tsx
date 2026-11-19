@@ -450,9 +450,11 @@ function ExtensionRows({
               onClick={() => model.viewExtension(item.id)}
             />
             <div metadata={{ settingsLayout: "line" }}>
-              <Copy secondary>{[item.author, item.source].filter(Boolean).join(" · ")}</Copy>
+              <text metadata={{ settingsLayout: "secondary" }} style={{ whiteSpace: "nowrap" }}>
+                {[item.author, item.source].filter(Boolean).join(" · ")}
+              </text>
               {item.attention && (
-                <text role="status" metadata={{ settingsLayout: "error" }}>
+                <text role="status" metadata={{ settingsLayout: "error" }} style={{ whiteSpace: "nowrap" }}>
                   {attentionLabel(item)}
                 </text>
               )}
@@ -670,10 +672,9 @@ function Extensions({ model, bindings }: SettingsPanelProps) {
               action={null}
             />
           )}
-          <div metadata={{ settingsLayout: "line" }}>
-            <Copy secondary>{`${counts.all} installed`}</Copy>
-            <Copy secondary>{`${counts.enabled} enabled · ${counts.off} off`}</Copy>
-          </div>
+          <Copy secondary>
+            {`${counts.all} installed · ${counts.enabled} enabled · ${counts.off} off`}
+          </Copy>
         </>
       )}
       <Group title="Store">
