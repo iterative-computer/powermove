@@ -958,21 +958,28 @@ mod transition_tests {
     }
 
     #[test]
-    fn default_transition_alias_dispatches_in_editor_and_replays_in_text() {
-        use crate::keyboard::{Effect, Key, Resolver};
+    fn default_transition_shortcuts_are_unique_and_exclude_text_fields() {
+        use crate::keyboard::{Effect, Key, Resolver, shipped};
+
         for chord in ["cmd+alt+d", "shift+d"] {
-            for compat in [false, true] {
-                let key = |field| Key {
-                    token: 1, chord: chord.into(), field, repeat: false, up: false, compat,
-                };
-                assert!(matches!(
-                    Resolver::new().submit(key(false)).as_slice(),
-                    [Effect::Dispatch { command, .. }] if command == "addDefaultTransition"
-                ));
-                assert!(matches!(
-                    Resolver::new().submit(key(true)).as_slice(),
-                    [Effect::Replay(1)]
-                ));
+            let bindings: Vec<_> = shipped().into_iter().filter(|binding| binding.chord == chord).collect();
+            assert_eq!(bindings.len(), 1, "{chord}");
+            let key = |field, compat| Key {
+                token: 1,
+                chord: chord.into(),
+                field,
+                repeat: false,
+                up: false,
+                compat,
+            };
+
+            // Timeline and Viewer use the same native editor resolver.
+            assert!(matches!(
+                Resolver::new().submit(key(false, false)).as_slice(),
+                [Effect::Dispatch { command, .. }] if command == "addDefaultTransition"
+            ));
+            for (field, compat) in [(true, false), (false, true), (true, true)] {
+                assert_eq!(Resolver::new().submit(key(field, compat)), vec![Effect::Replay(1)]);
             }
         }
     }
