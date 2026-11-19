@@ -765,7 +765,6 @@ fn arrows_in_fields_never_dispatch_layer_nudge() {
     }
 }
 
-#[test]
 /// Acceptance run 27 (PM-502): two layers named "Rect" looked the same in
 /// the Track Matte list. Rows read by stack number and name, as After
 /// Effects lists them.

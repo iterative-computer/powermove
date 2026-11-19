@@ -1845,6 +1845,9 @@ mod scrolling_tests {
             preview_stamp: Default::default(),
             preview_task: None,
             preview_cancel: Default::default(),
+            added: Default::default(),
+            errors: Default::default(),
+            announcement: String::new(),
             fixture: Some((panels, workspaces)),
         }
     }

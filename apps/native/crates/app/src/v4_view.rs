@@ -2515,7 +2515,8 @@ impl SurfaceView {
         let picker = cx.new(|cx| Picker::new(color, tokens, window, source, cx));
         let subscription = cx.subscribe(&picker, move |v, _, edit, cx| match edit {
             Edit::Begin if binding.is_some() => {
-                v.scrub_ops.push_back(ScrubOp::Begin);
+                let name = v.undo_name(id);
+                v.scrub_ops.push_back(ScrubOp::Begin(name));
                 v.scrub_pump(cx);
             }
             Edit::Value(color) => {
@@ -2743,7 +2744,8 @@ impl SurfaceView {
             self.wheel_finish(true, cx);
             self.wheel_scrub = Some((id, HorizontalScrub::new(n.value), binding.is_some()));
             if binding.is_some() {
-                self.scrub_ops.push_back(ScrubOp::Begin);
+                let name = self.undo_name(id);
+                self.scrub_ops.push_back(ScrubOp::Begin(name));
             }
         }
         if delta.0 == 0. {

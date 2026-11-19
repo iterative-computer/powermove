@@ -2142,19 +2142,7 @@ impl GizmoSurface {
                                 .call(&project, Request::new(Caller::native(), call))
                                 .await
                                 .ok_or("Kernel closed")?
-                                .map_err(|e| e.to_string())?;
-                            if let (Some(id), false) =
-                                (select, matches!(ack.reply, Reply::Throw(_)))
-                            {
-                                let select = SelectionCall::Layers {
-                                    ids: vec![id],
-                                    add: false,
-                                };
-                                kernel
-                                    .call(&project, Request::new(Caller::native(), select))
-                                    .await;
-                            }
-                            return Ok(ack);
+                                .map_err(|e| e.to_string());
                         }
                         (Job::Begin(label), _) => GestureCall::Begin {
                             label: label.into(),
