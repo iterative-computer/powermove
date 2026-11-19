@@ -165,11 +165,9 @@ test("page lifecycle fences generations, retires pending reads, and keeps backgr
       seq: h.shim.inspect().sent,
       message: "synthetic page termination",
     });
-    expect(await observed).toBe("Remote DOM retired");
+    // A page fault keeps reads available for replay. An actual retirement
+    // rejects the pending reads even if the faulted page never answers.
     expect(h.shim.inspect().lifecycle).toBe("faulted");
-    expect(
-      h.shim.receive({ kind: "applied", session: h.shim.session, seq: 1 }),
-    ).toBe(false);
     expect(
       h.shim.receive({
         kind: "applied",
@@ -181,6 +179,12 @@ test("page lifecycle fences generations, retires pending reads, and keeps backgr
       realm.PM.proj.name = "kept";
     });
     expect(host.state.document.name).toBe("kept");
+    h.shim.dispose();
+    expect(await observed).toBe("Remote DOM retired");
+    expect(h.shim.inspect().lifecycle).toBe("retired");
+    expect(
+      h.shim.receive({ kind: "applied", session: h.shim.session, seq: 1 }),
+    ).toBe(false);
   } finally {
     realm.dispose();
     h.close();

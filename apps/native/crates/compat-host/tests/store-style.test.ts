@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { runInNewContext } from "node:vm";
+import { panelStyle } from "../../../js/compat/src/panels";
 import { RemoteDOM } from "../../../js/remote-dom/src/shim";
 const source = await Bun.file(
   new URL("../../compat-runner/src/store-bootstrap.js", import.meta.url),
@@ -20,6 +21,7 @@ test("sandbox contribution roots carry their manifest style mode on the DOM wire
       },
       StoreCompat: {
         RemoteDOM,
+        panelStyle,
         runtimeModules: {},
         sandboxReporter: () => () => {},
         createSandboxAPI: () => ({}),
