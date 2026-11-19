@@ -1359,15 +1359,21 @@ impl Scene {
         let scope = target.filter(|(owner, _)| {
             self.clip_selection.len() == 1 && self.clip_selection.contains(*owner)
         });
+        let selected = |clip: &Clip| {
+            self.clip_selection.contains(&clip.id)
+                && !scope.is_some_and(|(owner, _)| owner == clip.id)
+        };
         for row in &mut self.rows {
-            let selected = |clip: &Clip| {
-                self.clip_selection.contains(&clip.id)
-                    && !scope.is_some_and(|(owner, _)| owner == clip.id)
+            let changed = match &row.content {
+                RowContent::Layer { clip: Some(clip), .. } => clip.selected != selected(clip),
+                RowContent::Track { clips } => clips.iter().any(|clip| clip.selected != selected(clip)),
+                _ => false,
             };
-            match &mut row.content {
-                RowContent::Layer {
-                    clip: Some(clip), ..
-                } => clip.selected = selected(clip),
+            if !changed {
+                continue;
+            }
+            match &mut std::sync::Arc::make_mut(row).content {
+                RowContent::Layer { clip: Some(clip), .. } => clip.selected = selected(clip),
                 RowContent::Track { clips } => {
                     for clip in clips {
                         clip.selected = selected(clip);

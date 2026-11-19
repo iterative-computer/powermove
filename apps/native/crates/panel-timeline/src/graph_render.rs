@@ -246,7 +246,7 @@ pub fn sample(
     let index = &model.index;
     let (series, picked) = model.graph_series();
     let (layer_id, path) = model.graph_property().or_else(|| series.first().cloned())?;
-    let layer = index.layer(&layer_id)?;
+    index.layer(&layer_id)?;
     let speed = model.graph_mode == crate::GraphMode::Speed;
     let mut curves = vec![];
     let mut range = (f64::INFINITY, f64::NEG_INFINITY);

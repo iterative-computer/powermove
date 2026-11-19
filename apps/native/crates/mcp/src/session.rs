@@ -1310,7 +1310,8 @@ impl McpSession {
                 tx.interleaved |= ack.folded.is_some();
                 observe_foreign(session, &host, &id);
                 if let Some(owner) = &session.owner {
-                    host.completion_edit(owner, revision, ack.revision, tx.interleaved);
+                    let interleaved = session.transaction.as_ref().is_some_and(|tx| tx.interleaved);
+                    host.completion_edit(owner, revision, ack.revision, interleaved);
                 }
                 let message = if name == "edit_video" && ack.revision == revision {
                     "No source changes"
