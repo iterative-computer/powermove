@@ -411,7 +411,14 @@ impl ProviderRuns {
             .iter_mut()
             .find(|r| r.target == effect.target)
             .ok_or(Error::Stale)?;
-        if running.action.is_some() {
+        // Stop can queue behind a live steer without waiting for its receipt.
+        // Once Cancel is queued, replace the pending steer so it cannot restart the run.
+        let stop_supersedes_steer = matches!(effect.kind, EffectKind::Stop)
+            && running
+                .action
+                .as_ref()
+                .is_some_and(|action| action.restart.is_some());
+        if running.action.is_some() && !stop_supersedes_steer {
             return Err(Error::Busy);
         }
         let run = effect.target.run.clone().ok_or(Error::Stale)?;
