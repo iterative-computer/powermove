@@ -51,6 +51,7 @@ import { install as installApp } from './app';
 import { install as installSettingsUi } from '../settings/install';
 import { install as installStoreUi } from '../store/install';
 import { installCloudAccount } from '../cloud/account';
+import { installPlan } from '../cloud/plan';
 import { installVars } from '../vars/setup';
 import { installTranscription } from '../transcription/install';
 import { installCaptions } from '../captions/install';
@@ -121,6 +122,7 @@ const INSTALLS: Array<[string, (PM: PMRegistry) => void]> = [
   ['ui/settings', installSettingsUi],
   ['ui/store', installStoreUi],
   ['cloud/account', installCloudAccount],
+  ['cloud/plan', installPlan as never],
   ['vars', installVars],
   /* On-device transcription: the download sheet and background download notices. */
   ['transcription', installTranscription],

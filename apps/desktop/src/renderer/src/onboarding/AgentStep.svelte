@@ -8,13 +8,15 @@
   const options: Array<{ id: OnboardingAgentProvider; name: string; detail: string; models: Array<{ id: string; label: string }> }> = [
     { id: 'chatgpt', name: 'ChatGPT', detail: 'Uses your ChatGPT plan through Codex.', models: AGENT_MODELS.chatgpt },
     { id: 'claude', name: 'Claude', detail: 'Uses your Claude plan through Claude Code.', models: AGENT_MODELS.claude.filter(model => !/\(latest\)$/.test(model.label)) },
-    { id: 'compatible', name: 'API or local model', detail: 'Ollama or LM Studio on this Mac, or an API key from OpenRouter, OpenAI, Anthropic or Google. Connect it in Settings.', models: [] }
+    { id: 'compatible', name: 'API or local model', detail: 'Ollama or LM Studio on this Mac, or an API key from OpenRouter, OpenAI, Anthropic or Google. Connect it in Settings.', models: [] },
+    { id: 'aerolite', name: 'Aerolite', detail: 'Claude and OpenAI models built into Powermove. No API keys; $9/month. Sign in and upgrade from the agent panel.', models: AGENT_MODELS.aerolite }
   ];
   let provider = $state<OnboardingAgentProvider>('chatgpt');
   const models = $state<Record<OnboardingAgentProvider, string>>({
     chatgpt: options[0]!.models[0]!.id,
     claude: options[1]!.models[0]!.id,
-    compatible: 'configured'
+    compatible: 'configured',
+    aerolite: AGENT_MODELS.aerolite[0]!.id
   });
 </script>
 

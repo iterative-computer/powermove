@@ -7,6 +7,7 @@
  * `ready` on a cold start), so `createDeepLinkQueue` holds them until the
  * account is ready and then hands them over in order.
  */
+import { createAerolite, type Aerolite } from './aerolite';
 import type { IpcMain, IpcMainInvokeEvent, MessageBoxOptions } from 'electron';
 import path from 'node:path';
 import type { ApiErrorBody, MeDto } from '@powermove/registry/wire';
@@ -75,6 +76,7 @@ export interface CloudService {
   session: CloudSession;
   auth: CloudAuth;
   registry: RegistryUrlSetting;
+  aerolite: Aerolite;
   /** Settings › Advanced › Registry URL: main's confirmation, then sign out and switch. */
   confirmRegistryChange(origin: string): Promise<boolean>;
 }
@@ -111,9 +113,11 @@ export async function startCloudService(options: CloudServiceOptions): Promise<C
     if (changed) notifyAccount(null);
     return changed;
   };
+  const aerolite = createAerolite(session, options.openExternal);
   registerCloudIpc(options.ipcMain, {
     auth,
     session,
+    aerolite,
     registry: { get: () => registry.get(), fromEnvironment: () => registry.fromEnvironment(), change: changeRegistry },
     isTrusted: options.isTrusted
   });
@@ -121,6 +125,7 @@ export async function startCloudService(options: CloudServiceOptions): Promise<C
     session,
     auth,
     registry,
+    aerolite,
     confirmRegistryChange: changeRegistry
   };
 }

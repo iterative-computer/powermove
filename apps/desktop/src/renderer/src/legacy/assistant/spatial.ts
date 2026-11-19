@@ -295,7 +295,10 @@ PM.WindowCapture = {
 const storedAccessMode: any = PM.store?.get?.('agentAccessMode', 'project');
 const storedApprovalMode: any = PM.store?.get?.('agentApprovalMode', 'auto');
 const storedProvider: any = PM.store?.get?.('agentProvider', 'chatgpt');
-const initialProvider: any = ['chatgpt', 'claude', 'compatible'].includes(storedProvider) ? storedProvider : 'chatgpt';
+const initialProvider: any = ['chatgpt', 'claude', 'compatible', 'aerolite'].includes(storedProvider) ? storedProvider : 'chatgpt';
+function defaultModel(provider: string): string {
+  return provider === 'compatible' ? 'configured' : provider === 'claude' ? 'sonnet' : provider === 'aerolite' ? 'claude-sonnet-5-5' : 'gpt-5.6-sol';
+}
 const S: any = {
   initialized: false, active: false,
   points: [], origin: { x: 0, y: 0 },
@@ -311,7 +314,7 @@ const S: any = {
   scope: PM.store?.get?.('agentScope', 'workspace') || 'workspace',
   autoApplyPanels: PM.store?.get?.('agentAutoApplyPanels', true) !== false,
   provider: initialProvider,
-  model: PM.store?.get?.(`agentModel.${initialProvider}`, initialProvider === 'compatible' ? 'configured' : initialProvider === 'claude' ? 'sonnet' : 'gpt-5.6-sol') || (initialProvider === 'compatible' ? 'configured' : initialProvider === 'claude' ? 'sonnet' : 'gpt-5.6-sol'),
+  model: PM.store?.get?.(`agentModel.${initialProvider}`, defaultModel(initialProvider)) || defaultModel(initialProvider),
   reasoningEffort: PM.store?.get?.('agentReasoningEffort', 'high') || 'high',
   accessMode: ['editor', 'project', 'computer'].includes(storedAccessMode) ? storedAccessMode : 'project',
   approvalMode: storedApprovalMode === 'supervised' ? 'supervised' : 'auto',
@@ -321,7 +324,19 @@ const AGENT_PROVIDERS: any = [
   { id: 'chatgpt', label: 'Codex' },
   { id: 'claude', label: 'Claude' },
   { id: 'compatible', label: 'API / local model' },
+  { id: 'aerolite', label: 'Aerolite' },
 ];
+/** Aerolite is connected when the signed-in plan includes hosted models. */
+async function aeroliteModels(): Promise<string[] | null> {
+  const result = await (hostBridge() as any)?.cloud?.plan?.().catch(() => null);
+  return result?.ok && result.value ? result.value.plan.models.map((model: { id: string }) => model.id) : null;
+}
+async function providerConnected(provider: string): Promise<boolean> {
+  const native: any = hostBridge();
+  if (provider === 'compatible') return !!(await native?.compatible?.status?.())?.model;
+  if (provider === 'aerolite') return !!(await aeroliteModels())?.length;
+  return (await (provider === 'claude' ? native?.claude : native?.chatgpt)?.status?.())?.state === 'connected';
+}
 function ensureClaudeModelChoice(model: string): void {
   // Keep any saved id the CLI accepts (claude-*, aliases like opusplan or sonnet[1m]) so the picker never shows a blank model.
   if (/^[a-z][a-z0-9.\-]{0,100}(?:\[[a-z0-9]{1,10}\])?$/.test(model) && !AGENT_MODELS.claude.some(item => item.id === model)) {
@@ -986,9 +1001,7 @@ function agentUISnapshot(): AgentSnapshot {
 }
 
 const workspaceImport = workspaceImportHandoff(PM, async () => {
-  const native: any = hostBridge();
-  if (S.provider === 'compatible') return !!(await native?.compatible?.status?.())?.model;
-  return (await (S.provider === 'claude' ? native?.claude : native?.chatgpt)?.status?.())?.state === 'connected';
+  return providerConnected(S.provider);
 });
 
 registerAgentPanel(PM, {
@@ -1033,7 +1046,8 @@ registerAgentPanel(PM, {
   setProvider: (provider: string) => {
     if (!AGENT_PROVIDERS.some((item: any) => item.id === provider) || S.activeRequest) return;
     S.provider = provider;
-    S.model = PM.store?.get?.(`agentModel.${provider}`, provider === 'compatible' ? 'configured' : provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol') || (provider === 'compatible' ? 'configured' : provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol');
+    S.model = PM.store?.get?.(`agentModel.${provider}`, defaultModel(provider)) || defaultModel(provider);
+    if (provider === 'aerolite' && !AGENT_MODELS.aerolite.some(item => item.id === S.model)) S.model = defaultModel(provider);
     if (provider === 'claude') ensureClaudeModelChoice(S.model);
     S.reasoningEffort = modelEffort(provider, selectedModelName(provider, S.model), S.reasoningEffort) || S.reasoningEffort;
     PM.store.set('agentProvider', provider);
@@ -1161,9 +1175,7 @@ async function requestExtensionRepair(target: { id: string; name?: string; diagn
     return openRepairAgent(PM, {
       id: target.id, name: target.name || target.id, prompt: request,
       // The popup's model picker is the agent's own, so each send uses the current choice.
-      connected: async () => S.provider === 'compatible'
-        ? !!(await native?.compatible?.status?.())?.model
-        : (await (S.provider === 'claude' ? native?.claude : native?.chatgpt)?.status?.())?.state === 'connected',
+      connected: async () => providerConnected(S.provider),
       run: async (prompt, history, signal, progress, extras) => {
         const { provider, model, reasoningEffort } = S;
         /* The agent panel's trace reducer over a run-local session: the

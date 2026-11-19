@@ -5,7 +5,7 @@ export type CreativeAppId = typeof CREATIVE_APPS[number]['id'];
 export const TIMELINE_MODES = ['layers', 'tracks'] as const;
 export type OnboardingTimelineMode = typeof TIMELINE_MODES[number];
 
-export const AGENT_PROVIDER_IDS = ['chatgpt', 'claude', 'compatible'] as const;
+export const AGENT_PROVIDER_IDS = ['chatgpt', 'claude', 'compatible', 'aerolite'] as const;
 export type OnboardingAgentProvider = typeof AGENT_PROVIDER_IDS[number];
 export interface OnboardingAgentChoice { provider: OnboardingAgentProvider; model: string }
 

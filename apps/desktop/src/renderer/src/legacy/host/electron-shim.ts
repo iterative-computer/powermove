@@ -111,7 +111,7 @@ export function install(PM: PMRegistry): void {
 
     return {
       id: String(body.id || ''),
-      provider: body.provider === 'compatible' ? 'compatible' : body.provider === 'claude' ? 'claude' : 'chatgpt',
+      provider: body.provider === 'compatible' ? 'compatible' : body.provider === 'aerolite' ? 'aerolite' : body.provider === 'claude' ? 'claude' : 'chatgpt',
       ...(typeof body.threadId === 'string' && body.threadId ? { threadId: body.threadId } : {}),
       mode,
       prompt: String(body.prompt || ''),

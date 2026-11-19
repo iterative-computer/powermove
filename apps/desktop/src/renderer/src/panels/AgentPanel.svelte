@@ -42,7 +42,7 @@
     state: 'checking', email: null, planType: null, detail: null
   });
   let accountBusy = $state(false);
-  const providerName = $derived(agentState.provider === 'compatible' ? 'API or local model' : agentState.provider === 'claude' ? 'Claude' : 'ChatGPT');
+  const providerName = $derived(agentState.provider === 'compatible' ? 'API or local model' : agentState.provider === 'aerolite' ? 'Aerolite' : agentState.provider === 'claude' ? 'Claude' : 'ChatGPT');
 
   const showPreview = $derived(agentState.phase === 'preview');
   const showResult = $derived(agentState.phase === 'result' && (agentState.panelRun || !agentState.run?.autonomous));
@@ -85,6 +85,7 @@
 
   async function connectProvider(): Promise<void> {
     if (agentState.provider === 'compatible') { PM.SettingsUI?.open('accounts'); return; }
+    if (agentState.provider === 'aerolite') { if (PM.Account?.me) PM.Plan?.openUpgrade?.('agent'); else PM.Account?.signIn?.('sign-up'); return; }
     const api = providerApi();
     if (!api || accountBusy) return;
     const provider = agentState.provider;
@@ -104,6 +105,7 @@
 
   async function retryProvider(): Promise<void> {
     if (agentState.provider === 'compatible') { PM.SettingsUI?.open('accounts'); return; }
+    if (agentState.provider === 'aerolite') { void PM.Plan?.refresh?.(); return; }
     const api = providerApi();
     if (!api || accountBusy) return;
     const provider = agentState.provider;
@@ -182,6 +184,22 @@
     let alive = true;
     accountBusy = false;
     accountStatus = { state: 'checking', email: null, planType: null, detail: null };
+    if (provider === 'aerolite') {
+      // Connected = the signed-in plan includes hosted models. plan.ts refreshes on sign-in, focus and checkout.
+      const apply = (plan: any) => {
+        if (!alive) return;
+        const models: string[] = plan?.plan?.models?.map((model: { id: string }) => model.id) ?? [];
+        if (models.length) { accountStatus = { state: 'connected', email: null, planType: plan.plan.tier, detail: null }; return; }
+        const signedIn = !!PM.Account?.me;
+        accountStatus = { state: 'disconnected', email: null, planType: signedIn ? 'free' : 'signed-out',
+          detail: signedIn ? 'Aerolite runs your agent on Claude and OpenAI models through your Powermove account. $9/month, no API keys.'
+            : 'Sign in to Powermove, then add Aerolite to run your agent on Claude and OpenAI models without API keys.' };
+      };
+      const onPlan = (event: Event) => apply((event as CustomEvent).detail);
+      window.addEventListener('pm-plan-changed', onPlan);
+      void (PM.Plan?.refresh?.() ?? Promise.resolve(null)).then(apply, (error: unknown) => { if (alive) accountStatus = unavailable(error); });
+      return () => { alive = false; window.removeEventListener('pm-plan-changed', onPlan); };
+    }
     if (provider === 'compatible') {
       const update = () => bridge()?.compatible?.status().then(config => {
         if (alive) accountStatus = { state: config.model ? 'connected' : 'disconnected', email: null, planType: null,

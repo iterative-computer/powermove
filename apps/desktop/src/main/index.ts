@@ -1476,6 +1476,7 @@ if (!hasSingleInstanceLock) {
     };
 
     registerCodexIpc(ipcMain, {
+      aerolite: () => cloud?.aerolite ?? null,
       registerStorageCleanup: (cleanup, busy) => { cleanupAgentCaches = cleanup; agentStorageBusy = busy ?? (() => false); },
       archivedArtifact: reference => libraryMedia!.archivedArtifact(reference),
       forgetArchivedArtifacts: projectId => libraryMedia!.forgetArtifacts(projectId),

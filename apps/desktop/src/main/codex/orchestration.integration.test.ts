@@ -144,7 +144,9 @@ describe('provider execution with the authenticated orchestration bridge', () =>
       expect(options.additionalInstructions).toContain('orchestrator_capabilities');
       if (request.id === 'root-integration' && !request.prompt.includes('SUBAGENT RESULTS')) {
         const catalog = await tool(options.nativeTools, 'orchestrator_capabilities', {});
-        expect(catalog.providers.every((item: any) => item.canRunCrossProviderChildTask)).toBe(true);
+        // Aerolite has no Powermove account in this harness, so it is listed but unavailable.
+        expect(catalog.providers.filter((item: any) => item.providerInstanceId !== 'aerolite').every((item: any) => item.canRunCrossProviderChildTask)).toBe(true);
+        expect(catalog.providers.find((item: any) => item.providerInstanceId === 'aerolite')?.canRunChildTask).toBe(false);
         await tool(options.nativeTools, 'delegate_task', { task: 'Native review', target: { providerInstanceId: childProvider } });
         await tool(options.nativeTools, 'delegate_task', { task: 'Local review', target: { providerInstanceId: 'compatible', model: 'local-model' } });
       } else if (request.id.startsWith('subagent-')) {

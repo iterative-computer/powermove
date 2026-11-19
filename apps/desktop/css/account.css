@@ -127,3 +127,13 @@
   .acct-spinner{animation-duration:1.8s}
   .acct-cell.active:not(.filled)::after{animation:none}
 }
+
+/* ── Aerolite upgrade sheet: the sign-in sheet's type and fills, plus one tinted list ── */
+.upg-eyebrow{display:block;margin-bottom:6px;font-size:var(--fs-sm);line-height:16px;font-weight:var(--fw-medium);color:var(--accent-tx)}
+.upg-list{display:flex;flex-direction:column;margin:20px -14px 0;padding:6px 0;border-radius:var(--r-lg);background:var(--ink-1);list-style:none}
+.upg-list li{position:relative;display:flex;flex-direction:column;padding:7px 14px 7px 38px}
+.upg-list li::before{content:"";position:absolute;left:15px;top:10px;width:12px;height:12px;background:var(--accent);-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m3.5 8.5 3 3 6-7' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat}
+.upg-list b{font-size:var(--fs-md);line-height:18px;font-weight:var(--fw-medium);color:var(--tx)}
+.upg-list span{font-size:var(--fs-sm);line-height:16px;color:var(--tx-3)}
+.upg .acct-providers{margin-top:18px}
+.upg-error{margin-top:10px}

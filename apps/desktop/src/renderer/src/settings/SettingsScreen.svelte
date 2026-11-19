@@ -13,9 +13,10 @@
   import { applyAccount, cloudBridge, openSignIn, signOut, subscribeAccount, type CloudUser } from '../cloud/account';
   import TranscriptionSettings from '../transcription/TranscriptionSettings.svelte';
   import StorageSettings from './StorageSettings.svelte';
+  import PlanSettings from './PlanSettings.svelte';
   import AgentClientsSettings from './AgentClientsSettings.svelte';
 
-  export type SettingsPage = 'general' | 'accounts' | 'transcription' | 'extensions' | 'storage' | 'project' | 'memory';
+  export type SettingsPage = 'general' | 'accounts' | 'plan' | 'transcription' | 'extensions' | 'storage' | 'project' | 'memory';
 
   let { PM, projectBridge }: {
     PM: Record<string, any>;
@@ -39,6 +40,7 @@
       items: [
         { id: 'general', label: 'General', icon: 'gear' },
         { id: 'accounts', label: 'Accounts', icon: 'link' },
+        { id: 'plan', label: 'Plan & Usage', icon: 'speedometer' },
         { id: 'transcription', label: 'Transcription', icon: 'waveform' },
         { id: 'extensions', label: 'Extensions', icon: 'puzzle' },
         { id: 'storage', label: 'Storage', icon: 'project' }
@@ -614,6 +616,8 @@
                   </div>
                 </section>
               {/if}
+            {:else if item.id === 'plan'}
+              <PlanSettings {PM} active={shown} />
             {:else if item.id === 'storage'}
               <StorageSettings {PM} active={shown} />
             {:else if item.id === 'accounts'}

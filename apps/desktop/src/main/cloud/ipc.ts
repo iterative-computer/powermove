@@ -22,6 +22,8 @@ import {
   type CloudResult
 } from '../../shared/cloud-ipc';
 import type { CloudAuth } from './auth';
+import type { Aerolite } from './aerolite';
+import { PLAN_TIERS } from '../../shared/aerolite';
 import { normalizeOrigin } from './client';
 import { DEFAULT_REGISTRY_ORIGIN } from './registry-url';
 import type { CloudSession } from './session';
@@ -34,6 +36,7 @@ export interface CloudIpcOptions {
   /** Settings › Advanced › Registry URL. `change` shows main's confirmation and signs out first. */
   registry: { get(): string; fromEnvironment?(): boolean; change(origin: string): Promise<boolean> };
   isTrusted(event: Sender): boolean;
+  aerolite?: Aerolite;
 }
 
 /** An http(s) URL a registry can live at; anything else is refused before main asks. */
@@ -58,7 +61,17 @@ export const cloudSchemas = {
   'cloud:sign-out': none,
   'cloud:delete-account': none,
   'cloud:registry-url': none,
-  'cloud:set-registry-url': z.strictObject({ origin: z.string().trim().min(1).max(CLOUD_REGISTRY_URL_MAX).refine(isRegistryUrl, 'invalid registry URL') })
+  'cloud:set-registry-url': z.strictObject({ origin: z.string().trim().min(1).max(CLOUD_REGISTRY_URL_MAX).refine(isRegistryUrl, 'invalid registry URL') }),
+  'cloud:plan-get': none,
+  'cloud:checkout': z.strictObject({ tier: z.enum(PLAN_TIERS) }),
+  'cloud:billing-portal': none,
+  'cloud:shares-list': none,
+  // Shape is checked again by the cloud; here only size and kind, so a renderer cannot push arbitrary payloads.
+  'cloud:share-create': z.strictObject({
+    snapshot: z.looseObject({ kind: z.enum(['project', 'extension']), title: z.string().min(1).max(120) }).refine(value => JSON.stringify(value).length <= 256_000, 'snapshot too large'),
+    poster: z.string().max(2_800_000).optional()
+  }),
+  'cloud:share-revoke': z.strictObject({ id: z.string().regex(/^[A-Za-z0-9]{6,32}$/) })
 } as const satisfies Record<keyof CloudChannels, z.ZodType>;
 
 function parse<T>(schema: z.ZodType<T>, channel: string, payload: unknown): T {
@@ -116,4 +129,12 @@ export function registerCloudIpc(ipcMain: Pick<IpcMain, 'handle'>, options: Clou
     const changed = await options.registry.change(request.origin);
     return { ...registry(), changed };
   }));
+  const aerolite = options.aerolite;
+  const needsAerolite = () => { if (!aerolite) throw new ApiError({ error: 'internal', detail: 'Plans are unavailable in this build.' }); return aerolite; };
+  handle(CLOUD_IPC.planGet, cloudSchemas['cloud:plan-get'], () => result(() => needsAerolite().plan()));
+  handle(CLOUD_IPC.checkout, cloudSchemas['cloud:checkout'], (request) => result(async () => { await needsAerolite().checkout(request.tier); return null; }));
+  handle(CLOUD_IPC.billingPortal, cloudSchemas['cloud:billing-portal'], () => result(async () => { await needsAerolite().portal(); return null; }));
+  handle(CLOUD_IPC.sharesList, cloudSchemas['cloud:shares-list'], () => result(() => needsAerolite().shares()));
+  handle(CLOUD_IPC.shareCreate, cloudSchemas['cloud:share-create'], (request) => result(() => needsAerolite().createShare(request as never)));
+  handle(CLOUD_IPC.shareRevoke, cloudSchemas['cloud:share-revoke'], (request) => result(async () => { await needsAerolite().revokeShare(request.id); return null; }));
 }

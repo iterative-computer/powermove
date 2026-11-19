@@ -14,11 +14,14 @@
   } = $props();
 
   const local = $derived(agentState.provider === 'compatible');
+  // Aerolite: Powermove's own models. Not connected means signed out or on the free plan.
+  const hosted = $derived(agentState.provider === 'aerolite');
+  const signedOut = $derived(hosted && status.planType === 'signed-out');
   const checking = $derived(status.state === 'checking');
   const waiting = $derived(status.state === 'connecting');
   const unavailable = $derived(status.state === 'unavailable');
   const heading = $derived(checking ? 'Checking connection…' : waiting ? `Finish connecting ${providerName}`
-    : local ? 'Bring your own model' : `Connect ${providerName}`);
+    : hosted ? 'Built-in Claude and OpenAI models' : local ? 'Bring your own model' : `Connect ${providerName}`);
   const body = $derived(checking ? `Checking your ${providerName} connection.`
     : status.detail || (local ? 'Run a model on this Mac with Ollama or LM Studio, or use an API key from OpenRouter, OpenAI, Anthropic, Google and others.'
       : `Use your ${providerName} subscription to power the Powermove agent.`));
@@ -50,12 +53,14 @@
       <button class="agent-connect-button" type="button" disabled={busy || waiting || checking}
         onclick={connect}>
         {#if waiting || checking}<span class="connection-wait" aria-hidden="true"></span>{/if}
-        <span>{checking ? 'Checking…' : waiting ? 'Waiting for sign-in…' : local ? 'Open settings' : `Connect ${providerName}`}</span>
+        <span>{checking ? 'Checking…' : waiting ? 'Waiting for sign-in…' : hosted ? signedOut ? 'Sign in to Powermove' : 'Get Aerolite' : local ? 'Open settings' : `Connect ${providerName}`}</span>
         {#if !waiting && !checking}<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10m-4-4 4 4-4 4" /></svg>{/if}
       </button>
     </div>
   {/if}
-  {#if !local || unavailable}
+  {#if hosted && !unavailable}
+    <button class="connection-settings" type="button" onclick={() => PM.SettingsUI?.open('plan')}>Plan & Usage<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg></button>
+  {:else if !local || unavailable}
     <button class="connection-settings" type="button" onclick={() => PM.SettingsUI?.open('accounts')}>Connection settings<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg></button>
   {/if}
 </section>

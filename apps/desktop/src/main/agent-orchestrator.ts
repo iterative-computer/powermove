@@ -22,7 +22,7 @@ const storedTaskSchema = z.object({
   task: z.object({
     taskId: z.string().uuid(), parentThreadId: z.string().max(120), childThreadId: z.string().uuid(),
     childRunId: z.string().max(120), parentTaskId: z.string().uuid().nullable(), requestId: z.string().max(120),
-    title: z.string().max(160), providerInstanceId: z.enum(['chatgpt', 'claude', 'compatible']), model: z.string().max(200).nullable(),
+    title: z.string().max(160), providerInstanceId: z.enum(['chatgpt', 'claude', 'compatible', 'aerolite']), model: z.string().max(200).nullable(),
     reasoningEffort: z.enum(['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']).nullable().optional(),
     status: z.enum(['queued', 'running', 'waiting', 'completed', 'failed', 'cancelled', 'interrupted']),
     workState: z.enum(['working', 'waiting_for_children', 'result_available']), hasPendingChildRuns: z.boolean(),
