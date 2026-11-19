@@ -127,16 +127,16 @@ fn dock_render_follows_wheel_and_momentum() {
         let start = window
             .update(&mut cx, |e, _, _| e.panel_rect("fxbrowser").unwrap())
             .unwrap();
-        for (frame, (delta, touch_phase)) in [
-            (0., TouchPhase::Started),
-            (-16., TouchPhase::Moved),
-            (-44., TouchPhase::Moved),
-            (-85., TouchPhase::Moved),
-            (-180., TouchPhase::Moved),
-            (-300., TouchPhase::Moved),
-            (-300., TouchPhase::Ended),
-            (195., TouchPhase::Moved),
-            (1000., TouchPhase::Ended),
+        for (frame, (delta, touch_phase, is_momentum)) in [
+            (0., TouchPhase::Started, false),
+            (-16., TouchPhase::Moved, false),
+            (-44., TouchPhase::Moved, false),
+            (-85., TouchPhase::Moved, true),
+            (-180., TouchPhase::Moved, true),
+            (-300., TouchPhase::Moved, true),
+            (-300., TouchPhase::Ended, true),
+            (195., TouchPhase::Moved, false),
+            (1000., TouchPhase::Ended, false),
         ]
         .into_iter()
         .enumerate()
@@ -150,6 +150,7 @@ fn dock_render_follows_wheel_and_momentum() {
                             delta: gpui::ScrollDelta::Pixels(point(px(0.), px(delta))),
                             modifiers: Default::default(),
                             touch_phase,
+                            is_momentum,
                         }
                         .to_platform_input(),
                         cx,

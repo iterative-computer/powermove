@@ -291,6 +291,7 @@ fn nested_wheel_crossing_an_edge_hands_off_only_the_remainder() {
                     delta: ScrollDelta::Pixels(point(px(0.), px(-50.))),
                     modifiers: Default::default(),
                     touch_phase: Default::default(),
+                    is_momentum: false,
                 }
                 .to_platform_input(),
                 cx,
@@ -589,6 +590,7 @@ fn wheel_over_dock_edge_and_panel_gap_scrolls_the_column() {
                                 delta: ScrollDelta::Pixels(point(px(0.), px(-0.25))),
                                 modifiers: Default::default(),
                                 touch_phase: Default::default(),
+                                is_momentum: true,
                             }
                             .to_platform_input(),
                             cx,

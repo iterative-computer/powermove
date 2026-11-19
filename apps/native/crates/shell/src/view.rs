@@ -5617,17 +5617,15 @@ mod tests {
             Tokens::new(pm_design::Scheme::Dark, Default::default()), None, cx));
         view.update(cx, |v, cx| {
             let before = v.layout.clone();
-            v.gesture = Some(super::Gesture::Panel(super::PanelDrag {
-                id: "agent".into(), stack: false,
-                start: gpui::point(gpui::px(0.), gpui::px(0.)),
-                at: gpui::point(gpui::px(0.), gpui::px(0.)),
-                original: before.clone(), moved: true,
-                preview: Some(crate::layout::DropPreview {
-                    target: crate::layout::DropTarget::Tab { dock: usize::MAX, group: 0, index: 0 },
-                    rect: crate::layout::Rect::default(),
-                    near: crate::layout::Near::Nothing,
-                }),
-            }));
+            let at = gpui::point(gpui::px(0.), gpui::px(0.));
+            let mut drag = v.new_drag("agent", at, false, false);
+            drag.moved = true;
+            drag.preview = Some(crate::layout::DropPreview {
+                target: crate::layout::DropTarget::Tab { dock: usize::MAX, group: 0, index: 0 },
+                rect: crate::layout::Rect::default(),
+                near: crate::layout::Near::Nothing,
+            });
+            v.gesture = Some(super::Gesture::Panel(drag));
             assert!(!v.drop_from_outside("agent", cx));
             assert_eq!(v.layout, before);
             assert!(v.outbox.is_empty());
