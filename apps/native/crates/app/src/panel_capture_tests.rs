@@ -225,6 +225,11 @@ fn capture_builtin_panels() {
                     first = r.runtime.take_publications().pop().unwrap();
                     assert!(first.surface.nodes().values().any(|n| n.props.get("id").and_then(serde_json::Value::as_str) == Some("export.project.editable")));
                 }
+                if panel == "export" && export_view.as_deref() == Some("rendering") {
+                    assert!(first.surface.nodes().values().any(|node| {
+                        node.props.get("resource").and_then(serde_json::Value::as_str) == Some(preview_key)
+                    }), "the Export sheet must publish the last encoded frame");
+                }
                 let runtime = r.runtime.clone();
                 let mut cx = HeadlessAppContext::with_platform(
                     Arc::new(
@@ -266,7 +271,23 @@ fn capture_builtin_panels() {
                         .unwrap();
                     cx.run_until_parked();
                 }
+                if panel == "export" {
+                    // Draw again after the asset decode or a programmatic scroll.
+                    for _ in 0..3 {
+                        cx.update_window(window.into(), |_, window, cx| {
+                            window.refresh();
+                            window.draw(cx).clear(cx);
+                        }).unwrap();
+                        cx.run_until_parked();
+                    }
+                }
                 let image = cx.capture_screenshot(window.into()).unwrap();
+                if panel == "export" && export_view.as_deref() == Some("rendering") {
+                    assert!(image.pixels().any(|pixel|
+                        u16::from(pixel[0]) > 215 && pixel[1] > 145
+                            && pixel[1] < 205 && pixel[2] > 70 && pixel[2] < 145
+                    ), "the synthetic preview should paint its amber disc");
+                }
                 let picture = if panel == "export" {
                     export_view.as_deref().unwrap_or(panel)
                 } else { panel };

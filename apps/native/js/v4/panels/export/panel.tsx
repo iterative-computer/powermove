@@ -263,6 +263,9 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
   ].includes(s.run.phase);
   const jobs = s.queue ?? [];
   const rendering = jobs.find((job) => job.status === "Rendering");
+  const activeJobs = jobs.filter(
+    (job) => job.status === "Pending" || job.status === "Rendering",
+  ).length;
   const running = active || !!rendering;
   const fraction =
     s.run.phase === "rendering" || s.run.phase === "checking"
@@ -433,6 +436,8 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
           <scroll
             id="export.queue.rows"
             label="Render queue and history"
+            // Reserve room for up to four two-line jobs while the preview flexes.
+            metadata={{ rowFloor: 2 * Math.min(activeJobs, 4) }}
             style={{
               ...stack,
               flexShrink: 1,
