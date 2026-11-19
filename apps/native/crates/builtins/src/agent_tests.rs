@@ -1183,6 +1183,7 @@ fn an_auto_run_reaches_the_provider_and_shows_what_it_did() {
     let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
     panel.connected(Provider::Chatgpt);
     // Auto runs the autonomous CLI (`codex exec`), not the App Server.
+    panel.choose("agent-access", "auto");
     {
         let agent = panel.agent();
         let state = agent.lock().unwrap();
@@ -2540,6 +2541,8 @@ fn steering_a_held_parent_retains_the_direction_after_child_results() {
         );
         let mut panel = Agent::mount(&actor, environment);
         panel.connected(Provider::Chatgpt);
+        // The fixture observes the parent and child through App Server.
+        panel.choose("agent-access", "editor");
         let agent = panel.agent();
         let thread = thread_id(&agent);
         let document = actor
