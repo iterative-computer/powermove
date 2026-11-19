@@ -113,6 +113,18 @@ fn g2_transition_crops() {
                 transition: pm_kernel::commands::transition_edges::builtin_spec("crossfade").map(Box::new),
             }.into()]);
             for (state, selected) in [("resting", false), ("selected", true)] {
+                if selected {
+                    rig.kernel.call(
+                        PROJECT,
+                        Request::new(
+                            Caller::native(),
+                            SelectionCall::Layers {
+                                ids: vec!["l0".into()],
+                                add: false,
+                            },
+                        ),
+                    ).wait().unwrap().unwrap();
+                }
                 app.update(|cx| {
                     surface.update(cx, |s, cx| {
                         s.published(cx);
@@ -123,6 +135,7 @@ fn g2_transition_crops() {
                 loop {
                     app.run_until_parked();
                     let ready = app.update(|cx| {
+                        surface.update(cx, |s, cx| s.published(cx));
                         gpui::AnyWindowHandle::from(window)
                             .update(cx, |_, window, cx| {
                                 window.refresh();
