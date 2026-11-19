@@ -102,6 +102,12 @@ pub fn expected_catalog() -> Value {
         assert!(schema["properties"].get("compositionId").is_none());
         schema["properties"]["compositionId"] = compositions["property"].clone();
     }
+    // Native transitions retain reciprocal pair and offset intent. Pin the
+    // additive fields here without changing the frozen main snapshot.
+    catalog["commandFields"]["set_transition"]
+        .as_array_mut()
+        .expect("existing transition command fields")
+        .extend([json!("pairedWith"), json!("offset")]);
     // Native panel authoring extends the app allowlist; the frozen source stays pinned.
     catalog["app"]
         .as_array_mut()
