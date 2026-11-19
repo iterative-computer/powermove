@@ -199,11 +199,16 @@ pub(crate) fn capture(inputs: &std::path::Path, output: &std::path::Path) -> any
 
     let mtm = objc2::MainThreadMarker::new().context("Settings capture needs the main thread")?;
     std::fs::create_dir_all(output)?;
+    let mut hidden_titles = 0;
     for entry in std::fs::read_dir(inputs)? {
         let file = entry?.path();
         if file.extension().is_none_or(|ext| ext != "json") {
             continue;
         }
+        let name = file
+            .file_stem()
+            .context("Settings fixture name")?
+            .to_string_lossy();
         let commits: Vec<pm_surface::Commit> = serde_json::from_slice(&std::fs::read(&file)?)?;
         let mut surface = Surface::default();
         for commit in commits {
@@ -255,6 +260,19 @@ pub(crate) fn capture(inputs: &std::path::Path, output: &std::path::Path) -> any
                         "Settings status filter lost its selected segment",
                     );
                 }
+                capture_row_titles(&form.borrow(), &publication.surface, &name, theme, "initial");
+                appearance.performAsCurrentDrawingAppearance(&block2::StackBlock::new(|| {
+                    scroll.setNeedsLayout(true);
+                    scroll.layoutSubtreeIfNeeded();
+                    scroll.displayIfNeeded();
+                }));
+                hidden_titles += capture_row_titles(
+                    &form.borrow(),
+                    &publication.surface,
+                    &name,
+                    theme,
+                    "settled",
+                );
                 let bitmap = scroll
                     .bitmapImageRepForCachingDisplayInRect(bounds)
                     .context("offscreen Settings bitmap")?;
@@ -268,10 +286,6 @@ pub(crate) fn capture(inputs: &std::path::Path, output: &std::path::Path) -> any
                     )
                 }
                 .context("encode Settings bitmap")?;
-                let name = file
-                    .file_stem()
-                    .context("Settings fixture name")?
-                    .to_string_lossy();
                 std::fs::write(output.join(format!("settings-{name}-{theme}.png")), unsafe {
                     png.as_bytes_unchecked()
                 })?;
@@ -279,7 +293,46 @@ pub(crate) fn capture(inputs: &std::path::Path, output: &std::path::Path) -> any
             })?;
         }
     }
+    anyhow::ensure!(hidden_titles == 0, "Settings review found {hidden_titles} unusable row titles");
     Ok(())
+}
+
+/// Regresses the leading labels on the same AppKit view tree the capture paints.
+#[cfg(debug_assertions)]
+fn capture_row_titles(form: &Form, surface: &Surface, fixture: &str, theme: &str, pass: &str) -> usize {
+    let mut unusable = 0;
+    for expected in ["Sign-Ins from the Original App", "Powermove Store"] {
+        let field = form.widgets.iter().find_map(|(id, widget)| match widget {
+            Widget::Label(field) if surface.node(*id).is_some_and(|node| text(surface, node) == expected) => {
+                Some(field)
+            }
+            _ => None,
+        });
+        let mut record = json!({
+            "fixture":fixture, "theme":theme, "pass":pass, "title":expected,
+            "present":field.is_some()
+        });
+        let visible = field.is_some_and(|field| {
+            let value = field.stringValue().to_string();
+            let frame = field.frame();
+            let hidden = field.isHiddenOrHasHiddenAncestor();
+            let mut alpha = field.alphaValue();
+            let mut ancestor = field.superview();
+            while let Some(view) = ancestor {
+                alpha *= view.alphaValue();
+                ancestor = view.superview();
+            }
+            record["stringValue"] = json!(value);
+            record["frame"] = json!([frame.origin.x,frame.origin.y,frame.size.width,frame.size.height]);
+            record["hidden"] = json!(hidden);
+            record["alpha"] = json!(alpha);
+            value == expected && !hidden && alpha > 0. && frame.size.width > 1. && frame.size.height > 1.
+        });
+        record["usable"] = json!(visible);
+        eprintln!("SETTINGS_ROW_TITLE {record}");
+        unusable += usize::from(!visible);
+    }
+    unusable
 }
 
 pub(super) fn semantic(node: &Node) -> Option<&str> {
