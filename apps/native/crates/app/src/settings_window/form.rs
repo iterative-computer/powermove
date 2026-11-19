@@ -315,6 +315,9 @@ fn capture_row_titles(form: &Form, surface: &Surface, fixture: &str, theme: &str
         let visible = field.is_some_and(|field| {
             let value = field.stringValue().to_string();
             let frame = field.frame();
+            let reference = NSTextField::labelWithString(&field.stringValue(), field.mtm());
+            reference.setFont(field.font().as_deref());
+            let required_width = reference.intrinsicContentSize().width;
             let hidden = field.isHiddenOrHasHiddenAncestor();
             let mut alpha = field.alphaValue();
             // The retained view hierarchy stays on AppKit's main thread.
@@ -327,7 +330,9 @@ fn capture_row_titles(form: &Form, surface: &Surface, fixture: &str, theme: &str
             record["frame"] = json!([frame.origin.x,frame.origin.y,frame.size.width,frame.size.height]);
             record["hidden"] = json!(hidden);
             record["alpha"] = json!(alpha);
-            value == expected && !hidden && alpha > 0. && frame.size.width > 1. && frame.size.height > 1.
+            record["requiredWidth"] = json!(required_width);
+            value == expected && !hidden && alpha > 0.
+                && frame.size.width + 1. >= required_width && frame.size.height > 1.
         });
         record["usable"] = json!(visible);
         eprintln!("SETTINGS_ROW_TITLE {record}");
@@ -1023,7 +1028,7 @@ impl Render<'_, '_> {
             _ if node.r#type == "text"
                 || node.props.get("role").and_then(Value::as_str) == Some("status") =>
             {
-                Widget::Label(text_label(mtm, node))
+                Widget::Label(text_label(mtm, self.surface, node))
             }
             _ => {
                 let inset = if component == Some(Component::EmptyState) {
@@ -1251,7 +1256,7 @@ fn control_value(
     (Some(kind), value, options)
 }
 
-fn text_label(mtm: objc2::MainThreadMarker, node: &Node) -> Retained<NSTextField> {
+fn text_label(mtm: objc2::MainThreadMarker, surface: &Surface, node: &Node) -> Retained<NSTextField> {
     let heading = node.props.get("role").and_then(Value::as_str) == Some("heading");
     let style = layout(node);
     let title = NSString::from_str(&node.text);
@@ -1260,7 +1265,14 @@ fn text_label(mtm: objc2::MainThreadMarker, node: &Node) -> Retained<NSTextField
         .get("style")
         .and_then(|style| style.get("whiteSpace"))
         .and_then(Value::as_str) == Some("nowrap");
-    let field = if nowrap {
+    // Row titles sit beside controls. A wrapping label has no intrinsic
+    // width, so the spacer can take all its drawable width on a later pass.
+    let row_title = node.parent.and_then(|id| surface.node(id)).is_some_and(|copy| {
+        layout(copy) == "copy"
+            && copy.children.first() == Some(&node.id)
+            && copy.parent.and_then(|id| surface.node(id)).is_some_and(|row| layout(row) == "row")
+    });
+    let field = if nowrap || row_title {
         let field = NSTextField::labelWithString(&title, mtm);
         field.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
         if style == "error" {
