@@ -559,7 +559,6 @@ impl TimelineSurface {
                 let _ = meter.step(0., 0., dt);
             }
         }
-        self.audio_controls(frame);
         // The last 32 pt of the layer header belong to its routing button.
         // Keep every meter pixel in this header, clear of the ruler/track area.
         if frame.viewport.layer_column >= 200. {
