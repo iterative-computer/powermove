@@ -805,6 +805,7 @@ impl Controller {
                 if let Some(on) = o["checked"].as_bool() {
                     c = c.checked(on);
                 }
+                c.informational = o["informational"] == true;
                 // A provider row keeps the menu open: its models follow.
                 c.stays(o["stays"] == true)
             })

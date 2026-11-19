@@ -311,6 +311,8 @@ export interface MenuOption {
   category?: string;
   /** Choosing it keeps the menu open (a provider: its models follow). */
   stays?: boolean;
+  /** Quiet status text, not a choice. */
+  informational?: boolean;
 }
 /** Opens the field menu under `anchor` (a node id); answers the chosen
  * value, or null when it closed unchosen. */
@@ -1861,6 +1863,8 @@ function Composer({
   // menu; it closes on a model, Escape or a click outside.
   const latest = useRef(s);
   latest.current = s;
+  const findingModels = useRef(n.findingModels);
+  findingModels.current = n.findingModels;
   const awaiting = useRef<{ anchor: number; provider: string } | null>(null);
   const modelRows = (s: Snapshot): MenuOption[] => [
     ...pairs(s.catalog.providers, s.settings.provider).map(({ v, label }) => ({
@@ -1876,6 +1880,19 @@ function Composer({
       checked: v === s.settings.model,
       category: "Model",
     })),
+    ...(s.settings.provider === "claude" &&
+    findingModels.current &&
+    s.settings.model &&
+    s.catalog.models.every(([id]) => id === s.settings.model)
+      ? [
+          {
+            label: "Finding models…",
+            value: "",
+            category: "Model",
+            informational: true,
+          },
+        ]
+      : []),
   ];
   const modelMenu = (anchor: number, update: boolean) =>
     void requestModelMenu({
@@ -1935,6 +1952,7 @@ function Composer({
     s.settings.model,
     s.catalog.providers,
     s.catalog.models,
+    n.findingModels,
   ]);
   const sendLabel = working ? "Send direction" : "Send";
   // The shortcuts menu hangs from the composer, once per draft that asks

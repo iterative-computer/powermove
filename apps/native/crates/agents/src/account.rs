@@ -68,6 +68,7 @@ pub struct Model {
 struct Slot {
     status: Status,
     models: Vec<Model>,
+    finding_models: bool,
     worker: bool,
     /// What runs when the current worker finishes. A sign-out outranks a sign-in.
     next: Option<Job>,
@@ -107,6 +108,7 @@ impl Accounts {
         let slot = || Slot {
             status: Status::of(State::Checking, None),
             models: vec![],
+            finding_models: false,
             worker: false,
             next: None,
             cancel: Arc::default(),
@@ -135,6 +137,14 @@ impl Accounts {
             .unwrap()
             .get(provider.name())
             .map_or_else(Vec::new, |s| s.models.clone())
+    }
+    /// True during the model request, not while waiting for sign-in.
+    pub fn finding_models(&self, provider: Provider) -> bool {
+        self.slots
+            .lock()
+            .unwrap()
+            .get(provider.name())
+            .is_some_and(|s| s.finding_models)
     }
     pub fn refresh(self: &Arc<Self>, provider: Provider) {
         self.start(provider, Job::Refresh);
@@ -188,10 +198,12 @@ impl Accounts {
                 let next = {
                     let mut slots = this.slots.lock().unwrap();
                     let slot = slots.get_mut(provider.name()).unwrap();
+                    slot.status = status;
+                    slot.finding_models = false;
                     slot.worker = false;
                     slot.next.take()
                 };
-                this.publish(provider, status);
+                this.bump();
                 if let Some(next) = next {
                     this.start(provider, next);
                 }
@@ -225,6 +237,7 @@ impl Accounts {
     fn set_models(&self, provider: Provider, models: Vec<Model>) {
         if let Some(slot) = self.slots.lock().unwrap().get_mut(provider.name()) {
             slot.models = models;
+            slot.finding_models = false;
         }
         self.bump();
     }
@@ -349,6 +362,13 @@ impl Accounts {
             status = claude_status(&binary, &vars, cancel)?;
         }
         if status.state == State::Connected {
+            self.slots
+                .lock()
+                .unwrap()
+                .get_mut(Provider::Claude.name())
+                .unwrap()
+                .finding_models = true;
+            self.bump();
             match claude_models(&binary, vars, discovery_timeout) {
                 Ok(models) => self.set_models(Provider::Claude, models),
                 Err(detail) => {
@@ -959,6 +979,42 @@ esac
         assert!(slow.unwrap_err().contains("timed out"));
         let exited = claude_models(&binary, fake.vars("exit"), MODELS);
         assert!(exited.unwrap_err().contains("exited"));
+    }
+
+    #[test]
+    fn claude_publishes_discovery_progress_until_the_failure_status_arrives() {
+        let fake = FakeClaude::new();
+        let source = Arc::new(Mutex::new(std::sync::Weak::<Accounts>::new()));
+        let read = source.clone();
+        let (send, changes) = mpsc::channel();
+        let provider = Provider::Claude;
+        let accounts = Accounts::new(
+            Environment {
+                profile: fake.0.join("profile"),
+                vars: [
+                    ("CLAUDE_BINARY".into(), fake.binary().display().to_string()),
+                    ("DISCOVERY".into(), "exit".into()),
+                ]
+                .into(),
+                ..Default::default()
+            },
+            Arc::new(|_| panic!("a refresh never opens a browser")),
+            Arc::new(move || {
+                if let Some(accounts) = read.lock().unwrap().upgrade() {
+                    let _ = send.send((
+                        accounts.finding_models(provider),
+                        accounts.status(provider).detail,
+                    ));
+                }
+            }),
+        );
+        *source.lock().unwrap() = Arc::downgrade(&accounts);
+        accounts.refresh(provider);
+        let wait = Duration::from_secs(5);
+        assert_eq!(changes.recv_timeout(wait).unwrap(), (true, None));
+        let (finding, detail) = changes.recv_timeout(wait).unwrap();
+        assert!(!finding);
+        assert!(detail.unwrap().contains("exited"));
     }
 
     #[test]

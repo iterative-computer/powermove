@@ -731,6 +731,11 @@ impl Backend {
         let session = panel.session(active).map_err(|e| format!("{e:?}"))?;
         let (connection, reason) = self.native.agent_link.connection(provider);
         let signed_out = connection == "unavailable" && self.native.agent_link.signed_out(provider);
+        let finding_models = self
+            .native
+            .agent_link
+            .accounts()
+            .is_some_and(|a| a.finding_models(provider));
         let needs_answer = session.needs_answer();
         // A docked panel fills its dock under the dock's own title; the
         // popover has a fixed width, its own title and the floating ground.
@@ -740,7 +745,7 @@ impl Backend {
             "docked"
         };
         Ok(
-            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"signedOut":signed_out,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
+            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"signedOut":signed_out,"findingModels":finding_models,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
         )
     }
     pub(crate) fn settings_snapshot(&mut self) -> Result<Value, String> {

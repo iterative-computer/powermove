@@ -432,6 +432,7 @@ test("Claude discovery updates the already-open picker without reopening it", as
   p.snapshot.settings.provider = "claude";
   p.snapshot.settings.model = "opus";
   p.snapshot.catalog.models = [["opus", "Opus 5.5"]];
+  p.native.findingModels = true;
   const requests: Parameters<Menu>[0][] = [];
   let choose!: (value: string) => void;
   const menu: Menu = (request) => {
@@ -449,8 +450,22 @@ test("Claude discovery updates the already-open picker without reopening it", as
   expect(
     requests[0]!.options
       .filter((o) => o.category === "Model")
-      .map((o) => o.label),
-  ).toEqual(["Opus 5.5"]);
+      .map((o) => [o.label, o.informational]),
+  ).toEqual([
+    ["Opus 5.5", undefined],
+    ["Finding models…", true],
+  ]);
+
+  // A failed discovery does not change the catalog, but removes its notice.
+  const failed = structuredClone(p);
+  failed.native.findingModels = false;
+  await root.render(<AgentView publication={failed} menu={menu} send={send} />);
+  expect(requests).toHaveLength(2);
+  expect(requests[1]!.refresh).toBe(true);
+  expect(requests[1]!.options.some((o) => o.informational)).toBe(false);
+  await root.render(<AgentView publication={p} menu={menu} send={send} />);
+  expect(requests).toHaveLength(3);
+  expect(requests[2]!.options.some((o) => o.informational)).toBe(true);
 
   const discovered = structuredClone(p);
   discovered.snapshot.catalog.models.push(
@@ -461,11 +476,11 @@ test("Claude discovery updates the already-open picker without reopening it", as
   await root.render(
     <AgentView publication={discovered} menu={menu} send={send} />,
   );
-  expect(requests).toHaveLength(2);
-  expect(requests[1]!.update).toBe(true);
-  expect(requests[1]!.refresh).toBe(true);
+  expect(requests).toHaveLength(4);
+  expect(requests[3]!.update).toBe(true);
+  expect(requests[3]!.refresh).toBe(true);
   expect(
-    requests[1]!.options
+    requests[3]!.options
       .filter((o) => o.category === "Model")
       .map((o) => [o.label, o.checked]),
   ).toEqual([
@@ -481,7 +496,7 @@ test("Claude discovery updates the already-open picker without reopening it", as
       send={send}
     />,
   );
-  expect(requests).toHaveLength(2);
+  expect(requests).toHaveLength(4);
   choose("model:sonnet");
   await Promise.resolve();
   await Promise.resolve();

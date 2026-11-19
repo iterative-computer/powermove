@@ -13,6 +13,8 @@ pub struct Choice {
     /// Choosing it keeps the menu open (a provider row: its models follow
     /// in the same menu); the owner sends the menu's new rows.
     pub stays: bool,
+    /// Read-only text below the choices, outside keyboard and pointer selection.
+    pub informational: bool,
     /// Layer and effect rows require a name search unless recently run.
     pub search_only: bool,
     pub aliases: Vec<String>,
@@ -127,6 +129,12 @@ impl Picker {
         self.page
             .map_or(0, |page| self.matches().len().saturating_sub(page))
     }
+    pub fn note(&self) -> Option<&str> {
+        self.choices
+            .iter()
+            .find(|c| c.informational)
+            .map(|c| c.label.as_str())
+    }
     fn matches(&self) -> Vec<usize> {
         let query = self.query.to_lowercase();
         let mut ranked: Vec<(u32, usize)> = self
@@ -134,6 +142,9 @@ impl Picker {
             .iter()
             .enumerate()
             .filter_map(|(i, c)| {
+                if c.informational {
+                    return None;
+                }
                 if c.search_only {
                     let query = self.query.trim().to_lowercase();
                     let name = if c.category == "Effect" {
@@ -266,6 +277,27 @@ mod palette_layer_tests {
         );
         picker.search("private-id".into());
         assert!(picker.filtered().is_empty());
+    }
+
+    #[test]
+    fn informational_text_is_visible_but_not_a_choice() {
+        let mut picker = Picker {
+            choices: vec![
+                Choice::new("Opus 5.5", "model:opus"),
+                Choice {
+                    informational: true,
+                    ..Choice::new("Finding models", "")
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(picker.filtered(), vec![0]);
+        picker.navigate("end");
+        assert_eq!(picker.navigate("enter").as_deref(), Some("model:opus"));
+        picker.search("Finding".into());
+        assert_eq!(picker.note(), Some("Finding models"));
+        assert!(picker.filtered().is_empty());
+        assert_eq!(picker.navigate("enter"), None);
     }
 }
 
