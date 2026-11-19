@@ -842,13 +842,18 @@ test("virtual project viewport has a single scroll owner across thumbnail refres
     );
     const list = root.inspect().nodes.find((n) => n.type === "virtual-list")!;
     const outer = find(root, "Project media");
-    expect(outer.props.metadata?.scrollOwner).toBe("child");
-    expect(list.props.metadata?.fixedItems).toBe(true);
+    expect(outer.props.metadata).toHaveProperty("scrollOwner", "child");
+    expect(list.props.metadata).toHaveProperty("fixedItems", true);
     if (previous !== undefined) expect(list.id).toBe(previous);
     previous = list.id;
   }
   await root.dispose();
 });
+
+function metaFlag(metadata: unknown, name: string) {
+  return typeof metadata === "object" && metadata !== null &&
+    name in metadata && (metadata as Record<string, unknown>)[name] === true;
+}
 
 test("grid selection uses a clipped ring and text-only truncation tooltips", async () => {
   const { root } = recorder();
@@ -874,13 +879,13 @@ test("grid selection uses a clipped ring and text-only truncation tooltips", asy
   const nodes = root.inspect().nodes;
   const cell = nodes.find((n) => n.props.role === "cell")!;
   expect(cell.props.title).toBeUndefined();
-  expect(cell.props.metadata?.selectionRingOnly).toBe(true);
-  expect(cell.props.style?.borderRadius).toBe(10);
+  expect(cell.props.metadata).toHaveProperty("selectionRingOnly", true);
+  expect(cell.props.style).toHaveProperty("borderRadius", 10);
   const dot = find(root, "Open in the timeline");
-  expect(dot.props.style?.right).toBe(11);
-  expect(dot.props.style?.bottom).toBe(11);
+  expect(dot.props.style).toHaveProperty("right", 11);
+  expect(dot.props.style).toHaveProperty("bottom", 11);
   expect(
-    nodes.filter((n) => n.props.metadata?.tooltipWhenTruncated).length,
+    nodes.filter((n) => metaFlag(n.props.metadata, "tooltipWhenTruncated")).length,
   ).toBe(2);
   await root.dispose();
 });
@@ -912,7 +917,7 @@ test("all media kinds rename inline in grid and list without opening the tile", 
         .inspect()
         .nodes.find(
           (n) =>
-            n.props.metadata?.tooltipWhenTruncated &&
+            metaFlag(n.props.metadata, "tooltipWhenTruncated") &&
             n.props.title ===
               ("Asset" in row.data
                 ? row.data.Asset[0].name
@@ -936,10 +941,10 @@ test("all media kinds rename inline in grid and list without opening the tile", 
       const field = root
         .inspect()
         .nodes.find(
-          (n) => n.type === "input" && n.props.metadata?.inlineRename,
+          (n) => n.type === "input" && metaFlag(n.props.metadata, "inlineRename"),
         )!;
       expect(field).toBeDefined();
-      expect(field.props.metadata?.cancelChange).toBe(true);
+      expect(field.props.metadata).toHaveProperty("cancelChange", true);
       expect(field.props.value).toBe(name.props.title);
       await event(root, field.id, "input", { value: "Draft name" });
       view = structuredClone(view); // A thumbnail/projection publication.
@@ -947,7 +952,7 @@ test("all media kinds rename inline in grid and list without opening the tile", 
       expect(
         root.inspect().nodes.find((n) => n.id === field.id)?.props.value,
       ).toBe("Draft name");
-      if ("Asset" in row.id) expect(field.props.metadata?.selectionEnd).toBe(1);
+      if ("Asset" in row.id) expect(field.props.metadata).toHaveProperty("selectionEnd", 1);
       await event(root, field.id, "change", { value: "New name" });
       expect(inputs.at(-1)).toEqual({
         CommitRename: { id: row.id, value: "New name" },
