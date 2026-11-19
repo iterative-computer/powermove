@@ -86,6 +86,23 @@ pub fn expected_catalog() -> Value {
         assert!(schema["properties"].get("compositionId").is_none());
         schema["properties"]["compositionId"] = compositions["property"].clone();
     }
+    let speed: Value = serde_json::from_str(include_str!(
+        "../../mcp/fixtures/mcp-speed-catalog.json"
+    ))
+    .expect("pinned native MCP speed contract");
+    for (name, overlay) in speed["overlays"].as_object().unwrap() {
+        let base = catalog["tools"].as_array_mut().unwrap().iter_mut()
+            .find(|tool| tool["name"] == name.as_str()).expect("existing main tool");
+        if let Some(note) = overlay["note"].as_str() {
+            base["description"] = json!(format!("{note}\n\n{}", base["description"].as_str().unwrap()));
+        }
+        if let Some(properties) = overlay["properties"].as_object() {
+            let schema = base["inputSchema"]["properties"].as_object_mut().unwrap();
+            for (key, value) in properties {
+                assert!(schema.insert(key.clone(), value.clone()).is_none());
+            }
+        }
+    }
     // Native panel authoring extends the app allowlist; the frozen source stays pinned.
     catalog["app"]
         .as_array_mut()

@@ -308,6 +308,9 @@ impl Automation {
     ) -> Result<crate::services::VideoExportRequest> {
         let options = crate::services::VideoOptions::parse(args)?;
         let snapshot = self.freeze(id)?;
+        if self.document_fence.is_some_and(|document| document != snapshot.document_id) {
+            return Err(Error::conflict("The attached project changed before export started"));
+        }
         let publication = if let Some(host) = self.app() {
             let mut published = host
                 .kernel

@@ -94,9 +94,10 @@ pub(crate) fn session_summary(view: &crate::automation::ProjectView) -> Result<V
             }))),
         None => Box::new(std::iter::once((open.as_str(), root))),
     };
-    let mut budget = 14_000;
-    let selection_layers = ids(view.selection.layers(), &mut budget);
-    let selection_keys = ids(view.selection.keys(), &mut budget);
+    let mut selection_budget = 3_000;
+    let selection_layers = ids(view.selection.layers(), &mut selection_budget);
+    let selection_keys = ids(view.selection.keys(), &mut selection_budget);
+    let mut budget = 11_000;
     let mut compositions = Vec::new();
     for (id, comp) in rows.take(64) {
         let count = layers_of(comp).count();
@@ -126,7 +127,7 @@ pub(crate) fn session_summary(view: &crate::automation::ProjectView) -> Result<V
         row["layers"] = json!(layers);
         compositions.push(row);
     }
-    let channel = view.selection.channel().map(|c| json!(c)).filter(|c| fits(&mut budget, c));
+    let channel = view.selection.channel().map(|c| json!(c)).filter(|c| fits(&mut selection_budget, c));
     let media_count = match root.get("assets").map(Node::kind) {
         Some(NodeKind::Object(assets)) => assets.len(),
         _ => 0,
