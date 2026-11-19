@@ -421,6 +421,75 @@ test("a provider pick keeps the model menu open and lists that provider's models
   });
   root.dispose();
 });
+test("Claude discovery updates the already-open picker without reopening it", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.catalog.providers = [
+    ["chatgpt", "ChatGPT"],
+    ["claude", "Claude"],
+    ["compatible", "Connected model"],
+  ];
+  p.snapshot.settings.provider = "claude";
+  p.snapshot.settings.model = "opus";
+  p.snapshot.catalog.models = [["opus", "Opus 5.5"]];
+  const requests: Parameters<Menu>[0][] = [];
+  let choose!: (value: string) => void;
+  const menu: Menu = (request) => {
+    requests.push(request);
+    return request.refresh
+      ? Promise.resolve(null)
+      : new Promise((resolve) => {
+          choose = resolve;
+        });
+  };
+  const actions: Action[] = [];
+  const send = (action: Action) => actions.push(action);
+  await root.render(<AgentView publication={p} menu={menu} send={send} />);
+  await root.drive(byId(root, "agent-model").id, "click");
+  expect(
+    requests[0]!.options
+      .filter((o) => o.category === "Model")
+      .map((o) => o.label),
+  ).toEqual(["Opus 5.5"]);
+
+  const discovered = structuredClone(p);
+  discovered.snapshot.catalog.models.push(
+    ["fable", "Fable 5.2"],
+    ["sonnet", "Sonnet 5.5"],
+    ["haiku", "Haiku 5.5"],
+  );
+  await root.render(
+    <AgentView publication={discovered} menu={menu} send={send} />,
+  );
+  expect(requests).toHaveLength(2);
+  expect(requests[1]!.update).toBe(true);
+  expect(requests[1]!.refresh).toBe(true);
+  expect(
+    requests[1]!.options
+      .filter((o) => o.category === "Model")
+      .map((o) => [o.label, o.checked]),
+  ).toEqual([
+    ["Opus 5.5", true],
+    ["Fable 5.2", false],
+    ["Sonnet 5.5", false],
+    ["Haiku 5.5", false],
+  ]);
+  await root.render(
+    <AgentView
+      publication={structuredClone(discovered)}
+      menu={menu}
+      send={send}
+    />,
+  );
+  expect(requests).toHaveLength(2);
+  choose("model:sonnet");
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(actions).toEqual([
+    { type: "setModel", model: "sonnet", effort: p.snapshot.settings.effort },
+  ]);
+  root.dispose();
+});
 test("suggestions read as buttons: a raised fill with a hairline edge, the label in body text", async () => {
   const { root } = mount();
   await root.render(

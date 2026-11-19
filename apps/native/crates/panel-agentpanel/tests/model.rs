@@ -1149,6 +1149,49 @@ fn switching_models_keeps_only_an_effort_the_new_model_takes() {
 }
 
 #[test]
+fn a_saved_claude_default_is_not_a_picker_row_while_discovery_is_pending() {
+    let mut p = panel();
+    let mut store = Memory::default();
+    p.save(&mut store, 1).unwrap();
+    let record = &mut store.values.get_mut("agentThreads.p").unwrap()["threads"][0];
+    record["provider"] = json!("claude");
+    record["model"] = json!("default");
+    let mut p = Panel::load(&mut store, "p", "blank", 2).unwrap();
+    let mut catalog = Catalog {
+        providers: vec![
+            ("claude".into(), "Claude".into()),
+            ("compatible".into(), "Connected model".into()),
+        ],
+        claude: true,
+        ..Default::default()
+    };
+    p.set_catalog("t", catalog.clone()).unwrap();
+    let window = pm_panel_agentpanel::v4::Window::new(&p, "t").unwrap();
+    let pending = window.snapshot(&p, 0..0, 3).unwrap();
+    assert_eq!(pending["settings"]["model"], "");
+    assert_eq!(pending["catalog"]["models"], json!([]));
+
+    catalog.models = vec![
+        ("opus".into(), "Opus 5.5".into()),
+        ("sonnet".into(), "Sonnet 5.5".into()),
+        ("haiku".into(), "Haiku 5.5".into()),
+    ];
+    catalog.resolves = vec![("".into(), "opus".into())];
+    p.set_catalog("t", catalog).unwrap();
+    let ready = window.snapshot(&p, 0..0, 4).unwrap();
+    assert_eq!(ready["settings"]["model"], "opus");
+    assert_eq!(
+        ready["catalog"]["models"],
+        json!([
+            ["opus", "Opus 5.5"],
+            ["sonnet", "Sonnet 5.5"],
+            ["haiku", "Haiku 5.5"]
+        ])
+    );
+    assert_eq!(p.session("t").unwrap().settings.model, "default");
+}
+
+#[test]
 fn a_thread_saved_with_no_model_or_default_reads_as_the_providers_default_model() {
     // The pickers list only real models; a saved "" / null / "default" (and
     // Claude's resolved id) resolve to one, while the saved value is kept so
