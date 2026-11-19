@@ -2,7 +2,7 @@
 //! Waiting is on MCP workers after releasing the kernel-host mutex.
 use crate::{
     Error, Result,
-    services::{ExportChild, FrozenProject, VideoExportRequest, VideoOptions},
+    services::{ExportChild, VideoExportRequest},
 };
 use serde_json::{Value, json};
 use std::{
@@ -21,8 +21,11 @@ pub struct Progress {
     pub seconds: f64,
 }
 struct Job {
-    snapshot: FrozenProject,
+    project: String,
+    document: u64,
     child: Arc<dyn ExportChild>,
+    cancel: Arc<AtomicBool>,
+    background: bool,
     started: Instant,
     result: Mutex<Option<Result<Value>>>,
     done: Condvar,
@@ -59,82 +62,63 @@ impl ExportJobs {
 
     pub fn prepare(
         &self,
-        snapshot: FrozenProject,
-        args: &Value,
+        request: VideoExportRequest,
         child: Arc<dyn ExportChild>,
-        directory: std::path::PathBuf,
+        background: bool,
+        checkpoint: impl FnOnce() -> Result<()>,
     ) -> Result<Pending> {
         let mut jobs = self
             .jobs
             .lock()
             .map_err(|_| Error::unavailable("native export job coordinator"))?;
-        jobs.retain(|_, job| {
-            !job.reported.load(Ordering::SeqCst) || job.result.lock().is_ok_and(|r| r.is_none())
-        });
-        let (id, job) = if let Some(id) = args.get("jobId") {
-            let Some(id) = id
-                .as_str()
-                .filter(|_| args.as_object().is_some_and(|o| o.len() == 1))
-            else {
-                return Err(Error::invalid(
-                    "export_video with a jobId takes no other arguments.",
-                ));
-            };
-            let job = jobs
-                .get(id)
-                .filter(|j| {
-                    !j.reported.load(Ordering::SeqCst)
-                        && j.snapshot.document_id == snapshot.document_id
-                        && j.snapshot.project_id == snapshot.project_id
-                })
-                .cloned()
-                .ok_or_else(unknown)?;
-            (id.to_owned(), job)
-        } else {
-            if let Some((id, _)) = jobs
+        if let Some((id, _)) = jobs
+            .iter()
+            .find(|(_, j)| j.result.lock().is_ok_and(|r| r.is_none()))
+        {
+            return Err(Error::invalid(format!(
+                "An export is already running. Call export_video with {{\"jobId\":\"{id}\"}} to wait for it."
+            )));
+        }
+        checkpoint()?;
+        // Keep recent terminal results available for repeated status polls.
+        if jobs.len() >= 64
+            && let Some(id) = jobs
                 .iter()
-                .find(|(_, j)| j.result.lock().is_ok_and(|r| r.is_none()))
-            {
-                return Err(Error::invalid(format!(
-                    "An export is already running. Call export_video with {{\"jobId\":\"{id}\"}} to wait for it."
-                )));
-            }
-            crate::catalog::validate("export_video", args)?;
-            let options = VideoOptions::parse(args)?;
-            let job = Arc::new(Job {
-                snapshot: snapshot.clone(),
-                child: child.clone(),
-                started: Instant::now(),
-                result: Mutex::new(None),
-                done: Condvar::new(),
-                reported: AtomicBool::new(false),
-            });
-            let worker = job.clone();
-            let request = VideoExportRequest {
-                snapshot,
-                options,
-                directory,
-            };
-            std::thread::Builder::new()
-                .name("pm-mcp-export".into())
-                .spawn(move || {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        crate::services::run_video(child.as_ref(), &request)
-                    }))
-                    .unwrap_or_else(|_| {
-                        Err(Error::unavailable(
-                            "native export worker stopped before reporting its outcome",
-                        ))
-                    });
-                    if let Ok(mut state) = worker.result.lock() {
-                        *state = Some(result);
-                        worker.done.notify_all();
-                    }
-                })?;
-            let id = pm_kernel::new_id("export");
-            jobs.insert(id.clone(), job.clone());
-            (id, job)
-        };
+                .min_by_key(|(_, job)| job.started)
+                .map(|(id, _)| id.clone())
+        {
+            jobs.remove(&id);
+        }
+        let job = Arc::new(Job {
+            project: request.snapshot.project_id.clone(),
+            document: request.snapshot.document_id,
+            child: child.clone(),
+            cancel: request.cancel.clone(),
+            background,
+            started: Instant::now(),
+            result: Mutex::new(None),
+            done: Condvar::new(),
+            reported: AtomicBool::new(false),
+        });
+        let worker = job.clone();
+        std::thread::Builder::new()
+            .name("pm-mcp-export".into())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::services::run_video(child.as_ref(), &request)
+                }))
+                .unwrap_or_else(|_| {
+                    Err(Error::unavailable(
+                        "native export worker stopped before reporting its outcome",
+                    ))
+                });
+                if let Ok(mut state) = worker.result.lock() {
+                    *state = Some(result);
+                    worker.done.notify_all();
+                }
+            })?;
+        let id = pm_kernel::new_id("export");
+        jobs.insert(id.clone(), job.clone());
         Ok(Pending {
             id,
             job,
@@ -142,6 +126,28 @@ impl ExportJobs {
             limit: self.limit,
         })
     }
+
+    pub fn find(&self, project: &str, document: u64, id: &str, legacy: bool) -> Result<Pending> {
+        let job = self
+            .jobs
+            .lock()
+            .map_err(|_| Error::unavailable("native export job coordinator"))?
+            .get(id)
+            .filter(|job| {
+                job.project == project
+                    && job.document == document
+                    && (!legacy || !job.reported.load(Ordering::SeqCst))
+            })
+            .cloned()
+            .ok_or_else(unknown)?;
+        Ok(Pending {
+            id: id.into(),
+            job,
+            wait: self.wait,
+            limit: self.limit,
+        })
+    }
+
     pub fn consume(&self, id: &str) -> Result<bool> {
         let mut jobs = self
             .jobs
@@ -156,7 +162,7 @@ impl ExportJobs {
             .lock()
             .map_err(|_| Error::unavailable("native export result"))?
             .is_some();
-        if complete {
+        if complete && !job.background {
             jobs.remove(id);
         }
         Ok(first)
@@ -194,6 +200,56 @@ impl ExportJobs {
     }
 }
 impl Pending {
+    pub fn submitted(&self) -> Value {
+        json!({"status":"running","jobId":self.id})
+    }
+
+    pub fn status(&self) -> Result<Value> {
+        self.poll(false)
+    }
+
+    pub fn cancel(&self) -> Result<Value> {
+        self.poll(true)
+    }
+
+    fn poll(&self, cancel: bool) -> Result<Value> {
+        let state = self
+            .job
+            .result
+            .lock()
+            .map_err(|_| Error::unavailable("native export result"))?;
+        if let Some(result) = state.as_ref() {
+            return Ok(match result {
+                Ok(delivery) => {
+                    let mut value = delivery.clone();
+                    value["jobId"] = json!(self.id);
+                    value["status"] = json!("done");
+                    value
+                }
+                Err(error) => {
+                    let status = if error.code == "export_cancelled" {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    };
+                    json!({"jobId":self.id,"status":status,"error":{"code":error.code,"message":error.message}})
+                }
+            });
+        }
+        if cancel {
+            self.job.cancel.store(true, Ordering::Release);
+        }
+        drop(state);
+        let mut value = self.submitted();
+        if self.job.cancel.load(Ordering::Acquire) {
+            value["status"] = json!("cancelling");
+        }
+        if !cancel {
+            self.add_progress(&mut value);
+        }
+        Ok(value)
+    }
+
     pub fn wait(&self) -> Result<(Value, bool)> {
         let state = self
             .job
@@ -218,7 +274,12 @@ impl Pending {
         // from publishing completion or another caller from draining the job.
         drop(state);
         let mut value = json!({"status":"running","jobId":self.id,"next":format!("The export continues in Powermove. Call export_video with {{\"jobId\":\"{}\"}} to keep waiting for its file.",self.id)});
-        if let Some(progress) = self.job.child.video_progress(&self.job.snapshot) {
+        self.add_progress(&mut value);
+        Ok((value, false))
+    }
+
+    fn add_progress(&self, value: &mut Value) {
+        if let Some(progress) = self.job.child.video_progress(self.job.document) {
             let mut fields = json!({"frames":progress.frames});
             if let Some(total) = progress.total.filter(|n| *n > 0) {
                 fields["totalFrames"] = json!(total);
@@ -233,7 +294,6 @@ impl Pending {
             }
             value["progress"] = fields;
         }
-        Ok((value, false))
     }
 }
 fn unknown() -> Error {

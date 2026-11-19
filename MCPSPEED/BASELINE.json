@@ -1,0 +1,34 @@
+{
+  "commit": "a8631063eee7a7cc0e1e93f777a86b0b05cce59b",
+  "environment": "Devin macOS VM, virtual Apple M4 Pro, debug build",
+  "measurement": "Serialized MCP results (including image blocks, excluding the JSON-RPC envelope)",
+  "jobs": [
+    {
+      "job": "title_animation",
+      "calls": 5,
+      "wall_ms": 4120,
+      "result_bytes": 27378,
+      "details": {
+        "check_frames": 3
+      }
+    },
+    {
+      "job": "lower_third",
+      "calls": 5,
+      "wall_ms": 160,
+      "result_bytes": 7085,
+      "details": {
+        "grouped_layers": 2
+      }
+    },
+    {
+      "job": "h264_1080p_2s",
+      "calls": 5,
+      "wall_ms": 5983,
+      "result_bytes": 3899,
+      "details": {
+        "export_reply_ms": 5923
+      }
+    }
+  ]
+}

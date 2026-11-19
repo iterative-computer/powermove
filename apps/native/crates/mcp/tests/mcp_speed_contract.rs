@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::PathBuf,
-    sync::{Arc, Condvar, Mutex, mpsc},
+    sync::{Arc, Condvar, Mutex, atomic::Ordering, mpsc},
     time::Duration,
 };
 
@@ -26,11 +26,22 @@ impl ExportGate {
 
 impl ExportChild for ExportGate {
     fn video(&self, request: &VideoExportRequest) -> Result<VideoDelivered> {
-        drop(
-            self.wake
-                .wait_while(self.released.lock().unwrap(), |released| !*released)
-                .unwrap(),
-        );
+        let mut released = self.released.lock().unwrap();
+        while !*released && !request.cancel.load(Ordering::Acquire) {
+            released = self
+                .wake
+                .wait_timeout(released, Duration::from_millis(20))
+                .unwrap()
+                .0;
+        }
+        if request.cancel.load(Ordering::Acquire) {
+            return Err(pm_mcp::Error {
+                code: "export_cancelled".into(),
+                message: "Synthetic worker cancelled".into(),
+                backing: None,
+            });
+        }
+        drop(released);
         let path = request.directory.join("synthetic.mp4");
         fs::create_dir_all(&request.directory)?;
         fs::write(&path, "synthetic output")?;
@@ -143,6 +154,32 @@ fn disconnect_preserves_checkpoint_but_rolls_back_later_edits() {
     let layers = fixture.layers();
     assert_eq!(layers.as_array().unwrap().len(), 1);
     assert_eq!(layers[0]["id"], "before-export");
+}
+
+#[test]
+fn status_and_cancel_reap_an_export_without_publishing_a_file() {
+    let fixture = Fixture::new(Duration::from_secs(10));
+    let mut session = fixture.start();
+    let queued = session
+        .dispatch("export_video", &json!({"wait":false}))
+        .unwrap();
+    let id = json!({"jobId":queued["jobId"]});
+    assert_eq!(
+        session.dispatch("export_status", &id).unwrap()["status"],
+        "running"
+    );
+    assert_eq!(
+        session
+            .dispatch("task_cancel", &json!({"taskId":queued["jobId"]}))
+            .unwrap()["status"],
+        "cancelling"
+    );
+    let jobs = fixture.host.lock().unwrap().export_jobs.clone();
+    jobs.drain(Duration::from_secs(2)).unwrap();
+    let terminal = session.dispatch("export_status", &id).unwrap();
+    assert_eq!(terminal["status"], "cancelled");
+    assert_eq!(session.dispatch("export_status", &id).unwrap(), terminal);
+    assert!(!fixture.root.join("exports/synthetic.mp4").exists());
 }
 
 #[test]

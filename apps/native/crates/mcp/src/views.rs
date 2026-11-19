@@ -53,6 +53,92 @@ fn at_path<'a>(root: &'a Value, path: &Value) -> Option<&'a Value> {
     }
     Some(v)
 }
+
+pub(crate) fn session_summary(view: &crate::automation::ProjectView) -> Result<Value> {
+    use pm_kernel::model::layers_of;
+    use pm_model::{Node, NodeKind};
+
+    // Budget for JSON embedded in MCP text, where quotes and escapes cost twice.
+    fn fits(budget: &mut usize, value: &Value) -> bool {
+        let cost = json!(value.to_string()).to_string().len() + 4;
+        if cost > *budget {
+            return false;
+        }
+        *budget -= cost;
+        true
+    }
+    fn name(node: Option<&Node>) -> String {
+        node.and_then(str_of).unwrap_or("").chars().take(100).collect()
+    }
+    fn str_of(node: &Node) -> Option<&str> {
+        match node.kind() {
+            NodeKind::String(text) => text.as_str(),
+            _ => None,
+        }
+    }
+    fn ids(ids: &[String], budget: &mut usize) -> Vec<Value> {
+        ids.iter().take(100).map(|id| json!(id))
+            .take_while(|id| fits(budget, id)).collect()
+    }
+    let root = view.snapshot.root().ok_or_else(|| Error::invalid("Missing document"))?;
+    let open = view.snapshot.render_comp();
+    let comps = match root.get("comps").map(Node::kind) {
+        Some(NodeKind::Object(comps)) if !comps.is_empty() => Some(comps),
+        _ => None,
+    };
+    let composition_count = comps.map_or(1, |c| c.len());
+    let rows: Box<dyn Iterator<Item = (&str, &Node)>> = match comps {
+        Some(comps) => Box::new(comps.get(open.as_bytes()).map(|c| (open.as_str(), c))
+            .into_iter().chain(comps.iter().filter_map(|(id, c)| {
+                id.as_str().filter(|id| *id != open).map(|id| (id, c))
+            }))),
+        None => Box::new(std::iter::once((open.as_str(), root))),
+    };
+    let mut budget = 14_000;
+    let selection_layers = ids(view.selection.layers(), &mut budget);
+    let selection_keys = ids(view.selection.keys(), &mut budget);
+    let mut compositions = Vec::new();
+    for (id, comp) in rows.take(64) {
+        let count = layers_of(comp).count();
+        let number = |key| match comp.get(key).map(Node::kind) {
+            Some(NodeKind::Number(number)) => Some(*number),
+            _ => None,
+        };
+        let mut row = json!({
+            "id":id,"name":name(if comps.is_none() { comp.get("compName").or_else(|| comp.get("name")) } else { comp.get("name") }),
+            "width":number("w"),"height":number("h"),"fps":number("fps"),"duration":number("dur"),
+            "open":id==open,"layerCount":count,"layers":[]
+        });
+        if !fits(&mut budget, &row) {
+            break;
+        }
+        // Leave room for other compositions, even if this one's names are long.
+        let mut layer_budget = budget.min(10_000 / composition_count.min(64));
+        let mut layers = Vec::new();
+        for layer in layers_of(comp).take(24) {
+            let layer = json!({"id":layer.get("id").and_then(str_of),
+                "name":name(layer.get("name")),"type":layer.get("type").and_then(str_of)});
+            if !fits(&mut layer_budget, &layer) || !fits(&mut budget, &layer) {
+                break;
+            }
+            layers.push(layer);
+        }
+        row["layers"] = json!(layers);
+        compositions.push(row);
+    }
+    let channel = view.selection.channel().map(|c| json!(c)).filter(|c| fits(&mut budget, c));
+    let media_count = match root.get("assets").map(Node::kind) {
+        Some(NodeKind::Object(assets)) => assets.len(),
+        _ => 0,
+    };
+    Ok(json!({
+        "compositions":compositions,"compositionCount":composition_count,
+        "selection":{"layers":selection_layers,"keys":selection_keys,"chan":channel,
+            "layerCount":view.selection.layers().len(),"keyCount":view.selection.keys().len()},
+        "mediaCount":media_count
+    }))
+}
+
 pub fn project_state(host: &Automation, id: &str, a: &Value) -> Result<Value> {
     let p = host.read_document(id)?;
     let original = host.original_view(id)?;

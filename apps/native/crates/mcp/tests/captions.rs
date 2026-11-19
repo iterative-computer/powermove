@@ -100,7 +100,9 @@ fn text_import_insert_and_explicit_empty_move_preserve_stable_cue_identity() {
 #[test]
 fn generic_add_caption_reports_the_same_normalized_cue_identity_the_actor_admits() {
     let mut f = Fixture::new();
-    let response=f.apply(json!([{"type":"add_layer","id":"caption","layerType":"captions","content":{"cues":[{"start":1,"end":2,"text":"Synthetic"}]}}]));
+    let response=f.session.dispatch("apply_commands", &json!({"verbose":true,"commands":[
+        {"type":"add_layer","id":"caption","layerType":"captions","content":{"cues":[{"start":1,"end":2,"text":"Synthetic"}]}}
+    ]})).unwrap();
     let projected = &response["results"][0]["data"]["layer"];
     let actual = f.layer();
     assert_eq!(actual["p"]["opacity"]["v"], 100.);

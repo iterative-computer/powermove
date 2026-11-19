@@ -7,7 +7,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::PathBuf,
     process::{Child, ChildStdout, Command, Stdio},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 struct Server {
@@ -154,11 +154,34 @@ fn standard_jobs() {
                    "content":{"shape":"rect","w":600,"h":140,"color":"#14304c"}}),
         ]);
         let start = Instant::now();
-        let delivery = server.text(
-            "export_video",
-            json!({"format":"mp4","codec":"h264","range":"all","audio":false}),
-        );
+        let background = std::env::var_os("PM_MCP_BENCH_BACKGROUND").is_some();
+        let mut args = json!({"format":"mp4","codec":"h264","range":"all","audio":false});
+        if background {
+            args["background"] = json!(true);
+        }
+        let mut delivery = server.text("export_video", args);
         let submit_ms = start.elapsed().as_millis() as u64;
+        if background {
+            let job = delivery["jobId"]
+                .as_str()
+                .expect("queued export id")
+                .to_owned();
+            loop {
+                assert!(
+                    start.elapsed() < Duration::from_secs(120),
+                    "export did not finish"
+                );
+                std::thread::sleep(Duration::from_secs(1));
+                delivery = server.text("export_status", json!({"jobId":job}));
+                match delivery["status"].as_str() {
+                    Some("done") => break,
+                    Some("running") => (),
+                    _ => panic!("export did not complete: {delivery}"),
+                }
+            }
+        }
+        assert_eq!(delivery["width"], 1920);
+        assert_eq!(delivery["height"], 1080);
         let output = PathBuf::from(delivery["path"].as_str().expect("export output path"));
         assert!(output.starts_with(&server.root));
         assert!(fs::metadata(output).unwrap().len() > 0);

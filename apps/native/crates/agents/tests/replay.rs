@@ -212,6 +212,36 @@ fn current_mcp_catalog(reference: &Observations) -> Observations {
         .as_array_mut()
         .unwrap()
         .extend(source.as_array().unwrap().iter().cloned());
+    let source = include_bytes!("../../mcp/fixtures/mcp-speed-catalog.json");
+    assert_eq!(
+        replay::sha256(source),
+        "f323b586ad772c8acf483bc5f3fc2c34eb47def0f862e88a4b4d0fde0f493d1d"
+    );
+    let speed: Value = serde_json::from_slice(source).unwrap();
+    let tools = catalog["tools"].as_array_mut().unwrap();
+    let composition_tools = [
+        "apply_commands", "check_project", "edit_3d", "edit_layer_strips", "edit_video",
+        "export_captions", "export_video", "generate_captions", "get_3d_scene",
+        "get_project_state", "get_timeline", "import_media_to_timeline",
+        "render_frames", "select_layers",
+    ];
+    for tool in tools.iter_mut() {
+        let name = tool["name"].as_str().unwrap();
+        let overlay = &speed["overlays"][name];
+        if composition_tools.contains(&name) {
+            tool["inputSchema"]["properties"]["compositionId"] = json!({
+                "type":"string","minLength":1,
+                "description":"Target composition ID from get_project_state.compositions. Omit for the open composition. Does not navigate the editor."
+            });
+        }
+        if let Some(note) = overlay["note"].as_str() {
+            tool["description"] = json!(format!("{note}\n\n{}", tool["description"].as_str().unwrap()));
+        }
+        if let Some(properties) = overlay["properties"].as_object() {
+            tool["inputSchema"]["properties"].as_object_mut().unwrap().extend(properties.clone());
+        }
+    }
+    tools.extend(speed["tools"].as_array().unwrap().iter().cloned());
     let mut expected = Observations {
         wire: reference.wire.clone(),
         events: reference.events.clone(),

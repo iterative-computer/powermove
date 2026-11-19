@@ -57,6 +57,28 @@ pub struct Batch {
     pub descriptions: Vec<String>,
     pub selection: Vec<String>,
 }
+pub(crate) struct Edits {
+    pub batch: Batch,
+    pub new_ids: Vec<String>,
+    pub changed_layer_ids: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct EditMode {
+    pub atomic: bool,
+    pub verbose: bool,
+}
+
+impl EditMode {
+    pub fn parse(args: &Value) -> Result<Self> {
+        for key in ["atomic", "verbose"] {
+            if args.get(key).is_some_and(|v| !v.is_boolean()) {
+                return Err(Error::invalid(format!("Invalid arguments.{key}")));
+            }
+        }
+        Ok(Self { atomic: args["atomic"] != false, verbose: args["verbose"] == true })
+    }
+}
 fn text(v: &Value, k: &str) -> Option<String> {
     v[k].as_str().map(str::to_owned)
 }
@@ -343,14 +365,18 @@ fn targets(c: &Value, p: &Doc, selection: &[String]) -> Result<Vec<String>> {
 /// command semantics. In particular a malformed later command cannot expose a
 /// stale-revision/earlier-target error or apply a prefix of a batch.
 pub fn clean_commands(raw: &[Value]) -> Result<Vec<Value>> {
-    const LIMIT: usize = 1_000_000;
     if raw.is_empty() {
         return Err(Error::invalid(
             "No valid Powermove edit commands were supplied.",
         ));
     }
-    raw.iter().enumerate().map(|(index, raw)| {
-        let invalid = || Error::invalid(format!("Invalid or oversized command at index {index}. No commands were applied. Each command must be valid JSON with a supported type and at most {LIMIT} characters."));
+    raw.iter().enumerate().map(|(index, raw)| clean_command(raw, index, true)).collect()
+}
+
+fn clean_command(raw: &Value, index: usize, atomic: bool) -> Result<Value> {
+        const LIMIT: usize = 1_000_000;
+        let suffix = if atomic { " No commands were applied." } else { "" };
+        let invalid = || Error::invalid(format!("Invalid or oversized command at index {index}.{suffix} Each command must be valid JSON with a supported type and at most {LIMIT} characters."));
         let source = if let Some(text) = raw.as_str() {
             if text.encode_utf16().count() > LIMIT { return Err(invalid()); }
             serde_json::from_str::<Value>(text).map_err(|_| invalid())?
@@ -376,7 +402,6 @@ pub fn clean_commands(raw: &[Value]) -> Result<Vec<Value>> {
         if kind == "update_section" && (!truthy(&command["sectionId"]) || command["layers"].as_array().is_none_or(|l| l.is_empty())) {return Err(invalid());}
         if ["set_property", "replace_keyframes"].contains(&kind) {command["preserveHandEdits"] = json!(command["preserveHandEdits"] != false);}
         Ok(command)
-    }).collect()
 }
 fn truthy(value: &Value) -> bool {
     match value {
@@ -412,13 +437,16 @@ pub(crate) fn plan_cleaned_with_definitions(
     plan_on(
         DocumentStore::new_untitled(model(project)),
         selection,
-        cleaned,
+        cleaned.iter().cloned().map(Ok),
         time,
         state,
+        None,
     )
+    .map(|edits| edits.batch)
 }
 
 /// Plans against the kernel's published snapshot (shared, never copied).
+#[cfg(test)]
 pub(crate) fn plan_snapshot(
     snapshot: &pm_kernel::Snapshot,
     selection: &[String],
@@ -429,19 +457,41 @@ pub(crate) fn plan_snapshot(
     plan_on(
         DocumentStore::scratch(snapshot),
         selection,
-        cleaned,
+        cleaned.iter().cloned().map(Ok),
         time,
         state,
+        None,
     )
+    .map(|edits| edits.batch)
+}
+
+pub(crate) fn plan_edits(
+    snapshot: &pm_kernel::Snapshot,
+    selection: &[String],
+    cleaned: Vec<Result<Value>>,
+    time: f64,
+    state: &pm_kernel::state::StateSnapshot,
+    mode: EditMode,
+) -> Result<Edits> {
+    plan_on(DocumentStore::scratch(snapshot), selection, cleaned.into_iter(), time, Some(state), Some(mode))
+}
+
+pub(crate) fn prepare_edits(args: &Value, mode: EditMode) -> Result<Vec<Result<Value>>> {
+    let raw = args["commands"].as_array().map(Vec::as_slice).unwrap_or_default();
+    if mode.atomic || raw.is_empty() {
+        return Ok(clean_commands(raw)?.into_iter().map(Ok).collect());
+    }
+    Ok(raw.iter().enumerate().map(|(index, raw)| clean_command(raw, index, false)).collect())
 }
 
 fn plan_on(
     mut scratch: DocumentStore,
     selection: &[String],
-    cleaned: &[Value],
+    cleaned: impl Iterator<Item = Result<Value>>,
     time: f64,
     state: Option<&pm_kernel::state::StateSnapshot>,
-) -> Result<Batch> {
+    mode: Option<EditMode>,
+) -> Result<Edits> {
     if let Some(state) = state {
         scratch.set_runtime_state(state.clone(), None);
     }
@@ -451,9 +501,12 @@ fn plan_on(
         descriptions: vec![],
         selection: selection.to_vec(),
     };
-    for mut c in cleaned.iter().cloned() {
+    let before = mode.map(|_| Doc::of(&scratch));
+    let compact = mode.is_some_and(|mode| !mode.verbose);
+    let mut other_ids = Vec::new();
+    let mut plan = |scratch: &mut DocumentStore, batch: &mut Batch, index: usize, mut c: Value| -> Result<()> {
         let kind = c["type"].as_str().unwrap().to_owned();
-        let p = Doc::of(&scratch);
+        let p = Doc::of(scratch);
         let target = || resolve(&c["target"], &p, &batch.selection);
         let mut data = Value::Null;
         let cmd: Command = match kind.as_str() {
@@ -980,7 +1033,7 @@ fn plan_on(
         scratch
             .execute(cmd.clone(), Origin::Mcp)
             .map_err(Error::kernel)?;
-        let after = Doc::of(&scratch);
+        let after = Doc::of(scratch);
         if kind == "group_layers" {
             batch.selection = vec![data["id"].as_str().unwrap().into()];
         }
@@ -1070,13 +1123,17 @@ fn plan_on(
         }
 
         let id = data["id"].as_str().unwrap_or("").to_owned();
-        let layer = after.layer(&id);
+        let layer = matches!(kind.as_str(), "add_captions" | "edit_captions" | "replace_keyframes")
+            .then(|| after.layer(&id)).flatten();
         let layer = layer.as_ref();
         if kind == "add_layer" || kind == "add_captions" {
-            let l = layer.unwrap();
             data = if kind == "add_captions" {
+                let l = layer.unwrap();
                 json!({"id":l["id"],"name":l["name"],"cues":l["d"]["cues"].as_array().map_or(0,Vec::len)})
+            } else if compact {
+                json!({"id":id})
             } else {
+                let l = after.layer(&id).unwrap();
                 json!({"id":l["id"],"name":l["name"],"layer":l})
             };
             if c["select"] != false {
@@ -1134,11 +1191,88 @@ fn plan_on(
             let existing = after.layer_ids();
             batch.selection.retain(|id| existing.contains(id.as_str()));
         }
-        batch.descriptions.push(describe(&c));
-        batch.results.push(json!({"command":c,"data":data}));
+        if mode.is_some() {
+            let new_id = match kind.as_str() {
+                "add_marker" | "create_section" => data["id"].as_str(),
+                "add_effect" => data["effectId"].as_str(),
+                _ => None,
+            };
+            if let Some(id) = new_id {
+                other_ids.push(id.to_owned());
+            }
+        }
+        let mut result = if compact {
+            if let Some(data) = data.as_object_mut() {
+                for key in ["value", "expression", "cue"] {
+                    data.remove(key);
+                }
+            }
+            json!({"data":data})
+        } else {
+            batch.descriptions.push(describe(&c));
+            json!({"command":c,"data":data})
+        };
+        if mode.is_some() {
+            result["index"] = json!(index);
+            result["ok"] = json!(true);
+        }
+        batch.results.push(result);
         batch.commands.push(cmd);
+        Ok(())
+    };
+    for (index, command) in cleaned.enumerate() {
+        if mode.is_none_or(|mode| mode.atomic) {
+            plan(&mut scratch, &mut batch, index, command?)?;
+            continue;
+        }
+        let prior = scratch.snapshot();
+        let selection = batch.selection.clone();
+        if let Err(error) = command.and_then(|c| plan(&mut scratch, &mut batch, index, c)) {
+            if scratch.revision() != prior.revision {
+                scratch = DocumentStore::scratch(&prior);
+                if let Some(state) = state {
+                    scratch.set_runtime_state(state.clone(), None);
+                }
+            }
+            batch.selection = selection;
+            batch.results.push(json!({"index":index,"ok":false,"message":error.message}));
+        }
     }
-    Ok(batch)
+    let (mut new_ids, changed_layer_ids) = before.map_or_else(
+        || (Vec::new(), Vec::new()),
+        |before| layer_delta(&before, &Doc::of(&scratch)),
+    );
+    for id in other_ids {
+        if !new_ids.contains(&id) {
+            new_ids.push(id);
+        }
+    }
+    Ok(Edits { batch, new_ids, changed_layer_ids })
+}
+
+fn layer_delta(before: &Doc, after: &Doc) -> (Vec<String>, Vec<String>) {
+    let ordered = |doc: &Doc| doc.layers()
+        .filter_map(|layer| Some((text_of(layer.get("id"))?.to_owned(), layer.rev())))
+        .collect::<Vec<_>>();
+    let previous = ordered(before);
+    let next = ordered(after);
+    let old: std::collections::HashMap<_, _> = previous.iter().map(|(id, rev)| (id.as_str(), *rev)).collect();
+    let new: HashSet<_> = next.iter().map(|(id, _)| id.as_str()).collect();
+    let mut changed = Vec::new();
+    let mut added = Vec::new();
+    let mut old_order = previous.iter().filter(|(id, _)| new.contains(id.as_str())).map(|(id, _)| id);
+    for (id, rev) in &next {
+        match old.get(id.as_str()) {
+            None => {
+                added.push(id.clone());
+                changed.push(id.clone());
+            }
+            Some(old_rev) if old_order.next() != Some(id) || old_rev != rev => changed.push(id.clone()),
+            _ => (),
+        }
+    }
+    changed.extend(previous.into_iter().filter_map(|(id, _)| (!new.contains(id.as_str())).then_some(id)));
+    (added, changed)
 }
 pub fn describe(c: &Value) -> String {
     let kind = c["type"].as_str().unwrap_or("");

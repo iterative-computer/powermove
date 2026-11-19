@@ -301,6 +301,37 @@ impl Automation {
         }
         Ok(view)
     }
+    pub(crate) fn video_request(
+        &self,
+        id: &str,
+        args: &Value,
+    ) -> Result<crate::services::VideoExportRequest> {
+        let options = crate::services::VideoOptions::parse(args)?;
+        let snapshot = self.freeze(id)?;
+        let publication = if let Some(host) = self.app() {
+            let mut published = host
+                .kernel
+                .published(id)
+                .filter(|p| {
+                    p.snapshot.doc_id == snapshot.document_id && p.revision() == snapshot.revision
+                })
+                .ok_or_else(|| Error::conflict("The composition changed before export started"))?;
+            if let Some(comp) = self.composition.as_deref() {
+                let targeted = composition_snapshot(&published.snapshot, comp)?;
+                Arc::make_mut(&mut published).snapshot = targeted;
+            }
+            Some(published)
+        } else {
+            None
+        };
+        Ok(crate::services::VideoExportRequest {
+            snapshot,
+            publication,
+            options,
+            directory: self.exports.clone(),
+            cancel: Arc::default(),
+        })
+    }
     pub(crate) fn original_view(&self, id: &str) -> Result<ProjectView> {
         match &self.backend {
             Backend::Owned(kernel) => {

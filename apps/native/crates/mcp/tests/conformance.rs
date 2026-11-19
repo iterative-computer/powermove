@@ -140,6 +140,9 @@ fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
                 let media: Value =
                     serde_json::from_str(include_str!("../fixtures/media-native-catalog.json"))
                         .unwrap();
+                let speed: Value =
+                    serde_json::from_str(include_str!("../fixtures/mcp-speed-catalog.json"))
+                        .unwrap();
                 for replacement in studio["tools"]
                     .as_array()
                     .unwrap()
@@ -153,6 +156,13 @@ fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
                         .unwrap() = replacement.clone();
                 }
                 for tool in &mut tools {
+                    let overlay = &speed["overlays"][tool["name"].as_str().unwrap()];
+                    if let Some(note) = overlay["note"].as_str() {
+                        tool["description"] = json!(format!("{note}\n\n{}", tool["description"].as_str().unwrap()));
+                    }
+                    if let Some(properties) = overlay["properties"].as_object() {
+                        tool["inputSchema"]["properties"].as_object_mut().unwrap().extend(properties.clone());
+                    }
                     if catalog::COMPOSITION_TOOLS.contains(&tool["name"].as_str().unwrap()) {
                         tool["inputSchema"]["properties"]["compositionId"] = json!({"type":"string","minLength":1,"description":"Target composition ID from get_project_state.compositions. Omit for the open composition. Does not navigate the editor."});
                     }
@@ -935,11 +945,15 @@ fn legacy_command_result_bodies_match_tag_source() {
         {"type":"update_section","sectionId":"section-fixture","layers":[{"id":"Saved-layer","type":"solid"}],"at":1000,"version":{"id":"SV-fixture"}}
     ]);
     let project = f.host.lock().unwrap().read_document(&id).unwrap();
-    let expected = node(
+    let mut expected = node(
         "command-pairs.mjs",
         Some(&json!({"project":project,"commands":commands})),
     );
-    let actual = value(s.call("apply_commands", json!({"commands":commands})));
+    for (index, result) in expected.as_array_mut().unwrap().iter_mut().enumerate() {
+        result["index"] = json!(index);
+        result["ok"] = json!(true);
+    }
+    let actual = value(s.call("apply_commands", json!({"commands":commands,"verbose":true})));
     assert_eq!(actual["results"], expected);
 }
 #[test]
