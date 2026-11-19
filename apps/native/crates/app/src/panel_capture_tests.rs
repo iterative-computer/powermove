@@ -233,11 +233,16 @@ fn capture_builtin_panels() {
                     && matches!(export_view.as_deref(), Some("settings" | "settings-bottom" | "project"))
                 {
                     // Drive the same host wake that republishes completed encoder checks.
+                    let summary = if export_view.as_deref() == Some("project") {
+                        "Synthetic Film.pmv"
+                    } else {
+                        "300 frames · 10 s · 640×360"
+                    };
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
                     while !first.surface.nodes().values().any(|node| {
                         node.props.get("id").and_then(serde_json::Value::as_str) == Some("export.summary")
                             && node.props.get("label").and_then(serde_json::Value::as_str)
-                                == Some("300 frames · 10 s · 640×360")
+                                == Some(summary)
                     }) {
                         if let Some(ticket) = r.runtime.publish_finished_checks().transpose().unwrap() {
                             wait_export_publication(ticket);
