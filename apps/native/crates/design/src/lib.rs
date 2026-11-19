@@ -354,6 +354,8 @@ pub struct Metrics {
     /// panel's width up to `curve_editor_max`.
     pub curve_editor: f32,
     pub curve_editor_max: f32,
+    /// Equal-width columns in each Easing preset family.
+    pub easing_preset_columns: f32,
     /// The curve editor's greatest width: a wide panel shows the graph at
     /// 16:9 on the rows' inset, not stretched across it.
     pub curve_editor_wide: f32,
@@ -925,6 +927,7 @@ impl Tokens {
                 grade_field: 72.,
                 curve_editor: 200.,
                 curve_editor_max: 360.,
+                easing_preset_columns: 3.,
                 curve_editor_wide: 640.,
                 layer_column: 320.,
                 clip_radius: radius.sm,

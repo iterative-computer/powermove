@@ -290,7 +290,7 @@ export function EasingPanel({ model, bindings }: EasingProps) {
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(3, 1fr)",
+                gridTemplateColumns: t("metrics.easing_preset_columns"),
                 gap: t("metrics.gap"),
                 paddingLeft: t("metrics.inset"),
                 paddingRight: t("metrics.inset"),
@@ -369,7 +369,6 @@ export function EasingPanel({ model, bindings }: EasingProps) {
                     style={{
                       display: "flex",
                       flexDirection: "column",
-                      alignItems: "center",
                       paddingTop: t("metrics.gap"),
                       paddingBottom: t("metrics.gap"),
                       borderRadius: t("metrics.control_radius"),
@@ -381,7 +380,6 @@ export function EasingPanel({ model, bindings }: EasingProps) {
                         display: "flex",
                         flexDirection: "column",
                         alignItems: "center",
-                        width: "100%",
                         background: selected
                           ? t("colors.selected_fill")
                           : t("colors.panel"),
