@@ -18,6 +18,9 @@ import { repoManagement, storeUtility } from './routes/repo-management';
 import { adminRoutes } from './routes/admin';
 import { storeRoutes } from './routes/store';
 import { installRoutes } from './routes/installs';
+import { aiRoutes } from './routes/ai';
+import { billingRoutes } from './routes/billing';
+import { sharePages, shareRoutes } from './routes/shares';
 export const MIN_DESKTOP_VERSION = '0.0.0';
 export function createApp(deps: {
   data: (env: CloudflareBindings) => Data;
@@ -51,6 +54,7 @@ export function createApp(deps: {
     }
     const data = deps.data(c.env);
     c.set('data', data);
+    c.set('freshData', () => deps.data(c.env));
     try {
       await next();
     } finally {
@@ -93,7 +97,7 @@ export function createApp(deps: {
   ).route('/v1/repos', repoManagement).route('/v1/admin', adminRoutes).route('/v1/store', storeRoutes).route(
     '/v1/store',
     storeUtility,
-  ).route('/v1/installs', installRoutes);
+  ).route('/v1/installs', installRoutes).route('/v1/billing', billingRoutes).route('/v1/ai', aiRoutes).route('/v1/shares', shareRoutes).route('/s', sharePages);
   app.post('/v1/auth/sign-in/oauth2', async (c) => {
     const body = await c.req.json().catch(() => null) as { providerId?: unknown; callbackURL?: unknown } | null;
     if (body?.providerId !== 'google') return c.json({ error: 'not_found' }, 404);

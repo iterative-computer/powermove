@@ -4,6 +4,13 @@ import type { ClaudeModelOption, CodexModelOption, ReasoningEffort } from './ipc
 // Claude aliases resolve to the current model supported by the installed CLI.
 export const AGENT_MODELS = {
   compatible: [{ id: 'configured', label: 'Connected model' }],
+  // Powermove Aerolite's hosted models. The plan decides which are live; this keeps the picker usable offline.
+  aerolite: [
+    { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5' },
+    { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5' },
+    { id: 'gpt-6.2-sol', label: 'GPT-6.2 Sol' },
+    { id: 'gpt-6-luna', label: 'GPT-6 Luna' },
+  ],
   chatgpt: [
     { id: 'gpt-6-astra', label: 'GPT 6 Astra' },
     { id: 'gpt-6.1-sol', label: 'GPT 6.1 Sol' },
@@ -77,6 +84,8 @@ export function modelEfforts(provider: string, model: string | null): ReasoningE
   if (provider === 'claude' && model && discoveredClaudeEfforts.has(model)) {
     return discoveredClaudeEfforts.get(model)!;
   }
+  // The proxy forwards chat completions as-is; no effort parameter until both providers accept it there.
+  if (provider === 'aerolite') return [];
   if (provider === 'compatible') {
     if (/^gpt-6-(?:sol|luna)(?:-|$)/.test(model || '')) return REASONING_EFFORTS.slice(0, -1);
     if (/^gpt-(6-astra|5\.6)(?:-|$)/.test(model || '')) return STANDARD_REASONING_EFFORTS;

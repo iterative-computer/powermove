@@ -449,6 +449,12 @@ const bridge: PowermoveBridge = {
     deleteAccount: () => cloudInvoke(CLOUD_IPC.deleteAccount),
     registryUrl: () => cloudInvoke(CLOUD_IPC.registryUrl),
     setRegistryUrl: (req) => cloudInvoke(CLOUD_IPC.setRegistryUrl, { origin: req.origin }),
+    plan: () => cloudInvoke(CLOUD_IPC.planGet),
+    checkout: (req) => cloudInvoke(CLOUD_IPC.checkout, { tier: req.tier }),
+    billingPortal: () => cloudInvoke(CLOUD_IPC.billingPortal),
+    shares: () => cloudInvoke(CLOUD_IPC.sharesList),
+    createShare: (req) => cloudInvoke(CLOUD_IPC.shareCreate, req),
+    revokeShare: (req) => cloudInvoke(CLOUD_IPC.shareRevoke, { id: req.id }),
     onAccountChanged: cloudEvent(CLOUD_IPC.accountChanged),
     onSignInFailed: cloudEvent(CLOUD_IPC.signInFailed)
   },

@@ -338,7 +338,7 @@ export interface MediaProxyReadRequest {
 export type CodexMode = 'editor' | 'autonomous';
 export type CodexAccess = 'editor' | 'project' | 'computer';
 export type ReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
-export type AgentProviderId = 'chatgpt' | 'claude' | 'compatible';
+export type AgentProviderId = 'chatgpt' | 'claude' | 'compatible' | 'aerolite';
 /** Who approves an action the Project sandbox blocks: the person each time
  * (`supervised`), or a provider's automatic reviewer where one exists (`auto`;
  * providers without one still ask the person). */

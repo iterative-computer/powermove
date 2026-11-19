@@ -105,6 +105,8 @@ export interface CodexIpcContext {
   /** The bundled ffmpeg the agent's media tools run (probe, frames, waveform). */
   agentMediaFfmpeg?: string;
   agentExportDirectory?: string;
+  /** Powermove Cloud's Aerolite client; null when the cloud service failed to start. */
+  aerolite?(): import('../cloud/aerolite').Aerolite | null;
   externalMcp?: {
     /** Desktop boot barrier: only return an editor after its tool listener is ready. */
     getOwner?(): BrowserWindow['webContents'] | null;
@@ -374,10 +376,16 @@ export function registerCodexIpc(
   appServerRunner: CodexAppServerRunner = new CodexAppServerRunner()
 ): void {
   const compatible = new CompatibleProvider(ctx.userData);
+  // Aerolite: the same API runner, pointed at Powermove's metered proxy with the account's session.
+  const aerolite = new CompatibleProvider(ctx.userData, fetch, async () => {
+    const hosted = ctx.aerolite?.();
+    if (!hosted) throw new Error('Sign in to Powermove to use Aerolite models.');
+    return hosted.hostedConnection();
+  });
   // Each transport owns its own runs; only the one running this id accepts.
   // `codex exec` cannot take input mid-run, so Codex Project runs fall back.
   const steerProvider = async (request: CodexSteerRequest): Promise<boolean> =>
-    await appServerRunner.steer(request) || await claudeRunner.steer(request) || compatible.steer(request);
+    await appServerRunner.steer(request) || await claudeRunner.steer(request) || compatible.steer(request) || aerolite.steer(request);
   const approvals = new AgentApprovals();
   const runner = new CodexRunner(appServerRunner);
   const claudeRunner = new ClaudeRunner();
@@ -388,11 +396,13 @@ export function registerCodexIpc(
   const preserveRunEdits = new Set<string>();
   const cancelProvider = async (id: string): Promise<void> => {
     compatible.cancel(id);
+    aerolite.cancel(id);
     await Promise.all([runner.cancel(id), appServerRunner.cancel(id), claudeRunner.cancel(id)]);
   };
   const orchestrator: AgentOrchestrator = new AgentOrchestrator({
     directory: path.join(ctx.userData, 'Agent Tasks'),
-    providers: () => orchestrationProviders({ chatgpt: account, claude: claudeAccount, compatible }),
+    providers: () => orchestrationProviders({ chatgpt: account, claude: claudeAccount, compatible,
+      aerolite: { models: async () => (await ctx.aerolite?.()?.plan().catch(() => null))?.plan.models.map(model => model.id) ?? [] } }),
     cancel: cancelProvider,
     steer: steerProvider,
     answer: request => approvals.answer(request) || appServerRunner.answer(request) || claudeRunner.answer(request),
@@ -453,8 +463,8 @@ export function registerCodexIpc(
       // internal runs under that existing authority, never new IPC grants.
       const inheritedGrant = execution.isChild || execution.continuation ? { consumeConsentToken: () => true } : {};
       const additionalInstructions = session ? AGENT_ORCHESTRATION_INSTRUCTIONS + (execution.role ? `\n\nTask role: ${execution.role}` : '') : undefined;
-      const result = req.provider === 'compatible'
-        ? await compatible.run(req, execution.onTrace,
+      const result = req.provider === 'compatible' || req.provider === 'aerolite'
+        ? await (req.provider === 'aerolite' ? aerolite : compatible).run(req, execution.onTrace,
           session && toolBridge ? (name, args) => toolBridge.callTool(session!, name, args) : undefined,
           { extensionsDir: ctx.extensionsDir, apiPackFiles: ctx.apiPackFiles, workspaceId, additionalInstructions, outsideSandbox: !!session?.outsideSandbox, ...inheritedGrant,
             onWorkspace: directory => { if (session) session.stagingDirectory = directory; } })
@@ -668,7 +678,7 @@ export function registerCodexIpc(
     // Codex exec and API models cannot ask the person themselves, so a
     // supervised Project run asks through Powermove's run_outside_sandbox.
     const outsideSandbox = req.mode === 'autonomous' && req.access === 'project'
-      && (req.provider === 'compatible' || ((req.provider ?? 'chatgpt') === 'chatgpt' && req.approval === 'supervised'))
+      && (req.provider === 'compatible' || req.provider === 'aerolite' || ((req.provider ?? 'chatgpt') === 'chatgpt' && req.approval === 'supervised'))
       ? outsideSandboxRunner(agentWorkspaceRoot(ctx.userData, threadWorkspaceId ?? req.projectId), requestApproval, runEnded.signal)
       : undefined;
     const rendererDestroyed = (): void => {
@@ -897,6 +907,7 @@ export function registerCodexIpc(
     void externalHost?.then(host => host.close()).catch(() => {});
     void orchestrator.shutdown();
     compatible.cancelAll();
+    aerolite.cancelAll();
     void runner.cancelAll();
     void appServerRunner.shutdown();
     void claudeRunner.cancelAll();

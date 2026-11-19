@@ -64,6 +64,13 @@
       "when": 1790472625333,
       "tag": "0008_admins",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795050444753,
+      "tag": "0009_aerolite",
+      "breakpoints": true
     }
   ]
 }

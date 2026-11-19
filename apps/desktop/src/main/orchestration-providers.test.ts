@@ -6,12 +6,15 @@ describe('subagent provider discovery', () => {
     const catalog = await orchestrationProviders({
       chatgpt: { status: async () => ({ state: 'connected' } as any), models: async () => [{ id: 'custom-codex', label: 'Custom Codex', reasoningEfforts: ['high'] }] },
       claude: { status: async () => ({ state: 'connected' } as any), models: async () => [{ id: 'custom-claude', label: 'Custom Claude', reasoningEfforts: ['low', 'medium'] }] },
-      compatible: { status: async () => ({ baseUrl: 'https://example.test/v1', hasKey: true, vision: false, model: 'local-model', models: ['local-model', 'other-model'] }) }
+      compatible: { status: async () => ({ baseUrl: 'https://example.test/v1', hasKey: true, vision: false, model: 'local-model', models: ['local-model', 'other-model'] }) },
+      aerolite: { models: async () => ['claude-sonnet-5-5', 'gpt-6.2-sol'] }
     });
     expect(catalog.every(provider => provider.canRunChildTask && provider.canRunCrossProviderChildTask)).toBe(true);
     expect(catalog[0]!.models.find(model => model.id === 'custom-codex')?.options[0]?.options).toEqual([{ id: 'high', label: 'High' }]);
     expect(catalog[1]!.models.find(model => model.id === 'custom-claude')?.options[0]?.options.map(option => option.id)).toEqual(['low', 'medium']);
     expect(catalog[2]!.models.map(model => model.id)).toEqual(['local-model', 'other-model']);
+    expect(catalog[3]).toMatchObject({ providerInstanceId: 'aerolite', displayName: 'Aerolite', driverKind: 'compatible' });
+    expect(catalog[3]!.models.map(model => model.id)).toEqual(['claude-sonnet-5-5', 'gpt-6.2-sol']);
     expect(JSON.stringify(catalog)).not.toContain('https://example.test');
     expect(JSON.stringify(catalog)).not.toContain('hasKey');
   });
@@ -25,5 +28,6 @@ describe('subagent provider discovery', () => {
     expect(catalog.every(provider => !provider.canRunChildTask && provider.constraints.length)).toBe(true);
     expect(catalog[0]!.models.length).toBeGreaterThan(0);
     expect(catalog[2]!.models).toEqual([]);
+    expect(catalog[3]!.constraints).toEqual(['Built-in models need Powermove Aerolite.']);
   });
 });

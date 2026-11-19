@@ -6,7 +6,7 @@ const object = (properties: Record<string, unknown>, required: string[] = []) =>
 });
 const text = { type: 'string', minLength: 1, maxLength: 240 };
 const target = object({
-  providerInstanceId: { type: 'string', enum: ['chatgpt', 'claude', 'compatible'] },
+  providerInstanceId: { type: 'string', enum: ['chatgpt', 'claude', 'compatible', 'aerolite'] },
   model: { type: 'string', minLength: 1, maxLength: 200 },
   options: object({ reasoningEffort: { type: 'string', enum: ['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] } })
 });

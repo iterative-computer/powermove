@@ -11,6 +11,7 @@
  * Malformed payloads and untrusted senders still throw.
  */
 import type { ApiErrorBody, MeDto } from '@powermove/registry/wire';
+import type { CreatedShareDto, CreateShareRequest, PlanDto, PlanTier, ShareDto } from './aerolite';
 
 export const CLOUD_IPC = {
   accountGet: 'cloud:account-get',
@@ -23,6 +24,12 @@ export const CLOUD_IPC = {
   deleteAccount: 'cloud:delete-account',
   registryUrl: 'cloud:registry-url',
   setRegistryUrl: 'cloud:set-registry-url',
+  planGet: 'cloud:plan-get',
+  checkout: 'cloud:checkout',
+  billingPortal: 'cloud:billing-portal',
+  sharesList: 'cloud:shares-list',
+  shareCreate: 'cloud:share-create',
+  shareRevoke: 'cloud:share-revoke',
   /** main → renderer: the signed-in account changed (`MeDto | null`). */
   accountChanged: 'cloud:account-changed',
   /** main → renderer: a browser sign-in came back and could not be completed (`ApiErrorBody`). */
@@ -54,6 +61,15 @@ export interface CloudChannels {
   'cloud:registry-url': { req: void; res: CloudRegistry };
   /** Main asks first (a native dialog naming the origin) and signs out; `changed: false` means it was cancelled. */
   'cloud:set-registry-url': { req: { origin: string }; res: CloudResult<CloudRegistry & { changed: boolean }> };
+  /** Plan, usage fractions, share and storage quotas. Null when signed out. */
+  'cloud:plan-get': { req: void; res: CloudResult<PlanDto | null> };
+  /** Opens Stripe Checkout in the browser. */
+  'cloud:checkout': { req: { tier: PlanTier }; res: CloudResult<null> };
+  /** Opens the Stripe customer portal in the browser. */
+  'cloud:billing-portal': { req: void; res: CloudResult<null> };
+  'cloud:shares-list': { req: void; res: CloudResult<ShareDto[]> };
+  'cloud:share-create': { req: CreateShareRequest; res: CloudResult<CreatedShareDto> };
+  'cloud:share-revoke': { req: { id: string }; res: CloudResult<null> };
 }
 
 /** Which registry this Mac talks to (Settings › Advanced). */
@@ -89,6 +105,13 @@ export interface CloudBridge {
   deleteAccount(): Promise<CloudChannels['cloud:delete-account']['res']>;
   registryUrl(): Promise<CloudChannels['cloud:registry-url']['res']>;
   setRegistryUrl(req: CloudChannels['cloud:set-registry-url']['req']): Promise<CloudChannels['cloud:set-registry-url']['res']>;
+  /** Optional: absent in the web build and older test doubles. */
+  plan?(): Promise<CloudChannels['cloud:plan-get']['res']>;
+  checkout?(req: CloudChannels['cloud:checkout']['req']): Promise<CloudChannels['cloud:checkout']['res']>;
+  billingPortal?(): Promise<CloudChannels['cloud:billing-portal']['res']>;
+  shares?(): Promise<CloudChannels['cloud:shares-list']['res']>;
+  createShare?(req: CloudChannels['cloud:share-create']['req']): Promise<CloudChannels['cloud:share-create']['res']>;
+  revokeShare?(req: CloudChannels['cloud:share-revoke']['req']): Promise<CloudChannels['cloud:share-revoke']['res']>;
   onAccountChanged(cb: (me: MeDto | null) => void): () => void;
   onSignInFailed(cb: (error: ApiErrorBody) => void): () => void;
 }

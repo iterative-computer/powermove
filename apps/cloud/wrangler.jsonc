@@ -12,7 +12,8 @@
   "r2_buckets": [
     { "binding": "OBJECTS", "bucket_name": "powermove-objects" },
     { "binding": "TARS", "bucket_name": "powermove-tars" },
-    { "binding": "ICONS", "bucket_name": "powermove-icons" }
+    { "binding": "ICONS", "bucket_name": "powermove-icons" },
+    { "binding": "SHARES", "bucket_name": "powermove-shares" }
   ],
   "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["sign-in@trypowermove.com"] }],
   "unsafe": { "bindings": [

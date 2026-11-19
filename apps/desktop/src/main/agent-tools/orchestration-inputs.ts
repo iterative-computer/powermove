@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const orchestrationTarget = z.object({
-  providerInstanceId: z.enum(['chatgpt', 'claude', 'compatible']).optional(),
+  providerInstanceId: z.enum(['chatgpt', 'claude', 'compatible', 'aerolite']).optional(),
   model: z.string().min(1).max(200).optional(),
   options: z.object({ reasoningEffort: z.enum(['none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']).optional() }).strict().optional()
 }).strict();

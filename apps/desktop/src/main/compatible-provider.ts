@@ -78,13 +78,17 @@ function modelToolResult(result: AgentToolResponseEvent): string {
     `The tool returned more data than fits in one response. Its success/change status above is unchanged; do not repeat a completed mutation. Output is an excerpt, not complete state. For get_project_state discover with indexOnly=true and follow nextLayerOffset, or layerSearch; then read a single layerId with propertyLimit:10/keyframeLimit:0 and page properties/keyframes. For thread_read use smaller limit/maxCharsPerMessage and textOffset. For files use bounded reads.\n\nUNTRUSTED OUTPUT EXCERPT\n${content.map(item => item.text).join('\n').slice(0, 8000)}` }] });
 }
 
+/** A connection supplied by Powermove rather than saved by the person (Aerolite). */
+export interface HostedConnection { baseUrl: string; key: string; models: string[]; vision: boolean }
+
 export class CompatibleProvider {
   private runs = new Map<string, AbortController>();
   /** Live direction waiting for the next model request, per running run.
    * Null once the run is finishing: a later steer is refused so the caller
    * can fall back instead of losing it. */
   private steering = new Map<string, CodexSteerRequest[] | null>();
-  constructor(private directory: string, private request: typeof fetch = fetch) {}
+  /** `hosted` replaces the saved connection: the endpoint, key and models come from Powermove's plan. */
+  constructor(private directory: string, private request: typeof fetch = fetch, private hosted?: () => Promise<HostedConnection>) {}
   private get file() { return path.join(this.directory, 'agent-provider.json'); }
   private async read(): Promise<Saved> {
     try { return { ...DEFAULT_COMPATIBLE_PROVIDER, ...JSON.parse(await readFile(this.file, 'utf8')) }; }
@@ -170,7 +174,14 @@ export class CompatibleProvider {
   private async httpError(response: Response, model = ''): Promise<Error> {
     const { status } = response;
     let detail = '';
-    try { detail = providerDetail((await response.text()).slice(0, 16_000)); } catch { /* no body */ }
+    let raw = '';
+    try { raw = (await response.text()).slice(0, 16_000); detail = providerDetail(raw); } catch { /* no body */ }
+    if (this.hosted) {
+      // Powermove Cloud errors are `{ error: code, detail: sentence }`; the sentence is written for people.
+      try { const body = JSON.parse(raw); if (typeof body?.detail === 'string') detail = providerDetail(JSON.stringify({ error: body.detail })); } catch { /* not JSON */ }
+      if (status === 401) return new Error('Your Powermove sign-in expired. Sign in again in Settings › Accounts.');
+      if (detail && (status === 403 || status === 429)) return new Error(detail);
+    }
     if (status === 401 || status === 403) return new Error('The provider rejected the API key. Check the key in Settings.');
     if (/\btools?\b/i.test(detail) && /support|enable|allow/i.test(detail)) {
       return new Error(`${model || 'This model'} can chat but can’t use tools, so it can’t edit your project. Choose a model with tool support.`);
@@ -299,12 +310,15 @@ export class CompatibleProvider {
       if (req.access === 'computer' && (!req.consentToken || !(options?.consumeConsentToken ?? consumeToken)(req.consentToken))) {
         throw new Error('Computer access requires fresh approval for this run.');
       }
-      const config = await this.read();
+      const connection = this.hosted ? await this.hosted() : null;
+      const config: Saved = connection
+        ? { ...DEFAULT_COMPATIBLE_PROVIDER, baseUrl: connection.baseUrl, model: connection.models[0] ?? '', models: connection.models, vision: connection.vision, hasKey: true }
+        : await this.read();
       if (!config.model) throw new Error('Connect an API or local model in Settings to start chatting.');
       const model = !req.model || req.model === 'configured' ? config.model : req.model;
       if (model !== config.model && !config.models?.includes(model)) throw new Error('This model is no longer available in the saved connection. Test and connect again in Settings.');
       const effort = modelEffort('compatible', model, req.reasoningEffort);
-      const key = this.key(config);
+      const key = connection ? connection.key : this.key(config);
       const autonomous = req.mode === 'autonomous';
       if (autonomous && req.access !== 'editor') {
         if (!options) throw new Error('Project workspace is unavailable. Restart Powermove and retry.');
