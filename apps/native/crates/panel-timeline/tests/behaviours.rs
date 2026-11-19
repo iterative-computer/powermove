@@ -2885,8 +2885,14 @@ fn first_and_last_keys_refresh_rows_and_active_value_field_survives() {
     let p = c.model.property_diamond(&targets, 0.).unwrap();
     run(&mut c, p);
     assert!(c.model.row_position(&property).is_some());
+    let editing_row = c.model.row_position(&property).unwrap();
     c.model.editing_property = None;
     c.model.rebuild_rows();
+    assert_eq!(c.model.row_position(&property), Some(editing_row));
+    select(&mut c, &["c"]);
+    c.model
+        .reveal_property('u', false, 1000, &PropertyFacts::default())
+        .unwrap();
     assert!(c.model.row_position(&property).is_none());
     assert!(!c.model.layer_disclosable("c"));
 }
