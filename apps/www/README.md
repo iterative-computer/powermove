@@ -29,6 +29,22 @@ bun run --cwd apps/www check  # svelte-check (alias: typecheck)
   at the local copy in `src/lib/powermove/`, and will point at
   `@powermove/player/svg-player` once that package lands.
 
+## Search and AI answer engines
+
+- **Positioning and metadata**: `src/lib/site.ts` holds the headline ("The video
+  editor you customize with AI"), the home title and description, the page list,
+  and the JSON-LD builders. `src/lib/Seo.svelte` writes each page's title,
+  description, canonical, Open Graph, and JSON-LD.
+- **Generated files**: `sitemap.xml`, `llms.txt`, and `llms-full.txt` are
+  prerendered routes built from the same data (`src/routes/*/+server.ts`), so a
+  new page in `PAGES` or a new clone shows up everywhere. `static/robots.txt`
+  allows crawlers and points at the sitemap.
+- **FAQ**: `src/lib/faq.ts`. Keep answers short and self-contained; answer
+  engines quote them one at a time.
+- **Effect clones**: add an entry to `src/lib/clones.ts` and its short to
+  `static/clones/<slug>.mp4` (720×1280 H.264, no audio, `+faststart`) with a
+  poster and a 16:9 thumb. `/clones/<slug>` renders from that entry.
+
 ## Deployment
 
 `bun run build` writes a fully prerendered site to `build/` (`index.html` plus

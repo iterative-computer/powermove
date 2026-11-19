@@ -5,7 +5,7 @@
 
   const features: Feature[] = [
     {
-      id: 'agent', label: 'An editor you can rewrite',
+      id: 'agent', label: 'An editor you customize with AI',
       lead: "It's up to you.",
       text: 'Connect a coding agent and do basically anything. Make extensions, restyle the interface, or even generate effects and shaders.',
     },

@@ -13,6 +13,9 @@
         { label: 'Agent', href: '/#agent' },
         { label: 'Extensions', href: '/#extensions' },
         { label: 'Export', href: '/#export' },
+        { label: 'Effect clones', href: '/clones' },
+        { label: 'vs After Effects', href: '/vs/after-effects' },
+        { label: 'FAQ', href: '/#faq' },
       ],
     },
     {

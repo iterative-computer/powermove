@@ -154,6 +154,62 @@ main{overflow:clip}
   .slab:hover{transform:none}
 }
 
+/* ---- home additions ---- */
+.hero-description .strong{color:#fff;font-weight:500}
+a.row-media{display:block;transition:box-shadow var(--dur-3)}
+a.row-media:hover{box-shadow:0 0 0 1px rgb(28 18 12 / .1),0 28px 56px -28px rgb(28 18 12 / .28)}
+.row-link{color:var(--tx);white-space:nowrap;text-decoration:underline;text-decoration-color:var(--line-strong);text-underline-offset:3px;transition:text-decoration-color var(--dur-2)}
+.row-link:hover{text-decoration-color:var(--tx)}
+
+/* ---- FAQ: question beside its answer, on the rows' 4/8 grid, hairlines between ---- */
+.faq{display:grid;gap:clamp(32px,4vw,48px);max-width:var(--col);margin:clamp(104px,12vw,152px) auto 0;padding-inline:24px;scroll-margin-top:32px}
+@media(max-width:640px){.faq{padding-inline:16px}}
+.faq-list{margin:0;border-top:1px solid var(--line-2)}
+.faq-item{display:grid;gap:8px;padding:22px 0;border-bottom:1px solid var(--line-2)}
+@media(min-width:900px){.faq-item{grid-template-columns:minmax(0,4fr) minmax(0,8fr);gap:48px}}
+.faq-item dt{font-size:17px;font-weight:500;line-height:1.4;letter-spacing:-.011em;color:var(--tx);text-wrap:balance}
+.faq-item dd{margin:0;max-width:60ch;font-size:17px;line-height:1.5;letter-spacing:-.011em;color:var(--tx-2);text-wrap:pretty}
+
+/* A solid pill for paper, the counterpart of .pill.light on the stage. */
+.pill.line{background:#fff;color:#16110E;box-shadow:0 0 0 1px rgb(28 18 12 / .1)}
+.pill.line:hover{box-shadow:0 0 0 1px rgb(28 18 12 / .22)}
+.pill.dark:hover{background:#2A221D}
+
+/* ---- sub-pages (clones, comparisons): the rows' measure and type, on paper ---- */
+.page{max-width:var(--col);margin-inline:auto;padding:128px 24px 0}
+@media(max-width:640px){.page{padding:104px 16px 0}}
+.crumbs{display:flex;flex-wrap:wrap;gap:6px;font-size:var(--fs-lg);color:var(--tx-3)}
+.crumbs a{transition:color var(--dur-2)}
+.crumbs a:hover{color:var(--tx)}
+.crumbs [aria-current]{color:var(--tx-2)}
+.page-title{margin-top:20px;max-width:22ch;font-size:clamp(34px,4.6vw,54px);font-weight:500;line-height:1.06;letter-spacing:-.035em;color:var(--tx);text-wrap:balance}
+.page-lead{margin-top:20px;max-width:52ch;font-size:clamp(17px,1.5vw,19px);line-height:1.5;letter-spacing:-.011em;color:var(--tx-3);text-wrap:pretty}
+.page-lead .strong{color:var(--tx);font-weight:500}
+.page-lead a,.prose a{color:var(--tx);text-decoration:underline;text-decoration-color:var(--line-strong);text-underline-offset:3px}
+.page-lead a:hover,.prose a:hover{text-decoration-color:var(--tx)}
+.page-section{display:grid;gap:clamp(28px,3.5vw,40px);margin-top:clamp(88px,11vw,136px);scroll-margin-top:32px}
+.card{overflow:hidden;border-radius:16px;background:#fff;box-shadow:0 0 0 1px rgb(28 18 12 / .06),0 24px 48px -28px rgb(28 18 12 / .2)}
+.label{font-size:var(--fs-md);font-weight:500;color:var(--tx-3)}
+.prose{max-width:60ch;font-size:17px;line-height:1.55;letter-spacing:-.011em;color:var(--tx-2);text-wrap:pretty}
+.prose .strong{color:var(--tx);font-weight:500}
+
+/* Numbered steps, two by two on wide screens. */
+.steps{display:grid;gap:12px;counter-reset:step}
+@media(min-width:720px){.steps{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.steps li{display:grid;align-content:start;gap:8px;padding:24px 24px 28px;counter-increment:step}
+.steps li::before{content:counter(step);display:grid;place-items:center;width:24px;height:24px;margin-bottom:8px;border-radius:50%;background:var(--accent-dim);color:var(--accent-tx);font-size:var(--fs-md);font-weight:600;font-variant-numeric:tabular-nums}
+.steps h3{font-size:17px;font-weight:500;letter-spacing:-.011em;color:var(--tx)}
+.steps p{font-size:15px;line-height:1.5;color:var(--tx-2);text-wrap:pretty}
+
+/* The closing call: a slice of the stage, the hero's ink with our orange rising. */
+.cta-band{position:relative;isolation:isolate;display:grid;justify-items:center;gap:20px;overflow:hidden;padding:clamp(56px,7vw,88px) 24px;border-radius:20px;text-align:center;color:#F5F5F4;background:
+  radial-gradient(70% 90% at 50% 120%,color-mix(in oklab,var(--ember) 85%,transparent),transparent 70%),
+  linear-gradient(in oklab,var(--ink-0),color-mix(in oklab,var(--ember) 22%,var(--ink-0)))}
+.cta-band h2{max-width:22ch;font-size:clamp(26px,3vw,36px);font-weight:500;line-height:1.12;letter-spacing:-.03em;text-wrap:balance}
+.cta-band p{max-width:46ch;font-size:17px;line-height:1.5;color:rgb(255 255 255 / .72);text-wrap:balance}
+.cta-band .hero-cta{margin-top:4px}
+.cta-band a:focus-visible{box-shadow:0 0 0 2px var(--ink-0),0 0 0 4px rgb(255 255 255 / .7)}
+
 /* ---- footer ----
    The hero in reverse: paper warms through our orange and settles into
    near-black, so the page ends on the stage it opened on. Type stays at the
