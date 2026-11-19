@@ -1268,7 +1268,7 @@ impl Controller {
         for error in runtime.take_errors() {
             eprintln!("v4: {error}");
         }
-        self.sync_agent_launcher(cx);
+        let (progress, additional_runs) = self.sync_agent_launcher(cx);
         // A requested popover is not acknowledged until its window exists.
         let shown = self.builtins.agent_shown || self.builtins.windows.get("agent")
             .is_some_and(|window| cx.windows().contains(window));
@@ -1282,7 +1282,8 @@ impl Controller {
                 failed,
                 elapsed: elapsed.map(|ms| format!("{}:{:02}", ms / 60_000, ms / 1000 % 60)),
                 background,
-                progress: runtime.agent_progress(),
+                progress,
+                additional_runs,
                 paused: self.session.as_ref().is_some_and(|s| self.mcp.is_paused(&s.project)),
                 held: self.session.as_ref().is_some_and(|s| self.mcp.is_held(&s.project)),
             });
@@ -1659,31 +1660,36 @@ impl Controller {
         })
         .detach();
     }
-    fn sync_agent_launcher(&self, cx: &App) {
-        let Some(runtime) = &self.builtins.runtime else { return; };
+    fn sync_agent_launcher(&self, cx: &App) -> (Option<String>, usize) {
+        let Some(runtime) = &self.builtins.runtime else {
+            return (None, 0);
+        };
         let (tasks, revision, active_thread) = runtime.agent_launcher_tasks();
         let panel_open =
             self.agent_open(cx) || (self.builtins.agent_docked && !self.builtins.agent_parked);
-        self.host
-            .borrow_mut()
-            .set_agent_launcher(pm_shell::agent_launcher::Snapshot {
-                tasks: tasks
-                    .into_iter()
-                    .map(|(id, title, step, started_at, attention, running)| {
-                        pm_shell::agent_launcher::Task {
-                            id,
-                            title,
-                            step,
-                            started_at,
-                            attention,
-                            running,
-                        }
-                    })
-                    .collect(),
-                panel_open,
-                revision,
-                active_thread,
-            });
+        let snapshot = pm_shell::agent_launcher::Snapshot {
+            tasks: tasks
+                .into_iter()
+                .map(|(id, title, step, started_at, attention, running)| {
+                    pm_shell::agent_launcher::Task {
+                        id,
+                        title,
+                        step,
+                        started_at,
+                        attention,
+                        running,
+                    }
+                })
+                .collect(),
+            panel_open,
+            revision,
+            active_thread,
+        };
+        let presence = snapshot.run_summary().map_or((None, 0), |(newest, others)| {
+            ((!newest.step.is_empty()).then(|| newest.step.clone()), others)
+        });
+        self.host.borrow_mut().set_agent_launcher(snapshot);
+        presence
     }
     /// Whether the Agent popover is showing (or on its way).
     pub fn agent_open(&self, cx: &App) -> bool {

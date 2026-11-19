@@ -1574,6 +1574,10 @@ define_class!(
         }
     }
 );
+const COEDIT_CHIP_WIDTH: f64 = 250.;
+const COEDIT_CHIP_HEIGHT: f64 = 24.;
+const COEDIT_TITLE_WIDTH: f64 = 194.;
+const COEDIT_LIGHT_SIZE: f64 = 14.;
 /// One open project in the toolbar's tab strip.
 #[derive(Clone, Debug, PartialEq)]
 struct Tab {
@@ -2937,7 +2941,7 @@ impl ToolbarDelegate {
         }
         if name == "agentPresence" {
             let view: Retained<CoeditPresence> = unsafe {
-                msg_send![super(CoeditPresence::alloc(mtm).set_ivars(())),initWithFrame:NSRect::new(NSPoint::ZERO,NSSize::new(250.,24.))]
+                msg_send![super(CoeditPresence::alloc(mtm).set_ivars(())),initWithFrame:NSRect::new(NSPoint::ZERO,NSSize::new(COEDIT_CHIP_WIDTH,COEDIT_CHIP_HEIGHT))]
             };
             let view: Retained<NSView> = Retained::into_super(view);
             view.setWantsLayer(true);
@@ -2946,7 +2950,7 @@ impl ToolbarDelegate {
                 layer.setBackgroundColor(Some(&native_color(t.colors.field).CGColor()));
             }
             for (tag, title, x, width) in [
-                (0, "Agent working", 4., 194.),
+                (0, "Agent working", 4., COEDIT_TITLE_WIDTH),
                 (2, "Ⅱ", 200., 22.),
                 (3, "■", 224., 22.),
             ] {
@@ -2973,7 +2977,17 @@ impl ToolbarDelegate {
                     })));
                 }
                 button.setBordered(false);
-                button.setFrame(NSRect::new(NSPoint::new(x, 0.), NSSize::new(width, 24.)));
+                button.setFrame(NSRect::new(
+                    NSPoint::new(x, 0.),
+                    NSSize::new(width, COEDIT_CHIP_HEIGHT),
+                ));
+                if tag == 0 {
+                    button.setImage(Some(&presence_light(&AgentStatus::default(), 0., t)));
+                    button.setImagePosition(NSCellImagePosition::ImageLeft);
+                    if let Some(cell) = button.cell() {
+                        cell.setWraps(false);
+                    }
+                }
                 view.addSubview(&button);
             }
             item.setView(Some(&view));
@@ -3044,12 +3058,7 @@ impl ToolbarDelegate {
         // it and sizes it. Export is the bar's one prominent item, tinted
         // with the accent.
         let &(_, sym, label) = TOOLBAR_BUTTONS.iter().find(|(n, ..)| *n == name.as_str())?;
-        let image = if name == "agent" {
-            agent_toolbar_image(&AgentStatus::default(), 0., t)
-        } else {
-            toolbar_symbol(sym, label, t)
-        };
-        item.setImage(Some(&image));
+        item.setImage(Some(&toolbar_symbol(sym, label, t)));
         unsafe {
             item.setTarget(Some(target));
             item.setAction(Some(sel!(act:)));
@@ -3070,28 +3079,23 @@ impl ToolbarDelegate {
 #[path = "agent_launcher_native.rs"]
 mod launcher_native;
 use launcher_native::AgentButton;
+fn agent_launcher_button(toolbar: &NSToolbar) -> Option<Retained<AgentButton>> {
+    toolbar
+        .items()
+        .iter()
+        .find(|item| item.itemIdentifier().to_string() == "agent")?
+        .view()?
+        .downcast()
+        .ok()
+}
 impl Host {
     pub fn set_agent_launcher(&mut self, snapshot: crate::agent_launcher::Snapshot) {
-        let Some(item) = self
-            ._toolbar
-            .items()
-            .iter()
-            .find(|i| i.itemIdentifier().to_string() == "agent")
-        else {
-            return;
-        };
-        let Some(view) = item.view() else {
-            return;
-        };
-        let Some(button) = view.downcast_ref::<AgentButton>() else {
-            return;
-        };
-        button.publish(snapshot, self.tokens.clone());
+        if let Some(button) = agent_launcher_button(&self._toolbar) {
+            button.publish(snapshot, self.tokens.clone());
+        }
     }
 }
-/// The toolbar Agent item's state (agent-panel.md §1, v1 launcher status):
-/// idle, working (an accent ring turns around the glyph) or needing an
-/// answer (an accent dot; it wins over the ring), with background runs.
+/// Status for the co-editing chip, project tab and Agent tooltip.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AgentStatus {
     pub working: bool,
@@ -3102,6 +3106,7 @@ pub struct AgentStatus {
     pub elapsed: Option<String>,
     pub background: usize,
     pub progress: Option<String>,
+    pub additional_runs: usize,
     pub paused: bool,
     pub held: bool,
 }
@@ -3217,6 +3222,7 @@ fn task_toolbar_image(status: &TaskStatus, turn: f64, t: &Tokens) -> Retained<NS
 }
 /// A primary-label sparkle; an accent working ring or a trailing notice dot.
 /// AppKit retains ownership of the bezel and inactive-window treatment.
+#[cfg(test)]
 fn agent_toolbar_image(status: &AgentStatus, turn: f64, t: &Tokens) -> Retained<NSImage> {
     let glyph = symbol("sparkles", "Agent");
     let config =
@@ -3349,8 +3355,71 @@ fn presence_light(status: &AgentStatus, phase: f64, t: &Tokens) -> Retained<NSIm
         .fill();
         objc2::runtime::Bool::YES
     });
-    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(14., 14.), false, &draw)
+    NSImage::imageWithSize_flipped_drawingHandler(
+        NSSize::new(COEDIT_LIGHT_SIZE, COEDIT_LIGHT_SIZE),
+        false,
+        &draw,
+    )
 }
+
+fn coedit_presence_title(
+    status: &AgentStatus,
+    font: &NSFont,
+    width: f64,
+) -> Retained<objc2_foundation::NSAttributedString> {
+    use objc2::AnyThread;
+    use objc2_foundation::{NSDictionary, NSAttributedString, NSMutableAttributedString};
+
+    let text = if !status.working {
+        "Done · Undo".to_owned()
+    } else if status.paused {
+        "Paused · ⇧⌘. to resume".to_owned()
+    } else if status.held {
+        "Waiting for you to finish".to_owned()
+    } else {
+        format!("• {}", status.progress.as_deref().unwrap_or("Agent working"))
+    };
+    let font_key = unsafe { NSFontAttributeName };
+    let foreground_key = unsafe { NSForegroundColorAttributeName };
+    let foreground = NSColor::controlTextColor();
+    let attrs = NSDictionary::from_slices(
+        &[font_key, foreground_key],
+        &[font as &AnyObject, &*foreground as &AnyObject],
+    );
+    let count = if status.working && status.additional_runs > 0 {
+        let count_font = NSFont::systemFontOfSize(10.);
+        let color = NSColor::secondaryLabelColor();
+        let attrs = NSDictionary::from_slices(
+            &[font_key, foreground_key],
+            &[&*count_font as &AnyObject, &*color as &AnyObject],
+        );
+        Some(unsafe {
+            NSAttributedString::initWithString_attributes(
+                NSAttributedString::alloc(),
+                &NSString::from_str(&format!("  +{}", status.additional_runs)),
+                Some(&attrs),
+            )
+        })
+    } else {
+        None
+    };
+    let count_width = count.as_ref().map_or(0., |label| label.size().width.ceil());
+    let text = crate::agent_launcher::fit_presence_title(&text, width - count_width, |text| unsafe {
+        NSString::from_str(text).sizeWithAttributes(Some(&attrs)).width.ceil()
+    });
+    let title = unsafe {
+        NSMutableAttributedString::initWithString_attributes(
+            NSMutableAttributedString::alloc(),
+            &NSString::from_str(&text),
+            Some(&attrs),
+        )
+    };
+    if let Some(count) = count {
+        title.appendAttributedString(&count);
+    }
+    Retained::into_super(title)
+}
+
 impl Host {
     pub fn agent_effect_frames(&self) -> u64 {
         self.agent_effect_frames.get()
@@ -3384,29 +3453,21 @@ impl Host {
         else {
             return;
         };
+        if let Some(launcher) = agent_launcher_button(&self._toolbar) {
+            launcher.set_presence_visible(true);
+        }
         if let Some(view) = item.view() {
             let buttons = view.subviews().to_vec();
-            if let Some(button) = buttons.first() {
-                let text = if !status.working {
-                    "Done · Undo".to_owned()
-                } else if status.paused {
-                    "Paused · ⇧⌘. to resume".to_owned()
-                } else if status.held {
-                    "Waiting for you to finish".to_owned()
-                } else {
-                    format!(
-                        "• {}",
-                        status.progress.as_deref().unwrap_or("Agent working")
-                    )
-                };
-                let text: String = text.chars().take(38).collect();
-                let old: Retained<NSString> = unsafe { msg_send![&**button, title] };
-                if old.to_string() != text {
-                    let _: () =
-                        unsafe { msg_send![&**button,setTitle:&*NSString::from_str(&text)] };
+            if let Some(button) = buttons.first().and_then(|view| view.downcast_ref::<NSButton>()) {
+                if let Some(cell) = button.cell() {
+                    let width = cell.titleRectForBounds(button.bounds()).size.width;
+                    let font = button.font().unwrap_or_else(|| NSFont::systemFontOfSize(13.));
+                    let title = coedit_presence_title(status, &font, width);
+                    if button.title().to_string() != title.string().to_string() {
+                        button.setAttributedTitle(&title);
+                    }
                 }
-                let _: () =
-                    unsafe { msg_send![&**button,setTag:if status.working {0isize}else{1isize}] };
+                button.setTag(if status.working { 0 } else { 1 });
             }
             if !status.working {
                 for button in buttons.iter().skip(1) {
@@ -3430,6 +3491,9 @@ impl Host {
                     {
                         toolbar.removeItemAtIndex(index as isize);
                     }
+                    if let Some(launcher) = agent_launcher_button(&toolbar) {
+                        launcher.set_presence_visible(false);
+                    }
                 });
             let timer = unsafe {
                 objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(6., false, &step)
@@ -3441,9 +3505,7 @@ impl Host {
         }
     }
 
-    /// Shows the agent's state on the toolbar's Agent item: its glyph (a
-    /// turning ring while working, still under Reduce Motion; a dot when it
-    /// needs an answer) and its tooltip.
+    /// Updates the co-editing chip, project tab and Agent tooltip.
     pub fn set_agent_status(&mut self, status: AgentStatus) {
         if status == self.agent_status {
             return;
@@ -3462,14 +3524,14 @@ impl Host {
         self.paint_agent_status(status, false);
     }
     fn paint_agent_status(&mut self, status: AgentStatus, force: bool) {
-        let Some(item) = self
+        if let Some(item) = self
             ._toolbar
             .items()
             .iter()
             .find(|i| i.itemIdentifier().to_string() == "agent")
-        else {
-            return;
-        };
+        {
+            item.setToolTip(Some(&NSString::from_str(&status.tooltip())));
+        }
         let tokens = self.tokens.clone();
         let presence = self
             ._toolbar
@@ -3484,7 +3546,6 @@ impl Host {
                 timer.invalidate();
             }
         }
-        item.setToolTip(Some(&NSString::from_str(&status.tooltip())));
         let visual_changed = force
             || status.failed != self.agent_status.failed
             || status.unread != self.agent_status.unread
@@ -3503,26 +3564,19 @@ impl Host {
             if let Some(timer) = self.agent_timer.take() {
                 timer.invalidate();
             }
-            if visual_changed {
-                item.setImage(Some(&agent_toolbar_image(&status, 0., &tokens)));
-                if let Some(button) = &presence {
-                    button.setImage(Some(&presence_light(&status, 0., &tokens)));
-                }
+            if visual_changed && let Some(button) = &presence {
+                button.setImage(Some(&presence_light(&status, 0., &tokens)));
             }
-        } else if self.agent_timer.is_none() {
+        } else if self.agent_timer.is_none() && let Some(button) = presence {
             let started = std::time::Instant::now();
             let shown = status.clone();
-            let item = item.clone();
             let frame_count = self.agent_effect_frames.clone();
             let step =
                 block2::RcBlock::new(move |timer: std::ptr::NonNull<objc2_foundation::NSTimer>| {
                     frame_count.set(frame_count.get() + 1);
                     let elapsed = started.elapsed().as_secs_f64();
                     if elapsed >= 12. {
-                        item.setImage(Some(&agent_toolbar_image(&shown, 0.5, &tokens)));
-                        if let Some(button) = &presence {
-                            button.setImage(Some(&presence_light(&shown, 0., &tokens)));
-                        }
+                        button.setImage(Some(&presence_light(&shown, 0., &tokens)));
                         // Keep the invalidated timer in agent_timer until the
                         // run ends: elapsed text updates must not restart it.
                         unsafe {
@@ -3530,11 +3584,7 @@ impl Host {
                         }
                         return;
                     }
-                    let turn = elapsed % 1.;
-                    item.setImage(Some(&agent_toolbar_image(&shown, turn, &tokens)));
-                    if let Some(button) = &presence {
-                        button.setImage(Some(&presence_light(&shown, elapsed, &tokens)));
-                    }
+                    button.setImage(Some(&presence_light(&shown, elapsed, &tokens)));
                 });
             let timer = unsafe {
                 objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(
@@ -5955,6 +6005,9 @@ impl Host {
             popup.borrow_mut().update_tokens(&t, surface);
         }
         self.tokens = t;
+        if let Some(launcher) = agent_launcher_button(&self._toolbar) {
+            launcher.set_tokens(self.tokens.clone());
+        }
         // Rebuild token-coloured notices and the timer's captured appearance.
         if let Some(timer) = self.agent_timer.take() {
             timer.invalidate();
