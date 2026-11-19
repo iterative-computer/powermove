@@ -4861,8 +4861,10 @@ fn g2_g6_split_tool_keeps_the_pair_on_the_pieces_adjacent_to_the_cut(cx: &mut Te
 
     for (clip, time) in [("l0", 1.), ("l1", 3.)] {
         let mut project: serde_json::Value =
-            serde_json::from_str(&crate::v4_view_tests::project_json(2)).unwrap();
-        project["layers"][1]["from"] = serde_json::json!(2.);
+            serde_json::from_str(&crate::v4_view_tests::strips_json()).unwrap();
+        project["layers"].as_array_mut().unwrap().truncate(2);
+        project["layers"][0]["id"] = serde_json::json!("l0");
+        project["layers"][1]["id"] = serde_json::json!("l1");
         project["layers"][0]["transitionOut"] =
             serde_json::json!({"type":"crossfade","dur":0.5,"paired":"l1","offset":-0.25,"p":{}});
         project["layers"][1]["transitionIn"] =
@@ -4892,7 +4894,9 @@ fn g2_g6_split_tool_keeps_the_pair_on_the_pieces_adjacent_to_the_cut(cx: &mut Te
             (outs[0].clone(), duration)
         };
         let before = pair(&s);
+        assert!(before.1 > 0., "fixture needs media on both sides");
         s.surface.update(&mut s.vcx, |t, cx| {
+            t.set_view(Some(72.), Some(0.), Some(0.), cx);
             t.command("timeline.mode:tracks", 0., None, false, cx);
             t.command("timeline.tool:split", 0., None, false, cx);
         });
@@ -4901,15 +4905,20 @@ fn g2_g6_split_tool_keeps_the_pair_on_the_pieces_adjacent_to_the_cut(cx: &mut Te
         let at = s.surface.read_with(&s.vcx, |t, _| {
             let frame = t.frame().unwrap();
             let op = frame.ops.iter().find(|o| o.id == format!("clip:{clip}")).unwrap();
-            origin + point(
-                px((frame.viewport.layer_column + (time - frame.viewport.scroll_time) * frame.viewport.pps) as f32),
-                px((op.bounds.y + op.bounds.height / 2.) as f32),
-            )
+            let x = frame.viewport.layer_column + (time - frame.viewport.scroll_time) * frame.viewport.pps;
+            let y = op.bounds.y + op.bounds.height / 2.;
+            assert_eq!(frame.hit_clip(x, y).map(|(id, _)| id), Some(clip));
+            origin + point(px(x as f32), px(y as f32))
         });
         s.vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
         s.vcx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
         s.idle(cx);
-        assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.model().index.layers.len()), 3);
+        assert_eq!(
+            s.surface.read_with(&s.vcx, |t, _| t.model().index.layers.len()),
+            3,
+            "split {clip} at {time}; reports: {:?}",
+            s.recorder.reports.borrow()
+        );
         let after = pair(&s);
         assert_eq!(after.0.1, "l1");
         assert_eq!(after.0.0 == "l0", clip == "l1");
