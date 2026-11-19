@@ -305,7 +305,7 @@ export function EffectControls(props: PanelProps) {
                 overscanViewports: 1,
                 anchor: p.rows[0]?.id ?? null,
               }}
-              onRangeChange={(e) => {
+              onRangeChange={(e: SurfaceEvent) => {
                 // A list laid out with no height shows no rows: it asks
                 // for none rather than emptying the window it has.
                 if (e.range && e.range[1] > e.range[0]) {
