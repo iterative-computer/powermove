@@ -1373,7 +1373,7 @@ impl TimelineSurface {
             self.offline.clone(),
             self.sources.clone(),
         );
-        cx.spawn(async move |this, cx| {
+        crate::interaction_work::timeline!(cx, job, Job, async move |this, cx| {
             let (client, effects, built, preview) = cx
                 .background_executor()
                 .spawn(async move {

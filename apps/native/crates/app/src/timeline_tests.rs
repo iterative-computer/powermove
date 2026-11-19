@@ -4962,3 +4962,7 @@ fn g2_g6_split_tool_keeps_the_pair_on_the_pieces_adjacent_to_the_cut(cx: &mut Te
         assert_eq!(pair(&s), before);
     }
 }
+
+// Headless measurements through mounted app objects and their kernel workers.
+#[path = "drag_latency_timeline_tests.rs"]
+mod drag_latency_metrics;

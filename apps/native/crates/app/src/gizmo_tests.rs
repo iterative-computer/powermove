@@ -4082,3 +4082,5 @@ fn gradient_handle_unheard_release_closes_the_kernel_gesture(cx: &mut TestAppCon
     s.undo(cx);
     assert_eq!(s.surface.read_with(&s.vcx,|g,_|g.effect_points()),before);
 }
+#[path = "drag_latency_viewer_tests.rs"]
+mod drag_latency_metrics;

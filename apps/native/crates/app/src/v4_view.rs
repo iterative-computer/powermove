@@ -3057,7 +3057,7 @@ impl SurfaceView {
         let runtime = self.runtime.clone();
         let panel = self.publication.panel.clone();
         let gesture = self.scrub_gesture;
-        cx.spawn(async move |this, cx| {
+        crate::interaction_work::spawn!(cx, async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
