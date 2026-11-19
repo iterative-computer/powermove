@@ -504,7 +504,7 @@ fn plan_on(
     let before = mode.map(|_| Doc::of(&scratch));
     let compact = mode.is_some_and(|mode| !mode.verbose);
     let mut other_ids = Vec::new();
-    let mut plan = |scratch: &mut DocumentStore, batch: &mut Batch, index: usize, mut c: Value| -> Result<()> {
+    let mut plan = |scratch: &mut DocumentStore, batch: &mut Batch, command_index: usize, mut c: Value| -> Result<()> {
         let kind = c["type"].as_str().unwrap().to_owned();
         let p = Doc::of(scratch);
         let target = || resolve(&c["target"], &p, &batch.selection);
@@ -1213,7 +1213,7 @@ fn plan_on(
             json!({"command":c,"data":data})
         };
         if mode.is_some() {
-            result["index"] = json!(index);
+            result["index"] = json!(command_index);
             result["ok"] = json!(true);
         }
         batch.results.push(result);
