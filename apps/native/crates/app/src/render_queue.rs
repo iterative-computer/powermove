@@ -133,11 +133,30 @@ impl Queue {
             Ok(())
         })
     }
+    fn move_pending(rows: &mut [Row], id: u64, earlier: bool) -> Result<(), String> {
+        let from = rows
+            .iter()
+            .position(|row| row.id == id && row.status == "Pending")
+            .ok_or("Only waiting jobs can be moved")?;
+        let pending = |at: &usize| rows[*at].status == "Pending";
+        let to = if earlier {
+            (0..from).rev().find(pending)
+        } else {
+            (from + 1..rows.len()).find(pending)
+        };
+        if let Some(to) = to {
+            rows.swap(from, to);
+        }
+        Ok(())
+    }
     pub fn action(&mut self, id: u64, action: &str) -> Result<(), String> {
         self.change(|rows| {
             if action == "clear" {
                 rows.retain(|r| r.status == "Pending" || r.status == "Rendering");
                 return Ok(());
+            }
+            if matches!(action, "moveUp" | "moveDown") {
+                return Self::move_pending(rows, id, action == "moveUp");
             }
             let row = rows
                 .iter_mut()
@@ -205,6 +224,29 @@ mod tests {
         q.action(b, "remove").unwrap();
         assert_eq!(q.rows.len(), 2);
     }
+    #[test]
+    fn pending_order_can_change_while_a_job_renders_and_survives_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("queue.json");
+        let mut queue = Queue::load(file.clone());
+        let done = queue.add(json!({"name":"Previous export"})).unwrap();
+        queue.take_pending().unwrap();
+        queue.finish(done, "Done", String::new()).unwrap();
+        let running = queue.add(json!({"name":"Current export"})).unwrap();
+        let first = queue.add(json!({"name":"First waiting"})).unwrap();
+        let second = queue.add(json!({"name":"Second waiting"})).unwrap();
+        assert_eq!(queue.take_pending().unwrap().unwrap().0, running);
+        assert!(queue.action(running, "moveDown").is_err());
+        assert!(queue.action(done, "moveDown").is_err());
+        queue.action(second, "moveUp").unwrap();
+        assert_eq!(queue.rows.iter().map(|row| row.id).collect::<Vec<_>>(), [done, running, second, first]);
+        assert_eq!(queue.rows[1].status, "Rendering");
+        assert!(queue.take_pending().unwrap().is_none());
+        assert_eq!(Queue::load(file).rows.iter().map(|row| row.id).collect::<Vec<_>>(), [done, running, second, first]);
+        queue.finish(running, "Done", String::new()).unwrap();
+        assert_eq!(queue.take_pending().unwrap().unwrap().0, second);
+    }
+
     #[test]
     fn relaunch_restores_interrupted_job_as_pending() {
         let dir = tempfile::tempdir().unwrap();

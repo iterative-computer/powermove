@@ -16,14 +16,14 @@ const sectionLabel = {
   fontVariantNumeric: "tabular-nums",
 };
 const caption = { color: t("colors.muted"), fontSize: t("typography.minimum") };
-export const jobActions = (status: QueueJob["status"]) =>
-  status === "Rendering" || status === "Pending"
-    ? ["cancel"]
-    : status === "Failed"
-      ? ["retry", "remove"]
-      : status === "Done"
-        ? ["finder", "remove"]
-        : ["remove"];
+const actionsByStatus = {
+  Pending: ["moveUp", "moveDown", "cancel"],
+  Rendering: ["cancel"],
+  Failed: ["retry", "remove"],
+  Done: ["finder", "remove"],
+  Cancelled: ["remove"],
+} as const;
+export const jobActions = (status: QueueJob["status"]) => actionsByStatus[status];
 export function jobFormat(job: QueueJob) {
   if (job.format === "prores")
     return `ProRes ${({ "422proxy": "422 Proxy", "422lt": "422 LT", "422": "422", "422hq": "422 HQ", "4444": "4444", "4444xq": "4444 XQ" } as Record<string, string>)[job.profile ?? "4444"] ?? ""}`.trim();
@@ -57,6 +57,8 @@ export function jobTime(seconds?: number, now = new Date()) {
   return `${prefix} ${date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false })}`;
 }
 const icons = {
+  moveUp: ["chevron.up", "Move up"],
+  moveDown: ["chevron.down", "Move down"],
   cancel: ["xmark", "Cancel"],
   retry: ["arrow.clockwise", "Retry"],
   finder: ["magnifyingglass", "Show in Finder"],
@@ -66,9 +68,13 @@ function JobRow({
   job,
   model,
   watch,
+  canMoveUp = false,
+  canMoveDown = false,
 }: {
   key?: number;
   job: QueueJob;
+  canMoveUp?: boolean;
+  canMoveDown?: boolean;
   model: ExportModel;
   watch: (p: Promise<unknown>) => void;
 }) {
@@ -198,13 +204,17 @@ function JobRow({
       )}
       <div style={{ ...row, flexShrink: 0, opacity: hover || focus ? 1 : 0 }}>
         {jobActions(job.status).map((action) => {
-          const [symbol, label] = icons[action as keyof typeof icons];
+          const [symbol, label] = icons[action];
           return (
             <UI.ToolbarItem
               key={action}
               id={`queue.${action}.${job.id}`}
               label={`${label} ${job.name}`}
               title={label}
+              disabled={
+                (action === "moveUp" && !canMoveUp) ||
+                (action === "moveDown" && !canMoveDown)
+              }
               attr={{ symbol }}
               metadata={{ pmKit: { recipe: "icon_button" } }}
               style={{
@@ -237,6 +247,9 @@ export function RenderQueue({
   const pending = jobs.filter(
     (j) => j.status === "Pending" || j.status === "Rendering",
   );
+  const waiting = pending.filter((job) => job.status === "Pending");
+  const firstWaiting = waiting[0]?.id;
+  const lastWaiting = waiting.at(-1)?.id;
   const history = jobs
     .filter((j) => j.status !== "Pending" && j.status !== "Rendering")
     .sort(
@@ -280,7 +293,14 @@ export function RenderQueue({
             />
           </div>
           {pending.map((job) => (
-            <JobRow key={job.id} job={job} model={model} watch={watch} />
+            <JobRow
+              key={job.id}
+              job={job}
+              model={model}
+              watch={watch}
+              canMoveUp={job.id !== firstWaiting}
+              canMoveDown={job.id !== lastWaiting}
+            />
           ))}
         </div>
       ) : null}

@@ -645,7 +645,7 @@ test("each queue status has exactly its inline actions, revealed on hover and ke
   const f = await mounted(seed, true);
   expect(named(f.root, "queue.time.5").textContent).not.toBe("");
   const expected = [
-    ["cancel"],
+    ["moveUp", "moveDown", "cancel"],
     ["cancel"],
     ["finder", "remove"],
     ["retry", "remove"],
@@ -657,7 +657,7 @@ test("each queue status has exactly its inline actions, revealed on hover and ke
     expect(jobRow.props.style).toMatchObject({
       height: { token: "metrics.export_job_row" },
     });
-    for (const action of ["cancel", "retry", "finder", "remove"]) {
+    for (const action of ["moveUp", "moveDown", "cancel", "retry", "finder", "remove"]) {
       const node = [...f.root.host.nodes.values()].find(
         (n) => n.props.id === `queue.${action}.${id}`,
       );
@@ -696,18 +696,20 @@ test("each queue status has exactly its inline actions, revealed on hover and ke
   await f.root.dispose();
 });
 
-test("project-file settings keep the output form above slim progress", async () => {
+test("project export shows an editable-project card just after its format options", async () => {
   const seed = initial();
   seed.options.format = "json";
-  seed.run = { phase: "preparing" };
   const f = await mounted(seed);
-  expect(
-    [...f.root.host.nodes.values()].filter(
-      (n) => n.props.id === "export.queue",
-    ),
-  ).toHaveLength(0);
-  expect(named(f.root, "export.format")).toBeDefined();
-  expect(named(f.root, "export.current")).toBeDefined();
+  const format = named(f.root, "export.row.format");
+  const card = named(f.root, "export.project.editable");
+  expect(card.parent).toBe(format.parent);
+  const children = card.parent!.children;
+  expect(children.indexOf(card) - children.indexOf(format)).toBe(2); // one divider
+  const info = [card, ...card.children];
+  expect(info.some((node) => node.textContent === "Keep every layer editable")).toBe(true);
+  expect(info.every((node) => node.props.control === undefined && node.props.role !== "switch")).toBe(true);
+  expect(has(f.root, "export.destination.choose")).toBe(true);
+  expect(has(f.root, "export.current")).toBe(false);
   check(replay(f.commits));
   await f.root.dispose();
 });
@@ -753,12 +755,12 @@ const queueFixture = (): NonNullable<ExportSnapshot["queue"]> => [
 ];
 test("settings open first with grouped output in order and actions outside the scroll", async () => {
   const seed = initial();
-  seed.queue = queueFixture();
+  seed.queue = queueFixture().map((job) => job.status === "Rendering" ? { ...job, status: "Pending" as const } : job);
   const f = await mounted(seed);
-  expect(has(f.root, "export.queue.rows")).toBe(false);
-  expect(has(f.root, "queue.job.1")).toBe(false);
+  expect(inside(f.root, "queue.job.1", "export.options")).toBe(true);
   const ids = [...f.root.host.nodes.values()].map((n) => n.props.id);
   const fields = [
+    "export.kind",
     "export.format",
     "export.quality",
     "export.range",
@@ -770,7 +772,7 @@ test("settings open first with grouped output in order and actions outside the s
   expect(
     positions.every((v, i) => v >= 0 && (!i || v > positions[i - 1])),
   ).toBe(true);
-  for (const id of fields)
+  for (const id of fields.slice(1))
     expect(inside(f.root, id, "export.options")).toBe(true);
   expect(named(f.root, "export.queue.badge").textContent).toBe("3");
   for (const id of ["export.queue.open", "export.queue.add", "export.start"]) {
@@ -791,7 +793,7 @@ test("settings open first with grouped output in order and actions outside the s
 });
 test("Queue pushes inside the same popover; Back and Escape return to settings", async () => {
   const seed = initial();
-  seed.queue = queueFixture();
+  seed.queue = queueFixture().map((job) => job.status === "Rendering" ? { ...job, status: "Pending" as const } : job);
   const f = await mounted(seed);
   const sheet = named(f.root, "export.sheet").id;
   await event(f.root, named(f.root, "export.queue.open").id, "click");
@@ -805,7 +807,7 @@ test("Queue pushes inside the same popover; Back and Escape return to settings",
   await event(f.root, named(f.root, "export.queue.back").id, "click");
   await f.root.flush();
   expect(has(f.root, "export.format")).toBe(true);
-  expect(has(f.root, "export.queue.rows")).toBe(false);
+  expect(inside(f.root, "queue.job.1", "export.options")).toBe(true);
   await event(f.root, named(f.root, "export.queue.open").id, "click");
   await f.root.flush();
   expect(await f.model.key("Escape")).toBe(true);
@@ -842,25 +844,50 @@ test("empty Queue and History sections are hidden; both empty show one compact m
     await f.root.dispose();
   }
 });
-test("settings show one slim progress row above the fixed footer, then the completion banner", async () => {
+test("the active run shows progress and preview above the queue, then returns to setup", async () => {
   const seed = initial();
-  seed.queue = queueFixture();
-  seed.run = { phase: "rendering", frame: 42, total: 100, elapsed: 2 };
+  seed.queue = [...queueFixture(), {
+    id: 4, name: "Credits", format: "mp4", path: "/Exports/Credits.mp4",
+    status: "Pending", progress: 0, error: "",
+  }];
+  seed.run = {
+    phase: "rendering",
+    frame: 42,
+    total: 100,
+    elapsed: 2,
+    preview: "fixture/frame-42",
+  };
   const f = await mounted(seed);
-  expect(named(f.root, "export.current.name").textContent).toBe("Opening");
-  expect(named(f.root, "export.current.percent").textContent).toBe("42 %");
-  expect(named(f.root, "export.progress").props.style).toMatchObject({
-    height: { token: "metrics.export_job_progress_height" },
-  });
+  const current = named(f.root, "export.current");
+  expect(
+    named(f.root, "export.header").children.some((heading) =>
+      heading.children.some((title) => title.textContent === "Exporting “Opening”"),
+    ),
+  ).toBe(true);
+  expect(named(f.root, "export.progress").props.value).toBe(0.42);
+  expect(
+    named(f.root, "export.preview").children.some((image) =>
+      image.props.resource === "fixture/frame-42",
+    ),
+  ).toBe(true);
   expect(has(f.root, "export.queue.indicator")).toBe(true);
-  expect(has(f.root, "queue.job.1")).toBe(false);
-  expect(inside(f.root, "export.current", "export.options")).toBe(false);
-  const children = named(f.root, "export.sheet").children.map(
-    (n) => n.props.id,
-  );
-  expect(children.indexOf("export.current")).toBeLessThan(
-    children.indexOf("export.footer"),
-  );
+  expect(inside(f.root, "queue.job.1", "export.queue.rows")).toBe(true);
+  expect(inside(f.root, "queue.job.2", "export.queue.rows")).toBe(true);
+  expect(has(f.root, "export.options")).toBe(false);
+  const children = named(f.root, "export.sheet").children;
+  expect(children.indexOf(current)).toBeLessThan(children.indexOf(named(f.root, "export.queue.rows")));
+  expect(children.indexOf(named(f.root, "export.queue.rows"))).toBeLessThan(children.indexOf(named(f.root, "export.footer")));
+  expect(has(f.root, "export.start")).toBe(false);
+  expect(has(f.root, "export.queue.add")).toBe(false);
+  expect(named(f.root, "queue.moveUp.2").props.disabled).toBe(true);
+  expect(named(f.root, "queue.moveDown.4").props.disabled).toBe(true);
+  await event(f.root, named(f.root, "queue.moveUp.4").id, "click");
+  await f.root.flush();
+  expect(f.requests.some(({ operation }) =>
+    operation.type === "command" && operation.command === "export.queue.action" &&
+    JSON.stringify(operation.args) === JSON.stringify({ id: 4, action: "moveUp" }),
+  )).toBe(true);
+  check(replay(f.commits));
   await event(f.root, named(f.root, "export.cancel").id, "click");
   await f.root.flush();
   expect(
@@ -873,10 +900,12 @@ test("settings show one slim progress row above the fixed footer, then the compl
   await f.root.dispose();
   const done = initial();
   done.run = { phase: "done", path: "/Exports/Opening.mp4" };
+  done.queue = [{ ...queueFixture()[0]!, status: "Done", progress: 1 }];
   const g = await mounted(done);
   expect(has(g.root, "export.current")).toBe(false);
   expect(has(g.root, "export.completed")).toBe(true);
   expect(has(g.root, "export.showInFinder")).toBe(true);
+  expect(inside(g.root, "queue.job.1", "export.options")).toBe(true);
   check(replay(g.commits));
   await g.root.dispose();
 });

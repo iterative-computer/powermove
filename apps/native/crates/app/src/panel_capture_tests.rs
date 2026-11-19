@@ -139,6 +139,12 @@ fn capture_builtin_panels() {
                             {"id":2,"name":"Logo","format":"prores","path":"/Exports/Logo.mov","status":"Pending","progress":0.,"error":""},
                             {"id":3,"name":"Opening","format":"mp4","path":"/Exports/Opening.mp4","status":"Done","progress":1.,"error":"","finishedAt":1794686520}
                         ])).unwrap());
+                    } else if export_view.as_deref() == Some("rendering") {
+                        wait(r.runtime.observe_render_queue(serde_json::json!([
+                            {"id":1,"name":"Opening","format":"mp4","path":"/Exports/Opening.mp4","status":"Rendering","progress":0.42,"error":""},
+                            {"id":2,"name":"Logo","format":"prores","path":"/Exports/Logo.mov","status":"Pending","progress":0.,"error":""},
+                            {"id":3,"name":"Credits","format":"mp4","path":"/Exports/Credits.mp4","status":"Pending","progress":0.,"error":""}
+                        ])).unwrap());
                     } else if export_view.as_deref() == Some("empty") {
                         wait(r.runtime.observe_render_queue(serde_json::json!([])).unwrap());
                     }

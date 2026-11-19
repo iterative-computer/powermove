@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { jobActions, jobFormat, jobTime } from "./queue";
 import type { QueueJob } from "./model";
 test("queue action policy follows each status", () => {
-  expect(jobActions("Pending")).toEqual(["cancel"]);
+  expect(jobActions("Pending")).toEqual(["moveUp", "moveDown", "cancel"]);
   expect(jobActions("Rendering")).toEqual(["cancel"]);
   expect(jobActions("Failed")).toEqual(["retry", "remove"]);
   expect(jobActions("Done")).toEqual(["finder", "remove"]);
