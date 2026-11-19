@@ -446,6 +446,7 @@ function ExtensionRows({
             <UI.PushButton
               tabIndex={-1}
               label={item.name}
+              children={[]}
               metadata={{ settingsLayout: "nameButton" }}
               onClick={() => model.viewExtension(item.id)}
             />
