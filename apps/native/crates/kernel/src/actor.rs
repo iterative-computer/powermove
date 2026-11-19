@@ -1332,6 +1332,10 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
                         .then_some(*token)
                 });
             match crate::pro_editing::prepare(kernel, &project, request, clock) {
+                Ok(crate::pro_editing::Prepared::Rejected(ack)) => {
+                    reply(Ok(crate::pro_editing::ProReply::Document(ack)));
+                    return;
+                }
                 Ok(crate::pro_editing::Prepared::Call(request)) => Msg::Call {
                     project,
                     request,

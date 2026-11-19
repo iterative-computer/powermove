@@ -230,20 +230,13 @@ impl ProEditCommand {
                 linked,
             } => {
                 let delta = number(*delta)?;
-                let left = targets(cx, std::slice::from_ref(left_id), *linked)?;
-                let right = targets(cx, std::slice::from_ref(right_id), *linked)?;
-                let pairs = adjacent_pairs(cx, &left, &right)?;
-                let mut lo = f64::NEG_INFINITY;
-                let mut hi = f64::INFINITY;
-                for (a, b) in &pairs {
-                    let frame = 1. / cx.fps(a.comp.as_deref());
-                    lo = lo.max(frame - a.dur).max(if b.remap {
-                        f64::NEG_INFINITY
-                    } else {
-                        -b.trim / b.rate
-                    });
-                    hi = hi.min(b.dur - frame).min(a.out_handle(cx));
-                }
+                let pairs = roll_pairs(
+                    cx,
+                    std::slice::from_ref(left_id),
+                    std::slice::from_ref(right_id),
+                    *linked,
+                )?;
+                let (lo, hi) = roll_limits(cx, &pairs);
                 if lo > hi {
                     return Err(invalid("No source handles remain at this edit."));
                 }
@@ -288,6 +281,57 @@ impl ProEditCommand {
         }
     }
 }
+
+fn roll_pairs(
+    cx: &Cx<'_>,
+    left_ids: &[String],
+    right_ids: &[String],
+    linked: bool,
+) -> Result<Vec<(Clip, Clip)>, CommandError> {
+    let left = targets(cx, left_ids, linked)?;
+    let right = targets(cx, right_ids, linked)?;
+    adjacent_pairs(cx, &left, &right)
+}
+
+fn roll_limits(cx: &Cx<'_>, pairs: &[(Clip, Clip)]) -> (f64, f64) {
+    let mut lo = f64::NEG_INFINITY;
+    let mut hi = f64::INFINITY;
+    for (a, b) in pairs {
+        let frame = 1. / cx.fps(a.comp.as_deref());
+        lo = lo.max(frame - a.dur).max(if b.remap {
+            f64::NEG_INFINITY
+        } else {
+            -b.trim / b.rate
+        });
+        hi = hi.min(b.dur - frame).min(a.out_handle(cx));
+    }
+    (lo, hi)
+}
+
+/// Preflight for the typed adapter: refuse the edit if the gesture planner would clamp it.
+pub(crate) fn check_typed_roll(
+    cx: &Cx<'_>,
+    left_ids: &[String],
+    right_ids: &[String],
+    delta: f64,
+    linked: bool,
+) -> Result<(), CommandError> {
+    let delta = number(delta)?;
+    let pairs = roll_pairs(cx, left_ids, right_ids, linked)?;
+    let (lo, hi) = roll_limits(cx, &pairs);
+    if delta >= lo && delta <= hi {
+        return Ok(());
+    }
+    // Preserve the old refusal for the requested (unclamped) edit.
+    for (mut a, mut b) in pairs {
+        a.dur += delta;
+        b.trim_in(delta)?;
+        a.validate(cx, true)?;
+        b.validate(cx, true)?;
+    }
+    Err(invalid("The edit exceeds available source handles."))
+}
+
 pub(super) fn targets(
     cx: &Cx<'_>,
     ids: &[String],

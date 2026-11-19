@@ -2,9 +2,11 @@
 //! the host supplies the authenticated caller and observed document identity.
 //! All planning runs on the kernel actor, against its current state.
 use crate::{
-    Ack, Call, Caller, Command, CommandError, Kernel, KernelFailure, Request, SelectionCall,
+    Ack, Call, Caller, Command, CommandError, Kernel, KernelFailure, Reply, Request, SelectionCall,
+    TransactionError, TxId,
     commands::{
-        pro_edit::{Edge, ProEditCommand as Edit, SplitTail, TrackTarget},
+        Cx,
+        pro_edit::{Edge, ProEditCommand as Edit, SplitTail, TrackTarget, check_typed_roll},
         pro_links::{self, ProLinkCommand as Link},
         pro_source::{
             EditPoints, ProSourceCommand, SourceEditMode, SourceMedia, SourceSplit, SourceTarget,
@@ -99,6 +101,7 @@ pub(crate) struct SourceFinish {
 }
 pub(crate) enum Prepared {
     Call(Request),
+    Rejected(Ack),
     SourceEdit {
         request: Request,
         finish: SourceFinish,
@@ -465,7 +468,38 @@ pub(crate) fn prepare(
         })
     };
     match r.action {
-        ProAction::Command(c) => return Ok(transact(c)),
+        ProAction::Command(c) => {
+            // Native gestures send their edits directly, not through this typed adapter.
+            // At an older revision, let the transaction replay or reject as usual.
+            if r.revision == store.revision()
+                && let Command::ProEdit(Edit::Roll {
+                    left_id,
+                    right_id,
+                    delta,
+                    linked,
+                }) = &c
+                && let Err(error) = check_typed_roll(
+                    &Cx::new(root, r.caller.origin),
+                    std::slice::from_ref(left_id),
+                    std::slice::from_ref(right_id),
+                    *delta,
+                    *linked,
+                )
+            {
+                return Ok(Prepared::Rejected(Ack {
+                    txid: r.txid.map(|txid| TxId {
+                        realm: r.caller.writer.realm,
+                        generation: r.caller.writer.generation,
+                        txid,
+                    }),
+                    revision: r.revision,
+                    folded: None,
+                    notice: None,
+                    reply: Reply::Throw(TransactionError::Command(error).into()),
+                }));
+            }
+            return Ok(transact(c));
+        }
         ProAction::Undo | ProAction::Redo => {
             if r.revision != store.revision() {
                 return Err(error("Pro history revision changed"));
