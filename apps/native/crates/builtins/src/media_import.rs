@@ -1720,6 +1720,7 @@ mod tests {
                     ImportRequest {
                         paths: vec![path],
                         place_at: Some(1.),
+                        models: true,
                         ..Default::default()
                     },
                     &AtomicBool::new(false),
