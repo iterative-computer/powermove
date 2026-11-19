@@ -28,10 +28,6 @@ export const absolute = (path: string) => (path.startsWith('http') ? path : SITE
 /** Every indexable page, in sitemap order. */
 export const PAGES = [
   { path: '/', title: HOME_TITLE },
-  { path: '/vs/after-effects', title: 'Powermove vs After Effects' },
-  { path: '/clones', title: 'Free After Effects plugin alternatives, made in Powermove' },
-  { path: '/clones/sapphire-glint', title: 'Free Sapphire S_Glint alternative, made in Powermove' },
-  { path: '/clones/optical-flares', title: 'Free Optical Flares alternative, made in Powermove' },
   { path: '/privacy', title: 'Privacy Policy' },
   { path: '/terms', title: 'Terms of Service' },
 ] as const;
@@ -93,13 +89,6 @@ export function faqPage(items: Qa[], path: string): Json {
     '@type': 'FAQPage',
     '@id': `${SITE_URL}${path === '/' ? '/' : path}#faq`,
     mainEntity: items.map(({ q, a }) => ({ '@type': 'Question', name: q, acceptedAnswer: { '@type': 'Answer', text: a } })),
-  };
-}
-
-export function breadcrumbs(trail: { name: string; path: string }[]): Json {
-  return {
-    '@type': 'BreadcrumbList',
-    itemListElement: trail.map((crumb, i) => ({ '@type': 'ListItem', position: i + 1, name: crumb.name, item: absolute(crumb.path) })),
   };
 }
 

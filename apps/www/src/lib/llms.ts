@@ -1,5 +1,3 @@
-import { CLONES, cloneDescription, cloneTitle } from './clones';
-import { VS_AE_DESCRIPTION, VS_AE_FAQ, VS_AE_ROWS } from './compare';
 import { HOME_FAQ } from './faq';
 import { DISCORD, GITHUB, RELEASES } from './links';
 import { HEADLINE, MALLEABLE, absolute } from './site';
@@ -29,9 +27,6 @@ ${FACTS.map((fact) => `- ${fact}`).join('\n')}
 ## Pages
 
 - [Home](${absolute('/')}): ${HEADLINE}. What Powermove is, what it does, and FAQs.
-- [Powermove vs After Effects](${absolute('/vs/after-effects')}): ${VS_AE_DESCRIPTION}
-- [Effect clones](${absolute('/clones')}): Paid plugin looks rebuilt in Powermove from one sentence each.
-${CLONES.map((clone) => `- [${cloneTitle(clone)}](${absolute(`/clones/${clone.slug}`)}): ${cloneDescription(clone)}`).join('\n')}
 
 ## Get Powermove
 
@@ -50,22 +45,6 @@ ${CLONES.map((clone) => `- [${cloneTitle(clone)}](${absolute(`/clones/${clone.sl
 
 export function llmsFullTxt(downloadHref: string): string {
   const qa = (items: { q: string; a: string }[]) => items.map(({ q, a }) => `### ${q}\n\n${a}`).join('\n\n');
-  const clones = CLONES.map((clone) => {
-    const lines = [
-      `### ${cloneTitle(clone)}`,
-      '',
-      `URL: ${absolute(`/clones/${clone.slug}`)}`,
-      '',
-      `${clone.plugin} by ${clone.vendor} costs ${clone.price} (${clone.priceNote}). ${clone.what}`,
-      '',
-      clone.video
-        ? `Prompt used in Powermove${clone.agent ? ` (${clone.agent.provider} ${clone.agent.model})` : ''}: "${clone.prompt}". ${clone.video.description}`
-        : `Prompt: "${clone.prompt}". The short for this clone is in production.`,
-    ];
-    if (clone.controls) lines.push('', `Controls the generated effect exposes: ${clone.controls.join(', ')}.`);
-    return lines.join('\n');
-  }).join('\n\n');
-
   return `# Powermove
 
 > ${SUMMARY}
@@ -81,19 +60,5 @@ ${FACTS.map((fact) => `- ${fact}`).join('\n')}
 ## Frequently asked questions
 
 ${qa(HOME_FAQ)}
-
-## Powermove vs After Effects
-
-URL: ${absolute('/vs/after-effects')}
-
-${VS_AE_ROWS.map((row) => `- ${row.topic}. Powermove: ${row.powermove} After Effects: ${row.ae}`).join('\n')}
-
-${qa(VS_AE_FAQ)}
-
-## Effect clones
-
-Paid plugin looks, rebuilt in Powermove from a one-sentence prompt to a coding agent.
-
-${clones}
 `;
 }

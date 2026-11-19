@@ -60,13 +60,6 @@
 
     <Features />
 
-    <article class="row" id="clones" aria-labelledby="clones-title">
-      <div class="row-copy">
-        <h3 id="clones-title">Plugin looks from a sentence</h3>
-        <p><span class="strong">Sapphire S_Glint is a $1,865 license.</span> In Powermove it took one prompt to Claude. <a class="row-link" href="/clones">See the effect clones</a></p>
-      </div>
-      <a class="row-media" href="/clones/sapphire-glint" aria-label="Free Sapphire S_Glint alternative, made in Powermove"><img src="/clones/sapphire-glint-wide.jpg" alt="A night avenue of street lamps with star-shaped glints on every lamp, made by the Glint effect an agent wrote in Powermove." width="1080" height="608" loading="lazy" /></a>
-    </article>
 
     <article class="row" aria-labelledby="kernel-title">
       <div class="row-copy">

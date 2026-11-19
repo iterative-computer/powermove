@@ -4,7 +4,7 @@
   type Props = {
     title: string;
     description: string;
-    /** Site-relative path without a trailing slash, e.g. "/vs/after-effects". */
+    /** Site-relative path without a trailing slash, e.g. "/privacy". */
     path: string;
     image?: string;
     imageAlt?: string;
