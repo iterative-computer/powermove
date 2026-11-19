@@ -5,6 +5,39 @@ pub mod quad {
     use wgsl_rs::std::*;
 
     #[derive(Clone, Copy, Wgsl)]
+    pub struct QuadPaint {
+        pub tag_and_color_space: u32,
+        pub gradient_angle_or_pattern_height: f32,
+        pub colors: [LinearColorStop; 2],
+    }
+
+    impl QuadPaint {
+        pub fn unpack(paint: QuadPaint) -> Background {
+            let raw_tag = paint.tag_and_color_space & 3u32;
+            let mut tag = BackgroundTag::Solid;
+            if raw_tag == 1u32 {
+                tag = BackgroundTag::LinearGradient;
+            } else if raw_tag == 2u32 {
+                tag = BackgroundTag::PatternSlash;
+            } else if raw_tag == 3u32 {
+                tag = BackgroundTag::Checkerboard;
+            }
+            let mut color_space = ColorSpace::Srgb;
+            if (paint.tag_and_color_space & 4u32) != 0u32 {
+                color_space = ColorSpace::Oklab;
+            }
+            Background {
+                tag,
+                color_space,
+                solid: paint.colors[0].color,
+                gradient_angle_or_pattern_height: paint.gradient_angle_or_pattern_height,
+                colors: paint.colors,
+                padding: 0u32,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Wgsl)]
     pub struct Quad {
         pub order: u32,
         pub border_style: BorderStyle,
@@ -12,8 +45,8 @@ pub mod quad {
         pub border_dashed_gap: f32,
         pub bounds: Bounds,
         pub content_mask: ContentMask,
-        pub background: Background,
-        pub border_color: Background,
+        pub background: QuadPaint,
+        pub border_color: QuadPaint,
         pub corner_radii: Corners,
         pub border_widths: Edges,
         pub corner_smoothing: f32,
@@ -514,10 +547,10 @@ pub mod quad {
         let vertex = rectangle_vertex(vertex_id, quad.bounds);
         QuadVertexData {
             position: vertex.clip_position,
-            border: prepare_paint(Paint::new(quad.border_color, quad.bounds)),
+            border: prepare_paint(Paint::new(QuadPaint::unpack(quad.border_color), quad.bounds)),
             quad_id: instance_id,
             clip_distances: clip_distances(vertex.viewport_position, quad.content_mask.bounds),
-            fill: prepare_paint(Paint::new(quad.background, quad.bounds)),
+            fill: prepare_paint(Paint::new(QuadPaint::unpack(quad.background), quad.bounds)),
         }
     }
 
@@ -578,7 +611,7 @@ pub mod quad {
         let quad = get!(QUADS)[input.quad_id as usize];
         let fade = content_mask_alpha(quad.content_mask, input.position.xy());
         let fill_color = paint_color(
-            Paint::new(quad.background, quad.bounds),
+            Paint::new(QuadPaint::unpack(quad.background), quad.bounds),
             input.position.xy(),
             PreparedPaint::new(input.fill_solid, input.fill_color0, input.fill_color1),
         );
@@ -595,7 +628,7 @@ pub mod quad {
         let mut color = fill_color;
         if max(distances.inner, distances.outer) < PIXEL_ANTIALIAS_RADIUS {
             let mut border_color = paint_color(
-                Paint::new(quad.border_color, quad.bounds),
+                Paint::new(QuadPaint::unpack(quad.border_color), quad.bounds),
                 input.position.xy(),
                 PreparedPaint::new(input.border_solid, input.border_color0, input.border_color1),
             );
@@ -697,7 +730,7 @@ pub mod quad {
         let quad = get!(QUADS)[input.quad_id as usize];
         let fade = content_mask_alpha(quad.content_mask, input.position.xy());
         let fill_color = paint_color(
-            Paint::new(quad.background, quad.bounds),
+            Paint::new(QuadPaint::unpack(quad.background), quad.bounds),
             input.position.xy(),
             PreparedPaint::new(input.fill_solid, input.fill_color0, input.fill_color1),
         );
@@ -797,7 +830,7 @@ pub mod quad {
 
         if max(inner, outer) < PIXEL_ANTIALIAS_RADIUS {
             let mut border_color = paint_color(
-                Paint::new(quad.border_color, quad.bounds),
+                Paint::new(QuadPaint::unpack(quad.border_color), quad.bounds),
                 input.position.xy(),
                 PreparedPaint::new(input.border_solid, input.border_color0, input.border_color1),
             );

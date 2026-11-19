@@ -206,7 +206,7 @@ impl HeadlessAppContext {
                 .scene
                 .quads
                 .iter()
-                .filter(|quad| quad.background.solid == color)
+                .filter(|quad| quad.background.solid() == Some(color))
                 .map(|quad| quad.bounds)
                 .collect()
         })

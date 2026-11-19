@@ -5459,7 +5459,7 @@ mod tests {
                     .scene
                     .quads
                     .iter()
-                    .any(|quad| quad.background.solid == highlight_color.into())
+                    .any(|quad| quad.background.solid() == Some(highlight_color.into()))
             }),
             "the highlighted inline text did not paint its background"
         );

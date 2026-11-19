@@ -2,7 +2,7 @@
 //! so private fields are checked too, without exposing them to renderer implementations.
 
 use super::*;
-use crate::{AtlasTextureId, DevicePixels, LinearColorStop, Size};
+use crate::{AtlasTextureId, DevicePixels, Size};
 
 #[doc(hidden)]
 pub struct SceneBufferLayout {
@@ -53,6 +53,13 @@ pub const SCENE_BUFFER_LAYOUTS: &[SceneBufferLayout] = &[
         "TransformationMatrix",
         rotation_scale,
         translation
+    ),
+    layout!(
+        QuadPaint,
+        "QuadPaint",
+        tag_and_color_space,
+        gradient_angle_or_pattern_height,
+        colors
     ),
     layout!(
         Quad,

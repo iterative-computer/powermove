@@ -5203,12 +5203,13 @@ impl Window {
 
         let snapped_bounds = self.snap_bounds(quad.bounds);
         let snapped_border_widths = self.snap_border_widths(quad.border_widths);
+        let has_background = !quad.background.is_transparent();
         let quad = Quad {
             order: 0,
             bounds: snapped_bounds,
             content_mask: self.snapped_content_mask(),
-            background: quad.background,
-            border_color: quad.border_color,
+            background: quad.background.into(),
+            border_color: quad.border_color.into(),
             corner_radii: quad.corner_radii.scale(self.scale_factor()),
             border_widths: snapped_border_widths,
             border_style: quad.border_style,
@@ -5218,7 +5219,7 @@ impl Window {
             padding: 0,
         };
 
-        if !quad.background.is_transparent() {
+        if has_background {
             self.next_frame.scene.insert_primitive(quad);
             return;
         }
