@@ -10,7 +10,7 @@ import { requireSession } from './session';
 import { loadAccount, providerSpend } from '../billing/account';
 import { costMicros, MODEL_PROVIDERS, MODELS, resolveModel, type HostedModel, type TokenUsage } from '../billing/plans';
 import { checkModelBudget } from '../billing/quotas';
-import { estimateUsage, meteredStream, usageFromJson } from '../billing/meter';
+import { estimateUsage, meterBody, usageFromJson } from '../billing/meter';
 
 /** Output ceiling per request; keeps a single call from blowing far past the remaining budget. */
 export const MAX_OUTPUT_TOKENS = 16_000;
@@ -114,9 +114,11 @@ export const aiRoutes = new Hono<Env>()
       await record(c, s.userId, model, usage);
       return c.json(json);
     }
-    const userId = s.userId;
-    const metered = response.body.pipeThrough(meteredStream(async (usage, bytes) => {
-      await record(c, userId, model, usage ?? estimateUsage(requestText.length, bytes));
-    }));
-    return new Response(metered, { status: 200, headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
+    // Meter from our own copy of the stream: the client may stop reading at
+    // finish_reason (before the usage chunk) or disconnect, and the provider
+    // still bills us for the whole generation.
+    const [toClient, toMeter] = response.body.tee();
+    const metering = meterBody(toMeter).then(({ usage, bytes }) => record(c, s.userId, model, usage ?? estimateUsage(requestText.length, bytes)));
+    try { c.executionCtx.waitUntil(metering); } catch { /* no execution context outside Workers (tests, local dev) */ }
+    return new Response(toClient, { status: 200, headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' } });
   });

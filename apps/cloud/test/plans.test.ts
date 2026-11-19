@@ -135,3 +135,15 @@ describe('stripe signatures', () => {
     expect(await verifyStripeSignature(body, undefined, secret)).toBe(false);
   });
 });
+
+describe('metering a cut-off stream', () => {
+  test('a stream that errors midway is still metered by bytes', async () => {
+    const { meterBody } = await import('../src/billing/meter');
+    const enc = new TextEncoder();
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>({ pull(c) { if (sent) { c.error(new Error('aborted')); return; } sent = true; c.enqueue(enc.encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n')); } });
+    const result = await meterBody(body);
+    expect(result.usage).toBeNull();
+    expect(result.bytes).toBeGreaterThan(20);
+  });
+});

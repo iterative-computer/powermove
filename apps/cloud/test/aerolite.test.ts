@@ -52,6 +52,7 @@ test('free users get no hosted models; aerolite users are proxied and metered pe
   r = await call({ model: 'claude-sonnet-5-5', max_tokens: 999_999, stream: true, user: 'spoof', messages: [{ role: 'user', content: 'hi' }] });
   expect(r.status).toBe(200);
   expect(await r.text()).toContain('[DONE]');
+  await Bun.sleep(20);
   expect(upstream[0]!.url).toBe('https://api.anthropic.com/v1/chat/completions');
   expect(upstream[0]!.headers.get('x-api-key')).toBe('sk-ant-test');
   expect(upstream[0]!.body.max_tokens).toBe(16000);
@@ -60,12 +61,16 @@ test('free users get no hosted models; aerolite users are proxied and metered pe
 
   r = await call({ model: 'gpt-6.2-sol', messages: [{ role: 'user', content: 'hi' }] });
   expect(r.status).toBe(200);
+  // A client that stops reading early is still metered (from the proxy's own copy of the stream).
+  r = await call({ model: 'gpt-6-luna', stream: true, messages: [{ role: 'user', content: 'hi' }] });
+  await r.body!.cancel();
+  await Bun.sleep(50);
   expect(upstream[1]!.url).toBe('https://api.openai.com/v1/chat/completions');
   expect(upstream[1]!.body.user).toBe(s.id);
 
   const events = await data.db.select().from(usageEvents).where(eq(usageEvents.userId, s.id));
   expect(events.map(e => [e.provider, e.inputTokens, e.outputTokens, e.costMicros])).toEqual([
-    ['anthropic', 1000, 200, 4000], ['openai', 1000, 200, 4000],
+    ['anthropic', 1000, 200, 4000], ['openai', 1000, 200, 4000], ['openai', 1000, 200, 200],
   ]);
 
   // Exhaust Claude's monthly allowance: Claude is refused, OpenAI still works.

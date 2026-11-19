@@ -18,6 +18,21 @@ export function estimateUsage(requestBytes: number, responseBytes: number): Toke
   return { input: Math.ceil(requestBytes / 3), output: Math.ceil(responseBytes / 3) };
 }
 
+/** Reads an SSE body to the end for its usage chunk. Fed from a tee, so a client that disconnects early is still metered. */
+export async function meterBody(body: ReadableStream<Uint8Array>): Promise<{ usage: TokenUsage | null; bytes: number }> {
+  let result: { usage: TokenUsage | null; bytes: number } = { usage: null, bytes: 0 };
+  const sink = meteredStream(async (usage, bytes) => { result = { usage, bytes }; });
+  const writer = sink.writable.getWriter();
+  const drain = sink.readable.pipeTo(new WritableStream()).catch(() => undefined);
+  const reader = body.getReader();
+  try {
+    for (;;) { const { done, value } = await reader.read(); if (done) break; await writer.write(value); }
+  } catch { /* cancelled upstream (the person pressed Stop): bill what arrived */ }
+  await writer.close().catch(() => undefined);
+  await drain;
+  return result;
+}
+
 /** A pass-through transform that watches SSE `data:` lines for a usage object. */
 export function meteredStream(onDone: (usage: TokenUsage | null, bytes: number) => Promise<void>): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
