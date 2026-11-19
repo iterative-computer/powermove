@@ -2166,7 +2166,24 @@ impl TimelineSurface {
                     op.detail["edge"].as_str()?.to_owned(),
                 ))
             });
-        self.set_transition_selection(capsule.clone(), cx);
+        if self.transition_selected != capsule {
+            // Finish hit-testing against the frame that received this press.
+            // Changing transition selection invalidates that frame.
+            let target = capsule.clone();
+            let timeline = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = timeline.update(cx, |surface, cx| {
+                    let selected = target.as_ref().map(|(id, edge)| {
+                        use pm_panel_timeline::render::Edge;
+                        let edge = if edge == "in" { Edge::In } else { Edge::Out };
+                        (id.clone(), edge)
+                    });
+                    surface.set_transition_selection(target, cx);
+                    surface.queue.push_back(Job::SelectTransition(selected));
+                    surface.pump(cx);
+                });
+            });
+        }
         if let Some((layer, edge)) = capsule {
             if self
                 .model
