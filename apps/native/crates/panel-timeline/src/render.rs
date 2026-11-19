@@ -1399,6 +1399,29 @@ impl Scene {
             }
         }
     }
+    /// Trim or move clip names so a transition never paints across them.
+    fn keep_names_clear(ops: &mut [Op], bounds: Rect) {
+        for name in ops.iter_mut().filter(|op| {
+            op.id.starts_with("clip-content:")
+                && op.shape == "text"
+                && op.bounds.y < bounds.y + bounds.height
+                && op.bounds.y + op.bounds.height > bounds.y
+                && op.bounds.x < bounds.x + bounds.width
+                && op.bounds.x + op.bounds.width > bounds.x
+        }) {
+            if name.bounds.x < bounds.x {
+                name.bounds.width = name
+                    .bounds
+                    .width
+                    .min((bounds.x - 4. - name.bounds.x).max(0.));
+            } else {
+                let right = name.bounds.x + name.bounds.width;
+                name.bounds.x = bounds.x + bounds.width + 4.;
+                name.bounds.width = (right - name.bounds.x).max(0.);
+            }
+        }
+    }
+
     fn paint_transitions(
         &self,
         clip: &Clip,
@@ -1424,6 +1447,7 @@ impl Scene {
                 let gap = t.strip_gap() as f64 / 2.;
                 let x = v.x(capsule.from) + if capsule.edge == "in" { gap } else { -gap };
                 let bounds = Rect::new(x, strip.y, width, strip.height);
+                Self::keep_names_clear(ops, bounds);
                 let edge = if capsule.edge == "in" { Edge::In } else { Edge::Out };
                 let tooltip = format!("{} · {:.2} s", capsule.label, capsule.duration);
                 let detail = json!({"layer":clip.id,"edge":capsule.edge,
@@ -1450,27 +1474,7 @@ impl Scene {
                 }
                 continue;
             }
-            // Keep the clip names outside the capsule, including the
-            // outgoing clip's name when a pair straddles the cut.
-            for name in ops.iter_mut().filter(|op| {
-                op.id.starts_with("clip-content:")
-                    && op.shape == "text"
-                    && op.bounds.y < bounds.y + bounds.height
-                    && op.bounds.y + op.bounds.height > bounds.y
-                    && op.bounds.x < bounds.x + bounds.width
-                    && op.bounds.x + op.bounds.width > bounds.x
-            }) {
-                if name.bounds.x < bounds.x {
-                    name.bounds.width = name
-                        .bounds
-                        .width
-                        .min((bounds.x - 4. - name.bounds.x).max(0.));
-                } else {
-                    let right = name.bounds.x + name.bounds.width;
-                    name.bounds.x = bounds.x + bounds.width + 4.;
-                    name.bounds.width = (right - name.bounds.x).max(0.);
-                }
-            }
+            Self::keep_names_clear(ops, bounds);
             // The tint remains translucent, over an opaque capsule ground.
             // Clip edges and selection rings must never cross its label.
             let mut ground = Op::new(
