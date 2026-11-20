@@ -813,6 +813,9 @@ function PointView({
                   style={{
                     color: t("colors.muted"),
                     fontSize: t("typography.label"),
+                    ...(embedded
+                      ? { width: t("metrics.symbol_inline"), flexShrink: 0 }
+                      : {}),
                   }}
                 >
                   {i ? "Y" : "X"}
@@ -831,6 +834,11 @@ function PointView({
                   unit={p.unit}
                   onKeyDown={stop}
                   onClick={stop}
+                  style={
+                    embedded
+                      ? { width: t("metrics.grade_field"), flexShrink: 1 }
+                      : undefined
+                  }
                 />
               </div>
             ))}

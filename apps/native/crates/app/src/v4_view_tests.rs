@@ -3019,6 +3019,8 @@ fn overlap_inspector_point_children_fit_between_adjacent_rows(cx: &mut TestAppCo
         );
     }
     assert!(x.bottom() <= y.top(), "{x:?} overlaps {y:?}");
+    assert_eq!(x.size.width, y.size.width, "coordinate wells: {x:?}, {y:?}");
+    assert_eq!(x.left(), y.left(), "coordinate wells: {x:?}, {y:?}");
     assert!(start.bottom() <= end.top(), "{start:?} overlaps {end:?}");
 }
 
