@@ -1,8 +1,11 @@
 //! AppKit windows and toolbar. No project/document state is authored here.
+#[path = "coedit_presence.rs"]
+mod coedit_presence;
 #[path = "flowchart.rs"]
 mod flowchart;
 #[path = "tab_scroll.rs"]
 mod tab_scroll;
+use coedit_presence::CoeditPresence;
 pub use flowchart::FlowchartRow;
 use tab_scroll::{TabLayout, TabScroll};
 
@@ -1547,171 +1550,6 @@ pub const ADD: [(&str, &str); 6] = [
     ("newAdjustment", "New Adjustment Layer"),
     ("newNull", "New Null Object"),
 ];
-define_class!(
-    #[unsafe(super(NSView))]
-    #[thread_kind=MainThreadOnly]
-    #[name="PMCoeditPresence"]
-    #[ivars = CoeditPresenceViews]
-    struct CoeditPresence;
-    impl CoeditPresence {
-        #[unsafe(method(updateTrackingAreas))]
-        fn tracking(&self) {
-            for area in self.trackingAreas().to_vec() {self.removeTrackingArea(&area);}
-            let area=unsafe {NSTrackingArea::initWithRect_options_owner_userInfo(
-                <NSTrackingArea as objc2::AllocAnyThread>::alloc(),self.bounds(),
-                NSTrackingAreaOptions::MouseEnteredAndExited|NSTrackingAreaOptions::ActiveAlways|NSTrackingAreaOptions::InVisibleRect,
-                Some(self),None)};
-            self.addTrackingArea(&area);
-        }
-        #[unsafe(method(mouseEntered:))]
-        fn entered(&self,_:&NSEvent) {
-            if self.ivars().undo.isHidden() {
-                self.set_hovered(true);
-            }
-        }
-        #[unsafe(method(mouseExited:))]
-        fn exited(&self,_:&NSEvent) {
-            self.set_hovered(false);
-        }
-    }
-);
-const COEDIT_CHIP_WIDTH: f64 = 250.;
-const COEDIT_CHIP_HEIGHT: f64 = 24.;
-const COEDIT_LIGHT_X: f64 = 4.;
-const COEDIT_LIGHT_SIZE: f64 = 14.;
-const COEDIT_TITLE_INSET: f64 = COEDIT_LIGHT_SIZE + 2.;
-const COEDIT_TITLE_WIDTH: f64 = 194.;
-const COEDIT_PAUSE_X: f64 = 200.;
-const COEDIT_STOP_X: f64 = 224.;
-const COEDIT_ACTION_WIDTH: f64 = 22.;
-const COEDIT_UNDO_WIDTH: f64 = COEDIT_STOP_X - COEDIT_PAUSE_X + COEDIT_ACTION_WIDTH;
-const COEDIT_DONE_LABEL: &str = "Done";
-
-struct CoeditPresenceViews {
-    done_light: Retained<NSImageView>,
-    steer: Retained<NSButton>,
-    done: Retained<NSTextField>,
-    undo: Retained<NSButton>,
-    pause: Retained<NSButton>,
-    stop: Retained<NSButton>,
-}
-
-impl CoeditPresence {
-    fn new(mtm: MainThreadMarker, target: &Target, t: &Tokens) -> Retained<Self> {
-        let light = presence_light(&AgentStatus::default(), 0., t);
-        let done_light = NSImageView::imageViewWithImage(&light, mtm);
-        done_light.setAccessibilityElement(false);
-        done_light.setFrame(NSRect::new(
-            NSPoint::new(
-                COEDIT_LIGHT_X,
-                (COEDIT_CHIP_HEIGHT - COEDIT_LIGHT_SIZE) / 2.,
-            ),
-            NSSize::new(COEDIT_LIGHT_SIZE, COEDIT_LIGHT_SIZE),
-        ));
-        let button = |tag, title, x, width| {
-            let button = unsafe {
-                NSButton::buttonWithTitle_target_action(
-                    &NSString::from_str(title),
-                    Some(target),
-                    Some(sel!(coedit:)),
-                    mtm,
-                )
-            };
-            button.setTag(tag);
-            button.setBordered(false);
-            button.setFrame(NSRect::new(
-                NSPoint::new(x, 0.),
-                NSSize::new(width, COEDIT_CHIP_HEIGHT),
-            ));
-            button
-        };
-        let steer = button(0, "Agent working", COEDIT_LIGHT_X, COEDIT_TITLE_WIDTH);
-        steer.setImage(Some(&light));
-        steer.setImagePosition(NSCellImagePosition::ImageLeft);
-        steer.setAlignment(NSTextAlignment::Left);
-        if let Some(cell) = steer.cell() {
-            cell.setWraps(false);
-        }
-        let font = steer.font().unwrap_or_else(|| NSFont::systemFontOfSize(13.));
-        let done = NSTextField::labelWithString(&NSString::from_str(COEDIT_DONE_LABEL), mtm);
-        done.setFont(Some(&font));
-        done.setTextColor(Some(&NSColor::controlTextColor()));
-        let height = done.fittingSize().height;
-        // NSTextField adds 2 pt of horizontal padding inside its frame.
-        done.setFrame(NSRect::new(
-            NSPoint::new(
-                COEDIT_LIGHT_X + COEDIT_TITLE_INSET - 2.,
-                (COEDIT_CHIP_HEIGHT - height) / 2.,
-            ),
-            NSSize::new(COEDIT_TITLE_WIDTH - COEDIT_TITLE_INSET, height),
-        ));
-        let undo = button(1, "Undo", COEDIT_PAUSE_X, COEDIT_UNDO_WIDTH);
-        undo.setAttributedTitle(&coedit_undo_title(&font, t));
-        let pause = button(2, "Ⅱ", COEDIT_PAUSE_X, COEDIT_ACTION_WIDTH);
-        let stop = button(3, "■", COEDIT_STOP_X, COEDIT_ACTION_WIDTH);
-        for (action, label) in [(&pause, "Pause or Resume Agent"), (&stop, "Stop Agent")] {
-            let label = NSString::from_str(label);
-            action.setToolTip(Some(&label));
-            action.setAccessibilityLabel(Some(&label));
-        }
-        let views = CoeditPresenceViews {
-            done_light,
-            steer,
-            done,
-            undo,
-            pause,
-            stop,
-        };
-        let view: Retained<Self> = unsafe {
-            msg_send![super(Self::alloc(mtm).set_ivars(views)), initWithFrame:
-                NSRect::new(NSPoint::ZERO, NSSize::new(COEDIT_CHIP_WIDTH, COEDIT_CHIP_HEIGHT))]
-        };
-        view.setWantsLayer(true);
-        if let Some(layer) = view.layer() {
-            layer.setCornerRadius(t.metrics.capsule_radius as f64);
-            layer.setBackgroundColor(Some(&native_color(t.colors.field).CGColor()));
-        }
-        let views = view.ivars();
-        for child in [
-            &*views.done_light as &NSView,
-            &*views.steer,
-            &*views.done,
-            &*views.undo,
-            &*views.pause,
-            &*views.stop,
-        ] {
-            view.addSubview(child);
-        }
-        views.done_light.setHidden(true);
-        views.done.setHidden(true);
-        views.undo.setHidden(true);
-        view.set_hovered(false);
-        view
-    }
-
-    fn set_hovered(&self, hovered: bool) {
-        self.ivars().pause.setHidden(!hovered);
-        self.ivars().stop.setHidden(!hovered);
-    }
-
-    fn set_status(&self, status: &AgentStatus) {
-        let views = self.ivars();
-        views.steer.setHidden(!status.working);
-        views.done_light.setHidden(status.working);
-        views.done.setHidden(status.working);
-        views.undo.setHidden(status.working);
-        if !status.working {
-            self.set_hovered(false);
-        } else if let Some(cell) = views.steer.cell() {
-            let width = cell.titleRectForBounds(views.steer.bounds()).size.width;
-            let font = views.steer.font().unwrap_or_else(|| NSFont::systemFontOfSize(13.));
-            let title = coedit_presence_title(status, &font, width);
-            if views.steer.title().to_string() != title.string().to_string() {
-                views.steer.setAttributedTitle(&title);
-            }
-        }
-    }
-}
 /// One open project in the toolbar's tab strip.
 #[derive(Clone, Debug, PartialEq)]
 struct Tab {
@@ -3406,125 +3244,6 @@ mod coedit_window_presence_tests {
         assert_eq!(agent_window_title("Lettering", false), "Lettering");
     }
 }
-fn presence_light(status: &AgentStatus, phase: f64, t: &Tokens) -> Retained<NSImage> {
-    let palette = t.sketch();
-    let paused = status.paused;
-    let reduced = t.accessibility.reduce_motion;
-    let muted = t.colors.muted;
-    let draw = block2::RcBlock::new(move |_: NSRect| -> objc2::runtime::Bool {
-        let breath = if reduced || paused {
-            0.5
-        } else {
-            0.5 + 0.5 * (phase * std::f64::consts::TAU * 0.5).sin()
-        };
-        if !reduced && !paused {
-            native_color(palette.halo)
-                .colorWithAlphaComponent(0.16 + 0.10 * breath)
-                .setFill();
-            NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-                NSPoint::new(0., 0.),
-                NSSize::new(14., 14.),
-            ))
-            .fill();
-        }
-        let radius = if reduced || paused {
-            1.5
-        } else {
-            2.2 + 0.6 * (breath - 0.5)
-        };
-        native_color(if paused { muted } else { palette.core }).setFill();
-        NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-            NSPoint::new(7. - radius, 7. - radius),
-            NSSize::new(radius * 2., radius * 2.),
-        ))
-        .fill();
-        objc2::runtime::Bool::YES
-    });
-    NSImage::imageWithSize_flipped_drawingHandler(
-        NSSize::new(COEDIT_LIGHT_SIZE, COEDIT_LIGHT_SIZE),
-        false,
-        &draw,
-    )
-}
-
-fn coedit_presence_title(
-    status: &AgentStatus,
-    font: &NSFont,
-    width: f64,
-) -> Retained<objc2_foundation::NSAttributedString> {
-    use objc2::AnyThread;
-    use objc2_foundation::{NSDictionary, NSAttributedString, NSMutableAttributedString};
-
-    let text = if !status.working {
-        COEDIT_DONE_LABEL
-    } else if status.paused {
-        "Paused · ⇧⌘. to resume"
-    } else if status.held {
-        "Waiting for you to finish"
-    } else {
-        status.progress.as_deref().unwrap_or("Agent working")
-    };
-    let font_key = unsafe { NSFontAttributeName };
-    let foreground_key = unsafe { NSForegroundColorAttributeName };
-    let foreground = NSColor::controlTextColor();
-    let attrs = NSDictionary::from_slices(
-        &[font_key, foreground_key],
-        &[font as &AnyObject, &*foreground as &AnyObject],
-    );
-    let count = if status.working && status.additional_runs > 0 {
-        let count_font = NSFont::systemFontOfSize(10.);
-        let color = NSColor::secondaryLabelColor();
-        let attrs = NSDictionary::from_slices(
-            &[font_key, foreground_key],
-            &[&*count_font as &AnyObject, &*color as &AnyObject],
-        );
-        Some(unsafe {
-            NSAttributedString::initWithString_attributes(
-                NSAttributedString::alloc(),
-                &NSString::from_str(&format!("  +{}", status.additional_runs)),
-                Some(&attrs),
-            )
-        })
-    } else {
-        None
-    };
-    let count_width = count.as_ref().map_or(0., |label| label.size().width.ceil());
-    let text = crate::agent_launcher::fit_presence_title(text, width - count_width, |text| unsafe {
-        NSString::from_str(text).sizeWithAttributes(Some(&attrs)).width.ceil()
-    });
-    let title = unsafe {
-        NSMutableAttributedString::initWithString_attributes(
-            NSMutableAttributedString::alloc(),
-            &NSString::from_str(&text),
-            Some(&attrs),
-        )
-    };
-    if let Some(count) = count {
-        title.appendAttributedString(&count);
-    }
-    Retained::into_super(title)
-}
-
-fn coedit_undo_title(font: &NSFont, t: &Tokens) -> Retained<objc2_foundation::NSAttributedString> {
-    use objc2::AnyThread;
-    use objc2_foundation::{NSDictionary, NSAttributedString};
-
-    let color = native_color(t.colors.accent_text);
-    let attrs = NSDictionary::from_slices(
-        &[unsafe { NSFontAttributeName }, unsafe {
-            NSForegroundColorAttributeName
-        }],
-        &[font as &AnyObject, &*color as &AnyObject],
-    );
-    unsafe {
-        NSAttributedString::initWithString_attributes(
-            NSAttributedString::alloc(),
-            &NSString::from_str("Undo"),
-            Some(&attrs),
-        )
-    }
-}
-
 impl Host {
     pub fn agent_effect_frames(&self) -> u64 {
         self.agent_effect_frames.get()
@@ -3550,19 +3269,10 @@ impl Host {
             self.agent_presence_generation
                 .set(self.agent_presence_generation.get() + 1);
         }
-        let Some(item) = self
-            ._toolbar
-            .items()
-            .iter()
-            .find(|i| i.itemIdentifier().to_string() == "agentPresence")
-        else {
-            return;
-        };
-        if let Some(launcher) = agent_launcher_button(&self._toolbar) {
+        if (status.working || existing.is_some())
+            && let Some(launcher) = agent_launcher_button(&self._toolbar)
+        {
             launcher.set_presence_visible(true);
-        }
-        if let Some(view) = item.view().and_then(|view| view.downcast::<CoeditPresence>().ok()) {
-            view.set_status(status);
         }
         if !status.working && was_working {
             let toolbar = self._toolbar.clone();
@@ -3629,18 +3339,8 @@ impl Host {
             .find(|i| i.itemIdentifier().to_string() == "agentPresence")
             .and_then(|i| i.view())
             .and_then(|v| v.downcast::<CoeditPresence>().ok());
-        if force && let Some(view) = &presence {
-            if let Some(layer) = view.layer() {
-                layer.setBackgroundColor(Some(&native_color(tokens.colors.field).CGColor()));
-            }
-            let undo = &view.ivars().undo;
-            let font = undo.font().unwrap_or_else(|| NSFont::systemFontOfSize(13.));
-            undo.setAttributedTitle(&coedit_undo_title(&font, &tokens));
-        }
-        if status.progress != self.agent_status.progress {
-            if let Some(timer) = self.agent_timer.take() {
-                timer.invalidate();
-            }
+        if let Some(view) = &presence {
+            view.set_status(&status, &tokens, force);
         }
         let visual_changed = force
             || status.failed != self.agent_status.failed
@@ -3649,7 +3349,8 @@ impl Host {
             || status.attention != self.agent_status.attention
             || status.paused != self.agent_status.paused
             || status.held != self.agent_status.held;
-        let turning = status.working
+        let turning = presence.is_some()
+            && status.working
             && !status.attention
             && !status.paused
             && !status.held
@@ -3661,32 +3362,32 @@ impl Host {
                 timer.invalidate();
             }
             if visual_changed && let Some(view) = &presence {
-                let light = presence_light(&status, 0., &tokens);
-                if status.working {
-                    view.ivars().steer.setImage(Some(&light));
-                } else {
-                    view.ivars().done_light.setImage(Some(&light));
-                }
+                view.paint_marker(&status, 0., &tokens);
             }
         } else if self.agent_timer.is_none() && let Some(view) = presence {
-            let button = view.ivars().steer.clone();
+            view.paint_marker(&status, 0., &tokens);
+            let weak = objc2::rc::Weak::new(&*view);
             let started = std::time::Instant::now();
             let shown = status.clone();
             let frame_count = self.agent_effect_frames.clone();
             let step =
                 block2::RcBlock::new(move |timer: std::ptr::NonNull<objc2_foundation::NSTimer>| {
-                    frame_count.set(frame_count.get() + 1);
+                    let Some(view) = weak.load() else {
+                        unsafe { timer.as_ref().invalidate(); }
+                        return;
+                    };
                     let elapsed = started.elapsed().as_secs_f64();
                     if elapsed >= 12. {
-                        button.setImage(Some(&presence_light(&shown, 0., &tokens)));
+                        view.paint_marker(&shown, 0., &tokens);
                         // Keep the invalidated timer in agent_timer until the
                         // run ends: elapsed text updates must not restart it.
                         unsafe {
                             timer.as_ref().invalidate();
                         }
-                        return;
+                    } else if !view.isHiddenOrHasHiddenAncestor() && view.window().is_some() {
+                        frame_count.set(frame_count.get() + 1);
+                        view.paint_marker(&shown, elapsed, &tokens);
                     }
-                    button.setImage(Some(&presence_light(&shown, elapsed, &tokens)));
                 });
             let timer = unsafe {
                 objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(
