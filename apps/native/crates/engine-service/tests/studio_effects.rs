@@ -62,8 +62,32 @@ fn scene() -> Value {
         .unwrap();
     for (kind, id) in [("box", "cube"), ("camera", "cam"), ("point", "lamp")] {
         let published = actor.handle().published("p").unwrap();
-        let (_, commands, _) =
+        let (_, mut commands, _) =
             pm_panel_studio3d::properties::add_layer(&published, 0., kind, id).unwrap();
+        // The menu's cube comes with its key light only; the studio's sky and
+        // floor, which the cube used to bring, are added as before.
+        if kind == "box" {
+            let root = from_model(&published.snapshot.root().unwrap().to_value()).unwrap();
+            let before = root["comps"]["c"]["layers"]
+                .as_array()
+                .or_else(|| root["layers"].as_array())
+                .cloned()
+                .unwrap_or_default();
+            for args in pm_panel_studio3d::view::starter(&before, id) {
+                if args["operation"] != "add_light" {
+                    commands.push(
+                        pm_kernel::Scene3dCommand::Apply {
+                            comp: published.snapshot.open_comp(),
+                            args: to_model(&args),
+                            selection: vec![],
+                            time: 0.,
+                            autokey: false,
+                        }
+                        .into(),
+                    );
+                }
+            }
+        }
         transact(&actor, commands);
     }
     let published = actor.handle().published("p").unwrap();

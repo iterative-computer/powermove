@@ -1300,6 +1300,14 @@ pub fn add_layer(
             json!({"operation":"add_object","id":id,"name":label,"object":{"source":{"primitive":kind}}})
         }
     };
+    let mut args = args;
+    // The first 3D layer is seen by the default camera at (3, 2, 6), which
+    // already looks at it three-quarters on: a cube this size spans about
+    // 37% of the frame's height.
+    if kind == "box" && !layers.iter().any(|l| schema::role(l).is_some()) {
+        args["object"]["source"]["parameters"] =
+            json!({"width":FIRST_CUBE,"height":FIRST_CUBE,"depth":FIRST_CUBE});
+    }
     let mut commands = vec![scene(p, time, args)];
     if kind == "terrain" {
         if let Some(camera) = overview_camera(&layers, id) {
@@ -1311,7 +1319,7 @@ pub fn add_layer(
     }
     let shape = new_menu().iter().take(8).any(|(k, _)| *k == kind);
     if shape {
-        commands.extend(starter(&layers, id).into_iter().map(|a| scene(p, time, a)));
+        commands.extend(key_light(&layers, id).into_iter().map(|a| scene(p, time, a)));
     }
     let select = if kind == "sky" {
         world.unwrap_or_else(|| id.into())
@@ -1415,6 +1423,19 @@ fn landscape_fog(layers: &[Value]) -> Option<Value> {
     Some(json!({"operation":"set_world","id":world["id"],"world":{"p":{
         "fogHeightFalloff":LANDSCAPE_FOG.0,"fogDistance":LANDSCAPE_FOG.1}}}))
 }
+/// Side of the cube Layer ▸ Add 3D Layer adds to a composition with no 3D yet.
+const FIRST_CUBE: f64 = 1.55;
+
+/// A shape added from Layer ▸ Add 3D Layer to an unlit composition gets the
+/// key softbox and nothing else: no floor and no world over the
+/// composition's 2D layers. Set Up Studio adds the full studio set.
+fn key_light(layers: &[Value], id: &str) -> Vec<Value> {
+    starter(layers, id)
+        .into_iter()
+        .filter(|a| a["operation"] == "add_light")
+        .collect()
+}
+
 /// The first object in an empty scene arrives lit (3d-studio.md's product
 /// film): a clear sky, a key softbox placed for a highlight, and a floor so
 /// it has a contact shadow and a reflection. Nothing is added

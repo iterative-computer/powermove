@@ -71,6 +71,17 @@ fn layers(root: &mut Value) -> &mut Vec<Value> {
 
 #[test]
 fn a_cube_added_among_2d_layers_keeps_the_layers_below_and_above_it_visible() {
+    cube_between_2d_layers(false);
+}
+
+/// The cube added to an empty composition first, then 2D layers above and
+/// below it: no studio floor or sky hides the layer below.
+#[test]
+fn a_cube_added_before_the_2d_layers_keeps_the_layers_below_and_above_it_visible() {
+    cube_between_2d_layers(true);
+}
+
+fn cube_between_2d_layers(cube_first: bool) {
     let actor = KernelActor::spawn(KernelConfig::default());
     actor
         .handle()
@@ -83,14 +94,26 @@ fn a_cube_added_among_2d_layers_keeps_the_layers_below_and_above_it_visible() {
         .unwrap()
         .unwrap();
     // A 2D layer, then a cube as the menu adds it, then a 2D layer over it.
-    transact(&actor, vec![solid("below")]);
+    if !cube_first {
+        transact(&actor, vec![solid("below")]);
+    }
     let published = actor.handle().published("p").unwrap();
     let (_, commands, _) =
         pm_panel_studio3d::properties::add_layer(&published, 0., "box", "cube").unwrap();
     transact(&actor, commands);
+    if cube_first {
+        transact(&actor, vec![solid("below")]);
+    }
     transact(&actor, vec![solid("above")]);
     let published = actor.handle().published("p").unwrap();
     let mut root = from_model(&published.snapshot.root().unwrap().to_value()).unwrap();
+    if cube_first {
+        // The layer below goes to the bottom of the stack.
+        let all = layers(&mut root);
+        let at = all.iter().position(|l| l["id"] == "below").unwrap();
+        let below = all.remove(at);
+        all.push(below);
+    }
     let names: Vec<String> = layers(&mut root)
         .iter()
         .map(|l| l["name"].as_str().unwrap_or_default().to_owned())
