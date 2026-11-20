@@ -171,6 +171,14 @@ pub struct Geometry {
     pub tabs: std::collections::HashMap<(usize, usize), Vec<(usize, f32, f32)>>,
 }
 impl Geometry {
+    pub(crate) fn next_group(&self, dock: usize, group: usize) -> Option<usize> {
+        self.panels
+            .iter()
+            .filter(|p| p.dock == dock && p.group > group)
+            .map(|p| p.group)
+            .min()
+    }
+
     /// Window-space header geometry, shared by painting and docking hit tests.
     pub fn header_rect(&self, p: &Placement, t: &Tokens) -> Rect {
         let mut header = Rect {
@@ -327,6 +335,53 @@ impl Layout {
         natural: &BTreeMap<String, f32>,
     ) -> Geometry {
         self.geometry_impl(bounds, t, Some(natural))
+    }
+
+    /// Hide unavailable standalone stacks without changing saved group indices.
+    pub(crate) fn visible_geometry(
+        &self,
+        bounds: Rect,
+        t: &Tokens,
+        natural: &BTreeMap<String, f32>,
+        unavailable: &std::collections::BTreeSet<String>,
+        maximized: Option<&str>,
+    ) -> Geometry {
+        let measure = |layout: &Self| {
+            if maximized.is_some() {
+                layout.geometry_with_maximized(bounds, t, maximized)
+            } else {
+                layout.geometry_with_panel_heights(bounds, t, natural)
+            }
+        };
+        if unavailable.is_empty() {
+            return measure(self);
+        }
+        let mut visible = self.clone();
+        let groups: Vec<Vec<usize>> = visible
+            .docks
+            .iter_mut()
+            .map(|dock| {
+                let mut index = 0;
+                let mut kept = vec![];
+                dock.groups.retain(|group| {
+                    let show = group.tabs.iter().any(|id| !unavailable.contains(id));
+                    if show {
+                        kept.push(index);
+                    }
+                    index += 1;
+                    show
+                });
+                kept
+            })
+            .collect();
+        let mut geometry = measure(&visible);
+        for p in &mut geometry.panels {
+            p.group = groups[p.dock][p.group];
+        }
+        for d in &mut geometry.dividers {
+            d.group = d.group.map(|i| groups[d.dock][i]);
+        }
+        geometry
     }
 
     fn geometry_impl(
@@ -627,7 +682,18 @@ impl Layout {
         natural: Option<&BTreeMap<String, f32>>,
     ) {
         let geometry = self.geometry_impl(bounds, t, natural);
-        let min = t.metrics.min_panel;
+        self.resize_from_geometry(divider, delta, bounds, t, &geometry, natural.is_some());
+    }
+
+    pub(crate) fn resize_from_geometry(
+        &mut self,
+        divider: &Divider,
+        delta: f32,
+        bounds: Rect,
+        t: &Tokens,
+        geometry: &Geometry,
+        natural: bool,
+    ) {
         let height = |dock: usize, group: usize| {
             geometry
                 .panels
@@ -636,11 +702,14 @@ impl Layout {
                 .map(|p| p.rect.h)
         };
         if let Some(i) = divider.group {
-            let (Some(a), Some(b)) = (height(divider.dock, i), height(divider.dock, i + 1)) else {
+            let Some(j) = geometry.next_group(divider.dock, i) else {
+                return;
+            };
+            let (Some(a), Some(b)) = (height(divider.dock, i), height(divider.dock, j)) else {
                 return;
             };
             let total = a + b;
-            let side = natural.is_some()
+            let side = natural
                 && matches!(self.docks[divider.dock].id.as_str(), "left" | "right");
             let groups = &self.docks[divider.dock].groups;
             let least = |g: &Group| {
@@ -651,7 +720,7 @@ impl Layout {
                     floor
                 }
             };
-            let (least_a, least_b) = (least(&groups[i]), least(&groups[i + 1]));
+            let (least_a, least_b) = (least(&groups[i]), least(&groups[j]));
             let upper = if total >= least_a + least_b {
                 (a + delta).clamp(least_a, total - least_b)
             } else {
@@ -672,7 +741,7 @@ impl Layout {
                 // A side stack can exceed its viewport. Record the requested
                 // adjacent heights; never turn a fixed neighbour into a fluid
                 // filler, or it would shrink as soon as this splitter moves.
-                for (index, height) in [(i, upper), (i + 1, total - upper)] {
+                for (index, height) in [(i, upper), (j, total - upper)] {
                     let group = &mut d.groups[index];
                     if group.size.is_none() {
                         self.flex_bases.insert(group.tabs[0].clone(), height);
@@ -687,13 +756,22 @@ impl Layout {
             let flexible = d
                 .groups
                 .iter()
-                .position(|g| g.size.is_none())
-                .unwrap_or(d.groups.len() - 1);
+                .enumerate()
+                .find(|(g, group)| group.size.is_none() && height(divider.dock, *g).is_some())
+                .map(|(g, _)| g)
+                .or_else(|| {
+                    geometry.panels.iter().filter(|p| p.dock == divider.dock)
+                        .map(|p| p.group)
+                        .max()
+                })
+                .unwrap_or(j);
             for (gi, g) in d.groups.iter_mut().enumerate() {
-                g.size = height(divider.dock, gi);
+                if let Some(h) = height(divider.dock, gi) {
+                    g.size = Some(h);
+                }
             }
             d.groups[i].size = Some(upper);
-            d.groups[i + 1].size = Some(total - upper);
+            d.groups[j].size = Some(total - upper);
             d.groups[flexible].size = None;
             return;
         }
@@ -761,7 +839,6 @@ impl Layout {
         let sign = if self.trailing(divider.dock) { -1. } else { 1. };
         // The original app's side columns: `column_least` to `column_most`
         // wide, and never more than the fluid column can give.
-        let _ = min;
         let least = t.metrics.column_least.min(current.w);
         let most = (current.w + room)
             .min(t.metrics.column_most.max(current.w))
@@ -832,7 +909,9 @@ impl Layout {
         let shown = |id: &str| {
             self.docks
                 .iter()
-                .position(|d| d.id == id && !d.collapsed && !d.groups.is_empty())
+                .enumerate()
+                .find(|(i, d)| d.id == id && geometry.panels.iter().any(|p| p.dock == *i))
+                .map(|(i, _)| i)
         };
         let dock_rect = |di: usize| {
             let mut placed = geometry.panels.iter().filter(|p| p.dock == di);
@@ -1140,39 +1219,12 @@ impl Layout {
         id: &str,
         stack: bool,
     ) -> DropOutcome {
-        let Some((di, gi, _)) = self.find(id) else {
-            return DropOutcome::Nowhere;
+        let mut preview = match self.drag_zone(geometry, bounds, at, t, id, stack) {
+            Ok(preview) => preview,
+            Err(outcome) => return outcome,
         };
-        let Some(mut preview) = self.drop_target(geometry, bounds, at.0, at.1, t) else {
-            return DropOutcome::Nowhere;
-        };
-        let whole = stack || self.docks[di].groups[gi].tabs.len() == 1;
-        // Over the very stack being moved: it is already there.
-        if whole
-            && geometry
-                .panels
-                .iter()
-                .any(|p| (p.dock, p.group) == (di, gi) && p.rect.contains(at.0, at.1))
-        {
-            return DropOutcome::Here;
-        }
-        let source_stacks =
-            stacks(id) && (!stack || self.docks[di].groups[gi].tabs.iter().all(|id| stacks(id)));
-        if !source_stacks && let DropTarget::Tab { dock, group, .. } = preview.target {
-            // A panel that takes no tabs splits the panel instead, at the
-            // middle of its body.
-            let Some(p) = geometry
-                .panels
-                .iter()
-                .find(|p| (p.dock, p.group) == (dock, group))
-            else {
-                return DropOutcome::Nowhere;
-            };
-            preview = self.panel_zone(geometry, p, at.0, at.1, t, false);
-        }
         let mut next = self.clone();
-        let moved = next.apply_drop(id, &preview, stack);
-        if moved.is_err() {
+        if next.apply_drop(id, &preview, stack).is_err() {
             return DropOutcome::Nowhere;
         }
         if next == *self {
@@ -1193,6 +1245,49 @@ impl Layout {
             }
             None => DropOutcome::Nowhere,
         }
+    }
+
+    /// Hit-test the frozen zones without solving a prospective layout.
+    pub(crate) fn drag_zone(
+        &self,
+        geometry: &Geometry,
+        bounds: Rect,
+        at: (f32, f32),
+        t: &Tokens,
+        id: &str,
+        stack: bool,
+    ) -> Result<DropPreview, DropOutcome> {
+        let Some((di, gi, _)) = self.find(id) else {
+            return Err(DropOutcome::Nowhere);
+        };
+        let Some(mut preview) = self.drop_target(geometry, bounds, at.0, at.1, t) else {
+            return Err(DropOutcome::Nowhere);
+        };
+        let whole = stack || self.docks[di].groups[gi].tabs.len() == 1;
+        // Over the very stack being moved: it is already there.
+        if whole
+            && geometry
+                .panels
+                .iter()
+                .any(|p| (p.dock, p.group) == (di, gi) && p.rect.contains(at.0, at.1))
+        {
+            return Err(DropOutcome::Here);
+        }
+        let source_stacks =
+            stacks(id) && (!stack || self.docks[di].groups[gi].tabs.iter().all(|id| stacks(id)));
+        if !source_stacks && let DropTarget::Tab { dock, group, .. } = preview.target {
+            // A panel that takes no tabs splits the panel instead, at the
+            // middle of its body.
+            let Some(p) = geometry
+                .panels
+                .iter()
+                .find(|p| (p.dock, p.group) == (dock, group))
+            else {
+                return Err(DropOutcome::Nowhere);
+            };
+            preview = self.panel_zone(geometry, p, at.0, at.1, t, false);
+        }
+        Ok(preview)
     }
     /// The tab that shows in group `g` of dock `d` once `moving` (one tab,
     /// unless `stack`) has left it: what a drop against that group is named
@@ -1519,13 +1614,19 @@ impl Layout {
     /// Before a splitter between two panels is dragged: a folded one beside
     /// it opens again (the original app), so the drag has room to work in.
     pub fn expand_beside(&mut self, divider: &Divider) -> bool {
+        self.expand_visible_beside(divider, divider.group.map(|i| i + 1))
+    }
+
+    pub(crate) fn expand_visible_beside(&mut self, divider: &Divider, next: Option<usize>) -> bool {
         let Some(i) = divider.group else {
             return false;
         };
         let mut changed = false;
         if let Some(d) = self.docks.get_mut(divider.dock) {
-            for g in d.groups.iter_mut().skip(i).take(2) {
-                changed |= std::mem::take(&mut g.collapsed);
+            for index in [Some(i), next].into_iter().flatten() {
+                if let Some(g) = d.groups.get_mut(index) {
+                    changed |= std::mem::take(&mut g.collapsed);
+                }
             }
         }
         changed
@@ -1555,10 +1656,24 @@ impl Layout {
         t: &Tokens,
         natural: Option<&BTreeMap<String, f32>>,
     ) -> bool {
+        let geometry = self.geometry_impl(bounds, t, natural);
+        self.reset_split_from_geometry(divider, bounds, t, &geometry, natural.is_some())
+    }
+
+    pub(crate) fn reset_split_from_geometry(
+        &mut self,
+        divider: &Divider,
+        bounds: Rect,
+        t: &Tokens,
+        geometry: &Geometry,
+        natural: bool,
+    ) -> bool {
         let Some(i) = divider.group else {
             return false;
         };
-        let geometry = self.geometry_impl(bounds, t, natural);
+        let Some(j) = geometry.next_group(divider.dock, i) else {
+            return false;
+        };
         let height = |group: usize| {
             geometry
                 .panels
@@ -1566,7 +1681,7 @@ impl Layout {
                 .find(|p| (p.dock, p.group) == (divider.dock, group))
                 .map(|p| p.rect.h)
         };
-        let (Some(a), Some(b)) = (height(i), height(i + 1)) else {
+        let (Some(a), Some(b)) = (height(i), height(j)) else {
             return false;
         };
         let total = a + b;
@@ -1585,8 +1700,8 @@ impl Layout {
                 .and_then(|p| p.size)
         };
         let groups = &self.docks[divider.dock].groups;
-        let (least_a, least_b) = (group_least(&groups[i], t), group_least(&groups[i + 1], t));
-        let upper = match (shipped(&groups[i]), shipped(&groups[i + 1])) {
+        let (least_a, least_b) = (group_least(&groups[i], t), group_least(&groups[j], t));
+        let upper = match (shipped(&groups[i]), shipped(&groups[j])) {
             (Some(s), _) => s,
             (None, Some(s)) => total - s,
             (None, None) => total / 2.,
@@ -1601,7 +1716,7 @@ impl Layout {
         }
         // Use the same adjacent-height update as a drag, including the
         // transient basis of fluid side panels and fixed neighbours.
-        self.resize_impl(divider, upper - a, bounds, t, natural);
+        self.resize_from_geometry(divider, upper - a, bounds, t, geometry, natural);
         true
     }
     pub fn reset_dock(&mut self, divider: &Divider) -> bool {

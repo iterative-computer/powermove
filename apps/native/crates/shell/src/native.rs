@@ -143,6 +143,8 @@ pub struct MenuState {
     pub tool: String,
     /// Commands that cannot run now: menu rows dim, the palette omits them.
     pub disabled: std::collections::BTreeSet<String>,
+    /// Local workspace history (undo, redo) while the shell owns focus.
+    pub workspace_history: [bool; 2],
     /// Why Add Default Transition is disabled at the current cut.
     pub transition_refusal: Option<String>,
     /// Toggles that are on: their menu rows carry a checkmark.
@@ -186,28 +188,19 @@ fn sheet_up() -> bool {
 /// (`MenuState::disabled`); every menu dims for a sheet.
 const STATEFUL_MENUS: [&str; 4] = ["Edit", "Composition", "Playback", "View"];
 thread_local! {
-    /// The project's Undo/Redo titles ("Undo New Solid"), kept while a sheet's
-    /// field owns the items, which then read as the field's plain verb.
-    static PROJECT_TITLES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    static PROJECT_HISTORY: RefCell<[Option<String>; 2]> = const { RefCell::new([None, None]) };
 }
-fn undo_title_for_field(item: &NSMenuItem, name: &str, sheet: bool) {
-    let verb = match name {
-        "contextUndo" => "Undo",
-        "contextRedo" => "Redo",
-        _ => return,
+fn history_title(item: &NSMenuItem, index: usize, field: bool, workspace: bool) {
+    let verb = ["Undo", "Redo"][index];
+    let title = if field {
+        verb.to_owned()
+    } else if workspace {
+        format!("{verb} Move Panel")
+    } else {
+        PROJECT_HISTORY.with(|h| h.borrow()[index].as_ref()
+            .map_or_else(|| verb.to_owned(), |label| format!("{verb} {label}")))
     };
-    PROJECT_TITLES.with(|t| {
-        let mut t = t.borrow_mut();
-        if sheet {
-            let title = item.title().to_string();
-            if title != verb {
-                t.insert(name.to_owned(), title);
-            }
-            item.setTitle(&NSString::from_str(verb));
-        } else if let Some(title) = t.remove(name) {
-            item.setTitle(&NSString::from_str(&title));
-        }
-    });
+    item.setTitle(&NSString::from_str(&title));
 }
 /// The Edit menu's Undo and Redo named by the front project's history
 /// ("Undo New Solid"; the plain verb, dimmed, when there is none). Under a
@@ -217,31 +210,23 @@ pub fn history_titles(undo: Option<&str>, redo: Option<&str>) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
+    PROJECT_HISTORY.with(|h| *h.borrow_mut() = [undo.map(str::to_owned), redo.map(str::to_owned)]);
     let app = NSApplication::sharedApplication(mtm);
     let Some(root) = app.mainMenu() else { return };
     let sheet = sheet_up();
+    let state = active_state();
     for top in root.itemArray() {
         if top.title().to_string() != "Edit" {
             continue;
         }
         let Some(menu) = top.submenu() else { continue };
-        let rows = [("contextUndo", "Undo", undo), ("contextRedo", "Redo", redo)];
-        for (index, (name, verb, label)) in rows.into_iter().enumerate() {
-            let title = label.map_or(verb.to_owned(), |l| format!("{verb} {l}"));
-            PROJECT_TITLES.with(|t| {
-                let mut t = t.borrow_mut();
-                if sheet {
-                    t.insert(name.to_owned(), title.clone());
-                } else {
-                    t.remove(name);
-                }
-            });
+        for (index, label) in [undo, redo].into_iter().enumerate() {
             if sheet {
                 continue;
             }
             if let Some(item) = menu.itemAtIndex(index as isize) {
-                item.setTitle(&NSString::from_str(&title));
-                item.setEnabled(label.is_some());
+                history_title(&item, index, false, state.workspace_history[index]);
+                item.setEnabled(label.is_some() || state.workspace_history[index]);
             }
         }
     }
@@ -954,7 +939,16 @@ define_class!(
                 // A sheet holds every command that acts on the window under it
                 // (HIG); the app's own and its fields' Edit commands stay.
                 let sheet = sheet_up();
-                undo_title_for_field(item, name, sheet);
+                let workspace_history = if let Some(index) =
+                    ["contextUndo", "contextRedo"].iter().position(|&n| n == name)
+                {
+                    let field = sheet || key_field_editing();
+                    let workspace = !field && state.workspace_history[index];
+                    history_title(item, index, field, workspace);
+                    workspace
+                } else {
+                    false
+                };
                 let beside = !sheet
                     || (menu::runs_beside_sheet(name, key_field_editing()) && field_can(name));
                 // Menus that dim by state (`STATEFUL_MENUS`); the others only
@@ -965,7 +959,7 @@ define_class!(
                     STATEFUL_MENUS.contains(&title.as_str())
                         || menu::DISPLAY_ONLY.contains(&title.as_str())
                 });
-                beside && !(stateful && state.disabled.contains(name))
+                beside && (workspace_history || !(stateful && state.disabled.contains(name)))
             } else {
                 // A row built when its menu opens (a panel, a workspace, a
                 // layer kind) names its command; a sheet holds it too.
@@ -3811,6 +3805,7 @@ pub struct Host {
     pub native_panels: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
     pub native_panel_clips: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
     pub native_panel_fades: Rc<RefCell<Vec<(String, [f64; 2])>>>,
+    pub native_panel_snapshots: Rc<RefCell<std::collections::BTreeSet<String>>>,
     /// Keeps web panels in sync with resolved appearance and accessibility.
     pub native_style: Option<Rc<dyn Fn(&Tokens)>>,
     /// Runs inside the composition transaction, with the window size.
@@ -4026,6 +4021,7 @@ impl Host {
             native_panels: Rc::default(),
             native_panel_clips: Rc::default(),
             native_panel_fades: Rc::default(),
+            native_panel_snapshots: Rc::default(),
             native_style: None,
             native_present: None,
             native_accessibility: vec![],
@@ -6038,6 +6034,11 @@ impl Host {
     fn text_has_keyboard(&self) -> bool {
         self.window.firstResponder().is_some_and(|r| unsafe {
             msg_send![&*r, isKindOfClass: NSTextView::class()]
+        })
+    }
+    pub(crate) fn shell_owns_history(&self) -> bool {
+        self.window.firstResponder().is_some_and(|r| {
+            std::ptr::eq(&*self.gpui as *const _ as *const NSResponder, &*r)
         })
     }
     /// The key posted for replay that has not reached the window yet, its

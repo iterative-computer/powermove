@@ -1813,7 +1813,7 @@ impl SurfaceView {
     pub fn semantic_ids(&self) -> Vec<String> {
         self.prepared.semantics.keys().cloned().collect()
     }
-    /// Review builds and capture tests: `event` on the node whose semantic id
+    /// Dev preview and headless tests: `event` on the node whose semantic id
     /// is, or ends with, `semantic` (`--open reviewPanel:settings:select:nav.general`).
     #[cfg(any(debug_assertions, test))]
     pub fn review_send(&mut self, semantic: &str, event: &str, cx: &mut Context<Self>) {

@@ -271,14 +271,16 @@
   const contributionBounds = new WeakMap();
   const applyContributionBounds = (root, rect) => {
     const bounds = {
-      position: 'fixed', left: rect.x + 'px', top: rect.y + 'px',
+      display: 'block', position: 'fixed', left: rect.x + 'px', top: rect.y + 'px',
       width: rect.w + 'px', height: rect.h + 'px', 'box-sizing': 'border-box',
       'min-width': '0', 'min-height': '0',
       'max-width': rect.w + 'px', 'max-height': rect.h + 'px',
       'clip-path': 'inset(0)',
     };
-    for (const [key, value] of Object.entries(bounds))
-      root.style.setProperty(key, value, 'important');
+    for (const [key, value] of Object.entries(bounds)) {
+      if (root.style.getPropertyValue(key) !== value || root.style.getPropertyPriority(key) !== 'important')
+        root.style.setProperty(key, value, 'important');
+    }
   };
   const restoreContributionBounds = (root) => {
     const rect = contributionBounds.get(root);
@@ -300,8 +302,11 @@
     call({kind:'panel_layout_applied', panel:0, payload:{...placement,
       rect:{x:box.x,y:box.y,w:box.width,h:box.height}}});
   }, (active) => {
-    for (const root of document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])'))
-      root.style.setProperty('visibility', active.has(root.getAttribute('data-pm-contribution')) ? 'visible' : 'hidden', 'important');
+    for (const root of document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])')) {
+      const visibility = active.has(root.getAttribute('data-pm-contribution')) ? 'visible' : 'hidden';
+      if (root.style.visibility !== visibility || root.style.getPropertyPriority('visibility') !== 'important')
+        root.style.setProperty('visibility', visibility, 'important');
+    }
   });
   // The same linear 28px edge mask as the side dock, inside the shared view.
   const updatePanelScrollEdges = (node) => {

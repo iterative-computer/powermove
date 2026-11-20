@@ -19,6 +19,16 @@ test("placements coalesce per panel per animation frame", () => {
   h.tick();
   expect(h.acks).toHaveLength(2);
 });
+test("an unrelated DOM batch does not flush pending divider placements early", () => {
+  const h = setup();
+  h.queue.enqueue([{ id: "pexels", generation: 1 }]);
+  h.queue.refresh();
+  h.queue.enqueue([{ id: "pexels", generation: 2 }]);
+  h.queue.refresh();
+  expect(h.applied).toHaveLength(0);
+  h.tick();
+  expect(h.applied.map(p => p.generation)).toEqual([2]);
+});
 test("stale placements and superseded paint acknowledgements are ignored", () => {
   const h = setup();
   h.queue.enqueue([{id:'a', generation:2}]);

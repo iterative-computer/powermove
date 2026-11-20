@@ -13,7 +13,7 @@ use objc2_web_kit::*;
 use serde_json::{Value, json};
 use std::{
     cell::{Cell, RefCell},
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::Read,
     rc::Rc,
 };
@@ -146,6 +146,9 @@ struct Shared {
     geometry_dirty: Cell<bool>,
     closed: Cell<bool>,
     layouts: RefCell<BTreeMap<String, (u64, Rect, bool)>>,
+    /// Footprints the shared page can still be painting until it acknowledges
+    /// the newest placement. They must not leak through its viewer aperture.
+    stale_layouts: RefCell<BTreeMap<String, Rect>>,
     layout_sequence: Cell<u64>,
     snapshots: RefCell<BTreeMap<String, PanelSnapshot>>,
     overscan: RefCell<Option<Overscan>>,
@@ -154,6 +157,20 @@ struct Shared {
     fonts: RefCell<BTreeMap<String, std::sync::Arc<[u8]>>>,
 }
 impl Shared {
+    fn panel_safe_stage(&self, stage: Rect, frozen: &BTreeMap<String, Rect>) -> Vec<Rect> {
+        let stale = self.stale_layouts.borrow();
+        let layouts = self.layouts.borrow();
+        stale
+            .values()
+            .chain(frozen.keys().filter_map(|id| layouts.get(id).map(|(_, r, _)| r)))
+            .fold(vec![stage], |regions, cut| {
+                regions
+                    .into_iter()
+                    .flat_map(|r| subtract_build_region(r, *cut))
+                    .collect()
+            })
+    }
+
     fn capture_layout_is_current(&self, id: &str, generation: u64) -> bool {
         let layouts = self.layouts.borrow();
         layouts
@@ -315,7 +332,11 @@ impl Shared {
                     {
                         return Ok(Value::Null);
                     }
+                    if layout.2 {
+                        return Ok(Value::Null);
+                    }
                     layout.2 = true;
+                    self.stale_layouts.borrow_mut().remove(id);
                     if let Some(snapshot) = self.snapshots.borrow_mut().get_mut(id) {
                         snapshot.revision += 1;
                     }
@@ -965,6 +986,8 @@ pub struct MacDomHost {
     /// regions show and the content does not (`set_fill`).
     fill: Option<[f64; 4]>,
     overlays: BTreeMap<String, (Retained<SnapshotView>, Retained<NSImageView>)>,
+    snapshot_targets: BTreeMap<String, Rect>,
+    frozen_pixels: BTreeMap<String, (Rect, Retained<NSImage>)>,
     build_masks: BTreeMap<String, (u64, f32)>,
     /// The continuous radius of each region's bottom corners
     /// (`set_corner_radius`): the panels' bodies end in their corners.
@@ -1044,6 +1067,7 @@ impl MacDomHost {
             geometry_dirty: Cell::new(true),
             closed: Cell::new(false),
             layouts: RefCell::default(),
+            stale_layouts: RefCell::default(),
             layout_sequence: Cell::new(0),
             snapshots: RefCell::default(),
             overscan: RefCell::default(),
@@ -1115,6 +1139,8 @@ impl MacDomHost {
             content: None,
             fill: None,
             overlays: BTreeMap::new(),
+            snapshot_targets: BTreeMap::new(),
+            frozen_pixels: BTreeMap::new(),
             build_masks: BTreeMap::new(),
             corner_radius: 0.,
         };
@@ -1420,7 +1446,14 @@ impl MacDomHost {
     /// The extension panels shown through this page and their bodies, so a
     /// press is known by its panel: a tab beside it shows in the same body.
     pub fn set_bodies(&mut self, bodies: Vec<(String, Rect)>) {
-        self.bodies = Some(bodies);
+        if self.bodies.as_ref() != Some(&bodies) {
+            // Resolve a pending press against the slot that received it.
+            if self.bodies.is_some() {
+                self.caret_left();
+            }
+            self.bodies = Some(bodies);
+            self.shared.geometry_dirty.set(true);
+        }
     }
     pub fn set_body_fades(&mut self, fades: Vec<(Rect, [f64; 2])>) {
         if self.body_fades != fades {
@@ -1503,22 +1536,53 @@ impl MacDomHost {
             .is_some_and(|(_, placed, applied)| *placed == rect && *applied)
     }
     /// Send only changed geometry directly to the page, once per native frame.
-    pub fn place_panels(&mut self, panels: Vec<(String, Rect)>) -> Result<()> {
+    pub fn place_panels(
+        &mut self,
+        panels: Vec<(String, Rect)>,
+        freeze: &BTreeSet<String>,
+    ) -> Result<()> {
         if !self.shared.ready.get() {
             return Ok(());
         }
         let mut layouts = self.shared.layouts.borrow().clone();
+        let mut stale = self.shared.stale_layouts.borrow().clone();
+        let snapshots = self.shared.snapshots.borrow();
+        let snapshot_targets: BTreeMap<_, _> = panels
+            .iter()
+            .filter(|(id, _)| {
+                freeze.contains(id)
+                    && layouts.contains_key(id)
+                    && snapshots.get(id).is_some_and(|s| s.image.is_some())
+            })
+            .cloned()
+            .collect();
+        drop(snapshots);
         let mut changed = vec![];
         let active: Vec<String> = panels.iter().map(|(id, _)| id.clone()).collect();
         let retired = layouts.keys().any(|id| !active.contains(id));
         layouts.retain(|id, _| panels.iter().any(|(active, _)| active == id));
+        stale.retain(|id, _| layouts.contains_key(id));
         for (id, rect) in panels {
             if !rect.valid() {
                 return Err(Error::InvalidGeometry);
             }
             let previous = layouts.get(&id);
+            if snapshot_targets.contains_key(&id) {
+                continue;
+            }
             if !retired && previous.is_some_and(|(_, old, _)| *old == rect) {
                 continue;
+            }
+            if let Some((_, old, _)) = previous {
+                stale
+                    .entry(id.clone())
+                    .and_modify(|r| {
+                        let x = r.x.min(old.x);
+                        let y = r.y.min(old.y);
+                        *r = Rect::new(x, y, (r.x + r.w).max(old.x + old.w) - x,
+                            (r.y + r.h).max(old.y + old.h) - y);
+                    })
+                    .or_insert(*old);
             }
             let generation = self.shared.layout_sequence.get() + 1;
             self.shared.layout_sequence.set(generation);
@@ -1529,9 +1593,33 @@ impl MacDomHost {
             self.shared.send(
                 json!({"kind":"panel_layout","panel":0,"placements":changed,"active":active}),
             )?;
+            self.shared.geometry_dirty.set(true);
         }
         *self.shared.layouts.borrow_mut() = layouts;
+        *self.shared.stale_layouts.borrow_mut() = stale;
+        if self.snapshot_targets != snapshot_targets {
+            self.frozen_pixels.retain(|id, _| snapshot_targets.contains_key(id));
+            let snapshots = self.shared.snapshots.borrow();
+            for id in snapshot_targets.keys() {
+                if let Some(image) = snapshots.get(id).and_then(|s| s.image.as_ref()) {
+                    self.frozen_pixels.entry(id.clone()).or_insert_with(|| image.clone());
+                }
+            }
+            self.snapshot_targets = snapshot_targets;
+            self.shared.geometry_dirty.set(true);
+        }
         Ok(())
+    }
+    pub fn panel_layouts_settled(&self) -> bool {
+        self.shared.layouts.borrow().values().all(|(_, _, applied)| *applied)
+    }
+    pub fn panel_uses_snapshot(&self, id: &str) -> bool {
+        self.snapshot_targets.contains_key(id)
+    }
+    /// A shared page can contain a viewer overlay and panel roots. Its viewer
+    /// hole must not reveal an old root beside the panel's native snapshot.
+    pub fn panel_safe_stage(&self, stage: Rect) -> Vec<Rect> {
+        self.shared.panel_safe_stage(stage, &self.snapshot_targets)
     }
     /// An idle clone is painted in a full-height strip outside every visible
     /// page region. The original roots, scrolling and events stay untouched.
@@ -1634,11 +1722,11 @@ impl MacDomHost {
             *self.shared.overscan.borrow_mut() = Some(pending);
         }
     }
-    /// Cache settled panel pixels. Pending layouts use these pixels at their
-    /// original scale, pinned to the new top-left and clipped by a native layer.
+    /// Cache settled panel pixels. A gesture pins those pixels and can scale
+    /// them across the divider, clipped to the new panel instead of reflowing.
     fn present_snapshots(&mut self, viewport: Rect) {
         let layouts = self.shared.layouts.borrow().clone();
-        let settled = layouts.values().all(|(_, _, applied)| *applied);
+        let settled = self.panel_layouts_settled();
         self.build_masks.retain(|id, _| layouts.contains_key(id));
         self.overlays.retain(|id, (view, _)| {
             let keep = layouts.contains_key(id);
@@ -1647,7 +1735,9 @@ impl MacDomHost {
             }
             keep
         });
-        for (id, (generation, rect, applied)) in layouts {
+        for (id, (generation, layout_rect, applied)) in layouts {
+            let frozen = self.snapshot_targets.get(&id).copied();
+            let rect = frozen.unwrap_or(layout_rect);
             // Capturing a rectangle in the shared page is safe only when
             // every panel is in its acknowledged slot, and the whole capture
             // is on the page. Offscreen/partial panels use an isolated copy.
@@ -1656,7 +1746,9 @@ impl MacDomHost {
                 .as_ref()
                 .and_then(|bodies| bodies.iter().find(|(panel, _)| panel == &id))
                 .map_or(viewport, |(_, clip)| viewport.intersection(*clip));
-            if settled && applied && rect.intersection(clip) == rect && rect.w > 0. && rect.h > 0. {
+            if frozen.is_none()
+                && settled && applied && rect.intersection(clip) == rect && rect.w > 0. && rect.h > 0.
+            {
                 let mut snapshots = self.shared.snapshots.borrow_mut();
                 let snapshot = snapshots.entry(id.clone()).or_default();
                 if let Some((view, _)) = self.overlays.get(&id) {
@@ -1714,9 +1806,14 @@ impl MacDomHost {
                         &callback,
                     );
                 }
-            } else if !settled {
+            } else if frozen.is_some() || !settled {
                 let snapshots = self.shared.snapshots.borrow();
-                let Some((source, image)) = snapshots.get(&id).and_then(|s| s.image.as_ref())
+                let image = if frozen.is_some() {
+                    self.frozen_pixels.get(&id)
+                } else {
+                    snapshots.get(&id).and_then(|s| s.image.as_ref())
+                };
+                let Some((source, image)) = image
                 else {
                     if let Some((view, _)) = self.overlays.get(&id) {
                         view.setHidden(true);
@@ -1738,7 +1835,11 @@ impl MacDomHost {
                     self.slot.addSubview(&view);
                     (view, picture)
                 });
-                let (outer, inner) = snapshot_geometry(*source, rect, clip, viewport.h);
+                // Scale only across the divider. Overscan may have captured
+                // more height than the body, for scrolling behind its clip.
+                let scaled = Rect { w: rect.w, ..*source };
+                let (outer, inner) = snapshot_geometry(scaled, rect, clip, viewport.h);
+                picture.setImageScaling(NSImageScaling::ScaleAxesIndependently);
                 view.setFrame(NSRect::new(
                     NSPoint::new(outer.x, outer.y),
                     NSSize::new(outer.w, outer.h),
@@ -1945,13 +2046,15 @@ impl MacDomHost {
                 view.setHidden(true);
             }
         }
-        self.overscan_snapshot(viewport);
+        if self.snapshot_targets.is_empty() || self.shared.overscan.borrow().is_some() {
+            self.overscan_snapshot(viewport);
+        }
         refuse_drags(&self.web);
         self.shared.geometry_dirty.set(false);
         Ok(())
     }
     pub fn composition_dirty(&self) -> bool {
-        self.shared.geometry_dirty.get()
+        self.shared.geometry_dirty.get() || self.pressed.get().is_some()
     }
 
     /// Job-scoped, nestable activity. Park only when the editor window is closed
@@ -2250,6 +2353,7 @@ mod admission_tests {
                 geometry_dirty: Cell::new(false),
                 closed: Cell::new(false),
                 layouts: RefCell::default(),
+                stale_layouts: RefCell::default(),
                 layout_sequence: Cell::new(0),
                 snapshots: RefCell::default(),
                 overscan: RefCell::default(),
@@ -2352,6 +2456,12 @@ mod admission_tests {
         s.layouts
             .borrow_mut()
             .insert("logos".into(), (2, Rect::new(0., 0., 100., 80.), false));
+        let stage = Rect::new(100., 0., 400., 80.);
+        s.stale_layouts
+            .borrow_mut()
+            .insert("logos".into(), Rect::new(0., 0., 200., 80.));
+        let frozen = BTreeMap::new();
+        let masked = vec![Rect::new(200., 0., 300., 80.)];
         for generation in [1, 3] {
             s.handle(
                 &json!({"generation":3,"panel":0,"kind":"panel_layout_applied",
@@ -2360,6 +2470,7 @@ mod admission_tests {
             )
             .unwrap();
             assert!(!s.layouts.borrow()["logos"].2);
+            assert_eq!(s.panel_safe_stage(stage, &frozen), masked);
         }
         s.handle(
             &json!({"generation":3,"panel":0,"kind":"panel_layout_applied",
@@ -2368,6 +2479,7 @@ mod admission_tests {
         )
         .unwrap();
         assert!(!s.layouts.borrow()["logos"].2);
+        assert_eq!(s.panel_safe_stage(stage, &frozen), masked);
         s.handle(
             &json!({"generation":3,"panel":0,"kind":"panel_layout_applied",
             "payload":{"id":"logos","generation":2,"rect":{"x":0,"y":0,"w":100,"h":80}}})
@@ -2375,6 +2487,7 @@ mod admission_tests {
         )
         .unwrap();
         assert!(s.layouts.borrow()["logos"].2);
+        assert_eq!(s.panel_safe_stage(stage, &frozen), [stage]);
     }
     const INPUT: &str =
         r#"{"generation":3,"panel":1,"kind":"remote_dom","payload":{"kind":"event"}}"#;

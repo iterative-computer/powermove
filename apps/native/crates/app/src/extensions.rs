@@ -212,7 +212,8 @@ pub struct Extensions {
     /// A built-in menu's callback while extensions answer for its menu.
     choice: Option<(u64, crate::timeline_surface::Choose)>,
     next_menu: u64,
-    placed: BTreeMap<String, layout::Rect>,
+    /// Visibility sent to the realm. The page owns all subsequent geometry.
+    placed: BTreeSet<String>,
     seen: u64,
     commands: BTreeSet<String>,
     /// Palette entries from v1–3 contributions and from v4 `commands.register`,
@@ -263,12 +264,6 @@ pub struct Extensions {
     /// extension made one (`viewer.stage`, `viewer.ov`). The viewer keeps the
     /// pointer there.
     stage: Rc<std::cell::Cell<Option<layout::Rect>>>,
-    /// Where each panel was placed lately, as sent to the realm's page
-    /// (`Placements`): a panel shows only where it is now *and* where the
-    /// page may still be drawing it.
-    sent: Rc<RefCell<Placements>>,
-    /// A repaint is due once recent placements have settled.
-    settle_pending: bool,
     stage_used: bool,
     /// The viewer slot and composition frame last told to the realm.
     stage_sent: Option<Option<[i64; 8]>>,
@@ -313,7 +308,7 @@ impl Default for Extensions {
             menu: None,
             choice: None,
             next_menu: 0,
-            placed: BTreeMap::new(),
+            placed: BTreeSet::new(),
             seen: 0,
             commands: BTreeSet::new(),
             compat_choices: vec![],
@@ -346,8 +341,6 @@ impl Default for Extensions {
                 ..Default::default()
             }),
             stage: Rc::default(),
-            sent: Rc::default(),
-            settle_pending: false,
             stage_used: false,
             stage_sent: None,
             presented: None,
@@ -2048,22 +2041,6 @@ impl Controller {
             host.set_panel(id, true);
         }
         self.ensure_page(id, cx);
-        self.place_panels();
-        // Once the page has caught up, its panels show whole again.
-        if !self.extensions.settle_pending && self.extensions.sent.borrow().moving() {
-            self.extensions.settle_pending = true;
-            cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(PLACEMENT_LAG + PLACEMENT_LAG / 4)
-                    .await;
-                let _ = this.update(cx, |v, cx| {
-                    v.extensions.settle_pending = false;
-                    cx.notify();
-                });
-                cx.update(|cx| cx.refresh_windows());
-            })
-            .detach();
-        }
         Some(
             div()
                 .w_full()
@@ -2268,8 +2245,8 @@ impl Controller {
         let bodies = shell.native_panels.clone();
         let clips = shell.native_panel_clips.clone();
         let fades = shell.native_panel_fades.clone();
+        let frozen = shell.native_panel_snapshots.clone();
         let stage = self.extensions.stage.clone();
-        let sent = self.extensions.sent.clone();
         // Native panel over native window tint, over the shared material.
         let fill = Rc::new(Cell::new(pm_compat_host::native_style::panel_backing(
             &shell.tokens,
@@ -2295,8 +2272,7 @@ impl Controller {
             let viewport = Rect::new(0., 0., width, height);
             let bodies = bodies.borrow();
             let owners = owners.borrow();
-            let mut sent = sent.borrow_mut();
-            sent.prune(std::time::Instant::now());
+            let frozen = frozen.borrow();
             let mut dirty = false;
             for (key, page) in views.borrow().iter() {
                 let mut host = page.borrow_mut();
@@ -2319,28 +2295,21 @@ impl Controller {
                 };
                 let panel_regions: Vec<Rect> = mine.iter().map(|(id, r)| clipped(id, *r)).collect();
                 let overlay_regions: Vec<Rect> = stage.as_ref().map(to_rect).into_iter().collect();
-                if !(cfg!(debug_assertions)
-                    && std::env::var_os("PM_NATIVE_LEGACY_PANEL_LAYOUT").is_some())
-                {
-                    let _ = host.place_panels(
-                        mine.iter()
-                            .map(|(id, rect)| ((*id).clone(), *rect))
-                            .collect(),
-                    );
-                }
+                let _ = host.place_panels(
+                    mine.iter()
+                        .map(|(id, rect)| ((*id).clone(), *rect))
+                        .collect(),
+                    &frozen,
+                );
                 // A shared page can draw into a neighbour's slot until all
                 // its roots reach the new layout. Until then it presents the
                 // last completed snapshot of each panel at the new placement.
-                let settled = mine.iter().all(|(id, r)| host.panel_layout_applied(id, *r));
-                let content = (!(cfg!(debug_assertions)
-                    && std::env::var_os("PM_NATIVE_NO_PANEL_MASK").is_some()))
-                .then(|| {
-                    mine.iter()
-                        .filter(|_| settled)
-                        .map(|(id, r)| clipped(id, *r))
-                        .chain(stage.as_ref().map(to_rect))
-                        .collect()
-                });
+                let settled = host.panel_layouts_settled();
+                let content = mine.iter()
+                    .filter(|(id, r)| settled && !host.panel_uses_snapshot(id) && host.panel_layout_applied(id, *r))
+                    .map(|(id, r)| clipped(id, *r))
+                    .chain(stage.as_ref().into_iter().flat_map(|s| host.panel_safe_stage(to_rect(s))))
+                    .collect();
                 let _ = host.set_regions_with_transparent_overlays(panel_regions, overlay_regions);
                 host.set_corner_radius(corner);
                 let fades = fades.borrow();
@@ -2352,14 +2321,13 @@ impl Controller {
                         })
                         .collect(),
                 );
-                let _ = host.set_content_regions(content);
+                let _ = host.set_content_regions(Some(content));
                 host.set_bodies(
                     mine.iter()
                         .map(|(id, r)| ((*id).clone(), clipped(id, *r)))
                         .collect(),
                 );
                 host.set_fill(Some(fill.get()));
-                dirty |= host.composition_dirty();
                 let _ = host.attach(
                     PAGE_PANEL,
                     PanelSlot {
@@ -2367,7 +2335,10 @@ impl Controller {
                         clip: viewport,
                     },
                 );
-                let _ = host.present(viewport);
+                if host.composition_dirty() {
+                    dirty = true;
+                    let _ = host.present(viewport);
+                }
             }
             dirty
         }));
@@ -2483,42 +2454,22 @@ impl Controller {
             "quality": frame.scale,
         }));
     }
-    fn place_panels(&mut self) {
+    /// The realm needs to hear when a body becomes visible, but never gets
+    /// a second stream of moving rects alongside the page's placement batch.
+    pub fn finish_extension_layout(&mut self, shown: &[&str]) {
         self.sync_viewport();
         self.sync_viewer_stage();
         let Some(host) = &self.extensions.host else {
             return;
         };
-        if self.extensions.placed == self.extensions.panels {
-            return;
-        }
         for (id, rect) in &self.extensions.panels {
-            if !self.extensions.hidden.contains(id) && self.extensions.placed.get(id) != Some(rect)
-            {
+            if shown.contains(&id.as_str()) {
+                self.extensions.hidden.remove(id);
+                if !self.extensions.placed.insert(id.clone()) {
+                    continue;
+                }
                 host.place_panel(id, Some([rect.x, rect.y, rect.w, rect.h]));
-                self.extensions.sent.borrow_mut().record(
-                    id,
-                    Rect::new(rect.x as f64, rect.y as f64, rect.w as f64, rect.h as f64),
-                    std::time::Instant::now(),
-                );
-            }
-        }
-        self.extensions.placed = self
-            .extensions
-            .panels
-            .iter()
-            .filter(|(id, _)| !self.extensions.hidden.contains(*id))
-            .map(|(id, rect)| (id.clone(), *rect))
-            .collect();
-    }
-    /// A tab behind another stays open in the realm but leaves the shared
-    /// document's paint and hit testing; `extension_panel` brings it back.
-    pub fn hide_extension_panels(&mut self, shown: &[&str]) {
-        let Some(host) = &self.extensions.host else {
-            return;
-        };
-        for id in self.extensions.panels.keys() {
-            if !shown.contains(&id.as_str()) && self.extensions.hidden.insert(id.clone()) {
+            } else if self.extensions.hidden.insert(id.clone()) {
                 self.extensions.placed.remove(id);
                 host.place_panel(id, None);
             }
@@ -2660,90 +2611,8 @@ const STOPS_PAGE: &[&str] = &["compat_applier_stopped"];
 /// How often a minute a stopped page is made again.
 const PAGE_REBUILDS: usize = 3;
 
-/// How long the realm's page may take to move a panel's content after the
-/// shell placed it (it hears through the realm, on a worker).
-pub(crate) const PLACEMENT_LAG: std::time::Duration = std::time::Duration::from_millis(250);
-/// The places each extension panel was sent lately. The page draws a panel
-/// where the last placement it applied says, which can lag the shell by a
-/// few frames; the shell does not hear which one. Masking each panel to its
-/// body now and every place sent within `PLACEMENT_LAG` (and the one before
-/// those) keeps its content inside its own body whichever the page drew.
-#[derive(Default)]
-pub(crate) struct Placements(BTreeMap<String, Vec<(std::time::Instant, Rect)>>);
-impl Placements {
-    pub fn record(&mut self, id: &str, rect: Rect, at: std::time::Instant) {
-        self.0.entry(id.to_owned()).or_default().push((at, rect));
-        self.prune(at);
-    }
-    /// Forgets places older than the lag, keeping the newest of those (the
-    /// page has drawn at least that one).
-    pub fn prune(&mut self, now: std::time::Instant) {
-        for places in self.0.values_mut() {
-            let old = places
-                .iter()
-                .rposition(|(t, _)| now.duration_since(*t) > PLACEMENT_LAG);
-            if let Some(i) = old {
-                places.drain(..i);
-            }
-        }
-    }
-    /// Where panel `id` may show: its body now, within every recent place.
-    pub fn mask(&self, id: &str, now: Rect) -> Rect {
-        self.0
-            .get(id)
-            .into_iter()
-            .flatten()
-            .fold(now, |r, (_, place)| r.intersection(*place))
-    }
-    /// A panel moved within the lag: its mask is still narrower than its body.
-    pub fn moving(&self) -> bool {
-        self.0.values().any(|places| places.len() > 1)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    /// Chike's clip (2026-11-14): two stacked extension panels and a splitter
-    /// dragged between them. Each shows only within its own body, both while
-    /// the page still draws the old places and after it caught up.
-    #[test]
-    fn stacked_extension_panels_never_show_through_each_other() {
-        use super::{PLACEMENT_LAG, Placements, Rect};
-        use std::time::{Duration, Instant};
-        let t0 = Instant::now();
-        let mut sent = Placements::default();
-        // Upper and lower panels, the splitter between them at y = 400.
-        let (upper, lower) = (
-            Rect::new(0., 100., 300., 300.),
-            Rect::new(0., 408., 300., 300.),
-        );
-        sent.record("upper", upper, t0);
-        sent.record("lower", lower, t0);
-        // Dragged down 120 pt: the upper grows, the lower shrinks from its top.
-        let t1 = t0 + Duration::from_millis(16);
-        let (upper2, lower2) = (
-            Rect::new(0., 100., 300., 420.),
-            Rect::new(0., 528., 300., 180.),
-        );
-        sent.record("upper", upper2, t1);
-        sent.record("lower", lower2, t1);
-        let (mu, ml) = (sent.mask("upper", upper2), sent.mask("lower", lower2));
-        // Neither shows outside its body now, nor where the page may still
-        // draw the other: the upper's new strip waits for its content.
-        assert_eq!(mu, upper);
-        assert_eq!(ml, lower2);
-        assert!(mu.intersection(lower2).h == 0. && ml.intersection(upper2).h == 0.);
-        assert!(sent.moving());
-        // Settled: each shows its whole body again.
-        let later = t1 + PLACEMENT_LAG + Duration::from_millis(1);
-        sent.prune(later);
-        assert_eq!(sent.mask("upper", upper2), upper2);
-        assert_eq!(sent.mask("lower", lower2), lower2);
-        assert!(!sent.moving());
-        // A panel never placed shows its body.
-        assert_eq!(sent.mask("other", lower), lower);
-    }
-
     /// What a window pins comes from one publication of the host: the
     /// definitions published while an extension was still loading stay a
     /// load in progress however far the host has moved on since, so a frame
