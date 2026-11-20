@@ -1392,16 +1392,100 @@ fn a_made_extension_with_a_broken_manifest_says_why() {
     assert_eq!(made.len(), 1);
     let why = made[0].broken.clone().expect("listed as broken");
     assert!(why.contains("author") && why.contains("\"user\""), "{why}");
-    assert!(crate::store_window::broken_status(&why).starts_with("Its manifest has a problem"));
+    assert_eq!(
+        crate::store_window::broken_status(&why),
+        "Author is invalid. Open Details."
+    );
 }
 
-/// PM-505: Publish while signed out says so and offers the way to an account:
-/// a Sign In button, not only a line of text.
 #[::core::prelude::v1::test]
-fn publishing_signed_out_offers_sign_in() {
+fn words_signed_out_publish_offers_sign_in_in_an_app_window() {
+    use crate::store_window::publish_sign_in_message;
+    assert_eq!(publish_sign_in_message(true, true), (crate::publish::SIGN_IN, true));
+    assert_eq!(publish_sign_in_message(true, false).1, false);
+    assert_eq!(publish_sign_in_message(false, true), (
+        "Publishing needs a Powermove account, which isn't available in this build yet.",
+        false,
+    ));
+}
+
+#[::core::prelude::v1::test]
+fn words_made_by_you_has_a_new_extension_action() {
     let f = fixture();
-    let profile = f.profile.path().canonicalize().unwrap();
-    let folder = profile.join("extensions/made-here");
+    let mut cx = TestAppContext::single();
+    let (view, cx) = open(&mut cx, services(&f, false));
+    view.update(cx, |v, cx| v.set_page(Page::Library, cx));
+    settle(&view, cx, "library", |v| ready(&v.library));
+    assert!(cx.debug_bounds("store-new-extension").is_some());
+}
+
+#[::core::prelude::v1::test]
+fn words_a_manifest_lists_each_invalid_field() {
+    let profile = tempfile::tempdir().unwrap();
+    let folder = profile.path().join("extensions/acc-tint");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("manifest.json"),
+        r#"{"id":"acc-tint","apiVersion":3,"author":"acceptance"}"#,
+    )
+    .unwrap();
+    let made = crate::store_window::yours(profile.path());
+    let issues = made[0].broken.as_deref().expect("listed as broken");
+    use crate::store_window::broken_status;
+    assert_eq!(
+        broken_status(issues),
+        "Name is missing or invalid. Open Details."
+    );
+    assert_eq!(
+        broken_status(r#"invalid "displayName""#),
+        "Name is missing or invalid. Open Details."
+    );
+    assert_eq!(
+        broken_status(r#"invalid "version" (x.y.z)"#),
+        "Version is missing or invalid. Open Details."
+    );
+    assert_eq!(
+        broken_status("unexpected end of input"),
+        "This extension needs a fix. Open Details."
+    );
+    assert_eq!(issues.lines().count(), 3);
+    for field in ["name", "version", "author"] {
+        assert!(issues.contains(&format!("\"{field}\"")), "{issues}");
+    }
+}
+
+#[::core::prelude::v1::test]
+#[ignore = "writes synthetic review captures"]
+fn capture_words_extension_library() {
+    let f = fixture();
+    let folder = f.profile.path().join("extensions/acc-tint");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("manifest.json"),
+        r#"{"id":"acc-tint","apiVersion":3,"author":"acceptance"}"#,
+    )
+    .unwrap();
+    for (capture, signed_out) in [
+        ("store-extension-library", false),
+        ("store-extension-publish", true),
+    ] {
+        crate::utility_capture_tests::capture(capture, |_, cx| {
+            cx.new(|cx| {
+                let mut v = StoreWindow::new(services(&f, false), pm_shell::tokens(), cx);
+                v.set_page(Page::Library, cx);
+                if signed_out {
+                    v.message = Some(crate::publish::SIGN_IN.to_owned());
+                }
+                v
+            })
+        });
+    }
+}
+
+#[::core::prelude::v1::test]
+fn words_publish_with_no_account_service_has_no_dead_sign_in_button() {
+    let f = fixture();
+    let folder = f.profile.path().join("extensions/made-here");
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(
         folder.join("manifest.json"),
@@ -1418,6 +1502,5 @@ fn publishing_signed_out_offers_sign_in() {
         view.read_with(cx, |v, _| v.message.clone()).as_deref(),
         Some(crate::publish::SIGN_IN)
     );
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("store-sign-in").is_some(), "a Sign In button is shown");
+    assert!(cx.debug_bounds("store-sign-in").is_none());
 }

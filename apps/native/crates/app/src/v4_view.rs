@@ -4876,10 +4876,11 @@ impl SurfaceView {
             let c = &self.table.tokens.colors;
             let drag = PanelDrag {
                 panel: self.publication.panel.clone(),
-                label: node
-                    .ax
-                    .as_ref()
-                    .and_then(|ax| ax.label.clone())
+                label: self.publication.surface.node(id)
+                    .and_then(|surface| surface.props.get("metadata"))
+                    .and_then(|metadata| metadata["dragLabel"].as_str())
+                    .map(Into::into)
+                    .or_else(|| node.ax.as_ref().and_then(|ax| ax.label.clone()))
                     .unwrap_or_else(|| "Media".into()),
                 item: node.drag_item.clone(),
                 colors: (c.floating, c.separator, c.text),

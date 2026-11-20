@@ -929,18 +929,26 @@ impl KernelData for Data {
                             all.extend(b.transition_commands(definition, target, time, false)?);
                             continue;
                         }
-                        let request = b
-                            .model
-                            .as_mut()
-                            .ok_or("No open project")?
-                            .add_effect_at(caller, target, definition, time)
-                            .map_err(|e| e.to_string())?;
-                        if let pm_kernel::Call::Transact {
-                            body: pm_kernel::WriteBody::Commands(commands),
-                            ..
-                        } = request.call
-                        {
-                            all.extend(commands);
+                        let model = b.model.as_mut().ok_or("No open project")?;
+                        let targets = model.selected_layers().to_vec();
+                        for layer in targets {
+                            if !model.editable(&layer)
+                                || model.layer(&layer).ok().is_none_or(|node| {
+                                    node.get("type").and_then(pm_model::Value::as_str) == Some("audio")
+                                })
+                            {
+                                continue;
+                            }
+                            let request = model
+                                .add_effect_at(caller, &layer, definition, time)
+                                .map_err(|e| e.to_string())?;
+                            if let pm_kernel::Call::Transact {
+                                body: pm_kernel::WriteBody::Commands(commands),
+                                ..
+                            } = request.call
+                            {
+                                all.extend(commands);
+                            }
                         }
                     }
                     kernel = Some(pm_kernel::Request::new(

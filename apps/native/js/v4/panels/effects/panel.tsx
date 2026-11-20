@@ -39,6 +39,7 @@ export function EffectsPanel({
   const [, redraw] = useReducer((n: number) => n + 1, 0);
   useLayoutEffect(() => model.subscribe(() => redraw(undefined)), [model]);
   const window = model.window();
+  const status = model.error ?? model.selectionHint;
   const focus = (row: Row) =>
     model.focus === "list" && model.focused === row.key;
   // Speak each registry kind, including transitions, in the row label.
@@ -131,17 +132,17 @@ export function EffectsPanel({
           </PushButton>
         </div>
       ) : null}
-      {model.error ? (
+      {status ? (
         <text
           role="status"
-          label={model.error}
+          label={status}
           metadata={{ symbol: "exclamationmark.triangle.fill" }}
           style={{
             color: token("colors.warning"),
             fontSize: token("typography.body"),
           }}
         >
-          {model.error}
+          {status}
         </text>
       ) : null}
       <div
@@ -325,7 +326,7 @@ export function EffectsPanel({
                     title={
                       item.failed
                         ? "This effect couldn’t load."
-                        : "Drag onto a layer, or click Add."
+                        : "Drag onto a layer, or double-click to apply to the selected layer."
                     }
                     tabIndex={-1}
                     onSelect={() => model.select(row.key)}
@@ -350,6 +351,7 @@ export function EffectsPanel({
                     }}
                     metadata={{
                       item: item.id,
+                      dragLabel: item.label,
                       kind: item.kind,
                       parent: row.parent,
                       focused,

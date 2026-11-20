@@ -455,6 +455,13 @@ mod original_name_tests {
         assert_eq!(super::shown_name("Run6 — Native — Native", None), "Run6 — Native");
     }
     #[test]
+    fn words_editor_title_keeps_only_one_shipped_copy_suffix() {
+        let title = super::shown_name;
+        assert_eq!(title("Cut", None), "Cut");
+        assert_eq!(title("Cut — Native", None), "Cut — Native");
+        assert_eq!(title("Cut — Native — Native", None), "Cut — Native");
+    }
+    #[test]
     fn a_part_repeated_after_itself_shows_once() {
         let n = |s: &str| super::original_name(s.to_owned());
         assert_eq!(n("Run6 — Native — Native"), "Run6 — Native");

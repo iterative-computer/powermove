@@ -381,3 +381,72 @@ fn pm555_publishing_checks_compat_and_v4_effect_shaders() {
     }
     fs::remove_dir_all(profile).unwrap();
 }
+
+#[test]
+fn words_starter_templates_are_complete_discoverable_and_loadable() {
+    use crate::extension_template::{Kind, create};
+    let profile = tempfile::tempdir().unwrap();
+    let root = profile.path().join("extensions");
+    let name = "A \"starter\" / example";
+    let panel = create(profile.path(), name, Kind::Panel).unwrap();
+    let effect = create(profile.path(), name, Kind::Effect).unwrap();
+    assert_eq!(panel, "a-starter-example");
+    assert_eq!(effect, "a-starter-example-2");
+    assert!(create(profile.path(), "   ", Kind::Effect).is_err());
+
+    let found = pm_compat_runner::discovery::scan(&[root]);
+    assert_eq!(found.len(), 2);
+    for (item, entry, api) in [
+        (&found[0], "index.tsx", 4),
+        (&found[1], "index.ts", 3),
+    ] {
+        let manifest = item.manifest.as_ref().unwrap();
+        assert_eq!(manifest["id"], item.id);
+        assert_eq!(manifest["name"], name);
+        assert_eq!(manifest["version"], "1.0.0");
+        assert_eq!(manifest["entry"], entry);
+        assert_eq!(manifest["apiVersion"], api);
+        assert_eq!(manifest["author"], "user");
+        assert!(item.directory.join(entry).is_file());
+        check(&item.directory, manifest).unwrap();
+    }
+    let effect_code = fs::read_to_string(found[1].directory.join("index.ts")).unwrap();
+    assert!(effect_code.contains("a-starter-example-2.effect"));
+    assert!(effect_code.contains(&json!(name).to_string()));
+    let made = crate::store_window::yours(profile.path());
+    assert_eq!(made.len(), 2);
+    assert!(made.iter().all(|item| item.name == name && item.broken.is_none()));
+}
+
+#[test]
+fn words_new_extension_sheet_uses_the_standard_name_and_kind_fields() {
+    let sheet = crate::extension_template::surface();
+    assert_eq!(sheet.title, "New Extension");
+    assert_eq!(sheet.fields[0].id, "name");
+    assert_eq!(sheet.fields[0].placeholder, Some("My Extension"));
+    assert!(sheet.fields[0].description.is_none());
+    assert!(sheet.result_line.is_none());
+    assert_eq!(sheet.fields[1].values, ["Panel", "Effect"]);
+    assert_eq!(sheet.buttons[0], crate::dialogs::Button::cancel(false));
+    let create = &sheet.buttons[1];
+    assert_eq!(create.label, "Create");
+    assert_eq!(create.id, "apply");
+    assert!(create.default);
+    assert!(!create.enabled);
+}
+
+#[test]
+fn words_file_new_menu_offers_extension_creation() {
+    let menus = pm_shell::menu::menus();
+    let file = menus.iter().find(|(name, _)| *name == "File").unwrap();
+    assert!(
+        file.1
+            .iter()
+            .any(|item| item.label == "New" && item.command == "newFile")
+    );
+    assert!(
+        pm_shell::menu::new_file()
+            .iter()
+            .any(|item| item.label == "Extension…" && item.command == "newExtension")
+    );
+}

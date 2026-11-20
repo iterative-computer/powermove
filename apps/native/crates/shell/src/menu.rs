@@ -102,7 +102,7 @@ pub fn runs_beside_sheet(command: &str, field_editing: bool) -> bool {
     BESIDE_SHEET.contains(&command) || (field_editing && command.starts_with("context"))
 }
 /// Commands whose items get a dynamic submenu (rebuilt when opened).
-pub const SUBMENUS: [&str; 8] = [
+pub const SUBMENUS: [&str; 9] = [
     "openRecent",
     "workspaces",
     "panels",
@@ -110,8 +110,12 @@ pub const SUBMENUS: [&str; 8] = [
     "timelineTools",
     "new3d",
     "newLayers",
+    "newFile",
     "view3d",
 ];
+pub fn new_file() -> Vec<Item> {
+    vec![Item::command("Extension…", "newExtension", "")]
+}
 /// Items of the View ▸ Tools submenu, in toolbar order (registry chords).
 pub fn tools() -> Vec<Item> {
     let keymap = crate::keymap::current();
@@ -308,6 +312,7 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
             vec![
                 m("newProject"),
                 m("newWindow"),
+                Item::command("New", "newFile", ""),
                 m("open"),
                 Item::command("Open Recent", "openRecent", ""),
                 r("Projects…", "projects"),

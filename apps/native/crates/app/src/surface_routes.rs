@@ -37,6 +37,31 @@ impl Controller {
         }
         match name {
             "newProject" => self.new_project(cx),
+            "newExtension" => {
+                let (owner, tokens) = {
+                    let host = self.host.borrow();
+                    (host.window.clone(), host.tokens.clone())
+                };
+                let this = cx.entity().downgrade();
+                crate::extension_template::open(
+                    self.profile.clone(),
+                    &owner,
+                    &tokens,
+                    cx,
+                    move |cx| {
+                        let _ = this.update(cx, |v, cx| {
+                            if let Some(store) = v.store.clone() {
+                                store.update(cx, |store, cx| store.show_made_library(cx));
+                            }
+                            v.note(
+                                "Extension created. Find it in Store Library under Made by You."
+                                    .into(),
+                                cx,
+                            );
+                        });
+                    },
+                );
+            }
             "addDefaultTransition" => self.add_default_transition(cx),
             "openRecent" => self.show_home(cx),
             // The toolbar's Home and ⌘P (v1's `ProjectsScreen.toggle`): Home,

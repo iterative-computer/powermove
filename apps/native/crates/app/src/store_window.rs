@@ -517,6 +517,31 @@ impl StoreWindow {
             cx.notify();
         }
     }
+    pub(crate) fn show_made_library(&mut self, cx: &mut Context<Self>) {
+        if self.page == Page::Library && self.detail.is_none() {
+            self.load_library();
+            cx.notify();
+        } else {
+            self.set_page(Page::Library, cx);
+        }
+    }
+
+    fn new_extension(&self, window: &Window, cx: &mut Context<Self>) {
+        let Some(owner) = crate::platform::ns_window(window) else {
+            return;
+        };
+        let this = cx.entity().downgrade();
+        crate::extension_template::open(
+            self.services.profile.clone(),
+            &owner,
+            &self.tokens,
+            cx,
+            move |cx| {
+                let _ = this.update(cx, |v, cx| v.show_made_library(cx));
+            },
+        );
+    }
+
     /// What the Store installed here, then which of those it has updates for.
     fn load_library(&mut self) {
         self.library_generation += 1;
@@ -1157,6 +1182,22 @@ fn problem_text(
         _ => "This extension can’t be published as it is.".into(),
     }
 }
+pub(crate) fn publish_sign_in_message(service: bool, window: bool) -> (&'static str, bool) {
+    if !service {
+        (
+            "Publishing needs a Powermove account, which isn't available in this build yet.",
+            false,
+        )
+    } else if !window {
+        (
+            "Sign in to publish. The sign-in sheet needs an app window.",
+            false,
+        )
+    } else {
+        (crate::publish::SIGN_IN, true)
+    }
+}
+
 const GENERIC: &str = "Something went wrong. Try again.";
 const SIGNING: &str = "Installing from the Store isn't available in this build.";
 /// A failed read, as one sentence for the person who asked (v1.2.0 `actionErrorText`).
@@ -1168,9 +1209,18 @@ fn load_error(error: pm_services::ServiceError) -> String {
     }
     .into()
 }
-/// A broken card's line: what is wrong with its manifest, in a sentence.
-pub(crate) fn broken_status(why: &str) -> String {
-    format!("Its manifest has a problem: {why}.")
+/// The card summarizes the first issue. Details shows the full diagnostics.
+pub(crate) fn broken_status(why: &str) -> &'static str {
+    let first = why.lines().next().unwrap_or_default();
+    if first.starts_with(r#"invalid "name""#) || first.starts_with(r#"invalid "displayName""#) {
+        "Name is missing or invalid. Open Details."
+    } else if first.starts_with(r#"invalid "version""#) {
+        "Version is missing or invalid. Open Details."
+    } else if first.starts_with(r#"invalid "author""#) {
+        "Author is invalid. Open Details."
+    } else {
+        "This extension needs a fix. Open Details."
+    }
 }
 fn uuid_like(s: &str) -> bool {
     s.len() == 36 && s.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-')
@@ -2329,8 +2379,7 @@ impl StoreWindow {
         let made = if self.yours.is_empty() {
             self.empty_card(
                 "Nothing Made Yet",
-                "Ask your agent for an effect, a panel or a theme. What it makes shows up here, \
-                 ready to publish.",
+                "Extensions you make on this Mac show up here.",
                 None,
             )
             .into_any_element()
@@ -2402,7 +2451,10 @@ impl StoreWindow {
                 .collect();
             self.grid(cards, width, across)
         };
-        out.push(self.section(self.heading("Made by You", None), made));
+        let create = self
+            .head_action("store-new-extension", "New Extension…", None)
+            .on_click(cx.listener(|v, _, window, cx| v.new_extension(window, cx)));
+        out.push(self.section(self.heading("Made by You", Some(create.into_any_element())), made));
         out
     }
     /// A made-here extension whose manifest can't be loaded: the card says
@@ -2417,6 +2469,25 @@ impl StoreWindow {
     ) -> AnyElement {
         let c = &self.tokens.colors;
         let id = item.id.clone();
+        let issues = why
+            .lines()
+            .map(|line| format!("• {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let details = self
+            .button(format!("store-issues-{id}"), "Details…", true, false)
+            .aria_label(format!("Manifest issues for {}", item.name))
+            .on_click(cx.listener(move |_, _, window, _| {
+                if let Some(owner) = crate::platform::ns_window(window) {
+                    let _ = crate::alert::Alert::new(
+                        "Manifest issues",
+                        &issues,
+                        vec![crate::alert::Button::new("OK", ()).default()],
+                    )
+                    .notice()
+                    .sheet(&owner);
+                }
+            }));
         let corner = self.card_corner(
             CardMenu {
                 id: id.clone(),
@@ -2425,12 +2496,7 @@ impl StoreWindow {
                 yours: true,
                 switch_in_menu: false,
             },
-            Some(
-                div()
-                    .text_color(rgb(c.muted))
-                    .child("Needs a fix")
-                    .into_any_element(),
-            ),
+            Some(details.into_any_element()),
             cx,
         );
         self.frame(
@@ -2439,7 +2505,7 @@ impl StoreWindow {
             Face {
                 seed: &format!("local:{id}"),
                 name: &item.name,
-                line: Some(("Can’t load".to_owned(), c.warning)),
+                line: Some(("Needs attention".to_owned(), c.warning)),
             },
             div()
                 .text_color(rgb(c.warning))
@@ -2869,13 +2935,18 @@ impl StoreWindow {
         ]
     }
     fn message_line(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let message = self.message.clone()?;
+        let message = self.message.as_deref()?;
+        let sign_in = message == crate::publish::SIGN_IN;
+        let (message, offer_sign_in) = if sign_in {
+            publish_sign_in_message(crate::cloud::sign_in_available(cx), self.owner.is_some())
+        } else {
+            (message, false)
+        };
         let line = self
-            .status(&message)
+            .status(message)
             .debug_selector(|| "store-message".into());
-        // Publishing needs an account: the way to one is right there
-        // (PM-505), not only a line of text.
-        if message == crate::publish::SIGN_IN {
+        // The same account sheet is available from Settings and the Store.
+        if offer_sign_in {
             let owner = self.owner.clone();
             let sign_in = self
                 .button("store-sign-in", "Sign In…", true, true)

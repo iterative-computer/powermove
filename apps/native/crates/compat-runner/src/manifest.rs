@@ -132,12 +132,28 @@ pub fn parse(raw: &Value) -> Result<Value, String> {
     let name = text("name", NAME_CHARS, true)
         .ok()
         .flatten()
-        .ok_or("invalid \"name\"")?;
+        .filter(|name| !name.trim().is_empty());
     let version = text("version", 20, true)
         .ok()
         .flatten()
-        .filter(|v| extension_version(v))
-        .ok_or("invalid \"version\" (x.y.z)")?;
+        .filter(|version| extension_version(version));
+    let invalid_author = m.get("author").is_some_and(|author| {
+        !matches!(author.as_str(), Some("powermove" | "user" | "agent"))
+    });
+    let (name, version) = match (name, version, invalid_author) {
+        (Some(name), Some(version), false) => (name, version),
+        (name, version, invalid_author) => {
+            let issues: Vec<_> = [
+                name.is_none().then_some("invalid \"name\""),
+                version.is_none().then_some("invalid \"version\" (x.y.z)"),
+                invalid_author.then_some("invalid \"author\" (use \"user\", \"agent\" or \"powermove\")"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            return Err(issues.join("\n"));
+        }
+    };
     let api = m
         .get("apiVersion")
         .and_then(Value::as_f64)
@@ -233,11 +249,6 @@ pub fn parse(raw: &Value) -> Result<Value, String> {
         if !valid {
             return Err("invalid \"links\" (up to 5 origins like \"https://example.com\")".into());
         }
-    }
-    if let Some(author) = m.get("author")
-        && !matches!(author.as_str(), Some("powermove" | "user" | "agent"))
-    {
-        return Err("invalid \"author\" (use \"user\", \"agent\" or \"powermove\")".into());
     }
     let mut out = Map::new();
     out.insert("id".into(), json!(id));

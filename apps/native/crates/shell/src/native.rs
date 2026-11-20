@@ -8851,6 +8851,8 @@ pub fn install_menus() {
     commands.extend(menu::timeline_tools().into_iter().map(|i| (i.command, i.args)));
     let new_layers_start = commands.len();
     commands.extend(menu::new_layers().into_iter().map(|i| (i.command, i.args)));
+    let new_file_start = commands.len();
+    commands.extend(menu::new_file().into_iter().map(|i| (i.command, i.args)));
     let new3d_start = commands.len();
     commands.extend(menu::new3d().into_iter().map(|i| (i.command, i.args)));
     let view3d_start = commands.len();
@@ -8945,6 +8947,14 @@ pub fn install_menus() {
                     delegate(&tools, MenuKind::DisplayOnly);
                     item.setSubmenu(Some(&tools));
                 }
+                "newFile" => {
+                    let sub = NSMenu::new(mtm);
+                    for (i, item) in menu::new_file().iter().enumerate() {
+                        sub.addItem(&row(&item.label, &item.chord, new_file_start + i));
+                    }
+                    delegate(&sub, MenuKind::DisplayOnly);
+                    item.setSubmenu(Some(&sub));
+                }
                 "newLayers" => {
                     let sub = NSMenu::new(mtm);
                     for (i, t) in menu::new_layers().iter().enumerate() {
@@ -9010,7 +9020,7 @@ pub fn install_menus() {
             }
             if matches!(
                 spec.command.as_str(),
-                "tools" | "new3d" | "newLayers" | "view3d"
+                "tools" | "new3d" | "newLayers" | "newFile" | "view3d"
             ) {
                 // In an auto-enabling menu an item with no action is disabled;
                 // its submenu's own action keeps the parent enabled.
