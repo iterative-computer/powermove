@@ -31,25 +31,15 @@ struct PanelDrag {
     moved: bool,
     preview: Option<DropPreview>,
     aim: Option<DropPreview>,
-    cue: still_drag::Cue,
     chip: Option<still_drag::Chip>,
     /// False for a panel dragged in from outside.
     live: bool,
     geometry: Geometry,
     /// How far the drag's own edge scroll has moved each column since lift.
     scrolled: HashMap<String, f32>,
-    /// When the press became a drag: the chip fades in from then.
-    lifted: Option<std::time::Instant>,
+    lifted: bool,
     /// When the edge scroll last ran.
     scroll_tick: Option<std::time::Instant>,
-}
-/// The chip gliding home after cancellation.
-#[derive(Clone)]
-struct Settle {
-    chip: still_drag::Chip,
-    from: (f32, f32),
-    to: (f32, f32),
-    since: std::time::Instant,
 }
 #[derive(Clone)]
 struct AreaDrag {
@@ -108,8 +98,6 @@ pub struct Editor {
     slides: PanelSlides,
     /// Tabs sliding along their strips after the same changes.
     tab_slides: crate::drag::TabSlides,
-    /// The drag chip settling after a release.
-    settle: Option<Settle>,
     /// Where each extension body was placed this frame (its panel's
     /// animated rect, less the header and the dividers' grab).
     native_body_rects: Vec<(String, Rect)>,
@@ -182,9 +170,30 @@ pub struct Editor {
     /// A drag of a splitter between two panels has passed its dead zone.
     resize_live: bool,
     resize_geometry: Option<Geometry>,
-    resize_pause: Option<Task<()>>,
-    resize_tracks: HashMap<(usize, usize), layout::TabTrack>,
+    tab_scrolls: HashMap<String, TabScroll>,
     deferred_panel_commands: Vec<String>,
+}
+
+#[derive(Default)]
+struct TabScroll {
+    selected: String,
+    viewport: f32,
+    active_span: (f32, f32),
+    offset: f32,
+}
+
+impl TabScroll {
+    fn reveal(&mut self, selected: &str, viewport: f32, span: (f32, f32), max: f32, fade: f32) {
+        if self.selected != selected || self.viewport != viewport || self.active_span != span {
+            self.selected = selected.to_owned();
+            self.viewport = viewport;
+            self.active_span = span;
+            let padding = fade.min(((viewport - (span.1 - span.0)) / 2.).max(0.));
+            let left = span.0 - padding;
+            self.offset = self.offset.clamp((span.1 + padding - viewport).min(left), left);
+        }
+        self.offset = self.offset.clamp(0., max);
+    }
 }
 
 struct WorkspaceView(WeakEntity<Editor>);
@@ -244,7 +253,6 @@ impl Editor {
             header_wash: None,
             slides: PanelSlides::default(),
             tab_slides: Default::default(),
-            settle: None,
             native_body_rects: Vec::new(),
             maximized_panel: None,
             parked: HashMap::new(),
@@ -280,8 +288,7 @@ impl Editor {
             split_hover: None,
             resize_live: false,
             resize_geometry: None,
-            resize_pause: None,
-            resize_tracks: HashMap::new(),
+            tab_scrolls: HashMap::new(),
             deferred_panel_commands: Vec::new(),
         }
     }
@@ -354,18 +361,11 @@ impl Editor {
             return;
         };
         let moved = matches!(&g, Gesture::Panel(d) if d.moved);
-        if let Gesture::Panel(drag) = &g
-            && drag.moved
-        {
-            self.put_back(drag);
-        }
         if !matches!(g, Gesture::Panel(_)) {
             self.layout = g.original();
         }
         self.resize_live = false;
         self.resize_geometry = None;
-        self.resize_pause = None;
-        self.resize_tracks.clear();
         if moved {
             self.notify_status("Move cancelled".into(), cx);
         }
@@ -1806,12 +1806,11 @@ impl Editor {
             moved: false,
             preview: None,
             aim: None,
-            cue: Default::default(),
             chip: None,
             live,
             geometry: self.geometry.clone(),
             scrolled: HashMap::new(),
-            lifted: None,
+            lifted: false,
             scroll_tick: None,
         }
     }
@@ -1840,8 +1839,10 @@ impl Editor {
         if !drag.live || !drag.moved {
             return;
         }
-        if drag.lifted.is_none() {
-            drag.lifted = Some(crate::drag::now());
+        if !drag.lifted {
+            drag.lifted = true;
+            self.slides.snap();
+            self.tab_slides.snap();
             drag.geometry = self.geometry.clone();
             self.reveal_motion = None;
             self.reveal_panel = None;
@@ -1882,10 +1883,7 @@ impl Editor {
             }
             Some(p)
         });
-        drag.cue.update(drag.preview.map(|p| {
-            let tab = matches!(p.target, DropTarget::Tab { .. });
-            (if tab { p.rect } else { still_drag::slot(p.rect) }, tab)
-        }), changed, tokens);
+
     }
     /// While a drag is held near the top or bottom of a scrolling column,
     /// the column scrolls towards that edge and the target follows.
@@ -1927,22 +1925,6 @@ impl Editor {
         self.dock_scroll.insert(id, next);
         self.retarget(true);
         true
-    }
-    /// After an invalid release or Escape, only the chip returns home.
-    fn put_back(&mut self, drag: &PanelDrag) {
-        if !drag.live || self.tokens.accessibility.reduce_motion {
-            return;
-        }
-        let Some(chip) = drag.chip.clone() else {
-            return;
-        };
-        let o = crate::drag::CHIP_OFFSET;
-        self.settle = Some(Settle {
-            chip,
-            from: (f32::from(drag.at.x) + o, f32::from(drag.at.y) + o),
-            to: (f32::from(drag.start.x), f32::from(drag.start.y)),
-            since: crate::drag::now(),
-        });
     }
     /// Where tab `id` (or a lone title) is drawn in its header, as last
     /// rendered. For headless recordings and tests.
@@ -1995,9 +1977,10 @@ impl Editor {
         }
         drag.at = pointer;
         drag.moved = true;
-        drag.lifted.get_or_insert_with(crate::drag::now);
+        drag.lifted = true;
+        self.slides.snap();
+        self.tab_slides.snap();
         drag.preview = preview;
-        drag.cue.update(preview.map(|p| (still_drag::slot(p.rect), false)), true, &self.tokens);
         self.gesture = Some(Gesture::Panel(drag));
         cx.notify();
         preview.is_some()
@@ -2078,8 +2061,8 @@ impl Editor {
             self.panel_undo.remove(0);
         }
         self.panel_undo.push((before, self.layout.clone()));
-        self.slides.arm_drop();
-        self.tab_slides.arm_drop();
+        self.slides.snap();
+        self.tab_slides.snap();
         self.save();
     }
     fn shell_history_focus(&self, window: &Window, cx: &App) -> bool {
@@ -2110,8 +2093,8 @@ impl Editor {
         };
         self.layout = if redo { after.clone() } else { before.clone() };
         to.push((before, after));
-        self.slides.arm_drop();
-        self.tab_slides.arm_drop();
+        self.slides.snap();
+        self.tab_slides.snap();
         self.save();
         true
     }
@@ -2123,8 +2106,6 @@ impl Editor {
         };
         let resized = std::mem::take(&mut self.resize_live);
         self.resize_geometry = None;
-        self.resize_pause = None;
-        self.resize_tracks.clear();
         if let Gesture::Resize(d, _, original) = &g {
             if resized && self.layout != *original {
                 if !d.horizontal {
@@ -2198,9 +2179,6 @@ impl Editor {
             // was already there, or that it was no drop zone.
             let panels = self.panels(cx);
             let name = self.moving_name(&drag.original, &drag.id, drag.stack, &panels);
-            if drag.preview.is_none() {
-                self.put_back(&drag);
-            }
             let message = match drag.preview {
                 Some(p) => {
                     let (near, kind) = self.near_name(p.near, &drag, &panels);
@@ -2272,7 +2250,6 @@ impl Editor {
     }
     fn begin_panel_drag(&mut self, id: &str, at: Point<Pixels>, stack: bool, w: &Window, cx: &App) {
         self.maximized_panel = None;
-        self.settle = None;
         let mut drag = self.new_drag(id, at, stack, true);
         let label = self.moving_name(&drag.original, id, stack, &self.panels(cx));
         drag.chip = Some(still_drag::Chip::new(label, &self.tokens, w));
@@ -2617,6 +2594,27 @@ fn title_width(text: &str, size: f32, window: &Window) -> f32 {
         .shape_line(text.to_string().into(), px(size), &[run]);
     f32::from(line.width).ceil()
 }
+/// Keep a whole-word prefix if it fits before the ellipsis. A single long
+/// word falls back to the text element's grapheme-safe end truncation.
+fn tab_label(title: &str, room: f32, size: f32, window: &Window) -> String {
+    let mut prefix = title;
+    while let Some((words, _)) = prefix.rsplit_once(char::is_whitespace) {
+        prefix = words.trim_end();
+        let label = format!("{prefix}…");
+        if title_width(&label, size, window) <= room {
+            return label;
+        }
+    }
+    title.to_owned()
+}
+
+fn panel_switcher_entries(group: &layout::Group, panels: &layout::Panels) -> Vec<MenuEntry> {
+    group.tabs.iter().enumerate().map(|(index, id)| {
+        MenuEntry::item(panels.title(id), format!("panel:activate:{id}"))
+            .checked(index == group.active)
+    }).collect()
+}
+
 pub use crate::kit::ink as tint;
 /// Panels gliding to the places a discrete layout change gave them. Each is
 /// laid out at its new size at once and travels from where it was on the
@@ -2629,23 +2627,18 @@ pub struct PanelSlides {
     /// Offsets still travelling, by panel.
     moving: HashMap<String, pm_design::motion::Animated<2>>,
     clock: pm_design::motion::Clock,
-    drop_deadline: Option<std::time::Instant>,
     /// The next placement is a discrete change: panels that moved slide.
     pub armed: bool,
 }
 impl PanelSlides {
-    fn arm_drop(&mut self) {
-        self.armed = true;
-        self.drop_deadline = Some(crate::drag::now() + Duration::from_secs_f64(crate::drag::MOVE));
+    fn snap(&mut self) {
+        self.armed = false;
+        self.moving.clear();
+        self.clock.rest();
     }
     /// Takes this frame's rects; true while something still travels.
     pub fn place(&mut self, placed: &[(String, Rect)], t: &Tokens) -> bool {
         let now = crate::drag::now();
-        if self.drop_deadline.is_some_and(|deadline| now >= deadline) {
-            self.drop_deadline = None;
-            self.moving.clear();
-            self.armed = false;
-        }
         let dt = self.clock.tick(now);
         if std::mem::take(&mut self.armed) {
             for (id, rect) in placed {
@@ -2751,15 +2744,11 @@ impl Editor {
         if let Some(h) = &self.host {
             let h = h.borrow();
             h.viewer_rect.set(None);
-            h.native_panel_clips.borrow_mut().clear();
-            h.native_panel_fades.borrow_mut().clear();
-            h.native_panel_snapshots.borrow_mut().clear();
             // Home covers the viewer: its extra 3D views have no place.
             h.viewer_tiles.borrow_mut().clear();
             h.canvas_focus.set(false);
             h.keyboard_control_focus.set(true);
             h.publish_menu_state(&self.menu_state(cx));
-            h.native_panels.borrow_mut().clear();
         }
         if let Some(integration) = &self.integration {
             integration.shown_panels(&[], cx);
@@ -2772,6 +2761,7 @@ impl Editor {
             .host
             .as_ref()
             .map_or(0., |h| h.borrow().sidebar_width());
+        let host = self.host.clone();
         div()
             .id("editor")
             .role(Role::Group)
@@ -2784,6 +2774,12 @@ impl Editor {
                 canvas(
                     |_, _, _| (),
                     move |bounds, _, window, _| {
+                        if let Some(host) = host {
+                            let host = host.borrow();
+                            host.native_panel_clips.borrow_mut().clear();
+                            host.native_panel_fades.borrow_mut().clear();
+                            host.native_panels.borrow_mut().clear();
+                        }
                         window.paint_quad(
                             PaintQuad::new(Bounds::new(
                                 point(bounds.origin.x + px(clear), bounds.origin.y),
@@ -2837,7 +2833,7 @@ impl Render for Editor {
         w.set_pointer_hover_suppressed(dragging);
         let scrolling = self.drag_edge_scroll(w);
         let scene = self.scene.clone();
-        // Cache the workspace as a sibling of the chip. Pointer and morph
+        // Cache the workspace as a sibling of the chip. Pointer and preview
         // frames replace only the overlay; edge scrolling can refresh the scene.
         let scene = if dragging && !scrolling {
             scene.cached(div().size_full().style().clone()).into_any_element()
@@ -2868,10 +2864,6 @@ impl Editor {
         }
         self.sync_workspaces(cx);
         let dragging = self.dragging_panel();
-        let resizing_dock = match &self.gesture {
-            Some(Gesture::Resize(d, ..)) if !d.horizontal => Some(d.dock),
-            _ => None,
-        };
         if !dragging && !matches!(self.gesture, Some(Gesture::Resize(..))) {
             for command in std::mem::take(&mut self.deferred_panel_commands) {
                 self.shell_command(&command, cx);
@@ -3284,15 +3276,6 @@ impl Editor {
                             }
                             if layout != this.layout {
                                 this.layout = layout;
-                                if !d.horizontal {
-                                    this.resize_pause = Some(cx.spawn(async move |this, cx| {
-                                        cx.background_executor().timer(Duration::from_millis(150)).await;
-                                        let _ = this.update(cx, |v, cx| {
-                                            v.resize_pause = None;
-                                            cx.notify();
-                                        });
-                                    }));
-                                }
                             }
                             cx.notify();
                         }
@@ -3406,7 +3389,6 @@ impl Editor {
         let mut native_bodies = vec![];
         let mut native_clips = vec![];
         let mut native_fades = vec![];
-        let mut native_snapshots = std::collections::BTreeSet::new();
         // Where each header's tabs are drawn, for drops over a header.
         let mut tab_spans: HashMap<(usize, usize), Vec<(usize, f32, f32)>> = HashMap::new();
         for p in ordered {
@@ -3423,7 +3405,7 @@ impl Editor {
                         && !native_bodies.iter().any(|(key, _)| key == surface)
                 });
             let tabs = group.tabs.clone();
-            let active = group.active;
+            let active = group.active.min(tabs.len() - 1);
             // Folded to its header (a double-click on the header).
             let collapsed = group.collapsed && !is_viewer;
             // Quiet text tabs (language §9): each takes its title's width plus
@@ -3437,7 +3419,6 @@ impl Editor {
                     title_width(panels.title(tab), t.typography.title, w)
                         + close_slot
                         + m.gap
-                        + TAB_SPACING
                 })
                 .collect();
             let header_rect = self.geometry.header_rect(&p, &t);
@@ -3469,9 +3450,6 @@ impl Editor {
                 // where it shows, so it stops short of the dividers' grab.
                 let edge = m.border.max(m.splitter_reach);
                 let body = native_body(shown, edge, m.header);
-                if dragging || (resizing_dock == Some(p.dock) && self.resize_pause.is_some()) {
-                    native_snapshots.insert(native_id.clone());
-                }
                 // The slot already includes the dock scroll. Place the body
                 // at the animated position, then clip it to the viewport
                 // and the travelling sticky header.
@@ -3535,44 +3513,6 @@ impl Editor {
                 .integration
                 .as_ref()
                 .and_then(|i| i.header(&id, p.rect, tabs.len() > 1, w, cx));
-            // The header's own tools (Add Panel, or the panel's actions such as
-            // Project's search and +) keep their room beside the tabs.
-            let tools = if custom.is_some() {
-                2. * m.hit + m.gap
-            } else {
-                m.hit
-            };
-            // Gaps: trailing padding, strip|chevron and chevron|tools, plus one spare.
-            let tab_room = |width: f32| width - m.gap * 4. - tools;
-            // Keep the same tabs and overflow as before the press. If the
-            // divider moves inward, the visible labels can truncate in place.
-            let resizing = resizing_dock == Some(p.dock);
-            let tab_width = if resizing {
-                self.resize_geometry.as_ref()
-                    .and_then(|g| g.panels.iter().find(|q| q.dock == p.dock))
-                    .map_or(p.rect.w, |q| q.rect.w)
-            } else {
-                p.rect.w
-            };
-            let track = || group.tab_track(tab_room(tab_width), &widths, &t);
-            let tab_track = if resizing {
-                self.resize_tracks.entry((p.dock, p.group)).or_insert_with(track).clone()
-            } else {
-                track()
-            };
-            let active_limit = |ti| tab_track.active_limit.filter(|_| ti == active);
-            let compression = if resizing && p.rect.w < tab_width && tabs.len() > 1 {
-                let room = tab_room(p.rect.w)
-                    - if tab_track.overflow.is_empty() { 0. } else { m.hit }
-                    - TAB_SPACING * tab_track.visible.len() as f32;
-                let natural = tab_track.visible.iter().map(|&i| {
-                    let width = widths[i] - TAB_SPACING;
-                    width.min(active_limit(i).unwrap_or(width))
-                }).sum::<f32>();
-                (room.max(0.) / natural.max(1.)).min(1.)
-            } else {
-                1.
-            };
             let group_name: SharedString = format!("tabs-{}-{}", p.dock, p.group).into();
             let header_id = id.clone();
             let menu_header = id.clone();
@@ -3636,30 +3576,53 @@ impl Editor {
                 // Quiet text tabs (language §9): the active title in `text`, the
                 // rest in `muted`; a pill appears only on hover. The whole tab is
                 // the drag handle. A single panel shows its title the same way.
-                let mut strip = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(TAB_SPACING))
-                    .when(multi, |s| s.flex_1().min_w(px(0.)).overflow_hidden());
-                let mut span_x = p.rect.x + if multi { 0. } else { m.inset };
+                let tools = if custom.is_some() { 2. * m.hit + m.gap }
+                    else if is_viewer { 0. } else { m.hit };
+                let restore = self.maximized_panel.is_some();
+                let controls = 1 + usize::from(tools > 0.) + usize::from(restore);
+                let reserved = tools + m.hit + if restore { m.symbol_inline } else { 0. };
+                let viewport = (p.rect.w - reserved - m.gap * (controls + 1) as f32).max(0.);
+                let gaps = TAB_SPACING * tabs.len().saturating_sub(1) as f32;
+                let track = group.tab_track(viewport - gaps, &widths);
+                let scroll_range = if multi {
+                    track.scroll + (gaps - viewport).max(0.)
+                } else {
+                    0.
+                };
+                let fade = pm_design::DOCK_SCROLL_FADE.min(viewport / 3.);
+                let tab_key = tabs[0].clone();
+                let offset = if scroll_range > 0. {
+                    let left = track.widths[..active].iter().sum::<f32>() + TAB_SPACING * active as f32;
+                    let right = left + track.widths[active];
+                    let state = self.tab_scrolls.entry(tab_key.clone()).or_default();
+                    state.reveal(&id, viewport, (left, right), scroll_range, fade);
+                    state.offset
+                } else {
+                    self.tab_scrolls.remove(&tab_key);
+                    0.
+                };
+                let mut row = div().flex().items_center().gap(px(TAB_SPACING));
+                let mut span_x = p.rect.x + if multi { -offset } else { m.inset };
                 let mut spans = vec![];
                 for (ti, tab) in tabs.iter().enumerate() {
-                    if !tab_track.visible.contains(&ti) {
-                        continue;
-                    }
-                    let full = if multi {
-                        widths[ti] - TAB_SPACING
-                    } else {
-                        title_width(panels.title(tab), t.typography.title, w)
+                    let full = widths[ti];
+                    let drawn = if multi { track.widths[ti] } else {
+                        (p.rect.w - tools - m.inset - m.gap * 2.).max(0.)
                     };
-                    let drawn = full.min(active_limit(ti).unwrap_or(full)) * compression;
+                    let label_width = if multi { drawn - close_slot - m.gap } else { drawn };
+                    let truncated = if multi { drawn < full } else {
+                        label_width < title_width(panels.title(tab), t.typography.title, w)
+                    };
                     let tab_left = span_x;
-                    spans.push((ti, span_x, span_x + drawn));
+                    let span_width = if multi { drawn } else {
+                        drawn.min(title_width(panels.title(tab), t.typography.title, w))
+                    };
+                    spans.push((ti, span_x, span_x + span_width));
                     span_x += drawn + TAB_SPACING;
                     // A tab given a new place in its strip slides to it.
                     let slide =
                         self.tab_slides
-                            .offset(tab, tab_left + shown.x - p.rect.x, p.rect.y, &t);
+                            .offset(tab, tab_left + offset + shown.x - p.rect.x, p.rect.y, &t);
                     let tabid = tab.clone();
                     let menu_id = tab.clone();
                     let selected = ti == active;
@@ -3711,15 +3674,16 @@ impl Editor {
                         .text_size(px(t.typography.title))
                         .font_weight(FontWeight(t.typography.medium_weight))
                         .whitespace_nowrap();
-                    // Long titles truncate; every panel retains its tab in the strip.
-                    cell = match (drawn < full).then_some(drawn) {
-                        Some(limit) => cell
-                            .max_w(px(limit))
-                            .min_w(px(0.))
-                            .overflow_hidden()
-                            .child(div().min_w(px(0.)).truncate().child(title.clone())),
-                        None => cell.flex_none().child(title.clone()),
+                    let label = if truncated {
+                        tab_label(&title, label_width, t.typography.title, w)
+                    } else {
+                        title.clone()
                     };
+                    cell = cell
+                        .when(multi, |s| s.w(px(drawn)))
+                        .when(!multi, |s| s.max_w(px(drawn)))
+                        .when(truncated && !dragging, |s| s.tooltip(tooltip(&t, &title)))
+                        .child(div().min_w(px(0.)).truncate().child(label));
                     if closable && !dragging {
                         // Mac tabs: the close button sits at the leading edge, on hover.
                         cell = cell.child(
@@ -3773,7 +3737,7 @@ impl Editor {
                                 .border_color(outline),
                         );
                     }
-                    strip = strip.child(
+                    row = row.child(
                         cell.on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, e: &MouseDownEvent, window, cx| {
@@ -3794,25 +3758,66 @@ impl Editor {
                     );
                 }
                 tab_spans.insert((p.dock, p.group), spans);
-                header = header.child(strip);
-                if !tab_track.overflow.is_empty() {
-                    let entries: Vec<_> = tab_track.overflow.iter()
-                        .map(|&i| {
-                            MenuEntry::item(
-                                panels.title(&tabs[i]),
-                                format!("panel:activate:{}", tabs[i]),
-                            )
-                            .checked(i == active)
+                if multi {
+                    let strip = div()
+                        .id(format!("tab-strip-{}-{}", p.dock, p.group))
+                        .relative()
+                        .w(px(viewport))
+                        .flex_none()
+                        .h(px(m.hit))
+                        .overflow_hidden()
+                        .overflow_fade(Edges::<AbsoluteLength> {
+                            left: px(offset.min(fade)).into(),
+                            right: px((scroll_range - offset).min(fade)).into(),
+                            top: px(0.).into(),
+                            bottom: px(0.).into(),
                         })
-                        .collect();
+                        .child(row.absolute().top_0().left(px(-offset)))
+                        .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
+                            if scroll_range <= 0. || this.gesture.is_some()
+                                || event.modifiers.control || event.modifiers.platform
+                            {
+                                return;
+                            }
+                            let delta = event.delta.pixel_delta(px(16.));
+                            // Horizontal trackpad gestures and vertical wheel ticks both
+                            // work. A vertical trackpad gesture still scrolls the dock.
+                            let by = if delta.x.abs() >= delta.y.abs() {
+                                delta.x
+                            } else if matches!(event.delta, gpui::ScrollDelta::Lines(_)) || event.modifiers.shift {
+                                delta.y
+                            } else {
+                                return;
+                            };
+                            if let Some(state) = this.tab_scrolls.get_mut(&tab_key) {
+                                let offset = (state.offset - f32::from(by)).clamp(0., scroll_range);
+                                if offset != state.offset {
+                                    state.offset = offset;
+                                    cx.notify();
+                                }
+                            }
+                            cx.stop_propagation();
+                        }));
+                    header = header.child(strip);
+                } else {
+                    header = header.child(row);
+                }
+                if multi {
+                    let entries = panel_switcher_entries(group, &panels);
                     header = header.child(
                         div()
-                            .id(format!("more-panels-{}-{}", p.dock, p.group))
+                            .id(format!("switch-panel-{}-{}", p.dock, p.group))
                             .flex_none()
                             .role(Role::Button)
-                            .aria_label("More Panels")
+                            .aria_label("Switch Panel")
                             .tab_index(0)
-                            .w(px(m.hit))
+                            .size(px(m.hit))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(m.control_radius))
+                            .when(!dragging, |d| d.tooltip(tooltip(&t, "Switch Panel"))
+                                .hover_style(|s| s.bg(rgb(c.hover))))
                             .child(crate::symbol::symbol(
                                 "chevron.down",
                                 m.symbol_inline,
@@ -4082,6 +4087,7 @@ impl Editor {
         }
         // Electron v1.2.0 hides side-column scrollbar chrome. Wheel and
         // momentum still move the column; no idle scrollbar timer is needed.
+        self.tab_scrolls.retain(|id, _| self.layout.find(id).is_some());
         self.geometry.tabs = tab_spans;
         if !dragging && self.tab_slides.end() {
             w.request_animation_frame();
@@ -4093,11 +4099,22 @@ impl Editor {
             integration.shown_panels(&shown, cx);
         }
         self.native_body_rects = native_bodies.clone();
-        if let Some(h) = &self.host {
-            *h.borrow().native_panel_clips.borrow_mut() = native_clips;
-            *h.borrow().native_panel_fades.borrow_mut() = native_fades;
-            *h.borrow().native_panel_snapshots.borrow_mut() = native_snapshots;
-            *h.borrow().native_panels.borrow_mut() = native_bodies;
+        if let Some(host) = self.host.clone() {
+            // Publish the layout that actually painted its headers. A
+            // compositor retry of the preceding scene keeps its own slots.
+            root = root.child(
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, _, _| {
+                        let host = host.borrow();
+                        *host.native_panel_clips.borrow_mut() = native_clips;
+                        *host.native_panel_fades.borrow_mut() = native_fades;
+                        *host.native_panels.borrow_mut() = native_bodies;
+                    },
+                )
+                .absolute()
+                .size_full(),
+            );
         }
         for (i, d) in self.geometry.dividers.clone().into_iter().enumerate() {
             let divd = d.clone();
@@ -4263,6 +4280,8 @@ impl Editor {
                             this.save();
                         }
                         this.resize_live = false;
+                        this.slides.snap();
+                        this.tab_slides.snap();
                         this.resize_geometry = Some(this.visible_geometry());
                         this.gesture = Some(Gesture::Resize(
                             divd.clone(),
@@ -5989,12 +6008,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn panel_calm_tab_track_does_not_change_with_divider_motion(cx: &mut TestAppContext) {
+    fn dock_tabs_keep_all_tabs_through_divider_motion(cx: &mut TestAppContext) {
         let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
         let (view, cx) = cx.add_window_view(|_, cx| Editor::new(tokens, None, cx));
         view.update(cx, |v, cx| {
             v.layout = Layout::preset("design");
             let (d, g, _) = v.layout.find("inspector").unwrap();
+            v.layout.docks[d].size = Some(215.);
             let group = &mut v.layout.docks[d].groups[g];
             group.tabs.extend(["anchor", "three-long-extra-tabs", "four-extra-tabs"].map(str::to_owned));
             cx.notify();
@@ -6007,13 +6027,52 @@ mod tests {
         });
         let visible = |v: &Editor| v.geometry.tabs[&key].iter().map(|s| s.0).collect::<Vec<_>>();
         let initial = view.read_with(cx, |v, _| visible(v));
+        assert_eq!(initial, [0, 1, 2, 3], "all tabs must be laid out at rest");
         press(cx, from);
         view.read_with(cx, |v, _| assert_eq!(visible(v), initial));
-        pull(cx, from, (from.0 + 135., from.1));
+        let wider = (from.0 - 170., from.1);
+        pull(cx, from, wider);
+        view.read_with(cx, |v, _| assert_eq!(visible(v), initial));
+        pull(cx, wider, (from.0 + 135., from.1));
         view.read_with(cx, |v, _| {
             assert!(v.resize_live);
             assert_eq!(visible(v), initial);
         });
+    }
+
+    #[::core::prelude::v1::test]
+    fn dock_tabs_selection_reveals_the_active_tab() {
+        let mut scroll = super::TabScroll::default();
+        scroll.reveal("pexels", 180., (224., 280.), 100., 0.);
+        assert_eq!(scroll.offset, 100.);
+        scroll.offset = 20.;
+        scroll.reveal("pexels", 180., (224., 280.), 100., 0.);
+        assert_eq!(scroll.offset, 20., "manual scrolling can browse other tabs");
+        scroll.reveal("voiceover", 180., (168., 224.), 100., 0.);
+        assert_eq!(scroll.offset, 44.);
+        scroll.reveal("voiceover", 142., (168., 224.), 138., 0.);
+        assert_eq!(scroll.offset, 82.);
+        scroll.reveal("properties", 142., (0., 56.), 138., 0.);
+        assert_eq!(scroll.offset, 0.);
+        scroll.reveal("voiceover", 142., (168., 224.), 138., 28.);
+        assert_eq!(scroll.offset, 110.);
+    }
+
+    #[::core::prelude::v1::test]
+    fn dock_tabs_switcher_lists_every_panel_in_order_and_marks_the_selection() {
+        let group = crate::layout::Group {
+            tabs: ["inspector", "fxbrowser", "notes", "captions", "easing"]
+                .map(str::to_owned).into(),
+            active: 2,
+            size: None,
+            collapsed: false,
+        };
+        let items = super::panel_switcher_entries(&group, &crate::layout::Panels::default());
+        assert_eq!(items.len(), group.tabs.len());
+        for (index, (item, id)) in items.iter().zip(&group.tabs).enumerate() {
+            assert_eq!(item.command, format!("panel:activate:{id}"));
+            assert_eq!(item.checked, index == group.active);
+        }
     }
 
     #[gpui::test]
@@ -6611,7 +6670,7 @@ mod tests {
             cx.simulate_mouse_move(at(p), gpui::MouseButton::Left, drag_none());
         }
     }
-    /// Let the overlay animation settle with the pointer still held.
+    /// Advance the deterministic frame clock with the pointer still held.
     fn rest(cx: &mut gpui::VisualTestContext, view: &gpui::Entity<Editor>) {
         crate::drag::advance_frame_time(0.3);
         view.update(cx, |_, cx| cx.notify());
@@ -6649,7 +6708,6 @@ mod tests {
         cx.simulate_mouse_up(at((from.0 + 3., from.1 + 2.)), gpui::MouseButton::Left, drag_none());
         view.read_with(cx, |v, _| {
             assert!(v.gesture.is_none());
-            assert!(v.settle.is_none(), "a click leaves no chip");
             assert_eq!(v.layout, before);
         });
         press(cx, from);
@@ -6740,7 +6798,6 @@ mod tests {
                 assert!(v.gesture.is_none());
                 assert_eq!(v.layout, shown, "{kind}: the release keeps what showed");
                 assert_eq!(v.outbox.len(), written + 1, "{kind}: one change, one undo step");
-                assert!(v.settle.is_none(), "only the layout moves after drop");
             });
             cx.run_until_parked();
         }
@@ -6766,8 +6823,8 @@ mod tests {
             v.cancel_gesture(cx);
             assert_eq!(v.layout, before, "a cancel restores the layout");
             assert_eq!(v.outbox.len(), written, "and writes nothing");
-            assert!(v.settle.is_some(), "the chip goes home");
-            assert!(!v.slides.armed, "only the chip moves");
+            assert!(!v.dragging_panel(), "the chip and preview disappear instantly");
+            assert!(!v.slides.armed, "cancel leaves the layout still");
         });
         cx.simulate_mouse_up(at(to), gpui::MouseButton::Left, drag_none());
         cx.run_until_parked();
@@ -6857,13 +6914,9 @@ mod tests {
         crate::drag::set_frame_time(Some(std::time::Instant::now()));
         let m = view.read_with(cx, |v, _| v.tokens.metrics);
         let home = view.read_with(cx, |v, _| stack_rect(v, "fxbrowser"));
-        let from = view.read_with(cx, |v, _| tab_middle(v, "inspector"));
-        // Properties dropped (in passing) below the Effects stack, in the
-        // same column: the stack sets off upwards for the top of it.
-        let to = (home.x + home.w / 2., home.y + home.h * 0.92);
-        press(cx, from);
-        pull(cx, from, to);
-        cx.simulate_mouse_up(at(to), gpui::MouseButton::Left, drag_none());
+        // A menu move can still animate. Dragging it takes ownership
+        // from the command at the header's actual painted location.
+        view.update(cx, |v, cx| assert!(v.run_shell_command("panel:below:inspector:fxbrowser", cx)));
         cx.run_until_parked();
         let place = view.read_with(cx, |v, _| stack_rect(v, "fxbrowser"));
         assert!(home.y - place.y > 100., "the stack has a new place above: {place:?}");
@@ -6945,10 +6998,10 @@ mod tests {
         });
     }
 
-    /// A native body's slot stays frozen during drag and travels with the
-    /// panel after release. Reduce Motion puts both in place at once.
+    /// The native body and its shell header occupy the same slot on pickup,
+    /// through target changes and on the first frame of a committed drop.
     #[gpui::test]
-    fn native_bodies_follow_their_panel_and_reduce_motion_places_everything(
+    fn dock_tabs_drag_drop_presents_final_body_in_one_frame(
         cx: &mut TestAppContext,
     ) {
         for reduced in [false, true] {
@@ -7000,34 +7053,10 @@ mod tests {
                 let place = stack_rect(v, "inspector");
                 assert_ne!(place, home, "only the release moved it");
                 let shown = v.slides.shown("inspector", place);
+                assert_eq!(shown, place, "the first drop frame is at the destination");
                 assert_eq!(body(v), super::native_body(shown, edge, m.header));
-                if reduced {
-                    assert_eq!(shown, place, "placed at once");
-                    assert!(v.slides.moving.is_empty() && !v.tab_slides.travelling());
-                } else {
-                    assert!(
-                        (shown.x - place.x).abs() > 100.,
-                        "still on its way from the right: {shown:?} to {place:?}"
-                    );
-                }
-            });
-            // Part of the way, then there: the body is with the panel throughout.
-            for (step, seconds) in [0.05, 0.25, 0.25, 0.25].into_iter().enumerate() {
-                crate::drag::advance_frame_time(seconds);
-                view.update(cx, |_, cx| cx.notify());
-                cx.run_until_parked();
-                view.read_with(cx, |v, _| {
-                    let place = stack_rect(v, "inspector");
-                    let shown = v.slides.shown("inspector", place);
-                    assert_eq!(body(v), super::native_body(shown, edge, m.header));
-                    if step == 3 {
-                        assert_eq!(shown, place, "arrived");
-                    }
-                });
-            }
-            view.read_with(cx, |v, _| {
-                assert!(v.settle.is_none(), "no chip glide after a successful drop");
-                assert!(v.layout.find("inspector").is_some());
+                assert!(v.slides.moving.is_empty() && !v.tab_slides.travelling());
+                assert!(!v.dragging_panel());
             });
             crate::drag::set_frame_time(None);
         }
@@ -7072,6 +7101,72 @@ mod slide_tests {
 mod dock_tab_capture_tests {
     use super::*;
     use std::sync::Arc;
+    #[::core::prelude::v1::test]
+    fn dock_tabs_review_captures() {
+        let Some(dir) = std::env::var_os("PM_DOCK_TABS_CAPTURE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (scheme, name) in [(pm_design::Scheme::Light, "light"), (pm_design::Scheme::Dark, "dark")] {
+            let mut cx = HeadlessAppContext::with_platform(
+                Arc::new(gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)),
+                Arc::new(()),
+                || Some(Box::new(gpui_apple::metal_renderer::MetalHeadlessRenderer::new())),
+            );
+            let tokens = Tokens::new(scheme, pm_design::Accessibility {
+                reduce_motion: true,
+                ..Default::default()
+            });
+            let window = cx.open_window(size(px(1280.), px(720.)), |_, cx| cx.new(|cx| {
+                let mut editor = Editor::new(tokens, None, cx);
+                editor.layout = Layout::preset("design");
+                let right = editor.layout.docks.iter_mut().find(|dock| dock.id == "right").unwrap();
+                right.groups[0] = layout::Group {
+                    tabs: ["inspector", "anchor-point", "remove-background", "commons-logos", "pexels"].map(str::to_owned).into(),
+                    active: 4,
+                    size: Some(200.),
+                    collapsed: false,
+                };
+                editor
+            })).unwrap();
+            for (index, width) in [550., 420., 330., 260., 180., 260.].into_iter().enumerate() {
+                window.update(&mut cx, |editor, _, cx| {
+                    let dock = editor.layout.docks.iter_mut().find(|dock| dock.id == "right").unwrap();
+                    dock.size = Some(width);
+                    dock.groups[0].size = Some(if index == 5 { 88. } else { 200. });
+                    cx.notify();
+                }).unwrap();
+                cx.run_until_parked();
+                if index == 4 {
+                    let menu = window.update(&mut cx, |editor, _, cx| {
+                        let (dock, group, _) = editor.layout.find("pexels").unwrap();
+                        let group = &editor.layout.docks[dock].groups[group];
+                        panel_switcher_entries(group, &editor.panels(cx))
+                    }).unwrap();
+                    assert_eq!(menu.len(), 5);
+                    assert_eq!(menu.iter().filter(|item| item.checked).count(), 1);
+                    assert_eq!(menu.last().unwrap().command, "panel:activate:pexels");
+                    let rows: Vec<_> = menu.iter().map(|item| (&item.label, item.checked)).collect();
+                    std::fs::write(dir.join(format!("{name}-switcher.json")),
+                        serde_json::to_vec(&rows).unwrap()).unwrap();
+                }
+                let rect = window.update(&mut cx, |editor, _, _| editor.panel_rect("pexels").unwrap()).unwrap();
+                let screenshot = cx.capture_screenshot(window.into()).unwrap();
+                let scale = screenshot.width() as f32 / 1280.;
+                let crop_height = rect.h + if index == 5 { 50. } else { 0. };
+                let crop = image::imageops::crop_imm(&screenshot,
+                    (rect.x * scale).round() as u32,
+                    (rect.y * scale).round() as u32,
+                    (rect.w * scale).round() as u32,
+                    (crop_height * scale).round() as u32,
+                ).to_image();
+                let file = if index == 5 { format!("{name}-short-stack.png") } else { format!("{name}-width-{index}.png") };
+                crop.save(dir.join(file)).unwrap();
+            }
+        }
+    }
+
     #[::core::prelude::v1::test]
     fn dock_tabs_capture() {
         let Ok(dir) = std::env::var("PM_DOCK_CAPTURE") else {
@@ -7264,3 +7359,6 @@ mod library_capture_tests {
 #[cfg(all(test, target_os = "macos"))]
 #[path = "dock_render_tests.rs"]
 mod dock_render_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "dock_drag_capture_tests.rs"]
+mod dock_drag_capture_tests;

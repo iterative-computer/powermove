@@ -212,39 +212,21 @@ fn maximize_tracks_group_across_tab_selection_without_persisting_geometry() {
     assert_eq!(restored, original);
 }
 #[test]
-fn overflow_keeps_active_and_never_loses_a_tab() {
+fn dock_tabs_keep_every_tab_in_a_scrollable_track() {
     let group = Group {
         tabs: (0..12).map(|i| format!("tab-{i}")).collect(),
         active: 10,
         size: None,
         collapsed: false,
     };
-    let t = tokens();
     let widths: Vec<f32> = (0..12).map(|i| 40. + 6. * i as f32).collect();
     for width in [24., 144., 300., 1200.] {
-        let track = group.tab_track(width, &widths, &t);
-        assert!(track.visible.contains(&10));
-        assert!(!track.overflow.contains(&10));
-        let mut all = track.visible.clone();
-        all.extend(&track.overflow);
-        all.sort_unstable();
-        assert_eq!(all, (0..12).collect::<Vec<_>>());
-        // Shown tabs plus the reserved More Panels square fit the header; only
-        // an active tab wider than that room truncates, to exactly that room.
-        let room = (width - t.metrics.hit).max(0.);
-        let shown: f32 = track.visible.iter().map(|&i| widths[i]).sum();
-        match track.active_limit {
-            None => assert!(shown <= room),
-            Some(limit) => {
-                assert_eq!(track.visible, [10]);
-                assert!(widths[10] > room);
-                assert_eq!(limit, room);
-            }
-        }
+        let track = group.tab_track(width, &widths);
+        assert_eq!(track.widths.len(), group.tabs.len());
+        assert!(track.widths.iter().all(|w| *w >= 56.));
+        assert_eq!(track.scroll, (672_f32 - width).max(0.));
     }
-    // Everything fits: no limit and nothing folded.
-    let wide = group.tab_track(10_000., &widths, &t);
-    assert!(wide.overflow.is_empty() && wide.active_limit.is_none());
+    assert_eq!(group.tab_track(1200., &widths).widths[10], widths[10]);
 }
 #[test]
 fn main_menu_has_system_show_all_delete_and_one_new_window() {

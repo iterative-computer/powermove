@@ -52,39 +52,33 @@ impl State {
             .filter(|(paint, ..)| Some(*paint) == last)
             .map(|(_, bounds, clip)| (bounds, clip))
     }
-    fn place_fade(&self, frame: NSRect, apply: bool) -> bool {
-        let Some((_, clip)) = self.placed() else {
+    fn visible_rect(bounds: NSRect, clip: NSRect) -> NSRect {
+        let x = bounds.origin.x.max(clip.origin.x);
+        let y = bounds.origin.y.max(clip.origin.y);
+        NSRect::new(
+            NSPoint::new(x, y),
+            NSSize::new(
+                ((bounds.origin.x + bounds.size.width).min(clip.origin.x + clip.size.width) - x).max(0.),
+                ((bounds.origin.y + bounds.size.height).min(clip.origin.y + clip.size.height) - y).max(0.),
+            ),
+        )
+    }
+
+    fn place_fade(&self, apply: bool) -> bool {
+        let Some((bounds, clip)) = self.placed() else {
             return false;
         };
-        let g = self.gpui.frame();
-        let visible = NSRect::new(
-            NSPoint::new(frame.origin.x - g.origin.x, g.origin.y + g.size.height - frame.origin.y - frame.size.height),
-            frame.size,
-        );
-        self.scroll_fade.place(&self.wrapper, visible, clip, apply)
+        self.scroll_fade.place(&self.wrapper, Self::visible_rect(bounds, clip), clip, apply)
     }
     /// The wrapper's frame, the control's frame inside it and whether the
     /// wrapper is hidden, for what the last paint staged.
     fn target(&self) -> Option<(NSRect, NSRect, bool)> {
         let (bounds, clip) = self.placed()?;
-        let x = bounds.origin.x.max(clip.origin.x);
-        let y = bounds.origin.y.max(clip.origin.y);
-        let visible = NSSize::new(
-            ((bounds.origin.x + bounds.size.width).min(clip.origin.x + clip.size.width) - x)
-                .max(0.),
-            ((bounds.origin.y + bounds.size.height).min(clip.origin.y + clip.size.height) - y)
-                .max(0.),
-        );
-        // In GPUI's view's parent (the window's content view, or the detail
-        // view of a split view that hosts GPUI's view), from GPUI's frame.
-        let g = self.gpui.frame();
-        let frame = NSRect::new(
-            NSPoint::new(
-                g.origin.x + x,
-                g.origin.y + g.size.height - y - visible.height,
-            ),
-            visible,
-        );
+        let visible = Self::visible_rect(bounds, clip);
+        let x = visible.origin.x;
+        let y = visible.origin.y;
+        let frame = crate::composition::hosted_rect(&self.gpui, &self.wrapper, visible);
+        let visible = visible.size;
         let local = NSRect::new(
             NSPoint::new(
                 bounds.origin.x - x,
@@ -299,7 +293,7 @@ pub(crate) fn pending(key: usize) -> bool {
                 state.wrapper.frame() != frame
                     || state.control.frame() != local
                     || state.wrapper.isHidden() != hidden
-                    || (!hidden && state.place_fade(frame, false))
+                    || (!hidden && state.place_fade(false))
                     || state.alpha.get().is_some_and(|(paint, alpha)| {
                         Some(paint) == crate::composition::last_paint(key)
                             && state.control.alphaValue() != alpha
@@ -340,7 +334,7 @@ pub(crate) fn present(key: usize) -> crate::composition::SlotChange {
             }
         }
         if !hidden {
-            moved |= state.place_fade(frame, true);
+            moved |= state.place_fade(true);
         }
         state.geometry.set(None);
         if !hidden && unsafe { state.wrapper.superview() }.is_none() {

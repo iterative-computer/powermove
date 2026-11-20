@@ -8,6 +8,10 @@
     applied = 0,
     stopped = false;
   const waiting = [];
+  // A pane bootstraps from a compact snapshot, then keeps using the realm's
+  // canonical batch numbers for feedback. Its own applier stays contiguous.
+  let sourceSequence = null;
+
   // ui.modal: each [data-pm-modal] root shows in a sheet the host presents (a
   // child web view); the root moves into that document, styles and theme with
   // it, and the sheet closes when the extension's realm removes the root.
@@ -268,6 +272,39 @@
   // The realm still sends its fallback inline placement. Once the host owns
   // a root's bounds, restore them during that style mutation, before layout
   // feedback or the next frame can observe the realm's previous width.
+  let slotOwner = null;
+  let slotReady = false;
+  let waitForSeed = false;
+  const placeSlotRoot = (root) => {
+    if (!root.hasAttribute('data-pm-contribution')) return;
+    const shown = root.getAttribute('data-pm-contribution') === slotOwner;
+    root.style.setProperty('display', shown ? 'block' : 'none', 'important');
+    if (!shown) return;
+    const bounds = {
+      visibility: 'visible', position: 'fixed', inset: '0',
+      width: '100%', height: '100%', 'box-sizing': 'border-box',
+      'min-width': '0', 'min-height': '0', 'max-width': '100%', 'max-height': '100%',
+      'clip-path': 'inset(0)', overflow: 'clip',
+    };
+    for (const [key, value] of Object.entries(bounds))
+      root.style.setProperty(key, value, 'important');
+  };
+  const refreshSlot = () => {
+    let found = false;
+    for (const child of document.body.children) {
+      if (child.hasAttribute('data-pm-contribution')) {
+        placeSlotRoot(child);
+        found ||= child.getAttribute('data-pm-contribution') === slotOwner;
+      } else if (child.localName !== 'style') {
+        // The viewer overlay is handled by the realm's separate stage page.
+        child.style.setProperty('display', 'none', 'important');
+      }
+    }
+    if (found && !slotReady && (!waitForSeed || sourceSequence != null)) {
+      slotReady = true;
+      call({kind:'panel_slot_ready', panel:0, payload:{id:slotOwner}});
+    }
+  };
   const contributionBounds = new WeakMap();
   const applyContributionBounds = (root, rect) => {
     const bounds = {
@@ -283,6 +320,10 @@
     }
   };
   const restoreContributionBounds = (root) => {
+    if (slotOwner !== null) {
+      placeSlotRoot(root);
+      return;
+    }
     const rect = contributionBounds.get(root);
     if (rect) applyContributionBounds(root, rect);
   };
@@ -301,13 +342,17 @@
     if (body) updatePanelScrollEdges(body);
     call({kind:'panel_layout_applied', panel:0, payload:{...placement,
       rect:{x:box.x,y:box.y,w:box.width,h:box.height}}});
-  }, (active) => {
+  }, (visible) => {
     for (const root of document.querySelectorAll('[data-pm-contribution]:not([data-pm-overscan])')) {
-      const visibility = active.has(root.getAttribute('data-pm-contribution')) ? 'visible' : 'hidden';
+      const shown = visible.has(root.getAttribute('data-pm-contribution'));
+      const display = shown ? 'block' : 'none';
+      const visibility = shown ? 'visible' : 'hidden';
+      if (root.style.display !== display || root.style.getPropertyPriority('display') !== 'important')
+        root.style.setProperty('display', display, 'important');
       if (root.style.visibility !== visibility || root.style.getPropertyPriority('visibility') !== 'important')
         root.style.setProperty('visibility', visibility, 'important');
     }
-  });
+  }, (sequence) => call({kind:'panel_visibility_applied', panel:0, payload:{sequence}}));
   // The same linear 28px edge mask as the side dock, inside the shared view.
   const updatePanelScrollEdges = (node) => {
     if (!node?.hasAttribute?.('data-pm-panel-body') &&
@@ -371,8 +416,13 @@
         if (node.localName === 'canvas') copies[i].getContext('2d')?.drawImage(node, 0, 0);
       });
       requestAnimationFrame(() => requestAnimationFrame(() => call({kind:'overscan_ready',panel:0,payload:{id:event.id,generation:event.generation}})));
+    } else if (event.kind === "panel_slot") {
+      slotOwner = event.id;
+      waitForSeed = !!event.wait_for_seed;
+      slotReady = false;
+      refreshSlot();
     } else if (event.kind === "panel_layout") {
-      panelLayouts.enqueue(event.placements, event.active);
+      panelLayouts.enqueue(event.placements, event.active, event.sequence);
     } else if (event.kind === "fonts") {
       await loadFonts(event.faces);
     } else if (event.kind === "theme") {
@@ -388,6 +438,7 @@
       if (event.panel !== panel) throw Error("Unknown remote DOM panel");
       if (event.kind === "batch") {
         const batch = event.batch;
+        if (Object.hasOwn(event, 'source_seq')) sourceSequence = event.source_seq;
         if (batch.session.generation !== generation)
           throw Error("Stale remote DOM generation");
         if (!applier)
@@ -397,6 +448,11 @@
             inlineStyleChanged: restoreContributionBounds,
             send: (payload) => {
               try {
+                if (slotOwner !== null) {
+                  if (sourceSequence == null || payload.kind === 'layout') return;
+                  if (payload.kind === 'applied') payload.seq = sourceSequence;
+                  if (payload.kind === 'event') payload.applied = sourceSequence;
+                }
                 return call({ kind: "remote_dom", panel, payload });
               } catch (error) {
                 stopped = true;
@@ -413,7 +469,8 @@
             },
           });
         if (!applier.apply(batch)) throw Error("Remote DOM page fault");
-        panelLayouts.refresh();
+        if (slotOwner === null) panelLayouts.refresh();
+        else refreshSlot();
         applied = batch.seq;
         await drawWaiting();
       } else if (event.kind === "canvas") {
@@ -478,6 +535,7 @@
       // ui.modal roots the realm appends to the body (it exists only now:
       // this script runs in the head).
       new MutationObserver((records) => {
+        if (slotOwner !== null) return;
         for (const record of records)
           for (const node of record.addedNodes)
             if (node.nodeType === 1 && node.matches?.("[data-pm-modal]"))

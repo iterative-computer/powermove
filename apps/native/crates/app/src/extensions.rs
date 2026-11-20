@@ -129,6 +129,8 @@ impl SyncHandler for PageEvents {
 struct Page {
     host: Rc<RefCell<MacDomHost>>,
     events: Rc<PageEvents>,
+    panel_expiry: Option<std::time::Instant>,
+    panel_expiry_task: Option<gpui::Task<()>>,
     ready: bool,
     /// The run this page belongs to: a realm generation, or a Store helper's
     /// writer. Batches of any other run never reach it.
@@ -2211,7 +2213,6 @@ impl Controller {
         };
         let light = pm_shell::theme::tokens(pm_design::Scheme::Light, tokens.accessibility);
         let dark = pm_shell::theme::tokens(pm_design::Scheme::Dark, tokens.accessibility);
-        let _ = host.update_native_style(&light, &dark, tokens.scheme);
         let spec = PanelSpec {
             id: PAGE_PANEL,
             label: "Extension panels".into(),
@@ -2219,7 +2220,6 @@ impl Controller {
         if host.create(spec).is_err() {
             return;
         }
-        let _ = host.add_fonts(&self.extensions.faces);
         // An export's page is never shown: it runs for its job in a window of
         // its own, whatever the editor's window does. In the editor's, a window
         // behind others or hidden held the page back (its answers came 3 to 7
@@ -2236,7 +2236,11 @@ impl Controller {
         if !exporting {
             let shell = self.host.borrow();
             host.install_below(&shell.native_container(), &shell.gpui);
+            host.enable_panel_renderers(&shell.native_container(), &shell.gpui);
         }
+        let css = pm_compat_host::native_style::stylesheet(&light, &dark);
+        host.update_renderer_style(&css, tokens.scheme);
+        let _ = host.add_fonts(&self.extensions.faces);
         drop(page_span);
         let page = Rc::new(RefCell::new(host));
         self.extensions
@@ -2249,7 +2253,6 @@ impl Controller {
         let bodies = shell.native_panels.clone();
         let clips = shell.native_panel_clips.clone();
         let fades = shell.native_panel_fades.clone();
-        let frozen = shell.native_panel_snapshots.clone();
         let stage = self.extensions.stage.clone();
         // Native panel over native window tint, over the shared material.
         let fill = Rc::new(Cell::new(pm_compat_host::native_style::panel_backing(
@@ -2263,7 +2266,7 @@ impl Controller {
             let dark = pm_shell::theme::tokens(pm_design::Scheme::Dark, tokens.accessibility);
             let css = pm_compat_host::native_style::stylesheet(&light, &dark);
             for page in themed_views.borrow().values() {
-                let _ = page.borrow().set_native_style(&css, tokens.scheme);
+                page.borrow_mut().update_renderer_style(&css, tokens.scheme);
             }
         }));
         // A body stops short of its panel's sides and bottom (the shell's
@@ -2276,7 +2279,6 @@ impl Controller {
             let viewport = Rect::new(0., 0., width, height);
             let bodies = bodies.borrow();
             let owners = owners.borrow();
-            let frozen = frozen.borrow();
             let mut dirty = false;
             for (key, page) in views.borrow().iter() {
                 let mut host = page.borrow_mut();
@@ -2297,41 +2299,45 @@ impl Controller {
                         .find(|(key, _)| key == id)
                         .map_or(r, |(_, clip)| to_rect(clip))
                 };
-                let panel_regions: Vec<Rect> = mine.iter().map(|(id, r)| clipped(id, *r)).collect();
-                let overlay_regions: Vec<Rect> = stage.as_ref().map(to_rect).into_iter().collect();
-                let _ = host.place_panels(
-                    mine.iter()
-                        .map(|(id, rect)| ((*id).clone(), *rect))
-                        .collect(),
-                    &frozen,
-                );
-                // A shared page can draw into a neighbour's slot until all
-                // its roots reach the new layout. Until then it presents the
-                // last completed snapshot of each panel at the new placement.
-                let settled = host.panel_layouts_settled();
-                let content = mine.iter()
-                    .filter(|(id, r)| settled && !host.panel_uses_snapshot(id) && host.panel_layout_applied(id, *r))
-                    .map(|(id, r)| clipped(id, *r))
-                    .chain(stage.as_ref().into_iter().flat_map(|s| host.panel_safe_stage(to_rect(s))))
+                let placements: Vec<_> = mine
+                    .iter()
+                    .map(|(id, rect)| ((*id).clone(), *rect, clipped(id, *rect)))
                     .collect();
-                let _ = host.set_regions_with_transparent_overlays(panel_regions, overlay_regions);
+                // The realm's stage page still measures the original shared
+                // virtual document. Its AppKit aperture exposes only the stage.
+                let _ = host.place_panels(
+                    placements
+                        .iter()
+                        .map(|(id, body, _)| (id.clone(), *body))
+                        .collect(),
+                    &BTreeSet::new(),
+                );
+                let stage = stage.as_ref().map(to_rect);
+                let stage_regions = stage.map_or_else(Vec::new, |rect| host.panel_safe_stage(rect));
+                let _ = host.set_regions_with_transparent_overlays(
+                    placements.iter().map(|(_, _, clip)| *clip).collect(),
+                    stage.into_iter().collect(),
+                );
+                let _ = host.set_content_regions(Some(stage_regions));
                 host.set_corner_radius(corner);
                 let fades = fades.borrow();
                 host.set_body_fades(
-                    mine.iter()
-                        .filter_map(|(id, rect)| {
-                            let (_, fade) = fades.iter().find(|(key, _)| key == *id)?;
-                            Some((clipped(id, *rect), *fade))
+                    placements
+                        .iter()
+                        .filter_map(|(id, _, clip)| {
+                            let (_, fade) = fades.iter().find(|(key, _)| key == id)?;
+                            Some((*clip, *fade))
                         })
                         .collect(),
                 );
-                let _ = host.set_content_regions(Some(content));
                 host.set_bodies(
-                    mine.iter()
-                        .map(|(id, r)| ((*id).clone(), clipped(id, *r)))
+                    placements
+                        .iter()
+                        .map(|(id, _, clip)| (id.clone(), *clip))
                         .collect(),
                 );
                 host.set_fill(Some(fill.get()));
+                dirty |= host.present_panel_renderers(&placements);
                 let _ = host.attach(
                     PAGE_PANEL,
                     PanelSlot {
@@ -2343,6 +2349,23 @@ impl Controller {
                     dirty = true;
                     let _ = host.present(viewport);
                 }
+            }
+            // The two-view budget belongs to the window, not each Store
+            // extension's separate trust domain.
+            let views = views.borrow();
+            let mut warm = Vec::new();
+            for (key, page) in views.iter() {
+                warm.extend(
+                    page.borrow()
+                        .warm_panels()
+                        .into_iter()
+                        .map(|(id, expires)| (expires, key, id)),
+                );
+            }
+            warm.sort_unstable();
+            let excess = warm.len().saturating_sub(2);
+            for (_, realm, id) in warm.into_iter().take(excess) {
+                views[realm].borrow_mut().evict_warm_panel(&id);
             }
             dirty
         }));
@@ -2361,6 +2384,8 @@ impl Controller {
             Page {
                 host: page,
                 events,
+                panel_expiry: None,
+                panel_expiry_task: None,
                 ready: false,
                 view,
             },
@@ -2526,7 +2551,11 @@ impl Controller {
                         .host
                         .borrow()
                         .send_command(&format!("dockReveal:{id}"), vec![json!(top), json!(height)]),
-                    HostEvent::GeometryChanged => (),
+                    HostEvent::GeometryChanged => {
+                        if !key.starts_with(EXPORT_PAGE) {
+                            cx.notify();
+                        }
+                    }
                     HostEvent::Ready { .. } => page.ready = true,
                     HostEvent::ProcessTerminated => {
                         eprintln!("extension page: its process ended");
@@ -2562,6 +2591,19 @@ impl Controller {
                     break;
                 }
                 batches.pop_front();
+            }
+            web.service_panel_renderers();
+            let expiry = web.next_panel_expiry();
+            if expiry != page.panel_expiry {
+                page.panel_expiry = expiry;
+                page.panel_expiry_task = expiry.map(|deadline| {
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(deadline.saturating_duration_since(std::time::Instant::now()))
+                            .await;
+                        let _ = this.update(cx, |view, cx| view.present_page(cx));
+                    })
+                });
             }
             if key.is_empty() {
                 host.return_batches(page.view, batches);

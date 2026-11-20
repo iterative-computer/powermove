@@ -103,6 +103,33 @@ test("restore and page load never revive a hidden tab or acknowledge its old pai
   expect(acks.map(p => p.id)).toEqual(['bird']);
 });
 
+test("a newly selected root waits for its own placement and retirement is acknowledged after paint", () => {
+  const context: any = {};
+  runInNewContext(readFileSync(new URL("../src/panel-layout.js", import.meta.url), "utf8"), context);
+  const frames: (() => void)[] = [], acknowledgements: number[] = [];
+  let visible: string[] = [];
+  const queue = new context.PMPanelLayout(
+    (frame: () => void) => frames.push(frame),
+    () => true,
+    () => {},
+    (roots: Set<string>) => { visible = [...roots]; },
+    (sequence: number) => acknowledgements.push(sequence),
+  );
+  const tick = () => frames.splice(0).forEach(frame => frame());
+  queue.enqueue([{id: "voiceover", generation: 1}], ["voiceover"], 1);
+  expect(visible).toEqual([]);
+  tick();
+  expect(visible).toEqual(["voiceover"]);
+  queue.enqueue([{id: "split-text", generation: 2}], ["split-text"], 2);
+  expect(visible).toEqual([]);
+  expect(acknowledgements).toEqual([]);
+  tick();
+  expect(visible).toEqual(["split-text"]);
+  expect(acknowledgements).toEqual([]);
+  tick();
+  expect(acknowledgements).toEqual([2]);
+});
+
 test("the shared page keeps recovered panel bodies and late roots in their own slots", async () => {
   const { createRequire } = await import("node:module");
   const require = createRequire(new URL("../../../js/remote-dom/package.json", import.meta.url));
@@ -130,6 +157,12 @@ test("the shared page keeps recovered panel bodies and late roots in their own s
     queue.enqueue([{id:'bird',generation:3,rect}], ['bird']);
     tick(); tick();
     const logos = dom.window.document.querySelector('[data-pm-contribution="logos"]');
+    // An author can make descendants visible even under visibility:hidden.
+    // The native host must remove the whole retired root from layout.
+    const retiredChild = dom.window.document.createElement("button");
+    retiredChild.style.visibility = "visible";
+    logos.append(retiredChild);
+    expect(logos.style.display).toBe("none");
     expect(logos.style.visibility).toBe('hidden');
     const bird = dom.window.document.createElement('section');
     bird.setAttribute('data-pm-contribution','bird');

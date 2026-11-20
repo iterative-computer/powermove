@@ -7,55 +7,12 @@ use crate::{
 use gpui::prelude::*;
 use gpui::{App, Div, FontWeight, PathBuilder, SharedString, Window, canvas, div, point, px, rgb};
 use pm_design::{Elevation, Scheme, Tokens};
-use std::time::Instant;
 
-const MORPH: f32 = 0.12;
 const INSET: f32 = 2.;
 const STROKE: f32 = 1.5;
 const LINE_WIDTH: f32 = 2.;
 
-#[derive(Clone, Copy, Default)]
-pub(super) struct Cue {
-    goal: Option<(Rect, bool)>,
-    from: Option<(Rect, Instant)>,
-}
-
-impl Cue {
-    pub(super) fn update(&mut self, goal: Option<(Rect, bool)>, animate: bool, t: &Tokens) {
-        if self.goal == goal {
-            return;
-        }
-        self.from =
-            if animate && goal.is_some_and(|(_, tab)| !tab) && !t.accessibility.reduce_motion {
-                self.shown(t)
-                    .filter(|(_, tab, _)| !tab)
-                    .map(|(r, _, _)| (r, drag::now()))
-            } else {
-                None
-            };
-        self.goal = goal;
-    }
-
-    fn shown(self, t: &Tokens) -> Option<(Rect, bool, bool)> {
-        let (mut to, tab) = self.goal?;
-        let mut moving = false;
-        if let Some((from, since)) = self.from {
-            let p = drag::progress(since, MORPH, t);
-            let mix = |a, b| a + (b - a) * p;
-            to = Rect {
-                x: mix(from.x, to.x),
-                y: mix(from.y, to.y),
-                w: mix(from.w, to.w),
-                h: mix(from.h, to.h),
-            };
-            moving = p < 1.;
-        }
-        Some((to, tab, moving))
-    }
-}
-
-/// The marker is based on the drawn strip, including its active tab and
-/// overflow, not on a speculative strip with the lifted tab inserted.
+/// The marker uses the tab positions in the current header.
 pub(super) fn tab_line(target: DropTarget, zones: &Geometry, t: &Tokens) -> Option<Rect> {
     let DropTarget::Tab { dock, group, index } = target else {
         return None;
@@ -180,7 +137,7 @@ fn chip_icon(size: f32, color: u32, rejected: bool) -> Div {
 
 impl Editor {
     pub(super) fn drag_overlay(&mut self, w: &mut Window, cx: &App) -> Option<Div> {
-        if !self.dragging_panel() && self.settle.is_none() {
+        if !self.dragging_panel() {
             return None;
         }
         let t = &self.tokens;
@@ -198,64 +155,38 @@ impl Editor {
                 w,
             ));
         }
-        let (chip, at, alpha, rejected) = if let Some(Gesture::Panel(d)) = &mut self.gesture
-            && d.moved
-        {
-            if d.chip.is_none() {
-                d.chip = unprepared;
-            }
-            if let Some((r, tab, moving)) = d.cue.shown(t) {
-                if moving {
-                    w.request_animation_frame();
-                }
-                if r.w > 0. && r.h > 0. {
-                    overlay = overlay.child(
-                        positioned(r)
-                            .id("drop-preview")
-                            .when(tab, |d| d.rounded(px(LINE_WIDTH / 2.)).bg(rgb(c.accent)))
-                            .when(!tab, |d| {
-                                let fill = if t.scheme == Scheme::Dark {
-                                    tint(pm_design::color::mix(c.floating, c.accent, 0.10), 0.28)
-                                } else {
-                                    tint(c.accent, 0.08)
-                                };
-                                d.rounded(px(m.panel_radius))
-                                    .border(px(STROKE))
-                                    .border_color(rgb(c.accent))
-                                    .bg(fill)
-                            }),
-                    );
-                }
-            }
-            let alpha = drag::progress(d.lifted.unwrap_or_else(drag::now), drag::LIFT, t);
-            if alpha < 1. {
-                w.request_animation_frame();
-            }
-            let o = drag::CHIP_OFFSET;
-            (
-                d.chip.clone()?,
-                (f32::from(d.at.x) + o, f32::from(d.at.y) + o),
-                alpha,
-                d.preview.is_none(),
-            )
-        } else {
-            let s = self.settle.as_ref()?;
-            let p = drag::progress(s.since, drag::SETTLE, t);
-            if p >= 1. {
-                self.settle = None;
-                return None;
-            }
-            w.request_animation_frame();
-            (
-                s.chip.clone(),
-                (
-                    s.from.0 + (s.to.0 - s.from.0) * p,
-                    s.from.1 + (s.to.1 - s.from.1) * p,
-                ),
-                1. - p,
-                false,
-            )
+        let Some(Gesture::Panel(d)) = &mut self.gesture else {
+            return None;
         };
+        if d.chip.is_none() {
+            d.chip = unprepared;
+        }
+        if let Some(preview) = d.preview {
+            let tab = d.live && matches!(preview.target, DropTarget::Tab { .. });
+            let r = if tab { preview.rect } else { slot(preview.rect) };
+            if r.w > 0. && r.h > 0. {
+                overlay = overlay.child(
+                    positioned(r)
+                        .id("drop-preview")
+                        .when(tab, |d| d.rounded(px(LINE_WIDTH / 2.)).bg(rgb(c.accent)))
+                        .when(!tab, |d| {
+                            let fill = if t.scheme == Scheme::Dark {
+                                tint(pm_design::color::mix(c.floating, c.accent, 0.10), 0.28)
+                            } else {
+                                tint(c.accent, 0.08)
+                            };
+                            d.rounded(px(m.panel_radius))
+                                .border(px(STROKE))
+                                .border_color(rgb(c.accent))
+                                .bg(fill)
+                        }),
+                );
+            }
+        }
+        let chip = d.chip.clone()?;
+        let o = drag::CHIP_OFFSET;
+        let at = (f32::from(d.at.x) + o, f32::from(d.at.y) + o);
+        let rejected = d.preview.is_none();
         let viewport = w.viewport_size();
         let window = (f32::from(viewport.width), f32::from(viewport.height));
         let width = chip.width.min((window.0 - 2. * drag::CHIP_MARGIN).max(0.));
@@ -276,7 +207,6 @@ impl Editor {
                 .rounded(px(m.control_radius))
                 .bg(rgb(c.floating))
                 .elevated(t, Elevation::Menu)
-                .opacity(alpha * if rejected { 0.78 } else { 1. })
                 .font_family(pm_design::TEXT_FONT)
                 .text_color(rgb(if rejected { c.muted } else { c.text }))
                 .text_size(px(t.typography.title))

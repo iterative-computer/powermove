@@ -1,4 +1,10 @@
-use crate::{contract::Panels, transport, *};
+use crate::{
+    contract::Panels,
+    panel_document::PanelDocument,
+    panel_renderers::{CanvasCache, PanelFeedback, PanelPageEvents, WarmPanels},
+    panel_slot::{PanelAttachment, editor_rect},
+    transport, *,
+};
 use block2::DynBlock;
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
@@ -10,10 +16,11 @@ use objc2_app_kit::*;
 use objc2_core_graphics::CGMutablePath;
 use objc2_foundation::*;
 use objc2_web_kit::*;
+use pm_remote_dom::protocol::Batch;
 use serde_json::{Value, json};
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io::Read,
     rc::Rc,
 };
@@ -74,6 +81,17 @@ impl StoreDataStores {
         }
     }
 }
+fn covering_rect(a: Rect, b: Rect) -> Rect {
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    Rect::new(
+        x,
+        y,
+        (a.x + a.w).max(b.x + b.w) - x,
+        (a.y + a.h).max(b.y + b.h) - y,
+    )
+}
+
 fn snapshot_geometry(source: Rect, target: Rect, clip: Rect, height: f64) -> (Rect, Rect) {
     let visible = target.intersection(clip);
     (
@@ -143,12 +161,19 @@ struct Shared {
     pending: RefCell<Option<(Task, u64)>>,
     ready: Cell<bool>,
     sheets: RefCell<Vec<(Retained<NSWindow>, Retained<WKWebView>)>>,
+    panel_feedback: RefCell<Option<Rc<PanelFeedback>>>,
+    slot_owner: RefCell<Option<String>>,
+    slot_dom_ready: Cell<bool>,
+    slot_snapshot_pending: Cell<bool>,
+    slot_painted: Cell<bool>,
     geometry_dirty: Cell<bool>,
     closed: Cell<bool>,
     layouts: RefCell<BTreeMap<String, (u64, Rect, bool)>>,
     /// Footprints the shared page can still be painting until it acknowledges
     /// the newest placement. They must not leak through its viewer aperture.
     stale_layouts: RefCell<BTreeMap<String, Rect>>,
+    retiring_layouts: RefCell<BTreeMap<String, (u64, Rect)>>,
+    visibility_sequence: Cell<u64>,
     layout_sequence: Cell<u64>,
     snapshots: RefCell<BTreeMap<String, PanelSnapshot>>,
     overscan: RefCell<Option<Overscan>>,
@@ -159,10 +184,16 @@ struct Shared {
 impl Shared {
     fn panel_safe_stage(&self, stage: Rect, frozen: &BTreeMap<String, Rect>) -> Vec<Rect> {
         let stale = self.stale_layouts.borrow();
+        let retiring = self.retiring_layouts.borrow();
         let layouts = self.layouts.borrow();
         stale
             .values()
-            .chain(frozen.keys().filter_map(|id| layouts.get(id).map(|(_, r, _)| r)))
+            .chain(retiring.values().map(|(_, rect)| rect))
+            .chain(
+                frozen
+                    .keys()
+                    .filter_map(|id| layouts.get(id).map(|(_, r, _)| r)),
+            )
             .fold(vec![stage], |regions, cut| {
                 regions
                     .into_iter()
@@ -177,6 +208,7 @@ impl Shared {
             .get(id)
             .is_some_and(|(current, _, _)| *current == generation)
             && layouts.values().all(|(_, _, applied)| *applied)
+            && self.retiring_layouts.borrow().is_empty()
     }
 
     fn send(&self, event: Value) -> Result<()> {
@@ -190,6 +222,20 @@ impl Shared {
                 Ok(None) => *self.pending.borrow_mut() = Some((task, after)),
                 Err(_) => fail_task(&task),
             }
+        }
+        Ok(())
+    }
+    fn queue_document(&self) -> Result<()> {
+        let slots: Vec<_> = self
+            .panels
+            .borrow()
+            .items
+            .values()
+            .map(|panel| (panel.spec.clone(), panel.slot.clone()))
+            .collect();
+        for (spec, slot) in slots {
+            self.send(json!({"kind":"create","panel":spec.id,"label":spec.label}))?;
+            self.send(json!({"kind":"slot","panel":spec.id,"slot":slot}))?;
         }
         Ok(())
     }
@@ -213,19 +259,14 @@ impl Shared {
             }
             self.ready.set(true);
             self.layouts.borrow_mut().clear();
+            self.stale_layouts.borrow_mut().clear();
+            self.retiring_layouts.borrow_mut().clear();
             self.snapshots.borrow_mut().clear();
             self.overscan.borrow_mut().take();
-            // Rebuild roots before asking the bridge for a fresh node snapshot.
-            let definitions: Vec<_> = self
-                .panels
-                .borrow()
-                .items
-                .values()
-                .map(|p| (p.spec.clone(), p.slot.clone()))
-                .collect();
-            for (p, slot) in definitions {
-                self.send(json!({"kind":"create","panel":p.id,"label":p.label}))?;
-                self.send(json!({"kind":"slot","panel":p.id,"slot":slot}))?;
+            // Pane renderers queue their owner and initial document before
+            // navigation, so the first poll can already paint it.
+            if self.slot_owner.borrow().is_none() {
+                self.queue_document()?;
             }
             self.handler.event(HostEvent::Ready { generation });
             return Ok(Value::Null);
@@ -307,6 +348,30 @@ impl Shared {
                         });
                     }
                 }
+            }
+            return Ok(Value::Null);
+        }
+        if kind == "panel_visibility_applied" {
+            let sequence = m["payload"]["sequence"]
+                .as_u64()
+                .ok_or(Error::InvalidRequest)?;
+            if sequence <= self.visibility_sequence.get() {
+                let mut retiring = self.retiring_layouts.borrow_mut();
+                let count = retiring.len();
+                retiring.retain(|_, (pending, _)| *pending > sequence);
+                if retiring.len() != count {
+                    self.geometry_dirty.set(true);
+                    self.handler.event(HostEvent::GeometryChanged);
+                }
+            }
+            return Ok(Value::Null);
+        }
+        if kind == "panel_slot_ready" {
+            let id = m["payload"]["id"].as_str().ok_or(Error::InvalidRequest)?;
+            if self.slot_owner.borrow().as_deref() == Some(id) && !self.slot_dom_ready.replace(true)
+            {
+                self.geometry_dirty.set(true);
+                self.handler.event(HostEvent::GeometryChanged);
             }
             return Ok(Value::Null);
         }
@@ -426,7 +491,11 @@ impl Shared {
                     );
                     return Err(Error::Forbidden);
                 }
-                self.handler.remote_dom(payload)?;
+                if let Some(feedback) = self.panel_feedback.borrow().as_ref() {
+                    feedback.received(None, payload)?;
+                } else {
+                    self.handler.remote_dom(payload)?;
+                }
                 Ok(Value::Null)
             }
             _ => Err(Error::InvalidRequest),
@@ -967,6 +1036,10 @@ pub struct MacDomHost {
     bridge: Retained<Bridge>,
     web: Retained<WKWebView>,
     slot: Retained<SlotView>,
+    renderers: Option<PanelRenderers>,
+    mirror_source: bool,
+    panel_attachment: Option<PanelAttachment>,
+    panel_frame: Option<NSRect>,
     ground: Retained<objc2_quartz_core::CAShapeLayer>,
     /// Where the page was last pressed ([`PageView`]), until a present
     /// names the panel there.
@@ -993,6 +1066,57 @@ pub struct MacDomHost {
     /// (`set_corner_radius`): the panels' bodies end in their corners.
     corner_radius: f64,
 }
+struct PanelMirror {
+    page: Box<MacDomHost>,
+    sequence: u64,
+    theme_applied: bool,
+    batches: VecDeque<(Batch, Option<u64>)>,
+    canvases: BTreeMap<u64, CanvasFrame>,
+}
+
+impl PanelMirror {
+    fn send_updates(
+        &mut self,
+        id: &str,
+        feedback: &PanelFeedback,
+        theme: Option<&(String, pm_design::Scheme)>,
+        fonts: &[PageFace],
+    ) {
+        if !self.theme_applied
+            && let Some((css, scheme)) = theme
+        {
+            self.theme_applied = self.page.set_native_style(css, *scheme).is_ok();
+        }
+        if !fonts.is_empty() {
+            let _ = self.page.add_fonts(fonts);
+        }
+        while let Some((batch, source)) = self.batches.front() {
+            let mut batch = batch.clone();
+            batch.seq = self.sequence + 1;
+            batch.caused_by = feedback.local_input(Some(id), batch.caused_by);
+            let event = json!({"kind":"batch", "panel":1, "batch":batch, "source_seq":source});
+            if self.page.shared.send(event).is_err() {
+                break;
+            }
+            self.sequence += 1;
+            self.batches.pop_front();
+        }
+    }
+}
+
+struct PanelRenderers {
+    parent: Retained<NSView>,
+    editor: Retained<NSView>,
+    document: PanelDocument,
+    feedback: Rc<PanelFeedback>,
+    views: BTreeMap<String, PanelMirror>,
+    warm: WarmPanels<PanelMirror>,
+    requested: Vec<(String, Rect, Rect)>,
+    canvases: CanvasCache,
+    fonts: BTreeMap<String, PageFace>,
+    theme: Option<(String, pm_design::Scheme)>,
+}
+
 struct Activity {
     policy: WKInactiveSchedulingPolicy,
     window: Retained<NSWindow>,
@@ -1052,6 +1176,29 @@ impl MacDomHost {
         page_bundle: &str,
         identity: Option<&pm_store_host::identity::DataStoreIdentity>,
     ) -> Result<Self> {
+        let host = Self::with_data_store(
+            mtm,
+            trust.clone(),
+            handler,
+            stores.get_for(&trust, identity),
+            format!(
+                "{page_bundle}\n{}\n{REMOTE_DOM_SHELL}",
+                include_str!("panel-layout.js")
+            ),
+            None,
+        )?;
+        host.load();
+        Ok(host)
+    }
+
+    fn with_data_store(
+        mtm: MainThreadMarker,
+        trust: Trust,
+        handler: Rc<dyn SyncHandler>,
+        data_store: Retained<WKWebsiteDataStore>,
+        applier: String,
+        process_pool: Option<&WKProcessPool>,
+    ) -> Result<Self> {
         if objc2_core_graphics::CGSessionCopyCurrentDictionary().is_none() {
             return Err(Error::Unsupported("compat_gui_session_unavailable"));
         }
@@ -1064,10 +1211,17 @@ impl MacDomHost {
             pending: RefCell::new(None),
             ready: Cell::new(false),
             sheets: RefCell::new(vec![]),
+            panel_feedback: RefCell::default(),
+            slot_owner: RefCell::default(),
+            slot_dom_ready: Cell::default(),
+            slot_snapshot_pending: Cell::default(),
+            slot_painted: Cell::default(),
             geometry_dirty: Cell::new(true),
             closed: Cell::new(false),
             layouts: RefCell::default(),
             stale_layouts: RefCell::default(),
+            retiring_layouts: RefCell::default(),
+            visibility_sequence: Cell::new(0),
             layout_sequence: Cell::new(0),
             snapshots: RefCell::default(),
             overscan: RefCell::default(),
@@ -1078,7 +1232,10 @@ impl MacDomHost {
             unsafe { msg_send![super(Bridge::alloc(mtm).set_ivars(shared.clone())), init] };
         let config = unsafe { WKWebViewConfiguration::new(mtm) };
         unsafe {
-            config.setWebsiteDataStore(&stores.get_for(&trust, identity));
+            config.setWebsiteDataStore(&data_store);
+            if let Some(pool) = process_pool {
+                config.setProcessPool(pool);
+            }
             config.setURLSchemeHandler_forURLScheme(
                 Some(ProtocolObject::from_ref(&*bridge)),
                 &NSString::from_str("pmcompat"),
@@ -1120,12 +1277,9 @@ impl MacDomHost {
         slot.setAccessibilityElement(true);
         slot.setAccessibilityRole(Some(&NSString::from_str("AXGroup")));
         slot.setAccessibilityLabel(Some(&NSString::from_str("Compatibility panels")));
-        let host = Self {
+        Ok(Self {
             shared,
-            applier: format!(
-                "{page_bundle}\n{}\n{REMOTE_DOM_SHELL}",
-                include_str!("panel-layout.js")
-            ),
+            applier,
             bridge,
             web,
             pressed,
@@ -1133,6 +1287,10 @@ impl MacDomHost {
             body_fades: Vec::new(),
             caret_panel: None,
             slot,
+            renderers: None,
+            mirror_source: false,
+            panel_attachment: None,
+            panel_frame: None,
             ground,
             activity: None,
             job_count: 0,
@@ -1143,9 +1301,7 @@ impl MacDomHost {
             frozen_pixels: BTreeMap::new(),
             build_masks: BTreeMap::new(),
             corner_radius: 0.,
-        };
-        host.load();
-        Ok(host)
+        })
     }
     fn load(&self) {
         let c = self.shared.channel.borrow();
@@ -1171,6 +1327,20 @@ impl MacDomHost {
     ) -> Result<()> {
         self.set_native_style(&crate::native_style::stylesheet(light, dark), scheme)
     }
+    pub fn update_renderer_style(&mut self, css: &str, scheme: pm_design::Scheme) {
+        if let Some(renderers) = self.renderers.as_mut() {
+            renderers.theme = Some((css.to_owned(), scheme));
+            for mirror in renderers
+                .views
+                .values_mut()
+                .chain(renderers.warm.panes().map(|(_, pane)| pane))
+            {
+                mirror.theme_applied = mirror.page.set_native_style(css, scheme).is_ok();
+            }
+        }
+        let _ = self.set_native_style(css, scheme);
+    }
+
     /// Reuse a generated sheet across every rendering document in a window.
     pub fn set_native_style(&self, css: &str, scheme: pm_design::Scheme) -> Result<()> {
         self.shared.send(serde_json::json!({
@@ -1328,6 +1498,11 @@ impl MacDomHost {
     /// route and loaded as a `FontFace` before any later batch applies; the
     /// page answers `HostEvent::FontsLoaded` once they are.
     pub fn add_fonts(&mut self, faces: &[PageFace]) -> Result<()> {
+        if let Some(renderers) = self.renderers.as_mut() {
+            renderers
+                .fonts
+                .extend(faces.iter().map(|face| (face.key(), face.clone())));
+        }
         let mut added = vec![];
         for face in faces {
             let key = face.key();
@@ -1353,6 +1528,16 @@ impl MacDomHost {
         if !self.shared.ready.get() {
             return Err(Error::Backpressure);
         }
+        if let Some(renderers) = self.renderers.as_mut() {
+            renderers.canvases.update(frame);
+            for mirror in renderers
+                .views
+                .values_mut()
+                .chain(renderers.warm.panes().map(|(_, pane)| pane))
+            {
+                mirror.canvases.insert(frame.node, frame.clone());
+            }
+        }
         let resource = self.shared.canvases.borrow_mut().insert(frame)?;
         let result = self.shared.send(json!({"kind":"canvas","panel":panel,
             "node":frame.node,"dom_sequence":frame.dom_sequence,"resource":resource,
@@ -1376,6 +1561,360 @@ impl MacDomHost {
         );
         refuse_drags(&self.web);
     }
+    /// Keep a stage page for window-level drawing and render visible
+    /// contributions in independent, clipped pages of the same realm.
+    pub fn enable_panel_renderers(&mut self, parent: &NSView, editor: &NSView) {
+        let feedback = Rc::new(PanelFeedback::new(self.shared.handler.clone()));
+        self.shared.panel_feedback.replace(Some(feedback.clone()));
+        self.renderers = Some(PanelRenderers {
+            parent: parent.retain(),
+            editor: editor.retain(),
+            feedback,
+            document: PanelDocument::default(),
+            views: BTreeMap::new(),
+            warm: WarmPanels::default(),
+            requested: Vec::new(),
+            canvases: CanvasCache::default(),
+            fonts: BTreeMap::new(),
+            theme: None,
+        });
+    }
+
+    pub fn present_panel_renderers(&mut self, placements: &[(String, Rect, Rect)]) -> bool {
+        let Some(renderers) = self.renderers.as_mut() else {
+            return false;
+        };
+        let changed = renderers.requested != placements;
+        if changed {
+            renderers.requested = placements.to_vec();
+        }
+        let now = std::time::Instant::now();
+        let retired: Vec<_> = renderers
+            .views
+            .keys()
+            .filter(|id| {
+                !placements
+                    .iter()
+                    .any(|(panel, _, clip)| panel == *id && clip.w > 0. && clip.h > 0.)
+            })
+            .cloned()
+            .collect();
+        let mut presented = !retired.is_empty();
+        for id in retired {
+            if let Some(mut mirror) = renderers.views.remove(&id) {
+                mirror.page.detach_panel_view();
+                renderers.feedback.retired(&id);
+                renderers.warm.retain(id, mirror, now);
+            }
+        }
+        let mut missing = false;
+        for (id, body, clip) in placements {
+            if clip.w <= 0. || clip.h <= 0. {
+                continue;
+            }
+            if !renderers.views.contains_key(id)
+                && let Some(mirror) = renderers.warm.reveal(id, now)
+            {
+                renderers.feedback.opening(id);
+                renderers.views.insert(id.clone(), mirror);
+            }
+            if let Some(mirror) = renderers.views.get_mut(id) {
+                let fade = self.body_fades.iter().find(|(rect, _)| rect == clip);
+                mirror.page.set_body_fades(
+                    fade.into_iter()
+                        .map(|(_, distances)| (Rect::new(0., 0., body.w, body.h), *distances))
+                        .collect(),
+                );
+                mirror.page.set_fill(self.fill);
+                mirror.page.set_corner_radius(self.corner_radius);
+                if changed || mirror.page.composition_dirty() {
+                    let attached = mirror.page.panel_is_attached();
+                    if mirror.page.present_panel_view(id, *body, *clip).is_ok() {
+                        let now_attached = mirror.page.panel_is_attached();
+                        if now_attached {
+                            renderers.feedback.place(id, (body.x, body.y));
+                        }
+                        presented |= attached != now_attached || changed && now_attached;
+                    }
+                }
+            } else {
+                missing = true;
+            }
+        }
+        if changed && (missing || renderers.warm.next_expiry().is_some()) {
+            self.shared.handler.event(HostEvent::GeometryChanged);
+        }
+        presented
+    }
+
+    #[cfg(feature = "macos-probes")]
+    #[doc(hidden)]
+    pub fn panel_probe(&self, id: &str) -> Option<&MacDomHost> {
+        self.renderers
+            .as_ref()?
+            .views
+            .get(id)
+            .map(|mirror| &*mirror.page)
+    }
+
+    pub fn warm_panels(&self) -> Vec<(String, std::time::Instant)> {
+        self.renderers.as_ref().map_or_else(Vec::new, |renderers| {
+            renderers
+                .warm
+                .ids_and_deadlines()
+                .map(|(id, deadline)| (id.to_owned(), deadline))
+                .collect()
+        })
+    }
+
+    pub fn evict_warm_panel(&mut self, id: &str) {
+        if let Some(renderers) = &mut self.renderers {
+            renderers.warm.remove(id);
+        }
+    }
+
+    pub fn next_panel_expiry(&self) -> Option<std::time::Instant> {
+        self.renderers.as_ref()?.warm.next_expiry()
+    }
+
+    /// Apply admitted deltas and seed newly visible renderers. No WebKit
+    /// document runs an extension module or creates another execution realm.
+    pub fn service_panel_renderers(&mut self) {
+        let Some(renderers) = self.renderers.as_mut() else {
+            return;
+        };
+        renderers.warm.expire(std::time::Instant::now());
+        let mtm = MainThreadMarker::from(&*self.web);
+        let mut seed = None;
+        let fonts: Vec<_> = renderers.fonts.values().cloned().collect();
+        for (id, body, clip) in &renderers.requested {
+            if clip.w <= 0. || clip.h <= 0. || renderers.views.contains_key(id) {
+                continue;
+            }
+            let Some(snapshot) = seed.get_or_insert_with(|| renderers.document.snapshot()) else {
+                continue;
+            };
+            let handler = Rc::new(PanelPageEvents {
+                owner: id.clone(),
+                feedback: renderers.feedback.clone(),
+            });
+            let config = unsafe { self.web.configuration() };
+            let (data_store, process_pool) =
+                unsafe { (config.websiteDataStore(), config.processPool()) };
+            let Ok(mut page) = Self::with_data_store(
+                mtm,
+                self.shared.trust.clone(),
+                handler,
+                data_store,
+                self.applier.clone(),
+                Some(&process_pool),
+            ) else {
+                continue;
+            };
+            page.mirror_source = true;
+            let preferences = unsafe { page.web.configuration().preferences() };
+            if preferences.respondsToSelector(sel!(setInactiveSchedulingPolicy:)) {
+                unsafe {
+                    preferences.setInactiveSchedulingPolicy(WKInactiveSchedulingPolicy::None)
+                };
+            }
+            page.install_panel_below(&renderers.parent, &renderers.editor);
+            if page
+                .create(PanelSpec {
+                    id: 1,
+                    label: id.clone(),
+                })
+                .is_err()
+            {
+                continue;
+            }
+            // Keep the page's first delivery hidden until it paints the
+            // current owner. Input routing remains distinct for every pane.
+            let viewport = Rect::new(0., 0., body.w, body.h);
+            let _ = page.present(viewport);
+            let _ = page.attach(
+                1,
+                PanelSlot {
+                    bounds: viewport,
+                    clip: viewport,
+                },
+            );
+            if page.shared.queue_document().is_err() || page.prepare_panel_document(id).is_err() {
+                continue;
+            }
+            let template = Batch {
+                version: snapshot.version,
+                session: snapshot.session.clone(),
+                seq: snapshot.seq,
+                caused_by: None,
+                ops: Vec::new(),
+            };
+            let mut batches = VecDeque::new();
+            let mut operations = Vec::new();
+            let mut size = 0;
+            for op in &snapshot.ops {
+                let bytes = serde_json::to_vec(op).map_or(0, |bytes| bytes.len() + 1);
+                if (size + bytes > MAX_MESSAGE_BYTES - 4096 || operations.len() >= 8192)
+                    && !operations.is_empty()
+                {
+                    batches.push_back((
+                        Batch {
+                            ops: std::mem::take(&mut operations),
+                            ..template.clone()
+                        },
+                        None,
+                    ));
+                    size = 0;
+                }
+                operations.push(op.clone());
+                size += bytes;
+            }
+            batches.push_back((
+                Batch {
+                    ops: operations,
+                    ..template
+                },
+                Some(snapshot.seq),
+            ));
+            renderers.feedback.new_document(id);
+            renderers.feedback.opening(id);
+            let mut mirror = PanelMirror {
+                page: Box::new(page),
+                sequence: 0,
+                theme_applied: false,
+                batches,
+                canvases: renderers
+                    .canvases
+                    .frames()
+                    .map(|frame| (frame.node, frame.clone()))
+                    .collect(),
+            };
+            mirror.send_updates(id, &renderers.feedback, renderers.theme.as_ref(), &fonts);
+            mirror.page.load();
+            renderers.views.insert(id.clone(), mirror);
+        }
+        for (id, mirror) in renderers
+            .views
+            .iter_mut()
+            .map(|(id, pane)| (id.as_str(), pane))
+            .chain(renderers.warm.panes())
+        {
+            if !mirror.page.shared.ready.get() || mirror.page.prepare_panel_document(id).is_err() {
+                continue;
+            }
+            mirror.send_updates(id, &renderers.feedback, renderers.theme.as_ref(), &fonts);
+            if mirror.batches.is_empty() {
+                mirror.canvases.retain(|_, frame| {
+                    let mut local = frame.clone();
+                    local.dom_sequence = mirror.sequence;
+                    mirror.page.present_canvas(1, &local).is_err()
+                });
+            }
+        }
+    }
+
+    /// Give this rendering document a physically separate view for one
+    /// contribution. The first presentation attaches it when it can paint.
+    pub fn install_panel_below(&mut self, container: &NSView, editor: &NSView) {
+        let mtm = MainThreadMarker::from(&*self.web);
+        self.slot.removeFromSuperview();
+        self.panel_attachment = Some(PanelAttachment::new(mtm, container, editor, &self.slot));
+    }
+
+    pub fn panel_is_attached(&self) -> bool {
+        self.panel_frame.is_some() && self.shared.slot_painted.get()
+    }
+
+    pub fn detach_panel_view(&mut self) {
+        if self.panel_frame.is_some() {
+            self.release_keyboard();
+        }
+        if let Some(attachment) = &self.panel_attachment {
+            attachment.detach();
+        }
+        self.panel_frame = None;
+    }
+
+    fn prepare_panel_document(&self, id: &str) -> Result<()> {
+        if self.shared.slot_owner.borrow().as_deref() != Some(id) {
+            if let Some(attachment) = &self.panel_attachment {
+                attachment.detach();
+            }
+            self.shared.send(json!({
+                "kind": "panel_slot", "panel": 0, "id": id, "wait_for_seed": self.mirror_source
+            }))?;
+            self.shared.slot_owner.replace(Some(id.to_owned()));
+            self.shared.slot_dom_ready.set(false);
+            self.shared.slot_snapshot_pending.set(false);
+            self.shared.slot_painted.set(false);
+        }
+        Ok(())
+    }
+
+    fn prime_panel_pixels(&self, id: &str) {
+        if !self.shared.slot_dom_ready.get() || self.shared.slot_snapshot_pending.replace(true) {
+            return;
+        }
+        let id = id.to_owned();
+        let shared = self.shared.clone();
+        let painted = block2::RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+            if shared.closed.get() || shared.slot_owner.borrow().as_deref() != Some(id.as_str()) {
+                return;
+            }
+            shared.slot_snapshot_pending.set(false);
+            if error.is_null()
+                && unsafe { image.as_ref() }.is_some_and(|image| image.size().width > 0.)
+            {
+                shared.slot_painted.set(true);
+                shared.geometry_dirty.set(true);
+                shared.handler.event(HostEvent::GeometryChanged);
+            }
+        });
+        unsafe {
+            self.web
+                .takeSnapshotWithConfiguration_completionHandler(None, &painted)
+        };
+    }
+
+    /// Slot bounds and clipping come from the exact frame GPUI paints. WebKit
+    /// has its own viewport and cannot spill into another panel or its header.
+    pub fn present_panel_view(&mut self, id: &str, body: Rect, clip: Rect) -> Result<()> {
+        if !body.valid() || !clip.valid() {
+            return Err(Error::InvalidGeometry);
+        }
+        let Some(attachment) = &self.panel_attachment else {
+            return Err(Error::InvalidGeometry);
+        };
+        if !self.shared.ready.get() {
+            return Ok(());
+        }
+        self.prepare_panel_document(id)?;
+        if !self.shared.slot_painted.get() {
+            let frame = NSRect::new(NSPoint::ZERO, NSSize::new(body.w, body.h));
+            if self.web.frame() != frame {
+                self.web.setFrame(frame);
+            }
+            self.prime_panel_pixels(id);
+            return Ok(());
+        }
+        self.panel_frame = attachment.place(body, clip);
+        if self.panel_frame.is_none() {
+            return Ok(());
+        }
+        let viewport = Rect::new(0., 0., body.w, body.h);
+        let mut layouts = self.shared.layouts.borrow_mut();
+        if layouts.get(id).is_none_or(|(_, rect, _)| *rect != viewport) {
+            let sequence = self.shared.layout_sequence.get() + 1;
+            self.shared.layout_sequence.set(sequence);
+            layouts.clear();
+            layouts.insert(id.to_owned(), (sequence, viewport, true));
+        }
+        drop(layouts);
+        self.set_regions_with_transparent_overlays(vec![viewport], Vec::new())?;
+        self.set_content_regions(None)?;
+        self.present(viewport)
+    }
+
     /// The continuous radius of every region's bottom corners: a panel's body
     /// ends in the panel's own rounded corners, so the page is clipped there
     /// as the shell clips its own content.
@@ -1502,6 +2041,11 @@ impl MacDomHost {
         revision: u64,
         live_alpha: f32,
     ) -> (bool, Option<(Rect, Retained<NSImage>)>) {
+        if let Some(renderers) = &mut self.renderers {
+            return renderers.views.get_mut(id).map_or((false, None), |mirror| {
+                mirror.page.panel_build_snapshot(id, revision, live_alpha)
+            });
+        }
         if self.build_masks.get(id).map(|v| v.0) != Some(revision) {
             let mut snapshots = self.shared.snapshots.borrow_mut();
             let snapshot = snapshots.entry(id.to_owned()).or_default();
@@ -1520,15 +2064,30 @@ impl MacDomHost {
         (snapshot.is_some_and(|s| s.build_done), image)
     }
     pub fn forget_panel_snapshot(&mut self, id: &str) {
+        if let Some(renderers) = &mut self.renderers {
+            if let Some(mirror) = renderers.views.get_mut(id) {
+                mirror.page.forget_panel_snapshot(id);
+            }
+            renderers.warm.remove(id);
+        }
         self.shared.snapshots.borrow_mut().remove(id);
     }
     pub fn finish_panel_build(&mut self, id: &str) {
+        if let Some(mirror) = self.renderers.as_mut().and_then(|r| r.views.get_mut(id)) {
+            mirror.page.finish_panel_build(id);
+        }
         if self.build_masks.remove(id).is_some() {
             self.shared.geometry_dirty.set(true);
         }
     }
     /// Only the matching layout generation can release its native safety mask.
     pub fn panel_layout_applied(&self, id: &str, rect: Rect) -> bool {
+        if let Some(renderers) = &self.renderers {
+            return renderers.views.get(id).is_some_and(|mirror| {
+                mirror.page.panel_is_attached()
+                    && mirror.page.web.frame().size == NSSize::new(rect.w, rect.h)
+            });
+        }
         self.shared
             .layouts
             .borrow()
@@ -1559,9 +2118,23 @@ impl MacDomHost {
         drop(snapshots);
         let mut changed = vec![];
         let active: Vec<String> = panels.iter().map(|(id, _)| id.clone()).collect();
-        let retired = layouts.keys().any(|id| !active.contains(id));
-        layouts.retain(|id, _| panels.iter().any(|(active, _)| active == id));
-        stale.retain(|id, _| layouts.contains_key(id));
+        let visibility = self.shared.visibility_sequence.get() + 1;
+        let mut retiring = self.shared.retiring_layouts.borrow().clone();
+        let mut retired = false;
+        layouts.retain(|id, (_, rect, _)| {
+            if active.contains(id) {
+                return true;
+            }
+            retired = true;
+            let mut footprint = stale
+                .remove(id)
+                .map_or(*rect, |old| covering_rect(old, *rect));
+            if let Some((_, old)) = retiring.get(id) {
+                footprint = covering_rect(*old, footprint);
+            }
+            retiring.insert(id.clone(), (visibility, footprint));
+            false
+        });
         for (id, rect) in panels {
             if !rect.valid() {
                 return Err(Error::InvalidGeometry);
@@ -1576,12 +2149,7 @@ impl MacDomHost {
             if let Some((_, old, _)) = previous {
                 stale
                     .entry(id.clone())
-                    .and_modify(|r| {
-                        let x = r.x.min(old.x);
-                        let y = r.y.min(old.y);
-                        *r = Rect::new(x, y, (r.x + r.w).max(old.x + old.w) - x,
-                            (r.y + r.h).max(old.y + old.h) - y);
-                    })
+                    .and_modify(|r| *r = covering_rect(*r, *old))
                     .or_insert(*old);
             }
             let generation = self.shared.layout_sequence.get() + 1;
@@ -1591,12 +2159,14 @@ impl MacDomHost {
         }
         if retired || !changed.is_empty() {
             self.shared.send(
-                json!({"kind":"panel_layout","panel":0,"placements":changed,"active":active}),
+                json!({"kind":"panel_layout","panel":0,"placements":changed,"active":active,"sequence":visibility}),
             )?;
+            self.shared.visibility_sequence.set(visibility);
             self.shared.geometry_dirty.set(true);
         }
         *self.shared.layouts.borrow_mut() = layouts;
         *self.shared.stale_layouts.borrow_mut() = stale;
+        *self.shared.retiring_layouts.borrow_mut() = retiring;
         if self.snapshot_targets != snapshot_targets {
             self.frozen_pixels.retain(|id, _| snapshot_targets.contains_key(id));
             let snapshots = self.shared.snapshots.borrow();
@@ -1616,6 +2186,71 @@ impl MacDomHost {
     pub fn panel_uses_snapshot(&self, id: &str) -> bool {
         self.snapshot_targets.contains_key(id)
     }
+    /// Exercise the .19 shared-page mask in the offscreen comparison.
+    #[cfg(feature = "macos-probes")]
+    #[doc(hidden)]
+    pub fn set_panel_content_regions(
+        &mut self,
+        panels: &[(String, Rect, Rect)],
+        stage: Option<Rect>,
+    ) -> Result<()> {
+        let settled = self.panel_layouts_settled();
+        let content = panels
+            .iter()
+            .filter(|(id, rect, _)| {
+                settled && !self.panel_uses_snapshot(id) && self.panel_layout_applied(id, *rect)
+            })
+            .map(|(_, _, clip)| *clip)
+            .chain(
+                stage
+                    .into_iter()
+                    .flat_map(|rect| self.panel_safe_stage(rect)),
+            )
+            .collect();
+        self.set_content_regions(Some(content))
+    }
+
+    /// The actual AppKit picture, or the live region selected by the layer mask.
+    #[cfg(feature = "macos-probes")]
+    #[doc(hidden)]
+    pub fn presented_panel_probe(&self, id: &str, x: f64, y: f64) -> (bool, Option<Vec<u8>>) {
+        if let Some((view, picture)) = self.overlays.get(id) {
+            if !view.isHidden() {
+                let png = picture
+                    .image()
+                    .and_then(|image| image.TIFFRepresentation())
+                    .and_then(|data| NSBitmapImageRep::imageRepWithData(&data))
+                    .and_then(|rep| unsafe {
+                        rep.representationUsingType_properties(
+                            NSBitmapImageFileType::PNG,
+                            &NSDictionary::new(),
+                        )
+                    })
+                    .map(|data| unsafe { data.as_bytes_unchecked() }.to_vec());
+                return (false, png);
+            }
+        }
+        let layer = self.web.layer().unwrap();
+        let y = if self.web.isFlipped() {
+            y
+        } else {
+            self.web.bounds().size.height - y
+        };
+        let live = layer
+            .mask()
+            .and_then(|mask| mask.downcast::<objc2_quartz_core::CAShapeLayer>().ok())
+            .and_then(|mask| mask.path())
+            .is_some_and(|path| unsafe {
+                objc2_core_graphics::CGPath::contains_point(
+                    Some(&path),
+                    std::ptr::null(),
+                    NSPoint::new(x, y),
+                    false,
+                )
+            });
+        (live, None)
+    }
+
     /// A shared page can contain a viewer overlay and panel roots. Its viewer
     /// hole must not reveal an old root beside the panel's native snapshot.
     pub fn panel_safe_stage(&self, stage: Rect) -> Vec<Rect> {
@@ -1877,7 +2512,12 @@ impl MacDomHost {
                 .is_some_and(|v| v.isDescendantOf(&self.web))
         });
         if holds {
-            let to = self.slot.editor_view().or_else(|| window.contentView());
+            let to = self
+                .panel_attachment
+                .as_ref()
+                .map(PanelAttachment::editor)
+                .or_else(|| self.slot.editor_view())
+                .or_else(|| window.contentView());
             window.makeFirstResponder(to.as_deref().map(|v| v as &NSResponder));
         }
     }
@@ -1886,10 +2526,22 @@ impl MacDomHost {
             return Err(Error::InvalidGeometry);
         }
         self.shared.panels.borrow_mut().viewport = Rect::new(0., 0., viewport.w, viewport.h);
-        self.slot.setFrame(NSRect::new(
-            NSPoint::new(viewport.x, viewport.y),
-            NSSize::new(viewport.w, viewport.h),
-        ));
+        let frame = self
+            .panel_frame
+            .or_else(|| {
+                self.renderers
+                    .as_ref()
+                    .map(|renderers| editor_rect(viewport, &renderers.editor, &renderers.parent))
+            })
+            .unwrap_or_else(|| {
+                NSRect::new(
+                    NSPoint::new(viewport.x, viewport.y),
+                    NSSize::new(viewport.w, viewport.h),
+                )
+            });
+        if self.slot.frame() != frame {
+            self.slot.setFrame(frame);
+        }
         self.web.setFrame(NSRect::new(
             NSPoint::ZERO,
             NSSize::new(viewport.w, viewport.h),
@@ -1899,6 +2551,11 @@ impl MacDomHost {
             self.corner_radius,
             &self.body_fades,
         );
+        if self.renderers.is_some() {
+            // Body grounds are painted here. Only the stage's live drawing
+            // may receive input in this full-window page.
+            *self.slot.ivars().borrow_mut() = self.content.clone().unwrap_or_default();
+        }
         // The panel the page's caret is in stopped showing (another tab,
         // closed, a layout without it): the editor takes the keyboard back,
         // or keys and the input-source badge stay with a hidden field
@@ -2040,13 +2697,20 @@ impl MacDomHost {
                 None => unsafe { layer.setMask(None) },
             }
         }
-        self.present_snapshots(viewport);
+        if self.renderers.is_none()
+            && (self.panel_attachment.is_none() || !self.build_masks.is_empty())
+        {
+            self.present_snapshots(viewport);
+        }
         for id in self.build_masks.keys() {
             if let Some((view, _)) = self.overlays.get(id) {
                 view.setHidden(true);
             }
         }
-        if self.snapshot_targets.is_empty() || self.shared.overscan.borrow().is_some() {
+        if self.renderers.is_none()
+            && self.panel_attachment.is_none()
+            && (self.snapshot_targets.is_empty() || self.shared.overscan.borrow().is_some())
+        {
             self.overscan_snapshot(viewport);
         }
         refuse_drags(&self.web);
@@ -2247,8 +2911,28 @@ impl DomPanelHost for MacDomHost {
         if !self.shared.ready.get() {
             return Err(Error::Backpressure);
         }
-        self.shared
-            .send(json!({"kind":"batch","panel":id,"batch":batch}))
+        if let Some(renderers) = self.renderers.as_mut() {
+            let admitted: Batch =
+                serde_json::from_value(batch).map_err(|_| Error::InvalidRequest)?;
+            let mut primary = admitted.clone();
+            primary.caused_by = renderers.feedback.local_input(None, primary.caused_by);
+            self.shared
+                .send(json!({"kind":"batch","panel":id,"batch":primary}))?;
+            renderers.document.apply(&admitted);
+            for mirror in renderers
+                .views
+                .values_mut()
+                .chain(renderers.warm.panes().map(|(_, pane)| pane))
+            {
+                mirror
+                    .batches
+                    .push_back((admitted.clone(), Some(admitted.seq)));
+            }
+        } else {
+            self.shared
+                .send(json!({"kind":"batch","panel":id,"batch":batch}))?;
+        }
+        Ok(())
     }
     fn focus(&mut self, id: PanelId, node: Option<u64>) -> Result<()> {
         self.check(self.generation(), id)?;
@@ -2350,10 +3034,17 @@ mod admission_tests {
                 pending: RefCell::new(None),
                 ready: Cell::new(true),
                 sheets: RefCell::new(vec![]),
+                panel_feedback: RefCell::default(),
+                slot_owner: RefCell::default(),
+                slot_dom_ready: Cell::default(),
+                slot_snapshot_pending: Cell::default(),
+                slot_painted: Cell::default(),
                 geometry_dirty: Cell::new(false),
                 closed: Cell::new(false),
                 layouts: RefCell::default(),
                 stale_layouts: RefCell::default(),
+                retiring_layouts: RefCell::default(),
+                visibility_sequence: Cell::new(0),
                 layout_sequence: Cell::new(0),
                 snapshots: RefCell::default(),
                 overscan: RefCell::default(),
@@ -2412,6 +3103,44 @@ mod admission_tests {
             assert_eq!(inner.y + inner.h, target.h);
         }
     }
+    #[test]
+    fn dock_panel_retirement_keeps_its_native_mask_until_the_matching_page_ack() {
+        let (state, _) = shared(Trust::Trusted);
+        let stage = Rect::new(0., 0., 800., 500.);
+        let old = Rect::new(480., 60., 280., 140.);
+        state.visibility_sequence.set(3);
+        state
+            .retiring_layouts
+            .borrow_mut()
+            .insert("mirage".into(), (3, old));
+        let frozen = BTreeMap::new();
+        let covered = |state: &Shared| {
+            state
+                .panel_safe_stage(stage, &frozen)
+                .iter()
+                .any(|r| r.contains(500., 100.))
+        };
+        assert!(!covered(&state));
+        for sequence in [2, 4] {
+            state
+                .handle(
+                    &json!({"generation":3,"panel":0,"kind":"panel_visibility_applied",
+                "payload":{"sequence":sequence}})
+                    .to_string(),
+                )
+                .unwrap();
+            assert!(!covered(&state));
+        }
+        state
+            .handle(
+                &json!({"generation":3,"panel":0,"kind":"panel_visibility_applied",
+            "payload":{"sequence":3}})
+                .to_string(),
+            )
+            .unwrap();
+        assert!(covered(&state));
+    }
+
     #[test]
     fn a_pending_neighbour_invalidates_a_shared_page_capture() {
         let (state, _) = shared(Trust::Trusted);
