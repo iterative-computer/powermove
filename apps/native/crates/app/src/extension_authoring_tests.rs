@@ -183,7 +183,7 @@ fn an_agent_adds_a_panel_a_timeline_column_and_a_viewer_overlay_then_one_is_undo
     let started = call(
         &mut session,
         "start_session",
-        json!({"prompt":"Customise the app"}),
+        json!({"prompt":"Customise the app","includeExtensionStaging":true}),
     );
     let stage = |value: &Value| PathBuf::from(value["stagingDirectory"].as_str().unwrap());
     let staging = stage(&started);

@@ -72,7 +72,7 @@ pub fn fork() -> Check {
             .clone();
         let started = f.call(
             "start_session",
-            json!({"prompt":"Synthetic source copy","context":if commit {"app"} else {"project"}}),
+            json!({"prompt":"Synthetic source copy","context":if commit {"app"} else {"project"},"includeExtensionStaging":true}),
         )?;
         let stage = PathBuf::from(
             started["stagingDirectory"]

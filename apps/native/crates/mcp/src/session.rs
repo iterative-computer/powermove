@@ -1495,7 +1495,8 @@ impl McpSession {
             result["summary"] = views::session_summary(view)?;
         }
         let full = args["detail"] == "full";
-        let has_workspace = access != "editor" || granted.is_some();
+        let include_extension_staging = args["includeExtensionStaging"] == true;
+        let has_workspace = access != "editor" || granted.is_some() || include_extension_staging;
         let input = if (has_workspace || full) && let Some(id) = &project {
             crate::memory::agent_snapshot_model(&host.read_document_model(id)?)
         } else {
@@ -1522,20 +1523,19 @@ impl McpSession {
                 TOOL_DOCS.get_or_init(|| json!(catalog::served_tools()).to_string()),
             )?;
             result["workspace"] = json!(root);
-            result["stagingDirectory"] = json!(root.join("extensions"));
-            result["apiPackDirectory"] = json!(root.join("api"));
             result["artifactsDirectory"] = json!(root.join("artifacts"));
-            if host.extensions.is_some() {
-                result["extensionGuide"] = json!("Read api/EXTENSIONS.md before staging or publishing an extension. For new panels, call panel_begin first and report plan/commit/ready (or cancel/error) with panel_build.");
+            if include_extension_staging {
+                result["stagingDirectory"] = json!(root.join("extensions"));
+                result["apiPackDirectory"] = json!(root.join("api"));
+                result["extensionGuide"] = json!(if host.extensions.is_some() {
+                    "Before authoring a new panel, call panel_begin with its title, placement and planned controls. Say where you put it. Send panel_build plan/commit events as you commit controls; after publishing send ready with the registered panelId, or cancel/error on failure. To change the app itself, read api/EXTENSIONS.md, write extensions only in stagingDirectory (folder name = manifest id) and call publish_extensions: it validates, compiles and loads them into the running app."
+                } else {
+                    "Extension staging is inert: nothing here activates."
+                });
             }
-            let extensions = if host.extensions.is_some() {
-                " Before authoring a new panel, call panel_begin with its title, placement and planned controls. Say where you put it. Send panel_build plan/commit events as you commit controls; after publishing send ready with the registered panelId, or cancel/error on failure. To change the app itself, read api/EXTENSIONS.md, write extensions only in stagingDirectory (folder name = manifest id) and call publish_extensions: it validates, compiles and loads them into the running app."
-            } else {
-                " Extension staging is inert: nothing here activates."
-            };
-            result["instructions"] = json!(format!(
-                "Read get_project_state before edits. Its compositions list includes every composition; pass optional compositionId to composition tools to work inside a precomp without switching the editor. Omit it for the open composition. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. api/mcp-tools.json lists the public contract. A tool this build lacks returns an error naming what is missing, so report that instead of retrying.{extensions}"
-            ));
+            result["instructions"] = json!(
+                "Read get_project_state before edits. Its compositions list includes every composition; pass optional compositionId to composition tools to work inside a precomp without switching the editor. Omit it for the open composition. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. api/mcp-tools.json lists the public contract. A tool this build lacks returns an error naming what is missing, so report that instead of retrying."
+            );
             Some(root)
         };
         let stage = match (&workspace, host.extensions.clone()) {
