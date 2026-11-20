@@ -146,9 +146,9 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
   if (!p || !model.open || s.run.phase === "cancelled") return null;
   const o = model.options;
   const busy = model.locked;
-  const extensions = s.extensions ?? [];
-  const included = extensions.filter((entry) => entry.status === "included");
-  const omitted = extensions.filter((entry) => entry.status !== "included");
+  const projectExtensions = s.extensions ?? [];
+  const included = projectExtensions.filter((entry) => entry.status === "included");
+  const omitted = projectExtensions.filter((entry) => entry.status !== "included");
   const checked = o.includeExtensions !== false;
   const extensionSummary = `${checked ? "Includes" : "Can include"} ${included.length} ${included.length === 1 ? "extension" : "extensions"} needed to render`;
   const sizeLabel = (bytes: number) =>
@@ -539,7 +539,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   </text>
                 </div>
               ) : null}
-              {model.kind === "project" && extensions.length > 0 ? (
+              {model.kind === "project" && projectExtensions.length > 0 ? (
                 <div id="export.projectOptions" style={stack}>
                   {included.length > 0 && (
                     <UI.DisclosureGroup
