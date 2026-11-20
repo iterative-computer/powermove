@@ -236,7 +236,7 @@ fn current_mcp_catalog(reference: &Observations) -> Observations {
     let source = include_bytes!("../../mcp/fixtures/native-tools.json");
     assert_eq!(
         replay::sha256(source),
-        "480719e8c5034e7d31a822eb3007817404838743f621ccb6f0e41fe97b1db71e"
+        "d2b688edbcd209ce98e043be1fd85120c7ec84d6e192ee35e383dfbd287387ad"
     );
     let source: Value = serde_json::from_slice(source).unwrap();
     catalog["tools"]

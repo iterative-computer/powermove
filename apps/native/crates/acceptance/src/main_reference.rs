@@ -125,11 +125,11 @@ pub fn expected_catalog() -> Value {
             }
         }
     }
-    // Native panel authoring extends the app allowlist; the frozen source stays pinned.
+    // Native panel authoring and portable project export extend the app allowlist.
     catalog["app"]
         .as_array_mut()
         .unwrap()
-        .extend([json!("panel_begin"), json!("panel_build")]);
+        .extend([json!("panel_begin"), json!("panel_build"), json!("export_project")]);
     catalog
 }
 pub fn declarations() -> &'static Value {

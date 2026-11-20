@@ -879,9 +879,8 @@ fn surface_unknown_ids() -> Check {
 fn mcp_tool_contract() -> Check {
     let f = Fixture::new()?;
     assert_eq!(f.session.tools(), json!(pm_mcp::catalog::served_tools()));
-    assert_eq!(f.session.tools().as_array().unwrap().len(), 73);
-    assert!(f.session.tools().as_array().unwrap().iter().any(|tool| tool["name"] == "export_status"));
-    for name in ["panel_begin", "panel_build"] {
+    assert_eq!(f.session.tools().as_array().unwrap().len(), 74);
+    for name in ["panel_begin", "panel_build", "export_status", "export_project"] {
         assert!(
             f.session
                 .tools()
