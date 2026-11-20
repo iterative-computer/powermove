@@ -2518,19 +2518,22 @@ impl Controller {
                     cx.spawn(async move |this, cx| {
                         let picked = picked.recv().await.ok().flatten();
                         let _ = handle.update(cx, |_, window, cx| {
-                            let _ = this.update(cx, |v, cx| {
-                                v.builtins.agent_picking = false;
-                                if let Some(rect) = picked {
-                                    v.attach_region(rect, window, cx);
-                                }
-                                match &popover {
-                                    Some(popover) if v.builtins.windows.contains_key("agent") => {
-                                        let editor = v.host.borrow().window.clone();
-                                        gpui_macos::child_window::attach(popover, &editor);
-                                        gpui_macos::child_window::show(popover, true);
+                            if let Some(rect) = picked {
+                                let _ = this.update(cx, |v, cx| v.attach_region(rect, window, cx));
+                            }
+                            // Put the popover back after the deferred capture has drawn.
+                            window.defer(cx, move |window, cx| {
+                                let _ = this.update(cx, |v, cx| {
+                                    v.builtins.agent_picking = false;
+                                    match &popover {
+                                        Some(popover) if v.builtins.windows.contains_key("agent") => {
+                                            let editor = v.host.borrow().window.clone();
+                                            gpui_macos::child_window::attach(popover, &editor);
+                                            gpui_macos::child_window::show(popover, true);
+                                        }
+                                        _ => v.show_builtin("agent", window, cx),
                                     }
-                                    _ => v.show_builtin("agent", window, cx),
-                                }
+                                });
                             });
                         });
                     })
