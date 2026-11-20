@@ -279,7 +279,7 @@
         "type": "string",
         "minLength": 1,
         "maxLength": 4096,
-        "description": "Agent or session workspace PNG or JPEG to compare with every cell. Resized to the output size."
+        "description": "Agent or session workspace image to compare with every cell. Resized to the output size."
       }
     }
   },

@@ -194,19 +194,15 @@ fn read_image(context: &Context, path: &std::path::Path, size: Size) -> Result<V
     let bytes = context.read_image(path)?;
     let mut reader =
         ::image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
-    ensure!(
-        matches!(
-            reader.format(),
-            Some(::image::ImageFormat::Png | ::image::ImageFormat::Jpeg)
-        ),
-        "Use a PNG or JPEG workspace image."
-    );
     let mut limits = ::image::Limits::default();
     limits.max_image_width = Some(8192);
     limits.max_image_height = Some(8192);
     limits.max_alloc = Some(128 * 1024 * 1024);
     reader.limits(limits);
-    let pixels = reader.decode()?.into_rgba8();
+    let pixels = reader
+        .decode()
+        .map_err(|error| anyhow!("Could not decode the workspace image ({error})."))?
+        .into_rgba8();
     Ok(::image::imageops::resize(
         &pixels,
         size.width,
