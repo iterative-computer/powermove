@@ -4025,6 +4025,184 @@ fn a_new_layer_in_tracks_goes_above_what_it_overlaps() {
     assert_eq!([lane(&c, "still"), lane(&c, "a"), lane(&c, "b")], shown);
 }
 
+/// Every pair of root clips of one area that overlap in time: the one higher
+/// in the stack (drawn over) is on the higher track.
+fn assert_tracks_follow_the_stack(index: &TimelineIndex, layout: &tracks::Layout, what: &str) {
+    let lanes: Vec<_> = index
+        .layers
+        .iter()
+        .map(|l| (l, layout.item(&l.id).unwrap().lane))
+        .collect();
+    for (i, (upper, upper_lane)) in lanes.iter().enumerate() {
+        for (lower, lower_lane) in &lanes[i + 1..] {
+            let overlap = upper.from < lower.from + lower.duration - 1e-5
+                && lower.from < upper.from + upper.duration - 1e-5;
+            if overlap && tracks::area(&upper.kind) == tracks::area(&lower.kind) {
+                assert!(
+                    upper_lane > lower_lane,
+                    "{what}: {} (stack above, lane {upper_lane}) is drawn over {} (lane {lower_lane}); lanes {:?}",
+                    upper.id,
+                    lower.id,
+                    lanes.iter().map(|(l, n)| (l.id.as_str(), l.from, l.duration, *n)).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+}
+
+/// PM-512: over random Tracks layouts, and random edits made while the
+/// timeline shows them (a slide, a move, trims, a new layer from the
+/// viewer), the track order of overlapping clips is their render order, and
+/// no clip the edit did not retime changes track (PM-477).
+#[test]
+fn track_order_matches_render_order_over_random_layouts() {
+    use pm_kernel::commands::layers::AddLayer;
+    use pm_kernel::{LayerCommand, TimingCommand};
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    let solid = |id: &str, from: u64, dur: u64, track: u64| {
+        format!(
+            r##"{{"id":"{id}","name":"{id}","type":"solid","from":{from},"dur":{dur},"on":true,"track":{track},"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}}}}"##
+        )
+    };
+    for round in 0..60 {
+        let count = 3 + next(5) as usize;
+        let layers: Vec<String> = (0..count)
+            .map(|n| solid(&format!("c{n}"), next(20), 1 + next(8), next(4)))
+            .collect();
+        let project = parse(&format!(
+            r##"{{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":40,"comps":{{}},"assets":{{}},"layers":[{}]}}"##,
+            layers.join(",")
+        ))
+        .unwrap();
+        let (_a, mut c) = client_with(project);
+        c.model.mode = TimelineMode::Tracks;
+        c.sync().unwrap();
+        let shown = tracks::layout(&c.model.index, &c.model.reveal);
+        assert_tracks_follow_the_stack(&c.model.index, &shown, &format!("round {round}, opened"));
+        for step in 0..4 {
+            let index = c.model.index.clone();
+            let shown = tracks::layout(&index, &c.model.reveal);
+            let before: std::collections::HashMap<String, (usize, f64, f64)> = index
+                .layers
+                .iter()
+                .map(|l| (l.id.clone(), (shown.item(&l.id).unwrap().lane, l.from, l.duration)))
+                .collect();
+            let id = index.layers[next(index.layers.len() as u64) as usize].id.clone();
+            let kind = next(5);
+            let wrap = |command| tracks::in_tracks(&index, &c.model.reveal, command).into();
+            let command: Command = match kind {
+                0 => wrap(TimingCommand::Slide {
+                    layer_id: id.clone(),
+                    delta: next(9) as f64 - 4.,
+                }),
+                1 => wrap(TimingCommand::Move {
+                    layer_ids: vec![id.clone()],
+                    delta: next(13) as f64 - 6.,
+                }),
+                2 => wrap(TimingCommand::TrimOut {
+                    layer_ids: vec![id.clone()],
+                    time: next(30) as f64,
+                }),
+                3 => wrap(TimingCommand::TrimIn {
+                    layer_ids: vec![id.clone()],
+                    time: next(30) as f64,
+                }),
+                _ => {
+                    let (from, duration) = (next(20) as f64, 1. + next(8) as f64);
+                    let (track, at) =
+                        tracks::top_place(&index, &c.model.reveal, "shape", from, from + duration);
+                    LayerCommand::Add(Box::new(AddLayer {
+                        id: format!("n{step}"),
+                        layer_type: "shape".into(),
+                        comp: None,
+                        name: None,
+                        from: Some(from),
+                        duration: Some(duration),
+                        content: Default::default(),
+                        properties: Default::default(),
+                        color: None,
+                        index: Some(at),
+                        parent: None,
+                        blend: None,
+                        motion_blur: None,
+                        visible: None,
+                        shy: None,
+                        collapsed: None,
+                        track: Some(track as u32),
+                        time: 0.,
+                    }))
+                    .into()
+                }
+            };
+            // An edit the kernel refuses (a slide with no room) changes nothing.
+            let _ = block_on(c.dispatch(Plan::edit(vec![command], index.revision)));
+            c.sync().unwrap();
+            let what = format!("round {round}, step {step}, edit {kind} on {id}");
+            let layout = tracks::layout(&c.model.index, &c.model.reveal);
+            assert_tracks_follow_the_stack(&c.model.index, &layout, &what);
+            for l in &c.model.index.layers {
+                if let Some(&(lane, from, duration)) = before.get(&l.id)
+                    && l.id != id
+                    && (l.from - from).abs() < 1e-9
+                    && (l.duration - duration).abs() < 1e-9
+                {
+                    assert_eq!(layout.item(&l.id).unwrap().lane, lane, "{what}: {} changed track", l.id);
+                }
+            }
+        }
+    }
+}
+
+/// PM-512: in Tracks the track decides stacking. E, on the track above M,
+/// slides into M's time: M, drawn over E until now, is restacked under it,
+/// every clip keeps its track, and one undo restores the time and the stack.
+#[test]
+fn a_tracks_edit_restacks_overlapping_clips_by_track_in_the_same_undo_step() {
+    let project = parse(
+        r##"{"id":"P","compId":"C","name":"Lanes","w":200,"h":100,"fps":30,"dur":10,"comps":{},"assets":{},"layers":[
+        {"id":"m","name":"M","type":"shape","from":3,"dur":2,"on":true,"p":{}},
+        {"id":"e","name":"E","type":"shape","from":0,"dur":2.9,"on":true,"p":{}},
+        {"id":"k","name":"K","type":"shape","from":0,"dur":2.9,"on":true,"p":{}},
+        {"id":"n","name":"N","type":"shape","from":0,"dur":6,"on":true,"p":{}}
+        ]}"##,
+    )
+    .unwrap();
+    let (_a, mut c) = client_with(project);
+    c.model.mode = TimelineMode::Tracks;
+    c.sync().unwrap();
+    let lanes = |c: &TimelineClient| {
+        let layout = tracks::layout(&c.model.index, &c.model.reveal);
+        ["m", "e", "k", "n"].map(|id| layout.item(id).unwrap().lane)
+    };
+    let order = |c: &TimelineClient| -> Vec<String> {
+        c.model.index.layers.iter().map(|l| l.id.clone()).collect()
+    };
+    let before = lanes(&c);
+    assert_eq!(before, [1, 2, 1, 0]);
+    let slide = tracks::in_tracks(
+        &c.model.index,
+        &c.model.reveal,
+        pm_kernel::TimingCommand::Slide {
+            layer_id: "e".into(),
+            delta: 0.5,
+        },
+    );
+    edit(&mut c, vec![slide.into()]);
+    c.sync().unwrap();
+    assert_eq!(lanes(&c), before, "no clip changes track");
+    assert_eq!(order(&c), ["e", "m", "k", "n"], "E (V3) is drawn over M (V2)");
+    undo(&mut c);
+    c.sync().unwrap();
+    assert_eq!(order(&c), ["m", "e", "k", "n"]);
+    assert_eq!(c.model.index.layer("e").unwrap().from, 0.);
+}
+
 /// The common Tracks gesture: a slide drag on a clip with a neighbour on one
 /// side only, and on a still, works (the media-only edit refused both); the
 /// clip keeps its track and so do its neighbours.
