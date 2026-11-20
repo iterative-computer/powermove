@@ -361,6 +361,16 @@ impl EngineJobs {
             app_host: Default::default(),
         })
     }
+
+    fn settled_installed_resources(&self) -> Option<Resources> {
+        let host = self.app_host.get().and_then(std::sync::Weak::upgrade);
+        settled_resources(|id| {
+            host.as_ref().is_none_or(|host| {
+                let scope = host.project_extensions(id);
+                scope.root.is_none() && scope.excluded.is_empty()
+            })
+        })
+    }
     /// The definitions a job of `published` draws with: its window's, once
     /// that window's extensions have loaded when `wait` asks (ended early by
     /// `stop`: a cancelled export, a stopped capture), or with no window the
@@ -398,14 +408,7 @@ impl EngineJobs {
         // installed extensions), else with missing effects bypassed, as the
         // viewer draws them. Never a minute's wait for a load that cannot be.
         if window.is_none() && self.kernel.published(&published.project).is_none() {
-            let host = self.app_host.get().and_then(std::sync::Weak::upgrade);
-            return Ok(settled_resources(|id| {
-                host.as_ref().is_none_or(|host| {
-                    let scope = host.project_extensions(id);
-                    scope.root.is_none() && scope.excluded.is_empty()
-                })
-            })
-            .unwrap_or_default());
+            return Ok(self.settled_installed_resources().unwrap_or_default());
         }
         if let Some(mut resources) = window {
             if let Some(publication) = &settled {
@@ -2148,7 +2151,7 @@ impl EngineJobs {
                 let published = self.published_at(&project.id, project.document, project.revision)?;
                 Some(self.resources(&published, true, stop).map_err(failed)?)
             }
-            None => settled_resources(),
+            None => self.settled_installed_resources(),
         };
         if let Some(definition) = resources.as_ref().and_then(|r| find(&r.definitions)) {
             return Ok(definition);
