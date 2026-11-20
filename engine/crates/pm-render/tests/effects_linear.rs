@@ -524,3 +524,83 @@ fn adjustment_layers_read_e_with_linear_blending_on() {
         assert!(within >= 0.999 && max <= 4, "{id}: {within} {max}");
     }
 }
+
+#[test]
+fn pm555_backdrop_helper_samples_the_pass_rectangle() {
+    let _gpu = gpu();
+    let fixture = Fixture::new("fx-backdrop-rect");
+    let mut r = renderer();
+    // The render uses the real extension wrapper, just as a registered effect does.
+    let output = std::process::Command::new("bun")
+        .current_dir(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../apps/native/js/compat"
+        ))
+        .args([
+            "-e",
+            r#"
+import { definitionSnapshots } from "./src/definitions";
+const item = {id:"sample.backdrop",label:"Backdrop",group:"Test",params:[],
+  backdrop:true,viewportSafe:true,frag:`
+    if (u_res.x >= u_coordRes.x) { o = vec4(1., 0., 1., 1.); return; }
+    o = vec4(1.0 - bd(v_st).rgb, 1.0);
+  `};
+const [effect] = definitionSnapshots({
+  effects: {entries: () => [{id:item.id,ownerId:"test",item}]},
+  transitions: {entries: () => []},
+  layerTypes: {entries: () => []},
+});
+console.log(JSON.stringify(effect));
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let effect: DefinitionSnapshot = serde_json::from_slice(&output.stdout).unwrap();
+    let mut set = builtin_definitions();
+    set.definitions.push(effect);
+    let failures = r.set_definitions(&set).unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+
+    let mut top = layer(
+        "top",
+        "solid",
+        json!({"color":"#FFFFFF","w":40,"h":24}),
+        60.,
+        22.,
+        2.,
+    );
+    top["fx"] = json!([{ "id": "f1", "type": "sample.backdrop", "on": true, "p": {} }]);
+    let doc = document(vec![top, picture_layer("back")], "#000000", false);
+    let control = document(vec![picture_layer("back")], "#000000", false);
+    let mut request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
+    request.region = Some(pm_protocol::common::PixelRect {
+        x: 45,
+        y: 10,
+        width: 30,
+        height: 22,
+    });
+    let frame = r
+        .render(&doc, "Ptest-root", ticks(0.5), &request, &fixture.resolver)
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let actual = r.read_rgba(&frame).unwrap();
+    assert_eq!(actual.len(), 30 * 22 * 4);
+    let reference = render(&mut r, &control, &fixture.resolver, 0.5);
+    for (x, y) in [(52, 14), (65, 29), (72, 18)] {
+        let at = (((y - 10) * 30 + x - 45) * 4) as usize;
+        let full = ((y * W + x) * 4) as usize;
+        for ch in 0..3 {
+            assert!(
+                (actual[at + ch] - (1.0 - reference[full + ch])).abs() < 2.0 / 255.0,
+                "pixel ({x}, {y}): {:?} over {:?}",
+                &actual[at..at + 4],
+                &reference[full..full + 4]
+            );
+        }
+    }
+}

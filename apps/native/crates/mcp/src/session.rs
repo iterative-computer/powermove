@@ -1467,7 +1467,12 @@ impl McpSession {
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
-                    std::fs::write(path, text)?;
+                    std::fs::write(&path, text)?;
+                    if name == "builtin-effects.json" {
+                        let mut permissions = std::fs::metadata(&path)?.permissions();
+                        permissions.set_readonly(true);
+                        std::fs::set_permissions(&path, permissions)?;
+                    }
                 }
                 let project = project.as_deref().unwrap_or("powermove-global");
                 Some(crate::extensions::prepare(

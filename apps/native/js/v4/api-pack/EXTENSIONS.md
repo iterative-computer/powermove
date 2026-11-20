@@ -1,8 +1,7 @@
 # Extending Powermove
 
-Everything in Powermove is an extension, including the built-in panels. You can
-add a panel, change a built-in one, or replace it, by writing an extension and
-publishing it. The app loads it while it runs; there is no rebuild or restart.
+You can add a panel or replace a built-in panel by writing and publishing an
+extension. Powermove loads the extension while it runs.
 
 ## Start a new panel in its workspace slot
 
@@ -32,8 +31,8 @@ This applies to both native generated panels and extension/webview panels.
    `{"extensions":[{"id":"hello-panel","action":"created","summary":"..."}]}`.
    `action` is `created`, `updated` or `removed`. Powermove checks your report
    against the files, scans for credentials, compiles each extension and runs
-   it once in a throwaway runtime. If anything fails, nothing is applied and the
-   error says what to fix; the stage stays as you left it.
+   it once in a throwaway runtime. It also compiles the registered effect shaders.
+   If a check fails, Powermove keeps your staged files and reports what to fix.
 4. On success the extensions are live in every open window within a second.
    The result's `changeSetId` names this change; the user can undo it with
    **Undo Extension Change** in the command palette. The result also has a fresh
@@ -41,6 +40,13 @@ This applies to both native generated panels and extension/webview panels.
 
 Verify on screen with `get_panel_layout`, `capture_panel` or `render_frames`
 when available, and say honestly what you could not check.
+
+## Built-in effects
+
+The read-only [builtin-effects.json](builtin-effects.json) lists the 43 built-in
+effects, with their ids, parameters, passes, and GLSL. See
+[v3/EXTENSIONS.md](v3/EXTENSIONS.md#built-in-effect-reference) for examples and
+the shader authoring contract. The Effects browser panel's fork id is `fxbrowser`.
 
 ## Manifest
 

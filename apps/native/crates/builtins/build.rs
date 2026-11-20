@@ -23,6 +23,7 @@ fn main() {
     // Native effects reuse the compatibility wrapper, not a second prelude.
     for file in [
         "../compat/src/definitions.ts",
+        "../compat/src/effect-shader-preamble.json",
         "../compat/src/frozen/host/glsl.js",
         "../compat/src/frozen/host/extension-layers.js",
         "../compat/src/frozen/reference/legacy/gl/shader-prelude.ts",

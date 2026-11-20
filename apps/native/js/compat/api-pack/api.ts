@@ -203,12 +203,15 @@ export type ViewerHandle =
   | { kind: 'rect'; start: ViewerPointBinding; end: ViewerPointBinding };
 /**
  * Fragment shader body contract (GLSL ES 3.00). The kernel prepends the common
- * preamble (`v_uv`, `v_st`, `u_tex`, `u_res`, `u_texel`, `u_time`, helpers) and
+ * preamble (`v_uv`, `v_st`, `u_tex`, `u_res`, `u_texel`, `u_effectScale`, `u_time`, helpers) and
  * named scalar uniforms `u_<k>` (float for numbers/toggles, vec3 for colors).
  * Stop collections get `pm_<k>(t)` and their Count/P/C uniforms instead.
  * It also provides `u_pass` (int), `u_orig` when `keepOrig`, and
  * `u_backdrop` when `backdrop` is enabled. `u_backdrop` contains the pixels
- * accumulated beneath the layer before the effect is applied.
+ * accumulated beneath the layer before the effect is applied. It covers the
+ * same pass rectangle as `u_tex`, in GL row order. Sample with `bd(v_st)`
+ * or `texture(u_backdrop, v_st)`. For backdrop texel offsets, use
+ * `1.0 / vec2(textureSize(u_backdrop, 0))`.
  * `v_uv` is composition-normalized and `v_px` is in composition pixels even
  * when the editor is rendering a cropped high-zoom viewport; `u_coordRes` is
  * the full composition size in those pixels.

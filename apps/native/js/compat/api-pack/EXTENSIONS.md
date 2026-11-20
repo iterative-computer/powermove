@@ -33,11 +33,22 @@ examples and style rules below do not imply that every extension needs one.
 
 Start effect authoring with the complete [Gradient Tint sample](samples/gradient-tint/README.md).
 Call the agent tool `validate_effect` with the complete definition before
-returning staged changes. It uses the real registration validator, including
-the **32-parameter maximum**, unique keys matching `/^[a-z][a-zA-Z0-9]*$/`,
-1–8 passes, and a non-empty fragment limited to 65,536 characters. It does not
-register or render the effect. After loading, check `get_workspace_state` for
-extension health and `registeredEffects`, then verify the requested rendering.
+returning staged changes. It checks parameter keys, pass count, and shader
+size, compiles the shader for every pass, and reports errors by line in `frag`.
+After loading, check `get_workspace_state` for extension health and
+`registeredEffects`, then verify the requested rendering.
+
+## Built-in effect reference
+
+Open [builtin-effects.json](../builtin-effects.json) in the API pack to read the
+43 built-in definitions. Each entry includes its id, parameters, pass count
+(default 1), shader body (`frag`), and any historical revisions.
+
+- For multiple passes, see `blur` and `glow`.
+- For distortion and layer inputs, see `displace` and `displacementMap`.
+- For color and keying, see `color`, `gradient`, and `chroma`.
+
+The Effects browser panel can be forked with `fxbrowser`.
 
 ## Where extensions live
 
@@ -456,9 +467,13 @@ in-realm API after the person installing the extension accepts the trust dialog.
 - **keybindings** — `bind({ key, command, args?, inFields?, looseModifiers?, repeat?, priority? })`. Chords: `cmd+shift+k`, `space`, `shift+f9`, `alt+up`. Lower priority runs first; return `false` from the command to pass through. Repeated browser keydowns are ignored by default; set `repeat: true` only for continuous, repeat-safe actions such as frame stepping or nudging. Suppressed repeats do not prevent the browser's default behavior.
 - **effects** — `register({ id, label, group, params, frag, passes?, keepOrig?, backdrop? })`.
   `group` is the category in the FX browser. Reuse an existing family: Blur & Sharpen, Light & Shadow, Color, Stylize, Distort or Generate. Add a new group only when none plausibly fits; never one per effect or a near-duplicate of an existing name.
-  Write only the body of `main()` (GLSL ES 3.00). Varyings: `v_st` (the effect buffer's texture coordinate; sample `u_tex` with it), `v_uv` (composition-normalized, top-left origin), and `v_px` (composition pixels). `v_uv` and `v_px` stay in composition space even when the editor renders a cropped high-zoom viewport; `u_coordRes` is the full composition size in those pixels. Uniforms: `u_tex`, `u_res`, `u_texel`, `u_time`, `u_pass` (int), `u_orig` when `keepOrig` is set. Helpers: `src() luma() noise() fbm() hash() rgb2hsv() hsv2rgb()`. Each param `k` is a uniform `u_<k>` (float for numbers and toggles, vec3 for `type:'color'`). Output `o` (vec4).
+  Write only the body of `main()` (GLSL ES 3.00). Varyings: `v_st` (the effect buffer's texture coordinate; sample `u_tex` with it), `v_uv` (composition-normalized, top-left origin), and `v_px` (composition pixels). `v_uv` and `v_px` stay in composition space even when the editor renders a cropped high-zoom viewport; `u_coordRes` is the full composition size in those pixels. Uniforms: `u_tex`, `u_res`, `u_texel`, `u_effectScale`, `u_time`, `u_pass` (int), `u_orig` when `keepOrig` is set. Helpers: `src() luma() noise() fbm() hash() rgb2hsv() hsv2rgb()`. Each param `k` is a uniform `u_<k>` (float for numbers and toggles, vec3 for `type:'color'`). Output `o` (vec4).
   Set `backdrop: true` when the shader needs the already-composited pixels below
   the layer; the host binds those pixels as `u_backdrop` on every effect pass.
+  It covers the same pass rectangle as `u_tex`, in GL row order. Use
+  `bd(v_st)` (or `texture(u_backdrop, v_st)`) to sample the corresponding
+  pixel. For offsets measured in backdrop texels, use
+  `1.0 / vec2(textureSize(u_backdrop, 0))`.
   Params are keyframable automatically and appear in the Effects browser + inspector.
 - **transitions** — `register({ id, label, params, frag })`. Inputs `u_from` (frame so far), `u_to` (incoming layer), `u_prog` 0→1. Output `o`. Applied on a layer via its `transition` property (inspector or `set_layer` command with `{ transition: { type, dur, p } }`).
 - **layers** — `register({ id, label, version, params, defaults?, renderer })` adds a programmable renderer with structured project instances. Fragment renderers use `{ kind:'fragment', fragment }`; mesh renderers use `{ kind:'mesh', assetField:'assetId' }` and resolve a durable OBJ model id from layer data. Projects store only the definition id, version, JSON data, and keyframe channels—not renderer code or expanded vertex arrays. Missing definitions/assets keep their data and show a placeholder.

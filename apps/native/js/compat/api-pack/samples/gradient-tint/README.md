@@ -10,8 +10,8 @@ by Powermove from the four effect params.
    Effect ids match `/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/`. Each parameter must have a unique key matching `/^[a-z][a-zA-Z0-9]*$/`. Passes must be 1–8;
    the non-empty fragment body is limited to 65,536 characters.
 3. Call `validate_effect` with `{ "definition": <complete definition> }` before
-   returning the extension. This runs the real registration validator without
-   changing the project. It does not compile GLSL or prove rendered behavior.
+   returning the extension. Powermove checks the effect definition and compiles
+   the GLSL for every pass. Errors report the line in `frag`.
 4. Return the extension id and action in `extensions`. Staged code is not live
    until Powermove promotes and loads it. Do not attempt to apply a new effect
    through live tools before it is registered.

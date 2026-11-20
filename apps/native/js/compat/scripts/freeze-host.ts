@@ -155,7 +155,7 @@ const EMPTY_AFFINE=[1,0,0,1,0,0], EMPTY_MAT3=[1,0,0,0,1,0,0,0,1], EMPTY_MAT4=[1,
       .replace("export function paramAliases(", "function legacyParamAliases(")
       .replace("export function toLegacyFx(", "function legacyToLegacyFx(");
     code =
-      `import { gradientDeclarations } from "../../viewer-handles";\n` + code;
+      `import effectPreamble from "../../effect-shader-preamble.json";\nimport { gradientDeclarations } from "../../viewer-handles";\n` + code;
     code += `
 export function paramDeclarations(params) {
   return params.flatMap(p => p.type === "gradientStops" ? [gradientDeclarations(p.k)] : legacyParamDeclarations([p]));
@@ -164,8 +164,12 @@ export function paramAliases(params) {
   return legacyParamAliases(params).map((alias,i) => params[i].type === "gradientStops" ? "" : alias);
 }
 export function toLegacyFx(def, pre) {
-  if (def.viewerHandles?.length && !def.rawShader && !pre.includes("u_layerUV")) {
-    pre += ${JSON.stringify("\nuniform mat3 u_layerUV; uniform vec2 u_layerRes;\nvec2 pm_layerPoint(vec2 p){vec3 q=u_layerUV*vec3(p,1.);return q.xy/q.z*u_layerRes;}\n")};
+  if (!def.rawShader) {
+    if (!pre.includes("u_effectScale")) pre += "\\n" + effectPreamble.scale;
+    if (def.viewerHandles?.length && !pre.includes("u_layerUV"))
+      pre += "\\n" + effectPreamble.viewerHandles + "\\n";
+    if (def.backdrop === true && !pre.includes("u_backdrop"))
+      pre += "\\n" + effectPreamble.backdrop;
   }
   return legacyToLegacyFx(def,pre);
 }

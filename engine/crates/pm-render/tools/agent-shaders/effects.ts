@@ -89,15 +89,14 @@ export const EFFECTS: GeneratedShader[] = [
       ],
       frag: `
     vec4 shape = texture(u_tex, v_st);
-    vec2 bd = vec2(v_uv.x, 1.0 - v_uv.y);
     vec3 acc = vec3(0.0);
     float wsum = 0.0;
     for (int i = 0; i < 24; i++) {
       float a = float(i) * 2.39996323;
       float r = sqrt((float(i) + 0.5) / 24.0) * u_blur;
-      vec2 off = vec2(cos(a), sin(a)) * r / u_coordRes;
+      vec2 off = vec2(cos(a), sin(a)) * r * u_texel;
       float w = exp(-2.0 * r * r / max(u_blur * u_blur, 1e-3));
-      acc += texture(u_backdrop, bd + off).rgb * w;
+      acc += texture(u_backdrop, v_st + off).rgb * w;
       wsum += w;
     }
     vec3 glass = mix(acc / wsum, u_tint, u_tintAmount);
@@ -114,13 +113,13 @@ export const EFFECTS: GeneratedShader[] = [
       float r = texture(u_tex, v_st + vec2(u_texel.x, 0.0)).a;
       float d = texture(u_tex, v_st - vec2(0.0, u_texel.y)).a;
       float u = texture(u_tex, v_st + vec2(0.0, u_texel.y)).a;
-      o = vec4(0.5 + 0.5 * (r - l), 0.5 + 0.5 * (u - d), texture(u_backdrop, vec2(v_uv.x, 1.0 - v_uv.y)).g, 1.0);
+      o = vec4(0.5 + 0.5 * (r - l), 0.5 + 0.5 * (u - d), texture(u_backdrop, v_st).g, 1.0);
       return;
     }
     vec2 n = texture(u_tex, v_st).xy * 2.0 - 1.0;
     vec4 shape = texture(u_orig, v_st);
-    vec2 bd = vec2(v_uv.x, 1.0 - v_uv.y) - n * u_strength / u_coordRes;
-    vec3 bg = texture(u_backdrop, bd).rgb;
+    vec2 lensUV = v_st - n * u_strength * u_texel;
+    vec3 bg = texture(u_backdrop, lensUV).rgb;
     o = vec4(mix(bg, shape.rgb / max(shape.a, 1e-4), 0.15) * shape.a, shape.a);`,
     }),
 

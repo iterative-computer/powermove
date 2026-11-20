@@ -55,7 +55,7 @@ fn error(s: &mut McpSession, args: Value) -> Value {
     serde_json::to_value(error).unwrap()
 }
 #[test]
-fn only_studio_export_project_recovery_and_sequence_import_schemas_change_from_the_frozen_catalog() {
+fn native_tool_deltas_match_the_pinned_catalogs() {
     let original: Value =
         serde_json::from_str(include_str!("../fixtures/catalog-main-c7f46a056.json")).unwrap();
     let source: Value =
@@ -106,6 +106,12 @@ fn only_studio_export_project_recovery_and_sequence_import_schemas_change_from_t
                     .find(|t| t["name"] == name)
                     .unwrap()
             );
+        } else if name == "validate_effect" {
+            let effects: Value = serde_json::from_str(include_str!(
+                "../fixtures/viewer-handles-native-catalog.json"
+            ))
+            .unwrap();
+            assert_eq!(tool, &effects["tools"][0]);
         } else {
             assert_eq!(
                 tool,

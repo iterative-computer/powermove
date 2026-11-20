@@ -144,7 +144,7 @@ fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
                 let viewer = include_bytes!("../fixtures/viewer-handles-native-catalog.json");
                 assert_eq!(
                     pm_model::hash::sha256_hex(viewer),
-                    "166afbdea0e2053bca88ddcb8571a5ff966283facb2d8fbf8326cf813b39f470"
+                    "8a91a83136fe5583fdc864670e713f0233d1cf9025cc7a50357c0f58b68d6293"
                 );
                 let viewer: Value = serde_json::from_slice(viewer).unwrap();
                 for replacement in studio["tools"]
