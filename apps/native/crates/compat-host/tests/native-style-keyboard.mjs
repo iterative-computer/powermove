@@ -154,6 +154,47 @@ try {
     console.log(
       `HEADLESS CHECKBOX PASS ${scheme}: label toggle, accent, bezel, mixed, disabled and opt-out`,
     );
+    await call("Page.setDocumentContent", {
+      frameId: frameTree.frame.id,
+      html: `<!doctype html><html data-pm-scheme="${scheme}"><head><style>
+        ${css}
+        .insp { width: 240px; }
+        .insp .row.split { height: 30px; margin: 2px 0; padding: 0 16px; }
+        .insp .row.split .k { width: 78px; }
+        </style></head><body><div class="insp">
+        ${["Width", "Height", "Duration", "Frame rate", "Background"]
+          .map(
+            (label, index) => `<div class="row split">
+            <div class="k" id="pm-control-label-${index}">${label}</div>
+            <div class="vwrap"><input value="${["1920", "1080", "4s", "30", "#202024"][index]}"></div>
+          </div>`,
+          )
+          .join("")}
+        </div></body></html>`,
+    });
+    const rows =
+      await evaluate(`Array.from(document.querySelectorAll('.row.split'), row => ({
+      row: row.getBoundingClientRect().toJSON(),
+      label: row.querySelector('.k').getBoundingClientRect().toJSON(),
+      value: row.querySelector('input').getBoundingClientRect().toJSON(),
+    }))`);
+    for (const [index, { row, label, value }] of rows.entries()) {
+      assert(
+        label.right <= value.left,
+        `Row ${index} has no label and value columns`,
+      );
+      assert(
+        value.top >= row.top &&
+          value.bottom <= row.bottom &&
+          value.right <= row.right,
+        `Row ${index} does not contain its value`,
+      );
+      assert.equal(value.left, rows[0].value.left);
+      if (index) assert(rows[index - 1].value.bottom <= label.top);
+    }
+    console.log(
+      `HEADLESS ROWS PASS ${scheme}: labels and values align without overlap`,
+    );
   }
 } finally {
   socket?.close();

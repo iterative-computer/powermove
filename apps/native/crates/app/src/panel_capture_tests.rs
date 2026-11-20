@@ -273,20 +273,60 @@ fn capture_builtin_panels() {
                     },
                 );
                 let panel_fill = tokens.colors.panel;
+                let capture_timeline = panel == "timeline"
+                    && std::env::var_os("PM_TIMELINE_HEADER_CAPTURE").is_some();
+                let timeline_tokens = tokens.clone();
                 let window = cx
                     .open_window(size(px(w), px(h)), |window, cx| {
+                        let natives = Natives::default();
+                        let outline = natives.outline.clone();
+                        if capture_timeline {
+                            use crate::timeline_tests::{Recorder, Recording};
+                            let delegate = std::rc::Rc::new(Recording(std::rc::Rc::new(Recorder::default())));
+                            let timeline = cx.new(|cx| crate::timeline_surface::TimelineSurface::new(
+                                r.kernel.clone(),
+                                PROJECT.into(),
+                                timeline_tokens.clone(),
+                                delegate,
+                                outline.clone(),
+                                Default::default(),
+                                cx,
+                            ));
+                            natives.views.borrow_mut().insert("timeline".into(), timeline.into());
+                        }
                         let view = cx.new(|cx| {
-                            SurfaceView::new(runtime, first, tokens, Natives::default(), window, cx)
+                            SurfaceView::new(runtime, first, tokens, natives, window, cx)
                         });
+                        if capture_timeline {
+                            outline.bind(view.downgrade());
+                        }
                         cx.new(|_| Frame {
                             view,
                             fill: panel_fill,
+                            timecode: None,
                         })
                     })
                     .unwrap();
                 for _ in 0..40 {
                     cx.run_until_parked();
                     std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                if capture_timeline {
+                    // The live AppKit layer has no window in this harness.
+                    // Paint its first-frame text at the same origin.
+                    let slot = crate::playback::timecode_slot(&timeline_tokens);
+                    window.update(&mut cx, |frame, _, cx| {
+                        let bounds = frame.view.read(cx)
+                            .timeline_timecode_bounds(px(w), px(slot.w))
+                            .expect("timeline timecode should fit the capture");
+                        frame.timecode = Some((
+                            bounds.left(),
+                            bounds.center().y - px(timeline_tokens.metrics.ruler / 2.),
+                            timeline_tokens,
+                        ));
+                        cx.notify();
+                    }).unwrap();
+                    cx.run_until_parked();
                 }
                 if std::env::var_os("PM_PANEL_CAPTURE_BOTTOM").is_some()
                     || panel == "export" && export_view.as_deref() == Some("settings-bottom")
@@ -348,6 +388,7 @@ fn capture_builtin_panels() {
 struct Frame {
     view: gpui::Entity<SurfaceView>,
     fill: u32,
+    timecode: Option<(gpui::Pixels, gpui::Pixels, Tokens)>,
 }
 impl gpui::Render for Frame {
     fn render(
@@ -361,6 +402,14 @@ impl gpui::Render for Frame {
             .bg(gpui::rgb(self.fill))
             .font_family(pm_design::TEXT_FONT)
             .child(self.view.clone())
+            .children(self.timecode.as_ref().map(|(x, y, tokens)| {
+                gpui::div().absolute().left(*x).top(*y)
+                    .h(px(tokens.metrics.ruler)).flex().items_center()
+                    .text_color(gpui::rgb(tokens.colors.text))
+                    .text_size(px(tokens.typography.timecode))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child("00:00:00:00")
+            }))
     }
 }
 
@@ -455,7 +504,7 @@ fn capture_agent_states() {
                             }
                             view
                         });
-                        cx.new(|_| Frame { view, fill })
+                        cx.new(|_| Frame { view, fill, timecode: None })
                     })
                     .unwrap();
                 for _ in 0..30 {

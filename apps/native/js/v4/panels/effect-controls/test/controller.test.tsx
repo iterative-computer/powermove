@@ -336,6 +336,24 @@ test("a point's pad writes X and Y as one binding, and a gradient's bar its midp
   const bar = all.find((n) => n["data-pm-component"] === "gradient-bar")!;
   expect(bar.binding).toBe("midpoint");
   expect(bar.value).toBe(40);
+  await f.root.render(
+    <EffectControls controller={f.controller} rowHeight={24} embedded />,
+  );
+  const pointRow = [...f.root.host.nodes.values()].find(
+    (n) =>
+      n.props["data-pm-component"] === "inspector-row" &&
+      n.props.label === "Center",
+  );
+  expect(pointRow?.props.style).toMatchObject({ height: null, flexShrink: 0 });
+  for (const axis of ["centerX", "centerY"]) {
+    const field = [...f.root.host.nodes.values()].find(
+      (n) =>
+        n.props["data-pm-component"] === "number-field" && n.props.label === axis,
+    );
+    expect(field?.props.style).toMatchObject({
+      width: { token: "metrics.grade_field" },
+    });
+  }
   await f.root.dispose();
   await f.controller.dispose();
 });

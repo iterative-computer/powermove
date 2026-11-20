@@ -441,8 +441,6 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         // later, so trading the readout back and forth showed both times
                         // at once, or neither. Only the open time field takes its place.
                         let _:()=msg_send![&*layers.timecode,setBackgroundColor:&*crate::playhead::colour(colors.panel, 0.)];
-                        let typing=v.builtins.views.get("timeline").is_some_and(|t|t.read(cx).field_open("timeline:time"));
-                        let _:()=msg_send![&*layers.timecode,setHidden:geometry.is_none()||typing];
                         let viewer_bar=v.builtins.viewer_place;
                         let text:*mut AnyObject=msg_send![&*layers.timecode,string];
                         let _:()=msg_send![&*viewer_time,setString:text];
@@ -458,16 +456,23 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                             measured=Some((host.tokens.typography.timecode,timecode_slot(&host.tokens)));
                         }
                         let slot=&measured.as_ref().unwrap().1;
+                        let timecode = geometry.and_then(|(r, _)| {
+                            v.builtins.views.get("timeline")?.read(cx)
+                                .timeline_timecode_bounds(gpui::px(r.x + r.w), gpui::px(slot.w))
+                        });
+                        let _:()=msg_send![&*layers.timecode,setHidden:timecode.is_none()];
+                        if let Some(bounds) = timecode {
+                            let top = f32::from(bounds.center().y) - slot.h / 2.;
+                            let _:()=msg_send![&*layers.timecode,setFrame:NSRect::new(
+                                NSPoint::new(f32::from(bounds.left()) as f64,height-(top+slot.h) as f64),
+                                NSSize::new(slot.w as f64,slot.h as f64))];
+                        }
                         if let Some(b)=viewer_bar {
                             let top=b.y+(metrics.header-slot.h)/2.;
                             let _:()=msg_send![&*viewer_time,setFrame:NSRect::new(NSPoint::new((b.x+metrics.inset) as f64,height-(top+slot.h) as f64),NSSize::new(slot.w as f64,slot.h as f64))];
                         }
                         if geometry.is_none() && let Some(p)=&mut playhead { p.hide(); }
                         if let Some((r,y))=geometry {
-                            // The timeline's head sits over the layer column, beside the
-                            // ruler and under the tab row (`y`): play, then the time.
-                            let top=r.y+y+(metrics.ruler-slot.h)/2.;
-                            let _:()=msg_send![&*layers.timecode,setFrame:NSRect::new(NSPoint::new((r.x+metrics.inset+metrics.hit+metrics.gap) as f64,height-(top+slot.h) as f64),NSSize::new(slot.w as f64,slot.h as f64))];
                             let foot=bar.max(metrics.inset);
                             let tall=(r.h-y-foot).max(0.) as f64;
                             if let Some(p)=&mut playhead {

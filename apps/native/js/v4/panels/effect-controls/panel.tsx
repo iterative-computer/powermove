@@ -337,12 +337,15 @@ export function EffectControls(props: PanelProps) {
                     }}
                   />
                 ) : row.kind === "spacer" ? (
-                  // Under a point row: its pad reaches down into it.
-                  <div
-                    key={row.id}
-                    role="presentation"
-                    style={{ height: t("metrics.row"), flexShrink: 0 }}
-                  />
+                  // The standalone virtual list reserves a second slot for
+                  // the pad. Embedded Properties sizes the actual row.
+                  props.embedded ? null : (
+                    <div
+                      key={row.id}
+                      role="presentation"
+                      style={{ height: t("metrics.row"), flexShrink: 0 }}
+                    />
+                  )
                 ) : row.kind === "ramp" ? (
                   <RampView key={row.id} row={row} locked={p.locked} />
                 ) : row.kind === "point" ? (
@@ -351,6 +354,7 @@ export function EffectControls(props: PanelProps) {
                     row={row}
                     locked={p.locked}
                     controller={c}
+                    embedded={props.embedded}
                   />
                 ) : row.kind === "more" ? (
                   <MoreView
@@ -687,11 +691,13 @@ function PointView({
   row,
   locked,
   controller: c,
+  embedded,
 }: {
   key?: string;
   row: PointRow;
   locked: boolean;
   controller: EffectsController;
+  embedded?: boolean;
 }) {
   const axes = row.parameters;
   const disabled = locked || axes.some((p) => p.readonly);
@@ -723,6 +729,7 @@ function PointView({
           valueMostToken: "metrics.value_column_most",
         }}
         style={{
+          ...(embedded ? { height: null, flexShrink: 0 } : {}),
           color: t(
             locked || !row.enabled ? "colors.muted" : "colors.secondary",
           ),
@@ -763,10 +770,10 @@ function PointView({
           style={{
             display: "flex",
             flexDirection: "row",
-            // One row high and from its top: the pad and the X over Y
-            // reach down into the room the spacer row under it leaves.
+            // Only the virtual list uses a following spacer. In Properties,
+            // the pad and stacked fields determine the row's own height.
             alignItems: "flex-start",
-            height: t("metrics.row"),
+            ...(embedded ? {} : { height: t("metrics.row") }),
             paddingTop: t("metrics.border"),
             gap: t("metrics.gap"),
             flexGrow: 1,
@@ -806,6 +813,9 @@ function PointView({
                   style={{
                     color: t("colors.muted"),
                     fontSize: t("typography.label"),
+                    ...(embedded
+                      ? { width: t("metrics.symbol_inline"), flexShrink: 0 }
+                      : {}),
                   }}
                 >
                   {i ? "Y" : "X"}
@@ -824,6 +834,11 @@ function PointView({
                   unit={p.unit}
                   onKeyDown={stop}
                   onClick={stop}
+                  style={
+                    embedded
+                      ? { width: t("metrics.grade_field"), flexShrink: 1 }
+                      : undefined
+                  }
                 />
               </div>
             ))}

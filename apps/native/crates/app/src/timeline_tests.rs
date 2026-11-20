@@ -4927,3 +4927,30 @@ fn g2_g6_split_tool_keeps_the_pair_on_the_pieces_adjacent_to_the_cut(cx: &mut Te
         assert_eq!(pair(&s), before);
     }
 }
+
+/// The native edit tools and the time editor share the same header band.
+#[gpui::test]
+fn overlap_timeline_time_starts_after_edit_tools(cx: &mut TestAppContext) {
+    let mut stage = stage(cx, 1);
+    for width in [1000., 480., 320.] {
+        stage.vcx.simulate_resize(gpui::size(px(width), px(420.)));
+        stage.idle(cx);
+        let split = bounds(&mut stage.vcx, "timeline.tool:split");
+        let time = bounds(&mut stage.vcx, "timeline:time");
+        assert!(
+            split.right() <= time.left(),
+            "{width}: {split:?} and {time:?}"
+        );
+        let clock = stage.view.read_with(&stage.vcx, |view, _| {
+            let slot = crate::playback::timecode_slot(view.tokens());
+            view.timeline_timecode_bounds(px(width), px(slot.w))
+        });
+        assert_eq!(clock.map(|b| b.left()), Some(time.left()), "{width}");
+    }
+    stage.vcx.simulate_resize(gpui::size(px(72.), px(420.)));
+    stage.idle(cx);
+    assert!(stage.view.read_with(&stage.vcx, |view, _| {
+        let slot = crate::playback::timecode_slot(view.tokens());
+        view.timeline_timecode_bounds(px(72.), px(slot.w)).is_none()
+    }));
+}

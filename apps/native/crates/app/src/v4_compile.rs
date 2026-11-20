@@ -356,6 +356,8 @@ pub struct Prepared {
     pub header: Option<Id>,
     pub has_keydown: bool,
     pub anchors: Vec<Id>,
+    /// The clock button and its containing transport group.
+    pub timeline_time: Option<(Id, Id)>,
 }
 impl NumberFacts {
     /// The shipped field's reading: the declared precision, else two places
@@ -442,6 +444,14 @@ impl Prepared {
             has_keydown |= view.events.key_down;
             nodes.insert(node.id, view);
         }
+        // The timeline's display-link layer follows the actual GPUI layout.
+        // The leading group is also the clip for a squeezed header.
+        let timeline_time = semantics
+            .get("timeline:time")
+            .and_then(|&time| Some((time, nodes.get(&time)?.parent?)));
+        if let Some((time, transport)) = timeline_time {
+            anchors.extend([time, transport]);
+        }
         let header = header(&surface);
         Self {
             nodes,
@@ -449,6 +459,7 @@ impl Prepared {
             header,
             has_keydown,
             anchors,
+            timeline_time,
         }
     }
     pub fn node(&self, id: Id) -> Option<&NodeView> {

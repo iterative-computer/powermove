@@ -2895,3 +2895,139 @@ fn project_inline_rename_uses_text_geometry(cx: &mut TestAppContext) {
         assert!(field.style.padding.right.is_none());
     });
 }
+
+fn overlap_point_project() -> String {
+    let mut project: Value = serde_json::from_str(&project_json(1)).unwrap();
+    project["layers"][0]["fx"] = json!([{
+        "id": "ramp", "type": "gradient", "version": 2, "on": true,
+        "p": {
+            "startX": {"v": 320, "kf": []}, "startY": {"v": 0, "kf": []},
+            "endX": {"v": 320, "kf": []}, "endY": {"v": 360, "kf": []}
+        }
+    }]);
+    project.to_string()
+}
+
+fn select_overlap_layer(rig: &Rig) -> Publication {
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l0".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in rig.runtime.publish() {
+        let ticket = ticket.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while ticket.try_take().is_none() {
+            assert!(Instant::now() < deadline, "Properties did not publish");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    publication(rig)
+}
+
+#[::core::prelude::v1::test]
+fn overlap_native_inspector_follows_selection() {
+    let rig = rig("inspector", 1);
+    let empty_prompt = |p: &Publication| {
+        p.surface
+            .nodes()
+            .values()
+            .any(|n| n.text == "Select a layer to edit its properties.")
+    };
+    assert!(empty_prompt(&publication(&rig)));
+    let selected = select_overlap_layer(&rig);
+    assert!(!empty_prompt(&selected));
+    assert!(
+        selected
+            .surface
+            .nodes()
+            .values()
+            .any(|n| n.props.get("id").and_then(Value::as_str) == Some("section:transform"))
+    );
+    assert!(rig.runtime.take_errors().is_empty());
+}
+
+#[gpui::test]
+fn overlap_inspector_point_children_fit_between_adjacent_rows(cx: &mut TestAppContext) {
+    let rig = rig_project("inspector", &overlap_point_project());
+    let selected = select_overlap_layer(&rig);
+    let find = |component, label: &str| {
+        let node = selected
+            .surface
+            .nodes()
+            .values()
+            .find(|n| {
+                Component::of(n) == Some(component)
+                    && n.props
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| text.split(',').next() == Some(label))
+            })
+            .unwrap_or_else(|| panic!("Missing {label}"));
+        node.props
+            .get("id")
+            .and_then(Value::as_str)
+            .map_or_else(|| format!("n{}", node.id), str::to_owned)
+    };
+    let start = find(Component::InspectorRow, "Start Of Ramp");
+    let end = find(Component::InspectorRow, "End Of Ramp");
+    let header = find(Component::ListItem, "Gradient Ramp effect");
+    let pad = find(Component::PointPad, "Start Of Ramp");
+    let x = find(Component::NumberField, "Start Of Ramp X");
+    let y = find(Component::NumberField, "Start Of Ramp Y");
+    cx.executor().allow_parking();
+    let runtime = rig.runtime.clone();
+    let (_, vcx) = cx.add_window_view(|window, cx| {
+        let panel = cx.new(|cx| {
+            SurfaceView::new(runtime, selected, tokens(), Default::default(), window, cx)
+        });
+        InspectorLayoutFrame(panel)
+    });
+    let mut vcx = vcx.clone();
+    vcx.simulate_resize(size(px(320.), px(600.)));
+    vcx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+    vcx.run_until_parked();
+    let header = bounds(&mut vcx, &header);
+    let start = bounds(&mut vcx, &start);
+    let end = bounds(&mut vcx, &end);
+    let pad = bounds(&mut vcx, &pad);
+    let x = bounds(&mut vcx, &x);
+    let y = bounds(&mut vcx, &y);
+    for rect in [header, start, end, pad, x, y] {
+        assert!(rect.size.height > px(0.), "{rect:?} has no height");
+    }
+    assert!(
+        header.bottom() <= start.top(),
+        "{header:?} overlaps {start:?}"
+    );
+    for control in [pad, x, y] {
+        assert!(
+            start.top() <= control.top() && control.bottom() <= start.bottom(),
+            "{control:?} falls outside {start:?}"
+        );
+    }
+    assert!(x.bottom() <= y.top(), "{x:?} overlaps {y:?}");
+    assert_eq!(x.size.width, y.size.width, "coordinate wells: {x:?}, {y:?}");
+    assert_eq!(x.left(), y.left(), "coordinate wells: {x:?}, {y:?}");
+    assert!(start.bottom() <= end.top(), "{start:?} overlaps {end:?}");
+}
+
+struct InspectorLayoutFrame(Entity<SurfaceView>);
+
+impl Render for InspectorLayoutFrame {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().child(self.0.clone())
+    }
+}

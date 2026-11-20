@@ -5207,6 +5207,25 @@ fn build(
 }
 /// The frame the canvas prepared, and where, for the clips' accessible elements.
 type Shown = Rc<RefCell<Option<(Point<Pixels>, Arc<Frame>)>>>;
+const EDIT_TOOLS: [(EditTool, &str, &str); 3] = [
+    (EditTool::Selection, "cursorarrow", "Selection (V)"),
+    (
+        EditTool::Roll,
+        "arrow.left.and.right.righttriangle.left.righttriangle.right",
+        "Roll — or ⌥-drag a cut",
+    ),
+    (
+        EditTool::Split,
+        "scissors",
+        "Split (C) — click a clip to cut it. ⇧-click cuts every layer.",
+    ),
+];
+
+/// The native edit-tool strip sits over the outline header.
+pub(crate) fn edit_tools_width(metrics: &pm_design::Metrics) -> f32 {
+    EDIT_TOOLS.len() as f32 * metrics.control
+}
+
 impl Render for TimelineSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.activation.is_none() {
@@ -5281,11 +5300,7 @@ impl Render for TimelineSurface {
         } else if self.cursor == CursorStyle::Split { self.cursor = CursorStyle::Arrow; }
         let t = &self.tokens;
         let tools = div().id("timeline-ruler-tools").occlude().absolute().left(px(t.metrics.inset)).top(px(0.)).h(px(t.metrics.ruler))
-            .flex().items_center().children([
-                (EditTool::Selection, "cursorarrow", "Selection (V)"),
-                (EditTool::Roll, "arrow.left.and.right.righttriangle.left.righttriangle.right", "Roll — or ⌥-drag a cut"),
-                (EditTool::Split, "scissors", "Split (C) — click a clip to cut it. ⇧-click cuts every layer."),
-            ].into_iter().map(|(tool, symbol, label)| {
+            .flex().items_center().children(EDIT_TOOLS.into_iter().map(|(tool, symbol, label)| {
                 let image = pm_shell::symbol::rasterize(symbol, t.metrics.symbol_panel, pm_shell::symbol::Weight::Regular, t.colors.text, window.scale_factor());
                 div().id(SharedString::from(tool.command())).debug_selector(move || tool.command()).size(px(t.metrics.control)).flex().items_center().justify_center()
                     .rounded(px(t.metrics.control_radius)).when(self.model.edit_tool == tool, |d| d.bg(rgb(t.colors.floating)))

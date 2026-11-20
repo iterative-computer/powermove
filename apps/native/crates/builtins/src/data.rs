@@ -162,6 +162,7 @@ impl Backend {
                 0..if panel == "inspector" { usize::MAX } else { 96 },
             )
             .folding_grades(panel == "layer-effects")
+            .grouping_points(panel == "inspector")
             .adding_to_selection(panel == "inspector"),
             extension: format!("ext.builtin.{panel}"),
             native,

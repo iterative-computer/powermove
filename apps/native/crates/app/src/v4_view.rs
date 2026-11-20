@@ -2484,6 +2484,22 @@ impl SurfaceView {
     pub fn anchor_bounds(&self, id: Id) -> Option<Bounds<Pixels>> {
         self.anchors.borrow().get(&id).copied()
     }
+    /// The display-link readout follows its painted button. If the header
+    /// clips that slot, hide the layer too so it cannot cover other controls.
+    pub(crate) fn timeline_timecode_bounds(
+        &self,
+        right: Pixels,
+        width: Pixels,
+    ) -> Option<Bounds<Pixels>> {
+        let (id, transport) = self.prepared.timeline_time?;
+        if self.field_open("timeline:time") {
+            return None;
+        }
+        let time = self.anchor_bounds(id)?;
+        let transport = self.anchor_bounds(transport)?;
+        (time.left() + width <= right.min(transport.right()) && time.size.height > px(0.))
+            .then_some(time)
+    }
     pub fn change(&mut self, id: Id, value: Value, cx: &mut Context<Self>) {
         let Some(node) = self.publication.surface.node(id) else {
             return;
@@ -3796,6 +3812,21 @@ impl SurfaceView {
                     },
                 ).absolute().inset_0())
                 .into_any_element());
+        }
+        if self
+            .prepared
+            .timeline_time
+            .is_some_and(|(_, transport)| transport == id)
+            && self.publication.panel == "timeline"
+            && self.natives.views.borrow().contains_key("timeline")
+        {
+            let m = &self.table.tokens.metrics;
+            // Native edit tools stand over this band, before Play and Time.
+            element = element
+                .pl(px(crate::timeline_surface::edit_tools_width(m) + m.gap))
+                .pr(px(m.gap))
+                .min_w(px(0.))
+                .overflow_hidden();
         }
         if let Some(build) = &self.panel_build {
             if id == 0 || node.parent == Some(0) {
@@ -5204,10 +5235,18 @@ impl SurfaceView {
                 .is_some_and(|m| m["menuAnchor"] == true)
         {
             let (id, anchors) = (node.id, self.anchors.clone());
+            let wake = self
+                .prepared
+                .timeline_time
+                .filter(|&(time, transport)| id == time || id == transport)
+                .and_then(|_| self.installed.clone());
             element = element.child(
                 canvas(
                     move |bounds, _, _| {
-                        anchors.borrow_mut().insert(id, bounds);
+                        let changed = anchors.borrow_mut().insert(id, bounds) != Some(bounds);
+                        if changed && let Some(wake) = &wake {
+                            let _ = wake.try_send(());
+                        }
                     },
                     |_, _, _, _| {},
                 )
