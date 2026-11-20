@@ -443,15 +443,10 @@ fn chatgpt_models(peer: &mut Peer) -> Result<Vec<Model>, String> {
             if entry["hidden"] == true || models.iter().any(|m| m.id == id) {
                 continue;
             }
-            let label = text(&entry["displayName"], 120).unwrap_or_else(|| id.into());
-            // Codex's picker presents the GPT-6.2 family with a space before the tier.
-            let label = match label.strip_prefix("GPT-6.2-") {
-                Some(tier) => format!("GPT-6.2 {tier}"),
-                None => label,
-            };
+            let name = text(&entry["displayName"], 120);
             models.push(Model {
                 id: id.into(),
-                label,
+                label: codex_model_label(name.as_deref().unwrap_or(id)),
                 efforts: entry["supportedReasoningEfforts"]
                     .as_array()
                     .into_iter()
@@ -473,6 +468,22 @@ fn chatgpt_models(peer: &mut Peer) -> Result<Vec<Model>, String> {
         seen.push(next);
     }
     Err("Codex returned too many model list pages.".into())
+}
+
+fn codex_model_label(label: &str) -> String {
+    let Some((_, rest)) = label.split_once('-').filter(|(family, _)| family.eq_ignore_ascii_case("gpt")) else {
+        return label.to_owned();
+    };
+    let (version, tier) = rest.split_once(['-', ' ']).unwrap_or((rest, ""));
+    if !version.split('.').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())) {
+        return label.to_owned();
+    }
+    let tier = tier.trim_start();
+    if let Some(first) = tier.chars().next() {
+        format!("GPT-{version} {}{}", first.to_ascii_uppercase(), &tier[first.len_utf8()..])
+    } else {
+        format!("GPT-{version}")
+    }
 }
 /// `None` once the login finished; otherwise why it didn't.
 fn wait_for_login(
@@ -626,6 +637,13 @@ fn claude_version(id: &str) -> Option<(String, String)> {
 /// → "Opus 5.5 (1M context)"); a name that is not the family's, or already
 /// carries the version, stays as given.
 fn versioned(name: &str, family: &str, version: &str) -> String {
+    if let Some((first, suffix)) = name.split_once('-')
+        && first.eq_ignore_ascii_case(family)
+        && let Some(tail) = suffix.strip_prefix(version)
+        && (tail.is_empty() || tail.starts_with([' ', '(']))
+    {
+        return format!("{first} {version}{tail}");
+    }
     if name.contains(version) {
         return name.to_owned();
     }
@@ -704,7 +722,13 @@ fn claude_listing<'a>(entries: impl Iterator<Item = &'a Value>) -> Vec<Model> {
             0,
             Model {
                 id: d.clone(),
-                label: d,
+                label: claude_version(&d).map_or_else(
+                    || d.clone(),
+                    |(mut family, version)| {
+                        family[..1].make_ascii_uppercase();
+                        format!("{family} {version}")
+                    },
+                ),
                 efforts,
                 default: true,
                 aliases: vec![],
@@ -892,6 +916,7 @@ mod tests {
             claude_listing([e("opus[1m]", "claude-opus-5-5[1m]", "Opus (1M context)")].iter());
         assert_eq!(wide[0].label, "Opus 5.5 (1M context)");
         assert_eq!(wide[0].id, "opus[1m]");
+        assert_eq!(versioned("Opus-5.5 (1M context)", "opus", "5.5"), "Opus 5.5 (1M context)");
         assert_eq!(versioned("Best", "opus", "5.5"), "Best");
         assert_eq!(
             claude_version("claude-3-5-sonnet-20241022"),
@@ -902,6 +927,8 @@ mod tests {
             (only[0].id.as_str(), only[0].default),
             ("claude-next", true)
         );
+        let only = claude_listing([e("default", "claude-haiku-4-5", "Default (recommended)")].iter());
+        assert_eq!((only[0].id.as_str(), only[0].label.as_str()), ("claude-haiku-4-5", "Haiku 4.5"));
     }
 
     struct FakeClaude(PathBuf);
@@ -1140,7 +1167,10 @@ for line in sys.stdin:
                  'supportedReasoningEfforts': [{'reasoningEffort': 'low'}],
                  'defaultReasoningEffort': 'low'},
                 {'model': 'gpt-6.2-astra', 'displayName': 'GPT-6.2-Astra', 'isDefault': False},
-                {'model': 'gpt-6.1-terra', 'displayName': 'GPT-6.1 Terra', 'isDefault': False}
+                {'model': 'gpt-6.1-terra', 'displayName': 'GPT-6.1 Terra', 'isDefault': False},
+                {'model': 'gpt-6.1-sol', 'displayName': 'GPT-6.1-Sol'},
+                {'model': 'gpt-6-astra', 'displayName': 'GPT-6-Astra'},
+                {'model': 'gpt-5.6-terra'}
             ]}
     print(json.dumps(answer), flush=True)
 "#;
@@ -1161,10 +1191,13 @@ for line in sys.stdin:
         let good = accounts.models(provider);
         assert_eq!(
             good.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra"]
+            ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-terra"]
         );
         assert!(good[0].default);
-        assert_eq!(good[0].label, "GPT-6.2 Sol");
+        assert_eq!(
+            good.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
+            ["GPT-6.2 Sol", "GPT-6.2 Astra", "GPT-6.1 Terra", "GPT-6.1 Sol", "GPT-6 Astra", "GPT-5.6 Terra"],
+        );
         assert_eq!(good[0].efforts, ["low"]);
         for mode in ["error", "empty", "malformed"] {
             Arc::get_mut(&mut accounts)

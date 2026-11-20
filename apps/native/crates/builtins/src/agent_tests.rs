@@ -942,7 +942,7 @@ fn the_model_access_and_slash_menus_change_the_run_settings() {
             s.settings.access,
         )
     };
-    // Model and effort: what the signed-in provider offers, in one menu.
+    // The model menu groups the signed-in provider's choices under its name.
     panel.click("agent-model");
     let menu = panel.request("agentMenu");
     let categories: Vec<_> = menu.input["options"]
@@ -951,7 +951,8 @@ fn the_model_access_and_slash_menus_change_the_run_settings() {
         .iter()
         .map(|o| o["category"].as_str().unwrap().to_owned())
         .collect();
-    assert!(categories.contains(&"Provider".to_owned()));
+    assert!(categories.contains(&"ChatGPT".to_owned()));
+    assert_eq!(menu.input["search"], false);
     assert!(
         Agent::labels(&menu).contains(&"Fixture 5".to_owned()),
         "{:?}",
@@ -1058,7 +1059,7 @@ fn the_trigger_label_and_menu_tick_follow_a_pick_without_reopening() {
     let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
     panel.connected(Provider::Chatgpt);
     // Nothing chosen: the pickers name the provider's default model and
-    // its default effort, ticked; neither menu has a "Default" row.
+    // effort. The model's default badge is separate from the selection tick.
     panel.text();
     assert_eq!(
         panel.label("agent-model").as_deref(),
@@ -1085,7 +1086,17 @@ fn the_trigger_label_and_menu_tick_follow_a_pick_without_reopening() {
         !labels.contains(&"High".to_owned()),
         "effort has its own menu"
     );
-    assert_eq!(ticked(&menu), ["ChatGPT", "Fixture 5"]);
+    let defaults = |menu: &crate::PlatformRequest| -> Vec<String> {
+        menu.input["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["default"] == true)
+            .map(|o| o["label"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(ticked(&menu), ["Fixture 5"]);
+    assert_eq!(defaults(&menu), ["Fixture 5"]);
     // A pick shows at once: label, and the tick when the menu opens again.
     panel.pick_and_see(&menu, "model:fixture-6", "agent-model", "Model, Fixture 6");
     // High isn't Fixture 6's: it runs at its own default.
@@ -1095,7 +1106,8 @@ fn the_trigger_label_and_menu_tick_follow_a_pick_without_reopening() {
     );
     panel.click("agent-model");
     let menu = panel.request("agentMenu");
-    assert_eq!(ticked(&menu), ["ChatGPT", "Fixture 6"]);
+    assert_eq!(ticked(&menu), ["Fixture 6"]);
+    assert_eq!(defaults(&menu), ["Fixture 5"]);
     panel.panels.platform_reply(menu.id, Ok(Value::Null));
     panel.click("agent-effort");
     let menu = panel.request("agentMenu");

@@ -9,6 +9,7 @@ fn main() -> anyhow::Result<()> {
     use image::imageops::{FilterType, overlay, resize};
     use pm_design::{Accessibility, Scheme, Tokens};
     use pm_shell::layout::Rect;
+    use pm_shell::transient::COMPOSER_PICKER_MARGIN;
     use std::{fs, path::PathBuf};
 
     let mut args = std::env::args_os().skip(1).map(PathBuf::from);
@@ -75,8 +76,15 @@ fn main() -> anyhow::Result<()> {
                     );
                 } else {
                     ensure!(attached, "menu {at:?} detached from {anchor:?}");
+                    let margin = COMPOSER_PICKER_MARGIN;
+                    ensure!(
+                        at.x >= owner.x + margin && at.y >= owner.y + margin
+                            && at.x + at.w <= owner.x + owner.w - margin
+                            && at.y + at.h <= owner.y + owner.h - margin,
+                        "menu {at:?} violates the {margin}pt inset of {owner:?}",
+                    );
                     ensure!(clipped.is_empty(), "clipped descriptions: {clipped:?}");
-                    println!("{name}: anchor attached, no clipped descriptions");
+                    println!("{name}: anchor attached, 8pt inset, no clipped descriptions");
                 }
                 let bitmap = image::load_from_memory(&png)?.into_rgba8();
                 let scale = panel.width() as f32 / owner.w;

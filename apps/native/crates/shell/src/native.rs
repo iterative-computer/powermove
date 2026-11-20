@@ -10,7 +10,7 @@ use crate::{
     keyboard::{Class, Effect, Key, POINTER, Resolver},
     menu,
     native_control::{SEGMENT_MENU_INDICATOR, SegmentedControl},
-    transient::{Choice, ComposerPicker, Picker, composer_picker_frame},
+    transient::{Choice, ComposerPicker, Picker, composer_picker_frame, composer_picker_interior},
 };
 use foreign_types::ForeignType;
 use objc2::{
@@ -7914,13 +7914,18 @@ impl Popup {
         self.composer = composer.map(|(kind, _)| kind);
         self.set_searchable(composer.is_none_or(|(_, on)| on));
         let owner = self.parent.contentRectForFrameRect(self.parent.frame());
+        let interior = composer_picker_interior(crate::layout::Rect {
+            w: owner.size.width as f32,
+            h: owner.size.height as f32,
+            ..Default::default()
+        });
         let m = self.tokens.metrics;
         let mut frame = self.window.frame();
         frame.size.width = self.composer.map_or(m.field_menu_width, |kind| {
-            kind.width().min(owner.size.width as f32)
+            kind.width().min(interior.w)
         }) as f64;
         self.max_height = if self.composer.is_some() {
-            m.field_menu_height.min(owner.size.height as f32)
+            m.field_menu_height.min(interior.h)
         } else {
             m.field_menu_height
         };
@@ -8324,7 +8329,8 @@ pub fn capture_agent_picker(
     };
     let searchable = kind.is_none() || input["search"] == true;
     let surface = Surface::Menu;
-    let width = kind.map_or(t.metrics.field_menu_width, ComposerPicker::width).min(owner.w);
+    let available = if kind.is_some() { composer_picker_interior(owner) } else { owner };
+    let width = kind.map_or(t.metrics.field_menu_width, ComposerPicker::width).min(available.w);
     let shape = popup_shape(t, surface);
     let root = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::ZERO);
     root.setBoxType(NSBoxType::Custom);
@@ -8358,7 +8364,7 @@ pub fn capture_agent_picker(
     let mut rows = vec![];
     let height = PopupLayout {
         width: width as f64,
-        max_height: t.metrics.field_menu_height.min(owner.h),
+        max_height: t.metrics.field_menu_height.min(available.h),
         composer: kind,
         searchable,
         tokens: t,
