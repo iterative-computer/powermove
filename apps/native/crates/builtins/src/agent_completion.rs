@@ -400,6 +400,7 @@ mod tests {
             images: vec!["original.png".into()],
             role: Some("original-role".into()),
             files: vec![json!({"path":"original.txt"})],
+            project: None,
         };
         let mut report = json!({"revision":9,"errors":[],"images":(0..9).map(|_|json!({"data":"AA==","mimeType":"image/png"})).collect::<Vec<_>>()});
         let review = review_request(&original, &mut report, 1).unwrap();

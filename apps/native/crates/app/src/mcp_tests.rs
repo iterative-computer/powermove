@@ -927,7 +927,8 @@ fn a_connection_acts_as_the_run_that_launched_it() {
         "{}",
         refused.message
     );
-    let grant = pm_agents::launch::grants::issue("run-9", pm_agents::Access::Project).unwrap();
+    let grant =
+        pm_agents::launch::grants::issue("run-9", pm_agents::Access::Project, None).unwrap();
     let mut c = f.connection();
     pm_mcp::transport::ToolConnection::bind_agent_run(&mut c, grant.token());
     start(&mut c);

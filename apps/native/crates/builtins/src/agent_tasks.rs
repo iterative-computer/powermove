@@ -553,6 +553,8 @@ impl Tasks {
                 .as_array()
                 .cloned()
                 .unwrap_or_default(),
+            // Tasks inherit their parent's project.
+            project: base.project.clone(),
         };
         let handle = launch::launch(&environment, child.clone())?;
         self.children.push(Child {

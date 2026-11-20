@@ -285,7 +285,10 @@ impl McpSession {
                 "This connection can only inspect the project.",
             ));
         }
-        if session.context == "app" && !catalog::permits("app", "project_memory") {
+        if session.context == "app"
+            && session.project.is_none()
+            && !catalog::permits("app", "project_memory")
+        {
             return Err(Error::invalid(
                 "This agent has no project attached. Open a project to use composition tools.",
             ));
@@ -385,18 +388,39 @@ impl McpSession {
             self.active.as_ref().and_then(|session| session.document),
         )?;
         if ["list_projects", "create_project", "open_project"].contains(&name) {
-            if name != "list_projects" && self.active.is_some() {
+            // An app session changes projects, then works in the new one.
+            if name != "list_projects" && self.active.as_ref().is_some_and(|s| s.context != "app") {
                 return Err(Error::invalid(
                     "Finish the current session before changing projects.",
                 ));
             }
             catalog::validate(name, args)?;
-            return match name {
+            if name != "list_projects"
+                && let Some(active) = self.active.as_mut()
+            {
+                library_boundary(active, &mut host)?;
+            }
+            let result = match name {
                 "list_projects" => host.list_projects(),
                 "create_project" => host.create_project(args),
                 _ => host
                     .open_project_choice(args["projectId"].as_str().unwrap(), args.get("recovery")),
+            }?;
+            let opened = match name {
+                "create_project" => result["projectId"].as_str(),
+                "open_project" if result["recoveryRequired"] != true => args["projectId"].as_str(),
+                _ => None,
             };
+            if let (Some(id), Some(active)) = (opened, self.active.as_mut()) {
+                attach(
+                    active,
+                    &mut host,
+                    id,
+                    self.writer,
+                    self.agent_token.is_some(),
+                )?;
+            }
+            return Ok(result);
         }
         let session = self
             .active
@@ -418,7 +442,7 @@ impl McpSession {
             return publish(session, extensions.as_ref(), args, &self.host);
         }
         if name == "import_media_to_timeline"
-            && (session.access == "editor" || session.context == "app")
+            && (session.access == "editor" || session.project.is_none())
         {
             return Err(Error::invalid(
                 "This tool requires project access and an attached project.",
@@ -432,7 +456,7 @@ impl McpSession {
                 "This connection can only inspect the project.",
             ));
         }
-        if session.context == "app" && !catalog::permits("app", name) {
+        if session.context == "app" && session.project.is_none() && !catalog::permits("app", name) {
             return Err(Error::invalid(
                 "This agent has no project attached. Open a project to use composition tools.",
             ));
@@ -1531,12 +1555,32 @@ impl McpSession {
             ));
         }
         let context = args["context"].as_str().unwrap_or("project");
-        let project = if context == "project" {
-            Some(host.active_project().ok_or_else(|| {
+        if context == "app" && access == "editor" && granted.is_none() {
+            return Err(Error::invalid("App sessions require project access."));
+        }
+        // A run works in its thread's project, not whichever window is in front.
+        let pinned = self
+            .agent_token
+            .as_deref()
+            .and_then(|token| (host.agent_projects.as_ref()?)(token));
+        if pinned.is_some() && context == "app" {
+            return Err(Error::invalid(
+                "This run belongs to a project's thread: start the session without context \"app\".",
+            ));
+        }
+        let project = match (context, pinned) {
+            ("project", Some(id)) => {
+                if host.view(&id).is_err() {
+                    return Err(Error::invalid(
+                        "This thread's project isn't open. Ask the user to open it, then start the session again.",
+                    ));
+                }
+                Some(id)
+            }
+            ("project", None) => Some(host.active_project().ok_or_else(|| {
                 Error::invalid("Create or open a project before starting a project session.")
-            })?)
-        } else {
-            None
+            })?),
+            _ => None,
         };
         let view = project
             .as_ref()
@@ -1589,7 +1633,7 @@ impl McpSession {
                 });
             }
             result["instructions"] = if context == "app" {
-                json!("For effect work, iterate with render_effect_lab from the first draft. It works without a project. api/mcp-tools.json lists the tool contract.")
+                json!("For effect work, iterate with render_effect_lab from the first draft. It works without a project. No project is open. Call create_project (or open_project), then you can add layers and use render_frames. Use finish_session commit:true to keep edits. api/mcp-tools.json lists the tool contract.")
             } else {
                 json!(
                 "Read get_project_state before edits. Its compositions list includes every composition; pass optional compositionId to composition tools to work inside a precomp without switching the editor. Omit it for the open composition. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. api/mcp-tools.json lists the public contract. A tool this build lacks returns an error naming what is missing, so report that instead of retrying. For effect work, iterate with render_effect_lab from the first draft."
@@ -1778,20 +1822,19 @@ impl McpSession {
                 .map(str::trim)
                 .ok_or_else(|| Error::invalid("name is required"))
         };
-        // Library operations are immediate commit boundaries, outside rollback.
-        if let (Some(project), Some(tx)) = (active.project.clone(), active.transaction.take()) {
-            if tx.changed
-                && !active.external_actions
-                && !tx.interleaved
-                && host.revision(&project)? == tx.revision
-            {
-                host.squash(&project, &tx.mark, &format!("Agent · {}", tx.label))?;
-            }
-            active.committed |= tx.changed;
-        }
+        library_boundary(active, host)?;
         if operation == "create" {
             let result=host.create_project(&json!({"name":name()?,"width":a["w"],"height":a["h"],"fps":a["fps"],"duration":a["dur"]}))?;
             active.committed = true;
+            if let Some(created) = result["projectId"].as_str() {
+                attach(
+                    active,
+                    host,
+                    created,
+                    self.writer,
+                    self.agent_token.is_some(),
+                )?;
+            }
             return Ok(
                 json!({"projectId":result["projectId"],"name":result["name"],"active":true}),
             );
@@ -1803,6 +1846,7 @@ impl McpSession {
                 if opened["recoveryRequired"] == true {
                     return Ok(opened);
                 }
+                attach(active, host, &id, self.writer, self.agent_token.is_some())?;
             }
             "save" => host.save_library(&id)?,
             "rename" => {
@@ -1874,6 +1918,73 @@ impl Drop for McpSession {
             eprintln!("MCP disconnect rollback: {e}");
         }
     }
+}
+/// Library operations are immediate commit boundaries, outside rollback.
+fn library_boundary(active: &mut Active, host: &mut Automation) -> Result<()> {
+    if let (Some(project), Some(tx)) = (active.project.clone(), active.transaction.take()) {
+        if tx.changed
+            && !active.external_actions
+            && !tx.interleaved
+            && host.revision(&project)? == tx.revision
+        {
+            host.squash(&project, &tx.mark, &format!("Agent · {}", tx.label))?;
+        }
+        active.committed |= tx.changed;
+    }
+    Ok(())
+}
+/// An app session works in the project it created or opened, as a project
+/// session started there would; a project session keeps its own.
+fn attach(
+    active: &mut Active,
+    host: &mut Automation,
+    id: &str,
+    writer: u32,
+    agent: bool,
+) -> Result<()> {
+    if active.context != "app" {
+        return Ok(());
+    }
+    let view = host.view(id)?;
+    if active.project.as_deref() == Some(id) && active.document == Some(view.document) {
+        return Ok(());
+    }
+    if let Some(previous) = active.project.take() {
+        host.presence(&previous, &active.run, crate::presence::Kind::RunEnd, None);
+        if agent {
+            host.agent_turn(&previous, writer, false)?;
+        }
+    }
+    let baseline = host.revision(id)?;
+    let default_comp = view.snapshot.open_comp();
+    active.known_layers = host.read_document(id)?["layers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| l["id"].as_str().map(str::to_owned))
+        .collect();
+    active.document = Some(view.document);
+    active.baseline = baseline;
+    active.observed_revision = baseline;
+    active.time = host.playhead(id);
+    active.focus = view.selection.layers().to_vec();
+    active.focus_comp = default_comp.clone();
+    active.default_comp = default_comp;
+    active.comp_focus.clear();
+    active.owned_scopes.clear();
+    active.steer_epoch = crate::coedit::steer_epoch(id);
+    if agent {
+        if let Some(app) = host.coedit_host() {
+            app.record_turn(
+                id,
+                pm_kernel::Caller::realm(writer, 1, Origin::Mcp).writer,
+                "Edit project",
+            );
+        }
+        host.agent_turn(id, writer, true)?;
+    }
+    active.project = Some(id.to_owned());
+    Ok(())
 }
 fn assert_project(session: &Active, host: &Automation, id: &str) -> Result<()> {
     if host.view(id).ok().map(|view| view.document) != session.document {

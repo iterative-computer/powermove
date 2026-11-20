@@ -46,6 +46,7 @@ pub mod grants {
     struct Entry {
         run: String,
         access: Access,
+        project: Option<String>,
         workspace: Option<PathBuf>,
     }
     fn table() -> &'static Mutex<BTreeMap<String, Entry>> {
@@ -65,12 +66,13 @@ pub mod grants {
         }
     }
     /// A new token for `run` at `access`.
-    pub fn issue(run: &str, access: Access) -> std::io::Result<Grant> {
-        issue_for_workspace(run, access, None)
+    pub fn issue(run: &str, access: Access, project: Option<&str>) -> std::io::Result<Grant> {
+        issue_for_workspace(run, access, project, None)
     }
     pub(super) fn issue_for_workspace(
         run: &str,
         access: Access,
+        project: Option<&str>,
         workspace: Option<PathBuf>,
     ) -> std::io::Result<Grant> {
         let mut bytes = [0u8; 32];
@@ -81,6 +83,7 @@ pub mod grants {
             Entry {
                 run: run.into(),
                 access,
+                project: project.map(str::to_owned),
                 workspace,
             },
         );
@@ -106,20 +109,24 @@ pub mod grants {
     pub fn workspace(token: &str) -> Option<PathBuf> {
         table().lock().unwrap().get(token)?.workspace.clone()
     }
+    /// The project a live token's run was started from, if any.
+    pub fn project(token: &str) -> Option<String> {
+        table().lock().unwrap().get(token)?.project.clone()
+    }
     #[cfg(test)]
     mod tests {
         use super::*;
         #[test]
         fn panel_build_owner_expires_with_its_process_grant() {
-            let grant = issue("panel-build-owner-test", Access::Project).unwrap();
+            let grant = issue("panel-build-owner-test", Access::Project, None).unwrap();
             assert!(run_live("panel-build-owner-test"));
             drop(grant);
             assert!(!run_live("panel-build-owner-test"));
         }
         #[test]
         fn a_token_names_its_run_only_while_held() {
-            let grant = issue("run-a", Access::Editor).unwrap();
-            let other = issue("run-a", Access::Editor).unwrap();
+            let grant = issue("run-a", Access::Editor, None).unwrap();
+            let other = issue("run-a", Access::Editor, None).unwrap();
             assert_eq!(grant.token().len(), 64);
             assert_ne!(grant.token(), other.token());
             assert_eq!(
@@ -320,6 +327,14 @@ pub struct Request {
     /// Attached non-image files (`{name,type,content}`), given to the run as
     /// main's ATTACHED FILES section after its prompt. Subagents inherit them.
     pub files: Vec<Value>,
+    /// The project the run's thread belongs to; its tool sessions work there,
+    /// whichever window is in front. None for an application-window thread.
+    #[serde(default)]
+    pub project: Option<String>,
+}
+/// The project a thread's scope names: none for the application window's.
+pub fn thread_project(scope: &str) -> Option<String> {
+    (!matches!(scope, "" | "builtin-application" | "powermove-global")).then(|| scope.to_owned())
 }
 impl Request {
     /// Main's additional instructions: orchestration, then the task role.
@@ -343,6 +358,7 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
     let grant = grants::issue_for_workspace(
         &request.run,
         request.access,
+        request.project.as_deref(),
         Some(request.workspace.clone()),
     )
     .map_err(|e| format!("The agent's tool access couldn't be prepared: {e}"))?;
@@ -682,6 +698,7 @@ mod exec_reply_tests {
             images: vec![],
             role: None,
             files: vec![],
+            project: None,
         };
         let handle = launch(&environment, request).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

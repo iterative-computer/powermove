@@ -64,6 +64,7 @@ fn ordinary_provider_launch_receives_task_creative_response_and_authoring_guidan
             images: vec![],
             role: None,
             files: vec![],
+            project: None,
         },
     )
     .unwrap();

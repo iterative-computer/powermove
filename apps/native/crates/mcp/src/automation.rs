@@ -104,6 +104,8 @@ pub trait EngineHook: Send + Sync {
 /// the worker waits for its reply. `project` is the session's attached project.
 pub type AgentGrants = Arc<dyn Fn(&str) -> Option<(String, String)> + Send + Sync>;
 pub type AgentWorkspace = Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
+/// The project a grant token's run was started from (none for an app thread).
+pub type AgentProjects = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 pub trait SurfaceHook: Send + Sync {
     fn call(&self, tool: &str, project: Option<&str>, args: &Value) -> Result<Value>;
 }
@@ -188,6 +190,7 @@ pub struct Automation {
     /// MCP access. Only the app issues tokens.
     pub agent_grants: Option<AgentGrants>,
     pub agent_workspace: Option<AgentWorkspace>,
+    pub agent_projects: Option<AgentProjects>,
     pub media_registry: Option<Arc<dyn crate::media::MediaRegistry>>,
     pub media_importer: Option<Arc<dyn crate::services::MediaImporter>>,
     pub speech: Option<Arc<dyn crate::services::Speech>>,
@@ -257,6 +260,7 @@ impl Automation {
             surfaces: None,
             agent_grants: None,
             agent_workspace: None,
+            agent_projects: None,
             media_registry: None,
             media_importer: None,
             speech: None,

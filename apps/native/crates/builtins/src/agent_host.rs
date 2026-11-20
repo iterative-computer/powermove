@@ -843,6 +843,8 @@ fn launch_request(
             }
         }
         request.workspace = directory;
+        // Requests saved before runs carried their project resume in it too.
+        request.project = pm_agents::launch::thread_project(&effect.target.project);
         request.computer_consent = request.access == pm_agents::Access::Computer
             && state.panel.session(thread)?.computer_consent;
         request.prompt = format!(
@@ -904,6 +906,7 @@ fn launch_request(
         images,
         role: None,
         files,
+        project: pm_agents::launch::thread_project(&effect.target.project),
     };
     Ok((environment, request))
 }
@@ -1158,6 +1161,7 @@ mod tests {
             images: vec![image.to_string_lossy().into_owned()],
             files: vec![json!({"name":"original.txt","content":"original contents"})],
             role: Some("reviewer".into()),
+            project: None,
         };
         panel
             .host_admitted_request("thread", "old", &request, &settings)
