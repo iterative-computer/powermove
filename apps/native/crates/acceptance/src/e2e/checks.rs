@@ -879,9 +879,11 @@ fn surface_unknown_ids() -> Check {
 fn mcp_tool_contract() -> Check {
     let f = Fixture::new()?;
     assert_eq!(f.session.tools(), json!(pm_mcp::catalog::served_tools()));
-    assert_eq!(f.session.tools().as_array().unwrap().len(), 74);
+    assert_eq!(f.session.tools().as_array().unwrap().len(), 75);
     assert!(pm_mcp::catalog::served_tools().iter().any(|tool| tool["name"] == "export_status"));
     assert!(!pm_mcp::catalog::permits("app", "export_status"), "polling requires an attached project");
+    assert!(pm_mcp::catalog::permits("app", "render_effect_lab"));
+    assert!(pm_mcp::catalog::permits("inspection", "render_effect_lab"));
     for name in ["panel_begin", "panel_build", "export_project"] {
         assert!(
             f.session

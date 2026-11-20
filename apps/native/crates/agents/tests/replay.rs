@@ -223,7 +223,7 @@ fn current_mcp_catalog(reference: &Observations) -> Observations {
     let authoring: [(&[u8], &str); 2] = [
         (
             include_bytes!("../../mcp/fixtures/viewer-handles-native-catalog.json"),
-            "166afbdea0e2053bca88ddcb8571a5ff966283facb2d8fbf8326cf813b39f470",
+            "8a91a83136fe5583fdc864670e713f0233d1cf9025cc7a50357c0f58b68d6293",
         ),
         (
             include_bytes!("../../mcp/fixtures/extension-session-native-catalog.json"),
@@ -283,6 +283,12 @@ fn current_mcp_catalog(reference: &Observations) -> Observations {
         }
     }
     tools.extend(speed["tools"].as_array().unwrap().iter().cloned());
+    let lab = include_bytes!("../../mcp/fixtures/effect-lab-native-tool.json");
+    assert_eq!(
+        replay::sha256(lab),
+        "bc75fec554c8a82d0ba598cd76cfe997b039bc50facd0b22251075c042829802"
+    );
+    tools.push(serde_json::from_slice(lab).unwrap());
     let mut expected = Observations {
         wire: reference.wire.clone(),
         events: reference.events.clone(),

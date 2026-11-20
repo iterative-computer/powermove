@@ -73,10 +73,18 @@ pub fn expected_catalog() -> Value {
     let viewer = include_bytes!("../../mcp/fixtures/viewer-handles-native-catalog.json");
     assert_eq!(
         pm_model::hash::sha256_hex(viewer),
-        "166afbdea0e2053bca88ddcb8571a5ff966283facb2d8fbf8326cf813b39f470"
+        "8a91a83136fe5583fdc864670e713f0233d1cf9025cc7a50357c0f58b68d6293"
     );
     let viewer: Value = serde_json::from_slice(viewer).unwrap();
-    for overlay in viewer["tools"].as_array().unwrap() {
+    let extensions = include_bytes!("../../mcp/fixtures/extension-session-native-catalog.json");
+    assert_eq!(
+        pm_model::hash::sha256_hex(extensions),
+        "52d3cd3d7b7db1cf95a5e88239f98f1deae1cf20b3a0f6a2dcc2d13c8c9fbbe5"
+    );
+    let extensions: Value = serde_json::from_slice(extensions).unwrap();
+    for overlay in viewer["tools"].as_array().unwrap().iter()
+        .chain(extensions["tools"].as_array().unwrap())
+    {
         let base = catalog["tools"]
             .as_array_mut()
             .unwrap()
