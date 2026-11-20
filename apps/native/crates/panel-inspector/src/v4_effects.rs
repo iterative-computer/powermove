@@ -77,6 +77,7 @@ pub struct EffectsPanel {
     /// Effect Controls: a grade instrument's parameters fold into summary
     /// rows (the Color panel, which asks for every row, leaves this off).
     pub fold_grades: bool,
+    group_points: bool,
     add_to_selection: bool,
     range: Range<usize>,
     cache_key: Option<(u64, u64, String, Vec<bool>)>,
@@ -104,6 +105,11 @@ impl EffectsPanel {
     /// Folds grade instruments into summary rows (Effect Controls).
     pub fn folding_grades(mut self, fold: bool) -> Self {
         self.fold_grades = fold;
+        self
+    }
+    /// Properties keeps the authored order and groups only point pairs.
+    pub fn grouping_points(mut self, enabled: bool) -> Self {
+        self.group_points = enabled;
         self
     }
     pub fn adding_to_selection(mut self, enabled: bool) -> Self {
@@ -182,10 +188,11 @@ impl EffectsPanel {
                     let definition = text(effect, "type");
                     // Effect Controls lays an effect out as v1 did; a grade
                     // instrument folds into its summaries instead.
-                    if self.fold_grades
-                        && !params
-                            .iter()
-                            .any(|(_, p)| grade_group(definition, &p.key).is_some())
+                    if self.group_points
+                        || self.fold_grades
+                            && !params
+                                .iter()
+                                .any(|(_, p)| grade_group(definition, &p.key).is_some())
                     {
                         let rows = self.lay_out(model, effect, index, layer, params);
                         self.flat.extend(rows);
@@ -369,6 +376,21 @@ impl EffectsPanel {
             }
         };
         let mut rows = vec![];
+        if self.group_points {
+            // Keep unrelated parameters where they were. Replace a point's
+            // X with its control and omit the separate Y field.
+            for (_, param) in &params {
+                let point = layout.widgets.iter().find(|w| {
+                    matches!(w, Widget::Point { x, y, .. } if *x == param.key || *y == param.key)
+                });
+                match point {
+                    Some(w @ Widget::Point { x, .. }) if *x == param.key => widget(w, &mut rows),
+                    None => rows.extend(member(&param.key).map(row)),
+                    _ => {}
+                }
+            }
+            return rows;
+        }
         let hidden_point = |w: &Widget| matches!(w, Widget::Point { advanced: true, .. });
         for w in layout.widgets.iter().filter(|w| !hidden_point(w)) {
             widget(w, &mut rows);

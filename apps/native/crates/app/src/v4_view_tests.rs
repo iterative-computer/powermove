@@ -2895,3 +2895,104 @@ fn project_inline_rename_uses_text_geometry(cx: &mut TestAppContext) {
         assert!(field.style.padding.right.is_none());
     });
 }
+
+fn overlap_point_project() -> String {
+    let mut project: Value = serde_json::from_str(&project_json(1)).unwrap();
+    project["layers"][0]["fx"] = json!([{
+        "id": "ramp", "type": "gradient", "version": 2, "on": true,
+        "p": {
+            "startX": {"v": 320, "kf": []}, "startY": {"v": 0, "kf": []},
+            "endX": {"v": 320, "kf": []}, "endY": {"v": 360, "kf": []}
+        }
+    }]);
+    project.to_string()
+}
+
+fn select_overlap_layer(rig: &Rig) -> Publication {
+    rig.kernel
+        .call(
+            PROJECT,
+            pm_kernel::Request::new(
+                pm_kernel::Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["l0".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    for (_, ticket) in rig.runtime.publish() {
+        let ticket = ticket.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while ticket.try_take().is_none() {
+            assert!(Instant::now() < deadline, "Properties did not publish");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    publication(rig)
+}
+
+#[::core::prelude::v1::test]
+fn overlap_native_inspector_follows_selection() {
+    let rig = rig("inspector", 1);
+    let empty_prompt = |p: &Publication| {
+        p.surface
+            .nodes()
+            .values()
+            .any(|n| n.text == "Select a layer to edit its properties.")
+    };
+    assert!(empty_prompt(&publication(&rig)));
+    let selected = select_overlap_layer(&rig);
+    assert!(!empty_prompt(&selected));
+    assert!(
+        selected
+            .surface
+            .nodes()
+            .values()
+            .any(|n| n.props.get("id").and_then(Value::as_str) == Some("section:transform"))
+    );
+    assert!(rig.runtime.take_errors().is_empty());
+}
+
+#[gpui::test]
+fn overlap_inspector_point_children_fit_between_adjacent_rows(cx: &mut TestAppContext) {
+    let rig = rig_project("inspector", &overlap_point_project());
+    let selected = select_overlap_layer(&rig);
+    let find = |name: &str| {
+        selected
+            .surface
+            .nodes()
+            .values()
+            .find(|n| {
+                Component::of(n) == Some(Component::InspectorRow)
+                    && n.props.get("label").and_then(Value::as_str) == Some(name)
+            })
+            .unwrap_or_else(|| panic!("Missing {name} row"))
+            .id
+    };
+    let start = find("Start Of Ramp");
+    let end = find("End Of Ramp");
+    let (_, mut vcx) = window(cx, &rig, selected, Default::default());
+    vcx.simulate_resize(size(px(320.), px(1200.)));
+    vcx.run_until_parked();
+    let header = bounds(&mut vcx, "layer-effects:effect:effect:ramp");
+    let start = bounds(&mut vcx, &format!("n{start}"));
+    let end = bounds(&mut vcx, &format!("n{end}"));
+    let pad = bounds(&mut vcx, "layer-effects:pad:point:ramp:startX");
+    let x = bounds(&mut vcx, "layer-effects:field:point:ramp:startX:0");
+    let y = bounds(&mut vcx, "layer-effects:field:point:ramp:startX:1");
+    assert!(
+        header.bottom() <= start.top(),
+        "{header:?} overlaps {start:?}"
+    );
+    for control in [pad, x, y] {
+        assert!(
+            start.top() <= control.top() && control.bottom() <= start.bottom(),
+            "{control:?} falls outside {start:?}"
+        );
+    }
+    assert!(x.bottom() <= y.top(), "{x:?} overlaps {y:?}");
+    assert!(start.bottom() <= end.top(), "{start:?} overlaps {end:?}");
+}
