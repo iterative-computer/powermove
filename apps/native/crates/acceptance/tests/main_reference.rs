@@ -507,11 +507,12 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
         .unwrap()
         .extend([serde_json::json!("pairedWith"), serde_json::json!("offset")]);
     assert_eq!(command_fields, expected["commandFields"]);
-    // The app subset adds exactly the native panel-authoring tools.
+    // The app subset adds native panel authoring and portable project export.
     let mut app = bare["app"].as_array().unwrap().clone();
     app.extend([
         serde_json::json!("panel_begin"),
         serde_json::json!("panel_build"),
+        serde_json::json!("export_project"),
     ]);
     assert_eq!(expected["app"], serde_json::Value::Array(app));
 }
