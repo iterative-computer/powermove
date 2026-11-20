@@ -880,7 +880,9 @@ fn mcp_tool_contract() -> Check {
     let f = Fixture::new()?;
     assert_eq!(f.session.tools(), json!(pm_mcp::catalog::served_tools()));
     assert_eq!(f.session.tools().as_array().unwrap().len(), 74);
-    for name in ["panel_begin", "panel_build", "export_status", "export_project"] {
+    assert!(pm_mcp::catalog::served_tools().iter().any(|tool| tool["name"] == "export_status"));
+    assert!(!pm_mcp::catalog::permits("app", "export_status"), "polling requires an attached project");
+    for name in ["panel_begin", "panel_build", "export_project"] {
         assert!(
             f.session
                 .tools()
@@ -889,7 +891,7 @@ fn mcp_tool_contract() -> Check {
                 .iter()
                 .any(|tool| tool["name"] == name)
         );
-        assert!(pm_mcp::catalog::permits("app", name));
+        assert!(pm_mcp::catalog::permits("app", name), "{name}");
         assert!(!pm_mcp::catalog::permits("inspection", name));
     }
     assert_eq!(
