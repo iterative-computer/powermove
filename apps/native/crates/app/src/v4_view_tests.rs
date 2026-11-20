@@ -2990,7 +2990,7 @@ fn overlap_inspector_point_children_fit_between_adjacent_rows(cx: &mut TestAppCo
         let panel = cx.new(|cx| {
             SurfaceView::new(runtime, selected, tokens(), Default::default(), window, cx)
         });
-        cx.new(|_| InspectorLayoutFrame(panel))
+        InspectorLayoutFrame(panel)
     });
     let mut vcx = vcx.clone();
     vcx.simulate_resize(size(px(320.), px(600.)));
