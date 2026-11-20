@@ -77,6 +77,7 @@ pub fn catalog() -> &'static Value {
         value["app"].as_array_mut().unwrap().extend([
             Value::String("panel_begin".into()),
             Value::String("panel_build".into()),
+            Value::String("export_project".into()),
         ]);
         value
     })
@@ -277,6 +278,7 @@ pub const IMPLEMENTED: &[&str] = &[
     "finish_session",
     "manage_project",
     "save_project",
+    "export_project",
     "get_project_state",
     "get_timeline",
     "select_layers",

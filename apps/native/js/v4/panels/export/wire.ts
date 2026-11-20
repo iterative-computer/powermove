@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, expect } from "bun:test";
 import type { Commit } from "../../src";
-let executable: string | undefined;
+let executable = process.env.PM_EXPORT_PANEL_WIRE;
 function buildNative() {
   if (!executable) {
     if (process.env.PM_EXPORT_PANEL_WIRE)

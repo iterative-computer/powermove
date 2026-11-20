@@ -1919,6 +1919,44 @@ impl Builtins {
             "runtime.engine('export.destinationObserve',{});__pmBuiltin.publish()", destination
         ))
     }
+    /// A disk inventory prepared by the app worker for this Export sheet.
+    pub fn set_export_extensions(&self, extensions: Value) {
+        if let Some(entry) = self.broker.entry("export") {
+            let entry = entry.shared();
+            let mut backend = entry.backend.shared();
+            backend.native.export_extensions = extensions;
+        }
+    }
+
+    /// The v4 definitions in this runtime, with their provider ids. The
+    /// kernel registry also contains extensions mounted by other windows.
+    pub fn extension_effects(&self) -> Vec<(String, pm_protocol::definitions::DefinitionSnapshot)> {
+        let owners: BTreeMap<_, _> = self
+            .extension_realms
+            .shared()
+            .keys()
+            .filter_map(|id| {
+                let entry = self.broker.entry(id)?;
+                let owner = entry.shared().backend.shared().caller.writer;
+                Some((owner, id.clone()))
+            })
+            .collect();
+        let state = self.broker.kernel.state();
+        state
+            .registries
+            .get("effects")
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let id = owners.get(&entry.owner)?;
+                let snapshot = entry.definition.get("nativeSnapshot")?;
+                let definition =
+                    serde_json::from_str(&pm_model::json::to_canonical_string(snapshot)).ok()?;
+                Some((id.clone(), definition))
+            })
+            .collect()
+    }
+
     pub fn observe_export(&self, run: Value) -> Result<Ticket<Evaluation>> {
         self.realm_of("export")?.eval(format!(
             "runtime.engine('export.observe',{});__pmBuiltin.publish()",
@@ -2514,6 +2552,7 @@ impl EngineProxy for Broker {
                     ops.push(pm_kernel::state::StateOp::Register {
                         registry: "effects".into(),
                         entry: pm_kernel::state::Registration {
+                            project: Some(self.project.clone()),
                             token,
                             owner,
                             id,

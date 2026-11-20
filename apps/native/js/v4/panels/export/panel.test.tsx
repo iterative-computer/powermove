@@ -282,6 +282,50 @@ test("a kind's page shows on the click; its plan is asked for after", async () =
   expect(asked()).toBe(before + 1);
   await f.root.dispose();
 });
+test("Project extensions start checked, show sizes, and can be left out", async () => {
+  const seed = initial();
+  seed.options.format = "json";
+  seed.bindings.includeExtensions = "fixture:export:includeExtensions";
+  seed.extensions = [
+    {
+      id: "toy",
+      name: "Toy Tint",
+      version: "1.0.0",
+      bytes: 6144,
+      status: "included",
+    },
+    {
+      id: "store-demo",
+      name: "Store Demo",
+      version: "2.0.0",
+      bytes: 0,
+      status: "storeOnly",
+      storeId: "store-fixture",
+    },
+  ];
+  const f = await mounted(seed);
+  const checkbox = named(f.root, "export.includeExtensions");
+  expect(checkbox.props["aria-checked"]).toBe(true);
+  const disclosure = [...f.root.host.nodes.values()].find(
+    (n) =>
+      n.props.label === "Includes 1 extension needed to render" &&
+      n.props["aria-expanded"] === false,
+  )!;
+  expect(disclosure.props.metadata).toEqual({ pmKit: { alwaysShowChevron: true } });
+  await event(f.root, disclosure.id, "click");
+  await f.root.flush();
+  expect(f.root.host.nodes.get(disclosure.id)?.props["aria-expanded"]).toBe(true);
+  expect(
+    f.commits.some((commit) =>
+      commit.ops.some((op) => op.op === "setText" && op.text === "6 KB"),
+    ),
+  ).toBe(true);
+  await event(f.root, checkbox.id, "change", { value: false });
+  await f.root.flush();
+  expect(f.model.options.includeExtensions).toBe(false);
+  check(replay(f.commits));
+  await f.root.dispose();
+});
 test("keyboard kind navigation and popup/checkbox interactions reach the model and host planner", async () => {
   const f = await mounted();
   const video = [...f.root.host.nodes.values()].find(

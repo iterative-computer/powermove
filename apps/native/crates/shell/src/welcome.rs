@@ -85,6 +85,8 @@ pub struct Frame {
     pub eyebrow: Option<String>,
     pub title: String,
     pub line: String,
+    /// A dialog uses the standard sheet heading.
+    pub sheet_title: bool,
     pub status: Option<String>,
     pub spinner: bool,
     /// The card under the line: copy steps, or the folders macOS protects.

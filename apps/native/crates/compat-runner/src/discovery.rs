@@ -79,11 +79,24 @@ pub fn scan(roots: &[PathBuf]) -> Vec<Discovered> {
     found.into_values().collect()
 }
 
+pub(crate) fn project_origin(directory: &Path) -> Option<String> {
+    let path = directory.join(".powermove-project-origin.json");
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.len() > 16 * 1024 {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    value["project"].as_str().map(str::to_owned)
+}
+
 /// Who wrote it, from the shipped app's provenance file beside the extensions
 /// folder. An unreadable file must not promote someone else's code.
 fn trust(found: &Discovered) -> &'static str {
     if found.store.is_none() {
         return "local";
+    }
+    if project_origin(&found.directory).is_some() {
+        return "store";
     }
     let provenance = found
         .directory

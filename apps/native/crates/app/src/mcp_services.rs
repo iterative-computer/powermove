@@ -129,14 +129,14 @@ fn native_ready(
 }
 /// The definitions some open window's extensions have settled on: the
 /// profile's installed extensions, as any project open nowhere would load.
-fn settled_resources() -> Option<Resources> {
+fn settled_resources(allowed: impl Fn(u64) -> bool) -> Option<Resources> {
     RESOURCES
         .lock()
         .unwrap()
         .as_ref()?
-        .values()
-        .find(|r| !r.pending)
-        .cloned()
+        .iter()
+        .find(|(id, resources)| !resources.pending && allowed(**id))
+        .map(|(_, resources)| resources.clone())
 }
 /// The wait for a document's extensions was stopped by who asked (a
 /// cancelled export, a stopped capture).
@@ -193,6 +193,7 @@ pub fn connect_engine(
         tools.host.profile.clone(),
         overrides,
     );
+    let _ = jobs.app_host.set(Arc::downgrade(&tools.host));
     let mut automation = tools.automation.lock().unwrap();
     automation.export_child = jobs.clone();
     automation.media_importer = Some(jobs.clone());
@@ -338,6 +339,7 @@ pub struct EngineJobs {
     /// Its discovery, enabled preferences, reloads and Store confinement are
     /// identical to a window's; only DOM panels are absent.
     extensions: Mutex<HashMap<u64, ProjectExtensions>>,
+    app_host: std::sync::OnceLock<std::sync::Weak<crate::mcp::Host>>,
 }
 impl EngineJobs {
     pub fn new(
@@ -356,6 +358,7 @@ impl EngineJobs {
             progress: Mutex::default(),
             overrides,
             extensions: Mutex::default(),
+            app_host: Default::default(),
         })
     }
     /// The definitions a job of `published` draws with: its window's, once
@@ -395,7 +398,14 @@ impl EngineJobs {
         // installed extensions), else with missing effects bypassed, as the
         // viewer draws them. Never a minute's wait for a load that cannot be.
         if window.is_none() && self.kernel.published(&published.project).is_none() {
-            return Ok(settled_resources().unwrap_or_default());
+            let host = self.app_host.get().and_then(std::sync::Weak::upgrade);
+            return Ok(settled_resources(|id| {
+                host.as_ref().is_none_or(|host| {
+                    let scope = host.project_extensions(id);
+                    scope.root.is_none() && scope.excluded.is_empty()
+                })
+            })
+            .unwrap_or_default());
         }
         if let Some(mut resources) = window {
             if let Some(publication) = &settled {
@@ -417,14 +427,17 @@ impl EngineJobs {
             if let Some(publication) = settled {
                 // The owner can finish before the UI publishes its next pin.
                 // Take definitions and availability from that single moment.
-                let definitions = crate::extensions::native_effect_definitions(
-                    &self.kernel,
+                let definitions = if publication.native_surfaces {
+                    // native_ready waited for the window to pin its own
+                    // isolates for this exact publication.
+                    resources.definitions.clone()
+                } else {
                     publication
                         .contributions
                         .as_deref()
                         .map(crate::extensions::definitions)
-                        .unwrap_or_default(),
-                );
+                        .unwrap_or_default()
+                };
                 let unavailable = crate::extensions::unavailable(&publication);
                 if resources.definitions != definitions
                     || resources.unavailable != unavailable
@@ -459,7 +472,13 @@ impl EngineJobs {
                     self.overrides.clone(),
                 );
                 let fonts = self.overrides.painters().fonts;
-                let host = Arc::new(pm_compat_runner::host::ExtensionHost::start(
+                let excluded = self
+                    .app_host
+                    .get()
+                    .and_then(std::sync::Weak::upgrade)
+                    .map(|host| host.extension_exclusions(published.snapshot.doc_id))
+                    .unwrap_or_default();
+                let host = Arc::new(pm_compat_runner::host::ExtensionHost::start_scoped(
                     pm_compat_runner::host::HostConfig {
                         kernel: self.kernel.clone(),
                         project: published.project.clone(),
@@ -472,6 +491,10 @@ impl EngineJobs {
                         clipboard: None,
                         vars: Some(crate::extensions::vars_source(&self.profile)),
                         wake: Arc::new(|| {}),
+                    },
+                    pm_compat_runner::host::ProjectScope {
+                        excluded,
+                        ..Default::default()
                     },
                 ));
                 overrides.connect(host.raster_inbox());
@@ -539,7 +562,7 @@ impl EngineJobs {
                 .collect();
             (runtime, mounts)
         };
-        if let Some(runtime) = runtime {
+        if let Some(runtime) = &runtime {
             for surface in mounts {
                 let id = surface["id"]
                     .as_str()
@@ -567,7 +590,7 @@ impl EngineJobs {
         Ok(Arc::new(pm_engine_service::resources::ResourceSnapshot {
             generation,
             definitions: crate::extensions::native_effect_definitions(
-                &self.kernel,
+                runtime.as_deref(),
                 crate::extensions::definitions(&value),
             ),
             unavailable: crate::extensions::unavailable(&host.publication()),

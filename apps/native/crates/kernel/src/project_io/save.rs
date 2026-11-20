@@ -585,6 +585,25 @@ fn sha_of_range(file: &File, offset: u64, length: u64, buf: &mut [u8]) -> io::Re
 }
 
 impl SavePlan {
+    /// Inert records in the exported envelope. Regular saves preserve their
+    /// existing extra fields through the same PMV4 document checksum.
+    pub fn set_export_extension_bundle(&mut self, manifest: Option<Value>, files: Option<Value>) {
+        for (key, value) in [
+            ("extensions/manifest", manifest),
+            ("extensions/files", files),
+        ] {
+            if let Some(value) = value {
+                self.extra.insert(key, value);
+            } else {
+                self.extra.remove(key);
+            }
+        }
+    }
+
+    pub fn root(&self) -> Option<&pm_model::Node> {
+        self.document.root()
+    }
+
     pub fn destination(&self) -> &Path {
         &self.destination
     }

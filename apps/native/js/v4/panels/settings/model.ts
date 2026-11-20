@@ -49,7 +49,7 @@ export interface Extension {
   type: ExtensionCategory;
   author?: string | null;
   attention?: "error" | "missing" | null;
-  source: "Built in" | "Installed" | "AI-created" | "Custom";
+  source: "Built in" | "Installed" | "AI-created" | "Custom" | `From project ${string}`;
   enabled: boolean;
   about: string;
   includes: string[];

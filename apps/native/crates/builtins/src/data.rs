@@ -267,6 +267,7 @@ impl Backend {
             .get("layerTypes")
             .into_iter()
             .flatten()
+            .filter(|registration| registration.visible_to(&self.identity.project))
             .map(|registration| {
                 let d = wire(&registration.definition);
                 let params = d["params"]
@@ -283,7 +284,13 @@ impl Backend {
             .ok_or("No open project")?
             .set_layer_types(layer_types);
         let mut latest = BTreeMap::new();
-        for registration in state.registries.get("effects").into_iter().flatten() {
+        for registration in state
+            .registries
+            .get("effects")
+            .into_iter()
+            .flatten()
+            .filter(|registration| registration.visible_to(&self.identity.project))
+        {
             latest.insert(registration.id.clone(), wire(&registration.definition));
         }
         if self.last_effects == latest {
@@ -414,7 +421,9 @@ impl Backend {
         let mut items = BTreeMap::new();
         let mut groups: Vec<String> = Vec::new();
         for (registry, kind) in [("effects", "effect"), ("transitions", "transition")] {
-            for entry in state.registries.get(registry).into_iter().flatten() {
+            for entry in state.registries.get(registry).into_iter().flatten()
+                .filter(|entry| entry.visible_to(&self.identity.project))
+            {
                 let text = |key: &str| entry.definition.get(key).and_then(pm_model::Value::as_str);
                 let group = if kind == "transition" {
                     "Transitions"

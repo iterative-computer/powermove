@@ -27,6 +27,7 @@ impl EngineHook for Loader {
                 ops: vec![StateOp::Register {
                 registry: "effects".into(),
                 entry: Registration {
+                    project: None,
                     token: "probe-effect".into(), owner, id: "cps-probe.fx".into(),
                     definition: pm_model::json::parse(&json!({
                         "id":"cps-probe.fx", "label":"Probe", "group":"Test",

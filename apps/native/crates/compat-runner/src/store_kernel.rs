@@ -72,6 +72,35 @@ impl StoreAuthority for Mutex<Kernel> {
     }
 }
 
+/// A project-installed Store version cannot see or replace Library permission
+/// receipts, storage or registrations. Its reads see the real project only.
+pub(crate) struct ProjectStore {
+    kernel: KernelHandle,
+    state: Mutex<StateSnapshot>,
+}
+impl ProjectStore {
+    pub fn new(kernel: KernelHandle) -> Self {
+        Self {
+            kernel,
+            state: Mutex::new(StateSnapshot::default()),
+        }
+    }
+}
+impl StoreAuthority for ProjectStore {
+    fn state(&self) -> Arc<StateSnapshot> {
+        Arc::new(self.state.lock().unwrap().clone())
+    }
+    fn transact(&self, tx: StateTransaction) -> std::result::Result<(), String> {
+        let mut state = self.state.lock().unwrap();
+        let (next, _) = state.stage(tx)?;
+        *state = next;
+        Ok(())
+    }
+    fn project(&self, project: &str) -> Option<(u64, pm_model::Value)> {
+        StoreAuthority::project(&self.kernel, project)
+    }
+}
+
 /// Extension entries change as whole values, and several threads write them: a
 /// helper's storage, the host's records, Settings. Each write re-reads and
 /// retries when another landed between its read and its commit, so none is lost.

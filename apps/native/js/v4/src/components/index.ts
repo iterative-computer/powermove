@@ -371,6 +371,8 @@ export function DisclosureGroup(
   props: Omit<Common, "onChange"> & {
     open: boolean;
     onChange: (open: boolean) => void;
+    /** Keep the chevron visible while expanded. */
+    alwaysShowChevron?: boolean;
     /** The section's own action, at the trailing edge of its heading row
      * (Refresh Fonts, Add Mask). */
     accessory?: ComponentChildren;
@@ -379,7 +381,8 @@ export function DisclosureGroup(
     leading?: ComponentChildren;
   },
 ) {
-  const { children, open, onChange, accessory, leading, ...rest } = props;
+  const { children, open, onChange, accessory, leading, alwaysShowChevron, ...rest } =
+    props;
   const id = useId();
   // A section heading is a label, a step under its panel's title, on a row
   // of its own.
@@ -391,6 +394,9 @@ export function DisclosureGroup(
       disabled: props.disabled,
       "aria-expanded": open,
       "aria-controls": id,
+      ...(alwaysShowChevron
+        ? { metadata: kitMetadata({}, { alwaysShowChevron }) }
+        : {}),
       onClick: () => {
         if (!props.disabled) onChange(!open);
       },

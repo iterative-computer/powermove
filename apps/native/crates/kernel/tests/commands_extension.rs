@@ -21,6 +21,7 @@ fn definition(kernel: &mut Kernel, version: &str) {
             ops: vec![StateOp::Register {
                 registry: "layerTypes".into(),
                 entry: Registration {
+                    project: None,
                     token: format!("provider-{version}"),
                     owner: Writer {
                         realm: 1,
@@ -203,6 +204,7 @@ fn new_extension_uses_the_current_provider_defaults_and_fresh_parameter_key_iden
             ops: vec![StateOp::Register {
                 registry: "layerTypes".into(),
                 entry: Registration {
+                    project: None,
                     token: "current-provider".into(),
                     owner: Writer {
                         realm: 2,

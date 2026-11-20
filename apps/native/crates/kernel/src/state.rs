@@ -26,10 +26,18 @@ impl Default for UiState {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Registration {
+    /// Per-project extension hosts can register different versions of an id.
+    /// Built-in definitions have no project scope.
+    pub project: Option<String>,
     pub token: String,
     pub owner: Writer,
     pub id: String,
     pub definition: Value,
+}
+impl Registration {
+    pub fn visible_to(&self, project: &str) -> bool {
+        self.project.as_deref().is_none_or(|id| id == project)
+    }
 }
 pub const REGISTRIES: &[&str] = &[
     "panels",
@@ -119,6 +127,7 @@ fn builtin_registries() -> Arc<BTreeMap<String, Vec<Registration>>> {
             |registry: &str, kind: &str, definition: &pm_fx_defs::Definition| StateOp::Register {
                 registry: registry.into(),
                 entry: Registration {
+                    project: None,
                     token: format!("builtin.{kind}.{}", definition.id),
                     owner: crate::tx::Caller::native().writer,
                     id: definition.id.clone(),
@@ -205,6 +214,20 @@ impl StateSnapshot {
             .iter()
             .rev()
             .find(|r| r.id == id)
+    }
+    pub fn for_project(&self, project: &str) -> Self {
+        let mut state = self.clone();
+        if self
+            .registries
+            .values()
+            .flatten()
+            .any(|entry| !entry.visible_to(project))
+        {
+            for entries in Arc::make_mut(&mut state.registries).values_mut() {
+                entries.retain(|entry| entry.visible_to(project));
+            }
+        }
+        state
     }
     pub fn stage(&self, tx: StateTransaction) -> Result<(Self, Vec<StateChange>), String> {
         if tx.expected_revision.is_some_and(|r| r != self.revision) {

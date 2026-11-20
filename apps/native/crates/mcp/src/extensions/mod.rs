@@ -197,6 +197,15 @@ fn write_tree(dest: &Path, tree: &Tree) -> Result<()> {
     }
     Ok(())
 }
+/// The Library's bounded source-file inventory, excluding its import receipt.
+pub(crate) fn project_tree(source: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
+    read_tree(
+        source,
+        Some(".powermove-project-origin.json"),
+        &mut Budget { files: 0, bytes: 0 },
+    )
+    .map(|tree| tree.files)
+}
 fn copy_tree(source: &Path, dest: &Path) -> Result<()> {
     let tree = read_tree(source, None, &mut Budget { files: 0, bytes: 0 })?;
     write_tree(dest, &tree)

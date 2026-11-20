@@ -528,7 +528,7 @@ impl KernelAdapter {
             vec![args["commands"].clone()]
         };
         let document = wire(&realized(p));
-        let state = self.kernel.state();
+        let state = self.kernel.state().for_project(&self.project);
         match pm_mcp::commands::plan_with_definitions(
             &document,
             p.selection.layers(),

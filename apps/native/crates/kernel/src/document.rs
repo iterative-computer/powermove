@@ -503,6 +503,24 @@ impl DocumentStore {
         self.runtime_project = Some(project.to_owned());
     }
 
+    pub(crate) fn set_project_runtime_state(
+        &mut self,
+        state: &crate::state::StateSnapshot,
+        project: &str,
+        text: Option<crate::text_host::SharedTextHost>,
+    ) {
+        if self
+            .runtime_state
+            .as_ref()
+            .is_none_or(|current| current.revision != state.revision)
+            || self.runtime_project.as_deref() != Some(project)
+        {
+            self.set_runtime_state_for_project(project, state.for_project(project), text);
+        } else {
+            self.text_host = text;
+        }
+    }
+
     pub fn doc_id(&self) -> u64 {
         self.doc_id
     }

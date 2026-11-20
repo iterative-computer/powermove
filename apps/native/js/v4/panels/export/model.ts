@@ -58,6 +58,7 @@ export type Options = {
   audioCoding: AudioCoding;
   /** HLG HEVC: the Dolby Vision 8.4 metadata macOS adds. Absent means on. */
   dolbyVision?: boolean;
+  includeExtensions?: boolean;
 };
 export type StudioQuality =
   | "composition"
@@ -109,6 +110,14 @@ export type QueueJob = {
   progress: number;
   error: string;
 };
+export type ProjectExtension = {
+  id: string;
+  name: string;
+  version: string;
+  storeId?: string;
+  bytes: number;
+  status: "included" | "excluded" | "storeOnly" | "unavailable" | "invalid";
+};
 export interface ExportSnapshot {
   queue?: QueueJob[];
   destination?: { path: string; format: Format };
@@ -147,6 +156,7 @@ export interface ExportSnapshot {
     note?: string;
   };
   options: Options;
+  extensions?: ProjectExtension[] | null;
   /** Native generation-owned draft bindings, registered before this projection. */
   bindings: Record<string, string>;
   presets: { id: string; name: string; options: Options }[];
@@ -549,6 +559,7 @@ export class ExportModel {
     }
     if (["done", "cancelled"].includes(this.current.run.phase))
       this.accept((await this.command("export.reset")).value, true);
+    delete this.options.includeExtensions;
     this.open = true;
     // Closed, the sheet is not planned on every edit (PM-376): it plans as it
     // opens, and Export waits for that plan as for any other.

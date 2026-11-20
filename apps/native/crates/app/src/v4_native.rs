@@ -282,6 +282,7 @@ mod menu_tests {
                     ops: vec![StateOp::Register {
                         registry: "effects".into(),
                         entry: Registration {
+                            project: None,
                             token: token.into(),
                             owner: Writer {
                                 realm: 1,

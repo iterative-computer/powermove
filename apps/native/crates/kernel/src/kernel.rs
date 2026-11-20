@@ -94,7 +94,7 @@ pub enum OpenSource {
 }
 
 /// What [`Kernel::open`] reports.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OpenInfo {
     pub project: String,
     pub revision: u64,
@@ -108,6 +108,23 @@ pub struct OpenInfo {
     pub history_rejected: bool,
     /// Why (generic wording).
     pub history_error: Option<String>,
+    /// Inert manifest and files for consent/reporting. The kernel never loads code.
+    pub extension_bundle: pm_model::json::Map,
+}
+
+impl std::fmt::Debug for OpenInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenInfo")
+            .field("project", &self.project)
+            .field("revision", &self.revision)
+            .field("base_hash", &self.base_hash)
+            .field("journal", &self.journal)
+            .field("history_entries", &self.history_entries)
+            .field("history_rejected", &self.history_rejected)
+            .field("history_error", &self.history_error)
+            .field("has_extension_bundle", &!self.extension_bundle.is_empty())
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -434,6 +451,12 @@ impl Kernel {
             }
             _ => None,
         };
+        let mut extension_bundle = pm_model::json::Map::new();
+        for key in ["extensions/manifest", "extensions/files"] {
+            if let Some(value) = project.store().file().envelope.extra.get(key) {
+                extension_bundle.insert(key, value.clone());
+            }
+        }
         let info = OpenInfo {
             project: id.to_owned(),
             revision: project.store().revision(),
@@ -442,6 +465,7 @@ impl Kernel {
             history_entries: project.store().history().len(),
             history_rejected: history_error.is_some(),
             history_error,
+            extension_bundle,
         };
         self.slots.insert(
             id.to_owned(),
@@ -673,7 +697,7 @@ impl Kernel {
             .ok_or_else(|| KernelFailure::NoProject(id.to_owned()))?;
         slot.project
             .store_mut()
-            .set_runtime_state_for_project(id, self.state.clone(), self.config.text.clone());
+            .set_project_runtime_state(&self.state, id, self.config.text.clone());
         let metadata_write = matches!(&request.call, Call::Memory(_) | Call::AdmitMedia(_));
         if metadata_write && (slot.journal.is_none() || self.durability.is_none()) {
             return Err(KernelFailure::Storage(

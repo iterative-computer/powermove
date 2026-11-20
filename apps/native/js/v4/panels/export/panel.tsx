@@ -1,5 +1,5 @@
 import type { ComponentChildren } from "preact";
-import { useLayoutEffect, useReducer } from "preact/hooks";
+import { useLayoutEffect, useReducer, useState } from "preact/hooks";
 import type { SurfaceEvent } from "../../src";
 import * as UI from "../../src/components";
 import { RenderQueue } from "./queue";
@@ -49,6 +49,15 @@ const cluster = {
   gap: token("metrics.gap"),
 } as const;
 const stack = { display: "flex", flexDirection: "column" } as const;
+const column = {
+  paddingLeft: token("metrics.inset"),
+  paddingRight: token("metrics.inset"),
+} as const;
+// The rows' own inset completes the alignment with the disclosure label.
+const extensionDetails = {
+  marginLeft: token("metrics.hit"),
+  paddingLeft: token("metrics.gap"),
+} as const;
 const actions = { ...cluster, flexShrink: 0 } as const;
 const detail = {
   color: token("colors.muted"),
@@ -130,12 +139,22 @@ export function workAreaLabel(p: {
 
 export function ExportSheet({ model, anchor }: ExportSheetProps) {
   const [, update] = useReducer((n) => n + 1, 0);
+  const [extensionsExpanded, setExtensionsExpanded] = useState(false);
   useLayoutEffect(() => model.subscribe(() => update(null)), [model]);
   const s = model.state;
   const p = s.project;
   if (!p || !model.open || s.run.phase === "cancelled") return null;
   const o = model.options;
   const busy = model.locked;
+  const extensions = s.extensions ?? [];
+  const included = extensions.filter((entry) => entry.status === "included");
+  const omitted = extensions.filter((entry) => entry.status !== "included");
+  const checked = o.includeExtensions !== false;
+  const extensionSummary = `${checked ? "Includes" : "Can include"} ${included.length} ${included.length === 1 ? "extension" : "extensions"} needed to render`;
+  const sizeLabel = (bytes: number) =>
+    bytes >= 1024 * 1024
+      ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+      : `${Math.max(1, Math.ceil(bytes / 1024))} KB`;
   const watch = (job: Promise<unknown>) => {
     void job.catch((error) => {
       // A command that failed is said (an ambiguous host acknowledgement
@@ -518,6 +537,77 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                     Save a portable Powermove project with its media, effects,
                     keyframes and composition settings.
                   </text>
+                </div>
+              ) : null}
+              {model.kind === "project" && extensions.length > 0 ? (
+                <div id="export.projectOptions" style={stack}>
+                  {included.length > 0 && (
+                    <UI.DisclosureGroup
+                      id="export.projectExtensions"
+                      label={extensionSummary}
+                      open={extensionsExpanded}
+                      onChange={setExtensionsExpanded}
+                      alwaysShowChevron
+                      leading={
+                        <UI.Checkbox
+                          id="export.includeExtensions"
+                          label="Include render-required extensions"
+                          binding={s.bindings.includeExtensions}
+                          value={checked}
+                          disabled={busy}
+                          style={{
+                            ...line,
+                            width: token("metrics.hit"),
+                            height: token("metrics.row"),
+                            justifyContent: "end",
+                          }}
+                          onChange={(event) =>
+                            edit("includeExtensions", event.value as boolean)
+                          }
+                        />
+                      }
+                    >
+                      <div style={extensionDetails}>
+                        {included.map((entry) => (
+                          <div key={entry.id}>
+                            <UI.FormRow
+                              label={`${entry.name} ${entry.version}`}
+                              control={
+                                <text style={detail}>{sizeLabel(entry.bytes)}</text>
+                              }
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    </UI.DisclosureGroup>
+                  )}
+                  {!extensionsExpanded && included.length > 0 && (
+                    <div style={extensionDetails}>
+                      <text
+                        style={{ ...detail, ...column, paddingBottom: token("metrics.gap") }}
+                      >
+                        {included
+                          .map((entry) => `${entry.name} ${entry.version}`)
+                          .join(", ")}
+                      </text>
+                    </div>
+                  )}
+                  {omitted.map((entry) => (
+                    <div
+                      key={entry.id}
+                      style={{
+                        ...stack,
+                        ...column,
+                        paddingTop: token("metrics.gap"),
+                      }}
+                    >
+                      <text style={detail}>
+                        {entry.status === "storeOnly"
+                          ? `${entry.name} is needed to render, not included — recipients install it from the Store (${entry.storeId ?? entry.id}).`
+                          : `This project uses ${entry.name}, which isn't installed. Its effects won't render for the recipient.`}
+                      </text>
+                    </div>
+                  ))}
                 </div>
               ) : null}
               {shows(o, "quality") ? select("quality", qualities) : null}

@@ -34,6 +34,7 @@ pub struct Frozen {
     options: Options,
     media: pm_engine_service::MediaCatalog,
     resources: Arc<pm_engine_service::resources::ResourceSnapshot>,
+    extensions: Arc<pm_mcp::project_extensions::Bundle>,
     playhead: f64,
     pub destination: PathBuf,
     /// The person said Replace: the files there are replaced once the export
@@ -292,6 +293,7 @@ impl Controller {
         let activity = self.engine.export_activity();
         let tasks = self.builtins.export_tasks.clone();
         let resources = self.extensions.resources.clone();
+        let retry_extensions = saved.as_ref().map(|frozen| frozen.extensions.clone());
         cx.spawn(async move |this, cx| {
             let folder_profile = profile.clone();
             let id = p.project.clone();
@@ -433,12 +435,35 @@ impl Controller {
                     }
                 });
             }
+            let extensions = if let Some(bundle) = retry_extensions {
+                bundle
+            } else if typed.format == Format::Json {
+                let inventory = this
+                    .update(cx, |v, _| {
+                        crate::project_extensions::Inventory::new(v, &p.snapshot)
+                    })
+                    .unwrap_or_default();
+                let snapshot = p.snapshot.clone();
+                let include = typed
+                    .opaque
+                    .get("includeExtensions")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                Arc::new(
+                    cx.background_executor()
+                        .spawn(async move { inventory.collect(&snapshot, include) })
+                        .await,
+                )
+            } else {
+                Arc::default()
+            };
             let frozen = Frozen {
                 queue: queue_id,
                 publication: p,
                 options: typed,
                 media,
                 resources,
+                extensions,
                 playhead,
                 destination,
                 replace,
@@ -886,12 +911,13 @@ async fn execute_inner(
     };
     observe(runtime, json!({"phase":"preparing"})).await;
     if frozen.options.format == Format::Json {
-        let path = pm_builtins::delivery::portable(
+        let path = pm_builtins::delivery::portable_with_extensions(
             &frozen.publication.snapshot,
             &frozen.media.originals,
             &frozen.destination,
             frozen.replace,
             &job.cancel,
+            |plan| frozen.extensions.add_to(plan),
         )?;
         return Ok(Finished {
             path: path.to_string_lossy().into(),

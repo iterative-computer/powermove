@@ -1891,12 +1891,25 @@ impl Controller {
         // Controller update so the window can acquire its published panel safely.
         // The panel's first publication in this window already knows where it is shown.
         let facts = self.facts(cx);
+        let export_inventory = (id == "export")
+            .then(|| self.published.as_ref())
+            .flatten()
+            .map(|p| {
+                (
+                    p.snapshot.clone(),
+                    crate::project_extensions::Inventory::new(self, &p.snapshot),
+                )
+            });
         cx.spawn(async move |this, cx| {
             let told = runtime.clone();
             let page_for = page.clone();
             let id_for = id.clone();
             let show = async move {
                 told.update_facts(facts);
+                if let Some((snapshot, inventory)) = export_inventory {
+                    let bundle = inventory.collect(&snapshot, true);
+                    told.set_export_extensions(json!(bundle.entries));
+                }
                 let shown = match &page_for {
                     Some(page) => told.show_section(&id_for, page),
                     None => told.show(&id_for),

@@ -1123,6 +1123,7 @@ impl McpSession {
                 })
             }
             "save_project" => host.save_project(&id),
+            "export_project" => host.export_project(&id),
             "apply_commands" | "edit_layer_strips" | "edit_video" | "edit_3d" => {
                 let expected = session
                     .transaction
@@ -1221,7 +1222,7 @@ impl McpSession {
                         &selection,
                         cleaned,
                         session.time,
-                        &host.state(),
+                        &host.state().for_project(&id),
                         mode,
                     )?;
                     if edits.batch.commands.is_empty() {
