@@ -33,7 +33,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn external_session_gates_preserve_shared_legacy_and_213_main_refusals() {
+fn external_session_gates_replay_captured_cases_with_app_editor_admission() {
     for (source, tag, count) in [
         (
             include_str!("../fixtures/error-precedence-main-c7f46a056.json"),
@@ -52,6 +52,7 @@ fn external_session_gates_preserve_shared_legacy_and_213_main_refusals() {
         let f = Fixture::new();
         let mut covered = std::collections::HashSet::new();
         let mut superseded_memory_cases = 0;
+        let mut admitted_app_editor_cases = 0;
         for test in oracle["cases"].as_array().unwrap() {
             // project_memory was implemented after v1.2.0. Its three old
             // "unknown tool" bodies are superseded by the main memory contract;
@@ -76,6 +77,24 @@ fn external_session_gates_preserve_shared_legacy_and_213_main_refusals() {
             } else {
                 test["args"].clone()
             };
+            if test["error"] == "App sessions require project access." {
+                assert_eq!(tool, "start_session");
+                assert_eq!(state, "none");
+                assert_eq!(args["access"], "editor");
+                assert_eq!(args["context"], "app");
+                let result = session.call(tool, args);
+                assert_eq!(result["isError"], false, "{result}");
+                let opened: Value = serde_json::from_str(
+                    result["content"][0]["text"].as_str().unwrap(),
+                )
+                .unwrap();
+                assert_eq!(opened["access"], "editor");
+                assert_eq!(opened["projectId"], "powermove-global");
+                assert_eq!(session.call("get_project_state", json!({}))["isError"], true);
+                admitted_app_editor_cases += 1;
+                covered.insert(tool.to_owned());
+                continue;
+            }
             // Keep frozen external admission evidence; only the refusal wording
             // changes so outside clients are not told they chose a plan mode.
             let expected = match test["error"].as_str().unwrap() {
@@ -93,6 +112,7 @@ fn external_session_gates_preserve_shared_legacy_and_213_main_refusals() {
             covered.insert(tool.to_owned());
         }
         assert_eq!(superseded_memory_cases, if tag == "main" { 0 } else { 3 });
+        assert_eq!(admitted_app_editor_cases, 1);
         let tools = if tag == "main" {
             catalog::catalog()
         } else {

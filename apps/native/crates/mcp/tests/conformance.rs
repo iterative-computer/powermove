@@ -368,11 +368,6 @@ fn planning_and_app_context_access_is_enforced() {
     );
     value(s.call("get_timeline", json!({})));
     value(s.call("finish_session", json!({"commit":false})));
-    diagnostic(
-        &mut s,
-        "start_session",
-        json!({"prompt":"Bad","access":"editor","context":"app"}),
-    );
     value(s.call("start_session", json!({"prompt":"App","context":"app"})));
     diagnostic(&mut s, "get_project_state", json!({}));
     assert_eq!(

@@ -110,10 +110,17 @@ pub fn served_tools() -> Vec<Value> {
 pub fn native_tools() -> &'static Vec<Value> {
     static NATIVE: OnceLock<Vec<Value>> = OnceLock::new();
     NATIVE.get_or_init(|| {
-        serde_json::from_str(include_str!("../fixtures/native-tools.json")).expect("native tools")
+        let mut tools: Vec<Value> =
+            serde_json::from_str(include_str!("../fixtures/native-tools.json")).expect("native tools");
+        tools.push(serde_json::from_str(include_str!("../fixtures/effect-lab-native-tool.json"))
+            .expect("native effect lab tool"));
+        tools
     })
 }
 pub fn permits(subset: &str, name: &str) -> bool {
+    if name == "render_effect_lab" {
+        return matches!(subset, "app" | "inspection");
+    }
     if subset == "app" && ["panel_begin", "panel_build"].contains(&name) { return true; }
     catalog()[subset]
         .as_array()

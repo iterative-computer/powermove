@@ -14,7 +14,7 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-const MAX_LINE: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_LINE: usize = 2 * 1024 * 1024;
 
 fn descriptor_lock(directory: &Path) -> std::io::Result<std::fs::File> {
     let lock = std::fs::OpenOptions::new()

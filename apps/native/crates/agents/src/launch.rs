@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const INSTRUCTIONS: &str = "You are the agent inside Powermove, a motion graphics and video editor. Work through the powermove tools: call start_session first, read get_project_state before editing, make editable changes with apply_commands or edit_layer_strips, and end with finish_session commit:true to keep them. Before authoring a new panel of any type, read get_panel_layout and call panel_begin with a sensible placement and planned controls. Tell the user where you placed it. Send panel_build plan and commit events as you commit controls. Publish the panel, then send panel_build ready with its registered panelId; send cancel or error if building stops. Report plainly what changed. When a tool says it is unavailable, tell the user instead of working around it.";
+const INSTRUCTIONS: &str = "You are the agent inside Powermove, a motion graphics and video editor. Work through the powermove tools: call start_session first, read get_project_state before editing, make editable changes with apply_commands or edit_layer_strips, and end with finish_session commit:true to keep them. For effect work, iterate with render_effect_lab from the first draft. Before authoring a new panel of any type, read get_panel_layout and call panel_begin with a sensible placement and planned controls. Tell the user where you placed it. Send panel_build plan and commit events as you commit controls. Publish the panel, then send panel_build ready with its registered panelId; send cancel or error if building stops. Report plainly what changed. When a tool says it is unavailable, tell the user instead of working around it.";
 /// Main's `AGENT_ORCHESTRATION_INSTRUCTIONS`, given to every run with tools.
 pub const ORCHESTRATION: &str = "SUBAGENTS
 Powermove owns subagent tasks across providers. Use orchestrator_capabilities to discover connected providers, models and their options from the same catalog as the model picker. Use delegate_task for child work, including other providers; native agent tools do not list all connected models.
@@ -34,10 +34,16 @@ pub mod grants {
     use std::{
         collections::BTreeMap,
         io::Read,
+        path::PathBuf,
         sync::{Mutex, OnceLock},
     };
-    fn table() -> &'static Mutex<BTreeMap<String, (String, Access)>> {
-        static TABLE: OnceLock<Mutex<BTreeMap<String, (String, Access)>>> = OnceLock::new();
+    struct Entry {
+        run: String,
+        access: Access,
+        workspace: Option<PathBuf>,
+    }
+    fn table() -> &'static Mutex<BTreeMap<String, Entry>> {
+        static TABLE: OnceLock<Mutex<BTreeMap<String, Entry>>> = OnceLock::new();
         TABLE.get_or_init(Default::default)
     }
     /// Revokes its token on drop.
@@ -54,22 +60,45 @@ pub mod grants {
     }
     /// A new token for `run` at `access`.
     pub fn issue(run: &str, access: Access) -> std::io::Result<Grant> {
+        issue_for_workspace(run, access, None)
+    }
+    pub(super) fn issue_for_workspace(
+        run: &str,
+        access: Access,
+        workspace: Option<PathBuf>,
+    ) -> std::io::Result<Grant> {
         let mut bytes = [0u8; 32];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        table()
-            .lock()
-            .unwrap()
-            .insert(token.clone(), (run.into(), access));
+        table().lock().unwrap().insert(
+            token.clone(),
+            Entry {
+                run: run.into(),
+                access,
+                workspace,
+            },
+        );
         Ok(Grant(token))
     }
     /// Build slots follow the owning process lifetime without retaining its token.
     pub fn run_live(run: &str) -> bool {
-        table().lock().unwrap().values().any(|(id, _)| id == run)
+        table()
+            .lock()
+            .unwrap()
+            .values()
+            .any(|entry| entry.run == run)
     }
     /// The run and access a token was issued for, while that run lives.
     pub fn resolve(token: &str) -> Option<(String, Access)> {
-        table().lock().unwrap().get(token).cloned()
+        table()
+            .lock()
+            .unwrap()
+            .get(token)
+            .map(|entry| (entry.run.clone(), entry.access))
+    }
+    /// The authenticated provider's workspace, set by the launcher.
+    pub fn workspace(token: &str) -> Option<PathBuf> {
+        table().lock().unwrap().get(token)?.workspace.clone()
     }
     #[cfg(test)]
     mod tests {
@@ -305,8 +334,12 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
     }
     request.prompt = crate::context::assemble(&request.prompt);
     let authority = Authority::new(request.access, request.approval, request.computer_consent)?;
-    let grant = grants::issue(&request.run, request.access)
-        .map_err(|e| format!("The agent's tool access couldn't be prepared: {e}"))?;
+    let grant = grants::issue_for_workspace(
+        &request.run,
+        request.access,
+        Some(request.workspace.clone()),
+    )
+    .map_err(|e| format!("The agent's tool access couldn't be prepared: {e}"))?;
     let token = grant.token().to_owned();
     let loaded = crate::user_mcp::load(request.provider, request.access, &environment.vars);
     let warnings = loaded

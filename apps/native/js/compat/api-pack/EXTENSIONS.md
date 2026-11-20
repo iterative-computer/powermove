@@ -31,6 +31,13 @@ Applying an existing effect is a separate `add_effect` project command. Panels
 are appropriate when requested or needed for a separate workflow; the panel
 examples and style rules below do not imply that every extension needs one.
 
+For effect work, iterate with `render_effect_lab` from the first draft.
+Start an app-context session for a project-free preview. Supply the staged
+package's `extensionId` if its folder name differs from the effect id or if
+you are testing edits to an installed effect. The numbers on the PNG match
+the parameter sets in `cells`. An optional workspace reference image adds
+SSIM scores for the whole image and around the shape edge.
+
 Start effect authoring with the complete [Gradient Tint sample](samples/gradient-tint/README.md).
 Call the agent tool `validate_effect` with the complete definition before
 returning staged changes. It checks parameter keys, pass count, and shader

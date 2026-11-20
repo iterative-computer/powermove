@@ -35,6 +35,7 @@ mod diag;
 #[path = "surfaces/dialogs.rs"]
 mod dialogs;
 mod entry;
+mod effect_lab;
 mod error_log;
 mod export_coordinator;
 mod render_queue;
@@ -545,6 +546,7 @@ fn main() -> Result<()> {
             let mut automation = tools.automation.lock().unwrap();
             automation.surfaces = Some(Arc::new(bridge));
             // Only tokens this process issued to its provider runs resolve.
+            automation.agent_workspace = Some(Arc::new(pm_agents::launch::grants::workspace));
             automation.agent_grants = Some(Arc::new(|token: &str| {
                 pm_agents::launch::grants::resolve(token).map(|(run, access)| {
                     let access = if access == pm_agents::Access::Editor {

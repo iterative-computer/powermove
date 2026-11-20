@@ -192,7 +192,7 @@ pub fn check_with_dependencies(dir: &Path, raw: &Value, roots: &[PathBuf]) -> Re
             .collect()
     };
     if api >= 4 || depends(&manifest).is_empty() {
-        return check_activation(dir, &manifest, false);
+        return check_activation(dir, &manifest);
     }
     let runner = CompatRunner::new(&pm_compat_runner::initial()).map_err(|e| e.to_string())?;
     let compile = |dir: &Path, m: &Value| {
@@ -284,7 +284,7 @@ fn require_install_success(installed: &Value) -> Result<(), String> {
 
 /// Read the real renderer snapshots for this extension, including registrations
 /// that would become visible if a later provider were disposed.
-fn check_compat_effects(runner: &CompatRunner, owner: &Value) -> Result<(), String> {
+fn compat_effects(runner: &CompatRunner, owner: &Value) -> Result<Vec<DefinitionSnapshot>, String> {
     let snapshots = runner
         .json(&format!(
             r#"
@@ -297,20 +297,33 @@ fn check_compat_effects(runner: &CompatRunner, owner: &Value) -> Result<(), Stri
             owner
         ))
         .map_err(|e| e.to_string())?;
-    for snapshot in
-        serde_json::from_value::<Vec<DefinitionSnapshot>>(snapshots).map_err(|e| e.to_string())?
-    {
-        check_effect(snapshot)?;
-    }
-    Ok(())
+    serde_json::from_value(snapshots).map_err(|e| e.to_string())
 }
 /// Compile with the app's compiler, then activate in throwaway runtimes on a
 /// synthetic project: v1–3 in a trusted realm, v4 in its own panel isolate.
 pub fn check(dir: &Path, manifest: &Value) -> Result<(), String> {
-    check_activation(dir, manifest, true)
+    for snapshot in effect_definitions(dir, manifest)? {
+        check_effect(snapshot)?;
+    }
+    Ok(())
 }
 
-fn check_activation(dir: &Path, manifest: &Value, compile_effects: bool) -> Result<(), String> {
+pub(crate) fn effect_definitions(
+    dir: &Path,
+    manifest: &Value,
+) -> Result<Vec<DefinitionSnapshot>, String> {
+    activate(dir, manifest, true)
+}
+
+fn check_activation(dir: &Path, manifest: &Value) -> Result<(), String> {
+    activate(dir, manifest, false).map(drop)
+}
+
+fn activate(
+    dir: &Path,
+    manifest: &Value,
+    collect_effects: bool,
+) -> Result<Vec<DefinitionSnapshot>, String> {
     let api = manifest["apiVersion"].as_u64().unwrap_or(1);
     let entry = manifest["entry"].as_str().unwrap_or("index.ts");
     let runner = CompatRunner::new(&pm_compat_runner::initial()).map_err(|e| e.to_string())?;
@@ -323,10 +336,10 @@ fn check_activation(dir: &Path, manifest: &Value, compile_effects: bool) -> Resu
             .install(manifest, &graph.to_json())
             .map_err(|e| e.to_string())?;
         require_install_success(&installed)?;
-        return if compile_effects {
-            check_compat_effects(&runner, &manifest["id"])
+        return if collect_effects {
+            compat_effects(&runner, &manifest["id"])
         } else {
-            Ok(())
+            Ok(Vec::new())
         };
     }
     drop(runner);
@@ -355,22 +368,20 @@ fn check_activation(dir: &Path, manifest: &Value, compile_effects: bool) -> Resu
         if let Some(error) = errors.first() {
             return Err(error.clone());
         }
-        if compile_effects {
-            for snapshot in state
-                .registries
-                .get("effects")
-                .into_iter()
-                .flatten()
-                .filter_map(|entry| entry.definition.get("nativeSnapshot"))
-            {
-                let snapshot = serde_json::from_str::<DefinitionSnapshot>(
-                    &pm_model::json::to_canonical_string(snapshot),
-                )
-                .map_err(|e| e.to_string())?;
-                check_effect(snapshot)?;
-            }
+        if !collect_effects {
+            return Ok(Vec::new());
         }
-        Ok(())
+        state
+            .registries
+            .get("effects")
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.definition.get("nativeSnapshot"))
+            .map(|snapshot| {
+                serde_json::from_str(&pm_model::json::to_canonical_string(snapshot))
+                    .map_err(|e| e.to_string())
+            })
+            .collect()
     })();
     actor.shutdown();
     result

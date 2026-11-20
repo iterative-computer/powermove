@@ -11,6 +11,7 @@ pub mod coedit;
 pub mod completion;
 pub mod creative;
 pub mod effect;
+pub mod effect_lab;
 pub mod export_jobs;
 pub mod extensions;
 pub mod inspection;

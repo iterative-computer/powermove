@@ -91,7 +91,7 @@ fn name(entry: &fs::DirEntry) -> Result<String> {
         .map_err(|_| invalid("Extension paths must be UTF-8."))
 }
 /// Reads a regular file without following a link swapped in since the listing.
-fn read_regular(path: &Path, relative: &str) -> Result<Vec<u8>> {
+fn read_regular(path: &Path, relative: &str, budget: &mut Budget) -> Result<Vec<u8>> {
     let mut file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -111,6 +111,7 @@ fn read_regular(path: &Path, relative: &str) -> Result<Vec<u8>> {
             "Extension contains an unsupported file: {relative}"
         )));
     }
+    budget.take(meta.len(), "Extension source")?;
     let mut data = Vec::with_capacity(meta.len() as usize);
     (&mut file).take(meta.len() + 1).read_to_end(&mut data)?;
     if data.len() as u64 > meta.len() {
@@ -154,8 +155,7 @@ fn read_tree(root: &Path, skip_top: Option<&str>, budget: &mut Budget) -> Result
                 tree.directories.push(relative.clone());
                 walk(&entry.path(), &relative, None, tree, budget)?;
             } else if meta.is_file() {
-                let data = read_regular(&entry.path(), &relative)?;
-                budget.take(data.len() as u64, "Extension source")?;
+                let data = read_regular(&entry.path(), &relative, budget)?;
                 tree.files.insert(relative, data);
             } else {
                 return Err(invalid(format!(
@@ -297,6 +297,50 @@ impl Stage {
         self.roots.last().expect("a writable extension folder")
     }
 }
+/// A same-named staged package takes precedence only when it is a draft.
+pub fn is_draft(stage: &Stage, id: &str) -> bool {
+    if !extension_id(id) {
+        return false;
+    }
+    let source = stage.staging.join(id);
+    fs::symlink_metadata(&stage.staging).is_ok_and(|meta| meta.is_dir())
+        && fs::symlink_metadata(&source).is_ok_and(|meta| meta.is_dir())
+        && tree_hash(&source).is_ok_and(|hash| stage.baseline.get(id) != Some(&hash))
+}
+
+/// Freeze just the selected staged package into host-owned temporary storage
+/// before compiling it, using the same source checks as publication.
+pub fn preview_source(
+    host: &dyn ExtensionHost,
+    stage: &Stage,
+    id: &str,
+    destination: &Path,
+) -> Result<Value> {
+    if !extension_id(id) {
+        return Err(invalid("Invalid staged extension id."));
+    }
+    let source = stage.staging.join(id);
+    if !fs::symlink_metadata(&stage.staging)?.is_dir() || !fs::symlink_metadata(&source)?.is_dir() {
+        return Err(invalid(format!(
+            "{id}: use an extension folder in the current staging directory."
+        )));
+    }
+    copy_tree(&source, destination)?;
+    let raw = serde_json::from_slice(&fs::read(destination.join("manifest.json"))?)
+        .map_err(|error| invalid(format!("{id}: {error}")))?;
+    let manifest = host.manifest(&raw).map_err(invalid)?;
+    if manifest["id"] != id {
+        return Err(invalid(format!(
+            "{id}: the manifest id must match its folder."
+        )));
+    }
+    let blocked = scan_extension(id, destination)?;
+    if !blocked.is_empty() {
+        return Err(invalid(blocked.join("\n")));
+    }
+    Ok(manifest)
+}
+
 pub fn history_for(host: &dyn ExtensionHost, project: &str) -> PathBuf {
     let safe: String = project
         .chars()

@@ -1,0 +1,354 @@
+{
+  "name": "render_effect_lab",
+  "description": "Render a built-in, installed, or staged effect with the native compositor. Returns one PNG contact sheet with cells numbered to match their parameter sets, and optional whole-image and shape-edge SSIM scores. Use Editor access or above. Open a project only for a composition backdrop. Image paths must be inside the agent or session workspace. Each cell can be 32 to 1280 pixels per side, up to 8 megapixels across the sweep.",
+  "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "effectId",
+      "backdrop",
+      "width",
+      "height",
+      "parameterSets"
+    ],
+    "properties": {
+      "effectId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "extensionId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[a-z0-9][a-z0-9-]{1,63}$",
+        "description": "Package folder ID for a staged effect. Use this to preview edits to an already installed effect. Omit for built-in or installed effects and staged effects whose ID matches their package."
+      },
+      "backdrop": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "tileSize",
+              "colors"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "checker"
+                ]
+              },
+              "tileSize": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1280
+              },
+              "colors": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {
+                  "type": "string",
+                  "pattern": "^#[0-9a-fA-F]{6}$"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "color"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "solid"
+                ]
+              },
+              "color": {
+                "type": "string",
+                "pattern": "^#[0-9a-fA-F]{6}$"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "colors"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "gradient"
+                ]
+              },
+              "colors": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {
+                  "type": "string",
+                  "pattern": "^#[0-9a-fA-F]{6}$"
+                }
+              },
+              "angle": {
+                "type": "number",
+                "minimum": -360,
+                "maximum": 360
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "path"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "image"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "compositionId",
+              "time"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "composition"
+                ]
+              },
+              "compositionId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "time": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 86400
+              }
+            }
+          }
+        ]
+      },
+      "shape": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "full"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "width",
+              "height"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "rect"
+                ]
+              },
+              "width": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1280
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1280
+              },
+              "cornerRadius": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 640
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "width",
+              "height"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "capsule"
+                ]
+              },
+              "width": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1280
+              },
+              "height": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1280
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "diameter"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "circle"
+                ]
+              },
+              "diameter": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1280
+              }
+            }
+          }
+        ]
+      },
+      "width": {
+        "type": "integer",
+        "minimum": 32,
+        "maximum": 1280
+      },
+      "height": {
+        "type": "integer",
+        "minimum": 32,
+        "maximum": 1280
+      },
+      "parameterSets": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 24,
+        "items": {
+          "type": "object"
+        },
+        "description": "One map of parameter keys to values per cell. Omitted keys use their registered defaults."
+      },
+      "referencePath": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "Agent or session workspace PNG or JPEG to compare with every cell. Resized to the output size."
+      }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": [
+      "effectId",
+      "width",
+      "height",
+      "columns",
+      "rows",
+      "labelHeight",
+      "cells"
+    ],
+    "properties": {
+      "width": {
+        "type": "integer"
+      },
+      "height": {
+        "type": "integer"
+      },
+      "columns": {
+        "type": "integer"
+      },
+      "rows": {
+        "type": "integer"
+      },
+      "labelHeight": {
+        "type": "integer"
+      },
+      "effectId": {
+        "type": "string"
+      },
+      "metric": {
+        "type": "string"
+      },
+      "cells": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": [
+            "index",
+            "parameters"
+          ],
+          "properties": {
+            "index": {
+              "type": "integer"
+            },
+            "parameters": {
+              "type": "object"
+            },
+            "scores": {
+              "type": "object",
+              "required": [
+                "wholeImage",
+                "edgeBand"
+              ],
+              "properties": {
+                "wholeImage": {
+                  "type": "number"
+                },
+                "edgeBand": {
+                  "type": "number"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
