@@ -596,3 +596,217 @@ fn wheels_a_curve_and_luts_stack_on_one_clip() {
     assert_eq!(luts, ["one", "two"]);
     actor.shutdown();
 }
+
+/// A testsrc clip as FFmpeg writes it (MPEG-4, yuv420p), `w`×`h`, 2 s at 30 fps.
+fn testsrc(dir: &std::path::Path, w: u32, h: u32) -> std::path::PathBuf {
+    let ffmpeg = std::path::PathBuf::from(
+        std::env::var_os("PM_FFMPEG_DIR").expect("source native-env.sh before this test"),
+    )
+    .join("bin/ffmpeg");
+    let path = dir.join("clipA-testsrc.mp4");
+    let status = std::process::Command::new(ffmpeg)
+        .args(["-v", "error", "-y", "-f", "lavfi", "-i"])
+        .arg(format!("testsrc=size={w}x{h}:rate=30:duration=2"))
+        .args(["-c:v", "mpeg4", "-q:v", "2", "-pix_fmt", "yuv420p"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "ffmpeg wrote the clip");
+    path
+}
+
+/// The picture at `time`, rendered as the export renders it.
+fn export_frame(k: &KernelHandle, clip: &std::path::Path, size: (u32, u32), time: f64) -> Vec<f32> {
+    let p = k.published("video").unwrap();
+    let mut renderer = Renderer::headless().unwrap();
+    renderer
+        .set_main_effects_for_document(&p.snapshot.document)
+        .unwrap();
+    let mut request =
+        RenderRequest::sized(Size::new(size.0, size.1), Precision::Float16);
+    request.export = true;
+    request.output_kind = pm_render::OutputKind::Final;
+    let mut media = pm_export::render::MediaPaths::default();
+    media.insert("clip", clip.to_path_buf());
+    let frame = pm_export::render::render_frame(
+        &mut renderer,
+        &p.snapshot.document,
+        &p.snapshot.open_comp().unwrap(),
+        Ticks::new((time * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i64).unwrap(),
+        &request,
+        &media,
+        &pm_export::render::Unrestricted,
+        1,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    frame.rgba
+}
+
+/// The picture at `time` as the viewer's engine draws it while paused,
+/// paused at rest (the settled picture), playing and captured, in that order.
+fn viewer_frames(
+    headless: &mut pm_engine_service::Headless,
+    k: &KernelHandle,
+    clip: &std::path::Path,
+    size: (u32, u32),
+    time: f64,
+) -> Vec<Vec<f32>> {
+    use pm_engine_service::{FrameSpec, Moment, Output, Scene};
+    let p = k.published("video").unwrap();
+    let mut media = pm_export::render::MediaPaths::default();
+    media.insert("clip", clip.to_path_buf());
+    let scene = Scene {
+        doc: p.snapshot.document.clone(),
+        comp: p.snapshot.open_comp().unwrap(),
+        media: Arc::new(media),
+        content: p.revision(),
+    };
+    let output = Output {
+        width: size.0,
+        height: size.1,
+        display: 0,
+        headroom: 1.,
+        crop: None,
+    };
+    let at = Ticks::new((time * pm_protocol::common::TICKS_PER_SECOND as f64).round() as i64)
+        .unwrap();
+    let exact = FrameSpec::exact(at, output);
+    let paused = FrameSpec {
+        exact: false,
+        ..exact
+    };
+    let settled = FrameSpec {
+        settled: true,
+        ..paused
+    };
+    let playing = FrameSpec {
+        moment: Moment::Playing,
+        decode_deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(20)),
+        ..paused
+    };
+    [paused, settled, playing, exact]
+        .into_iter()
+        .map(|spec| {
+            headless
+                .frame_spec_settled(&scene, spec, &Default::default())
+                .unwrap()
+                .into_iter()
+                .flat_map(|[r, g, b]| [r as f32, g as f32, b as f32, 1.])
+                .collect()
+        })
+        .collect()
+}
+
+/// The share of pixels with a colour channel more than 2/255 apart. Gamma
+/// leaves a channel at 0 or 1 where it is, and most of testsrc's colour is
+/// there: its mean colour hardly moves, so pixels are counted instead.
+fn changed_pixels(a: &[f32], b: &[f32]) -> f64 {
+    assert_eq!(a.len(), b.len());
+    let changed = a
+        .chunks_exact(4)
+        .zip(b.chunks_exact(4))
+        .filter(|(x, y)| (0..3).any(|c| (x[c] - y[c]).abs() > 2. / 255.))
+        .count();
+    changed as f64 / (a.len() / 4) as f64
+}
+
+/// PM-482: Color Wheels added and dragged as the Color panel does it, on an
+/// imported video clip, whole or cut by a split, change the exported picture.
+#[test]
+fn a_colour_wheels_grade_changes_a_video_clips_picture() {
+    use pm_kernel::commands::effects::{AddEffect, EffectCommand, saved_builtin_definition};
+    use pm_kernel::commands::properties::SetProperty;
+    const W: u32 = 160;
+    const H: u32 = 90;
+    for split in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = testsrc(dir.path(), W, H);
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let k = actor.handle();
+        let mut video = layer(
+            "v",
+            "video",
+            json!({ "asset": "clip", "w": W, "h": H, "fit": "contain", "trim": 0, "speed": 1 }),
+        );
+        video["dur"] = json!(2);
+        video["p"]["position.x"] = channel(f64::from(W) / 2.);
+        video["p"]["position.y"] = channel(f64::from(H) / 2.);
+        let project = json!({
+            "id": "video", "name": "Video", "compId": "c", "w": W, "h": H, "fps": 30, "dur": 2,
+            "bg": "#000000", "layers": [video], "comps": {},
+            "assets": { "clip": { "id": "clip", "name": "clipA-testsrc.mp4", "kind": "video",
+                "format": "mp4", "w": W, "h": H, "dur": 2, "fps": 30 } }
+        });
+        k.open(
+            "video",
+            pm_kernel::OpenSource::Untitled(pm_model::json::parse(&project.to_string()).unwrap()),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+        let at = 1.5;
+        let target = if split {
+            let p = k.published("video").unwrap();
+            let cut = pm_kernel::commands::timing::TimingCommand::Split {
+                layer_ids: vec!["v".into()],
+                time: 1.0,
+                new_ids: vec!["v2".into()],
+            };
+            k.call_blocking("video", transact(&p, "Split", vec![cut.into()]))
+                .unwrap();
+            "v2"
+        } else {
+            "v"
+        };
+        let plain = export_frame(&k, &clip, (W, H), at);
+        let mut headless = pm_engine_service::Headless::new().unwrap();
+        let plain_viewer = viewer_frames(&mut headless, &k, &clip, (W, H), at);
+        let p = k.published("video").unwrap();
+        let definition =
+            saved_builtin_definition(&p.snapshot.document, "colorWheels", None, 0., 0.).unwrap();
+        let add = EffectCommand::Add(Box::new(AddEffect {
+            layer_id: target.into(),
+            effect_id: "wheels".into(),
+            definition,
+            parameters: Map::new(),
+            inputs: None,
+            open: true,
+            enabled: true,
+            enabled_animation: None,
+            index: None,
+        }));
+        k.call_blocking("video", transact(&p, "Add Color Wheels", vec![add.into()]))
+            .unwrap();
+        let p = k.published("video").unwrap();
+        let gamma: Vec<Command> = [("gammaRed", 0.21), ("gammaGreen", -0.10), ("gammaBlue", 0.35)]
+            .into_iter()
+            .map(|(key, v)| {
+                pm_kernel::PropertyCommand::Set(SetProperty::new(
+                    target,
+                    format!("wheels.{key}"),
+                    Value::from(v),
+                    at,
+                ))
+                .into()
+            })
+            .collect();
+        k.call_blocking("video", transact(&p, "Gamma", gamma)).unwrap();
+        let graded = export_frame(&k, &clip, (W, H), at);
+        let changed = changed_pixels(&plain, &graded);
+        assert!(
+            changed > 0.05,
+            "split={split}: the grade changed {changed} of the picture's pixels"
+        );
+        let graded_viewer = viewer_frames(&mut headless, &k, &clip, (W, H), at);
+        for (n, (plain, graded)) in plain_viewer.iter().zip(&graded_viewer).enumerate() {
+            let changed = changed_pixels(plain, graded);
+            assert!(
+                changed > 0.05,
+                "split={split}: the grade changed {changed} of the viewer's pixels ({n})"
+            );
+        }
+        actor.shutdown();
+    }
+}
