@@ -647,7 +647,10 @@ mod tests {
             "shape":{"type":"capsule","width":84,"height":52},"width":128,"height":128,"parameterSets":[{}]});
         let (metadata, output) = fixture.render(args.clone());
         let pixels = extract_cell(&decode_png(&output).unwrap(), &metadata, 0);
-        let pixel = |x, y| &pixels[(y * 128 + x) * 4..(y * 128 + x) * 4 + 4];
+        let pixel = |x: usize, y: usize| {
+            let start = (y * 128 + x) * 4;
+            &pixels[start..start + 4]
+        };
         for ((x, y), expected) in [
             ((5, 5), [224_u8, 32, 64, 255]),
             ((57, 57), [64, 32, 224, 255]),
