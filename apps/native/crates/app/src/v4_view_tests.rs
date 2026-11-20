@@ -2977,7 +2977,7 @@ fn overlap_inspector_point_children_fit_between_adjacent_rows(cx: &mut TestAppCo
     let (_, mut vcx) = window(cx, &rig, selected, Default::default());
     vcx.simulate_resize(size(px(320.), px(1200.)));
     vcx.run_until_parked();
-    let header = bounds(&mut vcx, "layer-effects:effect:effect:ramp");
+    let header = bounds(&mut vcx, "layer-effects:effect:ramp");
     let start = bounds(&mut vcx, &format!("n{start}"));
     let end = bounds(&mut vcx, &format!("n{end}"));
     let pad = bounds(&mut vcx, "layer-effects:pad:point:ramp:startX");
