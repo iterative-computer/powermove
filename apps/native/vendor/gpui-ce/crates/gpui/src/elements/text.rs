@@ -2225,7 +2225,7 @@ mod tests {
             .scene
             .quads
             .iter()
-            .filter(|quad| quad.background.solid == color)
+            .filter(|quad| quad.background.solid() == Some(color))
             .map(|quad| quad.bounds);
         let result = bounds.next().expect("expected a rendered quad");
         assert!(bounds.next().is_none(), "expected only one rendered quad");

@@ -354,6 +354,8 @@ pub struct Metrics {
     /// panel's width up to `curve_editor_max`.
     pub curve_editor: f32,
     pub curve_editor_max: f32,
+    /// Equal-width columns in each Easing preset family.
+    pub easing_preset_columns: f32,
     /// The curve editor's greatest width: a wide panel shows the graph at
     /// 16:9 on the rows' inset, not stretched across it.
     pub curve_editor_wide: f32,
@@ -466,6 +468,11 @@ pub struct Metrics {
     pub media_row_thumb_height: f32,
     /// A composition's frame inside its tile (v1.2.0 `.comp-frame`).
     pub media_comp_inset: f32,
+    /// Concentric frame and compact thumbnail radii; derived from the tile.
+    pub media_frame_radius: f32,
+    pub media_small_radius: f32,
+    /// Places a composition's open indicator inside the rounded corner.
+    pub media_open_dot_inset: f32,
     /// The red (missing) or accent (in cloud) wash over a tile.
     pub media_tint_opacity: f32,
     /// A missing file's remembered picture, dimmed under its badge.
@@ -920,6 +927,7 @@ impl Tokens {
                 grade_field: 72.,
                 curve_editor: 200.,
                 curve_editor_max: 360.,
+                easing_preset_columns: 3.,
                 curve_editor_wide: 640.,
                 layer_column: 320.,
                 clip_radius: radius.sm,
@@ -987,6 +995,9 @@ impl Tokens {
                 media_row_thumb_width: 32.,
                 media_row_thumb_height: 18.,
                 media_comp_inset: space.md,
+                media_frame_radius: 0.,
+                media_small_radius: 0.,
+                media_open_dot_inset: 0.,
                 media_tint_opacity: 0.1,
                 media_offline_opacity: 0.32,
                 media_loading_opacity: 0.55,
@@ -1078,7 +1089,15 @@ impl Tokens {
         };
         tokens.enforce_accessibility();
         tokens.derive_fills();
+        tokens.derive_media_geometry();
         tokens
+    }
+    fn derive_media_geometry(&mut self) {
+        let m = &mut self.metrics;
+        m.media_frame_radius = (m.control_radius - m.media_comp_inset).max(2.);
+        m.media_small_radius = (m.control_radius - m.media_inset).max(2.);
+        m.media_open_dot_inset =
+            m.media_comp_inset + m.media_frame_radius * (1. - 1. / 2_f32.sqrt()) + 3.;
     }
     /// Everything that is `text` ink over a ground at an alpha step follows a
     /// theme's colour patch: soft fills, the raised surface, hairlines and the
@@ -1170,6 +1189,7 @@ impl Tokens {
         }
         next.enforce_accessibility();
         next.derive_fills();
+        next.derive_media_geometry();
         *self = next;
         Ok(())
     }

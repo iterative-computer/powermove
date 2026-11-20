@@ -387,6 +387,15 @@ fn forged_run_identity_never_changes_conversation() {
 
 #[test]
 fn real_codex_stop_is_nonterminal_until_interrupt_acknowledgement() {
+    real_codex_stop(false);
+}
+
+#[test]
+fn real_codex_stop_takes_priority_over_a_pending_steer() {
+    real_codex_stop(true);
+}
+
+fn real_codex_stop(steer_before_stop: bool) {
     let temp = Temp::new();
     let (mut store, mut panel, effect) = setup();
     let mut runs = ProviderRuns::default();
@@ -410,6 +419,24 @@ fn real_codex_stop_is_nonterminal_until_interrupt_acknowledgement() {
     drain(&mut runs, &mut panel, &mut store, |p| {
         !p.session("t").unwrap().trace.rows.is_empty()
     });
+    if steer_before_stop {
+        panel
+            .draft_mut("t")
+            .unwrap()
+            .insert_text("Make it blue", 99, false);
+        let steer = panel.submit("t", "run", "direction", 100).unwrap();
+        runs.steer(
+            &mut panel,
+            &mut store,
+            &steer,
+            100,
+            "Make it blue".into(),
+            vec![],
+            Box::new(|| panic!("Stop must not restart the agent")),
+        )
+        .unwrap();
+        // Do not poll before Stop: the host has not drained the steer receipt.
+    }
     let stop = panel.stop("t").unwrap();
     runs.dispatch(&mut panel, &mut store, &stop, 100).unwrap();
     let end = Instant::now() + Duration::from_secs(5);

@@ -376,8 +376,17 @@ test("accessibility exposes dialog, exact control labels, units and actual progr
     numericValue: 0.4,
   });
   expect(progress.props.metadata).toMatchObject({
-    pmKit: { queueProgress: "bar" },
     export: { valueDescription: "40 percent, frame 120 of 300" },
+  });
+  expect(progress.props.metadata).not.toHaveProperty("pmKit.queueProgress");
+  const queueIndicator = named(g.root, "export.queue.indicator");
+  expect(queueIndicator.props.metadata).toMatchObject({
+    pmKit: { queueProgress: "ring" },
+  });
+  expect(native.ax.find((n: any) => n.id === queueIndicator.id)).toMatchObject({
+    role: "ProgressIndicator",
+    label: "Export in progress",
+    numericValue: 0.4,
   });
   await g.root.dispose();
 });

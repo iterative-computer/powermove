@@ -865,25 +865,17 @@ test("grid selection uses a clipped ring and text-only truncation tooltips", asy
       menu={() => {}}
       page={() => {}}
       native={native}
-      layout={{
-        ...layout,
-        cardGeometry: {
-          radius: 10,
-          frameRadius: 2,
-          smallRadius: 6,
-          dotInset: 11,
-        },
-      }}
+      layout={layout}
     />,
   );
   const nodes = root.inspect().nodes;
   const cell = nodes.find((n) => n.props.role === "cell")!;
   expect(cell.props.title).toBeUndefined();
   expect(cell.props.metadata).toHaveProperty("selectionRingOnly", true);
-  expect(cell.props.style).toHaveProperty("borderRadius", 10);
+  expect(cell.props.style).toHaveProperty("borderRadius", { token: "metrics.control_radius" });
   const dot = find(root, "Open in the timeline");
-  expect(dot.props.style).toHaveProperty("right", 11);
-  expect(dot.props.style).toHaveProperty("bottom", 11);
+  expect(dot.props.style).toHaveProperty("right", { token: "metrics.media_open_dot_inset" });
+  expect(dot.props.style).toHaveProperty("bottom", { token: "metrics.media_open_dot_inset" });
   expect(
     nodes.filter((n) => metaFlag(n.props.metadata, "tooltipWhenTruncated")).length,
   ).toBe(2);

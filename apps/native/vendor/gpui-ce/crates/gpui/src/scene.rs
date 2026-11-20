@@ -5,8 +5,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Pixels, Point,
-    Radians, ScaledFilter, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    AtlasTextureId, AtlasTile, Background, BackgroundTag, Bounds, ContentMask, Corners, Edges,
+    Hsla, LinearColorStop, Pixels, Point, Radians, ScaledFilter, ScaledPixels, Size,
+    bounds_tree::BoundsTree, point,
 };
 use smallvec::SmallVec;
 use std::{
@@ -827,6 +828,49 @@ impl<'a> Iterator for BatchIterator<'a> {
     }
 }
 
+/// Quad storage paint: gradients use both stops, other paints use just the first color.
+#[derive(Debug, Copy, Clone, Default, PartialEq)]
+#[repr(C)]
+pub struct QuadPaint {
+    tag_and_color_space: u32,
+    gradient_angle_or_pattern_height: f32,
+    colors: [LinearColorStop; 2],
+}
+
+impl QuadPaint {
+    pub(crate) fn solid(self) -> Option<SceneHsla> {
+        (self.tag_and_color_space & 3 == BackgroundTag::Solid as u32)
+            .then_some(self.colors[0].color)
+    }
+}
+
+impl From<Background> for QuadPaint {
+    fn from(paint: Background) -> Self {
+        let colors = if paint.tag == BackgroundTag::LinearGradient {
+            paint.colors
+        } else {
+            [
+                LinearColorStop {
+                    color: paint.solid,
+                    percentage: 0.0,
+                },
+                LinearColorStop::default(),
+            ]
+        };
+        Self {
+            tag_and_color_space: paint.tag as u32 | (paint.color_space as u32) << 2,
+            gradient_angle_or_pattern_height: paint.gradient_angle_or_pattern_height,
+            colors,
+        }
+    }
+}
+
+impl From<Hsla> for QuadPaint {
+    fn from(color: Hsla) -> Self {
+        Self::from(Background::from(color))
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 #[repr(C)]
 #[expect(missing_docs)]
@@ -837,8 +881,8 @@ pub struct Quad {
     pub border_dashed_gap: f32,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
-    pub background: Background,
-    pub border_color: Background,
+    pub background: QuadPaint,
+    pub border_color: QuadPaint,
     pub corner_radii: Corners<ScaledPixels>,
     pub border_widths: Edges<ScaledPixels>,
     pub corner_smoothing: f32,

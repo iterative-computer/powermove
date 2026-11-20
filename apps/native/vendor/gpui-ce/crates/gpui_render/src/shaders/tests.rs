@@ -100,22 +100,27 @@ fn ordinary_vertex_interfaces_stay_within_compact_budgets() {
     }
 }
 
+fn assert_scene_instance_budget<T>(name: &str, maximum: usize) {
+    let actual = std::mem::size_of::<T>();
+    assert!(
+        actual <= maximum,
+        "{name} is {actual} bytes, exceeding its {maximum}-byte storage budget"
+    );
+}
+
 #[test]
-fn scene_instance_storage_sizes_are_bounded() {
-    for (name, actual, maximum) in [
-        ("Quad", std::mem::size_of::<gpui::Quad>(), 248),
-        ("Shadow", std::mem::size_of::<gpui::Shadow>(), 184),
-        (
-            "PolychromeSprite",
-            std::mem::size_of::<gpui::PolychromeSprite>(),
-            112,
-        ),
-    ] {
-        assert!(
-            actual <= maximum,
-            "{name} is {actual} bytes, exceeding its {maximum}-byte storage budget"
-        );
-    }
+fn scene_instance_quad_storage_size_is_bounded() {
+    assert_scene_instance_budget::<gpui::Quad>("Quad", 248);
+}
+
+#[test]
+fn scene_instance_shadow_storage_size_is_bounded() {
+    assert_scene_instance_budget::<gpui::Shadow>("Shadow", 184);
+}
+
+#[test]
+fn scene_instance_polychrome_sprite_storage_size_is_bounded() {
+    assert_scene_instance_budget::<gpui::PolychromeSprite>("PolychromeSprite", 112);
 }
 
 #[test]

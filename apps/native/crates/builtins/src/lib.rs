@@ -204,17 +204,8 @@ pub struct RetainedAsset {
 /// panel's `inset` margins (W − 2·inset); a grid without one yet is laid
 /// out at the narrowest column.
 fn project_layout(grid: bool, width: Option<f64>, m: &pm_design::Metrics) -> Value {
-    let radius = m.control_radius;
-    let frame_radius = (radius - m.media_comp_inset).max(2.);
-    let geometry = json!({
-        "radius": radius,
-        "frameRadius": frame_radius,
-        "frameInset": m.media_comp_inset,
-        "smallRadius": (radius - m.media_inset).max(2.),
-        "dotInset": m.media_comp_inset + frame_radius * (1. - 1. / 2_f32.sqrt()) + 3.,
-    });
     if !grid {
-        return json!({"columns": 1, "rowHeight": m.row, "cardGeometry": geometry});
+        return json!({"columns": 1, "rowHeight": m.row});
     }
     let (inset, min) = (f64::from(m.inset), f64::from(m.thumbnail_min));
     let width = width.filter(|w| w.is_finite() && *w > 0.).unwrap_or(min);
@@ -227,7 +218,6 @@ fn project_layout(grid: bool, width: Option<f64>, m: &pm_design::Metrics) -> Val
         "rowHeight": row_height,
         "thumbWidth": thumb_width.floor(),
         "thumbHeight": thumb_height,
-        "cardGeometry": geometry,
     })
 }
 
@@ -236,14 +226,17 @@ mod project_layout_tests {
     #[test]
     fn project_card_curves_and_dot_derive_from_the_outer_shape() {
         for scheme in [pm_design::Scheme::Dark, pm_design::Scheme::Light] {
-            let m = pm_design::Tokens::new(scheme, Default::default()).metrics;
-            let layout = super::project_layout(true, Some(300.), &m);
-            let shape = &layout["cardGeometry"];
+            let mut tokens = pm_design::Tokens::new(scheme, Default::default());
+            tokens.apply_patch([("metrics.control_radius", 16.)]).unwrap();
+            let m = tokens.metrics;
             let frame = (m.control_radius - m.media_comp_inset).max(2.);
-            assert_eq!(shape["frameRadius"].as_f64(), Some(f64::from(frame)));
-            assert_eq!(shape["radius"].as_f64(), Some(f64::from(m.control_radius)));
-            assert_eq!(shape["smallRadius"].as_f64(), Some(f64::from((m.control_radius - m.media_inset).max(2.))));
-            assert_eq!(shape["dotInset"].as_f64(), Some(f64::from(m.media_comp_inset + frame * (1. - 1. / 2_f32.sqrt()) + 3.)));
+            assert_eq!(m.control_radius, 16.);
+            assert_eq!(m.media_frame_radius, frame);
+            assert_eq!(m.media_small_radius, (m.control_radius - m.media_inset).max(2.));
+            assert_eq!(
+                m.media_open_dot_inset,
+                m.media_comp_inset + frame * (1. - 1. / 2_f32.sqrt()) + 3.
+            );
         }
     }
     /// The list is one column of rows; the grid fills its width with
@@ -2982,7 +2975,11 @@ impl Broker {
     fn forget_overlay(&self, panel: &str) {
         let id = format!("{panel}{VIEWER_OVERLAY}");
         self.publications.shared().remove(&id);
-        self.overlays_cleared.shared().push(id);
+        // Realm disposal and unmount may both retire the same overlay before the UI drains it.
+        let mut cleared = self.overlays_cleared.shared();
+        if !cleared.contains(&id) {
+            cleared.push(id);
+        }
     }
     fn forget_themes(&self, panel: &str) {
         let mut themes = self.themes.shared();

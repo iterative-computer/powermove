@@ -12,7 +12,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 
-use pm_eval::{Comp, CompiledExpression, ExprContext, ExprError, ExpressionEngine, JsValue};
+use pm_eval::{Comp, CompiledExpression, ExprContext, ExprDeps, ExprError, ExpressionEngine, JsValue};
 use pm_expr::{Context, Dialect, Expression, GeneralBinding, Host, JsStr, Object, Shape, Value};
 use pm_model::{JsString, Node, NodeKind};
 
@@ -319,6 +319,17 @@ impl<'a> Host for NodeHost<'a> {
 }
 
 impl CompiledExpression for Compiled {
+    fn dependencies(&self) -> ExprDeps {
+        let reach = self.source.expression.reach();
+        ExprDeps {
+            layer: reach.layer,
+            comp: reach.comp,
+            params: reach.params,
+            index: reach.index,
+            document: reach.document,
+        }
+    }
+
     fn needs_idx(&self) -> bool {
         self.index.is_none() && self.source.expression.needs_idx()
     }

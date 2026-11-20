@@ -41,6 +41,7 @@ fn key_only_label(command: &str, args: &[Value]) -> Option<String> {
         "selectAll" => "Select All".into(),
         "blurField" => "Leave Text Field".into(),
         "toggleLayerStrips" => "Show Layer Bars".into(),
+        "timeline.tool:split" => "Split Tool".into(),
         "renameLayer" => "Rename Layer".into(),
         "newCamera" => "New Camera".into(),
         "studio.view" => {
@@ -605,6 +606,9 @@ mod tests {
             .filter_map(|r| r["id"].as_str())
             .collect();
         assert!(unnamed.is_empty(), "no names for {unnamed:?}");
+        let split_tool = row(&page, "timeline.tool:split");
+        assert_eq!(split_tool["label"], "Split Tool");
+        assert_eq!(split_tool["keys"], json!(["C"]));
         assert_eq!(row(&page, "rippleTrimIn")["keys"], json!(["⌥⇧["]));
         assert_eq!(row(&page, "fitView")["keys"], json!(["⇧\\"]));
         // The viewer's keys are listed too, under View.

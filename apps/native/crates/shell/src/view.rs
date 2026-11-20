@@ -5331,12 +5331,10 @@ mod tests {
     }
 
     /// Acceptance run 24: a workspace naming a panel from an extension not
-    /// installed here. While the extensions load, its tab waits under a name
-    /// ("Background Remover", not its id); once they are in it takes no slot
-    /// but keeps its place in the workspace, and it comes back in that place
-    /// when its extension registers it (v1's `visibleDockPlan`, PM-454).
+    /// installed here. Its named placeholder keeps its saved place, even if
+    /// initial extension registration finishes without providing it.
     #[gpui::test]
-    fn a_panel_no_extension_provides_waits_by_name_then_takes_no_slot(cx: &mut TestAppContext) {
+    fn a_panel_no_extension_provides_keeps_its_named_placeholder(cx: &mut TestAppContext) {
         const ID: &str = "background-remover.panel";
         let mut mine = workspace::preset("design").unwrap();
         mine["id"] = "mine".into();
@@ -5372,8 +5370,11 @@ mod tests {
                 v.settle_absent_panels(cx);
                 assert!(v.layout.open_panels().contains(&ID), "waits while extensions load");
                 assert_eq!(v.panels(cx).title(ID), "Background Remover");
+                let layout = v.layout.clone();
                 assert!(v.run_shell_command("panels:ready", cx));
-                assert!(!v.layout.open_panels().contains(&ID), "no slot once they are in");
+                assert!(!v.panels(cx).contains(ID), "no extension provides the panel");
+                assert!(v.absent.contains(ID), "the placeholder remains unavailable");
+                assert_eq!(v.layout, layout, "its saved place and active tab remain");
                 assert!(v.layout.open_panels().contains(&"inspector"));
                 v.save();
                 let saved = serde_json::to_string(&v.record).unwrap();
@@ -5381,6 +5382,8 @@ mod tests {
                 // Its extension is installed: it is back where it was.
                 *kernel.contributed.borrow_mut() = vec![(ID.into(), "Background Remover".into())];
                 v.settle_absent_panels(cx);
+                assert!(!v.absent.contains(ID));
+                assert_eq!(v.layout, layout);
                 let (dock, group, _) = v.layout.find(ID).expect("back");
                 assert!(v.layout.docks[dock].groups[group].tabs.iter().any(|t| t == "inspector"));
             })
@@ -5460,12 +5463,27 @@ mod tests {
                     ..home.clone()
                 });
                 v.sync_workspaces(cx);
-                assert_eq!(v.workspace_record(), &workspace::preset("design").unwrap());
+                let design = workspace::preset("design").unwrap();
+                assert_eq!(v.workspace_record(), &design);
+                v.sync_workspaces(cx);
+                assert!(matches!(kernel.writes.borrow().as_slice(), [
+                    workspace::Write::Active { before, after }
+                ] if before.is_null() && *after == design));
+                *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+                    project_id: Some("new".into()),
+                    project: Some(design),
+                    ..home.clone()
+                });
+                v.sync_workspaces(cx);
+                assert!(v.pending.is_empty());
                 // From here on its own layout changes are its own.
                 let r = resized(&v.record, 360);
-                v.commit(r);
+                v.commit(r.clone());
                 v.sync_workspaces(cx);
-                assert_eq!(active_ids(&kernel), vec!["design".to_owned()]);
+                assert!(matches!(kernel.writes.borrow().as_slice(), [
+                    workspace::Write::Active { .. },
+                    workspace::Write::Active { after, .. }
+                ] if *after == r));
             })
             .unwrap();
     }
@@ -5527,6 +5545,7 @@ mod tests {
     #[gpui::test]
     fn inherited_workspace_is_written_without_a_layout_edit(cx: &mut TestAppContext) {
         let kernel = Rc::new(Kernel::default());
+        *kernel.project.borrow_mut() = Some("old-project".into());
         *kernel.store.borrow_mut() = Rc::new(workspace::Store {
             records: workspace::seeded(&[]),
             current: Some("review".into()),
@@ -5538,6 +5557,7 @@ mod tests {
         let window = cx.add_window(|_, cx| {
             let mut e = Editor::new(Tokens::new(pm_design::Scheme::Dark, Default::default()), None, cx);
             e.preferred = Some("review".into());
+            e.preferred_for = Some("old-project".into());
             e.integration = Some(Rc::new(Stub(stub)));
             e
         });

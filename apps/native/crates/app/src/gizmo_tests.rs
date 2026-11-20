@@ -1191,7 +1191,6 @@ fn channel(layer: &pm_model::Value, mask: bool, key: &str) -> Option<f64> {
 #[gpui::test]
 fn the_shape_tool_draws_a_shape_layer_from_a_drag(cx: &mut TestAppContext) {
     let mut s = stage_on(cx, &project_of("shape"));
-    let before_selection = s.rig.kernel.published(PROJECT).unwrap().selection.clone();
     let none = SelectionCall::Layers {
         ids: vec![],
         add: false,
@@ -1203,6 +1202,7 @@ fn the_shape_tool_draws_a_shape_layer_from_a_drag(cx: &mut TestAppContext) {
         .unwrap()
         .unwrap();
     cx.run_until_parked();
+    let before_selection = s.rig.kernel.published(PROJECT).unwrap().selection.clone();
     s.recorder.tool.set(Some(Tool::Shape));
     let at = s.point_of([300., 200.]);
     // The stage's drag waits for a selected layer's box; there is none yet.

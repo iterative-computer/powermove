@@ -2802,7 +2802,7 @@ mod tests {
                     bounds,
                     ..Default::default()
                 },
-                background,
+                background: background.into(),
                 ..Default::default()
             });
         }
@@ -2914,7 +2914,7 @@ mod tests {
                 bounds: underline_frame,
                 ..Default::default()
             },
-            background: solid_background(hsla(0.0, 0.0, 0.1, 1.0)),
+            background: solid_background(hsla(0.0, 0.0, 0.1, 1.0)).into(),
             ..Default::default()
         });
         underline.insert_primitive(Underline {
@@ -3017,7 +3017,7 @@ mod tests {
                 bounds: full,
                 ..Default::default()
             },
-            background: solid_background(hsla(0.05, 0.8, 0.45, 1.0)),
+            background: solid_background(hsla(0.05, 0.8, 0.45, 1.0)).into(),
             border_style: BorderStyle::Dashed,
             border_color: hsla(0.6, 0.9, 0.7, 1.0).into(),
             corner_radii: Corners::all(ScaledPixels(2.0)),
@@ -3064,7 +3064,7 @@ mod tests {
                 bounds: full,
                 ..Default::default()
             },
-            background: solid_background(hsla(0.05, 0.8, 0.45, 1.0)),
+            background: solid_background(hsla(0.05, 0.8, 0.45, 1.0)).into(),
             border_style: BorderStyle::Dashed,
             border_dashed_length: 4.0,
             border_dashed_gap: 0.5,
@@ -3180,7 +3180,7 @@ mod tests {
                 bounds: full,
                 ..Default::default()
             },
-            background: checkerboard(hsla(0.2, 0.7, 0.5, 1.0), 2.0),
+            background: checkerboard(hsla(0.2, 0.7, 0.5, 1.0), 2.0).into(),
             ..Default::default()
         });
         filter.insert_primitive(BackdropFilter {

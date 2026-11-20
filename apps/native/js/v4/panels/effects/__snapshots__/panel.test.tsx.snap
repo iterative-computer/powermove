@@ -329,6 +329,9 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -336,7 +339,7 @@ exports[`Effects spec state: empty has a validated op-tree and native accessibil
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -1911,6 +1914,9 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -1918,7 +1924,7 @@ exports[`Effects spec state: loading-N-A-synchronous-registry has a validated op
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -3628,6 +3634,9 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -3635,7 +3644,7 @@ exports[`Effects spec state: selected has a validated op-tree and native accessi
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -5345,6 +5354,9 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -5352,7 +5364,7 @@ exports[`Effects spec state: hover has a validated op-tree and native accessibil
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -7059,6 +7071,9 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -7066,7 +7081,7 @@ exports[`Effects spec state: focus has a validated op-tree and native accessibil
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -8773,6 +8788,9 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -8780,7 +8798,7 @@ exports[`Effects spec state: disabled has a validated op-tree and native accessi
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -9922,6 +9940,9 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -9929,7 +9950,7 @@ exports[`Effects spec state: error has a validated op-tree and native accessibil
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -11570,6 +11591,9 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -11577,7 +11601,7 @@ exports[`Effects spec state: drag-source-model-payload-native-image-pending has 
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -13220,6 +13244,9 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -13227,7 +13254,7 @@ exports[`Effects spec state: drop-N-A-panel-does-not-accept has a validated op-t
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -14937,6 +14964,9 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -14944,7 +14974,7 @@ exports[`Effects spec state: multi-select-N-A-single-ID has a validated op-tree 
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -15689,6 +15719,9 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -15696,7 +15729,7 @@ exports[`Effects spec state: no-search-results has a validated op-tree and nativ
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -16541,6 +16574,9 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -16548,7 +16584,7 @@ exports[`Effects spec state: empty-scope has a validated op-tree and native acce
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -17650,6 +17686,9 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -17657,7 +17696,7 @@ exports[`Effects spec state: search-match has a validated op-tree and native acc
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -19120,6 +19159,9 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -19127,7 +19169,7 @@ exports[`Effects spec state: recent-flat has a validated op-tree and native acce
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -20478,6 +20520,9 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -20485,7 +20530,7 @@ exports[`Effects spec state: collapsed has a validated op-tree and native access
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -20892,11 +20937,11 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
     },
     {
       "actions": [],
-      "disabled": false,
+      "disabled": true,
       "expanded": null,
       "id": 18,
-      "label": "Gaussian Blur",
-      "role": "Label",
+      "label": "Animation preset",
+      "role": "Button",
       "selected": null,
       "value": null,
     },
@@ -20915,7 +20960,7 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
       "disabled": false,
       "expanded": null,
       "id": 20,
-      "label": null,
+      "label": "Gaussian Blur",
       "role": "Label",
       "selected": null,
       "value": null,
@@ -20946,7 +20991,7 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
       "expanded": null,
       "id": 23,
       "label": null,
-      "role": "GenericContainer",
+      "role": "Label",
       "selected": null,
       "value": null,
     },
@@ -20955,6 +21000,16 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
       "disabled": false,
       "expanded": null,
       "id": 24,
+      "label": null,
+      "role": "GenericContainer",
+      "selected": null,
+      "value": null,
+    },
+    {
+      "actions": [],
+      "disabled": false,
+      "expanded": null,
+      "id": 25,
       "label": null,
       "role": "Label",
       "selected": null,
@@ -21282,7 +21337,8 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
     "17": {
       "children": [
         18,
-        23,
+        19,
+        24,
       ],
       "id": 17,
       "input": null,
@@ -21379,12 +21435,43 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
       "type": "div",
     },
     "18": {
-      "children": [
-        19,
-        20,
-        22,
-      ],
+      "children": [],
       "id": 18,
+      "input": null,
+      "listeners": {},
+      "parent": 17,
+      "props": {
+        "attr": {
+          "symbol": "square.stack",
+        },
+        "data-pm-component": "toolbar-item",
+        "disabled": true,
+        "label": "Animation preset",
+        "style": {
+          "color": {
+            "token": "colors.secondary",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+          "symbolSize": {
+            "token": "metrics.symbol_toolbar",
+          },
+        },
+      },
+      "text": "",
+      "type": "button",
+    },
+    "19": {
+      "children": [
+        20,
+        21,
+        23,
+      ],
+      "id": 19,
       "input": null,
       "listeners": {},
       "parent": 17,
@@ -21405,16 +21492,6 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
         "title": "Gaussian Blur",
       },
       "text": "",
-      "type": "text",
-    },
-    "19": {
-      "children": [],
-      "id": 19,
-      "input": null,
-      "listeners": {},
-      "parent": 18,
-      "props": {},
-      "text": "Gaussian Blur",
       "type": "text",
     },
     "2": {
@@ -21453,13 +21530,23 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
       "type": "text",
     },
     "20": {
-      "children": [
-        21,
-      ],
+      "children": [],
       "id": 20,
       "input": null,
       "listeners": {},
-      "parent": 18,
+      "parent": 19,
+      "props": {},
+      "text": "Gaussian Blur",
+      "type": "text",
+    },
+    "21": {
+      "children": [
+        22,
+      ],
+      "id": 21,
+      "input": null,
+      "listeners": {},
+      "parent": 19,
       "props": {
         "style": {
           "fontWeight": {
@@ -21470,31 +21557,31 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
       "text": "",
       "type": "text",
     },
-    "21": {
-      "children": [],
-      "id": 21,
-      "input": null,
-      "listeners": {},
-      "parent": 20,
-      "props": {},
-      "text": "",
-      "type": "text",
-    },
     "22": {
       "children": [],
       "id": 22,
       "input": null,
       "listeners": {},
-      "parent": 18,
+      "parent": 21,
       "props": {},
       "text": "",
       "type": "text",
     },
     "23": {
-      "children": [
-        24,
-      ],
+      "children": [],
       "id": 23,
+      "input": null,
+      "listeners": {},
+      "parent": 19,
+      "props": {},
+      "text": "",
+      "type": "text",
+    },
+    "24": {
+      "children": [
+        25,
+      ],
+      "id": 24,
       "input": null,
       "listeners": {},
       "parent": 17,
@@ -21511,12 +21598,12 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
       "text": "",
       "type": "div",
     },
-    "24": {
+    "25": {
       "children": [],
-      "id": 24,
+      "id": 25,
       "input": null,
       "listeners": {},
-      "parent": 23,
+      "parent": 24,
       "props": {},
       "text": "",
       "type": "text",
@@ -21600,6 +21687,9 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -21607,7 +21697,7 @@ exports[`Effects spec state: preset-supplied-by-model has a validated op-tree an
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {
@@ -23777,6 +23867,9 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
       },
       "parent": 4,
       "props": {
+        "attr": {
+          "symbol": "magnifyingglass",
+        },
         "binding": "local:effects:search",
         "control": "text",
         "data-pm-component": "text-field",
@@ -23784,7 +23877,7 @@ exports[`Effects spec state: 60k-rows has a validated op-tree and native accessi
         "id": "fxbrowser:search",
         "label": "Search effects",
         "metadata": {
-          "placeholder": "Search",
+          "placeholder": "Search effects and presets",
           "search": true,
         },
         "preventDefault": {

@@ -340,6 +340,10 @@ const ROLES: &[(&str, &str)] = &[
         "metrics.curve_editor_wide",
         "The curve editor's greatest width in a wide panel",
     ),
+    (
+        "metrics.easing_preset_columns",
+        "Equal-width columns in each Easing preset family",
+    ),
     ("metrics.layer_column", "Timeline layer list column width"),
     ("metrics.clip_radius", "Timeline clip bar corner radius"),
     ("metrics.playhead", "Playhead line width"),
@@ -471,6 +475,18 @@ const ROLES: &[(&str, &str)] = &[
     (
         "metrics.media_comp_inset",
         "A composition's frame inside its Project tile",
+    ),
+    (
+        "metrics.media_frame_radius",
+        "Corner radius of the composition frame inside a Project tile",
+    ),
+    (
+        "metrics.media_small_radius",
+        "Corner radius of compact Project thumbnails",
+    ),
+    (
+        "metrics.media_open_dot_inset",
+        "Inset of the open-composition indicator from the tile corner",
     ),
     (
         "metrics.media_tint_opacity",

@@ -494,9 +494,18 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
     // Two layers: a title says how many; the lower can be the upper's matte.
     desk.select(&["a", "b"]);
     let two = labels(&menu(&desk, "a", 1.));
-    assert_eq!(two[0], "2 Layers");
-    assert_eq!(two[6], "Use Bottom Layer as Mask");
-    assert_eq!(two[7], "-");
+    assert_eq!(
+        &two[..7],
+        [
+            "2 Layers",
+            "Save Animation Preset…",
+            "Duplicate",
+            "Group Layers",
+            "Pre-compose…",
+            "Use Bottom Layer as Mask",
+            "-",
+        ]
+    );
     // Text layers split; nothing else offers it.
     desk.select(&["t"]);
     // One layer: Rename… leads (v1).
@@ -508,12 +517,12 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
     // A group ungroups, right after Group Layers, and has no timing of its own.
     desk.select(&["g"]);
     let group = labels(&menu(&desk, "g", 1.));
-    assert_eq!(group[2..4], ["Group Layers", "Ungroup Layers"]);
+    assert_eq!(group[3..5], ["Group Layers", "Ungroup Layers"]);
     assert!(!group.contains(&"Timing".to_owned()));
     // One pre-comp releases into its layers and can rasterize continuously.
     desk.select(&["p"]);
     let precomp = labels(&menu(&desk, "p", 1.));
-    assert_eq!(precomp[3..5], ["Pre-compose…", "Release Pre-comp"]);
+    assert_eq!(precomp[4..6], ["Pre-compose…", "Release Pre-comp"]);
     let raster = precomp.iter().position(|l| l == "Continuously Rasterize");
     assert_eq!(raster, Some(precomp.len() - 3), "{precomp:?}");
     // A video that carries its soundtrack.

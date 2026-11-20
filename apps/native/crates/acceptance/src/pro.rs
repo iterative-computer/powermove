@@ -5,6 +5,7 @@ use pm_kernel::commands::{
     pro_links::ProLinkCommand as Link,
     pro_source::*,
 };
+use pm_kernel::pro_editing::{ProAction, ProReply, ProRequest};
 use pm_kernel::session::{SessionHandle, SessionSource, ShellCall, ShellReply};
 use pm_kernel::{
     Call, Caller, Command, HistoryCall, KernelActor, Origin, Reply, Request, WriteBody,
@@ -103,16 +104,22 @@ impl Project {
         })
     }
     fn reject(&self, command: impl Into<Command>) -> Check {
+        self.reject_with(|| self.edit(command))
+    }
+    fn reject_with(&self, edit: impl FnOnce() -> Check) -> Check {
         let before = self.document()?;
         let history = self.host.inspect_project("P-pro").unwrap().history.clone();
-        assert!(self.edit(command).is_err());
+        assert!(edit().is_err());
         assert_eq!(self.document()?, before);
         assert_eq!(self.host.inspect_project("P-pro").unwrap().history, history);
         Ok(())
     }
     fn roundtrip(&self, command: impl Into<Command>) -> Check {
+        self.roundtrip_with(|| self.edit(command))
+    }
+    fn roundtrip_with(&self, edit: impl FnOnce() -> Check) -> Check {
         let before = without_revision(self.document()?);
-        self.edit(command)?;
+        edit()?;
         let after = without_revision(self.document()?);
         assert_ne!(after, before);
         self.call(HistoryCall::Undo)?;
@@ -203,23 +210,49 @@ pub fn ripple_trim() -> Check {
 }
 pub fn roll() -> Check {
     let p = Project::new(false, false)?;
-    p.roundtrip(Edit::Roll {
-        left_id: "a".into(),
-        right_id: "b".into(),
-        delta: 1.,
-        linked: true,
-    })?;
+    let roll = |delta: f64| -> Check {
+        let action = ProAction::decode(
+            &pm_model::json::parse(
+                &json!({"op":"roll","leftId":"a","rightId":"b","delta":delta,"linked":true})
+                    .to_string(),
+            )
+            .unwrap(),
+        )
+        .map_err(|e| e.to_string())?;
+        let project = p.host.inspect_project("P-pro").map_err(|e| e.to_string())?;
+        let reply = p
+            .host
+            .kernel
+            .pro_editing(
+                "P-pro",
+                ProRequest {
+                    caller: Caller::native(),
+                    document: project.snapshot.doc_id,
+                    revision: project.revision(),
+                    state_revision: None,
+                    txid: None,
+                    action,
+                },
+            )
+            .wait()
+            .ok_or("actor stopped")?
+            .map_err(|e| e.to_string())?;
+        match reply {
+            ProReply::Document(ack) => match ack.reply {
+                Reply::Applied { changed: true, .. } => Ok(()),
+                Reply::Throw(e) => Err(e.to_string()),
+                other => panic!("unexpected typed Roll transaction reply: {other:?}"),
+            },
+            other => panic!("unexpected typed Roll reply: {other:?}"),
+        }
+    };
+    p.roundtrip_with(|| roll(1.))?;
     let d = p.document()?;
     assert_eq!(layer(&d, "a")["dur"], 5);
     assert_eq!(layer(&d, "b")["dur"], 3);
     assert_eq!(layer(&d, "b")["d"]["trim"]["v"], 7);
     assert_eq!(layer(&d, "b")["p"]["opacity"]["kf"][0]["t"], 0);
-    p.reject(Edit::Roll {
-        left_id: "a".into(),
-        right_id: "b".into(),
-        delta: 100.,
-        linked: true,
-    })
+    p.reject_with(|| roll(100.))
 }
 pub fn slide() -> Check {
     let p = Project::new(false, false)?;

@@ -3126,6 +3126,7 @@ fn an_extension_draws_a_viewer_overlay_that_follows_the_frame() {
             .all(|p| p.panel != overlay)
     );
     panels.unmount_extension("synthetic-overlay");
+    panels.unmount_extension("synthetic-overlay");
     assert_eq!(panels.take_cleared_overlays(), vec![overlay.to_owned()]);
     panels.close();
     actor.shutdown();
@@ -6620,7 +6621,7 @@ fn properties_show_and_edit_a_layer_transition() {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|s| s["id"].as_str().is_some_and(|id| id.starts_with("transition.")))
+            .filter(|s| s["id"].as_str().is_some_and(|id| id.starts_with("transition-")))
             .cloned()
             .collect();
         (sections, model)
@@ -6632,7 +6633,8 @@ fn properties_show_and_edit_a_layer_transition() {
     let (sections, mut model) = snapshot(&mut presenter);
     assert_eq!(sections.len(), 1, "only the In edge has one");
     let section = &sections[0];
-    assert_eq!(section["title"], "Transition In");
+    assert_eq!(section["id"], "transition-in");
+    assert_eq!(section["title"], "Wipe · In");
     assert_eq!(section["action"], "remove-transition");
     let rows = section["rows"].as_array().unwrap();
     let row = |label: &str| rows.iter().find(|r| r["label"] == label).unwrap_or_else(|| panic!("{label}"));
@@ -6678,7 +6680,7 @@ fn properties_show_and_edit_a_layer_transition() {
         .intent(
             &mut model,
             Caller::native(),
-            &serde_json::json!({"type":"section-action","section":"transition.in","action":"remove-transition"}),
+            &serde_json::json!({"type":"section-action","section":"transition-in","action":"remove-transition"}),
             0.,
         )
         .unwrap()

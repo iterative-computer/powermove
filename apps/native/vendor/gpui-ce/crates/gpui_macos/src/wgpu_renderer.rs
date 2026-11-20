@@ -168,7 +168,7 @@ mod tests {
                 bounds: bounds(32.0),
                 ..Default::default()
             },
-            background: gpui::solid_background(gpui::red()),
+            background: gpui::red().into(),
             ..Default::default()
         });
         scene.finish();

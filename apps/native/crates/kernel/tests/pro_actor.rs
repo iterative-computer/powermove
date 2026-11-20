@@ -72,6 +72,34 @@ fn redo(h: &KernelHandle) {
     ));
 }
 #[test]
+fn typed_roll_rejects_an_oversized_delta_without_mutation() {
+    let a = actor(vec![clip("a", 0., 4., 0), clip("b", 4., 4., 0)]);
+    let h = a.handle();
+    let roll = |delta| {
+        json!({"op":"roll","leftId":"a","rightId":"b","delta":delta,"linked":false})
+    };
+    let before = tree(&h);
+    let published = h.published("P").unwrap();
+    let ProReply::Document(ack) = send(&h, roll(100.)) else {
+        panic!("expected the typed transaction reply");
+    };
+    assert!(matches!(
+        ack.reply,
+        Reply::Throw(pm_kernel::KernelError::Transaction(
+            pm_kernel::TransactionError::Command(pm_kernel::CommandError::Invalid(_))
+        ))
+    ));
+    assert_eq!(tree(&h), before);
+    let after = h.published("P").unwrap();
+    assert_eq!(after.revision(), published.revision());
+    assert_eq!(after.history, published.history);
+
+    good(&h, roll(1.));
+    assert_eq!(get(&h, "a").get("dur"), Some(&Value::Number(5.)));
+    assert_eq!(get(&h, "b").get("from"), Some(&Value::Number(5.)));
+}
+
+#[test]
 fn ripple_roll_slide_are_published_one_step_and_roundtrip_exactly() {
     for command in [
         json!({"op":"rippleDelete","layerIds":["b"],"tracks":[{"track":0}],"linked":true}),

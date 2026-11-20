@@ -124,13 +124,15 @@ def codex():
             if os.environ.get('PM_FAKE_REQUESTS'):
                 with open(os.environ['PM_FAKE_REQUESTS'], 'a') as record:
                     record.write(json.dumps({'cwd': os.getcwd(), 'request': request}) + '\n')
-            last = request['params']['input'][0]['text'].split('\n')[-1]
+            prompt = request['params']['input'][0]['text']
+            # Attachment metadata follows the brief; it is not a fixture command.
+            last = prompt.rsplit('\n\nATTACHED FILES\n', 1)[0].split('\n')[-1]
             if last.startswith('Secret:'):
                 emit({'id': 900, 'method': 'item/tool/requestUserInput', 'params': {**turn, 'itemId': 'q1', 'isBlocking': True,
                     'questions': [{'id': 'pin', 'question': 'What is the PIN?', 'isSecret': True}]}})
             elif mode == 'stream':
                 threading.Thread(target=stream, args=(turn,), daemon=True).start()
-            elif mode != 'hold' and not request['params']['input'][0]['text'].split('\n')[-1].startswith('Hold:'):
+            elif mode != 'hold' and not last.startswith('Hold:'):
                 if mode == 'slow':
                     release = os.environ.get('PM_FAKE_CHILD_RELEASE')
                     if release and last == 'Child brief':
@@ -141,7 +143,7 @@ def codex():
                             time.sleep(0.005)
                     else:
                         time.sleep(float(os.environ.get('PM_FAKE_DELAY', '0.4')))
-                elif request['params']['input'][0]['text'].split('\n')[-1].startswith('Slow:'):
+                elif last.startswith('Slow:'):
                     time.sleep(12)
                 text = 'Saw: ' + request['params']['input'][0]['text'].split('\n')[-1]
                 emit({'method': 'item/agentMessage/delta', 'params': {**turn, 'itemId': 'answer', 'delta': text}})

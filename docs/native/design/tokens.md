@@ -109,6 +109,7 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.drag_opacity` | Opacity of a drag source left in place | 0.5 | 0.5 | 0.5 | 0.5 |
 | `metrics.drag_threshold` | Pointer travel before a drag starts | 3 | 3 | 3 | 3 |
 | `metrics.drop_stroke` | Drop-target inner stroke | 1.5 | 1.5 | 2 | 2 |
+| `metrics.easing_preset_columns` | Equal-width columns in each Easing preset family | 3 | 3 | 3 | 3 |
 | `metrics.edge_strip` | Width of a side drop strip where no dock stands | 96 | 96 | 96 | 96 |
 | `metrics.edge_strip_bottom` | Height of the bottom drop strip where no dock stands | 56 | 56 | 56 | 56 |
 | `metrics.export_job_progress_height` | Inline export job progress stroke | 2 | 2 | 2 | 2 |
@@ -143,13 +144,16 @@ Every token needs a role sentence in `crates/design/tests/spec.rs`.
 | `metrics.media_badge_opacity` | Opacity of the media badge fill | 0.55 | 0.55 | 0.55 | 0.55 |
 | `metrics.media_comp_inset` | A composition's frame inside its Project tile | 8 | 8 | 8 | 8 |
 | `metrics.media_folder_glyph` | Folder glyph on a Project folder tile | 30 | 30 | 30 | 30 |
+| `metrics.media_frame_radius` | Corner radius of the composition frame inside a Project tile | 2 | 2 | 2 | 2 |
 | `metrics.media_glyph` | Media kind glyph on a Project tile without a picture | 22 | 22 | 22 | 22 |
 | `metrics.media_inset` | Project tile badges and actions from the tile edge; badge padding; tile-to-name gap | 4 | 4 | 4 | 4 |
 | `metrics.media_loading_opacity` | A Project tile's picture while its media loads | 0.55 | 0.55 | 0.55 | 0.55 |
 | `metrics.media_offline_opacity` | A missing file's remembered picture under its badge | 0.32 | 0.32 | 0.32 | 0.32 |
+| `metrics.media_open_dot_inset` | Inset of the open-composition indicator from the tile corner | 11.586 | 11.586 | 11.586 | 11.586 |
 | `metrics.media_ring` | Selection ring inside a Project tile | 2 | 2 | 2 | 2 |
 | `metrics.media_row_thumb_height` | Height of a Project list row's leading thumbnail | 18 | 18 | 18 | 18 |
 | `metrics.media_row_thumb_width` | Width of a Project list row's leading thumbnail | 32 | 32 | 32 | 32 |
+| `metrics.media_small_radius` | Corner radius of compact Project thumbnails | 4 | 4 | 4 | 4 |
 | `metrics.media_tint_opacity` | Red or accent wash over a Project tile needing attention | 0.1 | 0.1 | 0.1 | 0.1 |
 | `metrics.menu_inset` | Menu and palette row inset | 12 | 12 | 12 | 12 |
 | `metrics.menu_row` | Palette row height | 30 | 30 | 30 | 30 |

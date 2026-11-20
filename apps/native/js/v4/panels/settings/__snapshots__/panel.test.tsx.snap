@@ -809,496 +809,514 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
                   button push-button label="Bring Sign-Ins from the Original App…"
                     text "Bring Sign-Ins from the Original App…"
         div
-          input text-field label="Filter extensions" value=""
+          text heading
+            text "Extensions"
+          text
+            text "Manage extensions and turn them on or off."
+        div
+          input text-field label="Search extensions" value=""
           button pop-up-button label="Extension Type" value="All Types"
-        div group label="Installed"
+        div
+          div segmented-control radiogroup label="Extension status"
+            button segment radio P0-0:all label="All 60000"
+              text "All 60000"
+            button segment radio P0-0:enabled label="Enabled 60000"
+              text "Enabled 60000"
+            button segment radio P0-0:off label="Off 0"
+              text "Off 0"
+            button segment radio P0-0:attention label="Needs attention 0"
+              text "Needs attention 0"
+        div group label="Effects · 60000"
           div
-            text heading
-              text "Installed"
-          div group label="Installed"
-            div form-group group label="Installed"
-              div
-                virtual-list list settings.extensions label="Extensions" count=60000 range=29980,30040
-                  div listitem settings.extension.fixture-29980 label="Fixture 29980"
-                    button push-button label="Fixture 29980"
-                      text "Fixture 29980"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29980"
-                        text "Details"
-                  div listitem settings.extension.fixture-29981 label="Fixture 29981"
-                    button push-button label="Fixture 29981"
-                      text "Fixture 29981"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29981"
-                        text "Details"
-                  div listitem settings.extension.fixture-29982 label="Fixture 29982"
-                    button push-button label="Fixture 29982"
-                      text "Fixture 29982"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29982"
-                        text "Details"
-                  div listitem settings.extension.fixture-29983 label="Fixture 29983"
-                    button push-button label="Fixture 29983"
-                      text "Fixture 29983"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29983"
-                        text "Details"
-                  div listitem settings.extension.fixture-29984 label="Fixture 29984"
-                    button push-button label="Fixture 29984"
-                      text "Fixture 29984"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29984"
-                        text "Details"
-                  div listitem settings.extension.fixture-29985 label="Fixture 29985"
-                    button push-button label="Fixture 29985"
-                      text "Fixture 29985"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29985"
-                        text "Details"
-                  div listitem settings.extension.fixture-29986 label="Fixture 29986"
-                    button push-button label="Fixture 29986"
-                      text "Fixture 29986"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29986"
-                        text "Details"
-                  div listitem settings.extension.fixture-29987 label="Fixture 29987"
-                    button push-button label="Fixture 29987"
-                      text "Fixture 29987"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29987"
-                        text "Details"
-                  div listitem settings.extension.fixture-29988 label="Fixture 29988"
-                    button push-button label="Fixture 29988"
-                      text "Fixture 29988"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29988"
-                        text "Details"
-                  div listitem settings.extension.fixture-29989 label="Fixture 29989"
-                    button push-button label="Fixture 29989"
-                      text "Fixture 29989"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29989"
-                        text "Details"
-                  div listitem settings.extension.fixture-29990 label="Fixture 29990"
-                    button push-button label="Fixture 29990"
-                      text "Fixture 29990"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29990"
-                        text "Details"
-                  div listitem settings.extension.fixture-29991 label="Fixture 29991"
-                    button push-button label="Fixture 29991"
-                      text "Fixture 29991"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29991"
-                        text "Details"
-                  div listitem settings.extension.fixture-29992 label="Fixture 29992"
-                    button push-button label="Fixture 29992"
-                      text "Fixture 29992"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29992"
-                        text "Details"
-                  div listitem settings.extension.fixture-29993 label="Fixture 29993"
-                    button push-button label="Fixture 29993"
-                      text "Fixture 29993"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29993"
-                        text "Details"
-                  div listitem settings.extension.fixture-29994 label="Fixture 29994"
-                    button push-button label="Fixture 29994"
-                      text "Fixture 29994"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29994"
-                        text "Details"
-                  div listitem settings.extension.fixture-29995 label="Fixture 29995"
-                    button push-button label="Fixture 29995"
-                      text "Fixture 29995"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29995"
-                        text "Details"
-                  div listitem settings.extension.fixture-29996 label="Fixture 29996"
-                    button push-button label="Fixture 29996"
-                      text "Fixture 29996"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29996"
-                        text "Details"
-                  div listitem settings.extension.fixture-29997 label="Fixture 29997"
-                    button push-button label="Fixture 29997"
-                      text "Fixture 29997"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29997"
-                        text "Details"
-                  div listitem settings.extension.fixture-29998 label="Fixture 29998"
-                    button push-button label="Fixture 29998"
-                      text "Fixture 29998"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29998"
-                        text "Details"
-                  div listitem settings.extension.fixture-29999 label="Fixture 29999"
-                    button push-button label="Fixture 29999"
-                      text "Fixture 29999"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 29999"
-                        text "Details"
-                  div listitem settings.extension.fixture-30000 label="Fixture 30000"
-                    button push-button label="Fixture 30000"
-                      text "Fixture 30000"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30000"
-                        text "Details"
-                  div listitem settings.extension.fixture-30001 label="Fixture 30001"
-                    button push-button label="Fixture 30001"
-                      text "Fixture 30001"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30001"
-                        text "Details"
-                  div listitem settings.extension.fixture-30002 label="Fixture 30002"
-                    button push-button label="Fixture 30002"
-                      text "Fixture 30002"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30002"
-                        text "Details"
-                  div listitem settings.extension.fixture-30003 label="Fixture 30003"
-                    button push-button label="Fixture 30003"
-                      text "Fixture 30003"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30003"
-                        text "Details"
-                  div listitem settings.extension.fixture-30004 label="Fixture 30004"
-                    button push-button label="Fixture 30004"
-                      text "Fixture 30004"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30004"
-                        text "Details"
-                  div listitem settings.extension.fixture-30005 label="Fixture 30005"
-                    button push-button label="Fixture 30005"
-                      text "Fixture 30005"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30005"
-                        text "Details"
-                  div listitem settings.extension.fixture-30006 label="Fixture 30006"
-                    button push-button label="Fixture 30006"
-                      text "Fixture 30006"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30006"
-                        text "Details"
-                  div listitem settings.extension.fixture-30007 label="Fixture 30007"
-                    button push-button label="Fixture 30007"
-                      text "Fixture 30007"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30007"
-                        text "Details"
-                  div listitem settings.extension.fixture-30008 label="Fixture 30008"
-                    button push-button label="Fixture 30008"
-                      text "Fixture 30008"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30008"
-                        text "Details"
-                  div listitem settings.extension.fixture-30009 label="Fixture 30009"
-                    button push-button label="Fixture 30009"
-                      text "Fixture 30009"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30009"
-                        text "Details"
-                  div listitem settings.extension.fixture-30010 label="Fixture 30010"
-                    button push-button label="Fixture 30010"
-                      text "Fixture 30010"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30010"
-                        text "Details"
-                  div listitem settings.extension.fixture-30011 label="Fixture 30011"
-                    button push-button label="Fixture 30011"
-                      text "Fixture 30011"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30011"
-                        text "Details"
-                  div listitem settings.extension.fixture-30012 label="Fixture 30012"
-                    button push-button label="Fixture 30012"
-                      text "Fixture 30012"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30012"
-                        text "Details"
-                  div listitem settings.extension.fixture-30013 label="Fixture 30013"
-                    button push-button label="Fixture 30013"
-                      text "Fixture 30013"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30013"
-                        text "Details"
-                  div listitem settings.extension.fixture-30014 label="Fixture 30014"
-                    button push-button label="Fixture 30014"
-                      text "Fixture 30014"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30014"
-                        text "Details"
-                  div listitem settings.extension.fixture-30015 label="Fixture 30015"
-                    button push-button label="Fixture 30015"
-                      text "Fixture 30015"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30015"
-                        text "Details"
-                  div listitem settings.extension.fixture-30016 label="Fixture 30016"
-                    button push-button label="Fixture 30016"
-                      text "Fixture 30016"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30016"
-                        text "Details"
-                  div listitem settings.extension.fixture-30017 label="Fixture 30017"
-                    button push-button label="Fixture 30017"
-                      text "Fixture 30017"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30017"
-                        text "Details"
-                  div listitem settings.extension.fixture-30018 label="Fixture 30018"
-                    button push-button label="Fixture 30018"
-                      text "Fixture 30018"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30018"
-                        text "Details"
-                  div listitem settings.extension.fixture-30019 label="Fixture 30019"
-                    button push-button label="Fixture 30019"
-                      text "Fixture 30019"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30019"
-                        text "Details"
-                  div listitem settings.extension.fixture-30020 label="Fixture 30020"
-                    button push-button label="Fixture 30020"
-                      text "Fixture 30020"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30020"
-                        text "Details"
-                  div listitem settings.extension.fixture-30021 label="Fixture 30021"
-                    button push-button label="Fixture 30021"
-                      text "Fixture 30021"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30021"
-                        text "Details"
-                  div listitem settings.extension.fixture-30022 label="Fixture 30022"
-                    button push-button label="Fixture 30022"
-                      text "Fixture 30022"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30022"
-                        text "Details"
-                  div listitem settings.extension.fixture-30023 label="Fixture 30023"
-                    button push-button label="Fixture 30023"
-                      text "Fixture 30023"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30023"
-                        text "Details"
-                  div listitem settings.extension.fixture-30024 label="Fixture 30024"
-                    button push-button label="Fixture 30024"
-                      text "Fixture 30024"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30024"
-                        text "Details"
-                  div listitem settings.extension.fixture-30025 label="Fixture 30025"
-                    button push-button label="Fixture 30025"
-                      text "Fixture 30025"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30025"
-                        text "Details"
-                  div listitem settings.extension.fixture-30026 label="Fixture 30026"
-                    button push-button label="Fixture 30026"
-                      text "Fixture 30026"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30026"
-                        text "Details"
-                  div listitem settings.extension.fixture-30027 label="Fixture 30027"
-                    button push-button label="Fixture 30027"
-                      text "Fixture 30027"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30027"
-                        text "Details"
-                  div listitem settings.extension.fixture-30028 label="Fixture 30028"
-                    button push-button label="Fixture 30028"
-                      text "Fixture 30028"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30028"
-                        text "Details"
-                  div listitem settings.extension.fixture-30029 label="Fixture 30029"
-                    button push-button label="Fixture 30029"
-                      text "Fixture 30029"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30029"
-                        text "Details"
-                  div listitem settings.extension.fixture-30030 label="Fixture 30030"
-                    button push-button label="Fixture 30030"
-                      text "Fixture 30030"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30030"
-                        text "Details"
-                  div listitem settings.extension.fixture-30031 label="Fixture 30031"
-                    button push-button label="Fixture 30031"
-                      text "Fixture 30031"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30031"
-                        text "Details"
-                  div listitem settings.extension.fixture-30032 label="Fixture 30032"
-                    button push-button label="Fixture 30032"
-                      text "Fixture 30032"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30032"
-                        text "Details"
-                  div listitem settings.extension.fixture-30033 label="Fixture 30033"
-                    button push-button label="Fixture 30033"
-                      text "Fixture 30033"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30033"
-                        text "Details"
-                  div listitem settings.extension.fixture-30034 label="Fixture 30034"
-                    button push-button label="Fixture 30034"
-                      text "Fixture 30034"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30034"
-                        text "Details"
-                  div listitem settings.extension.fixture-30035 label="Fixture 30035"
-                    button push-button label="Fixture 30035"
-                      text "Fixture 30035"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30035"
-                        text "Details"
-                  div listitem settings.extension.fixture-30036 label="Fixture 30036"
-                    button push-button label="Fixture 30036"
-                      text "Fixture 30036"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30036"
-                        text "Details"
-                  div listitem settings.extension.fixture-30037 label="Fixture 30037"
-                    button push-button label="Fixture 30037"
-                      text "Fixture 30037"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30037"
-                        text "Details"
-                  div listitem settings.extension.fixture-30038 label="Fixture 30038"
-                    button push-button label="Fixture 30038"
-                      text "Fixture 30038"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30038"
-                        text "Details"
-                  div listitem settings.extension.fixture-30039 label="Fixture 30039"
-                    button push-button label="Fixture 30039"
-                      text "Fixture 30039"
-                    div
-                      text
-                        text "Effects · Installed"
-                      button push-button label="Details for Fixture 30039"
-                        text "Details"
+            div
+              img
+              text heading
+                text "Effects · 60000"
+          div group label="Effects · 60000"
+            div form-group group label="Effects · 60000"
+              virtual-list list settings.extensions.Effects label="Effects" count=60000 range=29980,30040
+                div listitem settings.extension.fixture-29980 label="Fixture 29980"
+                  button push-button label="Fixture 29980"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29980" value=true disabled
+                    button push-button label="Details for Fixture 29980"
+                      text "Details"
+                div listitem settings.extension.fixture-29981 label="Fixture 29981"
+                  button push-button label="Fixture 29981"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29981" value=true disabled
+                    button push-button label="Details for Fixture 29981"
+                      text "Details"
+                div listitem settings.extension.fixture-29982 label="Fixture 29982"
+                  button push-button label="Fixture 29982"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29982" value=true disabled
+                    button push-button label="Details for Fixture 29982"
+                      text "Details"
+                div listitem settings.extension.fixture-29983 label="Fixture 29983"
+                  button push-button label="Fixture 29983"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29983" value=true disabled
+                    button push-button label="Details for Fixture 29983"
+                      text "Details"
+                div listitem settings.extension.fixture-29984 label="Fixture 29984"
+                  button push-button label="Fixture 29984"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29984" value=true disabled
+                    button push-button label="Details for Fixture 29984"
+                      text "Details"
+                div listitem settings.extension.fixture-29985 label="Fixture 29985"
+                  button push-button label="Fixture 29985"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29985" value=true disabled
+                    button push-button label="Details for Fixture 29985"
+                      text "Details"
+                div listitem settings.extension.fixture-29986 label="Fixture 29986"
+                  button push-button label="Fixture 29986"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29986" value=true disabled
+                    button push-button label="Details for Fixture 29986"
+                      text "Details"
+                div listitem settings.extension.fixture-29987 label="Fixture 29987"
+                  button push-button label="Fixture 29987"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29987" value=true disabled
+                    button push-button label="Details for Fixture 29987"
+                      text "Details"
+                div listitem settings.extension.fixture-29988 label="Fixture 29988"
+                  button push-button label="Fixture 29988"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29988" value=true disabled
+                    button push-button label="Details for Fixture 29988"
+                      text "Details"
+                div listitem settings.extension.fixture-29989 label="Fixture 29989"
+                  button push-button label="Fixture 29989"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29989" value=true disabled
+                    button push-button label="Details for Fixture 29989"
+                      text "Details"
+                div listitem settings.extension.fixture-29990 label="Fixture 29990"
+                  button push-button label="Fixture 29990"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29990" value=true disabled
+                    button push-button label="Details for Fixture 29990"
+                      text "Details"
+                div listitem settings.extension.fixture-29991 label="Fixture 29991"
+                  button push-button label="Fixture 29991"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29991" value=true disabled
+                    button push-button label="Details for Fixture 29991"
+                      text "Details"
+                div listitem settings.extension.fixture-29992 label="Fixture 29992"
+                  button push-button label="Fixture 29992"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29992" value=true disabled
+                    button push-button label="Details for Fixture 29992"
+                      text "Details"
+                div listitem settings.extension.fixture-29993 label="Fixture 29993"
+                  button push-button label="Fixture 29993"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29993" value=true disabled
+                    button push-button label="Details for Fixture 29993"
+                      text "Details"
+                div listitem settings.extension.fixture-29994 label="Fixture 29994"
+                  button push-button label="Fixture 29994"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29994" value=true disabled
+                    button push-button label="Details for Fixture 29994"
+                      text "Details"
+                div listitem settings.extension.fixture-29995 label="Fixture 29995"
+                  button push-button label="Fixture 29995"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29995" value=true disabled
+                    button push-button label="Details for Fixture 29995"
+                      text "Details"
+                div listitem settings.extension.fixture-29996 label="Fixture 29996"
+                  button push-button label="Fixture 29996"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29996" value=true disabled
+                    button push-button label="Details for Fixture 29996"
+                      text "Details"
+                div listitem settings.extension.fixture-29997 label="Fixture 29997"
+                  button push-button label="Fixture 29997"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29997" value=true disabled
+                    button push-button label="Details for Fixture 29997"
+                      text "Details"
+                div listitem settings.extension.fixture-29998 label="Fixture 29998"
+                  button push-button label="Fixture 29998"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29998" value=true disabled
+                    button push-button label="Details for Fixture 29998"
+                      text "Details"
+                div listitem settings.extension.fixture-29999 label="Fixture 29999"
+                  button push-button label="Fixture 29999"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 29999" value=true disabled
+                    button push-button label="Details for Fixture 29999"
+                      text "Details"
+                div listitem settings.extension.fixture-30000 label="Fixture 30000"
+                  button push-button label="Fixture 30000"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30000" value=true disabled
+                    button push-button label="Details for Fixture 30000"
+                      text "Details"
+                div listitem settings.extension.fixture-30001 label="Fixture 30001"
+                  button push-button label="Fixture 30001"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30001" value=true disabled
+                    button push-button label="Details for Fixture 30001"
+                      text "Details"
+                div listitem settings.extension.fixture-30002 label="Fixture 30002"
+                  button push-button label="Fixture 30002"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30002" value=true disabled
+                    button push-button label="Details for Fixture 30002"
+                      text "Details"
+                div listitem settings.extension.fixture-30003 label="Fixture 30003"
+                  button push-button label="Fixture 30003"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30003" value=true disabled
+                    button push-button label="Details for Fixture 30003"
+                      text "Details"
+                div listitem settings.extension.fixture-30004 label="Fixture 30004"
+                  button push-button label="Fixture 30004"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30004" value=true disabled
+                    button push-button label="Details for Fixture 30004"
+                      text "Details"
+                div listitem settings.extension.fixture-30005 label="Fixture 30005"
+                  button push-button label="Fixture 30005"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30005" value=true disabled
+                    button push-button label="Details for Fixture 30005"
+                      text "Details"
+                div listitem settings.extension.fixture-30006 label="Fixture 30006"
+                  button push-button label="Fixture 30006"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30006" value=true disabled
+                    button push-button label="Details for Fixture 30006"
+                      text "Details"
+                div listitem settings.extension.fixture-30007 label="Fixture 30007"
+                  button push-button label="Fixture 30007"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30007" value=true disabled
+                    button push-button label="Details for Fixture 30007"
+                      text "Details"
+                div listitem settings.extension.fixture-30008 label="Fixture 30008"
+                  button push-button label="Fixture 30008"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30008" value=true disabled
+                    button push-button label="Details for Fixture 30008"
+                      text "Details"
+                div listitem settings.extension.fixture-30009 label="Fixture 30009"
+                  button push-button label="Fixture 30009"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30009" value=true disabled
+                    button push-button label="Details for Fixture 30009"
+                      text "Details"
+                div listitem settings.extension.fixture-30010 label="Fixture 30010"
+                  button push-button label="Fixture 30010"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30010" value=true disabled
+                    button push-button label="Details for Fixture 30010"
+                      text "Details"
+                div listitem settings.extension.fixture-30011 label="Fixture 30011"
+                  button push-button label="Fixture 30011"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30011" value=true disabled
+                    button push-button label="Details for Fixture 30011"
+                      text "Details"
+                div listitem settings.extension.fixture-30012 label="Fixture 30012"
+                  button push-button label="Fixture 30012"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30012" value=true disabled
+                    button push-button label="Details for Fixture 30012"
+                      text "Details"
+                div listitem settings.extension.fixture-30013 label="Fixture 30013"
+                  button push-button label="Fixture 30013"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30013" value=true disabled
+                    button push-button label="Details for Fixture 30013"
+                      text "Details"
+                div listitem settings.extension.fixture-30014 label="Fixture 30014"
+                  button push-button label="Fixture 30014"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30014" value=true disabled
+                    button push-button label="Details for Fixture 30014"
+                      text "Details"
+                div listitem settings.extension.fixture-30015 label="Fixture 30015"
+                  button push-button label="Fixture 30015"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30015" value=true disabled
+                    button push-button label="Details for Fixture 30015"
+                      text "Details"
+                div listitem settings.extension.fixture-30016 label="Fixture 30016"
+                  button push-button label="Fixture 30016"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30016" value=true disabled
+                    button push-button label="Details for Fixture 30016"
+                      text "Details"
+                div listitem settings.extension.fixture-30017 label="Fixture 30017"
+                  button push-button label="Fixture 30017"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30017" value=true disabled
+                    button push-button label="Details for Fixture 30017"
+                      text "Details"
+                div listitem settings.extension.fixture-30018 label="Fixture 30018"
+                  button push-button label="Fixture 30018"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30018" value=true disabled
+                    button push-button label="Details for Fixture 30018"
+                      text "Details"
+                div listitem settings.extension.fixture-30019 label="Fixture 30019"
+                  button push-button label="Fixture 30019"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30019" value=true disabled
+                    button push-button label="Details for Fixture 30019"
+                      text "Details"
+                div listitem settings.extension.fixture-30020 label="Fixture 30020"
+                  button push-button label="Fixture 30020"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30020" value=true disabled
+                    button push-button label="Details for Fixture 30020"
+                      text "Details"
+                div listitem settings.extension.fixture-30021 label="Fixture 30021"
+                  button push-button label="Fixture 30021"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30021" value=true disabled
+                    button push-button label="Details for Fixture 30021"
+                      text "Details"
+                div listitem settings.extension.fixture-30022 label="Fixture 30022"
+                  button push-button label="Fixture 30022"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30022" value=true disabled
+                    button push-button label="Details for Fixture 30022"
+                      text "Details"
+                div listitem settings.extension.fixture-30023 label="Fixture 30023"
+                  button push-button label="Fixture 30023"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30023" value=true disabled
+                    button push-button label="Details for Fixture 30023"
+                      text "Details"
+                div listitem settings.extension.fixture-30024 label="Fixture 30024"
+                  button push-button label="Fixture 30024"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30024" value=true disabled
+                    button push-button label="Details for Fixture 30024"
+                      text "Details"
+                div listitem settings.extension.fixture-30025 label="Fixture 30025"
+                  button push-button label="Fixture 30025"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30025" value=true disabled
+                    button push-button label="Details for Fixture 30025"
+                      text "Details"
+                div listitem settings.extension.fixture-30026 label="Fixture 30026"
+                  button push-button label="Fixture 30026"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30026" value=true disabled
+                    button push-button label="Details for Fixture 30026"
+                      text "Details"
+                div listitem settings.extension.fixture-30027 label="Fixture 30027"
+                  button push-button label="Fixture 30027"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30027" value=true disabled
+                    button push-button label="Details for Fixture 30027"
+                      text "Details"
+                div listitem settings.extension.fixture-30028 label="Fixture 30028"
+                  button push-button label="Fixture 30028"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30028" value=true disabled
+                    button push-button label="Details for Fixture 30028"
+                      text "Details"
+                div listitem settings.extension.fixture-30029 label="Fixture 30029"
+                  button push-button label="Fixture 30029"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30029" value=true disabled
+                    button push-button label="Details for Fixture 30029"
+                      text "Details"
+                div listitem settings.extension.fixture-30030 label="Fixture 30030"
+                  button push-button label="Fixture 30030"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30030" value=true disabled
+                    button push-button label="Details for Fixture 30030"
+                      text "Details"
+                div listitem settings.extension.fixture-30031 label="Fixture 30031"
+                  button push-button label="Fixture 30031"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30031" value=true disabled
+                    button push-button label="Details for Fixture 30031"
+                      text "Details"
+                div listitem settings.extension.fixture-30032 label="Fixture 30032"
+                  button push-button label="Fixture 30032"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30032" value=true disabled
+                    button push-button label="Details for Fixture 30032"
+                      text "Details"
+                div listitem settings.extension.fixture-30033 label="Fixture 30033"
+                  button push-button label="Fixture 30033"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30033" value=true disabled
+                    button push-button label="Details for Fixture 30033"
+                      text "Details"
+                div listitem settings.extension.fixture-30034 label="Fixture 30034"
+                  button push-button label="Fixture 30034"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30034" value=true disabled
+                    button push-button label="Details for Fixture 30034"
+                      text "Details"
+                div listitem settings.extension.fixture-30035 label="Fixture 30035"
+                  button push-button label="Fixture 30035"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30035" value=true disabled
+                    button push-button label="Details for Fixture 30035"
+                      text "Details"
+                div listitem settings.extension.fixture-30036 label="Fixture 30036"
+                  button push-button label="Fixture 30036"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30036" value=true disabled
+                    button push-button label="Details for Fixture 30036"
+                      text "Details"
+                div listitem settings.extension.fixture-30037 label="Fixture 30037"
+                  button push-button label="Fixture 30037"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30037" value=true disabled
+                    button push-button label="Details for Fixture 30037"
+                      text "Details"
+                div listitem settings.extension.fixture-30038 label="Fixture 30038"
+                  button push-button label="Fixture 30038"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30038" value=true disabled
+                    button push-button label="Details for Fixture 30038"
+                      text "Details"
+                div listitem settings.extension.fixture-30039 label="Fixture 30039"
+                  button push-button label="Fixture 30039"
+                  div
+                    text
+                      text "Installed"
+                    button switch switch label="Fixture 30039" value=true disabled
+                    button push-button label="Details for Fixture 30039"
+                      text "Details"
+        text
+          text "60000 installed · 60000 enabled · 0 off"
         div group label="Store"
           div
             text heading
@@ -1314,7 +1332,7 @@ exports[`60k-extensions: six-op tree snapshot passes the real Rust wire and kit 
                 div
                   button push-button label="Open Store"
                     text "Open Store"
-Focus: ["Bring Sign-Ins from the Original App…","Filter extensions","Extension Type","Details for Fixture 29980","Details for Fixture 29981","Details for Fixture 29982","Details for Fixture 29983","Details for Fixture 29984","Details for Fixture 29985","Details for Fixture 29986","Details for Fixture 29987","Details for Fixture 29988","Details for Fixture 29989","Details for Fixture 29990","Details for Fixture 29991","Details for Fixture 29992","Details for Fixture 29993","Details for Fixture 29994","Details for Fixture 29995","Details for Fixture 29996","Details for Fixture 29997","Details for Fixture 29998","Details for Fixture 29999","Details for Fixture 30000","Details for Fixture 30001","Details for Fixture 30002","Details for Fixture 30003","Details for Fixture 30004","Details for Fixture 30005","Details for Fixture 30006","Details for Fixture 30007","Details for Fixture 30008","Details for Fixture 30009","Details for Fixture 30010","Details for Fixture 30011","Details for Fixture 30012","Details for Fixture 30013","Details for Fixture 30014","Details for Fixture 30015","Details for Fixture 30016","Details for Fixture 30017","Details for Fixture 30018","Details for Fixture 30019","Details for Fixture 30020","Details for Fixture 30021","Details for Fixture 30022","Details for Fixture 30023","Details for Fixture 30024","Details for Fixture 30025","Details for Fixture 30026","Details for Fixture 30027","Details for Fixture 30028","Details for Fixture 30029","Details for Fixture 30030","Details for Fixture 30031","Details for Fixture 30032","Details for Fixture 30033","Details for Fixture 30034","Details for Fixture 30035","Details for Fixture 30036","Details for Fixture 30037","Details for Fixture 30038","Details for Fixture 30039","Open Store"]"
+Focus: ["Bring Sign-Ins from the Original App…","Search extensions","Extension Type","P0-0:all","Details for Fixture 29980","Details for Fixture 29981","Details for Fixture 29982","Details for Fixture 29983","Details for Fixture 29984","Details for Fixture 29985","Details for Fixture 29986","Details for Fixture 29987","Details for Fixture 29988","Details for Fixture 29989","Details for Fixture 29990","Details for Fixture 29991","Details for Fixture 29992","Details for Fixture 29993","Details for Fixture 29994","Details for Fixture 29995","Details for Fixture 29996","Details for Fixture 29997","Details for Fixture 29998","Details for Fixture 29999","Details for Fixture 30000","Details for Fixture 30001","Details for Fixture 30002","Details for Fixture 30003","Details for Fixture 30004","Details for Fixture 30005","Details for Fixture 30006","Details for Fixture 30007","Details for Fixture 30008","Details for Fixture 30009","Details for Fixture 30010","Details for Fixture 30011","Details for Fixture 30012","Details for Fixture 30013","Details for Fixture 30014","Details for Fixture 30015","Details for Fixture 30016","Details for Fixture 30017","Details for Fixture 30018","Details for Fixture 30019","Details for Fixture 30020","Details for Fixture 30021","Details for Fixture 30022","Details for Fixture 30023","Details for Fixture 30024","Details for Fixture 30025","Details for Fixture 30026","Details for Fixture 30027","Details for Fixture 30028","Details for Fixture 30029","Details for Fixture 30030","Details for Fixture 30031","Details for Fixture 30032","Details for Fixture 30033","Details for Fixture 30034","Details for Fixture 30035","Details for Fixture 30036","Details for Fixture 30037","Details for Fixture 30038","Details for Fixture 30039","Open Store"]"
 `;
 
 exports[`project-open: six-op tree snapshot passes the real Rust wire and kit validators 1`] = `
