@@ -760,10 +760,13 @@ pub mod native {
             size.height += shift;
             self.window.setContentSize(size);
             self.content.setFrameSize(size);
+            let message_view: &NSView = label;
             for view in self.content.subviews().iter() {
-                if std::ptr::eq::<NSView>(&**label, &view)
-                    || self.buttons.values().any(|button| std::ptr::eq::<NSView>(&**button, &view))
-                {
+                let is_footer_button = self.buttons.values().any(|button| {
+                    let button_view: &NSView = button;
+                    std::ptr::eq(button_view, &*view)
+                });
+                if std::ptr::eq(message_view, &*view) || is_footer_button {
                     continue;
                 }
                 let mut origin = view.frame().origin;
