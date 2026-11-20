@@ -3703,7 +3703,9 @@ impl SurfaceView {
             let font_size = text.font_size.to_pixels(window.rem_size());
             let leading = font_size * t.typography.reading_leading;
             let line = window.text_system().shape_line(label.clone(), font_size, &[text.to_run(label.len())]);
-            return Err(element.w(line.width).h(leading).min_w(px(0.))
+            // Leave room for the layout engine to snap the measured width to pixels.
+            let width = px(f32::from(line.width).ceil());
+            return Err(element.w(width).h(leading).min_w(px(0.))
                 .child(canvas(
                     move |bounds, window, _| {
                         if line.width <= bounds.size.width {
