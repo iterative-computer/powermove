@@ -2241,7 +2241,10 @@ impl Controller {
                                     self.composition_sheet(false, None, cx)
                                 }
                                 pm_panel_media::Effect::Reveal { path, .. } => {
-                                    crate::platform::reveal(std::path::Path::new(&path))
+                                    let path = std::path::Path::new(&path);
+                                    if path.exists() {
+                                        crate::platform::reveal(path);
+                                    }
                                 }
                                 pm_panel_media::Effect::PickFiles { replace } => {
                                     let place = replace.is_none();

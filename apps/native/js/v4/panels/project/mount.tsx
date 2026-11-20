@@ -4,6 +4,7 @@ import {
   ProjectService,
   type ViewMode,
 } from "./index";
+import { projectMenuOptions } from "./presentation";
 import type { BuiltinEnv, Mounted } from "../../src/builtin";
 
 /** Poster keys are the host's own picture keys (`thumb/…`): the host draws
@@ -46,9 +47,11 @@ export async function mount(env: BuiltinEnv): Promise<Mounted> {
       native={{
         ...fields(["searchBinding", "renameBinding"]),
         menu(entries, choose, context) {
-          void platform("project.menu", { entries, context })
+          const options = projectMenuOptions(entries);
+          void platform("project.menu", { entries: options, context })
             .then((index) => {
-              if (index !== null) choose(entries[index]);
+              const entry = index === null ? null : options[index];
+              if (entry) choose(entry);
             })
             .catch(report);
         },

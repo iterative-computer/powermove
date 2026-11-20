@@ -92,6 +92,10 @@ pub enum Availability {
     },
 }
 impl Availability {
+    pub(crate) fn can_reveal(&self) -> bool {
+        !matches!(self, Self::Offline | Self::Cloud { .. })
+    }
+
     /// The file can't be played from here: offline, changed, failed or still
     /// in the cloud (the Project panel's Missing, the status line's offline count).
     pub fn is_missing(&self) -> bool {
@@ -183,6 +187,14 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub(crate) fn unused_assets(&self) -> impl Iterator<Item = &String> {
+        let mut used = HashSet::new();
+        collect_composition_media_ids(&self.root, &mut used);
+        self.asset_order
+            .iter()
+            .filter(move |id| !used.contains(id.as_str()))
+    }
+
     pub(crate) fn search_folders(&self, folder: Option<&str>, descendants: bool) -> Vec<&String> {
         let mut found = vec![];
         let mut todo = vec![folder.map(str::to_owned)];
@@ -549,6 +561,40 @@ pub(crate) fn layer_asset(l: &Value) -> Option<&str> {
                 .filter(|s| !s.is_empty())
                 .or_else(|| text(d, "assetId"))
         })
+}
+/// Include references held by layer effects and extension payloads as well as
+/// the layer's own source. A LUT used only by an effect is still in use.
+fn collect_composition_media_ids<'a>(comp: &'a Value, ids: &mut HashSet<&'a str>) {
+    if let Some(layers) = comp.get("layers").and_then(Value::as_array) {
+        for layer in layers {
+            collect_layer_media_ids(layer, ids);
+        }
+    }
+    if let Some(comps) = comp.get("comps").and_then(Value::as_object) {
+        for child in comps.values() {
+            collect_composition_media_ids(child, ids);
+        }
+    }
+}
+
+fn collect_layer_media_ids<'a>(value: &'a Value, ids: &mut HashSet<&'a str>) {
+    match value {
+        Value::Object(fields) => {
+            ids.extend(["asset", "assetId"].into_iter().filter_map(|key| text(value, key)));
+            if let Some(maps) = value.get("maps").and_then(Value::as_object) {
+                ids.extend(maps.values().filter_map(Value::as_str));
+            }
+            for child in fields.values() {
+                collect_layer_media_ids(child, ids);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_layer_media_ids(item, ids);
+            }
+        }
+        _ => {}
+    }
 }
 fn reference_counts(root: &Value) -> HashMap<String, usize> {
     let mut out = HashMap::new();

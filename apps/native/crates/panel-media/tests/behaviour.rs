@@ -2315,3 +2315,148 @@ fn composition_rename_keeps_v2_unique_names_and_labels_the_actual_result() {
     history(&h, HistoryCall::Undo);
     assert_eq!(current(&h).item_name(&id), Some(old.as_str()));
 }
+
+#[test]
+fn offline_asset_context_menu_hides_reveal() {
+    let (c, mut p, mut r) = setup();
+    r.set("a", Availability::Offline);
+    let menu = p.menu(&c, &r, Some(asset("a"))).unwrap();
+    assert!(
+        !menu
+            .entries
+            .iter()
+            .any(|entry| { matches!(entry.command, MenuCommand::Reveal(_)) })
+    );
+}
+
+const UNUSED_PROJECT: &str = r#"{
+  "id":"P","compId":"C1","w":640,"h":360,"fps":30,"dur":20,
+  "assets":{
+    "main":{"id":"main","name":"Main","kind":"image"},
+    "nested":{"id":"nested","name":"Nested","kind":"image"},
+    "precomp":{"id":"precomp","name":"Precomp only","kind":"image"},
+    "grade":{"id":"grade","name":"Look","kind":"lut"},
+    "unused":{"id":"unused","name":"Unused","kind":"image"},
+    "in-bin":{"id":"in-bin","name":"Unused in bin","kind":"image","folder":"bin"}
+  },
+  "assetFolders":{"bin":{"id":"bin","name":"Bin"}},
+  "layers":[{"id":"l1","type":"image","d":{"asset":"main"}},{"id":"p1","type":"precomp","d":{"comp":"C2"}}],
+  "comps":{
+    "C2":{"id":"C2","layers":[{"id":"l2","type":"image","d":{"asset":"precomp"}},{"id":"p2","type":"precomp","d":{"comp":"C3"}}]},
+    "C3":{"id":"C3","layers":[
+      {"id":"l3","type":"image","d":{"asset":"nested"},
+       "fx":[{"id":"fx1","type":"applyColorLut","on":true,"inputs":{"lut":{"kind":"asset","assetId":"grade"}}}]}
+    ]}
+  }
+}"#;
+
+fn unused_menu_command(p: &mut MediaPanel, c: &Catalog, r: &Runtime, name: &str) -> MenuEntry {
+    p.menu(c, r, None)
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|entry| serde_json::to_value(&entry.command).unwrap().as_str() == Some(name))
+        .unwrap_or_else(|| panic!("missing project menu command {name}"))
+}
+
+#[test]
+fn select_unused_media_covers_all_bins_and_preserves_nested_references() {
+    let c = Catalog::new(
+        "P".into(),
+        DocumentStore::new_untitled(parse(UNUSED_PROJECT).unwrap()).snapshot(),
+    )
+    .unwrap();
+    let r = Runtime::ready();
+    let mut p = MediaPanel::default();
+    p.refresh(&c, &r);
+    for id in ["main", "nested", "precomp"] {
+        assert_eq!(c.assets[id].references, 1, "{id}");
+    }
+    let command = unused_menu_command(&mut p, &c, &r, "SelectUnusedMedia");
+    assert!(command.enabled);
+    let out = invoke(&mut p, &c, &r, command.command);
+    assert!(out.edit.is_none());
+    p.refresh(&c, &r);
+    let mut selected = p.selected_assets().to_vec();
+    selected.sort();
+    assert_eq!(selected, ["in-bin", "unused"]);
+}
+
+#[test]
+fn remove_unused_media_confirms_and_undo_restores_the_whole_project() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let h = actor.handle();
+    h.open("P", OpenSource::Untitled(parse(UNUSED_PROJECT).unwrap()))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let original = project(&h);
+    let c = current(&h);
+    let r = Runtime::ready();
+    let mut p = MediaPanel::default();
+    p.refresh(&c, &r);
+    let command = unused_menu_command(&mut p, &c, &r, "RemoveUnusedMedia");
+    assert!(command.enabled);
+    let request = |p: &mut MediaPanel| {
+        let out = invoke(p, &c, &r, command.command.clone());
+        assert!(out.edit.is_none());
+        match &out.effects[..] {
+            [
+                Effect::ConfirmDelete {
+                    token,
+                    assets,
+                    references: 0,
+                },
+            ] => {
+                assert_eq!(assets.len(), 2);
+                *token
+            }
+            effects => panic!("expected unused media confirmation, got {effects:?}"),
+        }
+    };
+    let token = request(&mut p);
+    let cancelled = p
+        .dispatch(
+            &c,
+            &r,
+            Input::ConfirmDelete {
+                token,
+                approved: false,
+            },
+        )
+        .unwrap();
+    assert!(cancelled.edit.is_none());
+
+    let token = request(&mut p);
+    let approved = p
+        .dispatch(
+            &c,
+            &r,
+            Input::ConfirmDelete {
+                token,
+                approved: true,
+            },
+        )
+        .unwrap();
+    let edit = approved.edit.unwrap();
+    assert!(matches!(
+        edit,
+        Edit::DeleteAssets {
+            confirmed: false,
+            ..
+        }
+    ));
+    applied(&h, &c.prepare(edit).unwrap());
+
+    let after = current(&h);
+    assert_eq!(after.assets.len(), 4);
+    for id in ["main", "nested", "precomp", "grade"] {
+        assert!(after.assets.contains_key(id));
+    }
+    p.refresh(&after, &r);
+    for name in ["SelectUnusedMedia", "RemoveUnusedMedia"] {
+        assert!(!unused_menu_command(&mut p, &after, &r, name).enabled);
+    }
+    history(&h, HistoryCall::Undo);
+    assert_eq!(project(&h), original);
+}

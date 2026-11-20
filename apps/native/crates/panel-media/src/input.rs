@@ -292,9 +292,11 @@ impl MediaPanel {
                     }
                     out.edit = Some(Edit::DeleteAssets {
                         ids: pending.assets,
-                        confirmed: true,
+                        confirmed: pending.references > 0,
                     });
-                    self.clear(&mut out.effects);
+                    if pending.references > 0 {
+                        self.clear(&mut out.effects);
+                    }
                 }
             }
             Input::DragStart { id, nested_control } => {
@@ -317,11 +319,7 @@ impl MediaPanel {
                             a.name.clone(),
                             a.kind.clone(),
                             a.duration,
-                            self.asset_order
-                                .iter()
-                                .filter(|id| self.is_selected(id))
-                                .cloned()
-                                .collect(),
+                            self.ordered_selected_assets(c),
                             true,
                             true,
                         )
@@ -595,11 +593,7 @@ impl MediaPanel {
         let ids = if let Some(id) = asset.filter(|id| !self.is_selected(id)) {
             vec![id]
         } else if self.selected_count() > 0 {
-            self.asset_order
-                .iter()
-                .filter(|id| self.is_selected(id))
-                .cloned()
-                .collect()
+            self.ordered_selected_assets(c)
         } else {
             vec![]
         };
@@ -624,21 +618,47 @@ impl MediaPanel {
             });
             self.clear(&mut out.effects);
         } else {
-            self.next_token = self.next_token.checked_add(1).ok_or(Error::InvalidTarget)?;
-            let token = self.next_token;
-            self.confirmation = Some(crate::model::Confirmation {
-                token,
-                stamp: c.stamp.clone(),
-                assets: ids.clone(),
-            });
-            out.effects.push(Effect::ConfirmDelete {
-                token,
-                assets: ids,
-                references,
-            });
+            self.confirm_delete(c, ids, references, out)?;
         }
         Ok(())
     }
+
+    fn confirm_delete(
+        &mut self,
+        c: &Catalog,
+        assets: Vec<String>,
+        references: usize,
+        out: &mut Outcome,
+    ) -> Result<(), Error> {
+        self.next_token = self.next_token.checked_add(1).ok_or(Error::InvalidTarget)?;
+        let token = self.next_token;
+        self.confirmation = Some(crate::model::Confirmation {
+            token,
+            stamp: c.stamp.clone(),
+            assets: assets.clone(),
+            references,
+        });
+        out.effects.push(Effect::ConfirmDelete {
+            token,
+            assets,
+            references,
+        });
+        Ok(())
+    }
+
+    fn ordered_selected_assets(&self, c: &Catalog) -> Vec<String> {
+        let order = if self.project_wide_selection {
+            &c.asset_order
+        } else {
+            &self.asset_order
+        };
+        order
+            .iter()
+            .filter(|id| self.is_selected(id))
+            .cloned()
+            .collect()
+    }
+
     pub fn can_drop(&self, c: &Catalog, target: Option<&str>, files: bool) -> bool {
         if target.is_some_and(|id| !c.folders.contains_key(id)) {
             return false;
@@ -687,6 +707,7 @@ impl MediaPanel {
             return Ok(out);
         }
         if key == Key::A && m.primary() {
+            self.project_wide_selection = false;
             self.exclusive = None;
             self.all_except = Some(Default::default());
             self.selection_cache.take();
@@ -829,6 +850,9 @@ impl MediaPanel {
                 out.effects.push(Effect::InterpretFootage(id));
             }
             Reveal(id) => {
+                if c.assets.contains_key(&id) && !r.state(&c.stamp, &id).availability.can_reveal() {
+                    return Err(Error::InvalidTarget);
+                }
                 let path = c
                     .assets
                     .get(&id)
@@ -856,6 +880,29 @@ impl MediaPanel {
                 }
             }
             DeleteAssets => self.request_delete(c, None, out)?,
+            SelectUnusedMedia => {
+                let unused: Vec<_> = c.unused_assets().cloned().collect();
+                if !unused.is_empty() {
+                    self.clear(&mut out.effects);
+                    self.project_wide_selection = true;
+                    self.selected = unused.iter().cloned().collect();
+                    self.selection = unused;
+                    self.active = self
+                        .asset_order
+                        .iter()
+                        .find(|id| self.selected.contains(*id))
+                        .cloned();
+                    self.anchor = self.active.clone();
+                    self.focused = self.active.clone().map(ItemId::Asset);
+                    out.effects.push(Effect::Focus(self.focused.clone()));
+                }
+            }
+            RemoveUnusedMedia => {
+                let unused: Vec<_> = c.unused_assets().cloned().collect();
+                if !unused.is_empty() {
+                    self.confirm_delete(c, unused, 0, out)?;
+                }
+            }
             Rendition(action) => {
                 let assets = self.rendition_targets(c, r);
                 if assets.is_empty()
