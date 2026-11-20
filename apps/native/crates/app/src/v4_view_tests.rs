@@ -2986,7 +2986,7 @@ fn overlap_inspector_point_children_fit_between_adjacent_rows(cx: &mut TestAppCo
     let y = find(Component::NumberField, "Start Of Ramp Y");
     cx.executor().allow_parking();
     let runtime = rig.runtime.clone();
-    let (_, vcx) = cx.add_window_view(|window, cx| {
+    let (frame, vcx) = cx.add_window_view(|window, cx| {
         let panel = cx.new(|cx| {
             SurfaceView::new(runtime, selected, tokens(), Default::default(), window, cx)
         });
@@ -2997,6 +2997,13 @@ fn overlap_inspector_point_children_fit_between_adjacent_rows(cx: &mut TestAppCo
     vcx.update(|window, cx| {
         window.refresh();
         window.draw(cx).clear(cx);
+    });
+    vcx.run_until_parked();
+    // The earlier Properties sections can put Effects below the fold.
+    // Scroll the real panel before inspecting the narrow viewport's paint.
+    let panel = frame.read_with(&vcx, |frame, _| frame.0.clone());
+    panel.update(&mut vcx, |panel, cx| {
+        panel.review_scroll_to(f32::MAX, cx);
     });
     vcx.run_until_parked();
     let header = bounds(&mut vcx, &header);
