@@ -40,18 +40,19 @@ define_class!(
         }
         #[unsafe(method(control:textView:doCommandBySelector:))]
         fn command(&self, _: &NSControl, _: &NSTextView, selector: Sel) -> bool {
-            if !self.ivars().sheet_keys.get() {
-                return false;
-            }
-            let action = if selector == sel!(insertNewline:) {
-                "apply"
+            let action = if !self.ivars().sheet_keys.get() {
+                None
+            } else if selector == sel!(insertNewline:) {
+                Some("apply")
             } else if selector == sel!(cancelOperation:) {
-                "cancel"
+                Some("cancel")
             } else {
-                return false;
+                None
             };
-            let _ = self.ivars().tx.try_send(action.into());
-            true
+            if let Some(action) = action {
+                let _ = self.ivars().tx.try_send(action.into());
+            }
+            action.is_some()
         }
     }
     unsafe impl NSTextFieldDelegate for Target {}
