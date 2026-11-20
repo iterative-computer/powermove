@@ -143,6 +143,7 @@ fn attach_hold_note(name: &str, result: &mut Value, pending: &mut Option<Value>)
         Value::Array(content)
             if [
                 "render_frames",
+                "render_effect_lab",
                 "probe_media",
                 "sample_media_frames",
                 "media_contact_sheet",
@@ -240,6 +241,7 @@ impl McpSession {
             };
         }
         match self.dispatch(name, &args) {
+            Ok(v) if name == "render_effect_lab" && v.is_array() => crate::effect_lab::result(v),
             Ok(v)
                 if [
                     "render_frames",
@@ -472,6 +474,62 @@ impl McpSession {
             drop(host);
             let live = surfaces.call(name, project.as_deref(), args)?;
             return Ok(live_layout(saved, &live));
+        }
+        if name == "render_effect_lab" {
+            use crate::effect_lab::{Backdrop, Context, Project, Request};
+            let permits = |access: &str| matches!(access, "editor" | "project");
+            let has_grant = self.agent_token.is_none()
+                || agent(self.agent_token.as_deref(), &host)
+                    .is_some_and(|(_, access)| permits(&access));
+            if !permits(&session.access) || !has_grant {
+                return Err(Error::invalid("The effect lab requires Editor access."));
+            }
+            let request = Request::parse(args)?;
+            if let Some(id) = &session.project {
+                assert_project(session, &host, id)?;
+            }
+            let project = session.project.clone().or_else(|| host.active_project());
+            let project = project
+                .map(|id| {
+                    let view = host.original_view(&id)?;
+                    Ok::<_, Error>(Project {
+                        id,
+                        document: view.document,
+                        revision: view.revision,
+                    })
+                })
+                .transpose()?;
+            if matches!(request.backdrop, Backdrop::Composition { .. }) && project.is_none() {
+                return Err(Error::invalid(
+                    "Open the project that contains the backdrop composition.",
+                ));
+            }
+            let engine = host
+                .engine
+                .clone()
+                .ok_or_else(|| Error::unavailable("native effect lab renderer"))?;
+            let context = Context {
+                project,
+                workspace: session.workspace.clone(),
+                agent_workspace: self
+                    .agent_token
+                    .as_deref()
+                    .zip(host.agent_workspace.as_ref())
+                    .and_then(|(token, workspace)| workspace(token)),
+                stage: session.stage.clone(),
+            };
+            let grants = host.agent_grants.clone();
+            let token = self.agent_token.clone();
+            drop(host);
+            let stop = || {
+                token
+                    .as_deref()
+                    .zip(grants.as_ref())
+                    .is_some_and(|(token, grants)| {
+                        grants(token).is_none_or(|(_, access)| !permits(&access))
+                    })
+            };
+            return engine.render_effect_lab(&request, &context, &stop)?.content();
         }
         if name == "validate_effect" {
             if let Some(id) = &session.project {
@@ -1473,9 +1531,6 @@ impl McpSession {
             ));
         }
         let context = args["context"].as_str().unwrap_or("project");
-        if context == "app" && access == "editor" {
-            return Err(Error::invalid("App sessions require project access."));
-        }
         let project = if context == "project" {
             Some(host.active_project().ok_or_else(|| {
                 Error::invalid("Create or open a project before starting a project session.")
@@ -1533,9 +1588,13 @@ impl McpSession {
                     "Extension staging is inert: nothing here activates."
                 });
             }
-            result["instructions"] = json!(
-                "Read get_project_state before edits. Its compositions list includes every composition; pass optional compositionId to composition tools to work inside a precomp without switching the editor. Omit it for the open composition. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. api/mcp-tools.json lists the public contract. A tool this build lacks returns an error naming what is missing, so report that instead of retrying."
-            );
+            result["instructions"] = if context == "app" {
+                json!("For effect work, iterate with render_effect_lab from the first draft. It works without a project. api/mcp-tools.json lists the tool contract.")
+            } else {
+                json!(
+                "Read get_project_state before edits. Its compositions list includes every composition; pass optional compositionId to composition tools to work inside a precomp without switching the editor. Omit it for the open composition. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. api/mcp-tools.json lists the public contract. A tool this build lacks returns an error naming what is missing, so report that instead of retrying. For effect work, iterate with render_effect_lab from the first draft."
+                )
+            };
             Some(root)
         };
         let stage = match (&workspace, host.extensions.clone()) {

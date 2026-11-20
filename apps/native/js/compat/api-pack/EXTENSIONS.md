@@ -34,7 +34,17 @@ examples and style rules below do not imply that every extension needs one.
 For an effect request, check installed effects in the staging copy and search
 the Store with `store_search` (category `effects`). Ask for
 `includeExtensionStaging: true` in `start_session` to get the staging folder.
-Reuse or adapt a matching effect. For a new effect, start with the complete [Gradient Tint sample](samples/gradient-tint/README.md).
+Reuse or adapt a matching effect.
+
+For effect work, iterate with `render_effect_lab` from the first draft.
+Start an app-context session for a project-free preview. Supply the staged
+package's `extensionId` if its folder name differs from the effect id or if
+you are testing edits to an installed effect. The PNG shows the changed
+values with each cell number. The full parameter sets are in `cells`. A
+workspace reference image adds a whole-image SSIM score to each label and
+returns both whole-image and shape-edge scores.
+
+For a new effect, start with the complete [Gradient Tint sample](samples/gradient-tint/README.md).
 Call the agent tool `validate_effect` with the complete definition before
 returning staged changes. It checks parameter keys, pass count, and shader
 size, compiles the shader for every pass, and reports errors by line in `frag`.

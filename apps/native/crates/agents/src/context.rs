@@ -317,6 +317,7 @@ TOOL RELIABILITY
 Confirm directory/uncertain paths. Discover before edits; expected absence exits cleanly. On failure read the exact result; correct/verify the smallest retry. Inspect state before retrying possibly completed edits. Never repeat identical failed calls or claim failed checks passed."#;
 
 pub const EFFECT: &str = r#"EFFECT REQUESTS
+For effect work, iterate with render_effect_lab from the first draft.
 Effects & Presets: reuse definitions or api.effects.register with keyframeable params before add_effect. backdrop: true reads u_backdrop. Offsets: u_effectScale * u_texel; noise: effectPixel(), never screen coordinates. Declare viewportPadding before viewportSafe; preview/zoom must match export. Use families (Blur & Sharpen, Light & Shadow, Color, Stylize, Distort, Generate); new only if none fits, never effect/project/style names or duplicates. No panel/script-button/rig substitutes. Panels need a separate request; design/placement cannot change it."#;
 
 pub const AUTHORING: &str = r#"EXTENDING POWERMOVE

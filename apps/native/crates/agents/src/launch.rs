@@ -17,7 +17,7 @@ use std::{
 
 const INSTRUCTIONS: &str = "You are the agent inside Powermove, a motion graphics and video editor. Start with start_session. If the task needs a project and none is open, call create_project first. Read get_project_state before editing. Make editable changes with apply_commands or edit_layer_strips and keep them with finish_session commit:true.
 
-For effect requests, check installed effects in the staging copy (ask for includeExtensionStaging:true in start_session) or in get_workspace_state. Search the Store with store_search before writing a new effect. Reuse or adapt an existing effect when it fits. Render with render_frames. When matching a look, score the first render against the reference and use the score to guide revisions. If Powermove's renderer is out of reach, tell the user instead of building a stand-in renderer.
+For effect requests, check installed effects in the staging copy (ask for includeExtensionStaging:true in start_session) or in get_workspace_state. Search the Store with store_search before writing a new effect. Reuse or adapt an existing effect when it fits. Iterate with render_effect_lab from the first draft. Render project work with render_frames. When matching a look, score the first render against the reference and use the score to guide revisions. If Powermove's renderer is out of reach, tell the user instead of building a stand-in renderer.
 
 Before authoring a new panel, read get_panel_layout and call panel_begin with its placement and planned controls. Tell the user where you placed it. Send panel_build plan and commit events as you commit controls. After publishing, send ready with its registered panelId, or cancel or error if building stops.
 
@@ -40,10 +40,16 @@ pub mod grants {
     use std::{
         collections::BTreeMap,
         io::Read,
+        path::PathBuf,
         sync::{Mutex, OnceLock},
     };
-    fn table() -> &'static Mutex<BTreeMap<String, (String, Access)>> {
-        static TABLE: OnceLock<Mutex<BTreeMap<String, (String, Access)>>> = OnceLock::new();
+    struct Entry {
+        run: String,
+        access: Access,
+        workspace: Option<PathBuf>,
+    }
+    fn table() -> &'static Mutex<BTreeMap<String, Entry>> {
+        static TABLE: OnceLock<Mutex<BTreeMap<String, Entry>>> = OnceLock::new();
         TABLE.get_or_init(Default::default)
     }
     /// Revokes its token on drop.
@@ -60,22 +66,45 @@ pub mod grants {
     }
     /// A new token for `run` at `access`.
     pub fn issue(run: &str, access: Access) -> std::io::Result<Grant> {
+        issue_for_workspace(run, access, None)
+    }
+    pub(super) fn issue_for_workspace(
+        run: &str,
+        access: Access,
+        workspace: Option<PathBuf>,
+    ) -> std::io::Result<Grant> {
         let mut bytes = [0u8; 32];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        table()
-            .lock()
-            .unwrap()
-            .insert(token.clone(), (run.into(), access));
+        table().lock().unwrap().insert(
+            token.clone(),
+            Entry {
+                run: run.into(),
+                access,
+                workspace,
+            },
+        );
         Ok(Grant(token))
     }
     /// Build slots follow the owning process lifetime without retaining its token.
     pub fn run_live(run: &str) -> bool {
-        table().lock().unwrap().values().any(|(id, _)| id == run)
+        table()
+            .lock()
+            .unwrap()
+            .values()
+            .any(|entry| entry.run == run)
     }
     /// The run and access a token was issued for, while that run lives.
     pub fn resolve(token: &str) -> Option<(String, Access)> {
-        table().lock().unwrap().get(token).cloned()
+        table()
+            .lock()
+            .unwrap()
+            .get(token)
+            .map(|entry| (entry.run.clone(), entry.access))
+    }
+    /// The authenticated provider's workspace, set by the launcher.
+    pub fn workspace(token: &str) -> Option<PathBuf> {
+        table().lock().unwrap().get(token)?.workspace.clone()
     }
     #[cfg(test)]
     mod tests {
@@ -311,8 +340,12 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
     }
     request.prompt = crate::context::assemble(&request.prompt);
     let authority = Authority::new(request.access, request.approval, request.computer_consent)?;
-    let grant = grants::issue(&request.run, request.access)
-        .map_err(|e| format!("The agent's tool access couldn't be prepared: {e}"))?;
+    let grant = grants::issue_for_workspace(
+        &request.run,
+        request.access,
+        Some(request.workspace.clone()),
+    )
+    .map_err(|e| format!("The agent's tool access couldn't be prepared: {e}"))?;
     let token = grant.token().to_owned();
     let loaded = crate::user_mcp::load(request.provider, request.access, &environment.vars);
     let warnings = loaded

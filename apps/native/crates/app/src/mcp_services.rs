@@ -598,11 +598,7 @@ impl EngineJobs {
         }))
     }
     fn published(&self, frozen: &FrozenProject) -> Result<Arc<Published>> {
-        let published = self
-            .kernel
-            .published(&frozen.project_id)
-            .filter(|p| p.snapshot.doc_id == frozen.document_id && p.revision() == frozen.revision)
-            .ok_or_else(|| Error::conflict("The composition changed during engine work"))?;
+        let published = self.published_at(&frozen.project_id, frozen.document_id, frozen.revision)?;
         if let Some(comp) = frozen.project["compId"].as_str()
             && published.snapshot.open_comp().as_deref() != Some(comp)
         {
@@ -613,6 +609,13 @@ impl EngineJobs {
             return Ok(Arc::new(targeted));
         }
         Ok(published)
+    }
+
+    fn published_at(&self, id: &str, document: u64, revision: u64) -> Result<Arc<Published>> {
+        self.kernel
+            .published(id)
+            .filter(|p| p.snapshot.doc_id == document && p.revision() == revision)
+            .ok_or_else(|| Error::conflict("The composition changed during engine work"))
     }
 
     fn start(
@@ -1759,6 +1762,65 @@ impl EngineHook for EngineJobs {
             .map_err(|error| Error::invalid(error.to_string()))
     }
 
+    fn render_effect_lab(
+        &self,
+        request: &pm_mcp::effect_lab::Request,
+        context: &pm_mcp::effect_lab::Context,
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<pm_mcp::services::ToolOutput> {
+        use pm_mcp::effect_lab::Backdrop;
+        let deadline = Instant::now() + EXTENSIONS_WAIT;
+        let stop = || cancelled() || Instant::now() >= deadline;
+
+        let backdrop = if let Backdrop::Composition {
+            composition_id,
+            time,
+        } = &request.backdrop
+        {
+            let frozen = context
+                .project
+                .as_ref()
+                .ok_or_else(|| Error::invalid("Open the backdrop's project first."))?;
+            let mut published =
+                (*self.published_at(&frozen.id, frozen.document, frozen.revision)?).clone();
+            published.snapshot =
+                pm_mcp::automation::composition_snapshot(&published.snapshot, composition_id)?;
+            let published = Arc::new(published);
+            let root = published
+                .snapshot
+                .root()
+                .ok_or_else(|| Error::invalid("No open project"))?;
+            let comp = pm_kernel::model::comp_node(root, Some(composition_id)).unwrap_or(root);
+            let number = |key| comp.get(key).and_then(|value| value.to_value().as_f64());
+            let duration = number("dur").unwrap_or(10.);
+            if *time >= duration {
+                return Err(Error::invalid(
+                    "Choose a time within the backdrop composition.",
+                ));
+            }
+            let resources = self.resources(&published, true, &stop).map_err(failed)?;
+            std::fs::create_dir_all(&self.cache)?;
+            Some(
+                frame(
+                    self,
+                    &published,
+                    number("fps").unwrap_or(30.),
+                    *time,
+                    Size::new(request.width, request.height),
+                    MCP_LOOK,
+                    &stop,
+                    Capture::AgentStill,
+                    resources,
+                )
+                .map_err(failed)?,
+            )
+        } else {
+            None
+        };
+        let definition = self.lab_definition(request, context, &stop)?;
+        crate::effect_lab::render(request, context, &definition, backdrop.as_deref(), &stop)
+            .map_err(|error| Error::invalid(error.to_string()))
+    }
     fn capture(&self, _: &CaptureRequest) -> Result<Value> {
         Err(Error::invalid("Frame capture needs a frozen project"))
     }
@@ -1983,7 +2045,7 @@ impl EngineHook for EngineJobs {
     }
 }
 
-type Rgba = (Vec<u8>, u32, u32);
+pub(crate) type Rgba = (Vec<u8>, u32, u32);
 pub(crate) fn png(pixels: &[u8], width: u32, height: u32) -> AnyResult<Vec<u8>> {
     let mut bytes = vec![];
     let mut encoder = ::png::Encoder::new(&mut bytes, width, height);
@@ -1992,7 +2054,7 @@ pub(crate) fn png(pixels: &[u8], width: u32, height: u32) -> AnyResult<Vec<u8>> 
     encoder.write_header()?.write_image_data(pixels)?;
     Ok(bytes)
 }
-fn decode_png(bytes: &[u8]) -> AnyResult<Rgba> {
+pub(crate) fn decode_png(bytes: &[u8]) -> AnyResult<Rgba> {
     let mut decoder = ::png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(::png::Transformations::ALPHA | ::png::Transformations::STRIP_16);
     let mut reader = decoder.read_info()?;
@@ -2002,7 +2064,7 @@ fn decode_png(bytes: &[u8]) -> AnyResult<Rgba> {
     Ok((pixels, info.width, info.height))
 }
 /// Nearest-neighbour fit. These frames are for an agent to look at, not deliver.
-fn fit(source: &Rgba, width: u32, height: u32) -> Vec<u8> {
+pub(crate) fn fit(source: &Rgba, width: u32, height: u32) -> Vec<u8> {
     let (pixels, w, h) = source;
     let mut out = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {
@@ -2015,7 +2077,7 @@ fn fit(source: &Rgba, width: u32, height: u32) -> Vec<u8> {
     }
     out
 }
-fn image(pixels: &[u8], width: u32, height: u32) -> Result<Image> {
+pub(crate) fn image(pixels: &[u8], width: u32, height: u32) -> Result<Image> {
     let bytes = png(pixels, width, height).map_err(failed)?;
     Ok(Image {
         data: base64(&bytes),
@@ -2040,6 +2102,120 @@ fn sheet(cells: &[Rgba], plan: &SheetPlan) -> Result<Image> {
     image(&canvas, width, height)
 }
 impl EngineJobs {
+    fn lab_definition(
+        &self,
+        request: &pm_mcp::effect_lab::Request,
+        context: &pm_mcp::effect_lab::Context,
+        stop: &(dyn Fn() -> bool + Sync),
+    ) -> Result<pm_protocol::definitions::DefinitionSnapshot> {
+        use pm_protocol::definitions::{DefinitionKind, DefinitionSnapshot};
+        let find = |defs: &[DefinitionSnapshot]| {
+            defs.iter()
+                .find(|definition| {
+                    definition.kind == DefinitionKind::Effect
+                        && definition.id.as_str() == request.effect_id
+                })
+                .cloned()
+        };
+        let staged = request.extension_id.as_deref().or_else(|| {
+            // Stage and live start with the same files. Prefer an explicitly
+            // selected draft, or a new/changed package named like its effect.
+            context.stage.as_ref().and_then(|stage| {
+                pm_mcp::extensions::is_draft(stage, &request.effect_id)
+                    .then_some(request.effect_id.as_str())
+            })
+        });
+        if let Some(id) = staged {
+            let stage = context.stage.as_ref().ok_or_else(|| {
+                Error::invalid("This session has no extension staging directory.")
+            })?;
+            let scratch = tempfile::tempdir()?;
+            let host = crate::extension_authoring::AppExtensions::new(self.profile.clone());
+            let manifest = pm_mcp::extensions::preview_source(&host, stage, id, scratch.path())?;
+            let definitions =
+                crate::extension_authoring::effect_definitions(scratch.path(), &manifest)
+                    .map_err(Error::invalid)?;
+            return find(&definitions).ok_or_else(|| {
+                Error::invalid(format!(
+                    "Staged extension {id} did not register effect {}.",
+                    request.effect_id
+                ))
+            });
+        }
+
+        let resources = match &context.project {
+            Some(project) => {
+                let published = self.published_at(&project.id, project.document, project.revision)?;
+                Some(self.resources(&published, true, stop).map_err(failed)?)
+            }
+            None => settled_resources(),
+        };
+        if let Some(definition) = resources.as_ref().and_then(|r| find(&r.definitions)) {
+            return Ok(definition);
+        }
+        if let Some(definition) =
+            find(&pm_render::effects::versions::builtin_snapshot().definitions)
+        {
+            return Ok(definition);
+        }
+        if resources.is_none()
+            && let Some(definition) = find(&self.lab_installed_definitions(stop)?)
+        {
+            return Ok(definition);
+        }
+        Err(Error::invalid(format!(
+            "Unknown effect {}. For a staged effect, supply its extensionId.",
+            request.effect_id
+        )))
+    }
+
+    /// A project-free session can still use installed effects. Start the
+    /// production windowless loader on a private actor, seeded with the live
+    /// enable/disable preferences. The scratch document never enters the app.
+    fn lab_installed_definitions(
+        &self,
+        stop: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Vec<pm_protocol::definitions::DefinitionSnapshot>> {
+        use pm_kernel::state::{StateOp, StateTransaction};
+        let actor = pm_kernel::KernelActor::spawn(pm_kernel::KernelConfig::default());
+        let kernel = actor.handle();
+        let ops = self
+            .kernel
+            .state()
+            .extensions
+            .values()
+            .cloned()
+            .map(StateOp::Extension)
+            .collect();
+        kernel
+            .state_transaction(StateTransaction {
+                expected_revision: None,
+                ops,
+            })
+            .wait()
+            .ok_or_else(|| Error::unavailable("private extension loader"))?
+            .map_err(Error::kernel)?;
+        let document = pm_model::json::parse(&pm_compat_runner::initial()["document"].to_string())
+            .map_err(Error::kernel)?;
+        let project = "effect-lab";
+        kernel
+            .open(project, pm_kernel::OpenSource::Untitled(document))
+            .wait()
+            .ok_or_else(|| Error::unavailable("private extension loader"))?
+            .map_err(Error::kernel)?;
+        let jobs = EngineJobs::new(
+            kernel.clone(),
+            self.executable.clone(),
+            Default::default(),
+            self.profile.clone(),
+            self.overrides.clone(),
+        );
+        let published = kernel
+            .published(project)
+            .ok_or_else(|| Error::unavailable("private extension loader"))?;
+        let resources = jobs.resources(&published, true, stop).map_err(failed)?;
+        Ok(resources.definitions.clone())
+    }
     fn original(&self, request: &MediaRequest) -> Result<PathBuf> {
         let asset = request
             .asset

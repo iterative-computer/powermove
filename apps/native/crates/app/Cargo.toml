@@ -41,6 +41,7 @@ serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 blake3 = "1"
 tempfile = "3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 sha2 = "0.10"
 base64 = "0.22"
 
@@ -131,8 +132,3 @@ path = "../../vendor/gpui-ce/crates/gpui_macos/src/native_text_keyboard.rs"
 
 [dev-dependencies.pm-panel-inspector]
 path = "../panel-inspector"
-
-# Headless capture fixtures upload already rendered pixels synchronously.
-[dev-dependencies.image]
-version = "0.25"
-default-features = false
