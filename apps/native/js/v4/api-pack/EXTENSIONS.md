@@ -24,8 +24,10 @@ This applies to both native generated panels and extension/webview panels.
 
 ## The loop
 
-1. `start_session` gives you `stagingDirectory`: a private copy of the user's
-   extensions. Nothing there runs until you publish.
+1. Call `start_session` with `includeExtensionStaging: true` to get
+   `stagingDirectory`, a private copy of the user's extensions, and
+   `apiPackDirectory`, the authoring guides and types. Nothing in the staging
+   folder runs until you publish.
 2. Write or edit one folder per extension in `stagingDirectory`. The folder name
    is the manifest `id`.
 3. `publish_extensions` with every folder you changed:

@@ -449,7 +449,7 @@ fn promote(
         .collect();
     let report = |message: String| {
         invalid(format!(
-            "{message} Nothing was applied. Actual staged extension changes: {}. Inspect these changes and return each once in extensions with the indicated action, or revert unintended staged edits before completing.",
+            "{message} Nothing was applied. Actual staged extension changes: {}. Revert unintended staged edits, then retry publish_extensions with each intended change and its indicated action.",
             Value::Array(expected.clone())
         ))
     };
@@ -820,7 +820,7 @@ pub fn fork(
     Ok(
         json!({"dir":dest,"forkId":fork_id,"files":tree.files.keys().collect::<Vec<_>>(),
         "forkedFrom":forked_from,
-        "reminder":format!("List {fork_id} in the result's extensions array with action created.")}),
+        "reminder":format!("When ready, call publish_extensions with {fork_id} and action created.")}),
     )
 }
 

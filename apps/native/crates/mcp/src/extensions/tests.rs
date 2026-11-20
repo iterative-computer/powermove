@@ -96,6 +96,7 @@ fn publication_promotes_exactly_the_declared_changes_and_undo_restores_them() {
 
     let error = publish(&f.host, &stage, &[change("panel-a", "created")]).unwrap_err();
     assert!(error.message.starts_with("The agent change report did not match its staged files. Nothing was applied. Actual staged extension changes: [{\"id\":\"kept\",\"action\":\"updated\"},{\"id\":\"panel-a\",\"action\":\"created\"}]"), "{}", error.message);
+    assert!(error.message.contains("publish_extensions"), "{}", error.message);
     let error = publish(
         &f.host,
         &stage,
@@ -266,6 +267,9 @@ fn forks_copy_a_pristine_base_and_rebases_merge_upstream_changes() {
     fs::write(builtin.join("src/rows.tsx"), "row\n").unwrap();
     let stage = f.stage("run-1");
     let forked = fork(&f.host, "timeline", None, &stage.staging).unwrap();
+    let reminder = forked["reminder"].as_str().unwrap();
+    assert!(!reminder.contains("extensions array"), "{reminder}");
+    assert!(reminder.contains("publish_extensions"), "{reminder}");
     assert_eq!(forked["forkId"], "timeline-fork");
     assert_eq!(forked["forkedFrom"], "timeline@1.0.0");
     let dir = stage.staging.join("timeline-fork");

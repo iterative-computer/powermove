@@ -55,13 +55,19 @@ fn error(s: &mut McpSession, args: Value) -> Value {
     serde_json::to_value(error).unwrap()
 }
 #[test]
-fn only_studio_export_project_recovery_and_sequence_import_schemas_change_from_the_frozen_catalog() {
+fn served_tool_contracts_match_the_frozen_catalog_with_native_overrides() {
     let original: Value =
         serde_json::from_str(include_str!("../fixtures/catalog-main-c7f46a056.json")).unwrap();
     let source: Value =
         serde_json::from_str(include_str!("../fixtures/studio3d-native-catalog.json")).unwrap();
     let projects: Value =
         serde_json::from_str(include_str!("../fixtures/project-native-catalog.json")).unwrap();
+    let extensions: Value =
+        serde_json::from_str(include_str!("../fixtures/extension-session-native-catalog.json"))
+            .unwrap();
+    let viewer: Value =
+        serde_json::from_str(include_str!("../fixtures/viewer-handles-native-catalog.json"))
+            .unwrap();
     assert_eq!(catalog::tools().len(), 68);
     for tool in catalog::tools() {
         let name = tool["name"].as_str().unwrap();
@@ -93,6 +99,14 @@ fn only_studio_export_project_recovery_and_sequence_import_schemas_change_from_t
             );
         } else if name == "open_project" {
             assert_eq!(tool, &projects["tools"][0]);
+        } else if let Some(extension) = extensions["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(viewer["tools"].as_array().unwrap())
+            .find(|t| t["name"] == name)
+        {
+            assert_eq!(tool, extension);
         } else if ["import_media", "import_media_to_timeline", "replace_media"].contains(&name) {
             // The media importer takes an image sequence (additive).
             let media: Value =

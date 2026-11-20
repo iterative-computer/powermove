@@ -43,17 +43,25 @@ pub fn catalog() -> &'static Value {
                 .expect("existing media tool");
             *tool = replacement.clone();
         }
-        // Live viewer-handle guidance extends the frozen compatibility catalog.
+        // Native authoring guidance extends the frozen compatibility catalog.
         let viewer_handles: Value =
             serde_json::from_str(include_str!("../fixtures/viewer-handles-native-catalog.json"))
                 .expect("viewer-handle authoring catalog");
-        for replacement in viewer_handles["tools"].as_array().unwrap() {
+        let extensions: Value =
+            serde_json::from_str(include_str!("../fixtures/extension-session-native-catalog.json"))
+                .expect("native extension session catalog");
+        for replacement in viewer_handles["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(extensions["tools"].as_array().unwrap())
+        {
             let tool = value["tools"]
                 .as_array_mut()
                 .unwrap()
                 .iter_mut()
                 .find(|t| t["name"] == replacement["name"])
-                .expect("existing viewer-handle authoring tool");
+                .expect("existing authoring tool");
             *tool = replacement.clone();
         }
         for tool in value["tools"].as_array_mut().unwrap() {

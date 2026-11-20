@@ -245,7 +245,9 @@ def flow(mcp, name):
     probe = PROBES.get(name, panel_colour)
     visible, reverted = CHECKS.get(name, COLOUR)
     eid = manifest["id"]
-    session = json.loads(mcp.tool("start_session", {"prompt": f"Agent flow {name}"})[0]["text"])
+    session = json.loads(mcp.tool(
+        "start_session", {"prompt": f"Agent flow {name}", "includeExtensionStaging": True}
+    )[0]["text"])
     stage = session["stagingDirectory"]
     try:
         folder = os.path.join(stage, eid)

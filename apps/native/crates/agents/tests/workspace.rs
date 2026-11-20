@@ -282,3 +282,14 @@ fn extension_compile_uses_frozen_slug_validation() {
             .is_ok()
     );
 }
+
+#[test]
+fn complete_task_accepts_omitted_extensions() {
+    let t = Temp::new();
+    let host = Fake::default();
+    let calls = host.calls.clone();
+    let mut w = ws(&t, host, false);
+    let result = json!({"summary":"done","commands":[],"artifacts":[],"notes":[],"externalActions":[]});
+    assert_eq!(w.call("complete_task", &result).unwrap(), result);
+    assert_eq!(*calls.lock().unwrap(), vec!["stop-all", "publish"]);
+}

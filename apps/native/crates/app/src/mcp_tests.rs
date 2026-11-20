@@ -1249,7 +1249,10 @@ fn headless_publication_loads_effect_before_first_add_effect() {
             .unwrap();
     let mut connection = f.connection();
     let started = connection
-        .dispatch("start_session", &json!({"prompt":"Synthetic effect proof"}))
+        .dispatch(
+            "start_session",
+            &json!({"prompt":"Synthetic effect proof","includeExtensionStaging":true}),
+        )
         .unwrap();
     connection.dispatch("apply_commands", &json!({"commands":[{
         "type":"add_layer", "id":"plate", "layerType":"solid", "content":{"color":"#FF0000","w":320,"h":180}, "name":"Probe plate"
@@ -1481,7 +1484,7 @@ fn headless_v4_publication_registers_effects_in_the_live_catalog() {
     let started = connection
         .dispatch(
             "start_session",
-            &json!({"prompt":"Synthetic native effect"}),
+            &json!({"prompt":"Synthetic native effect","includeExtensionStaging":true}),
         )
         .unwrap();
     add(&mut connection, "plate");

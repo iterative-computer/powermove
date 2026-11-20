@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 pub(crate) fn session(name: &str, args: &Value) -> Result<()> {
     let mut issues = Vec::new();
     let fields: &[&str] = if name == "start_session" {
-        &["prompt", "access", "context"]
+        &["prompt", "access", "context", "includeExtensionStaging"]
     } else {
         &["commit"]
     };
@@ -42,6 +42,12 @@ pub(crate) fn session(name: &str, args: &Value) -> Result<()> {
             } else if *field == "commit" {
                 if !value.is_some_and(Value::is_boolean) {
                     issues.push(type_issue("boolean", value, &path));
+                }
+            } else if *field == "includeExtensionStaging" {
+                if let Some(value) = value
+                    && !value.is_boolean()
+                {
+                    issues.push(type_issue("boolean", Some(value), &path));
                 }
             } else if let Some(value) = value {
                 let choices = if *field == "access" {
