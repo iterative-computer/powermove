@@ -7890,6 +7890,7 @@ impl Popup {
                 .hash(&mut h);
         }
         self.model.unlisted().hash(&mut h);
+        self.model.note().hash(&mut h);
         (self.window.frame().size.width as i64).hash(&mut h);
         h.finish()
     }
@@ -8070,7 +8071,15 @@ impl Popup {
                 .push(Retained::into_super(Retained::into_super(note)));
             y += row_h;
         }
-        if chosen.is_empty() {
+        if let Some(note) = self.model.note() {
+            let note = popup_label(note, t.typography.body, t.colors.muted, mtm);
+            note.setAccessibilityElement(true);
+            centred(&note, lead, y, row_h, (width - lead - edge).max(0.));
+            self.list.addSubview(&note);
+            self.parts
+                .push(Retained::into_super(Retained::into_super(note)));
+            y += row_h;
+        } else if chosen.is_empty() {
             let none = popup_label("No Results", t.typography.body, t.colors.muted, mtm);
             none.setAlignment(NSTextAlignment::Center);
             centred(&none, inset, 0., row_h, width - inset * 2.);

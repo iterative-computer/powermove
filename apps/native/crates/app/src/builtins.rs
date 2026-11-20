@@ -990,9 +990,6 @@ impl Controller {
         request: &pm_builtins::PlatformRequest,
         cx: &mut Context<Self>,
     ) {
-        if let Some((previous, id, _)) = self.builtins.agent_pick.take() {
-            previous.platform_reply(id, Ok(Value::Null));
-        }
         let options = request.input["options"]
             .as_array()
             .cloned()
@@ -1025,11 +1022,30 @@ impl Controller {
                 if let Some(on) = o["checked"].as_bool() {
                     c = c.checked(on);
                 }
+                c.informational = o["informational"] == true;
                 // A provider row keeps the menu open: its models follow.
                 c.stays(o["stays"] == true)
             })
             .collect();
         let values = options.iter().map(|o| o["value"].clone()).collect();
+        if request.input["refresh"] == true {
+            // An account update can arrive while the user is choosing. Keep
+            // the existing reply id, and update its row indices along with the menu.
+            if let Some((owner, _, current)) = &mut self.builtins.agent_pick
+                && Arc::ptr_eq(owner, runtime)
+                && current
+                    .iter()
+                    .any(|value| value.as_str().is_some_and(|v| v.starts_with("provider:")))
+                && self.host.borrow_mut().update_menu(choices)
+            {
+                *current = values;
+            }
+            runtime.platform_reply(request.id, Ok(Value::Null));
+            return;
+        }
+        if let Some((previous, id, _)) = self.builtins.agent_pick.take() {
+            previous.platform_reply(id, Ok(Value::Null));
+        }
         // The rows of a menu still open after a row that stays was chosen:
         // they replace the open menu's in place, no closing and reopening.
         if request.input["update"] == true {

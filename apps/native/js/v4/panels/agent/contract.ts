@@ -100,6 +100,8 @@ export interface NativeFacts {
   connection: "checking" | "waiting" | "connected" | "unavailable";
   /** Unavailable because nobody is signed in: offer to connect. */
   signedOut?: boolean;
+  /** The provider is currently discovering its models. */
+  findingModels?: boolean;
   /** What to tell the user when `connection` isn't "connected". */
   reason: string;
   presentation: "popover" | "docked";

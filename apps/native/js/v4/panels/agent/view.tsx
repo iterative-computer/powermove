@@ -779,6 +779,8 @@ export interface MenuOption {
   category?: string;
   /** Choosing it keeps the menu open (a provider: its models follow). */
   stays?: boolean;
+  /** Quiet status text, not a choice. */
+  informational?: boolean;
 }
 /** Opens the field menu under `anchor` (a node id); answers the chosen
  * value, or null when it closed unchosen. */
@@ -788,6 +790,8 @@ export type Menu = (request: {
   options: MenuOption[];
   /** New rows for the menu still open after a row that stays was chosen. */
   update?: boolean;
+  /** Change the open model menu's rows without replacing its pending choice. */
+  refresh?: boolean;
 }) => Promise<unknown>;
 /** A borderless trigger in a bar or header that opens the window's menu:
  * its value, then the pop-up chevron (as a bar NSPopUpButton). */
@@ -2534,6 +2538,19 @@ function Composer({
       ? "Add direction…"
       : "Describe a change…";
   const hasDraft = s.draft.text.trim().length > 0 || s.attachments.length > 0;
+  const openModelMenu = useRef<{ anchor: number; rows: string } | null>(null);
+  const requestModelMenu: Menu = async (request) => {
+    const open = {
+      anchor: request.anchor,
+      rows: JSON.stringify(request.options),
+    };
+    openModelMenu.current = open;
+    try {
+      return await menu?.(request);
+    } finally {
+      if (openModelMenu.current === open) openModelMenu.current = null;
+    }
+  };
   const modelName = named(
     s.catalog.models,
     s.settings.model,
@@ -2551,6 +2568,8 @@ function Composer({
   // menu; it closes on a model, Escape or a click outside.
   const latest = useRef(s);
   latest.current = s;
+  const findingModels = useRef(n.findingModels);
+  findingModels.current = n.findingModels;
   const awaiting = useRef<{
     anchor: number;
     provider: string;
@@ -2571,13 +2590,26 @@ function Composer({
       checked: v === s.settings.model,
       category: "Model",
     })),
+    ...(s.settings.provider === "claude" &&
+    findingModels.current &&
+    s.settings.model &&
+    s.catalog.models.every(([id]) => id === s.settings.model)
+      ? [
+          {
+            label: "Finding models…",
+            value: "",
+            category: "Model",
+            informational: true,
+          },
+        ]
+      : []),
   ];
   const modelMenu = (
     anchor: number,
     update: boolean,
     epoch = menuEpoch.current,
   ) =>
-    void menu?.({
+    void requestModelMenu({
       anchor,
       placeholder: "Search models",
       options: modelRows(latest.current),
@@ -2631,6 +2663,27 @@ function Composer({
     awaiting.current = null;
     modelMenu(pending.anchor, true);
   }, [s.settings.provider, s.catalog.models]);
+  useLayoutEffect(() => {
+    const open = openModelMenu.current;
+    if (!open) return;
+    const options = modelRows(s);
+    const rows = JSON.stringify(options);
+    if (rows === open.rows) return;
+    open.rows = rows;
+    void menu?.({
+      anchor: open.anchor,
+      placeholder: "Search models",
+      options,
+      update: true,
+      refresh: true,
+    });
+  }, [
+    s.settings.provider,
+    s.settings.model,
+    s.catalog.providers,
+    s.catalog.models,
+    n.findingModels,
+  ]);
   const sendLabel = working ? "Send direction" : "Send";
   // The shortcuts menu hangs from the composer, once per draft that asks
   // for it (the window's searchable menu); closing it unchosen leaves the
