@@ -148,6 +148,7 @@ export class EffectsModel {
   focusRequest: string | undefined;
   target: Target | null = null;
   error?: string;
+  selectionHint?: string;
   announcement = { sequence: 0, text: "" };
   viewport = { start: 0, size: 0 };
   constructor(private readonly ports: ModelPorts) {}
@@ -353,6 +354,7 @@ export class EffectsModel {
   }
   setTarget(target: Target | null) {
     if (this.retired) return;
+    if (target) this.selectionHint = undefined;
     this.target = target
       ? Object.freeze({
           ...target,
@@ -436,7 +438,8 @@ export class EffectsModel {
     this.error = undefined;
     const target = this.target;
     if (!target) {
-      this.announce("Select a layer first");
+      this.selectionHint = "Select a layer first";
+      this.announce(this.selectionHint);
       this.changed();
       return false;
     }

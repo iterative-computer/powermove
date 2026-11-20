@@ -632,6 +632,10 @@ fn changed(cx: &mut App) {
     });
 }
 
+pub(crate) fn sign_in_available(cx: &App) -> bool {
+    cx.has_global::<Cloud>()
+}
+
 /// Settings › Account › Sign In…: the first step's sheet on `window`.
 pub fn open_sign_in(window: Retained<NSWindow>, cx: &mut App) {
     if !cx.has_global::<Cloud>() {

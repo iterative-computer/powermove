@@ -40,6 +40,7 @@ mod export_coordinator;
 mod render_queue;
 mod expression_sheet;
 mod extension_authoring;
+mod extension_template;
 mod extension_transfer;
 mod extension_vars;
 mod extensions;

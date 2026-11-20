@@ -292,6 +292,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
     // out): set when it changes, cleared only while no other message
     // replaced it.
     let mut shown = None::<String>;
+    let mut extension_notice = ExtensionNotice::default();
     let mut studio_status = None;
     let mut measured = None::<(f32, Slot)>;
     // The display link's next vsync (host seconds): where a playing playhead
@@ -381,7 +382,9 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                         crate::error_log::shared(cx).borrow_mut().push("Viewer",e);
                         format!("Viewer: {first} Details are in Window ▸ Error Log.")
                     }
-                }).or_else(||failures_line(&status, v.published.as_deref())).or_else(||status.notice());
+                }).or_else(|| extension_notice.line(&status))
+                    .or_else(|| failures_line(&status, v.published.as_deref()))
+                    .or_else(|| status.notice());
                 if line!=shown {
                     // Layers newly left out (or back): Properties marks them.
                     v.update_builtins(cx);
@@ -690,3 +693,76 @@ mod placeholder_tests {
 #[cfg(test)]
 #[path = "cursor_render_tests.rs"]
 mod cursor_render_tests;
+
+/// Give the latest switch precedence over earlier bypassed effects.
+#[derive(Default)]
+struct ExtensionNotice {
+    previous: Option<Vec<String>>,
+    newest: Option<String>,
+}
+
+impl ExtensionNotice {
+    fn line(&mut self, status: &pm_engine_service::ViewerStatus) -> Option<String> {
+        let disabled = || status.unavailable.iter().filter(|ext| ext.why == "is turned off");
+        if self.previous.as_ref().is_none_or(|previous| {
+            !disabled().map(|ext| ext.id.as_str()).eq(previous.iter().map(String::as_str))
+        }) {
+            self.newest = self.previous.as_ref().and_then(|previous| {
+                disabled().find(|ext| !previous.contains(&ext.id)).map(|ext| ext.id.clone())
+            });
+            self.previous = Some(disabled().map(|ext| ext.id.clone()).collect());
+        }
+        let id = self.newest.as_deref()?;
+        let owner = disabled().find(|ext| ext.id == id)?;
+        let line = format!("{} {}", owner.name, owner.why);
+        let Some(missing) = status.missing_effects.iter().find(|missing| {
+            missing.revision.is_none() && owner.would_provide(&missing.effect)
+        }) else {
+            return Some(line);
+        };
+        let layers = if missing.layers == 1 { "layer" } else { "layers" };
+        Some(format!(
+            "{line}: {} is bypassed on {} {layers}",
+            missing.effect, missing.layers
+        ))
+    }
+}
+
+#[cfg(test)]
+mod extension_notice_tests {
+    use super::ExtensionNotice;
+    use pm_engine_service::{ViewerStatus, resources::Unavailable};
+
+    fn turned_off(id: &str, name: &str) -> Unavailable {
+        Unavailable {
+            id: id.into(),
+            name: name.into(),
+            why: "is turned off".into(),
+            provides: vec![format!("{id}.effect")],
+        }
+    }
+
+    #[test]
+    fn words_status_names_the_extension_that_just_turned_off() {
+        let mut status = ViewerStatus {
+            missing_effects: ["old.effect", "tint.effect"].into_iter().map(|effect| {
+                pm_render::effects::versions::MissingEffect {
+                    effect: effect.into(), revision: None, layers: 1,
+                }
+            }).collect(),
+            unavailable: vec![turned_off("old", "Earlier Effects")],
+            ..ViewerStatus::default()
+        };
+        let mut notice = ExtensionNotice::default();
+        assert!(notice.line(&status).is_none());
+        assert!(status.notice().unwrap().starts_with("Earlier Effects is turned off"));
+        status.unavailable.push(turned_off("tint", "Acceptance Tint"));
+        let expected = Some("Acceptance Tint is turned off: tint.effect is bypassed on 1 layer");
+        assert_eq!(notice.line(&status).as_deref(), expected);
+        assert_eq!(notice.line(&status).as_deref(), expected);
+        status.missing_effects.pop();
+        assert_eq!(notice.line(&status).as_deref(), Some("Acceptance Tint is turned off"));
+        status.unavailable.pop();
+        assert!(notice.line(&status).is_none());
+    }
+}

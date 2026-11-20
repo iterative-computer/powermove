@@ -1248,3 +1248,73 @@ fn a_ui_only_effect_controls_intent_is_answered_with_its_projection() {
         .unwrap();
     assert_eq!(header["expanded"], false, "the reply shows it collapsed");
 }
+
+#[test]
+fn words_effect_browser_adds_to_selected_layers_in_one_named_undo_step() {
+    use pm_surface::host_api::{EditCommand, HOST_API_VERSION, HostOperation, HostRequest};
+    use pm_surface::host_data::KernelData;
+    let (actor, backend) = setup_project(|project| {
+        let mut other = project["layers"][0].clone();
+        other["id"] = json!("b");
+        project["layers"].as_array_mut().unwrap().push(other);
+    });
+    let kernel = actor.handle();
+    kernel
+        .call(
+            "synthetic",
+            Request::new(
+                Caller::native(),
+                pm_kernel::SelectionCall::Layers {
+                    ids: vec!["a".into(), "b".into()],
+                    add: false,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let before = kernel.published("synthetic").unwrap();
+    let identity = backend.identity.clone();
+    let mut service = data::Data(std::sync::Arc::new(std::sync::Mutex::new(backend)));
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    service
+        .enqueue(
+            HostRequest {
+                version: HOST_API_VERSION,
+                realm: identity.realm,
+                generation: identity.generation,
+                project: identity.project,
+                request_id: 1,
+                expected_revision: before.revision(),
+                expected_state_revision: None,
+                operation: HostOperation::Edit {
+                    label: "Add Gradient".into(),
+                    commands: vec![EditCommand {
+                        command: "effect.add".into(),
+                        args: json!({"target":"a","definition":"gradient"}),
+                    }],
+                },
+            },
+            tx,
+        )
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let after = loop {
+        let after = kernel.published("synthetic").unwrap();
+        if after.revision() > before.revision() {
+            break after;
+        }
+        if let Ok(ack) = rx.try_recv() {
+            assert!(ack.accepted, "{:?}", ack.error);
+        }
+        assert!(std::time::Instant::now() < deadline, "the Effects edit did not reach the kernel");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    };
+    assert_eq!(after.history.undo_label.as_deref(), Some("Add Gradient"));
+    let root = after.snapshot.root().unwrap();
+    for id in ["a", "b"] {
+        let layer = pm_kernel::model::find_layer(root, id).unwrap();
+        let fx = pm_kernel::model::layer_at(root, &layer).unwrap().get("fx").unwrap().to_value();
+        assert_eq!(data::wire(&fx)[0]["type"], "gradient", "effect on {id}");
+    }
+}
