@@ -209,3 +209,122 @@ fn cube_between_2d_layers(cube_first: bool) {
         "no studio floor among 2D layers: {names:?}"
     );
 }
+
+/// Where a point of the scene lands in a `size`-pixel square frame seen by
+/// the default camera (no camera layer): at (3, 2, 6), aimed at the origin,
+/// 45° vertical field of view.
+fn pixel(p: [f64; 3], size: u32) -> (u32, u32) {
+    let eye = [3., 2., 6.];
+    let norm = |a: [f64; 3]| {
+        let l = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+        a.map(|x| x / l)
+    };
+    let cross = |a: [f64; 3], b: [f64; 3]| {
+        [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    };
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let f = norm([-eye[0], -eye[1], -eye[2]]);
+    let r = norm(cross(f, [0., 1., 0.]));
+    let u = cross(r, f);
+    let t = 22.5f64.to_radians().tan();
+    let d = [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]];
+    let (x, y) = (dot(d, r) / dot(d, f) / t, dot(d, u) / dot(d, f) / t);
+    let s = size as f64;
+    (((x + 1.) / 2. * s) as u32, ((1. - y) / 2. * s) as u32)
+}
+
+/// The cube Layer ▸ Add 3D Layer adds to an unlit composition: its face
+/// turned away from the key light still reads (the scene's default ambient
+/// fills it), and stays darker than the face the key lights.
+#[test]
+fn the_menu_cube_shadow_side_reads_against_its_lit_side() {
+    const FRAME: u32 = 128;
+    let actor = KernelActor::spawn(KernelConfig::default());
+    actor
+        .handle()
+        .open(
+            "p",
+            OpenSource::Untitled(to_model(&json!({"id":"p","compId":"c","w":FRAME,"h":FRAME,
+                "fps":30,"dur":1,"layers":[],"assets":{},"comps":{}}))),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let published = actor.handle().published("p").unwrap();
+    let (_, commands, _) =
+        pm_panel_studio3d::properties::add_layer(&published, 0., "box", "cube").unwrap();
+    transact(&actor, commands);
+    let published = actor.handle().published("p").unwrap();
+    let mut root = from_model(&published.snapshot.root().unwrap().to_value()).unwrap();
+    let cube = layers(&mut root)
+        .iter()
+        .find(|l| l["id"] == "cube")
+        .unwrap()
+        .clone();
+    let side = cube["d"]["data"]["object"]["source"]["parameters"]["width"]
+        .as_f64()
+        .unwrap_or(1.)
+        * cube["p"]["scale.x"]["v"].as_f64().unwrap_or(100.)
+        / 100.;
+    let quality = pm_scene3d::quality::resolve(
+        &pm_scene3d::quality::preset("production").unwrap(),
+        &json!({"minSamples":16,"maxSamples":16,"noiseThreshold":0,"caustics":false}),
+    )
+    .unwrap();
+    if root["comps"]["c"].is_object() {
+        root["comps"]["c"]["studioQuality"] = quality;
+    } else {
+        root["studioQuality"] = quality;
+    }
+    root["colorDepth"] = json!(16);
+    let doc = pm_kernel::DocumentStore::new_untitled(to_model(&root))
+        .snapshot()
+        .document;
+    let h = side / 2.;
+    // The key is up and to the left, in front: it lights the front face.
+    // The right face is turned away from it. Both in the export and in the
+    // viewer.
+    let mut ratios = vec![];
+    for export in [true, false] {
+        let mut renderer = Renderer::headless().unwrap();
+        studio::attach(&mut renderer, doc.clone(), &Default::default());
+        let mut request = RenderRequest::sized(Size::new(FRAME, FRAME), Precision::Float16);
+        request.export = export;
+        request.output_kind = if export {
+            OutputKind::Final
+        } else {
+            OutputKind::Preview
+        };
+        request.background = false;
+        let frame = renderer
+            .render(&doc, "c", Ticks::ZERO, &request, &pm_render::MapResolver::default())
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        let pixels = renderer.read_rgba(&frame).unwrap();
+        // Mean luminance over a 5×5 patch around a face's centre.
+        let face = |centre: [f64; 3]| {
+            let (cx, cy) = pixel(centre, FRAME);
+            let mut sum = 0.;
+            for y in cy - 2..=cy + 2 {
+                for x in cx - 2..=cx + 2 {
+                    let i = ((y * FRAME + x) * 4) as usize;
+                    let p = &pixels[i..i + 4];
+                    assert!(p[3] > 0.99, "the cube covers {x},{y}: {p:?}");
+                    sum += 0.2126 * p[0] as f64 + 0.7152 * p[1] as f64 + 0.0722 * p[2] as f64;
+                }
+            }
+            sum / 25.
+        };
+        let lit = face([0., 0., h]);
+        let dark = face([h, 0., 0.]);
+        let ratio = dark / lit;
+        ratios.push((export, lit, dark, ratio));
+    }
+    for (export, lit, dark, ratio) in ratios {
+        assert!(
+            (0.30..=0.95).contains(&ratio),
+            "export {export}: the shadow side is {:.0}% of the lit side ({dark:.4} / {lit:.4})",
+            ratio * 100.
+        );
+    }
+}
