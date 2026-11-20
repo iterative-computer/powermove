@@ -80,6 +80,7 @@ for line in sys.stdin:
                 images: vec![],
                 files: vec![],
                 role: None,
+                project: None,
             },
         )
         .unwrap();

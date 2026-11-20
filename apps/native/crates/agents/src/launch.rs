@@ -36,8 +36,10 @@ pub mod grants {
         io::Read,
         sync::{Mutex, OnceLock},
     };
-    fn table() -> &'static Mutex<BTreeMap<String, (String, Access)>> {
-        static TABLE: OnceLock<Mutex<BTreeMap<String, (String, Access)>>> = OnceLock::new();
+    /// Each token's run, access and the project its thread belongs to.
+    type Entry = (String, Access, Option<String>);
+    fn table() -> &'static Mutex<BTreeMap<String, Entry>> {
+        static TABLE: OnceLock<Mutex<BTreeMap<String, Entry>>> = OnceLock::new();
         TABLE.get_or_init(Default::default)
     }
     /// Revokes its token on drop.
@@ -52,39 +54,46 @@ pub mod grants {
             table().lock().unwrap().remove(&self.0);
         }
     }
-    /// A new token for `run` at `access`.
-    pub fn issue(run: &str, access: Access) -> std::io::Result<Grant> {
+    /// A new token for `run` at `access`, working in `project` (none for an
+    /// application-window thread).
+    pub fn issue(run: &str, access: Access, project: Option<&str>) -> std::io::Result<Grant> {
         let mut bytes = [0u8; 32];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        table()
-            .lock()
-            .unwrap()
-            .insert(token.clone(), (run.into(), access));
+        table().lock().unwrap().insert(
+            token.clone(),
+            (run.into(), access, project.map(str::to_owned)),
+        );
         Ok(Grant(token))
     }
     /// Build slots follow the owning process lifetime without retaining its token.
     pub fn run_live(run: &str) -> bool {
-        table().lock().unwrap().values().any(|(id, _)| id == run)
+        table().lock().unwrap().values().any(|(id, _, _)| id == run)
     }
     /// The run and access a token was issued for, while that run lives.
     pub fn resolve(token: &str) -> Option<(String, Access)> {
-        table().lock().unwrap().get(token).cloned()
+        let table = table().lock().unwrap();
+        let (run, access, _) = table.get(token)?;
+        Some((run.clone(), *access))
+    }
+    /// The project a live token's run was started from, if any.
+    pub fn project(token: &str) -> Option<String> {
+        table().lock().unwrap().get(token)?.2.clone()
     }
     #[cfg(test)]
     mod tests {
         use super::*;
         #[test]
         fn panel_build_owner_expires_with_its_process_grant() {
-            let grant = issue("panel-build-owner-test", Access::Project).unwrap();
+            let grant = issue("panel-build-owner-test", Access::Project, None).unwrap();
             assert!(run_live("panel-build-owner-test"));
             drop(grant);
             assert!(!run_live("panel-build-owner-test"));
         }
         #[test]
         fn a_token_names_its_run_only_while_held() {
-            let grant = issue("run-a", Access::Editor).unwrap();
-            let other = issue("run-a", Access::Editor).unwrap();
+            let grant = issue("run-a", Access::Editor, None).unwrap();
+            let other = issue("run-a", Access::Editor, None).unwrap();
             assert_eq!(grant.token().len(), 64);
             assert_ne!(grant.token(), other.token());
             assert_eq!(
@@ -285,6 +294,14 @@ pub struct Request {
     /// Attached non-image files (`{name,type,content}`), given to the run as
     /// main's ATTACHED FILES section after its prompt. Subagents inherit them.
     pub files: Vec<Value>,
+    /// The project the run's thread belongs to; its tool sessions work there,
+    /// whichever window is in front. None for an application-window thread.
+    #[serde(default)]
+    pub project: Option<String>,
+}
+/// The project a thread's scope names: none for the application window's.
+pub fn thread_project(scope: &str) -> Option<String> {
+    (!matches!(scope, "" | "builtin-application" | "powermove-global")).then(|| scope.to_owned())
 }
 impl Request {
     /// Main's additional instructions: orchestration, then the task role.
@@ -305,7 +322,7 @@ pub fn launch(environment: &Environment, mut request: Request) -> Result<Handle,
     }
     request.prompt = crate::context::assemble(&request.prompt);
     let authority = Authority::new(request.access, request.approval, request.computer_consent)?;
-    let grant = grants::issue(&request.run, request.access)
+    let grant = grants::issue(&request.run, request.access, request.project.as_deref())
         .map_err(|e| format!("The agent's tool access couldn't be prepared: {e}"))?;
     let token = grant.token().to_owned();
     let loaded = crate::user_mcp::load(request.provider, request.access, &environment.vars);
@@ -643,6 +660,7 @@ mod exec_reply_tests {
             images: vec![],
             role: None,
             files: vec![],
+            project: None,
         };
         let handle = launch(&environment, request).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

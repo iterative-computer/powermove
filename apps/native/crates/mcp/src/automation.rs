@@ -95,6 +95,8 @@ pub trait EngineHook: Send + Sync {
 /// live half of get_workspace_state/get_panel_layout). Runs on the main thread;
 /// the worker waits for its reply. `project` is the session's attached project.
 pub type AgentGrants = Arc<dyn Fn(&str) -> Option<(String, String)> + Send + Sync>;
+/// The project a grant token's run was started from (none for an app thread).
+pub type AgentProjects = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 pub trait SurfaceHook: Send + Sync {
     fn call(&self, tool: &str, project: Option<&str>, args: &Value) -> Result<Value>;
 }
@@ -178,6 +180,7 @@ pub struct Automation {
     /// Resolves a provider run's grant token (`--agent-run`) to its run id and
     /// MCP access. Only the app issues tokens.
     pub agent_grants: Option<AgentGrants>,
+    pub agent_projects: Option<AgentProjects>,
     pub media_registry: Option<Arc<dyn crate::media::MediaRegistry>>,
     pub media_importer: Option<Arc<dyn crate::services::MediaImporter>>,
     pub speech: Option<Arc<dyn crate::services::Speech>>,
@@ -246,6 +249,7 @@ impl Automation {
             engine: None,
             surfaces: None,
             agent_grants: None,
+            agent_projects: None,
             media_registry: None,
             media_importer: None,
             speech: None,

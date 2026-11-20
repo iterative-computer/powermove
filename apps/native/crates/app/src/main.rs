@@ -555,6 +555,7 @@ fn main() -> Result<()> {
                     (run, access.to_owned())
                 })
             }));
+            automation.agent_projects = Some(Arc::new(pm_agents::launch::grants::project));
         }
         // The server itself starts once the library is attached (first_run).
         Ok((actor, engine, mcp_host, tools))
