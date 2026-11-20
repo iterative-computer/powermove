@@ -67,6 +67,14 @@ enum Gesture {
     Resize(Divider, Point<Pixels>, Layout),
     Panel(PanelDrag),
 }
+
+fn panel_history_direction(command: &str) -> Option<bool> {
+    match command {
+        "undo" | "contextUndo" => Some(false),
+        "redo" | "contextRedo" => Some(true),
+        _ => None,
+    }
+}
 impl Gesture {
     fn original(self) -> Layout {
         match self {
@@ -126,6 +134,8 @@ pub struct Editor {
     /// Docking area of the last render, in window points.
     dock_bounds: Rect,
     gesture: Option<Gesture>,
+    panel_undo: Vec<(Layout, Layout)>,
+    panel_redo: Vec<(Layout, Layout)>,
     focus: FocusHandle,
     panel_focus: HashMap<String, FocusHandle>,
     panel_order: Vec<String>,
@@ -243,6 +253,8 @@ impl Editor {
             pending_restores: Vec::new(),
             dock_bounds: Rect::default(),
             gesture: None,
+            panel_undo: Vec::new(),
+            panel_redo: Vec::new(),
             focus: cx.focus_handle(),
             panel_focus: HashMap::new(),
             ringed_panel: None,
@@ -429,6 +441,8 @@ impl Editor {
     }
     pub fn bind_project(&mut self, project: String) {
         self.parked.clear();
+        self.panel_undo.clear();
+        self.panel_redo.clear();
         self.project = project;
         // The project's own workspace arrives with the store; until then the
         // window keeps showing what it showed, and writes none of it: the
@@ -590,6 +604,8 @@ impl Editor {
     }
     fn show_record(&mut self, record: serde_json::Value) {
         self.maximized_panel = None;
+        self.panel_undo.clear();
+        self.panel_redo.clear();
         // Places in the layout this replaces; the new one's absent panels
         // are found again on the next frame.
         for id in std::mem::take(&mut self.absent) {
@@ -848,6 +864,13 @@ impl Editor {
             self.integration.as_ref().is_some_and(|i| i.panels_loading(cx)),
         )
     }
+    fn open_panels(&self) -> Vec<&str> {
+        self.layout
+            .open_panels()
+            .into_iter()
+            .filter(|id| !self.absent.contains(*id))
+            .collect()
+    }
     fn menu_state(&self, cx: &App) -> MenuState {
         let panels = self.panels(cx);
         MenuState {
@@ -867,7 +890,6 @@ impl Editor {
                 .map(|id| (id.to_owned(), panels.title(id).to_owned()))
                 .collect(),
             open: self
-                .layout
                 .open_panels()
                 .into_iter()
                 .map(String::from)
@@ -882,6 +904,7 @@ impl Editor {
                 .as_ref()
                 .map(|i| i.disabled(cx))
                 .unwrap_or_default(),
+            workspace_history: [false; 2],
             transition_refusal: self
                 .integration
                 .as_ref()
@@ -898,15 +921,34 @@ impl Editor {
                 .unwrap_or_default(),
         }
     }
-    fn dock_visible(&self, id: &str) -> bool {
-        self.layout
-            .docks
-            .iter()
-            .any(|d| d.id == id && !d.collapsed && !d.groups.is_empty())
+    fn menu_state_with_focus(&self, window: &Window, cx: &App) -> MenuState {
+        let mut state = self.menu_state(cx);
+        if self.shell_history_focus(window, cx) {
+            state.workspace_history = [
+                self.can_restore_panel_drop(false),
+                self.can_restore_panel_drop(true),
+            ];
+        }
+        state
     }
-    /// Once the extensions are in, a panel nothing provides takes no slot
-    /// (its stack's other tabs and the column fill the space) and keeps its
-    /// place in the workspace; it comes back when something registers it.
+    fn dock_visible(&self, id: &str) -> bool {
+        self.layout.docks.iter().any(|d| {
+            d.id == id && !d.collapsed
+                && d.groups.iter().any(|g| g.tabs.iter().any(|id| !self.absent.contains(id)))
+        })
+    }
+
+    fn visible_geometry(&self) -> Geometry {
+        self.layout.visible_geometry(
+            self.dock_bounds,
+            &self.tokens,
+            &self.dock_natural_heights,
+            &self.absent,
+            self.maximized_panel.as_deref(),
+        )
+    }
+    /// After discovery, unavailable panels keep their saved slots but don't
+    /// occupy an otherwise empty stack or count as shown in the Window menu.
     fn settle_absent_panels(&mut self, cx: &mut Context<Self>) {
         if self.awaiting_panels || self.integration.is_none() {
             return;
@@ -995,7 +1037,11 @@ impl Editor {
                 if self.layout.open_panels().contains(&rest) && layout::closable(rest) {
                     self.layout.close_panel(rest)
                 } else {
-                    self.layout.show_panel(rest, &panels)
+                    if let Err(error) = self.show_library_panel(rest, cx) {
+                        self.status = error;
+                    }
+                    cx.notify();
+                    return true;
                 }
             }
             ("panel", "activate") => {
@@ -1013,6 +1059,7 @@ impl Editor {
                     }
                     self.reveal_motion = None;
                     self.reveal_panel = Some(rest.into());
+                    self.maximized_panel = None;
                     self.header_wash = (!self.tokens.accessibility.reduce_motion)
                         .then(|| (rest.into(), std::time::Instant::now()));
                     self.save();
@@ -1023,7 +1070,10 @@ impl Editor {
             ("panel", "registered") => {
                 // A reconnect refreshes saved placeholders. It must not reopen
                 // something closed meanwhile, or add it to a different project.
-                if rest != "agent" { self.parked.remove(rest); }
+                if rest != "agent" {
+                    self.parked.remove(rest);
+                    self.absent.remove(rest);
+                }
                 cx.notify();
                 return true;
             }
@@ -1548,6 +1598,16 @@ impl Editor {
             "shell command={} args={:?} token={:?}",
             cmd.name, cmd.args, cmd.token
         );
+        if let Some(redo) = panel_history_direction(&cmd.name)
+            && self.shell_history_focus(window, cx)
+            && self.restore_panel_drop(redo)
+        {
+            if let (Some(token), Some(host)) = (cmd.token, &self.host) {
+                host.borrow_mut().resolve(token, true);
+            }
+            cx.notify();
+            return;
+        }
         // A command that cannot run declines, so its key reaches the focused
         // control and no route ever does nothing silently.
         if self
@@ -1594,7 +1654,7 @@ impl Editor {
         match cmd.name.as_str() {
             "palette" => {
                 if let Some(h) = &self.host {
-                    let state = self.menu_state(cx);
+                    let state = self.menu_state_with_focus(window, cx);
                     h.borrow_mut().open_palette(&state);
                 }
             }
@@ -1809,7 +1869,7 @@ impl Editor {
                 p.rect = line;
             } else {
                 let (dock, group, _) = next.find(&drag.id)?;
-                let layout = next.geometry_with_panel_heights(bounds, tokens, &self.dock_natural_heights);
+                let layout = next.visible_geometry(bounds, tokens, &self.dock_natural_heights, &self.absent, None);
                 p.rect = layout.panels.iter().find(|q| (q.dock, q.group) == (dock, group))?.rect;
                 if let Some(viewport) = layout.side_docks.get(&dock) {
                     let bottom = layout.panels.iter().filter(|q| q.dock == dock)
@@ -1963,10 +2023,8 @@ impl Editor {
             cx.notify();
             return false;
         }
-        self.layout = next;
-        self.slides.arm_drop();
-        self.tab_slides.arm_drop();
-        self.save();
+        let before = std::mem::replace(&mut self.layout, next);
+        self.record_panel_drop(before);
         cx.notify();
         true
     }
@@ -2004,10 +2062,58 @@ impl Editor {
         self.layout
             .apply_drop(&drag.id, &preview, drag.stack)
             .ok()?;
+        self.record_panel_drop(drag.original);
+        Some(preview.target)
+    }
+    fn record_panel_drop(&mut self, before: Layout) {
+        if before == self.layout {
+            return;
+        }
+        // Do not undo through a workspace edit made outside this history.
+        if self.panel_undo.last().is_some_and(|(_, after)| *after != before) {
+            self.panel_undo.clear();
+        }
+        self.panel_redo.clear();
+        if self.panel_undo.len() == 32 {
+            self.panel_undo.remove(0);
+        }
+        self.panel_undo.push((before, self.layout.clone()));
         self.slides.arm_drop();
         self.tab_slides.arm_drop();
         self.save();
-        Some(preview.target)
+    }
+    fn shell_history_focus(&self, window: &Window, cx: &App) -> bool {
+        window.focused(cx).is_none_or(|f| f == self.focus || f == self.workspace_focus)
+            && self.host.as_ref().is_none_or(|h| h.borrow().shell_owns_history())
+    }
+    fn can_restore_panel_drop(&self, redo: bool) -> bool {
+        if self.gesture.is_some() {
+            return false;
+        }
+        if redo {
+            self.panel_redo.last().is_some_and(|(before, _)| *before == self.layout)
+        } else {
+            self.panel_undo.last().is_some_and(|(_, after)| *after == self.layout)
+        }
+    }
+    fn restore_panel_drop(&mut self, redo: bool) -> bool {
+        if !self.can_restore_panel_drop(redo) {
+            return false;
+        }
+        let (from, to) = if redo {
+            (&mut self.panel_redo, &mut self.panel_undo)
+        } else {
+            (&mut self.panel_undo, &mut self.panel_redo)
+        };
+        let Some((before, after)) = from.pop() else {
+            return false;
+        };
+        self.layout = if redo { after.clone() } else { before.clone() };
+        to.push((before, after));
+        self.slides.arm_drop();
+        self.tab_slides.arm_drop();
+        self.save();
+        true
     }
     /// Ends the drag in progress as a release does: a panel moved lands
     /// where its preview showed, a resize keeps the sizes it reached.
@@ -2100,9 +2206,7 @@ impl Editor {
                     let (near, kind) = self.near_name(p.near, &drag, &panels);
                     let moved = self.layout.apply_drop(&drag.id, &p, drag.stack);
                     if moved.is_ok() {
-                        self.slides.arm_drop();
-                        self.tab_slides.arm_drop();
-                        self.save();
+                        self.record_panel_drop(drag.original);
                     }
                     match moved {
                         Ok(()) => match kind {
@@ -2815,19 +2919,7 @@ impl Editor {
                 }
             }
         }
-        self.geometry = if self.maximized_panel.is_some() {
-            self.layout.geometry_with_maximized(
-                self.dock_bounds,
-                &t,
-                self.maximized_panel.as_deref(),
-            )
-        } else {
-            self.layout.geometry_with_panel_heights(
-                self.dock_bounds,
-                &t,
-                &self.dock_natural_heights,
-            )
-        };
+        self.geometry = self.visible_geometry();
         if let Some(id) = self.reveal_panel.take()
             && let Some((di, gi, _)) = self.layout.find(&id)
             && let Some(bounds) = self.geometry.side_docks.get(&di)
@@ -3014,7 +3106,7 @@ impl Editor {
                 viewer.is_some()
                     && (in_viewer || w.focused(cx).is_none_or(|f| f == self.focus)),
             );
-            h.publish_menu_state(&self.menu_state(cx));
+            h.publish_menu_state(&self.menu_state_with_focus(w, cx));
             h.keyboard_control_focus.set(control_has_keyboard(
                 w.focused(cx).is_some_and(|f| {
                     f != self.focus && !self.panel_focus.values().any(|p| *p == f)
@@ -3110,7 +3202,12 @@ impl Editor {
                 .size_full(),
             )
             .on_mouse_move_all({
-                let listener = cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+                let listener = cx.listener(|this, (e, phase): &(MouseMoveEvent, DispatchPhase), _, cx| {
+                    // An already-pressed shell gesture owns motion even over
+                    // a panel whose own pointer handlers consume the bubble.
+                    if (*phase == DispatchPhase::Capture) != this.gesture.is_some() {
+                        return;
+                    }
                     let at = (f32::from(e.position.x), f32::from(e.position.y));
                     let hover = (!this.dragging_panel()).then(|| this
                         .geometry
@@ -3213,9 +3310,7 @@ impl Editor {
                     }
                 });
                 move |e, phase, _, w, cx| {
-                    if phase == DispatchPhase::Bubble {
-                        listener(e, w, cx);
-                    }
+                    listener(&(e.clone(), phase), w, cx);
                 }
             })
             .on_mouse_up_all({
@@ -3240,7 +3335,7 @@ impl Editor {
                     this.end_gesture(cx);
                 });
                 move |e: &MouseUpEvent, phase, _, w, cx| {
-                    if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
+                    if phase == DispatchPhase::Capture && e.button == MouseButton::Left {
                         listener(e, w, cx);
                     }
                 }
@@ -3273,12 +3368,13 @@ impl Editor {
                         }
                         _ => return,
                     };
-                    this.layout.resize_with_panel_heights(
+                    this.layout.resize_from_geometry(
                         &d,
                         delta,
                         this.dock_bounds,
                         &this.tokens,
-                        &this.dock_natural_heights,
+                        &this.geometry,
+                        true,
                     );
                     this.save();
                     cx.notify();
@@ -3305,7 +3401,7 @@ impl Editor {
             self.tab_slides.begin();
         }
         if let Some(integration) = &self.integration {
-            integration.open_panels(&self.layout.open_panels(), cx);
+            integration.open_panels(&self.open_panels(), cx);
         }
         let mut native_bodies = vec![];
         let mut native_clips = vec![];
@@ -4146,11 +4242,12 @@ impl Editor {
                         if e.click_count >= 2 {
                             this.gesture = None;
                             if this.layout.reset_dock(&divd)
-                                || this.layout.reset_split_with_panel_heights(
+                                || this.layout.reset_split_from_geometry(
                                     &divd,
                                     this.dock_bounds,
                                     &this.tokens,
-                                    &this.dock_natural_heights,
+                                    &this.geometry,
+                                    true,
                                 )
                             {
                                 this.slides.armed = true;
@@ -4161,13 +4258,12 @@ impl Editor {
                         }
                         // A folded panel beside it opens first, so the
                         // drag has room to work with.
-                        if this.layout.expand_beside(&divd) {
+                        let next = divd.group.and_then(|g| this.geometry.next_group(divd.dock, g));
+                        if this.layout.expand_visible_beside(&divd, next) {
                             this.save();
                         }
                         this.resize_live = false;
-                        this.resize_geometry = Some(this.layout.geometry_with_panel_heights(
-                            this.dock_bounds, &this.tokens, &this.dock_natural_heights,
-                        ));
+                        this.resize_geometry = Some(this.visible_geometry());
                         this.gesture = Some(Gesture::Resize(
                             divd.clone(),
                             e.position,
@@ -5224,6 +5320,8 @@ mod tests {
         project: RefCell<Option<String>>,
         home: std::cell::Cell<bool>,
         contributed: RefCell<Vec<(String, String)>>,
+        consume_viewer_pointer: std::cell::Cell<bool>,
+        native_pexels: std::cell::Cell<bool>,
     }
     struct Stub(Rc<Kernel>);
     impl crate::integration::Integration for Stub {
@@ -5233,12 +5331,20 @@ mod tests {
         }
         fn panel(
             &self,
-            _: &str,
+            id: &str,
             _: crate::layout::Rect,
             _: &mut Window,
             _: &mut App,
         ) -> Option<AnyElement> {
-            None
+            use gpui::{InteractiveElement, IntoElement, Styled};
+
+            (id == "viewer" && self.0.consume_viewer_pointer.get()).then(|| {
+                gpui::div()
+                    .size_full()
+                    .on_mouse_move(|_, _, cx| cx.stop_propagation())
+                    .on_mouse_up(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .into_any_element()
+            })
         }
         fn workspaces(&self, _: &App) -> Option<Rc<workspace::Store>> {
             Some(self.0.store.borrow().clone())
@@ -5248,6 +5354,9 @@ mod tests {
         }
         fn contributed_panels(&self, _: &App) -> Vec<(String, String)> {
             self.0.contributed.borrow().clone()
+        }
+        fn native_panel(&self, id: &str, _: &App) -> bool {
+            id == "fixture.pexels" && self.0.native_pexels.get()
         }
         fn project_id(&self, _: &App) -> Option<String> {
             (!self.0.home.get())
@@ -5668,6 +5777,214 @@ mod tests {
             assert_eq!(v.layout, before);
             assert!(v.simulate_drop().is_some());
             assert_ne!(v.layout, before);
+        });
+    }
+
+    fn away_fixture(cx: &mut gpui::Context<Editor>, kernel: Rc<Kernel>) -> Editor {
+        let mut v = Editor::new(
+            Tokens::new(
+                pm_design::Scheme::Dark,
+                pm_design::Accessibility { reduce_motion: true, ..Default::default() },
+            ),
+            None,
+            cx,
+        );
+        let record = serde_json::json!({"id": "away-fixture", "layout": {"docks": [
+            {"id": "left", "size": 260, "panels": [{"id": "assets", "flex": true}]},
+            {"id": "center", "panels": [{"id": "viewer", "flex": true}]},
+            {"id": "right", "size": 300, "panels": [
+                {"id": "inspector", "flex": true}, {"id": "fxbrowser", "size": 320}
+            ]}
+        ]}});
+        *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+            project: Some(record.clone()),
+            project_id: Some("p".into()),
+            ..Default::default()
+        });
+        v.integration = Some(Rc::new(Stub(kernel)));
+        v.project = "p".into();
+        v.seen = Some(record.clone());
+        v.show_record(record);
+        v
+    }
+
+    #[gpui::test]
+    fn panel_away_stacked_divider_owns_motion_across_viewer(cx: &mut TestAppContext) {
+        let kernel = Rc::new(Kernel::default());
+        kernel.consume_viewer_pointer.set(true);
+        let (view, cx) = cx.add_window_view(|_, cx| away_fixture(cx, kernel));
+        cx.run_until_parked();
+        let from = view.read_with(cx, |v, _| {
+            let d = v.layout.find("inspector").unwrap().0;
+            let r = v.geometry.dividers.iter().find(|s| s.dock == d && !s.horizontal).unwrap().rect;
+            (r.x + r.w / 2., r.y + 100.)
+        });
+        let to = (from.0 - 75., from.1);
+        press(cx, from);
+        cx.simulate_mouse_move(at(to), gpui::MouseButton::Left, drag_none());
+        view.read_with(cx, |v, _| {
+            let (d, _, _) = v.layout.find("inspector").unwrap();
+            assert_eq!(v.layout.docks[d].groups.len(), 2);
+            assert_eq!(v.layout.docks[d].size, Some(375.), "viewer must not eat divider motion");
+        });
+        cx.simulate_mouse_up(at(to), gpui::MouseButton::Left, drag_none());
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none(), "release must finish resize");
+            let (d, _, _) = v.layout.find("inspector").unwrap();
+            assert_eq!(v.layout.docks[d].size, Some(375.));
+        });
+    }
+
+    #[gpui::test]
+    fn panel_away_release_commits_even_where_viewer_consumes_mouse_up(cx: &mut TestAppContext) {
+        let kernel = Rc::new(Kernel::default());
+        kernel.consume_viewer_pointer.set(true);
+        let (view, cx) = cx.add_window_view(|_, cx| away_fixture(cx, kernel));
+        cx.run_until_parked();
+        let (before, to) = view.read_with(cx, |v, _| {
+            let r = stack_rect(v, "viewer");
+            (v.layout.clone(), (r.x + r.w / 2., r.y + r.h * 0.8))
+        });
+        view.update(cx, |v, cx| {
+            v.simulate_drag("fxbrowser", to.0, to.1);
+            assert!(target(v).is_some(), "fixture has a valid target");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let released = std::time::Instant::now();
+        cx.simulate_mouse_up(at(to), gpui::MouseButton::Left, drag_none());
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            assert_ne!(v.layout, before, "drop commits in the release dispatch");
+        });
+        eprintln!("PANEL_AWAY release-to-observed-commit {:?}", released.elapsed());
+    }
+
+    #[gpui::test]
+    fn panel_away_shell_undo_restores_the_layout_before_a_drop(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| away_fixture(cx, Rc::new(Kernel::default())));
+        cx.run_until_parked();
+        let (before, start, to) = view.read_with(cx, |v, _| {
+            let r = stack_rect(v, "viewer");
+            (v.layout.clone(), tab_middle(v, "fxbrowser"), (r.x + r.w / 2., r.y + r.h * 0.8))
+        });
+        press(cx, start);
+        pull(cx, start, to);
+        cx.simulate_mouse_up(at(to), gpui::MouseButton::Left, drag_none());
+        let dropped = view.read_with(cx, |v, _| {
+            assert_ne!(v.layout, before, "fixture drop must land");
+            v.layout.clone()
+        });
+        cx.update(|w, cx| {
+            view.update(cx, |v, cx| {
+                v.command(crate::native::Command {
+                    name: "undo".into(), args: vec![], token: None,
+                }, w, cx);
+                assert_eq!(v.layout, before);
+                v.command(crate::native::Command {
+                    name: "contextRedo".into(), args: vec![], token: None,
+                }, w, cx);
+                assert_eq!(v.layout, dropped);
+                w.focus(&v.panel_focus["viewer"], cx);
+                v.command(crate::native::Command {
+                    name: "contextUndo".into(), args: vec![], token: None,
+                }, w, cx);
+                assert_eq!(v.layout, dropped, "panel content is not workspace focus");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn panel_away_show_extension_from_menu_reveals_its_body(cx: &mut TestAppContext) {
+        let kernel = Rc::new(Kernel::default());
+        kernel.contributed.borrow_mut().push(("fixture.pexels".into(), "Pexels".into()));
+        let (view, cx) = cx.add_window_view(|_, cx| away_fixture(cx, kernel));
+        cx.run_until_parked();
+        view.update(cx, |v, cx| {
+            let (d, g, _) = v.layout.find("inspector").unwrap();
+            v.layout.docks[d].groups[g].size = Some(1800.);
+            assert!(v.shell_command("panel:toggle:fixture.pexels", cx));
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |v, cx| {
+            assert!(v.menu_state(cx).open.iter().any(|id| id == "fixture.pexels"));
+            let dock = v.layout.find("fixture.pexels").unwrap().0;
+            let viewport = v.geometry.side_docks[&dock];
+            let group = stack_rect(v, "fixture.pexels");
+            assert!(group.intersection(viewport).h > v.tokens.metrics.header,
+                "a newly checked panel must be brought into the viewport");
+        });
+    }
+
+    #[gpui::test]
+    fn panel_away_revealed_web_panel_has_one_native_body_at_each_resize_width(cx: &mut TestAppContext) {
+        let kernel = Rc::new(Kernel::default());
+        kernel.native_pexels.set(true);
+        kernel.contributed.borrow_mut().push(("fixture.pexels".into(), "Pexels".into()));
+        let (view, cx) = cx.add_window_view(|_, cx| away_fixture(cx, kernel));
+        view.update(cx, |v, cx| {
+            let (d, g, _) = v.layout.find("inspector").unwrap();
+            v.layout.docks[d].groups[g].size = Some(1800.);
+            assert!(v.shell_command("panel:toggle:fixture.pexels", cx));
+        });
+        cx.run_until_parked();
+        let body = |v: &Editor| {
+            let slots: Vec<_> = v.native_body_rects.iter()
+                .filter(|(id, _)| id == "fixture.pexels").map(|(_, r)| *r).collect();
+            assert_eq!(slots.len(), 1, "the shown extension owns exactly one native body");
+            slots[0]
+        };
+        let (start, initial) = view.read_with(cx, |v, _| {
+            let dock = v.layout.find("fixture.pexels").unwrap().0;
+            let r = v.geometry.dividers.iter().find(|s| s.dock == dock && !s.horizontal).unwrap().rect;
+            let initial = body(v);
+            ((r.x + r.w / 2., initial.y + 10.), initial)
+        });
+        press(cx, start);
+        for delta in [32., 57., 72.] {
+            let to = (start.0 - delta, start.1);
+            cx.simulate_mouse_move(at(to), gpui::MouseButton::Left, drag_none());
+            cx.run_until_parked();
+            view.read_with(cx, |v, _| assert_eq!(body(v).w, initial.w + delta));
+        }
+        cx.simulate_mouse_up(at((start.0 - 72., start.1)), gpui::MouseButton::Left, drag_none());
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| assert_eq!(body(v).w, initial.w + 72.));
+    }
+
+    #[gpui::test]
+    fn panel_away_unavailable_solo_group_does_not_take_dock_space(cx: &mut TestAppContext) {
+        const RETIRED: &str = "fixture.retired-import";
+        let kernel = Rc::new(Kernel::default());
+        let stub = kernel.clone();
+        let (view, cx) = cx.add_window_view(|_, cx| away_fixture(cx, stub));
+        view.update(cx, |v, cx| {
+            let mut record = v.record.clone();
+            record["layout"]["docks"][0]["panels"].as_array_mut().unwrap().push(
+                serde_json::json!({"id": RETIRED,"size":356}),
+            );
+            v.show_record(record);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| assert!(v.panel_rect(RETIRED).is_some(), "wait for discovery"));
+        view.update(cx, |v, cx| { assert!(v.shell_command("panels:ready", cx)); });
+        cx.run_until_parked();
+        view.read_with(cx, |v, cx| {
+            assert!(workspace::layout(&v.record).find(RETIRED).is_some(),
+                "keep the saved slot for an owner that may return");
+            assert!(v.panel_rect(RETIRED).is_none());
+            assert!(!v.menu_state(cx).open.iter().any(|id| id == RETIRED));
+        });
+        kernel.contributed.borrow_mut().push((RETIRED.into(), "Import".into()));
+        view.update(cx, |v, cx| {
+            assert!(v.shell_command(&format!("panel:registered:{RETIRED}"), cx));
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |v, cx| {
+            assert!(v.menu_state(cx).open.iter().any(|id| id == RETIRED));
+            assert_eq!(v.layout.find(RETIRED), Some((0, 1, 0)));
+            assert_eq!(v.panel_rect(RETIRED).unwrap().h, 356.);
         });
     }
 

@@ -171,6 +171,14 @@ pub struct Geometry {
     pub tabs: std::collections::HashMap<(usize, usize), Vec<(usize, f32, f32)>>,
 }
 impl Geometry {
+    pub(crate) fn next_group(&self, dock: usize, group: usize) -> Option<usize> {
+        self.panels
+            .iter()
+            .filter(|p| p.dock == dock && p.group > group)
+            .map(|p| p.group)
+            .min()
+    }
+
     /// Window-space header geometry, shared by painting and docking hit tests.
     pub fn header_rect(&self, p: &Placement, t: &Tokens) -> Rect {
         let mut header = Rect {
@@ -327,6 +335,53 @@ impl Layout {
         natural: &BTreeMap<String, f32>,
     ) -> Geometry {
         self.geometry_impl(bounds, t, Some(natural))
+    }
+
+    /// Hide unavailable standalone stacks without changing saved group indices.
+    pub(crate) fn visible_geometry(
+        &self,
+        bounds: Rect,
+        t: &Tokens,
+        natural: &BTreeMap<String, f32>,
+        unavailable: &std::collections::BTreeSet<String>,
+        maximized: Option<&str>,
+    ) -> Geometry {
+        let measure = |layout: &Self| {
+            if maximized.is_some() {
+                layout.geometry_with_maximized(bounds, t, maximized)
+            } else {
+                layout.geometry_with_panel_heights(bounds, t, natural)
+            }
+        };
+        if unavailable.is_empty() {
+            return measure(self);
+        }
+        let mut visible = self.clone();
+        let groups: Vec<Vec<usize>> = visible
+            .docks
+            .iter_mut()
+            .map(|dock| {
+                let mut index = 0;
+                let mut kept = vec![];
+                dock.groups.retain(|group| {
+                    let show = group.tabs.iter().any(|id| !unavailable.contains(id));
+                    if show {
+                        kept.push(index);
+                    }
+                    index += 1;
+                    show
+                });
+                kept
+            })
+            .collect();
+        let mut geometry = measure(&visible);
+        for p in &mut geometry.panels {
+            p.group = groups[p.dock][p.group];
+        }
+        for d in &mut geometry.dividers {
+            d.group = d.group.map(|i| groups[d.dock][i]);
+        }
+        geometry
     }
 
     fn geometry_impl(
@@ -647,7 +702,10 @@ impl Layout {
                 .map(|p| p.rect.h)
         };
         if let Some(i) = divider.group {
-            let (Some(a), Some(b)) = (height(divider.dock, i), height(divider.dock, i + 1)) else {
+            let Some(j) = geometry.next_group(divider.dock, i) else {
+                return;
+            };
+            let (Some(a), Some(b)) = (height(divider.dock, i), height(divider.dock, j)) else {
                 return;
             };
             let total = a + b;
@@ -662,7 +720,7 @@ impl Layout {
                     floor
                 }
             };
-            let (least_a, least_b) = (least(&groups[i]), least(&groups[i + 1]));
+            let (least_a, least_b) = (least(&groups[i]), least(&groups[j]));
             let upper = if total >= least_a + least_b {
                 (a + delta).clamp(least_a, total - least_b)
             } else {
@@ -683,7 +741,7 @@ impl Layout {
                 // A side stack can exceed its viewport. Record the requested
                 // adjacent heights; never turn a fixed neighbour into a fluid
                 // filler, or it would shrink as soon as this splitter moves.
-                for (index, height) in [(i, upper), (i + 1, total - upper)] {
+                for (index, height) in [(i, upper), (j, total - upper)] {
                     let group = &mut d.groups[index];
                     if group.size.is_none() {
                         self.flex_bases.insert(group.tabs[0].clone(), height);
@@ -698,13 +756,22 @@ impl Layout {
             let flexible = d
                 .groups
                 .iter()
-                .position(|g| g.size.is_none())
-                .unwrap_or(d.groups.len() - 1);
+                .enumerate()
+                .find(|(g, group)| group.size.is_none() && height(divider.dock, *g).is_some())
+                .map(|(g, _)| g)
+                .or_else(|| {
+                    geometry.panels.iter().filter(|p| p.dock == divider.dock)
+                        .map(|p| p.group)
+                        .max()
+                })
+                .unwrap_or(j);
             for (gi, g) in d.groups.iter_mut().enumerate() {
-                g.size = height(divider.dock, gi);
+                if let Some(h) = height(divider.dock, gi) {
+                    g.size = Some(h);
+                }
             }
             d.groups[i].size = Some(upper);
-            d.groups[i + 1].size = Some(total - upper);
+            d.groups[j].size = Some(total - upper);
             d.groups[flexible].size = None;
             return;
         }
@@ -842,7 +909,9 @@ impl Layout {
         let shown = |id: &str| {
             self.docks
                 .iter()
-                .position(|d| d.id == id && !d.collapsed && !d.groups.is_empty())
+                .enumerate()
+                .find(|(i, d)| d.id == id && geometry.panels.iter().any(|p| p.dock == *i))
+                .map(|(i, _)| i)
         };
         let dock_rect = |di: usize| {
             let mut placed = geometry.panels.iter().filter(|p| p.dock == di);
@@ -1545,13 +1614,19 @@ impl Layout {
     /// Before a splitter between two panels is dragged: a folded one beside
     /// it opens again (the original app), so the drag has room to work in.
     pub fn expand_beside(&mut self, divider: &Divider) -> bool {
+        self.expand_visible_beside(divider, divider.group.map(|i| i + 1))
+    }
+
+    pub(crate) fn expand_visible_beside(&mut self, divider: &Divider, next: Option<usize>) -> bool {
         let Some(i) = divider.group else {
             return false;
         };
         let mut changed = false;
         if let Some(d) = self.docks.get_mut(divider.dock) {
-            for g in d.groups.iter_mut().skip(i).take(2) {
-                changed |= std::mem::take(&mut g.collapsed);
+            for index in [Some(i), next].into_iter().flatten() {
+                if let Some(g) = d.groups.get_mut(index) {
+                    changed |= std::mem::take(&mut g.collapsed);
+                }
             }
         }
         changed
@@ -1581,10 +1656,24 @@ impl Layout {
         t: &Tokens,
         natural: Option<&BTreeMap<String, f32>>,
     ) -> bool {
+        let geometry = self.geometry_impl(bounds, t, natural);
+        self.reset_split_from_geometry(divider, bounds, t, &geometry, natural.is_some())
+    }
+
+    pub(crate) fn reset_split_from_geometry(
+        &mut self,
+        divider: &Divider,
+        bounds: Rect,
+        t: &Tokens,
+        geometry: &Geometry,
+        natural: bool,
+    ) -> bool {
         let Some(i) = divider.group else {
             return false;
         };
-        let geometry = self.geometry_impl(bounds, t, natural);
+        let Some(j) = geometry.next_group(divider.dock, i) else {
+            return false;
+        };
         let height = |group: usize| {
             geometry
                 .panels
@@ -1592,7 +1681,7 @@ impl Layout {
                 .find(|p| (p.dock, p.group) == (divider.dock, group))
                 .map(|p| p.rect.h)
         };
-        let (Some(a), Some(b)) = (height(i), height(i + 1)) else {
+        let (Some(a), Some(b)) = (height(i), height(j)) else {
             return false;
         };
         let total = a + b;
@@ -1611,8 +1700,8 @@ impl Layout {
                 .and_then(|p| p.size)
         };
         let groups = &self.docks[divider.dock].groups;
-        let (least_a, least_b) = (group_least(&groups[i], t), group_least(&groups[i + 1], t));
-        let upper = match (shipped(&groups[i]), shipped(&groups[i + 1])) {
+        let (least_a, least_b) = (group_least(&groups[i], t), group_least(&groups[j], t));
+        let upper = match (shipped(&groups[i]), shipped(&groups[j])) {
             (Some(s), _) => s,
             (None, Some(s)) => total - s,
             (None, None) => total / 2.,
@@ -1627,7 +1716,7 @@ impl Layout {
         }
         // Use the same adjacent-height update as a drag, including the
         // transient basis of fluid side panels and fixed neighbours.
-        self.resize_impl(divider, upper - a, bounds, t, natural);
+        self.resize_from_geometry(divider, upper - a, bounds, t, geometry, natural);
         true
     }
     pub fn reset_dock(&mut self, divider: &Divider) -> bool {

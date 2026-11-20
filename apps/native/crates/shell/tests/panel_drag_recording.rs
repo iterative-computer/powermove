@@ -7,9 +7,9 @@
 //! `PM_PANEL_DRAG_DIR=<dir> cargo test -p pm-shell --test panel_drag_recording -- --ignored`
 //! writes `recording-light.mp4`, `recording-dark.mp4` and `contact-sheet.png`.
 use gpui::{
-    AnyElement, App, AppContext, Context, HeadlessAppContext, InputEvent, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Styled, Window, div, point, px,
-    rgb, size,
+    AnyElement, App, AppContext, Context, HeadlessAppContext, InputEvent, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Styled,
+    Window, div, point, px, rgb, size,
 };
 use image::{Rgba, RgbaImage, imageops};
 use pm_design::{Accessibility, Scheme, Tokens};
@@ -123,7 +123,7 @@ fn script() -> Vec<Step> {
 
 // A repeatable stand-in for contributed panels on the headless Metal
 // renderer, which cannot include the AppKit/WKWebView composition layers.
-struct Fixture(Tokens);
+struct Fixture(Tokens, bool);
 
 impl Integration for Fixture {
     fn observe(&self, _: &mut Context<Editor>) {}
@@ -148,6 +148,16 @@ impl Integration for Fixture {
         .collect()
     }
     fn panel(&self, id: &str, _: Rect, _: &mut Window, _: &mut App) -> Option<AnyElement> {
+        if id == "viewer" && self.1 {
+            return Some(
+                div()
+                    .size_full()
+                    .bg(rgb(self.0.colors.viewer))
+                    .on_mouse_move(|_, _, cx| cx.stop_propagation())
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .into_any_element(),
+            );
+        }
         if !id.ends_with("-fixture") {
             return None;
         }
@@ -265,7 +275,7 @@ fn record(scheme: Scheme, name: &str, dir: &std::path::Path, capture: bool) -> V
         .open_window(size(px(m.window_width), px(m.window_height)), |_, cx| {
             cx.new(|cx| {
                 let mut v = Editor::new(tokens.clone(), None, cx);
-                v.integration = Some(Rc::new(Fixture(tokens)));
+                v.integration = Some(Rc::new(Fixture(tokens, false)));
                 v.layout = Layout::preset("design");
                 // Three tabs in the right-hand stack, so a reorder shows
                 // the neighbours making room.
@@ -477,6 +487,191 @@ fn record(scheme: Scheme, name: &str, dir: &std::path::Path, capture: bool) -> V
         frames as f32 / fps
     );
     marks
+}
+
+#[test]
+#[ignore = "writes away-window regression evidence; set PM_PANEL_DRAG_DIR"]
+fn record_panel_away_findings() {
+    let dir = PathBuf::from(std::env::var_os("PM_PANEL_DRAG_DIR").unwrap());
+    objc2::rc::autoreleasepool(|_| {
+        let mut cx = HeadlessAppContext::with_platform(
+            Arc::new(gpui_parley::ParleyTextSystem::new(
+                gpui_parley::SystemFonts::Load,
+            )),
+            Arc::new(()),
+            || {
+                Some(Box::new(
+                    gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                ))
+            },
+        );
+        let tokens = Tokens::new(
+            Scheme::Dark,
+            Accessibility {
+                reduce_motion: true,
+                ..Default::default()
+            },
+        );
+        let window = cx
+            .open_window(size(px(1280.), px(800.)), |_, cx| {
+                cx.new(|cx| {
+                    let mut v = Editor::new(tokens.clone(), None, cx);
+                    v.integration = Some(Rc::new(Fixture(tokens, true)));
+                    v.layout = Layout::preset("design");
+                    let (left, _, _) = v.layout.find("assets").unwrap();
+                    v.layout.docks[left].groups.push(Group {
+                        tabs: vec!["retired-import".into()],
+                        active: 0,
+                        size: Some(180.),
+                        collapsed: false,
+                    });
+                    v
+                })
+            })
+            .unwrap();
+        window.update(&mut cx, |v, _, cx| {
+            v.run_shell_command("panels:ready", cx);
+        }).unwrap();
+        let shot = |cx: &mut HeadlessAppContext, name: &str| {
+            cx.run_until_parked();
+            cx.capture_screenshot(window.into())
+                .unwrap()
+                .save(dir.join(format!("{name}.png")))
+                .unwrap();
+        };
+        let down = |cx: &mut HeadlessAppContext, position| {
+            cx.simulate_event(
+                window.into(),
+                MouseDownEvent {
+                    position,
+                    button: MouseButton::Left,
+                    click_count: 1,
+                    ..Default::default()
+                },
+            );
+        };
+        let up = |cx: &mut HeadlessAppContext, position| {
+            cx.simulate_event(
+                window.into(),
+                MouseUpEvent {
+                    position,
+                    button: MouseButton::Left,
+                    ..Default::default()
+                },
+            );
+        };
+        shot(&mut cx, "01-workspace");
+        let (r, viewer, original) = window
+            .update(&mut cx, |v, _, _| {
+                (
+                    v.panel_rect("inspector").unwrap(),
+                    v.panel_rect("viewer").unwrap(),
+                    v.layout.clone(),
+                )
+            })
+            .unwrap();
+        let x = 0.5 * (r.x + viewer.x + viewer.w);
+        let y = r.y + 100.;
+        down(&mut cx, point(px(x), px(y)));
+        let to = point(px(x - 72.), px(y));
+        cx.simulate_event(
+            window.into(),
+            MouseMoveEvent {
+                position: to,
+                pressed_button: Some(MouseButton::Left),
+                modifiers: Default::default(),
+            },
+        );
+        shot(&mut cx, "02-divider-held");
+        up(&mut cx, to);
+        let r = window
+            .update(&mut cx, |v, _, _| v.panel_rect("inspector").unwrap())
+            .unwrap();
+        eprintln!("PANEL_AWAY saved dock width: {r:?}");
+
+        // Reset the independent drop scenario even if the divider test lost release.
+        window
+            .update(&mut cx, |v, _, cx| {
+                v.cancel_gesture(cx);
+                v.layout = original;
+                cx.notify();
+            })
+            .unwrap();
+        shot(&mut cx, "03-before-drop");
+        let at = point(px(viewer.x + viewer.w * 0.5), px(viewer.y + viewer.h * 0.8));
+        let pre_drop = window
+            .update(&mut cx, |v, _, cx| {
+                let before = v.layout.clone();
+                v.simulate_drag("fxbrowser", at.x.into(), at.y.into());
+                cx.notify();
+                before
+            })
+            .unwrap();
+        shot(&mut cx, "04-held-drop");
+        let start = std::time::Instant::now();
+        up(&mut cx, at);
+        let committed = window
+            .update(&mut cx, |v, _, _| {
+                !v.dragging_panel() && v.layout != pre_drop
+            })
+            .unwrap();
+        eprintln!(
+            "PANEL_AWAY immediate drop commit: {committed} in {:?}",
+            start.elapsed()
+        );
+        shot(&mut cx, "05-after-release");
+        window
+            .update(&mut cx, |v, w, cx| {
+                v.command(
+                    ShellCommand {
+                        name: "undo".into(),
+                        args: vec![],
+                        token: None,
+                    },
+                    w,
+                    cx,
+                );
+                eprintln!(
+                    "PANEL_AWAY undo restored workspace: {}",
+                    committed && v.layout == pre_drop
+                );
+                v.cancel_gesture(cx);
+            })
+            .unwrap();
+        shot(&mut cx, "06-after-undo");
+
+        window
+            .update(&mut cx, |v, _, cx| {
+                let (dock, group, _) = v.layout.find("inspector").unwrap();
+                v.layout.docks[dock].groups[group].size = Some(1050.);
+                v.run_shell_command("panel:toggle:pexels-fixture", cx);
+                cx.notify();
+            })
+            .unwrap();
+        shot(&mut cx, "07-show-pexels");
+        let divider = window
+            .update(&mut cx, |v, _, _| {
+                v.panel_rect("pexels-fixture")
+                    .filter(|r| r.y >= 0. && r.y < 700.)
+                    .map(|r| (r.x - 3., r.y + 40.))
+            })
+            .unwrap();
+        if let Some((x, y)) = divider {
+            down(&mut cx, point(px(x), px(y)));
+            let to = point(px(x - 60.), px(y));
+            cx.simulate_event(
+                window.into(),
+                MouseMoveEvent {
+                    position: to,
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Default::default(),
+                },
+            );
+            shot(&mut cx, "08-pexels-divider-held");
+            up(&mut cx, to);
+            shot(&mut cx, "09-pexels-divider-released");
+        }
+    });
 }
 
 #[test]
