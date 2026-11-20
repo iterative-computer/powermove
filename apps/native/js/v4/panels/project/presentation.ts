@@ -326,3 +326,13 @@ export function menuEntries(
     };
   });
 }
+
+export function projectMenuOptions(
+  entries: NativeMenuEntry[],
+): (NativeMenuEntry | null)[] {
+  return entries.flatMap((entry) =>
+    entry.command === "SelectUnusedMedia" && entry.separatorBefore
+      ? [null, entry]
+      : [entry],
+  );
+}
