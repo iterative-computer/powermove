@@ -778,9 +778,22 @@ pub fn fork(
     let builtins = host
         .builtins()
         .ok_or_else(|| Error::unavailable(crate::catalog::backing("fork_builtin_extension")))?;
-    let source = fs::canonicalize(&builtins)?.join(id);
-    if !source.is_dir() {
-        return Err(invalid(format!("Unknown built-in extension: {id}")));
+    let builtins = fs::canonicalize(&builtins)?;
+    let source = builtins.join(id);
+    if !source.join("manifest.json").is_file() {
+        let mut ids = Vec::new();
+        for entry in sorted(&builtins)? {
+            if let Ok(name) = entry.file_name().into_string()
+                && extension_id(&name)
+                && entry.path().join("manifest.json").is_file()
+            {
+                ids.push(name);
+            }
+        }
+        return Err(invalid(format!(
+            "Unknown built-in extension: {id}. Forkable ids: {}",
+            ids.join(", ")
+        )));
     }
     let tree = read_tree(&source, None, &mut Budget { files: 0, bytes: 0 })?;
     let raw = manifest_object(tree.files.get("manifest.json"), "built-in")?;

@@ -20,8 +20,7 @@ export const legacyTransition = (item: Data): Data =>
   toLegacyTransition(item, TRANSITION_PRE);
 
 const utf8 = (text: string) => new TextEncoder().encode(text).length;
-function wrapped(source: string, body: string) {
-  const at = source.lastIndexOf(body);
+function wrapped(source: string, body: string, at = source.lastIndexOf(body)) {
   return {
     source,
     bodyLineOffset: at < 0 ? 0 : source.slice(0, at).split("\n").length - 1,
@@ -83,14 +82,19 @@ export function definitionSnapshots(
       }
     }
   };
-  each(kernel.effects, ({ item }) => ({
-    kind: "effect",
-    version: 0,
-    renderer: null,
-    glsl: wrapped(toLegacyFx(item, GLSL_PRE).frag, item.frag),
-    params: params(item.params),
-    flags: flags(item),
-  }));
+  each(kernel.effects, ({ item }) => {
+    const source = legacyEffect(item).frag;
+    // A short shader body can also occur in the wrapper's closing lines.
+    const start = item.rawShader ? 0 : source.length - item.frag.length - "\n}\n".length;
+    return {
+      kind: "effect",
+      version: 0,
+      renderer: null,
+      glsl: wrapped(source, item.frag, start),
+      params: params(item.params),
+      flags: flags(item),
+    };
+  });
   each(kernel.transitions, ({ item }) => ({
     kind: "transition",
     version: 0,

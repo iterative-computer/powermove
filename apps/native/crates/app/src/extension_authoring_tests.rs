@@ -282,3 +282,102 @@ fn an_agent_adds_a_panel_a_timeline_column_and_a_viewer_overlay_then_one_is_undo
     assert!(live.join("timeline-fork").exists() && live.join("shot-notes").exists());
     let _ = fs::remove_dir_all(profile);
 }
+
+#[test]
+fn pm555_unknown_fork_lists_builtin_ids() {
+    let profile = scratch("pm-effect-reference");
+    let host = AppExtensions::new(profile.clone());
+    let error = fork(&host, "effects", None, &profile.join("stage")).unwrap_err();
+    for panel in pm_builtins::BUILTIN_PANELS.iter() {
+        assert!(
+            error.message.contains(panel.id.as_str()),
+            "{}",
+            error.message
+        );
+    }
+    fs::remove_dir_all(profile).unwrap();
+}
+
+#[test]
+fn pm555_builtin_effect_reference_is_in_the_working_api_pack() {
+    use pm_mcp::{Automation, McpSession};
+    use std::sync::{Arc, Mutex};
+
+    let profile = scratch("pm-effect-reference");
+    let mut host = Automation::new(profile.clone(), profile.join("exports")).unwrap();
+    host.create_project(&json!({"name":"Synthetic"})).unwrap();
+    host.extensions = Some(Arc::new(AppExtensions::new(profile.clone())));
+    let mut session = McpSession::new(Arc::new(Mutex::new(host)));
+    let started = session
+        .dispatch("start_session", &json!({"prompt":"Read built-in effects"}))
+        .unwrap();
+    let path =
+        PathBuf::from(started["apiPackDirectory"].as_str().unwrap()).join("builtin-effects.json");
+    let source = fs::read_to_string(&path).expect("built-in effects reference");
+    let reference: Value = serde_json::from_str(&source).unwrap();
+    assert!(fs::metadata(&path).unwrap().permissions().readonly());
+    let effects = reference["effects"].as_array().unwrap();
+    assert_eq!(effects.len(), 43);
+    assert!(
+        effects
+            .iter()
+            .all(|effect| effect["frag"].is_string() && effect["params"].is_array())
+    );
+    fs::remove_dir_all(profile).unwrap();
+}
+
+#[test]
+fn pm555_publishing_checks_compat_and_v4_effect_shaders() {
+    use pm_mcp::{Automation, McpSession};
+    use std::sync::{Arc, Mutex};
+
+    let profile = scratch("pm-effect-publish");
+    let live = profile.join("extensions");
+    let mut host = Automation::new(profile.clone(), profile.join("exports")).unwrap();
+    host.create_project(&json!({"name":"Synthetic"})).unwrap();
+    host.extensions = Some(Arc::new(AppExtensions {
+        profile: profile.clone(),
+        roots: vec![live.clone()],
+    }));
+    let mut session = McpSession::new(Arc::new(Mutex::new(host)));
+    let started = session
+        .dispatch("start_session", &json!({"prompt":"Create an effect"}))
+        .unwrap();
+    let staging = PathBuf::from(started["stagingDirectory"].as_str().unwrap());
+    for (id, api, entry, install) in [
+        (
+            "compat-effect",
+            3,
+            "index.ts",
+            "export default function activate(api) { api.effects.register(definition); }",
+        ),
+        (
+            "v4-effect",
+            4,
+            "index.tsx",
+            "export async function mount(env) { env.effects.register(definition); const root = env.root(); await root.render(null); return {root, dispose: () => root.dispose()}; }",
+        ),
+    ] {
+        let dir = staging.join(id);
+        let definition = json!({
+            "id": "sample.broken", "label": "Broken", "group": "Test", "params": [],
+            "passes": 2, "backdrop": true, "frag": "\no = vec4(u_missing);"
+        });
+        let code = format!("const definition = {definition};\n{install}");
+        write(
+            &dir,
+            json!({"id":id,"name":"Sample Effect","version":"1.0.0","apiVersion":api,"entry":entry}),
+            &[(entry, &code)],
+        );
+        let change = json!({"extensions":[{"id":id,"action":"created","summary":"Shader"}]});
+        let error = session.dispatch("publish_extensions", &change).unwrap_err();
+        for detail in ["sample.broken", "pass 1 through 2", "line 2", "u_missing"] {
+            assert!(error.message.contains(detail), "{}", error.message);
+        }
+        assert!(!live.join(id).exists());
+        assert!(dir.join(entry).exists());
+        // Remove the failed folder before trying a different extension.
+        fs::remove_dir_all(dir).unwrap();
+    }
+    fs::remove_dir_all(profile).unwrap();
+}

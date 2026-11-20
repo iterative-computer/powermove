@@ -1,0 +1,5 @@
+{
+  "scale": "uniform vec2 u_effectScale;",
+  "backdrop": "uniform sampler2D u_backdrop;\nvec4 bd(vec2 uv){ return texture(u_backdrop, uv); }",
+  "viewerHandles": "uniform mat3 u_layerUV; uniform vec2 u_layerRes;\nvec2 pm_layerPoint(vec2 p){vec3 q=u_layerUV*vec3(p,1.);return q.xy/q.z*u_layerRes;}"
+}

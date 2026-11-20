@@ -4,7 +4,8 @@
 //! workers, never on the main thread.
 use pm_builtins::{BUILTIN_PANELS, Builtins};
 use pm_compat_runner::{CompatRunner, manifest};
-use pm_mcp::extensions::ExtensionHost;
+use pm_mcp::{effect::compile_program, extensions::ExtensionHost};
+use pm_protocol::definitions::DefinitionSnapshot;
 use pm_runtime_v8::{Evaluation, Ticket};
 use serde_json::Value;
 use std::{
@@ -17,6 +18,10 @@ const PACK: &[(&str, &str)] = &[
     (
         "EXTENSIONS.md",
         include_str!("../../../js/v4/api-pack/EXTENSIONS.md"),
+    ),
+    (
+        "builtin-effects.json",
+        include_str!("../../../../../engine/crates/pm-fx-defs/src/main-effects.json"),
     ),
     (
         "v4/builtin.ts",
@@ -187,7 +192,7 @@ pub fn check_with_dependencies(dir: &Path, raw: &Value, roots: &[PathBuf]) -> Re
             .collect()
     };
     if api >= 4 || depends(&manifest).is_empty() {
-        return check(dir, &manifest);
+        return check_activation(dir, &manifest, false);
     }
     let runner = CompatRunner::new(&pm_compat_runner::initial()).map_err(|e| e.to_string())?;
     let compile = |dir: &Path, m: &Value| {
@@ -252,6 +257,22 @@ pub fn check_with_dependencies(dir: &Path, raw: &Value, roots: &[PathBuf]) -> Re
     let installed = runner
         .install(&manifest, &graph.to_json())
         .map_err(|e| e.to_string())?;
+    require_install_success(&installed)
+}
+
+fn check_effect(snapshot: DefinitionSnapshot) -> Result<(), String> {
+    let shader = snapshot
+        .glsl
+        .ok_or_else(|| format!("effect {} has no shader", snapshot.id.as_str()))?;
+    compile_program(
+        snapshot.id.as_str(),
+        snapshot.flags.passes,
+        &shader.source,
+        shader.body_line_offset,
+    )
+}
+
+fn require_install_success(installed: &Value) -> Result<(), String> {
     match installed["ok"].as_bool() {
         Some(true) => Ok(()),
         _ => Err(installed["error"]["message"]
@@ -260,9 +281,36 @@ pub fn check_with_dependencies(dir: &Path, raw: &Value, roots: &[PathBuf]) -> Re
             .to_owned()),
     }
 }
+
+/// Read the real renderer snapshots for this extension, including registrations
+/// that would become visible if a later provider were disposed.
+fn check_compat_effects(runner: &CompatRunner, owner: &Value) -> Result<(), String> {
+    let snapshots = runner
+        .json(&format!(
+            r#"
+        PowermoveCompat.definitionSnapshots({{
+            effects: {{ entries: () => __compat.realm.kernel.effects.ownerEntries({}) }},
+            transitions: {{ entries: () => [] }},
+            layerTypes: {{ entries: () => [] }},
+        }}, (id, error) => {{ throw new Error(id + ": " + error.message); }})
+    "#,
+            owner
+        ))
+        .map_err(|e| e.to_string())?;
+    for snapshot in
+        serde_json::from_value::<Vec<DefinitionSnapshot>>(snapshots).map_err(|e| e.to_string())?
+    {
+        check_effect(snapshot)?;
+    }
+    Ok(())
+}
 /// Compile with the app's compiler, then activate in throwaway runtimes on a
 /// synthetic project: v1–3 in a trusted realm, v4 in its own panel isolate.
 pub fn check(dir: &Path, manifest: &Value) -> Result<(), String> {
+    check_activation(dir, manifest, true)
+}
+
+fn check_activation(dir: &Path, manifest: &Value, compile_effects: bool) -> Result<(), String> {
     let api = manifest["apiVersion"].as_u64().unwrap_or(1);
     let entry = manifest["entry"].as_str().unwrap_or("index.ts");
     let runner = CompatRunner::new(&pm_compat_runner::initial()).map_err(|e| e.to_string())?;
@@ -274,12 +322,11 @@ pub fn check(dir: &Path, manifest: &Value) -> Result<(), String> {
         let installed = runner
             .install(manifest, &graph.to_json())
             .map_err(|e| e.to_string())?;
-        return match installed["ok"].as_bool() {
-            Some(true) => Ok(()),
-            _ => Err(installed["error"]["message"]
-                .as_str()
-                .unwrap_or("activation failed")
-                .to_owned()),
+        require_install_success(&installed)?;
+        return if compile_effects {
+            check_compat_effects(&runner, &manifest["id"])
+        } else {
+            Ok(())
         };
     }
     drop(runner);
@@ -302,12 +349,28 @@ pub fn check(dir: &Path, manifest: &Value) -> Result<(), String> {
         };
         let settled = ticket.map_err(|e| e.to_string()).and_then(settle);
         let errors = panels.take_errors();
+        let state = actor.handle().state();
         panels.close();
         settled?;
-        match errors.first() {
-            Some(error) => Err(error.clone()),
-            None => Ok(()),
+        if let Some(error) = errors.first() {
+            return Err(error.clone());
         }
+        if compile_effects {
+            for snapshot in state
+                .registries
+                .get("effects")
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.definition.get("nativeSnapshot"))
+            {
+                let snapshot = serde_json::from_str::<DefinitionSnapshot>(
+                    &pm_model::json::to_canonical_string(snapshot),
+                )
+                .map_err(|e| e.to_string())?;
+                check_effect(snapshot)?;
+            }
+        }
+        Ok(())
     })();
     actor.shutdown();
     result

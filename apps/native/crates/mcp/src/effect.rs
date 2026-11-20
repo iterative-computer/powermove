@@ -1,5 +1,6 @@
 //! Native port of the owner-pinned main registration validator (`kernel/glsl.ts`).
-//! Validation does not register code, compile GLSL, or enter a JS realm.
+//! Shader compilation uses the same pipeline as rendering and needs no GPU.
+mod shader;
 use crate::{Error, Result, model};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -15,7 +16,7 @@ fn matches(pattern: &str, value: &Value) -> bool {
         .as_str()
         .is_some_and(|s| regex::Regex::new(pattern).unwrap().is_match(s))
 }
-/// Same JSON admission, order and diagnostics as validateEffect on pinned main.
+/// Check registration metadata, then compile the effect program.
 pub fn validate(def: &Value) -> Result<Value> {
     let bad = |message: String| Error::invalid(message);
     if !def.is_object() && !def.is_array() {
@@ -124,10 +125,53 @@ pub fn validate(def: &Value) -> Result<Value> {
             "{what}: shader is too large ({len} > 65536 bytes)"
         )));
     }
-    validate_contracts(def, params, passes.unwrap(), &what)?;
-    Ok(
-        json!({"valid":true,"id":id,"parameterCount":params.len(),"note":"Definition validation only. This does not register the effect or compile/render its shader."}),
-    )
+    let passes = passes.unwrap();
+    validate_contracts(def, params, passes, &what)?;
+    let (source, offset) = shader::wrap(def, params, frag);
+    compile_program(&id, passes as u8, &source, offset).map_err(bad)?;
+    Ok(json!({"valid":true,"id":id,"parameterCount":params.len(),"compiledPasses":passes as u8}))
+}
+
+/// All passes run the same shader, with a different runtime value of u_pass.
+pub fn compile_program(
+    id: &str,
+    passes: u8,
+    source: &str,
+    line_offset: u32,
+) -> std::result::Result<(), String> {
+    let Err(failure) = pm_glsl::translate(source, line_offset) else {
+        return Ok(());
+    };
+    let pass = if passes <= 1 {
+        "pass 1".to_owned()
+    } else {
+        format!("pass 1 through {passes}")
+    };
+    // A missing terminator may be reported at the generated closing brace.
+    let body_end = source
+        .strip_suffix("\n}\n")
+        .filter(|_| line_offset > 0)
+        .and_then(|body| (body.split('\n').count() as u32).checked_sub(line_offset));
+    let details = if failure.diagnostics.is_empty() {
+        failure.message
+    } else {
+        failure
+            .diagnostics
+            .iter()
+            .map(|diagnostic| match diagnostic.line {
+                Some(line) => {
+                    let line = body_end.map_or(line, |end| line.min(end));
+                    format!("line {line}: {}", diagnostic.message)
+                }
+                None => diagnostic.message.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    Err(format!(
+        "effect \"{id}\" {pass}: GLSL compilation failed ({}): {details}",
+        failure.stage.name(),
+    ))
 }
 
 fn reference(param: &Value) -> bool {
@@ -328,4 +372,51 @@ fn validate_contracts(def: &Value, params: &[Value], passes: f64, what: &str) ->
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod compile_tests {
+    use super::*;
+
+    fn effect(frag: &str) -> Value {
+        json!({"id": "glass", "label": "Glass", "group": "Test", "params": [], "frag": frag})
+    }
+
+    #[test]
+    fn rejects_shader_syntax_error_with_author_line() {
+        let error = validate(&effect("\n\nvec4 broken = ;\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("pass 1") && error.contains("line 3"),
+            "{error}"
+        );
+        let error = validate(&effect("o = vec4(1.0)")).unwrap_err().to_string();
+        assert!(error.contains("line 1"), "{error}");
+    }
+
+    #[test]
+    fn rejects_undeclared_uniform_with_author_line() {
+        let error = validate(&effect("\n\nvec4 broken = u_missing;\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("pass 1") && error.contains("line 3"),
+            "{error}"
+        );
+        assert!(error.contains("u_missing"), "{error}");
+    }
+
+    #[test]
+    fn compiles_backdrop_shader_with_parameter_uniform() {
+        let mut def = effect(
+            "o = mix(bd(v_st), texture(u_orig, v_st), u_amount) * u_effectScale.x + float(u_pass) * src(v_st);",
+        );
+        def["passes"] = json!(2);
+        def["keepOrig"] = json!(true);
+        def["params"] = json!([{"k": "amount", "def": 0.5}]);
+        def["backdrop"] = json!(true);
+        let result = validate(&def).unwrap();
+        assert_eq!(result["compiledPasses"], 2);
+    }
 }

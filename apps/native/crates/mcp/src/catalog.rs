@@ -390,7 +390,7 @@ pub fn backing(name: &str) -> &'static str {
         | "media_contact_sheet"
         | "media_waveform"
         | "transcribe_media" => "engine-service/media jobs",
-        "validate_effect" => "native frozen kernel/glsl.ts registration validator port",
+        "validate_effect" => "native effect registration checks and pm-glsl compilation",
         "project_memory" => {
             "kernel non-revision durable memory metadata admission and application actor binding"
         }

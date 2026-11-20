@@ -32,12 +32,23 @@ fn oracle(d: &Value) -> Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 fn base() -> Value {
-    json!({"id":"Synthetic.effect","label":"Synthetic","group":"Synthetic","params":[{"k":"amount","def":1}],"frag":"outColor=vec4(1.);"})
+    json!({"id":"Synthetic.effect","label":"Synthetic","group":"Synthetic","params":[{"k":"amount","def":1}],"frag":"o=vec4(1.);"})
 }
 fn compare(d: Value) {
     let expected = oracle(&d);
     match effect::validate(&d) {
-        Ok(value) => assert_eq!(value, expected["result"], "{d}"),
+        Ok(value) => {
+            assert_eq!(value["id"], expected["result"]["id"], "{d}");
+            assert_eq!(
+                value["parameterCount"], expected["result"]["parameterCount"],
+                "{d}"
+            );
+            assert_eq!(
+                value["compiledPasses"],
+                d["passes"].as_u64().unwrap_or(1),
+                "{d}"
+            );
+        }
         Err(e) => assert_eq!(e.message, expected["error"], "{d}"),
     }
 }
@@ -120,6 +131,9 @@ fn sampling_temporal_source_grid_padding_and_path_contracts_match_main() {
             let mut d = base();
             if key == "temporal" {
                 d["rawShader"] = json!(true);
+                d["frag"] = json!(
+                    "#version 300 es\nprecision highp float;\nout vec4 o;\nvoid main() { o=vec4(1.); }"
+                );
             }
             if key == "grid" {
                 d["passes"] = json!(2);

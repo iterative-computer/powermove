@@ -138,6 +138,12 @@ fn only_pinned_native_overlays_change_the_frozen_catalog() {
                     .find(|t| t["name"] == name)
                     .unwrap()
             );
+        } else if name == "validate_effect" {
+            let effects: Value = serde_json::from_str(include_str!(
+                "../fixtures/viewer-handles-native-catalog.json"
+            ))
+            .unwrap();
+            assert_eq!(tool, &effects["tools"][0]);
         } else {
             assert_eq!(
                 tool,

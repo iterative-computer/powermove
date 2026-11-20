@@ -5107,6 +5107,7 @@ dependencies = [
  "icu_collator",
  "libc",
  "pm-fx-defs",
+ "pm-glsl",
  "pm-kernel",
  "pm-model",
  "pm-panel-studio3d",

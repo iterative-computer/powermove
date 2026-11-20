@@ -31,7 +31,7 @@ fn oracle(input: Value) -> Value {
     serde_json::from_slice(&out.stdout).unwrap()
 }
 fn definition() -> Value {
-    json!({"id":"Synthetic.effect","label":"Synthetic","group":"Test","params":[{"k":"amount","def":1}],"frag":"outColor=vec4(1.);"})
+    json!({"id":"Synthetic.effect","label":"Synthetic","group":"Test","params":[{"k":"amount","def":1}],"frag":"o=vec4(1.);"})
 }
 #[test]
 fn validate_effect_matches_frozen_validator_including_error_order() {
@@ -58,7 +58,10 @@ fn validate_effect_matches_frozen_validator_including_error_order() {
         ("params", json!([{"k":"a"},{"k":"a"}])),
         ("frag", json!("")),
         ("frag", json!("x".repeat(65537))),
-        ("frag", json!("😀".repeat(32768))),
+        (
+            "frag",
+            json!(format!("/*{}*/o=vec4(1.); ", "😀".repeat(32760))),
+        ),
         ("frag", json!("😀".repeat(32769))),
         ("passes", json!(null)),
     ] {
@@ -69,7 +72,18 @@ fn validate_effect_matches_frozen_validator_including_error_order() {
     for d in cases {
         let expected = oracle(json!({"tool":"validate_effect","arguments":{"definition":d}}));
         match effect::validate(&d) {
-            Ok(result) => assert_eq!(result, expected["result"], "{d}"),
+            Ok(result) => {
+                assert_eq!(result["id"], expected["result"]["id"], "{d}");
+                assert_eq!(
+                    result["parameterCount"], expected["result"]["parameterCount"],
+                    "{d}"
+                );
+                assert_eq!(
+                    result["compiledPasses"],
+                    d["passes"].as_u64().unwrap_or(1),
+                    "{d}"
+                );
+            }
             Err(e) => assert_eq!(e.message, expected["error"].as_str().unwrap(), "{d}"),
         }
     }
