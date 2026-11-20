@@ -2134,9 +2134,8 @@ impl Controller {
             _ => {}
         }
     }
-    /// Delete Media… on media that layers use asks first, as v1 did; the
-    /// answer goes back to the Project panel, which deletes the media and
-    /// its layers in one Undo step.
+    /// The Project panel asks before removing unused media or deleting media
+    /// with layer references. It applies approval in one Undo step.
     pub(crate) fn confirm_delete_media(
         &mut self,
         owner: pm_panel_media::Stamp,
@@ -2148,25 +2147,12 @@ impl Controller {
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
-        let (title, detail) = delete_media_question(
-            assets
-                .first()
-                .filter(|_| assets.len() == 1)
-                .and_then(|id| self.asset_names().get(id).cloned())
-                .as_deref(),
-            assets.len(),
-            references,
-        );
-        use crate::alert::{Alert, Button};
-        let rx = Alert::new(
-            title,
-            detail,
-            vec![
-                Button::new("Delete", true).default().destructive(),
-                Button::new("Cancel", false).cancel(),
-            ],
-        )
-        .sheet(&self.host.borrow().window);
+        let name = assets
+            .first()
+            .filter(|_| assets.len() == 1 && references > 0)
+            .and_then(|id| self.asset_names().get(id).cloned());
+        let rx = delete_media_alert(name.as_deref(), assets.len(), references)
+            .sheet(&self.host.borrow().window);
         cx.spawn(async move |this, cx| {
             let approved = rx.recv().await == Ok(Some(true));
             let pending = cx
@@ -5526,6 +5512,33 @@ mod restore_tests {
     }
 }
 
+fn delete_media_alert(
+    name: Option<&str>,
+    count: usize,
+    references: usize,
+) -> crate::alert::Alert<bool> {
+    use crate::alert::{Alert, Button};
+    let (title, detail, action) = if references == 0 {
+        let items = if count == 1 { "item" } else { "items" };
+        (
+            format!("Remove {count} unused {items} from the project?"),
+            "Files on disk aren't deleted.".into(),
+            "Remove",
+        )
+    } else {
+        let (title, detail) = delete_media_question(name, count, references);
+        (title, detail, "Delete")
+    };
+    Alert::new(
+        title,
+        detail,
+        vec![
+            Button::new(action, true).default().destructive(),
+            Button::new("Cancel", false).cancel(),
+        ],
+    )
+}
+
 /// v1's Delete Media question: one item by name, several by count, and how
 /// many layers go with them.
 fn delete_media_question(name: Option<&str>, count: usize, references: usize) -> (String, String) {
@@ -5546,6 +5559,20 @@ fn delete_media_question(name: Option<&str>, count: usize, references: usize) ->
 
 #[cfg(test)]
 mod delete_media_question_tests {
+    #[test]
+    fn unused_confirmation_states_that_files_remain_on_disk() {
+        for (count, message) in [
+            (1, "Remove 1 unused item from the project?"),
+            (2, "Remove 2 unused items from the project?"),
+        ] {
+            let alert = super::delete_media_alert(None, count, 0);
+            assert_eq!(alert.message, message);
+            assert_eq!(alert.informative, "Files on disk aren't deleted.");
+            assert_eq!(alert.labels(), ["Remove", "Cancel"]);
+            assert!(alert.buttons[0].destructive);
+            assert_eq!(alert.buttons[1].key, crate::alert::Key::Escape);
+        }
+    }
     /// v1's question: one item by name with its layer count, several by
     /// count.
     #[test]

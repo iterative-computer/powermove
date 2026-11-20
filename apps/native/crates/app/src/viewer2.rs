@@ -568,7 +568,7 @@ pub fn update_checks(
                         pm_shell::viewer_preference("PowermoveGuidesLocked", false),
                         pm_shell::viewer_preference("PowermoveViewerSnapping", true),
                     ),
-                    Action::ToggleProxies => false,
+                    Action::ToggleProxies => proxies_checked(media),
                     Action::SafeAreas => safe,
                     Action::Guides => guides,
                     Action::Popout => popout,
@@ -1127,9 +1127,10 @@ impl Controller {
             Action::Media(mode) => self.set_media_mode(mode, cx),
             // Premiere's toggle: proxies where they exist, or originals.
             Action::ToggleProxies => self.set_media_mode(
-                match self.media_mode {
-                    MediaMode::ProxyPreferred | MediaMode::ProxyOnly => MediaMode::Originals,
-                    MediaMode::Automatic | MediaMode::Originals => MediaMode::ProxyPreferred,
+                if proxies_checked(self.media_mode) {
+                    MediaMode::Originals
+                } else {
+                    MediaMode::ProxyPreferred
                 },
                 cx,
             ),
@@ -1486,5 +1487,22 @@ mod guide_menu_tests {
                 );
             }
         }
+    }
+}
+
+fn proxies_checked(media: MediaMode) -> bool {
+    matches!(media, MediaMode::ProxyPreferred | MediaMode::ProxyOnly)
+}
+
+#[cfg(test)]
+#[test]
+fn toggle_proxies_check_follows_viewer_media_mode() {
+    for (mode, checked) in [
+        (MediaMode::Automatic, false),
+        (MediaMode::Originals, false),
+        (MediaMode::ProxyPreferred, true),
+        (MediaMode::ProxyOnly, true),
+    ] {
+        assert_eq!(proxies_checked(mode), checked, "{mode:?}");
     }
 }

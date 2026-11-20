@@ -53,6 +53,8 @@ pub enum MenuCommand {
     InterpretFootage(String),
     Download(String),
     DeleteAssets,
+    SelectUnusedMedia,
+    RemoveUnusedMedia,
     NewComposition,
     ImportFiles,
     ImportFolder(Option<String>),
@@ -224,6 +226,7 @@ pub(crate) struct Confirmation {
     pub token: u64,
     pub stamp: Stamp,
     pub assets: Vec<String>,
+    pub references: usize,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Marquee {
@@ -248,6 +251,8 @@ pub struct MediaPanel {
     pub(crate) all_except: Option<HashSet<String>>,
     pub(crate) selection_cache: OnceLock<Vec<String>>,
     pub(crate) selection: Vec<String>,
+    /// Select Unused Media spans folders and filters.
+    pub(crate) project_wide_selection: bool,
     pub(crate) selected: HashSet<String>,
     pub(crate) active: Option<String>,
     pub(crate) anchor: Option<String>,
@@ -438,7 +443,13 @@ impl MediaPanel {
             .map(|(i, id)| (id.clone(), i))
             .collect();
         self.rows = rows;
-        self.selection.retain(|id| self.positions.contains_key(id));
+        self.selection.retain(|id| {
+            if self.project_wide_selection {
+                c.assets.contains_key(id)
+            } else {
+                self.positions.contains_key(id)
+            }
+        });
         self.selected = self.selection.iter().cloned().collect();
         if let Some(excluded) = &mut self.all_except {
             excluded.retain(|id| self.positions.contains_key(id));
@@ -571,6 +582,7 @@ impl MediaPanel {
         effects.push(Effect::ClearPreview);
     }
     pub(crate) fn clear(&mut self, effects: &mut Vec<Effect>) {
+        self.project_wide_selection = false;
         self.all_except = None;
         self.selection_cache.take();
         self.selection.clear();
@@ -618,6 +630,7 @@ impl MediaPanel {
             self.anchor = Some(id.into());
         } else {
             self.all_except = None;
+            self.project_wide_selection = false;
             self.selection = vec![id.into()];
             self.selected = HashSet::from([id.into()]);
             self.anchor = Some(id.into());
@@ -644,6 +657,7 @@ impl MediaPanel {
         effects.push(Effect::Focus(self.focused.clone()));
     }
     pub(crate) fn select_exclusive(&mut self, id: ItemId, effects: &mut Vec<Effect>) {
+        self.project_wide_selection = false;
         self.all_except = None;
         self.selection_cache.take();
         self.selection.clear();
@@ -664,15 +678,17 @@ impl MediaPanel {
         let mut commands = vec![];
         let mut effects = vec![];
         match id {
-            None => commands.extend(
-                [
-                    NewComposition,
-                    NewFolder(self.folder.clone()),
-                    ImportFiles,
-                    ImportFolder(self.folder.clone()),
-                ]
-                .map(|c| (c, true)),
-            ),
+            None => {
+                let has_unused = c.unused_assets().next().is_some();
+                commands.extend([
+                    (NewComposition, true),
+                    (NewFolder(self.folder.clone()), true),
+                    (ImportFiles, true),
+                    (ImportFolder(self.folder.clone()), true),
+                    (SelectUnusedMedia, has_unused),
+                    (RemoveUnusedMedia, has_unused),
+                ]);
+            }
             Some(ItemId::Asset(id)) => {
                 if !self.positions.contains_key(&id) {
                     return Err(Error::MissingItem);
@@ -716,7 +732,7 @@ impl MediaPanel {
                     if self.folder.is_some() {
                         commands.push((MoveOut(ItemId::Asset(id.clone())), true));
                     }
-                    if a.source_path.is_some() {
+                    if a.source_path.is_some() && state.availability.can_reveal() {
                         commands.push((Reveal(id.clone()), true));
                     }
                     if matches!(a.kind.as_str(), "video" | "image") {

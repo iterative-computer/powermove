@@ -167,6 +167,8 @@ export function commandLabel(command: Command, row?: Row, count = 0): string {
   if (typeof command === "string")
     return {
       DeleteAssets: count > 1 ? "Delete Selected Media…" : "Delete Media…",
+      SelectUnusedMedia: "Select Unused Media",
+      RemoveUnusedMedia: "Remove Unused Media…",
       NewComposition: "New Composition…",
       ImportFiles: "Import Media…",
     }[command];
@@ -303,6 +305,7 @@ export function menuEntries(
     const boundary =
       c === "ImportFiles" ||
       c === "DeleteAssets" ||
+      c === "SelectUnusedMedia" ||
       (typeof c === "object" &&
         (("Rendition" in c &&
           (c.Rendition === "CreateProxy" ||

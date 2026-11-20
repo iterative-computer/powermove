@@ -99,6 +99,8 @@ export interface Page {
 }
 export type Command =
   | "DeleteAssets"
+  | "SelectUnusedMedia"
+  | "RemoveUnusedMedia"
   | "NewComposition"
   | "ImportFiles"
   | { AddAsset: string }
