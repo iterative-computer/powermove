@@ -174,7 +174,7 @@ impl SurfaceView {
                 let near = (from - margin, to + margin);
                 let mut budget = MEASURE_PER_FRAME;
                 let before = self.cull.culled.len();
-                self.flow(scroller, &handle, 0., near, &extents, &mut budget);
+                self.flow(scroller, (scroller, &handle), 0., near, &extents, &mut budget);
                 if self.cull.culled.len() > before {
                     self.cull.culled_in.insert(scroller);
                 }
@@ -230,12 +230,13 @@ impl SurfaceView {
     fn flow(
         &mut self,
         id: Id,
-        handle: &ScrollHandle,
+        scroller: (Id, &ScrollHandle),
         top: f32,
         near: (f32, f32),
         extents: &HashMap<Id, (f32, f32)>,
         budget: &mut usize,
     ) -> f32 {
+        let (scroller_id, handle) = scroller;
         let prepared = self.prepared.clone();
         let Some(node) = prepared.node(id) else {
             return 0.;
@@ -244,8 +245,14 @@ impl SurfaceView {
         // the node goes where its siblings' heights put it.
         let known = extents
             .get(&id)
+            .filter(|_| id != scroller_id)
             .copied()
             .map(|(t, h)| (if t.is_nan() { top } else { t }, h));
+        // An enclosing scroller measures the nested viewport as one box.
+        // Only the nested scroller assigns content coordinates to its rows.
+        if node.scroll_y && id != scroller_id {
+            return known.map_or_else(|| self.estimate(id, extents), |(_, height)| height);
+        }
         if !stacks(&node.style) {
             // Side by side (a row wrapping a page's column): each child starts
             // where the node does, and is laid out the same way, none left out.
@@ -255,7 +262,7 @@ impl SurfaceView {
                 if prepared.node(child).is_some_and(|c| {
                     !c.hidden && !c.is_plain_text && c.virtual_window.is_none() && c.native.is_none()
                 }) {
-                    tallest = tallest.max(self.flow(child, handle, top, near, extents, budget));
+                    tallest = tallest.max(self.flow(child, scroller, top, near, extents, budget));
                 }
             }
             return known.map_or_else(|| tallest.max(self.estimate(id, extents)), |(_, h)| h);
@@ -301,7 +308,7 @@ impl SurfaceView {
                 self.cull.culled.insert(child, height);
                 cursor = child_top + height;
             } else {
-                let built = self.flow(child, handle, child_top, near, extents, budget);
+                let built = self.flow(child, scroller, child_top, near, extents, budget);
                 cursor = child_top + built;
             }
         }
