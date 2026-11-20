@@ -551,6 +551,10 @@ impl GizmoSurface {
                 let mut properties = Map::new();
                 properties.insert("position.x", Value::Number(0.));
                 properties.insert("position.y", Value::Number(0.));
+                let place = self
+                    .kernel
+                    .published(&self.project)
+                    .and_then(|p| crate::layer_commands::place_on_top(&p, "shape", time, None));
                 let add = AddLayer {
                     id: id.clone(),
                     layer_type: "shape".into(),
@@ -561,14 +565,14 @@ impl GizmoSurface {
                     content,
                     properties,
                     color: None,
-                    index: None,
+                    index: place.map(|(_, at)| at),
                     parent: None,
                     blend: None,
                     motion_blur: None,
                     visible: None,
                     shy: None,
                     collapsed: None,
-                    track: None,
+                    track: place.map(|(track, _)| track),
                     time,
                 };
                 commands.push(LayerCommand::Add(Box::new(add)).into());

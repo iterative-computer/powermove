@@ -514,6 +514,41 @@ pub fn relative_lanes(index: &TimelineIndex, reveal: &RevealState) -> Vec<(Strin
         .map(|l| (l.id, u32::try_from(l.track).unwrap_or(u32::MAX)))
         .collect()
 }
+/// Where a new layer made over `from..end` goes in Tracks (PM-512): the
+/// lowest track above every clip of its area it overlaps (a new track when
+/// that is past the last), and the stack place directly above the topmost of
+/// those clips (with its members, for a group), so the higher track is
+/// drawn on top. With nothing to overlap: V1 (or A1) at the top of the stack.
+/// Returns (track, stack index).
+pub fn top_place(
+    index: &TimelineIndex,
+    reveal: &RevealState,
+    kind: &str,
+    from: f64,
+    end: f64,
+) -> (usize, usize) {
+    let area = area(kind);
+    let layout = layout(index, reveal);
+    let under: Vec<&Item> = layout
+        .items
+        .iter()
+        .filter(|i| {
+            i.area == area
+                && i.parent.is_none()
+                && i.from < end - 1e-5
+                && from < i.from + i.duration - 1e-5
+        })
+        .collect();
+    let track = under.iter().map(|i| i.lane + 1).max().unwrap_or(0);
+    let ids: Vec<String> = under.iter().map(|i| i.id.clone()).collect();
+    let place = index
+        .expanded_ids(&ids)
+        .iter()
+        .filter_map(|id| index.layers.iter().position(|l| &l.id == id))
+        .min()
+        .unwrap_or(0);
+    (track, place)
+}
 
 /// `command` as the Tracks timeline makes it: wrapped with the lanes it
 /// shows, so the kernel keeps every clip on its track.

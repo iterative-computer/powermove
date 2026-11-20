@@ -245,13 +245,35 @@ impl TimingCommand {
             } => ripple_trim(cx, layer_ids, *edge, *time, false),
             TimingCommand::InTracks { lanes, command } => {
                 pin_tracks(cx, lanes)?;
+                let comp = lanes
+                    .iter()
+                    .find_map(|(id, _)| cx.find(id).ok())
+                    .map(|loc| loc.comp_id);
+                let before: std::collections::HashMap<String, (f64, f64)> = comp
+                    .as_ref()
+                    .map(|c| {
+                        cx.layers(c.as_deref())
+                            .iter()
+                            .map(|l| {
+                                (
+                                    values::text(l, "id").unwrap_or_default().to_owned(),
+                                    ends(l),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 match command.as_ref() {
                     TimingCommand::RippleTrim {
                         layer_ids,
                         edge,
                         time,
-                    } => ripple_trim(cx, layer_ids, *edge, *time, true),
-                    other => other.plan(cx),
+                    } => ripple_trim(cx, layer_ids, *edge, *time, true)?,
+                    other => other.plan(cx)?,
+                }
+                match comp {
+                    Some(comp) => stack_follows_tracks(cx, comp.as_deref(), &before),
+                    None => Ok(()),
                 }
             }
             TimingCommand::PinTracks { lanes } => pin_tracks(cx, lanes),
@@ -1109,6 +1131,142 @@ fn pin_tracks(cx: &mut Cx<'_>, lanes: &[(String, u32)]) -> Result<(), CommandErr
         cx.set(path, Value::Number(lane))?;
     }
     Ok(())
+}
+
+/// In Tracks the track decides stacking (PM-512). After a Tracks edit, a
+/// clip it retimed takes the lowest free track from its own over its new
+/// time, as the timeline packs it; then the clips it overlaps on other tracks
+/// of its area and group (and theirs, onward) are restacked as little as they
+/// need, so a clip on a higher track is drawn above every clip it overlaps on
+/// a lower one. No other clip changes track and every other layer keeps its
+/// place. A restack that would move or pass a locked, 3D, group or track
+/// matte layer, or a layer of another area or group, is left out (as a
+/// Tracks move is).
+fn stack_follows_tracks(
+    cx: &mut Cx<'_>,
+    comp: Option<&str>,
+    before: &std::collections::HashMap<String, (f64, f64)>,
+) -> Result<(), CommandError> {
+    let mut layers = cx.layers(comp);
+    let id = |l: &Value| values::text(l, "id").unwrap_or_default().to_owned();
+    let group = |l: &Value| values::text(l, "type") == Some("group");
+    let key = |l: &Value| (values::text(l, "group").map(str::to_owned), area(l));
+    let track = |l: &Value| values::num(l, "track").unwrap_or(0.0).max(0.0).floor();
+    let overlap = |a: (f64, f64), b: (f64, f64)| a.0 < b.1 - 1e-5 && b.0 < a.1 - 1e-5;
+    let edited: Vec<usize> = (0..layers.len())
+        .filter(|&i| !group(&layers[i]) && before.get(&id(&layers[i])) != Some(&ends(&layers[i])))
+        .collect();
+    if edited.is_empty() {
+        return Ok(());
+    }
+    let mut changed = false;
+    // The timeline places a retimed clip after the clips that keep their
+    // time, from the bottom of the stack up.
+    for &i in edited.iter().rev() {
+        let mut t = track(&layers[i]);
+        while layers.iter().enumerate().any(|(j, o)| {
+            j != i
+                && !group(o)
+                && (j > i || !edited.contains(&j))
+                && key(o) == key(&layers[i])
+                && track(o) == t
+                && overlap(held_span(o), held_span(&layers[i]))
+        }) {
+            t += 1.0;
+        }
+        if t != track(&layers[i]) {
+            values::obj(&mut layers[i]).insert("track", Value::Number(t));
+            changed = true;
+        }
+    }
+    let linked = |layers: &[Value], a: usize, b: usize| {
+        !group(&layers[a])
+            && !group(&layers[b])
+            && key(&layers[a]) == key(&layers[b])
+            && track(&layers[a]) != track(&layers[b])
+            && overlap(ends(&layers[a]), ends(&layers[b]))
+    };
+    let mut run = edited.clone();
+    let mut k = 0;
+    while k < run.len() {
+        let a = run[k];
+        for b in 0..layers.len() {
+            if !run.contains(&b) && linked(&layers, a, b) {
+                run.push(b);
+            }
+        }
+        k += 1;
+    }
+    run.sort_unstable();
+    // Top first: each clip after every clip on a higher track it overlaps,
+    // otherwise in its present order.
+    let above = |a: usize, b: usize| linked(&layers, a, b) && track(&layers[a]) > track(&layers[b]);
+    let mut order = Vec::with_capacity(run.len());
+    let mut left = run.clone();
+    while let Some(pick) = left
+        .iter()
+        .position(|&a| !left.iter().any(|&b| above(b, a)))
+    {
+        order.push(left.remove(pick));
+    }
+    if order.len() == run.len() && order != run {
+        let moved: Vec<usize> = run
+            .iter()
+            .zip(&order)
+            .filter(|(slot, from)| slot != from)
+            .map(|(slot, _)| *slot)
+            .collect();
+        let matte = |l: &Value| l.get("matteMode").is_some_and(|m| *m != Value::Null);
+        let blocked = (moved[0]..=moved[moved.len() - 1]).any(|j| {
+            let l = &layers[j];
+            locked_here(&layers, l)
+                || values::flag(l, "threeD")
+                || group(l)
+                || matte(l)
+                || layers.get(j + 1).is_some_and(matte)
+                || key(l) != key(&layers[run[0]])
+        });
+        if !blocked {
+            let original = layers.clone();
+            for (slot, from) in run.iter().zip(&order) {
+                layers[*slot] = original[*from].clone();
+            }
+            changed = true;
+        }
+    }
+    if changed {
+        layers::write_layers(cx, comp, layers)
+    } else {
+        Ok(())
+    }
+}
+
+/// The time a clip holds its track alone: less what its transitions let a
+/// neighbour on its track overlap (the Tracks timeline's packing).
+fn held_span(layer: &Value) -> (f64, f64) {
+    let (from, end) = ends(layer);
+    let audio = values::text(layer, "type") == Some("audio");
+    let side = |field: &str, fade: &str| {
+        let length = if audio {
+            layer.get("d").and_then(|d| values::num(d, fade))
+        } else {
+            layer
+                .get(field)
+                .filter(|t| values::text(t, "type").is_some())
+                .and_then(|t| values::num(t, "dur"))
+        };
+        length.filter(|d| d.is_finite()).unwrap_or(0.0).max(0.0)
+    };
+    let (a, b) = (
+        from + side("transitionIn", "fadeIn"),
+        end - side("transitionOut", "fadeOut"),
+    );
+    if a <= b {
+        (a, b)
+    } else {
+        let mid = (from + end) / 2.0;
+        (mid, mid)
+    }
 }
 
 fn ripple_trim(

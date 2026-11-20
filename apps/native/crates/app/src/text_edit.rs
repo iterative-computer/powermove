@@ -1231,24 +1231,26 @@ fn add_text(
     let mut properties = Map::new();
     properties.insert("position.x", Value::Number(at[0]));
     properties.insert("position.y", Value::Number(at[1]));
+    let duration = crate::layer_commands::text_layer_duration(published, time);
+    let place = crate::layer_commands::place_on_top(published, "text", time, duration);
     let add = AddLayer {
         id: id.into(),
         layer_type: "text".into(),
         comp: None,
         name: Some("Text".into()),
         from: None,
-        duration: crate::layer_commands::text_layer_duration(published, time),
+        duration,
         content,
         properties,
         color: None,
-        index: None,
+        index: place.map(|(_, at)| at),
         parent: None,
         blend: None,
         motion_blur: None,
         visible: None,
         shy: None,
         collapsed: None,
-        track: None,
+        track: place.map(|(track, _)| track),
         time,
     };
     let mut commands: Vec<Command> = vec![LayerCommand::Add(Box::new(add)).into()];
@@ -1626,6 +1628,49 @@ mod tests {
             let menu_expected = if mode == "layers" { expected.max(1.) } else { expected };
             assert!((duration(&p, &plan.commands) - menu_expected).abs() < 1e-8);
         }
+    }
+    /// PM-512, the reported case: V1 has clips, V2's clip was deleted, V3 holds
+    /// an opaque still from 11 s. A title the Text tool adds at 11 s is the
+    /// top of the stack (the picture draws it over the still), so its track
+    /// is the lowest free one above the topmost it overlaps: V4, not V2.
+    #[test]
+    fn pm512_viewer_text_in_tracks_goes_on_the_track_above_the_topmost_it_overlaps() {
+        use pm_kernel::{Call, Caller, Command, KernelActor, KernelConfig, LayerCommand, OpenSource, Request, WriteBody};
+        let solid = |id: &str, from: f64, dur: f64, track: u32| {
+            format!(r##"{{"id":"{id}","name":"{id}","type":"solid","from":{from},"dur":{dur},"on":true,"track":{track},"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}}}}"##)
+        };
+        let project = pm_model::json::parse(&format!(
+            r##"{{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":30,"comps":{{}},"assets":{{}},"layers":[{},{},{},{}]}}"##,
+            solid("still", 11., 9., 2),
+            solid("v2", 9., 6., 1),
+            solid("a", 0., 7., 0),
+            solid("b", 7., 6., 0),
+        ))
+        .unwrap();
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        kernel.open("P", OpenSource::Untitled(project)).wait().unwrap().unwrap();
+        let transact = |commands: Vec<Command>| {
+            let call = Call::Transact { label: Some("Edit".into()), expected_revision: None, body: WriteBody::Commands(commands) };
+            kernel.call("P", Request::new(Caller::native(), call)).wait().unwrap().unwrap();
+        };
+        transact(vec![LayerCommand::Delete { layer_ids: vec!["v2".into()] }.into()]);
+        let mut p = (*kernel.published("P").unwrap()).clone();
+        p.ui_state.timeline = pm_model::json::parse(r#"{"mode":"tracks"}"#).unwrap();
+        let commands = super::add_text(&p, "title", [0., 0.], None, 11.);
+        let Command::Layer(LayerCommand::Add(add)) = &commands[0] else { panic!("text add") };
+        assert_eq!(add.index, Some(0), "directly above the still, the topmost it overlaps");
+        assert_eq!(add.track, Some(3), "the lowest free track above V3's still");
+        transact(commands);
+        let p = kernel.published("P").unwrap();
+        let index = pm_panel_timeline::TimelineIndex::from_snapshot(&p.snapshot);
+        let order: Vec<_> = index.layers.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(order, ["title", "still", "a", "b"], "render order, top first");
+        let track = |id: &str| index.layer(id).unwrap().preferred_track;
+        assert!(track("title") > track("still") && track("still") > track("a"));
+        let layout = pm_panel_timeline::tracks::layout(&index, &Default::default());
+        let lane = |id: &str| layout.item(id).unwrap().lane;
+        assert_eq!([lane("title"), lane("still"), lane("a"), lane("b")], [3, 2, 0, 0]);
     }
     fn layout() -> Layout {
         // Two lines: "ab" at y 0 and "cd" at y 20; 10 px per character.

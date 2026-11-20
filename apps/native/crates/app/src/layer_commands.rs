@@ -66,6 +66,33 @@ pub(crate) fn in_tracks(published: &Published, command: TimingCommand) -> Timing
     pm_panel_timeline::tracks::in_tracks(&index, &view.reveal, command)
 }
 
+/// Where a layer made in the viewer goes while the timeline shows tracks,
+/// over `time` for `duration` (the kernel's default when unset): the lowest
+/// track above every clip it overlaps, and the stack place directly above
+/// the topmost of them, so the higher track is drawn on top (PM-512). As
+/// (track, stack index); None in Layers mode.
+pub(crate) fn place_on_top(
+    published: &Published,
+    kind: &str,
+    time: f64,
+    duration: Option<f64>,
+) -> Option<(u32, usize)> {
+    if !shows_tracks(published) {
+        return None;
+    }
+    let fps = comp_number(published, "fps")
+        .filter(|f| *f > 0.)
+        .unwrap_or(30.);
+    let from = (time * fps).round() / fps;
+    let comp_end = comp_number(published, "dur").unwrap_or(0.);
+    let end = from + duration.unwrap_or_else(|| (comp_end - from).max(0.1));
+    let mut view = pm_panel_timeline::TimelineModel::default();
+    view.restore_ui(&published.ui_state);
+    let index = pm_panel_timeline::TimelineIndex::from_snapshot(&published.snapshot);
+    let (track, at) = pm_panel_timeline::tracks::top_place(&index, &view.reveal, kind, from, end);
+    Some((u32::try_from(track).ok()?, at))
+}
+
 /// Whether the timeline shows tracks (its published view).
 pub(crate) fn shows_tracks(published: &Published) -> bool {
     let mut view = pm_panel_timeline::TimelineModel::default();
