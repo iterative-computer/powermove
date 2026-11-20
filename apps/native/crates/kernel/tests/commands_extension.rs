@@ -298,6 +298,7 @@ fn extension_gradient_stop_parameters_validate_and_undo() {
             ops: vec![StateOp::Register {
                 registry: "layerTypes".into(),
                 entry: Registration {
+                    project: Some("P".into()),
                     token: "stop-provider".into(),
                     owner: Caller::native().writer,
                     id: "synthetic.extension".into(),
