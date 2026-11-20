@@ -1409,3 +1409,105 @@ fn an_unreadable_file_of_an_image_sequence_says_why_it_could_not_be_read() {
     }
     assert!(!destination.exists());
 }
+
+/// A composition with a cube added the way Layer ▸ Add 3D Layer ▸ Cube adds
+/// it, `seconds` long, at 320×180.
+#[cfg(feature = "kernel")]
+fn cube_request(destination: std::path::PathBuf, seconds: i32) -> ExportRequest {
+    use pm_kernel::{Call, Caller, KernelActor, KernelConfig, OpenSource, Request, WriteBody};
+    let actor = KernelActor::spawn(KernelConfig::default());
+    actor
+        .handle()
+        .open(
+            "p",
+            OpenSource::Untitled(pm_scene3d::to_model(&serde_json::json!({"id":"p","compId":"c",
+                "w":320,"h":180,"fps":30,"dur":seconds,"layers":[],"assets":{},"comps":{}}))),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let published = actor.handle().published("p").unwrap();
+    let (label, commands, _) =
+        pm_panel_studio3d::properties::add_layer(&published, 0., "box", "cube").unwrap();
+    actor
+        .handle()
+        .call(
+            "p",
+            Request::new(
+                Caller::native(),
+                Call::Transact {
+                    label: Some(label),
+                    body: WriteBody::Commands(commands),
+                    expected_revision: None,
+                },
+            ),
+        )
+        .wait()
+        .unwrap()
+        .unwrap();
+    let published = actor.handle().published("p").unwrap();
+    let mut root =
+        pm_scene3d::from_model(&published.snapshot.root().unwrap().to_value()).unwrap();
+    // Few samples: this is about the export finishing, not how finely it traces.
+    let quality = pm_scene3d::quality::resolve(
+        &pm_scene3d::quality::preset("production").unwrap(),
+        &serde_json::json!({"minSamples":1,"maxSamples":1,"noiseThreshold":0,"caustics":false,"denoise":false}),
+    )
+    .unwrap();
+    if root["comps"]["c"].is_object() {
+        root["comps"]["c"]["studioQuality"] = quality;
+    } else {
+        root["studioQuality"] = quality;
+    }
+    request_for(&root.to_string(), destination, seconds)
+}
+
+/// PM-513: an export of a composition with a 3D cube produces every frame.
+#[cfg(feature = "kernel")]
+#[test]
+fn a_composition_with_a_3d_cube_exports_every_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let destination = dir.path().join("cube");
+    let child = ExportHandle::start(
+        Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
+        cube_request(destination.clone(), 1),
+    )
+    .unwrap();
+    let status = child.wait().unwrap();
+    assert_eq!(status.state, JobState::Done, "{status:?}");
+    assert_eq!(std::fs::read_dir(destination).unwrap().count(), 30);
+}
+
+/// PM-513: a cancelled 3D export leaves nothing behind that holds the next
+/// export: a plain export afterwards completes.
+#[cfg(feature = "kernel")]
+#[test]
+fn a_cancelled_3d_export_is_followed_by_a_plain_export_that_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let cancelled = dir.path().join("cube");
+    let child = ExportHandle::start(
+        Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
+        cube_request(cancelled.clone(), 600),
+    )
+    .unwrap();
+    let start = Instant::now();
+    while child.status().progress == 0. {
+        let status = child.status();
+        assert!(!status.state.is_terminal(), "{status:?}");
+        assert!(start.elapsed() < Duration::from_secs(120), "no 3D frame");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    child.cancel();
+    let status = child.wait().unwrap();
+    assert_eq!(status.state, JobState::Cancelled, "{status:?}");
+    assert!(!cancelled.exists());
+    let plain = dir.path().join("plain");
+    let child = ExportHandle::start(
+        Path::new(env!("CARGO_BIN_EXE_pm-engine-service")),
+        request(plain.clone(), 1),
+    )
+    .unwrap();
+    let status = child.wait().unwrap();
+    assert_eq!(status.state, JobState::Done, "{status:?}");
+    assert_eq!(std::fs::read_dir(plain).unwrap().count(), 30);
+}
