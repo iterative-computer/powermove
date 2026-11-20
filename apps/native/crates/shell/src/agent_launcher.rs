@@ -37,16 +37,9 @@ pub(crate) fn fit_presence_title(text: &str, width: f64, measure: impl Fn(&str) 
         return text;
     }
 
-    let mut fitted = if text.starts_with("• ") && measure("• …") <= width {
-        "• …".to_owned()
-    } else {
-        "…".to_owned()
-    };
+    let mut fitted = "…".to_owned();
     for (end, _) in text.match_indices(' ') {
         let word_prefix = &text[..end];
-        if word_prefix == "•" {
-            continue;
-        }
         let candidate = format!("{}…", word_prefix.trim_end_matches('…'));
         if measure(&candidate) > width {
             break;
@@ -276,15 +269,12 @@ mod tests {
     #[test]
     fn pm546_fitting_never_splits_a_word_or_omits_the_ellipsis() {
         let width = |text: &str| text.chars().count() as f64;
-        let text = "• I'll find the wavy dither effect in the library";
+        let text = "I'll find the wavy dither effect in the library";
+        assert_eq!(fit_presence_title(text, 24., width), "I'll find the wavy…");
+        assert_eq!(fit_presence_title("Short", 24., width), "Short");
         assert_eq!(
-            fit_presence_title(text, 24., width),
-            "• I'll find the wavy…"
-        );
-        assert_eq!(fit_presence_title("• Short", 24., width), "• Short");
-        assert_eq!(
-            fit_presence_title("• Antidisestablishmentarianism", 12., width),
-            "• …"
+            fit_presence_title("Antidisestablishmentarianism", 12., width),
+            "…"
         );
     }
     #[test]

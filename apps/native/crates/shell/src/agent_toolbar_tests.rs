@@ -1,9 +1,8 @@
-use super::{AgentStatus, COEDIT_LIGHT_SIZE, COEDIT_TITLE_WIDTH};
+use super::{AgentStatus, COEDIT_TITLE_INSET, COEDIT_TITLE_WIDTH};
 
 // The actual unbordered AppKit button has a 2 pt gap after its image.
 // Native code reads titleRectForBounds from the cell on the main thread.
-const TITLE_INSET: f64 = COEDIT_LIGHT_SIZE + 2.;
-const TITLE_BUDGET: f64 = COEDIT_TITLE_WIDTH - TITLE_INSET;
+const TITLE_BUDGET: f64 = COEDIT_TITLE_WIDTH - COEDIT_TITLE_INSET;
 
 #[test]
 fn pm546_chip_fits_whole_words_and_count_at_the_native_width() {
@@ -16,14 +15,27 @@ fn pm546_chip_fits_whole_words_and_count_at_the_native_width() {
         ..Default::default()
     };
     for (count, expected) in [
-        (0, "• I’ll find the wavy dither…"),
-        (1, "• I’ll find the wavy dither…  +1"),
+        (0, "I’ll find the wavy dither…"),
+        (1, "I’ll find the wavy dither…  +1"),
     ] {
         status.additional_runs = count;
         let title = coedit_presence_title(&status, &font, TITLE_BUDGET);
         assert_eq!(title.string().to_string(), expected);
         assert!(title.size().width <= TITLE_BUDGET);
     }
+}
+
+#[test]
+fn pm546_done_has_a_plain_label_and_a_separate_undo_title() {
+    use super::*;
+
+    let font = NSFont::systemFontOfSize(13.);
+    let done = coedit_presence_title(&AgentStatus::default(), &font, TITLE_BUDGET);
+    assert_eq!(done.string().to_string(), "Done");
+    let tokens = Tokens::new(Scheme::Light, Accessibility::default());
+    let undo = coedit_undo_title(&font, &tokens);
+    assert_eq!(undo.string().to_string(), "Undo");
+    assert!(undo.size().width <= COEDIT_UNDO_WIDTH);
 }
 
 /// Toolbar contents drawn with AppKit at their native dimensions, without a
@@ -118,23 +130,29 @@ fn pm546_capture_coedit_chip_without_windows() {
                         let title = coedit_presence_title(status, &font, TITLE_BUDGET);
                         let text_y = 8. + (COEDIT_CHIP_HEIGHT - title.size().height) / 2.;
                         title.drawAtPoint(NSPoint::new(
-                            x + 4. + TITLE_INSET + (TITLE_BUDGET - title.size().width) / 2.,
+                            x + COEDIT_LIGHT_X + COEDIT_TITLE_INSET,
                             text_y,
                         ));
                         presence_light(status, 0., &tokens).drawInRect(NSRect::new(
                             NSPoint::new(
-                                x + 4.,
+                                x + COEDIT_LIGHT_X,
                                 8. + (COEDIT_CHIP_HEIGHT - COEDIT_LIGHT_SIZE) / 2.,
                             ),
                             NSSize::new(COEDIT_LIGHT_SIZE, COEDIT_LIGHT_SIZE),
                         ));
-                        if hover {
-                            for (glyph, offset) in [("Ⅱ", 200.), ("■", 224.)] {
+                        if !status.working {
+                            let undo = coedit_undo_title(&font, &tokens);
+                            undo.drawAtPoint(NSPoint::new(
+                                x + COEDIT_PAUSE_X + (COEDIT_UNDO_WIDTH - undo.size().width) / 2.,
+                                8. + (COEDIT_CHIP_HEIGHT - undo.size().height) / 2.,
+                            ));
+                        } else if hover {
+                            for (glyph, offset) in [("Ⅱ", COEDIT_PAUSE_X), ("■", COEDIT_STOP_X)] {
                                 draw_label(
                                     glyph,
                                     x + offset,
                                     text_y,
-                                    22.,
+                                    COEDIT_ACTION_WIDTH,
                                     &NSColor::controlTextColor(),
                                 );
                             }
