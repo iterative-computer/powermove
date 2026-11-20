@@ -113,6 +113,7 @@ pub fn plan(published: &Published, shape: ShapeBox, time: f64, variant: &str) ->
     let mut properties = Map::new();
     properties.insert("position.x", Value::Number((shape.x0 + shape.x1) / 2.));
     properties.insert("position.y", Value::Number((shape.y0 + shape.y1) / 2.));
+    let place = crate::layer_commands::place_on_top(published, "shape", time, None);
     let add = AddLayer {
         id: id.clone(),
         layer_type: "shape".into(),
@@ -123,14 +124,14 @@ pub fn plan(published: &Published, shape: ShapeBox, time: f64, variant: &str) ->
         content,
         properties,
         color: None,
-        index: None,
+        index: place.map(|(_, at)| at),
         parent: None,
         blend: None,
         motion_blur: None,
         visible: None,
         shy: None,
         collapsed: None,
-        track: crate::layer_commands::track_on_top(published, "shape", time, None),
+        track: place.map(|(track, _)| track),
         time,
     };
     Some(ShapePlan {

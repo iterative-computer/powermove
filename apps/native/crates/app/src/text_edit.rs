@@ -1232,6 +1232,7 @@ fn add_text(
     properties.insert("position.x", Value::Number(at[0]));
     properties.insert("position.y", Value::Number(at[1]));
     let duration = crate::layer_commands::text_layer_duration(published, time);
+    let place = crate::layer_commands::place_on_top(published, "text", time, duration);
     let add = AddLayer {
         id: id.into(),
         layer_type: "text".into(),
@@ -1242,14 +1243,14 @@ fn add_text(
         content,
         properties,
         color: None,
-        index: None,
+        index: place.map(|(_, at)| at),
         parent: None,
         blend: None,
         motion_blur: None,
         visible: None,
         shy: None,
         collapsed: None,
-        track: crate::layer_commands::track_on_top(published, "text", time, duration),
+        track: place.map(|(track, _)| track),
         time,
     };
     let mut commands: Vec<Command> = vec![LayerCommand::Add(Box::new(add)).into()];
@@ -1658,7 +1659,7 @@ mod tests {
         p.ui_state.timeline = pm_model::json::parse(r#"{"mode":"tracks"}"#).unwrap();
         let commands = super::add_text(&p, "title", [0., 0.], None, 11.);
         let Command::Layer(LayerCommand::Add(add)) = &commands[0] else { panic!("text add") };
-        assert_eq!(add.index, None, "the title is the top of the stack");
+        assert_eq!(add.index, Some(0), "directly above the still, the topmost it overlaps");
         assert_eq!(add.track, Some(3), "the lowest free track above V3's still");
         transact(commands);
         let p = kernel.published("P").unwrap();
