@@ -1,7 +1,7 @@
 use pm_mcp::{
     Automation, McpSession, Result,
     export_jobs::{ExportJobs, Progress},
-    services::{ExportChild, FrozenProject, VideoExportRequest},
+    services::{ExportChild, VideoExportRequest},
 };
 use serde_json::{Value, json};
 use std::{
@@ -56,7 +56,7 @@ impl ExportChild for Child {
         out.write_all(b"Synthetic worker output; not a video conformance witness")?;
         Ok(path.into())
     }
-    fn video_progress(&self, _: &FrozenProject) -> Option<Progress> {
+    fn video_progress(&self, _: u64) -> Option<Progress> {
         if let Some(signal) = self.progress_started.lock().unwrap().take() {
             signal.send(()).unwrap();
         }

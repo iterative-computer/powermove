@@ -63,6 +63,14 @@ pub fn catalog() -> &'static Value {
                     "description":"Target composition ID from get_project_state.compositions. Omit for the open composition. Does not navigate the editor."
                 });
             }
+            let overlay = &speed_catalog()["overlays"][tool["name"].as_str().unwrap()];
+            if let Some(note) = overlay["note"].as_str() {
+                let existing = tool["description"].as_str().unwrap();
+                tool["description"] = Value::String(format!("{note}\n\n{existing}"));
+            }
+            if let Some(properties) = overlay["properties"].as_object() {
+                tool["inputSchema"]["properties"].as_object_mut().unwrap().extend(properties.clone());
+            }
         }
         transition_fields(&mut value);
         // Native build tools extend the app subset beside the pinned contract.
@@ -110,8 +118,16 @@ pub fn served_tools() -> Vec<Value> {
 pub fn native_tools() -> &'static Vec<Value> {
     static NATIVE: OnceLock<Vec<Value>> = OnceLock::new();
     NATIVE.get_or_init(|| {
-        serde_json::from_str(include_str!("../fixtures/native-tools.json")).expect("native tools")
+        let mut tools: Vec<Value> = serde_json::from_str(include_str!("../fixtures/native-tools.json"))
+            .expect("native tools");
+        tools.extend(speed_catalog()["tools"].as_array().unwrap().iter().cloned());
+        tools
     })
+}
+fn speed_catalog() -> &'static Value {
+    static SPEED: OnceLock<Value> = OnceLock::new();
+    SPEED.get_or_init(|| serde_json::from_str(include_str!("../fixtures/mcp-speed-catalog.json"))
+        .expect("MCP speed catalog"))
 }
 pub fn permits(subset: &str, name: &str) -> bool {
     if subset == "app" && ["panel_begin", "panel_build"].contains(&name) { return true; }
@@ -282,6 +298,7 @@ pub const IMPLEMENTED: &[&str] = &[
     "media_contact_sheet",
     "media_waveform",
     "export_video",
+    "export_status",
     "export_captions",
     "transcribe_media",
     "generate_captions",

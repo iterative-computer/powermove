@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 pub(crate) fn session(name: &str, args: &Value) -> Result<()> {
     let mut issues = Vec::new();
     let fields: &[&str] = if name == "start_session" {
-        &["prompt", "access", "context"]
+        &["prompt", "access", "context", "detail"]
     } else {
         &["commit"]
     };
@@ -46,6 +46,8 @@ pub(crate) fn session(name: &str, args: &Value) -> Result<()> {
             } else if let Some(value) = value {
                 let choices = if *field == "access" {
                     ["project", "editor"]
+                } else if *field == "detail" {
+                    ["summary", "full"]
                 } else {
                     ["project", "app"]
                 };

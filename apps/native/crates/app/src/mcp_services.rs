@@ -300,9 +300,12 @@ pub fn headless(profile: PathBuf, exports: PathBuf, launch: Option<PathBuf>) -> 
             tools.connect(),
         );
         drop(server);
-        let result = result.and_then(|()| tools.automation.lock().unwrap().close_headless());
+        let exports = tools.automation.lock().unwrap().export_jobs.clone();
+        // In a windowless owner, stdin EOF closes the client, not its export.
+        let drained = exports.drain(exports.limit);
+        let closed = tools.automation.lock().unwrap().close_headless();
         actor.shutdown();
-        result.map_err(Into::into)
+        result.and(drained).and(closed).map_err(Into::into)
     })
 }
 struct ProjectExtensions {
@@ -718,7 +721,18 @@ fn file_name(name: &str, extension: &str, replace: bool) -> String {
 impl ExportChild for EngineJobs {
     fn video(&self, request: &VideoExportRequest) -> Result<pm_mcp::services::VideoDelivered> {
         let frozen = &request.snapshot;
-        let published = self.published(frozen)?;
+        let cancelled = || Error {
+            code: "export_cancelled".into(),
+            message: "Export cancelled.".into(),
+            backing: None,
+        };
+        if request.cancel.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(cancelled());
+        }
+        let published = match &request.publication {
+            Some(publication) => publication.clone(),
+            None => self.published(frozen)?,
+        };
         let project = &frozen.project;
         let options = sheet_options(project, &request.options)?;
         let time = project["time"].as_f64().unwrap_or(0.);
@@ -770,10 +784,10 @@ impl ExportChild for EngineJobs {
         }
         // Listed in Background Tasks beside the person's exports, where it can
         // be watched and cancelled.
-        let task =
-            crate::export_coordinator::AgentExport::start(&name, &frozen.project_id, plan.frames)
-                .map_err(failed)?;
-        let cancelled = || failed("The person cancelled this export in Background Tasks.");
+        let task = crate::export_coordinator::AgentExport::start_with_cancel(
+            &name, &frozen.project_id, plan.frames, request.cancel.clone(),
+        )
+        .map_err(failed)?;
         // Cancel in Background Tasks ends the wait for extensions too.
         let resources = match self.resources(&published, true, &|| task.cancelled()) {
             Ok(resources) => resources,
@@ -786,6 +800,10 @@ impl ExportChild for EngineJobs {
                 return Err(failed(error));
             }
         };
+        if task.cancelled() {
+            task.finish(Err("cancelled".into()));
+            return Err(cancelled());
+        }
         let handle = match self.start(
             &published,
             settings,
@@ -827,7 +845,7 @@ impl ExportChild for EngineJobs {
             std::thread::sleep(Duration::from_millis(50));
         }
         self.progress.lock().unwrap().remove(&frozen.document_id);
-        if task.cancelled() {
+        if task.cancelled() && handle.status().state != JobState::Done {
             let _ = handle.wait();
             task.finish(Err("cancelled".into()));
             return Err(cancelled());
@@ -846,11 +864,11 @@ impl ExportChild for EngineJobs {
         task.finish(result.as_ref().map(|_| ()).map_err(|e| e.message.clone()));
         result
     }
-    fn video_progress(&self, frozen: &FrozenProject) -> Option<Progress> {
+    fn video_progress(&self, document: u64) -> Option<Progress> {
         self.progress
             .lock()
             .unwrap()
-            .get(&frozen.document_id)
+            .get(&document)
             .cloned()
     }
 }

@@ -312,6 +312,9 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
         "generate_captions",
         "import_media_to_timeline",
     ];
+    let speed: serde_json::Value = serde_json::from_str(include_str!(
+        "../../mcp/fixtures/mcp-speed-catalog.json"
+    )).unwrap();
     for tool in bare["tools"].as_array().unwrap() {
         let mut actual = expected["tools"]
             .as_array()
@@ -333,6 +336,20 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
                 .cloned()
                 .unwrap_or_default();
             assert!(!required.contains(&serde_json::json!("compositionId")), "{name}");
+        }
+        let overlay = &speed["overlays"][name];
+        if let Some(note) = overlay["note"].as_str() {
+            let base = actual["description"].as_str().unwrap()
+                .strip_prefix(&format!("{note}\n\n")).unwrap();
+            actual["description"] = serde_json::json!(base);
+        }
+        if let Some(properties) = overlay["properties"].as_object() {
+            for (key, schema) in properties {
+                assert_eq!(
+                    actual["inputSchema"]["properties"].as_object_mut().unwrap().remove(key).as_ref(),
+                    Some(schema), "{name}.{key}"
+                );
+            }
         }
         let actual = &actual;
         if tool["name"] == "edit_3d" {

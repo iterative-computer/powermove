@@ -84,8 +84,17 @@ pub struct AgentExport {
     pub cancel: Arc<AtomicBool>,
 }
 impl AgentExport {
+    #[cfg(test)]
     pub fn start(title: &str, project: &str, frames: u64) -> Result<Self, String> {
-        Self::begin(
+        Self::start_with_cancel(title, project, frames, Arc::default())
+    }
+    pub fn start_with_cancel(
+        title: &str,
+        project: &str,
+        frames: u64,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
+        Self::begin_with_cancel(
             TaskSpec {
                 title: format!("{title} (Agent)"),
                 kind: TaskKind::Export,
@@ -94,10 +103,14 @@ impl AgentExport {
                 total: frames,
             },
             project,
+            cancel,
         )
     }
     /// Any cancellable row run off main (Generate Captions too).
     pub fn begin(spec: TaskSpec, project: &str) -> Result<Self, String> {
+        Self::begin_with_cancel(spec, project, Arc::default())
+    }
+    fn begin_with_cancel(spec: TaskSpec, project: &str, cancel: Arc<AtomicBool>) -> Result<Self, String> {
         let tasks = tasks();
         let mut tasks = tasks.lock().unwrap();
         let id = tasks
@@ -108,7 +121,6 @@ impl AgentExport {
             .start_next()
             .filter(|t| t.id == id)
             .ok_or("Export task did not start")?;
-        let cancel = Arc::new(AtomicBool::new(false));
         cancellers()
             .lock()
             .unwrap()

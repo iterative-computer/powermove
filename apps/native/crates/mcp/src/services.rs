@@ -2,7 +2,10 @@
 //! standalone builds fail explicitly when no real host is installed.
 use crate::{Automation, CaptureRequest, Error, Result};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 #[derive(Clone, Debug)]
 pub struct FrozenProject {
@@ -173,6 +176,10 @@ impl VideoOptions {
 #[derive(Clone, Debug)]
 pub struct VideoExportRequest {
     pub snapshot: FrozenProject,
+    /// Pin the native publication before the worker starts, including media and
+    /// the targeted composition. A later edit cannot invalidate this export.
+    pub publication: Option<Arc<pm_kernel::Published>>,
+    pub cancel: Arc<AtomicBool>,
     pub options: VideoOptions,
     /// Explicit isolated destination. Host must use atomic no-clobber publish,
     /// originals-only media (unless separately authorized), and reap its child.
@@ -248,7 +255,7 @@ impl From<PathBuf> for VideoDelivered {
 }
 pub trait ExportChild: Send + Sync {
     fn video(&self, request: &VideoExportRequest) -> Result<VideoDelivered>;
-    fn video_progress(&self, _: &FrozenProject) -> Option<crate::export_jobs::Progress> {
+    fn video_progress(&self, _: u64) -> Option<crate::export_jobs::Progress> {
         None
     }
     fn captions(&self, layer: &Value, format: &str) -> Result<String> {
@@ -265,11 +272,12 @@ impl ExportChild for NativeExportChild {
 }
 impl Automation {
     pub fn freeze(&self, id: &str) -> Result<FrozenProject> {
+        let view = self.view(id)?;
         Ok(FrozenProject {
             project_id: id.into(),
-            document_id: self.view(id)?.document,
-            revision: self.revision(id)?,
-            project: self.read_document(id)?,
+            document_id: view.document,
+            revision: view.revision,
+            project: crate::automation::document_json(&view.snapshot)?,
         })
     }
     pub fn render(&self, id: &str, args: &Value) -> Result<ToolOutput> {
@@ -452,16 +460,7 @@ impl Automation {
         Ok(result)
     }
     pub fn export_video(&self, id: &str, args: &Value) -> Result<Value> {
-        let options = VideoOptions::parse(args)?;
-        let snapshot = self.freeze(id)?;
-        run_video(
-            self.export_child.as_ref(),
-            &VideoExportRequest {
-                snapshot,
-                options,
-                directory: self.exports.clone(),
-            },
-        )
+        run_video(self.export_child.as_ref(), &self.video_request(id, args)?)
     }
     pub fn export_captions(&self, id: &str, args: &Value) -> Result<Value> {
         let p = self.read_document(id)?;

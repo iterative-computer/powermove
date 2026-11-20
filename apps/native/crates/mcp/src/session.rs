@@ -214,6 +214,25 @@ impl McpSession {
         self.agent_token = Some(token.to_owned());
     }
     pub fn call(&mut self, name: &str, args: Value) -> Value {
+        if std::env::var_os("PM_MCP_TIMING").as_deref() != Some(std::ffi::OsStr::new("1")) {
+            return self.call_tool(name, args);
+        }
+        let started = std::time::Instant::now();
+        let result = self.call_tool(name, args);
+        let elapsed = started.elapsed();
+        let bytes = serde_json::to_vec(&result).map_or(0, |buf| buf.len());
+        let tool = if catalog::spec(name).is_some() {
+            name
+        } else {
+            "unknown"
+        };
+        eprintln!(
+            "pm_mcp tool={tool} elapsed_us={} result_bytes={bytes}",
+            elapsed.as_micros()
+        );
+        result
+    }
+    fn call_tool(&mut self, name: &str, args: Value) -> Value {
         if name == "project_memory" && self.pending.is_none() {
             return match self.project_memory(&args) {
                 Ok(value) => crate::success_model(&value),
@@ -415,6 +434,18 @@ impl McpSession {
             return Err(Error::invalid(
                 "This agent has no project attached. Open a project to use composition tools.",
             ));
+        }
+        let cancel_export = name == "task_cancel"
+            && args["taskId"].as_str().is_some_and(|id| id.starts_with("export"));
+        if name == "export_status" || cancel_export {
+            catalog::validate(name, args)?;
+            let id = session.project.as_deref()
+                .ok_or_else(|| Error::invalid("This tool requires an attached project."))?;
+            assert_project(session, &host, id)?;
+            let job = args[if cancel_export { "taskId" } else { "jobId" }].as_str().unwrap();
+            let pending = host.export_jobs.find(id, session.document.unwrap(), job, false)?;
+            drop(host);
+            return if cancel_export { pending.cancel() } else { pending.status() };
         }
         if name == "manage_project" {
             catalog::validate(name, args)?;
@@ -759,15 +790,33 @@ impl McpSession {
             let id = session
                 .project
                 .as_deref()
-                .ok_or_else(|| Error::invalid("This tool requires an attached project."))?;
-            assert_project(session, &host, id)?;
+                .ok_or_else(|| Error::invalid("This tool requires an attached project."))?
+                .to_owned();
+            assert_project(session, &host, &id)?;
             let jobs = host.export_jobs.clone();
-            let pending = jobs.prepare(
-                host.freeze(id)?,
-                args,
-                host.export_child.clone(),
-                host.exports.clone(),
-            )?;
+            let pending = if let Some(job) = args.get("jobId") {
+                let job = job.as_str()
+                    .filter(|_| args.as_object().is_some_and(|o| o.len() == 1))
+                    .ok_or_else(|| Error::invalid("export_video with a jobId takes no other arguments."))?;
+                jobs.find(&id, session.document.unwrap(), job, true)?
+            } else {
+                catalog::validate(name, args)?;
+                let background = args["background"] == true || args["wait"] == false;
+                if args["background"].as_bool().zip(args["wait"].as_bool())
+                    .is_some_and(|(background, wait)| background == wait)
+                {
+                    return Err(Error::invalid("background and wait request opposite export modes."));
+                }
+                let request = host.video_request(&id, args)?;
+                let child = host.export_child.clone();
+                let pending = jobs.prepare(request, child, background, || {
+                    checkpoint(session, &mut host, &id, self.agent_token.is_some()).map(|_| ())
+                })?;
+                if background {
+                    return Ok(pending.submitted());
+                }
+                pending
+            };
             drop(host);
             let outcome = pending.wait();
             let finished = !matches!(&outcome, Ok((_, false)));
@@ -780,7 +829,7 @@ impl McpSession {
                 .host
                 .lock()
                 .map_err(|_| Error::unavailable("headless host stopped"))?;
-            assert_project(session, &observed, id)?;
+            assert_project(session, &observed, &id)?;
             return outcome.map(|(value, _)| value);
         }
         let prepared_selection = if name == "select_layers" {
@@ -800,13 +849,9 @@ impl McpSession {
         } else {
             None
         };
-        let cleaned_commands = if name == "apply_commands" {
-            Some(commands::clean_commands(
-                args["commands"]
-                    .as_array()
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-            )?)
+        let command_edits = if name == "apply_commands" {
+            let mode = commands::EditMode::parse(args)?;
+            Some((mode, commands::prepare_edits(args, mode)?))
         } else {
             if name != "select_layers" {
                 catalog::validate(name, args)?;
@@ -823,8 +868,8 @@ impl McpSession {
         // Publication validates in an isolated realm. A windowless project may
         // not have a live realm yet, and reloads register asynchronously. Use
         // the same loader as captures before reading the kernel's providers.
-        let needs_definitions = cleaned_commands.as_ref().is_some_and(|commands| {
-            commands.iter().any(|command| {
+        let needs_definitions = command_edits.as_ref().is_some_and(|(_, commands)| {
+            commands.iter().filter_map(|command| command.as_ref().ok()).any(|command| {
                 matches!(
                     command["type"].as_str(),
                     Some("add_effect" | "set_transition")
@@ -1158,6 +1203,8 @@ impl McpSession {
                 } else {
                     None
                 };
+                let mut edit_summary = None;
+                let mut compact_activity = None;
                 let batch = if name == "edit_3d" {
                     Some(crate::scene3d::batch(
                         &host.view(&id)?.snapshot,
@@ -1168,14 +1215,24 @@ impl McpSession {
                             .as_deref()
                             .unwrap_or(&pm_scene3d::geometry::NoAssets),
                     )?)
-                } else if strips.is_none() && video.is_none() {
-                    Some(commands::plan_snapshot(
+                } else if let Some((mode, cleaned)) = command_edits {
+                    let edits = commands::plan_edits(
                         &view.snapshot,
                         &selection,
-                        cleaned_commands.as_deref().unwrap(),
+                        cleaned,
                         session.time,
-                        Some(&host.state()),
-                    )?)
+                        &host.state(),
+                        mode,
+                    )?;
+                    if edits.batch.commands.is_empty() {
+                        return Ok(json!({"results":edits.batch.results,"newIds":[],
+                            "changedLayerIds":[],"revision":revision}));
+                    }
+                    if !mode.verbose {
+                        compact_activity = Some(edits.activity);
+                    }
+                    edit_summary = Some((mode.verbose, edits.new_ids, edits.changed_layer_ids));
+                    Some(edits.batch)
                 } else {
                     None
                 };
@@ -1236,25 +1293,30 @@ impl McpSession {
                         host.select_layers(&id, &batch.selection, false, self.writer)?;
                     }
                     session.focus = batch.selection;
-                    for result in &batch.results {
-                        if let Some(id) = result["data"]["id"].as_str() {
-                            session.known_layers.insert(id.into());
+                    let activity: Box<dyn Iterator<Item = (&Value, Option<&str>)>> =
+                        if let Some(activity) = &compact_activity {
+                            Box::new(activity.iter().map(|(command, id)| (command, id.as_deref())))
+                        } else {
+                            Box::new(batch.results.iter()
+                                .filter(|result| result["ok"] != false)
+                                .map(|result| (&result["command"], result["data"]["id"].as_str())))
+                        };
+                    for (command, target) in activity {
+                        if let Some(target) = target {
+                            session.known_layers.insert(target.into());
                         }
-                    }
-                    if ack.revision != revision {
-                        for result in &batch.results {
-                            let kind = match result["command"]["type"].as_str().unwrap_or("") {
+                        if ack.revision != revision {
+                            let kind = match command["type"].as_str().unwrap_or("") {
                                 "add_layer" | "add_text" | "add_shape" | "add_captions" => {
                                     crate::presence::Kind::Create
                                 }
                                 "replace_keyframes" => crate::presence::Kind::Key,
-                                "set_property" if result["command"]["mode"] != "static" => {
+                                "set_property" if command["mode"] != "static" => {
                                     crate::presence::Kind::Key
                                 }
                                 "remove_layers" | "delete_layers" => crate::presence::Kind::Remove,
                                 _ => crate::presence::Kind::Set,
                             };
-                            let target = result["data"]["id"].as_str();
                             let offset = target
                                 .and_then(|target| {
                                     host.view(&id).ok().and_then(|v| {
@@ -1268,7 +1330,7 @@ impl McpSession {
                                     })
                                 })
                                 .unwrap_or(0.);
-                            let mut times: Vec<f64> = result["command"]["keyframes"]
+                            let mut times: Vec<f64> = command["keyframes"]
                                 .as_array()
                                 .into_iter()
                                 .flatten()
@@ -1277,7 +1339,7 @@ impl McpSession {
                                 .collect();
                             if kind == crate::presence::Kind::Key && times.is_empty() {
                                 times.push(
-                                    result["command"]["time"]
+                                    command["time"]
                                         .as_f64()
                                         .unwrap_or(session.time)
                                         .max(offset),
@@ -1287,8 +1349,8 @@ impl McpSession {
                                 &id,
                                 &session.run,
                                 kind,
-                                result["data"]["id"].as_str().map(str::to_owned),
-                                result["command"]["path"].as_str().map(str::to_owned),
+                                target.map(str::to_owned),
+                                command["path"].as_str().map(str::to_owned),
                                 times,
                             );
                         }
@@ -1318,7 +1380,18 @@ impl McpSession {
                 } else {
                     &label
                 };
-                let mut result = json!({"applied":descriptions,"clip":clip,"results":results,"message":message,"revision":ack.revision});
+                let mut result = if let Some((verbose, new_ids, changed_layer_ids)) = edit_summary {
+                    let mut result = json!({"results":results,"newIds":new_ids,
+                        "changedLayerIds":changed_layer_ids,"revision":ack.revision});
+                    if verbose {
+                        result["applied"] = json!(descriptions);
+                        result["clip"] = clip;
+                        result["message"] = json!(message);
+                    }
+                    result
+                } else {
+                    json!({"applied":descriptions,"clip":clip,"results":results,"message":message,"revision":ack.revision})
+                };
                 if let Some(notice) = ack.notice {
                     result["notice"] = json!(format!("{notice:?}"));
                 }
@@ -1409,41 +1482,51 @@ impl McpSession {
         } else {
             None
         };
-        let baseline = project
+        let view = project
             .as_ref()
-            .map(|id| host.revision(id))
-            .transpose()?
-            .unwrap_or(0);
-        let document = project
-            .as_ref()
-            .map(|id| host.view(id).map(|view| view.document))
+            .map(|id| host.view(id))
             .transpose()?;
+        let baseline = view.as_ref().map_or(0, |view| view.revision);
+        let document = view.as_ref().map(|view| view.document);
         let run_id = format!("mcp-{}", pm_kernel::new_id("run"));
         let mut result = json!({"runId":run_id,"projectId":project.as_deref().unwrap_or("powermove-global"),"access":access});
-        let workspace = if access == "editor" && granted.is_none() {
+        if let Some(view) = &view {
+            result["summary"] = views::session_summary(view)?;
+        }
+        let full = args["detail"] == "full";
+        let has_workspace = access != "editor" || granted.is_some();
+        let input = if (has_workspace || full) && let Some(id) = &project {
+            crate::memory::agent_snapshot_model(&host.read_document_model(id)?)
+        } else {
+            pm_model::Value::Object(pm_model::Map::new())
+        };
+        if full && view.is_some() {
+            result["project"] = json_value(&input);
+        }
+        result["instructions"] = json!("Use get_project_state for detailed or paged reads, and tools/list for API docs.");
+        let workspace = if !has_workspace {
             None
         } else {
             let root = host.profile.join("mcp-runs").join(&run_id);
             for name in ["extensions", "api", "artifacts", "inputs"] {
                 std::fs::create_dir_all(root.join(name))?;
             }
-            let input = if let Some(ref id) = project {
-                crate::memory::agent_snapshot_model(&host.read_document_model(id)?)
-            } else {
-                pm_model::Value::Object(pm_model::Map::new())
-            };
             std::fs::write(
                 root.join("inputs/powermove-project.json"),
                 pm_model::json::to_canonical_string(&input),
             )?;
+            static TOOL_DOCS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
             std::fs::write(
                 root.join("api/mcp-tools.json"),
-                json!(catalog::served_tools()).to_string(),
+                TOOL_DOCS.get_or_init(|| json!(catalog::served_tools()).to_string()),
             )?;
             result["workspace"] = json!(root);
             result["stagingDirectory"] = json!(root.join("extensions"));
             result["apiPackDirectory"] = json!(root.join("api"));
             result["artifactsDirectory"] = json!(root.join("artifacts"));
+            if host.extensions.is_some() {
+                result["extensionGuide"] = json!("Read api/EXTENSIONS.md before staging or publishing an extension. For new panels, call panel_begin first and report plan/commit/ready (or cancel/error) with panel_build.");
+            }
             let extensions = if host.extensions.is_some() {
                 " Before authoring a new panel, call panel_begin with its title, placement and planned controls. Say where you put it. Send panel_build plan/commit events as you commit controls; after publishing send ready with the registered panelId, or cancel/error on failure. To change the app itself, read api/EXTENSIONS.md, write extensions only in stagingDirectory (folder name = manifest id) and call publish_extensions: it validates, compiles and loads them into the running app."
             } else {
@@ -1480,25 +1563,13 @@ impl McpSession {
             _ => None,
         };
         let time = project.as_deref().map_or(0., |id| host.playhead(id));
-        let known_layers = project
-            .as_deref()
-            .map(|id| host.read_document(id))
-            .transpose()?
-            .and_then(|p| p["layers"].as_array().cloned())
-            .unwrap_or_default()
+        let known_layers = view
             .iter()
-            .filter_map(|l| l["id"].as_str().map(str::to_owned))
+            .flat_map(|v| v.snapshot.layers(None))
+            .map(|layer| layer.id)
             .collect();
-        let focus = project
-            .as_deref()
-            .map(|id| host.view(id).map(|v| v.selection.layers().to_vec()))
-            .transpose()?
-            .unwrap_or_default();
-        let default_comp = project
-            .as_deref()
-            .map(|id| host.view(id).map(|v| v.snapshot.open_comp()))
-            .transpose()?
-            .flatten();
+        let focus = view.as_ref().map_or_else(Vec::new, |v| v.selection.layers().to_vec());
+        let default_comp = view.as_ref().and_then(|v| v.snapshot.open_comp());
         self.writer = next_writer();
         if self.agent_token.is_some()
             && let Some(id) = project.as_deref()
@@ -1571,31 +1642,24 @@ impl McpSession {
             let Some(tx) = session.transaction.as_ref() else {
                 return Ok(json!({"changed":session.committed}));
             };
+            if commit {
+                let history = checkpoint(&mut session, &mut host, &id, self.agent_token.is_some())?;
+                return Ok(json!({"changed":session.committed,"historyId":history.map(|id| id.to_string())}));
+            }
             if session.panel_actions {
                 let changed = tx.changed || tx.snapshot.revision != host.revision(&id)?;
-                if !commit && changed {
+                if changed {
                     return Err(Error::invalid(
                         "Panel actions were preserved after the run stopped. Use the editor Undo command to undo project changes.",
                     ));
                 }
                 return Ok(json!({"changed":session.committed || changed,"historyId":null}));
             }
-            let changed = tx.changed;
-            let mut history_id = None;
-            if !commit && changed {
+            if tx.changed {
                 rollback(&mut session, &mut host, &id, self.writer)?;
                 self.rolled_back = true;
-            } else if changed && !session.external_actions {
-                if self.agent_token.is_some() {
-                    history_id =
-                        host.squash_segments(&id, &tx.mark, &format!("Agent · {}", tx.label))?;
-                } else if !tx.interleaved && tx.revision == host.revision(&id)? {
-                    history_id = host.squash(&id, &tx.mark, &format!("Agent · {}", tx.label))?;
-                }
             }
-            Ok(
-                json!({"changed":session.committed||commit&&changed,"historyId":history_id.map(|id|id.to_string())}),
-            )
+            Ok(json!({"changed":session.committed,"historyId":null}))
         })();
         if let Some(root) = session.workspace {
             let cleanup = archive_workspace(&root, commit);
@@ -1842,6 +1906,37 @@ fn refresh(session: &mut Active, host: &mut Automation, id: &str, writer: u32) -
         tx.revision = revision;
     }
     Ok(())
+}
+/// Keep this segment's edits, leaving the workspace and connection live. A later
+/// edit opens a new transaction and can only roll back to this checkpoint.
+fn checkpoint(
+    session: &mut Active,
+    host: &mut Automation,
+    id: &str,
+    in_app_agent: bool,
+) -> Result<Option<u64>> {
+    let revision = host.revision(id)?;
+    let mut history_id = None;
+    if let Some(tx) = session.transaction.as_ref() {
+        if session.panel_actions {
+            session.committed |= tx.changed || tx.snapshot.revision != revision;
+        } else {
+            if tx.changed && !session.external_actions {
+                let label = format!("Agent · {}", tx.label);
+                if in_app_agent {
+                    history_id = host.squash_segments(id, &tx.mark, &label)?;
+                } else if !tx.interleaved && tx.revision == revision {
+                    history_id = host.squash(id, &tx.mark, &label)?;
+                }
+            }
+            session.committed |= tx.changed;
+        }
+    }
+    session.transaction = None;
+    session.baseline = revision;
+    session.panel_actions = false;
+    session.external_actions = false;
+    Ok(history_id)
 }
 fn rollback(session: &mut Active, host: &mut Automation, id: &str, writer: u32) -> Result<()> {
     if session.external_actions {
