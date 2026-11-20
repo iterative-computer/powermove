@@ -326,7 +326,7 @@ fn words_new_extension_sheet_uses_the_standard_name_and_kind_fields() {
     assert_eq!(sheet.fields[0].id, "name");
     assert_eq!(sheet.fields[0].placeholder, Some("My Extension"));
     assert!(sheet.fields[0].description.is_none());
-    assert_eq!(sheet.result_line.as_deref(), Some(""));
+    assert!(sheet.result_line.is_none());
     assert_eq!(sheet.fields[1].values, ["Panel", "Effect"]);
     assert_eq!(sheet.buttons[0], crate::dialogs::Button::cancel(false));
     let create = &sheet.buttons[1];

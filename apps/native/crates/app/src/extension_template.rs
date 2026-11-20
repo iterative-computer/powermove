@@ -4,7 +4,9 @@ use crate::{
     sheets::{OpenSheet, SheetParts},
 };
 use gpui::App;
-use objc2_app_kit::NSWindow;
+use objc2::{AnyThread, runtime::AnyObject};
+use objc2_app_kit::{NSBezelStyle, NSButton, NSColor, NSForegroundColorAttributeName, NSWindow};
+use objc2_foundation::{NSAttributedString, NSDictionary, NSString};
 use pm_compat_runner::manifest;
 use pm_design::Tokens;
 use serde_json::{Value, json};
@@ -123,14 +125,44 @@ pub(crate) fn surface() -> Surface {
         "Create",
     );
     surface.buttons[1].enabled = false;
-    surface.result_line = Some(String::new());
     surface
 }
 
 pub(crate) fn native_sheet(tokens: &Tokens) -> SheetParts {
     let parts = crate::sheets::from_surface(&surface(), tokens);
-    parts.0.buttons["apply"].setBezelColor(Some(&colour(tokens.colors.accent)));
+    parts.0.buttons["apply"].setBezelStyle(NSBezelStyle::Push);
     parts
+}
+
+pub(crate) fn set_create_enabled(button: &NSButton, enabled: bool, tokens: &Tokens) {
+    button.setEnabled(enabled);
+    // AppKit mutes the default bezel when the sheet is inactive. Keep the same
+    // native button and give its enabled state the accent and white title.
+    button.setBordered(!enabled);
+    button.setWantsLayer(true);
+    if let Some(layer) = button.layer() {
+        layer.setCornerRadius(tokens.metrics.control_radius.into());
+        let accent = enabled.then(|| colour(tokens.colors.accent).CGColor());
+        layer.setBackgroundColor(accent.as_deref());
+    }
+    let title = button.title();
+    if enabled {
+        let white = NSColor::whiteColor();
+        let attrs = NSDictionary::from_slices(
+            &[unsafe { NSForegroundColorAttributeName }],
+            &[&*white as &AnyObject],
+        );
+        let label = unsafe {
+            NSAttributedString::initWithString_attributes(
+                NSAttributedString::alloc(),
+                &title,
+                Some(&attrs),
+            )
+        };
+        button.setAttributedTitle(&label);
+    } else {
+        button.setTitle(&title);
+    }
 }
 
 fn name_text(sheet: &OpenSheet) -> String {
@@ -154,15 +186,19 @@ pub(crate) fn open(
     }
     let sheet = OpenSheet::present(native_sheet(tokens), owner, Some("name"));
     sheet.use_sheet_keys();
-    let warning = tokens.colors.warning;
+    let tokens = tokens.clone();
     let executor = cx.background_executor().clone();
     cx.spawn(async move |cx| {
         while let Ok(action) = sheet.actions.recv().await {
             match action.as_str() {
                 "cancel" => break,
                 "changed:name" => {
-                    sheet.describe("result", "", warning);
-                    sheet.enable("apply", !name_text(&sheet).trim().is_empty());
+                    sheet.sheet.set_footer_message("", tokens.colors.warning);
+                    set_create_enabled(
+                        &sheet.sheet.buttons["apply"],
+                        !name_text(&sheet).trim().is_empty(),
+                        &tokens,
+                    );
                 }
                 "apply" => {
                     let name = name_text(&sheet);
@@ -185,7 +221,7 @@ pub(crate) fn open(
                             cx.update(created);
                             return;
                         }
-                        Err(error) => sheet.describe("result", &error, warning),
+                        Err(error) => sheet.sheet.set_footer_message(&error, tokens.colors.warning),
                     }
                 }
                 _ => {}

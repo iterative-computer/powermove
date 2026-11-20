@@ -75,7 +75,7 @@ pub mod native {
     };
     use objc2_app_kit::*;
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
-    use std::collections::BTreeMap;
+    use std::{cell::OnceCell, collections::BTreeMap};
     /// A note under a row's title: its label, and the longest text it will
     /// show while the sheet is open (its height is kept for that).
     struct Note {
@@ -118,6 +118,7 @@ pub mod native {
         pub controls: BTreeMap<String, Retained<NSControl>>,
         pub layout: SheetLayout,
         items: Vec<Item>,
+        footer_message: OnceCell<Retained<NSTextField>>,
         mtm: MainThreadMarker,
         tokens: Tokens,
     }
@@ -166,6 +167,7 @@ pub mod native {
                 controls: BTreeMap::new(),
                 layout,
                 items: Vec::new(),
+                footer_message: OnceCell::new(),
                 mtm,
                 tokens: tokens.clone(),
             };
@@ -718,6 +720,60 @@ pub mod native {
                 view.setFrame(flipped(frame));
                 self.content.addSubview(&view);
             }
+        }
+        /// Shows a validation message between the rows and buttons, using
+        /// space only while there is a message.
+        pub fn set_footer_message(&self, text: &str, rgb: u32) {
+            if text.is_empty() && self.footer_message.get().is_none() {
+                return;
+            }
+            let label = self.footer_message.get_or_init(|| {
+                let label = self.wrapping("", self.tokens.typography.label.into(), rgb);
+                label.setFrame(NSRect::ZERO);
+                self.content.addSubview(&label);
+                label
+            });
+            label.setStringValue(&NSString::from_str(text));
+            label.setTextColor(Some(&colour(rgb)));
+            label.setHidden(text.is_empty());
+            let x = self.layout.label_x();
+            let width = self.layout.width - 2. * x;
+            label.setPreferredMaxLayoutWidth(width);
+            let height = if text.is_empty() {
+                0.
+            } else {
+                label.sizeThatFits(NSSize::new(width, f64::MAX)).height.ceil()
+            };
+            let shift = height - label.frame().size.height;
+            if shift == 0. {
+                return;
+            }
+            let button_top = self
+                .buttons
+                .values()
+                .map(|button| {
+                    let frame = button.frame();
+                    frame.origin.y + frame.size.height
+                })
+                .fold(0., f64::max);
+            let mut size = self.content.frame().size;
+            size.height += shift;
+            self.window.setContentSize(size);
+            self.content.setFrameSize(size);
+            for view in self.content.subviews().iter() {
+                if std::ptr::eq::<NSView>(&**label, &view)
+                    || self.buttons.values().any(|button| std::ptr::eq::<NSView>(&**button, &view))
+                {
+                    continue;
+                }
+                let mut origin = view.frame().origin;
+                origin.y += shift;
+                view.setFrameOrigin(origin);
+            }
+            label.setFrame(NSRect::new(
+                NSPoint::new(x, button_top + f64::from(self.tokens.space.md)),
+                NSSize::new(width, height),
+            ));
         }
         /// Main-thread shell binds native targets that only enqueue typed IDs.
         /// # Safety

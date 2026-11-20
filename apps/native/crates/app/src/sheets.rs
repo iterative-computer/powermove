@@ -364,15 +364,6 @@ pub fn from_surface(surface: &Surface, tokens: &pm_design::Tokens) -> SheetParts
             tokens.colors.warning,
         );
     }
-    if let Some(result) = &surface.result_line {
-        let ink = if surface.result_error {
-            tokens.colors.warning
-        } else {
-            tokens.colors.muted
-        };
-        let label = sheet.line_reserving(result, "\n", tokens.typography.label.into(), ink);
-        descriptions.insert("result".into(), label);
-    }
     let mut order = Vec::new();
     for button in &surface.buttons {
         sheet.button(
