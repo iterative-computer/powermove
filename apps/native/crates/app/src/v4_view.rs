@@ -1813,9 +1813,9 @@ impl SurfaceView {
     pub fn semantic_ids(&self) -> Vec<String> {
         self.prepared.semantics.keys().cloned().collect()
     }
-    /// Development builds: `event` on the node whose semantic id is, or ends
-    /// with, `semantic` (`--open reviewPanel:settings:select:nav.general`).
-    #[cfg(debug_assertions)]
+    /// Dev preview and headless tests: `event` on the node whose semantic id
+    /// is, or ends with, `semantic`.
+    #[cfg(any(debug_assertions, test))]
     pub fn review_send(&mut self, semantic: &str, event: &str, cx: &mut Context<Self>) {
         // `semantic=<json>` carries a value (a pop-up's choice, a switch's state).
         // A link carries spaces and quotes percent-encoded (`="Make%20it%20so"`).

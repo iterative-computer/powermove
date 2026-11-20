@@ -1389,6 +1389,7 @@ pub struct Window {
     #[cfg(feature = "profiler")]
     window_profiler: profiler::WindowProfiler,
     last_input_modality: InputModality,
+    pointer_hover_suppressed: bool,
     touch_gestures: TouchGestureRecognizer,
     touch_prediction_enabled: bool,
     long_press_timer: Option<Task<()>>,
@@ -2185,6 +2186,7 @@ impl Window {
             #[cfg(feature = "profiler")]
             window_profiler: profiler::WindowProfiler::new(handle.window_id())?,
             last_input_modality: InputModality::Mouse,
+            pointer_hover_suppressed: false,
             touch_gestures: TouchGestureRecognizer::new(
                 cx.platform
                     .gestures()
@@ -3358,6 +3360,16 @@ impl Window {
 
     pub(crate) fn last_input_was_touch(&self) -> bool {
         self.last_input_modality == InputModality::Touch
+    }
+
+    /// Suppress hover styles and tooltips for a host-managed gesture without
+    /// changing mouse hit testing or keyboard focus.
+    pub fn set_pointer_hover_suppressed(&mut self, suppressed: bool) {
+        self.pointer_hover_suppressed = suppressed;
+    }
+
+    pub(crate) fn pointer_hover_suppressed(&self) -> bool {
+        self.pointer_hover_suppressed
     }
 
     /// The current state of the keyboard's capslock

@@ -1,7 +1,6 @@
 //! Panel dragging: the motion constants and the pointer rules that don't
 //! need a window (threshold, steady target choice, edge auto-scroll, tab
-//! slides). The view shows the layout a drop would give while the drag is in
-//! progress; everything that moves for it moves on [`move_spring`].
+//! slides). Workspace motion is reserved for a committed drop.
 use crate::layout::{DropPreview, DropTarget};
 use pm_design::{
     Tokens,
@@ -23,25 +22,14 @@ pub const MOVE: f64 = 0.22;
 const MOVE_SETTLING: f64 = MOVE * 0.6;
 /// The drag chip fades in over this at pick-up.
 pub const LIFT: f32 = 0.12;
-/// After a release the chip glides to the slot (or home) and the slot's
-/// wash fades over this.
-pub const SETTLE: f32 = 0.18;
+/// On cancellation the chip glides home and fades.
+pub const SETTLE: f32 = 0.15;
 /// A new target is taken once the pointer is this clear of the current one.
 pub const HYSTERESIS: f32 = 5.;
 /// A drag held this near a scrolling column's top or bottom scrolls it ...
 pub const SCROLL_EDGE: f32 = 28.;
 /// ... at up to this many points a second, at the very edge.
 pub const SCROLL_SPEED: f32 = 720.;
-/// The layout re-flows to a new target once the pointer has rested on it
-/// this long ...
-pub const REST: f32 = 0.1;
-/// ... moving no more than this. A sweep across the workspace re-flows
-/// nothing on the way; a release never waits.
-pub const REST_SLOP: f32 = 6.;
-/// A column slot's ring: the accent at this opacity, a hairline ...
-pub const SLOT_RING: f32 = 0.6;
-/// ... over this much accent tint on the panel in it.
-pub const SLOT_TINT: f32 = 0.04;
 /// The chip sits this far right of and below the pointer.
 pub const CHIP_OFFSET: f32 = 10.;
 
@@ -101,14 +89,6 @@ pub fn lifted(start: (f32, f32), at: (f32, f32), threshold: f32) -> bool {
     (at.0 - start.0).hypot(at.1 - start.1) >= threshold
 }
 
-/// Whether the pointer at `at` is still resting where it came to rest.
-pub fn within_rest(rest: (f32, f32), at: (f32, f32)) -> bool {
-    (at.0 - rest.0).hypot(at.1 - rest.1) <= REST_SLOP
-}
-/// Whether a pointer at rest since `since` has rested long enough at `at`.
-pub fn rested(since: Instant, at: Instant) -> bool {
-    at.saturating_duration_since(since).as_secs_f32() >= REST
-}
 
 /// The target to show at `at`, given the one showing now: `target_at` says
 /// what a point would drop on. The current target is kept until the pointer
@@ -160,14 +140,25 @@ pub struct TabSlides {
     seen: HashMap<String, (f32, f32)>,
     moving: HashMap<String, Animated<1>>,
     clock: Clock,
+    drop_deadline: Option<Instant>,
     /// The next frame follows a discrete change: tabs that moved slide.
     pub armed: bool,
     arming: bool,
 }
 impl TabSlides {
+    pub(crate) fn arm_drop(&mut self) {
+        self.armed = true;
+        self.drop_deadline = Some(now() + Duration::from_secs_f64(MOVE));
+    }
     /// Start of a frame: steps what is under way.
     pub fn begin(&mut self) {
-        let dt = self.clock.tick(now());
+        let now = now();
+        if self.drop_deadline.is_some_and(|deadline| now >= deadline) {
+            self.drop_deadline = None;
+            self.moving.clear();
+            self.armed = false;
+        }
+        let dt = self.clock.tick(now);
         self.moving.retain(|_, slide| slide.step(dt));
         self.arming = std::mem::take(&mut self.armed);
         self.seen.clear();
@@ -263,14 +254,6 @@ mod tests {
         assert_eq!(chip_origin((500., 300.), chip, window), (500., 300.), "free of the edges");
         assert_eq!(chip_origin((1400., 890.), chip, window), (1252., 868.), "right and bottom");
         assert_eq!(chip_origin((-20., 2.), chip, window), (8., 8.), "left and top");
-    }
-    #[test]
-    fn the_layout_waits_for_the_pointer_to_rest() {
-        let start = Instant::now();
-        assert!(within_rest((100., 100.), (104., 103.)), "a hand never holds still");
-        assert!(!within_rest((100., 100.), (107., 100.)), "moving on");
-        assert!(!rested(start, start + Duration::from_millis(40)), "in passing");
-        assert!(rested(start, start + Duration::from_millis(110)));
     }
     #[test]
     fn a_drag_near_a_column_edge_scrolls_towards_it() {

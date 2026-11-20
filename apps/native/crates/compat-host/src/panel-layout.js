@@ -38,8 +38,11 @@ globalThis.PMPanelLayout = class {
     if (this.explicitActive) this.visibility(this.active);
     // The realm's batch can replace a root's inline style after the host has
     // acknowledged it. Repair the same DOM batch before WebKit can paint it.
-    this.pending.clear();
-    const rendered = this.applyPlacements(this.placements.values());
+    // New geometry belongs to the next frame, not this worker batch. Retry
+    // settled placements here in case a root mounted late or was replaced.
+    const rendered = this.applyPlacements(
+      [...this.placements.values()].filter(({ id }) => !this.pending.has(id)),
+    );
     if (rendered.length) this.frame(() => this.frame(() => this.confirm(rendered)));
   }
   applyPlacements(placements) {

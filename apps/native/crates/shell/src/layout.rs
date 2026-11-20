@@ -627,7 +627,18 @@ impl Layout {
         natural: Option<&BTreeMap<String, f32>>,
     ) {
         let geometry = self.geometry_impl(bounds, t, natural);
-        let min = t.metrics.min_panel;
+        self.resize_from_geometry(divider, delta, bounds, t, &geometry, natural.is_some());
+    }
+
+    pub(crate) fn resize_from_geometry(
+        &mut self,
+        divider: &Divider,
+        delta: f32,
+        bounds: Rect,
+        t: &Tokens,
+        geometry: &Geometry,
+        natural: bool,
+    ) {
         let height = |dock: usize, group: usize| {
             geometry
                 .panels
@@ -640,7 +651,7 @@ impl Layout {
                 return;
             };
             let total = a + b;
-            let side = natural.is_some()
+            let side = natural
                 && matches!(self.docks[divider.dock].id.as_str(), "left" | "right");
             let groups = &self.docks[divider.dock].groups;
             let least = |g: &Group| {
@@ -761,7 +772,6 @@ impl Layout {
         let sign = if self.trailing(divider.dock) { -1. } else { 1. };
         // The original app's side columns: `column_least` to `column_most`
         // wide, and never more than the fluid column can give.
-        let _ = min;
         let least = t.metrics.column_least.min(current.w);
         let most = (current.w + room)
             .min(t.metrics.column_most.max(current.w))
@@ -1140,39 +1150,12 @@ impl Layout {
         id: &str,
         stack: bool,
     ) -> DropOutcome {
-        let Some((di, gi, _)) = self.find(id) else {
-            return DropOutcome::Nowhere;
+        let mut preview = match self.drag_zone(geometry, bounds, at, t, id, stack) {
+            Ok(preview) => preview,
+            Err(outcome) => return outcome,
         };
-        let Some(mut preview) = self.drop_target(geometry, bounds, at.0, at.1, t) else {
-            return DropOutcome::Nowhere;
-        };
-        let whole = stack || self.docks[di].groups[gi].tabs.len() == 1;
-        // Over the very stack being moved: it is already there.
-        if whole
-            && geometry
-                .panels
-                .iter()
-                .any(|p| (p.dock, p.group) == (di, gi) && p.rect.contains(at.0, at.1))
-        {
-            return DropOutcome::Here;
-        }
-        let source_stacks =
-            stacks(id) && (!stack || self.docks[di].groups[gi].tabs.iter().all(|id| stacks(id)));
-        if !source_stacks && let DropTarget::Tab { dock, group, .. } = preview.target {
-            // A panel that takes no tabs splits the panel instead, at the
-            // middle of its body.
-            let Some(p) = geometry
-                .panels
-                .iter()
-                .find(|p| (p.dock, p.group) == (dock, group))
-            else {
-                return DropOutcome::Nowhere;
-            };
-            preview = self.panel_zone(geometry, p, at.0, at.1, t, false);
-        }
         let mut next = self.clone();
-        let moved = next.apply_drop(id, &preview, stack);
-        if moved.is_err() {
+        if next.apply_drop(id, &preview, stack).is_err() {
             return DropOutcome::Nowhere;
         }
         if next == *self {
@@ -1193,6 +1176,49 @@ impl Layout {
             }
             None => DropOutcome::Nowhere,
         }
+    }
+
+    /// Hit-test the frozen zones without solving a prospective layout.
+    pub(crate) fn drag_zone(
+        &self,
+        geometry: &Geometry,
+        bounds: Rect,
+        at: (f32, f32),
+        t: &Tokens,
+        id: &str,
+        stack: bool,
+    ) -> Result<DropPreview, DropOutcome> {
+        let Some((di, gi, _)) = self.find(id) else {
+            return Err(DropOutcome::Nowhere);
+        };
+        let Some(mut preview) = self.drop_target(geometry, bounds, at.0, at.1, t) else {
+            return Err(DropOutcome::Nowhere);
+        };
+        let whole = stack || self.docks[di].groups[gi].tabs.len() == 1;
+        // Over the very stack being moved: it is already there.
+        if whole
+            && geometry
+                .panels
+                .iter()
+                .any(|p| (p.dock, p.group) == (di, gi) && p.rect.contains(at.0, at.1))
+        {
+            return Err(DropOutcome::Here);
+        }
+        let source_stacks =
+            stacks(id) && (!stack || self.docks[di].groups[gi].tabs.iter().all(|id| stacks(id)));
+        if !source_stacks && let DropTarget::Tab { dock, group, .. } = preview.target {
+            // A panel that takes no tabs splits the panel instead, at the
+            // middle of its body.
+            let Some(p) = geometry
+                .panels
+                .iter()
+                .find(|p| (p.dock, p.group) == (dock, group))
+            else {
+                return Err(DropOutcome::Nowhere);
+            };
+            preview = self.panel_zone(geometry, p, at.0, at.1, t, false);
+        }
+        Ok(preview)
     }
     /// The tab that shows in group `g` of dock `d` once `moving` (one tab,
     /// unless `stack`) has left it: what a drop against that group is named
