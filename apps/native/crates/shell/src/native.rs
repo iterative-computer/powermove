@@ -1,8 +1,11 @@
 //! AppKit windows and toolbar. No project/document state is authored here.
+#[path = "coedit_presence.rs"]
+mod coedit_presence;
 #[path = "flowchart.rs"]
 mod flowchart;
 #[path = "tab_scroll.rs"]
 mod tab_scroll;
+use coedit_presence::CoeditPresence;
 pub use flowchart::FlowchartRow;
 use tab_scroll::{TabLayout, TabScroll};
 
@@ -1541,33 +1544,6 @@ pub const ADD: [(&str, &str); 6] = [
     ("newAdjustment", "New Adjustment Layer"),
     ("newNull", "New Null Object"),
 ];
-define_class!(
-    #[unsafe(super(NSView))]
-    #[thread_kind=MainThreadOnly]
-    #[name="PMCoeditPresence"]
-    struct CoeditPresence;
-    impl CoeditPresence {
-        #[unsafe(method(updateTrackingAreas))]
-        fn tracking(&self) {
-            for area in self.trackingAreas().to_vec() {self.removeTrackingArea(&area);}
-            let area=unsafe {NSTrackingArea::initWithRect_options_owner_userInfo(
-                <NSTrackingArea as objc2::AllocAnyThread>::alloc(),self.bounds(),
-                NSTrackingAreaOptions::MouseEnteredAndExited|NSTrackingAreaOptions::ActiveAlways|NSTrackingAreaOptions::InVisibleRect,
-                Some(self),None)};
-            self.addTrackingArea(&area);
-        }
-        #[unsafe(method(mouseEntered:))]
-        fn entered(&self,_:&NSEvent) {
-            let buttons=self.subviews().to_vec();
-            let done=buttons.first().and_then(|v|v.downcast_ref::<NSButton>()).is_some_and(|b|b.tag()==1);
-            if !done {for button in buttons.iter().skip(1) {button.setHidden(false);}}
-        }
-        #[unsafe(method(mouseExited:))]
-        fn exited(&self,_:&NSEvent) {
-            for button in self.subviews().to_vec().iter().skip(1) {button.setHidden(true);}
-        }
-    }
-);
 /// One open project in the toolbar's tab strip.
 #[derive(Clone, Debug, PartialEq)]
 struct Tab {
@@ -2930,46 +2906,7 @@ impl ToolbarDelegate {
             return Some(item);
         }
         if name == "agentPresence" {
-            let view: Retained<CoeditPresence> = unsafe {
-                msg_send![super(CoeditPresence::alloc(mtm).set_ivars(())),initWithFrame:NSRect::new(NSPoint::ZERO,NSSize::new(250.,24.))]
-            };
-            let view: Retained<NSView> = Retained::into_super(view);
-            view.setWantsLayer(true);
-            if let Some(layer) = view.layer() {
-                layer.setCornerRadius(t.metrics.capsule_radius as f64);
-                layer.setBackgroundColor(Some(&native_color(t.colors.field).CGColor()));
-            }
-            for (tag, title, x, width) in [
-                (0, "Agent working", 4., 194.),
-                (2, "Ⅱ", 200., 22.),
-                (3, "■", 224., 22.),
-            ] {
-                let button = unsafe {
-                    NSButton::buttonWithTitle_target_action(
-                        &NSString::from_str(title),
-                        Some(target),
-                        Some(sel!(coedit:)),
-                        mtm,
-                    )
-                };
-                button.setTag(tag);
-                if tag != 0 {
-                    button.setHidden(true);
-                    button.setToolTip(Some(&NSString::from_str(if tag == 2 {
-                        "Pause or Resume Agent"
-                    } else {
-                        "Stop Agent"
-                    })));
-                    button.setAccessibilityLabel(Some(&NSString::from_str(if tag == 2 {
-                        "Pause or Resume Agent"
-                    } else {
-                        "Stop Agent"
-                    })));
-                }
-                button.setBordered(false);
-                button.setFrame(NSRect::new(NSPoint::new(x, 0.), NSSize::new(width, 24.)));
-                view.addSubview(&button);
-            }
+            let view = CoeditPresence::new(mtm, target, t);
             item.setView(Some(&view));
             item.setLabel(&NSString::from_str("Agent presence"));
             return Some(item);
@@ -3038,12 +2975,7 @@ impl ToolbarDelegate {
         // it and sizes it. Export is the bar's one prominent item, tinted
         // with the accent.
         let &(_, sym, label) = TOOLBAR_BUTTONS.iter().find(|(n, ..)| *n == name.as_str())?;
-        let image = if name == "agent" {
-            agent_toolbar_image(&AgentStatus::default(), 0., t)
-        } else {
-            toolbar_symbol(sym, label, t)
-        };
-        item.setImage(Some(&image));
+        item.setImage(Some(&toolbar_symbol(sym, label, t)));
         unsafe {
             item.setTarget(Some(target));
             item.setAction(Some(sel!(act:)));
@@ -3064,28 +2996,23 @@ impl ToolbarDelegate {
 #[path = "agent_launcher_native.rs"]
 mod launcher_native;
 use launcher_native::AgentButton;
+fn agent_launcher_button(toolbar: &NSToolbar) -> Option<Retained<AgentButton>> {
+    toolbar
+        .items()
+        .iter()
+        .find(|item| item.itemIdentifier().to_string() == "agent")?
+        .view()?
+        .downcast()
+        .ok()
+}
 impl Host {
     pub fn set_agent_launcher(&mut self, snapshot: crate::agent_launcher::Snapshot) {
-        let Some(item) = self
-            ._toolbar
-            .items()
-            .iter()
-            .find(|i| i.itemIdentifier().to_string() == "agent")
-        else {
-            return;
-        };
-        let Some(view) = item.view() else {
-            return;
-        };
-        let Some(button) = view.downcast_ref::<AgentButton>() else {
-            return;
-        };
-        button.publish(snapshot, self.tokens.clone());
+        if let Some(button) = agent_launcher_button(&self._toolbar) {
+            button.publish(snapshot, self.tokens.clone());
+        }
     }
 }
-/// The toolbar Agent item's state (agent-panel.md §1, v1 launcher status):
-/// idle, working (an accent ring turns around the glyph) or needing an
-/// answer (an accent dot; it wins over the ring), with background runs.
+/// Status for the co-editing chip, project tab and Agent tooltip.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AgentStatus {
     pub working: bool,
@@ -3096,6 +3023,7 @@ pub struct AgentStatus {
     pub elapsed: Option<String>,
     pub background: usize,
     pub progress: Option<String>,
+    pub additional_runs: usize,
     pub paused: bool,
     pub held: bool,
 }
@@ -3211,6 +3139,7 @@ fn task_toolbar_image(status: &TaskStatus, turn: f64, t: &Tokens) -> Retained<NS
 }
 /// A primary-label sparkle; an accent working ring or a trailing notice dot.
 /// AppKit retains ownership of the bezel and inactive-window treatment.
+#[cfg(test)]
 fn agent_toolbar_image(status: &AgentStatus, turn: f64, t: &Tokens) -> Retained<NSImage> {
     let glyph = symbol("sparkles", "Agent");
     let config =
@@ -3309,42 +3238,6 @@ mod coedit_window_presence_tests {
         assert_eq!(agent_window_title("Lettering", false), "Lettering");
     }
 }
-fn presence_light(status: &AgentStatus, phase: f64, t: &Tokens) -> Retained<NSImage> {
-    let palette = t.sketch();
-    let paused = status.paused;
-    let reduced = t.accessibility.reduce_motion;
-    let muted = t.colors.muted;
-    let draw = block2::RcBlock::new(move |_: NSRect| -> objc2::runtime::Bool {
-        let breath = if reduced || paused {
-            0.5
-        } else {
-            0.5 + 0.5 * (phase * std::f64::consts::TAU * 0.5).sin()
-        };
-        if !reduced && !paused {
-            native_color(palette.halo)
-                .colorWithAlphaComponent(0.16 + 0.10 * breath)
-                .setFill();
-            NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-                NSPoint::new(0., 0.),
-                NSSize::new(14., 14.),
-            ))
-            .fill();
-        }
-        let radius = if reduced || paused {
-            1.5
-        } else {
-            2.2 + 0.6 * (breath - 0.5)
-        };
-        native_color(if paused { muted } else { palette.core }).setFill();
-        NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-            NSPoint::new(7. - radius, 7. - radius),
-            NSSize::new(radius * 2., radius * 2.),
-        ))
-        .fill();
-        objc2::runtime::Bool::YES
-    });
-    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(14., 14.), false, &draw)
-}
 impl Host {
     pub fn agent_effect_frames(&self) -> u64 {
         self.agent_effect_frames.get()
@@ -3370,43 +3263,10 @@ impl Host {
             self.agent_presence_generation
                 .set(self.agent_presence_generation.get() + 1);
         }
-        let Some(item) = self
-            ._toolbar
-            .items()
-            .iter()
-            .find(|i| i.itemIdentifier().to_string() == "agentPresence")
-        else {
-            return;
-        };
-        if let Some(view) = item.view() {
-            let buttons = view.subviews().to_vec();
-            if let Some(button) = buttons.first() {
-                let text = if !status.working {
-                    "Done · Undo".to_owned()
-                } else if status.paused {
-                    "Paused · ⇧⌘. to resume".to_owned()
-                } else if status.held {
-                    "Waiting for you to finish".to_owned()
-                } else {
-                    format!(
-                        "• {}",
-                        status.progress.as_deref().unwrap_or("Agent working")
-                    )
-                };
-                let text: String = text.chars().take(38).collect();
-                let old: Retained<NSString> = unsafe { msg_send![&**button, title] };
-                if old.to_string() != text {
-                    let _: () =
-                        unsafe { msg_send![&**button,setTitle:&*NSString::from_str(&text)] };
-                }
-                let _: () =
-                    unsafe { msg_send![&**button,setTag:if status.working {0isize}else{1isize}] };
-            }
-            if !status.working {
-                for button in buttons.iter().skip(1) {
-                    button.setHidden(true);
-                }
-            }
+        if (status.working || existing.is_some())
+            && let Some(launcher) = agent_launcher_button(&self._toolbar)
+        {
+            launcher.set_presence_visible(true);
         }
         if !status.working && was_working {
             let toolbar = self._toolbar.clone();
@@ -3424,6 +3284,9 @@ impl Host {
                     {
                         toolbar.removeItemAtIndex(index as isize);
                     }
+                    if let Some(launcher) = agent_launcher_button(&toolbar) {
+                        launcher.set_presence_visible(false);
+                    }
                 });
             let timer = unsafe {
                 objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(6., false, &step)
@@ -3435,9 +3298,7 @@ impl Host {
         }
     }
 
-    /// Shows the agent's state on the toolbar's Agent item: its glyph (a
-    /// turning ring while working, still under Reduce Motion; a dot when it
-    /// needs an answer) and its tooltip.
+    /// Updates the co-editing chip, project tab and Agent tooltip.
     pub fn set_agent_status(&mut self, status: AgentStatus) {
         if status == self.agent_status {
             return;
@@ -3456,14 +3317,14 @@ impl Host {
         self.paint_agent_status(status, false);
     }
     fn paint_agent_status(&mut self, status: AgentStatus, force: bool) {
-        let Some(item) = self
+        if let Some(item) = self
             ._toolbar
             .items()
             .iter()
             .find(|i| i.itemIdentifier().to_string() == "agent")
-        else {
-            return;
-        };
+        {
+            item.setToolTip(Some(&NSString::from_str(&status.tooltip())));
+        }
         let tokens = self.tokens.clone();
         let presence = self
             ._toolbar
@@ -3471,14 +3332,10 @@ impl Host {
             .iter()
             .find(|i| i.itemIdentifier().to_string() == "agentPresence")
             .and_then(|i| i.view())
-            .and_then(|v| v.subviews().to_vec().into_iter().next())
-            .and_then(|v| v.downcast::<NSButton>().ok());
-        if status.progress != self.agent_status.progress {
-            if let Some(timer) = self.agent_timer.take() {
-                timer.invalidate();
-            }
+            .and_then(|v| v.downcast::<CoeditPresence>().ok());
+        if let Some(view) = &presence {
+            view.set_status(&status, &tokens, force);
         }
-        item.setToolTip(Some(&NSString::from_str(&status.tooltip())));
         let visual_changed = force
             || status.failed != self.agent_status.failed
             || status.unread != self.agent_status.unread
@@ -3486,7 +3343,8 @@ impl Host {
             || status.attention != self.agent_status.attention
             || status.paused != self.agent_status.paused
             || status.held != self.agent_status.held;
-        let turning = status.working
+        let turning = presence.is_some()
+            && status.working
             && !status.attention
             && !status.paused
             && !status.held
@@ -3497,37 +3355,32 @@ impl Host {
             if let Some(timer) = self.agent_timer.take() {
                 timer.invalidate();
             }
-            if visual_changed {
-                item.setImage(Some(&agent_toolbar_image(&status, 0., &tokens)));
-                if let Some(button) = &presence {
-                    button.setImage(Some(&presence_light(&status, 0., &tokens)));
-                }
+            if visual_changed && let Some(view) = &presence {
+                view.paint_marker(&status, 0., &tokens);
             }
-        } else if self.agent_timer.is_none() {
+        } else if self.agent_timer.is_none() && let Some(view) = presence {
+            view.paint_marker(&status, 0., &tokens);
+            let weak = objc2::rc::Weak::new(&*view);
             let started = std::time::Instant::now();
             let shown = status.clone();
-            let item = item.clone();
             let frame_count = self.agent_effect_frames.clone();
             let step =
                 block2::RcBlock::new(move |timer: std::ptr::NonNull<objc2_foundation::NSTimer>| {
-                    frame_count.set(frame_count.get() + 1);
+                    let Some(view) = weak.load() else {
+                        unsafe { timer.as_ref().invalidate(); }
+                        return;
+                    };
                     let elapsed = started.elapsed().as_secs_f64();
                     if elapsed >= 12. {
-                        item.setImage(Some(&agent_toolbar_image(&shown, 0.5, &tokens)));
-                        if let Some(button) = &presence {
-                            button.setImage(Some(&presence_light(&shown, 0., &tokens)));
-                        }
+                        view.paint_marker(&shown, 0., &tokens);
                         // Keep the invalidated timer in agent_timer until the
                         // run ends: elapsed text updates must not restart it.
                         unsafe {
                             timer.as_ref().invalidate();
                         }
-                        return;
-                    }
-                    let turn = elapsed % 1.;
-                    item.setImage(Some(&agent_toolbar_image(&shown, turn, &tokens)));
-                    if let Some(button) = &presence {
-                        button.setImage(Some(&presence_light(&shown, elapsed, &tokens)));
+                    } else if !view.isHiddenOrHasHiddenAncestor() && view.window().is_some() {
+                        frame_count.set(frame_count.get() + 1);
+                        view.paint_marker(&shown, elapsed, &tokens);
                     }
                 });
             let timer = unsafe {
@@ -5951,6 +5804,9 @@ impl Host {
             popup.borrow_mut().update_tokens(&t, surface);
         }
         self.tokens = t;
+        if let Some(launcher) = agent_launcher_button(&self._toolbar) {
+            launcher.set_tokens(self.tokens.clone());
+        }
         // Rebuild token-coloured notices and the timer's captured appearance.
         if let Some(timer) = self.agent_timer.take() {
             timer.invalidate();

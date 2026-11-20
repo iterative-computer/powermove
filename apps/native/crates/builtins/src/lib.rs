@@ -275,7 +275,7 @@ mod project_layout_tests {
 /// The Project panel's id (its media, bins and compositions).
 pub const PROJECT_PANEL: &str = "assets";
 type LauncherFacts = (Vec<(String, String, String, u64, bool, bool)>, u64, String);
-type AgentStatus = (bool, bool, Option<u64>, usize, LauncherFacts, Option<String>, bool, bool);
+type AgentStatus = (bool, bool, Option<u64>, usize, LauncherFacts, bool, bool);
 pub struct Builtins {
     agent_status_cache: Mutex<AgentStatus>,
     pool: RuntimePool,
@@ -1015,13 +1015,13 @@ impl Builtins {
         let observed = (|| {
             let entries = self.broker.entries.try_lock().ok()?;
             let Some(entry) = entries.get("agent").cloned() else {
-                return Some((false, false, None, 0, (vec![], 0, String::new()), None, false, false));
+                return Some((false, false, None, 0, (vec![], 0, String::new()), false, false));
             };
             drop(entries);
             let backend = entry.try_lock().ok()?.backend.clone();
             let backend = backend.try_lock().ok()?;
             let Some(agent) = backend.native.agent.clone() else {
-                return Some((false, false, None, 0, (vec![], 0, String::new()), None, false, false));
+                return Some((false, false, None, 0, (vec![], 0, String::new()), false, false));
             };
             drop(backend);
             let mut state = agent.try_lock().ok()?;
@@ -1041,7 +1041,12 @@ impl Builtins {
                 let attention = panel.launcher_attention(&t.id);
                 if s.run.is_none() && !attention { return None; }
                 let started = s.run.as_ref().map_or(t.updated_at, |r| r.started_at);
-                Some((t.id, t.title, s.activity.clone(), started, attention, s.run.is_some()))
+                let step = if s.activity.is_empty() {
+                    s.progress.last().cloned().unwrap_or_default()
+                } else {
+                    s.activity.clone()
+                };
+                Some((t.id, t.title, step, started, attention, s.run.is_some()))
             }).collect();
             Some((
                 session.run.is_some() || background > 0,
@@ -1049,7 +1054,6 @@ impl Builtins {
                 session.elapsed_ms(agent_host::now_ms()),
                 background,
                 (tasks, revision, panel.active_id().into()),
-                session.run.as_ref().map(|_| if !session.activity.is_empty() { session.activity.clone() } else { session.progress.last().cloned().unwrap_or_else(|| "Agent working".into()) }),
                 unread,
                 failed,
             ))
@@ -1057,7 +1061,7 @@ impl Builtins {
         if let Some(observed) = observed {
             *cached = observed;
         }
-        (cached.0, cached.1, cached.2, cached.3, cached.6, cached.7)
+        (cached.0, cached.1, cached.2, cached.3, cached.5, cached.6)
     }
 
     /// Live facts across every thread, independent of panel visibility.
@@ -1196,9 +1200,6 @@ impl Builtins {
         let backend = self.backend(PROJECT_PANEL).ok()?;
         let backend = backend.shared();
         backend.native.project.panel.drag.clone()
-    }
-    pub fn agent_progress(&self) -> Option<String> {
-        self.agent_status_cache.lock().unwrap_or_else(|e| e.into_inner()).5.clone()
     }
     pub fn project_id(&self) -> &str {
         &self.broker.project
@@ -1409,7 +1410,7 @@ impl Builtins {
             },
         )?;
         Ok(Self {
-            agent_status_cache: Mutex::new((false, false, None, 0, (vec![], 0, String::new()), None, false, false)),
+            agent_status_cache: Mutex::new((false, false, None, 0, (vec![], 0, String::new()), false, false)),
             pool,
             broker,
             realms: Mutex::default(),

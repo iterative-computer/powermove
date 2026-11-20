@@ -15,6 +15,39 @@ pub struct Snapshot {
     pub revision: u64,
     pub active_thread: String,
 }
+impl Snapshot {
+    /// The newest run and the number of other running threads.
+    pub fn run_summary(&self) -> Option<(&Task, usize)> {
+        let mut running = self.tasks.iter().filter(|task| task.running);
+        let mut newest = running.next()?;
+        let mut others = 0;
+        for task in running {
+            if task.started_at > newest.started_at {
+                newest = task;
+            }
+            others += 1;
+        }
+        Some((newest, others))
+    }
+}
+
+pub(crate) fn fit_presence_title(text: &str, width: f64, measure: impl Fn(&str) -> f64) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if measure(&text) <= width {
+        return text;
+    }
+
+    let mut fitted = "…".to_owned();
+    for (end, _) in text.match_indices(' ') {
+        let word_prefix = &text[..end];
+        let candidate = format!("{}…", word_prefix.trim_end_matches('…'));
+        if measure(&candidate) > width {
+            break;
+        }
+        fitted = candidate;
+    }
+    fitted
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tone {
     #[default]
@@ -74,6 +107,13 @@ impl Launcher {
             Tone::Done
         } else if self.running_count() > 0 {
             Tone::Working
+        } else {
+            Tone::Idle
+        }
+    }
+    pub(crate) fn toolbar_tone(&self, presence_visible: bool) -> Tone {
+        if !presence_visible && self.running_count() == 0 && self.tone() == Tone::Attention {
+            Tone::Attention
         } else {
             Tone::Idle
         }
@@ -161,6 +201,81 @@ mod tests {
             running: true,
             ..Default::default()
         }
+    }
+    #[test]
+    fn pm546_launcher_stays_a_glyph_during_the_run_and_undo_window() {
+        let mut launcher = Launcher::default();
+        launcher.update(
+            Snapshot {
+                tasks: vec![task("one")],
+                ..Default::default()
+            },
+            1_000,
+        );
+        assert_eq!(launcher.popover_rows(20_000).len(), 1);
+        assert_eq!(launcher.toolbar_tone(true), Tone::Idle);
+        assert_eq!(launcher.toolbar_tone(false), Tone::Idle);
+
+        launcher.update(
+            Snapshot {
+                tasks: vec![Task {
+                    attention: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            20_000,
+        );
+        assert_eq!(launcher.toolbar_tone(true), Tone::Idle);
+        assert_eq!(launcher.toolbar_tone(false), Tone::Attention);
+    }
+
+    #[test]
+    fn pm546_newest_running_task_drives_presence_even_when_another_is_selected() {
+        let snapshot = Snapshot {
+            active_thread: "selected".into(),
+            tasks: vec![
+                task("selected"),
+                Task {
+                    started_at: 3_000,
+                    ..task("newest")
+                },
+                Task {
+                    started_at: 4_000,
+                    running: false,
+                    attention: true,
+                    ..task("not running")
+                },
+            ],
+            ..Default::default()
+        };
+        let (newest, others) = snapshot.run_summary().unwrap();
+        assert_eq!(newest.id, "newest");
+        assert_eq!(others, 1);
+        let launcher = Launcher {
+            snapshot,
+            ..Default::default()
+        };
+        assert_eq!(
+            launcher
+                .popover_rows(20_000)
+                .into_iter()
+                .map(|(id, _, _)| id)
+                .collect::<Vec<_>>(),
+            ["selected", "newest"]
+        );
+    }
+
+    #[test]
+    fn pm546_fitting_never_splits_a_word_or_omits_the_ellipsis() {
+        let width = |text: &str| text.chars().count() as f64;
+        let text = "I'll find the wavy dither effect in the library";
+        assert_eq!(fit_presence_title(text, 24., width), "I'll find the wavy…");
+        assert_eq!(fit_presence_title("Short", 24., width), "Short");
+        assert_eq!(
+            fit_presence_title("Antidisestablishmentarianism", 12., width),
+            "…"
+        );
     }
     #[test]
     fn idle_requests_zero_frames() {
@@ -362,46 +477,4 @@ mod tests {
         );
         assert_eq!(l.receiving_at, None);
     }
-}
-
-/// Electron's cubic-bezier(0.16, 1, 0.3, 1), inverted on x.
-pub fn ease_out(progress: f64) -> f64 {
-    let x = progress.clamp(0., 1.);
-    let (mut lo, mut hi) = (0., 1.);
-    for _ in 0..20 {
-        let u = (lo + hi) * 0.5;
-        let v = 1. - u;
-        let at = 3. * v * v * u * 0.16 + 3. * v * u * u * 0.3 + u * u * u;
-        if at < x {
-            lo = u;
-        } else {
-            hi = u;
-        }
-    }
-    let u = (lo + hi) * 0.5;
-    1. - (1. - u).powi(3)
-}
-
-/// CSS ease-in-out used by the 1.4 second attention pulse.
-pub fn pulse_opacity(progress: f64) -> f64 {
-    let phase = progress.fract();
-    let x = if phase < 0.5 {
-        phase * 2.
-    } else {
-        (1. - phase) * 2.
-    };
-    let (mut lo, mut hi) = (0., 1.);
-    for _ in 0..20 {
-        let u = (lo + hi) * 0.5;
-        let v = 1. - u;
-        let at = 3. * v * v * u * 0.42 + 3. * v * u * u * 0.58 + u * u * u;
-        if at < x {
-            lo = u;
-        } else {
-            hi = u;
-        }
-    }
-    let u = (lo + hi) * 0.5;
-    let y = 3. * (1. - u) * u * u + u * u * u;
-    1. - 0.65 * y
 }
