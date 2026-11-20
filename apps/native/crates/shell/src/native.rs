@@ -2393,6 +2393,12 @@ fn tab_insert_index(existing: &[Option<usize>], index: usize) -> Option<usize> {
     let places: Option<Vec<usize>> = existing.iter().copied().collect();
     Some(places?.iter().filter(|place| **place < index).count())
 }
+/// Puts a launch-restored tab into its group without a separate activation.
+pub(crate) fn join_restored_tab(leader: u64, member: u64) {
+    if let (Some(leader), Some(member)) = (session_window(leader), session_window(member)) {
+        add_tab(&leader, &member);
+    }
+}
 pub fn bring_session_window(id: u64) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;

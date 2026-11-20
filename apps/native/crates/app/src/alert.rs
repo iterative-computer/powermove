@@ -94,6 +94,33 @@ impl<A: Clone + 'static> Alert<A> {
     pub fn sheet(&self, window: &NSWindow) -> async_channel::Receiver<Option<A>> {
         self.sheet_with(window, |_| {})
     }
+    /// A background event can ask only after its editor is in front.
+    pub fn background_sheet(
+        self,
+        window: &NSWindow,
+        cx: &gpui::App,
+    ) -> async_channel::Receiver<Option<A>> {
+        if can_attach_background_sheet(window) || gpui_macos::child_window::would_hold() {
+            return self.sheet(window);
+        }
+        let window = objc2::rc::Weak::from(window);
+        let (tx, rx) = async_channel::bounded(1);
+        cx.spawn(async move |cx| {
+            while !tx.is_closed() {
+                let Some(window) = window.load() else { break };
+                if can_attach_background_sheet(&window) {
+                    let answer = self.sheet(&window);
+                    drop(window);
+                    let answer = answer.recv().await.ok().flatten();
+                    let _ = tx.try_send(answer);
+                    break;
+                }
+                drop(window);
+                cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+            }
+        }).detach();
+        rx
+    }
     /// As `sheet`, after `configure` adds to the alert (an accessory view).
     pub fn sheet_with(
         &self,
@@ -160,6 +187,34 @@ impl<A: Clone + 'static> Alert<A> {
         native.beginSheetModalForWindow_completionHandler(window, Some(&done));
         rx
     }
+}
+
+/// AppKit orders the sheet's parent forward. The editor must already be
+/// key, visible and the selected project tab before a background sheet starts.
+pub fn can_attach_background_sheet(window: &NSWindow) -> bool {
+    let app_active = MainThreadMarker::new().is_some_and(|mtm| {
+        objc2_app_kit::NSApplication::sharedApplication(mtm).isActive()
+    });
+    background_sheet_allowed(
+        app_active,
+        window.isKeyWindow(),
+        pm_shell::window_shown(window),
+        window.attachedSheet().is_some(),
+    )
+}
+
+fn background_sheet_allowed(app_active: bool, key: bool, shown: bool, attached: bool) -> bool {
+    app_active && key && shown && !attached
+}
+
+#[cfg(test)]
+#[test]
+fn window_jumps_only_the_front_window_and_selected_tab_can_show_a_sheet() {
+    assert!(background_sheet_allowed(true, true, true, false));
+    assert!(!background_sheet_allowed(false, true, true, false));
+    assert!(!background_sheet_allowed(true, false, true, false));
+    assert!(!background_sheet_allowed(true, true, false, false));
+    assert!(!background_sheet_allowed(true, true, true, true));
 }
 
 thread_local! {
@@ -271,4 +326,24 @@ mod tests {
         assert_eq!(chosen(&actions, NSModalResponseCancel), None);
         assert_eq!(chosen(&actions[..2], NSAlertThirdButtonReturn), None);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn window_jumps_background_watchdog_requests_cannot_attach_a_sheet_directly() {
+    let source = include_str!("extensions.rs");
+    let watchdog = source
+        .split_once("fn extension_request(")
+        .unwrap()
+        .1
+        .split_once("Some(\"unresponsive\") =>")
+        .unwrap()
+        .1
+        .split_once("Some(\"import\") =>")
+        .unwrap()
+        .0;
+    assert!(
+        !watchdog.contains(".sheet("),
+        "a background request must not attach an AppKit sheet directly"
+    );
 }

@@ -956,7 +956,7 @@ mod first_save_tests {
     fn a_tab_behind_waiting_for_an_answer_is_named_in_front() {
         assert_eq!(
             super::waiting_note("Paper"),
-            "“Paper” is waiting for an answer in its tab."
+            "“Paper” is waiting for an answer. Switch to the project to respond."
         );
     }
     #[test]
@@ -972,20 +972,18 @@ mod first_save_tests {
         assert_eq!(note, "Saved “Paper.pmv” in Movies. File ▸ Show in Finder shows it.");
     }
 }
-/// A project in a tab behind asks something (its Recover question): the
-/// editor whose tab is shown says so in its status line, once.
+/// A background project has a question: the editor in front says so once.
 pub(crate) fn tell_front_waiting(asking: gpui::EntityId, name: &str, cx: &mut App) {
     let shown = crate::entry::editors(cx)
         .into_iter()
-        .find(|c| c.entity_id() != asking && c.read(cx).host.borrow().tab_shown());
+        .find(|c| c.entity_id() != asking && c.read(cx).host.borrow().window.isKeyWindow());
     if let Some(front) = shown {
         let text = waiting_note(name);
         front.update(cx, |v, cx| v.note(text, cx));
     }
 }
-/// The front window's line when a tab behind waits for an answer.
 fn waiting_note(name: &str) -> String {
-    format!("“{name}” is waiting for an answer in its tab.")
+    format!("“{name}” is waiting for an answer. Switch to the project to respond.")
 }
 /// Whether `text` is a program's error value rather than a sentence: a type
 /// or variant name with its fields, as `Storage("Kernel state changed")` or
@@ -2727,7 +2725,7 @@ impl Controller {
                         _ => unreachable!(),
                     };
                     let (cancel, cancellation) = async_channel::bounded(1);
-                    let answer = this.update(cx, |v, _| {
+                    let answer = this.update(cx, |v, cx| {
                         if let ShellReply::RecoveryRequired {
                             recovery: RecoveryResult::Unrecoverable { reason, .. },
                             ..
@@ -2753,13 +2751,13 @@ impl Controller {
                         };
                         v.open_timer.mark("recovery_question", serde_json::json!({"kind":kind}));
                         v.mcp.awaiting_recovery(Some(name.clone()));
-                        // A tab behind asks unseen: its tab is marked until
-                        // the question is answered.
-                        let hidden = !v.host.borrow().tab_shown();
+                        // Mark the project while its question waits for the front.
+                        let hidden = !v.host.borrow().window.isKeyWindow();
                         if hidden {
                             v.host.borrow().set_attention(true);
                         }
-                        (recovery.alert.sheet(&v.host.borrow().window), hidden)
+                        let answer = recovery.alert.clone().background_sheet(&v.host.borrow().window, cx);
+                        (answer, hidden)
                     });
                     // ... and the window in front says so, once.
                     if let Ok((_, true)) = &answer {
@@ -2962,7 +2960,7 @@ impl Controller {
         let Some(session) = self.session.clone() else {
             return;
         };
-        let asked = self.kernel.shell(ShellCall::CopiesOf(session));
+        let asked = self.kernel.shell(ShellCall::CopiesOf(session.clone()));
         cx.spawn(async move |this, cx| {
             let Some(Ok(ShellReply::Copies(rows))) = asked.await else {
                 return;
@@ -2976,7 +2974,10 @@ impl Controller {
             };
             let different = rows.iter().any(|r| r.get("different").is_some());
             let named = rows.first().and_then(|r| field(r, "file"));
-            let Ok(answer) = this.update(cx, |v, _| {
+            let Ok(Some(answer)) = this.update(cx, |v, cx| {
+                if v.session.as_ref() != Some(&session) {
+                    return None;
+                }
                 let file = named
                     .or_else(|| {
                         v.path
@@ -2993,7 +2994,10 @@ impl Controller {
                             names.join("”, “")
                         ),
                     );
-                    return earlier_copy_alert(&file, &names).sheet(&v.host.borrow().window);
+                    return Some(
+                        earlier_copy_alert(&file, &names)
+                            .background_sheet(&v.host.borrow().window, cx),
+                    );
                 }
                 v.errors.borrow_mut().push(
                     "Project",
@@ -3002,13 +3006,18 @@ impl Controller {
                         names.join("”, “")
                     ),
                 );
-                stranded_copies_alert(&file, &names).sheet(&v.host.borrow().window)
+                Some(
+                    stranded_copies_alert(&file, &names)
+                        .background_sheet(&v.host.borrow().window, cx),
+                )
             }) else {
                 return;
             };
             if answer.recv().await.ok().flatten() == Some(true) {
                 let _ = this.update(cx, |v, cx| {
-                    v.replace_project(crate::entry::Pending::Library(newest), cx);
+                    if v.session.as_ref() == Some(&session) {
+                        v.replace_project(crate::entry::Pending::Library(newest), cx);
+                    }
                 });
             }
         })
@@ -3055,7 +3064,7 @@ impl Controller {
                     Some((text("why")?.to_owned(), text("path").map(PathBuf::from)))
                 })
                 .collect();
-            let Ok(Some((answer, reveal, told))) = this.update(cx, |v, _| {
+            let Ok(Some((answer, reveal, told))) = this.update(cx, |v, cx| {
                 // The window shows another project by now: not its notice.
                 if v.session.as_ref() != Some(&session) {
                     return None;
@@ -3079,7 +3088,7 @@ impl Controller {
                     .iter()
                     .find_map(|(why, path)| path.clone().filter(|_| why != "trashed"))
                     .or(v.path.clone());
-                Some((alert.sheet(&v.host.borrow().window), reveal, told))
+                Some((alert.background_sheet(&v.host.borrow().window, cx), reveal, told))
             }) else {
                 return;
             };
@@ -3176,10 +3185,15 @@ impl Controller {
             .unwrap_or("Untitled")
             .to_owned();
         self.message = format!("“{name}” stopped after an internal error. Reopen it to recover.");
-        let rx = stopped(&name).sheet(&self.host.borrow().window);
+        let session = self.session.clone();
+        let rx = stopped(&name).background_sheet(&self.host.borrow().window, cx);
         cx.spawn(async move |this, cx| {
             if rx.recv().await.ok().flatten() == Some(Action::Reopen) {
-                let _ = this.update(cx, |v, cx| v.reopen_stopped(name, cx));
+                let _ = this.update(cx, |v, cx| {
+                    if v.session == session {
+                        v.reopen_stopped(name, cx);
+                    }
+                });
             }
         })
         .detach();
@@ -3303,7 +3317,7 @@ impl Controller {
                         &format!("{} {} ({error})", alert.message, alert.informative),
                     );
                     v.message = String::new();
-                    let answer = alert.sheet(&v.host.borrow().window);
+                    let answer = alert.background_sheet(&v.host.borrow().window, cx);
                     cx.spawn(async move |_, _| {
                         if answer.recv().await.ok().flatten()
                             == Some(crate::surfaces::documents::Action::ShowInFinder)
@@ -3330,7 +3344,7 @@ impl Controller {
                 .get("size")
                 .and_then(pm_model::Value::as_f64)
                 .unwrap_or(0.0) as u64;
-            let Ok(answer) = this.update(cx, |v, _| {
+            let Ok(answer) = this.update(cx, |v, cx| {
                 let alert = crate::surfaces::documents::version_offer(
                     &name,
                     &file_name(&file),
@@ -3345,7 +3359,7 @@ impl Controller {
                     "Project",
                     &format!("{} {}", alert.message, alert.informative),
                 );
-                alert.sheet(&v.host.borrow().window)
+                alert.background_sheet(&v.host.borrow().window, cx)
             }) else {
                 return;
             };
@@ -3410,7 +3424,7 @@ impl Controller {
         };
         self.errors.borrow_mut().push("Project", &logged);
         self.message = String::new();
-        let rx = alert.sheet(&self.host.borrow().window);
+        let rx = alert.background_sheet(&self.host.borrow().window, cx);
         cx.spawn(async move |_, _| {
             if rx.recv().await.ok().flatten() == Some(Action::ShowInFinder)
                 && let Some(path) = path
@@ -3541,6 +3555,7 @@ impl Controller {
     /// Tells the viewer whether its window can be seen: a tab behind
     /// another (or a minimized window) draws nothing until it is shown.
     pub(crate) fn follow_shown(&mut self, cx: &mut Context<Self>) {
+        self.present_busy_prompt(cx);
         let shown = pm_shell::window_shown(&self.host.borrow().window);
         // Its extensions' panels count as not showing while it cannot be
         // seen: they get no animation frames.
@@ -3903,8 +3918,8 @@ impl Controller {
                 kept.display()
             ),
         );
-        let answer =
-            other_version_kept(&name, &file, &file_name(&kept)).sheet(&self.host.borrow().window);
+        let answer = other_version_kept(&name, &file, &file_name(&kept))
+            .background_sheet(&self.host.borrow().window, cx);
         cx.spawn(async move |this, cx| {
             // Shown and answered: only then was the notice about this file
             // seen, by the session it was about.
@@ -3948,14 +3963,14 @@ impl Controller {
             None => (save_failed(&name, failure, path.is_some()), path),
         };
         let kept = pm_kernel::project_io::kept_beside(detail);
-        let answer = alert.sheet(&self.host.borrow().window);
+        let answer = alert.background_sheet(&self.host.borrow().window, cx);
         let session = self.session.clone();
         cx.spawn(async move |this, cx| {
             let answered = answer.recv().await.ok().flatten();
             // The save's own kept file was shown and the sheet answered:
             // seen. Whatever else that save kept (another version it found
             // on the way) is told next.
-            if let (Some(kept), Some(session), Some(_)) = (kept, session, &answered) {
+            if let (Some(kept), Some(session), Some(_)) = (kept, session.clone(), &answered) {
                 if let Ok(seen) =
                     this.update(cx, |v, _| v.kept_seen(session, vec![kept], false, false))
                 {
@@ -3965,7 +3980,11 @@ impl Controller {
             }
             match answered {
                 Some(Action::SaveAs) => {
-                    let _ = this.update(cx, |v, cx| v.save_dialog(cx));
+                    let _ = this.update(cx, |v, cx| {
+                        if v.session == session {
+                            v.save_dialog(cx);
+                        }
+                    });
                 }
                 Some(Action::ShowInFinder) => {
                     if let Some(path) = path {
@@ -4009,11 +4028,16 @@ impl Controller {
                     // Already said, and still showing in the subtitle.
                     return;
                 }
+                let session = self.session.clone();
                 let answer = not_protected(&name, WriteFailure::of(&message))
-                    .sheet(&self.host.borrow().window);
+                    .background_sheet(&self.host.borrow().window, cx);
                 cx.spawn(async move |this, cx| {
                     if answer.recv().await.ok().flatten() == Some(Action::Save) {
-                        let _ = this.update(cx, |v, cx| v.save(None, cx));
+                        let _ = this.update(cx, |v, cx| {
+                            if v.session == session {
+                                v.save(None, cx);
+                            }
+                        });
                     }
                 })
                 .detach();

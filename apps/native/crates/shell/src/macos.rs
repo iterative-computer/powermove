@@ -168,7 +168,9 @@ fn restore_session(cx: &mut App) {
         })
         .map(|s| {
             let plan = s.launch_plan(crate::tabs_mode(), keeps_windows());
-            front = s.key.filter(|k| plan.iter().any(|w| w.id == *k));
+            front = s.key
+                .filter(|k| plan.iter().any(|w| w.id == *k))
+                .or_else(|| plan.first().map(|w| w.id));
             plan
         })
         .unwrap_or_default();
@@ -199,26 +201,21 @@ fn restore_session(cx: &mut App) {
         native::set_restore_arranging(true);
     }
     // The window (or tab group) that was in front opens last, so it lies
-    // over the others from the start: separate windows each take the front
-    // as they open.
+    // over the others from the start.
     for state in session::front_first(plan, front) {
+        let id = state.id;
         let leader = state.tab_group;
-        open_editor_window(cx, true, Some(state), leader);
+        open_editor_window(cx, true, Some(state), None);
+        if let Some(leader) = leader {
+            native::join_restored_tab(leader, id);
+        }
     }
-    // Once the tabs have joined their groups (a turn later), the window that
-    // was in front comes forward again, its tab the one shown.
-    cx.spawn(async move |cx| {
-        cx.background_executor()
-            .timer(std::time::Duration::from_millis(300))
-            .await;
-        let _ = cx.update(|_| {
-            if let Some(id) = front {
-                native::bring_session_window(id);
-            }
-            native::set_restore_arranging(false);
-        });
-    })
-    .detach();
+    // Pick the saved tab as part of opening the initial windows, before
+    // returning to the run loop where a person can pick a different one.
+    if let Some(id) = front {
+        native::bring_session_window(id);
+    }
+    native::set_restore_arranging(false);
 }
 /// Every window and tab comes back on relaunch with its project, as v1
 /// restored its open tabs (owner, 2026-11-15), whatever the system's “Close
@@ -260,10 +257,11 @@ fn open_editor_window(
     let cascade = native::editor_frame();
     let t = tokens();
     let m = t.metrics;
+    let focus = visible && restore.is_none();
     let result = cx.open_window(
         WindowOptions::new()
             .show(visible)
-            .focus(visible)
+            .focus(focus)
             .macos_window_background(MacosWindowBackground::Transparent)
             // Content runs under the glass toolbar (full-size content view), so
             // the window tint and blur continue behind it.
@@ -664,4 +662,17 @@ fn capture_utility_settings() {
             focus: cx.focus_handle(),
         })
     });
+}
+
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn startup_restore_does_not_reselect_a_window_after_a_timer() {
+    let restore = include_str!("macos.rs")
+        .split_once("fn restore_session(")
+        .unwrap()
+        .1
+        .split_once("fn keeps_windows(")
+        .unwrap()
+        .0;
+    assert!(!restore.contains(".timer("), "startup must not steal a later selection");
 }

@@ -1105,20 +1105,9 @@ impl Editor {
             // opens): in its place, or shown if it had none, but never taking
             // the showing tab of a stack it is already in (PM-427).
             ("panel", "restore") => match self.parked.remove(rest) {
-                Some((place, showing)) if self.layout.find(rest).is_none() => {
-                    let mut next = self.layout.clone();
-                    next.show_panel(rest, &panels)
-                        .and_then(|_| next.move_panel_to(rest, place))
-                        .map(|_| {
-                            if let Some((dock, group, tab)) = showing.and_then(|id| next.find(&id))
-                                && next
-                                    .find(rest)
-                                    .is_some_and(|(d, g, _)| (d, g) == (dock, group))
-                            {
-                                next.docks[dock].groups[group].active = tab;
-                            }
-                            self.layout = next
-                        })
+                Some((place, _)) if self.layout.find(rest).is_none() && panels.contains(rest) => {
+                    self.layout.insert_at(rest, place);
+                    Ok(())
                 }
                 _ if self.layout.find(rest).is_some() => Ok(()),
                 // Its extension has not registered it yet (launch): it comes
@@ -1129,8 +1118,16 @@ impl Editor {
                     }
                     Ok(())
                 }
-                _ => self.layout.show_panel(rest, &panels),
+                _ => self.layout.restore_panel(rest, &panels),
             },
+            ("panel", "background-close") => {
+                if let Some((dock, group, tab)) = self.layout.find(rest)
+                    && self.layout.docks[dock].groups[group].active != tab
+                {
+                    return self.shell_command(&format!("panel:close:{rest}"), cx);
+                }
+                Ok(())
+            }
             ("panel", "close") => {
                 // The frame that shows it closed: its feel line (`PM_FEEL_TRACE`).
                 gpui_macos::feel::note_now("panel.close");
@@ -5060,6 +5057,10 @@ mod keyboard_tests {
                 assert!(v.shell_command("panel:restore:ext.voice", cx));
                 assert!(v.layout.find("ext.voice").is_some(), "back in its place");
                 assert_eq!(showing(v), "ext.pexels");
+                assert!(v.shell_command("panel:background-close:ext.pexels", cx));
+                assert_eq!(showing(v), "ext.pexels", "a background close keeps the front tab");
+                v.show_library_panel("ext.voice", cx).unwrap();
+                assert_eq!(showing(v), "ext.voice", "Window › Panels still reveals the chosen tab");
             })
             .unwrap();
     }

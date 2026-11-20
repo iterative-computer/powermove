@@ -1751,6 +1751,18 @@ impl Layout {
             self.docks[di].collapsed = false;
             return Ok(());
         }
+        self.add_panel(id, panels, true)
+    }
+
+    /// Restores a panel without selecting a tab or expanding its dock.
+    pub fn restore_panel(&mut self, id: &str, panels: &Panels) -> anyhow::Result<()> {
+        if self.find(id).is_some() {
+            return Ok(());
+        }
+        self.add_panel(id, panels, false)
+    }
+
+    fn add_panel(&mut self, id: &str, panels: &Panels, reveal: bool) -> anyhow::Result<()> {
         // A saved tab remains usable as a placeholder while its owner loads.
         anyhow::ensure!(panels.contains(id), "Unknown panel");
         let preset = Layout::preset(&self.workspace);
@@ -1763,7 +1775,9 @@ impl Layout {
         let g = self::group(&[id], None);
         match next.docks.iter_mut().find(|d| d.id == home) {
             Some(d) => {
-                d.collapsed = false;
+                if reveal {
+                    d.collapsed = false;
+                }
                 d.groups.push(g);
             }
             None => {

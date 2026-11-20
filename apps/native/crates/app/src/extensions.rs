@@ -241,12 +241,10 @@ pub struct Extensions {
     /// a panel published while the window is open is shown, not left in a menu.
     mounted_once: BTreeSet<String>,
     booted: bool,
-    /// When its extensions last restarted (they do several times as a project
-    /// opens): a panel an extension opens as it starts again only returns to
-    /// its place for a while after, never taking the tab a stack shows.
-    restarted: Option<std::time::Instant>,
+    pending_busy: Option<((u64, u64), crate::alert::Alert<bool>)>,
+    busy_attention: bool,
     /// The D11 sheet is up for this task.
-    unresponsive: Option<u64>,
+    unresponsive: Option<(u64, u64)>,
     /// Quit stopped this window's extensions (a hung one); a cancelled quit
     /// starts them again.
     pub stopped_for_quit: bool,
@@ -331,7 +329,8 @@ impl Default for Extensions {
             forks: BTreeMap::new(),
             mounted_once: BTreeSet::new(),
             booted: false,
-            restarted: None,
+            pending_busy: None,
+            busy_attention: false,
             unresponsive: None,
             stopped_for_quit: false,
             // Until the host says its first load pass is over, an effect the
@@ -572,6 +571,41 @@ pub(crate) fn effect_clipboard() -> pm_builtins::EffectClipboard {
         std::sync::LazyLock::new(Default::default);
     CLIPBOARD.clone()
 }
+fn extension_panel_verb(open: bool) -> &'static str {
+    if open { "restore" } else { "background-close" }
+}
+
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn window_jumps_late_extension_panel_requests_are_passive() {
+    assert_eq!(extension_panel_verb(true), "restore");
+    assert_eq!(extension_panel_verb(false), "background-close");
+}
+
+const WAIT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(180);
+thread_local! {
+    static LAST_WAIT: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+}
+
+fn watchdog_can_present(
+    front: bool,
+    long_operation: bool,
+    since_wait: Option<std::time::Duration>,
+) -> bool {
+    front && !long_operation && since_wait.is_none_or(|elapsed| elapsed >= WAIT_COOLDOWN)
+}
+
+#[cfg(test)]
+#[::core::prelude::v1::test]
+fn window_jumps_watchdog_stays_quiet_during_work_and_after_wait() {
+    use std::time::Duration;
+    assert!(!watchdog_can_present(false, false, None));
+    assert!(!watchdog_can_present(true, true, None));
+    assert!(!watchdog_can_present(true, false, Some(Duration::from_secs(179))));
+    assert!(watchdog_can_present(true, false, Some(Duration::from_secs(180))));
+    assert!(watchdog_can_present(true, false, None));
+}
+
 impl Controller {
     /// The realm's inspector service reaches this window's Effect Controls
     /// once both run (the panels start after the extensions).
@@ -581,15 +615,85 @@ impl Controller {
             host.set_effects(Some(Arc::new(move |op: &str| desk.run(op))));
         }
     }
+    pub(crate) fn present_busy_prompt(&mut self, cx: &mut Context<Self>) {
+        let Some(&(ticket, _)) = self.extensions.pending_busy.as_ref() else {
+            return;
+        };
+        let (view, execution) = ticket;
+        if !self.extensions.host.as_ref().is_some_and(|host| {
+            host.view() == view && host.unresponsive_execution() == Some(execution)
+        }) {
+            self.extensions.pending_busy = None;
+            self.clear_busy_attention();
+            return;
+        }
+        let working = |task: &pm_promedia::tasks::Task| {
+            use pm_promedia::tasks::TaskState::*;
+            matches!(task.state, Running | PauseRequested | CancelRequested)
+        };
+        let long_operation = self.mcp.operation_in_progress()
+            || pm_engine_service::jobs::exports_running()
+            || crate::export_coordinator::tasks()
+                .lock()
+                .unwrap()
+                .all()
+                .iter()
+                .any(working)
+            || self.pro_media.snapshot().iter().any(working);
+        let since_wait = LAST_WAIT.with(|last| last.get().map(|at| at.elapsed()));
+        if self.extensions.unresponsive.is_some() {
+            return;
+        }
+        let front = crate::alert::can_attach_background_sheet(&self.host.borrow().window);
+        if !watchdog_can_present(front, long_operation, since_wait) {
+            if watchdog_can_present(true, long_operation, since_wait)
+                && !self.extensions.busy_attention
+                && !self.host.borrow().window.isKeyWindow()
+            {
+                self.extensions.busy_attention = true;
+                self.host.borrow().set_attention(true);
+                let (asking, name) = (cx.entity_id(), self.project_name());
+                cx.defer(move |cx| crate::session::tell_front_waiting(asking, &name, cx));
+            }
+            return;
+        }
+        let Some((_, alert)) = self.extensions.pending_busy.take() else {
+            return;
+        };
+        self.clear_busy_attention();
+        let answer = alert.sheet(&self.host.borrow().window);
+        self.extensions.unresponsive = Some(ticket);
+        cx.spawn(async move |this, cx| {
+            let answer = answer.recv().await.ok().flatten();
+            if answer == Some(false) {
+                LAST_WAIT.with(|last| last.set(Some(std::time::Instant::now())));
+            }
+            let _ = this.update(cx, |v, _| {
+                if v.extensions.unresponsive == Some(ticket) {
+                    v.extensions.unresponsive = None;
+                    if let Some(host) = &v.extensions.host
+                        && host.view() == view
+                    {
+                        host.answer_unresponsive(execution, answer == Some(true));
+                    }
+                }
+            });
+        }).detach();
+    }
+    fn clear_busy_attention(&mut self) {
+        if std::mem::take(&mut self.extensions.busy_attention) {
+            self.host.borrow().set_attention(false);
+        }
+    }
     /// Quitting while an extension isn't responding (D11): its sheet goes,
     /// the realm is stopped without a restart (its open entry is sealed;
     /// acknowledged kernel edits stay) and the quit goes on. `false` when no
     /// extension in this window is hung.
     pub fn stop_hung_extensions_for_quit(&mut self) -> bool {
-        if self.extensions.unresponsive.is_none() || self.extensions.host.is_none() {
+        if self.extensions.host.as_ref().and_then(ExtensionHost::unresponsive_execution).is_none() {
             return false;
         }
-        {
+        if self.extensions.unresponsive.is_some() {
             let shell = self.host.borrow();
             if let Some(sheet) = shell.window.attachedSheet() {
                 shell
@@ -610,6 +714,7 @@ impl Controller {
     /// counting up, so the viewer takes the next definitions as newer.
     pub(crate) fn reset_extensions(&mut self) {
         let generation = self.extensions.resources.generation;
+        self.clear_busy_attention();
         self.extensions = Extensions::default();
         self.extensions.resources = Arc::new(ResourceSnapshot {
             generation: generation + 1,
@@ -817,39 +922,33 @@ impl Controller {
         match request["kind"].as_str() {
             Some("panel") => {
                 let id = request["id"].as_str().unwrap_or_default();
-                // While the project opens, an extension that opens its panel
-                // as it starts (each restart does) puts it in its place only:
-                // the dock shows the tab the person left it on (PM-427).
-                let starting = !self.extensions.booted
-                    || self
-                        .extensions
-                        .restarted
-                        .is_some_and(|at| at.elapsed() < RESTART_SETTLE);
-                let verb = match request["open"] == true {
-                    true if starting => "restore",
-                    true => "show",
-                    false => "close",
-                };
+                // An asynchronous extension request carries no user activation.
+                let verb = extension_panel_verb(request["open"] == true);
                 self.host
                     .borrow()
                     .send_command(&format!("panel:{verb}:{id}"), vec![]);
             }
-            // v1's `inspector.focusText`: Properties shows, and the layer's
-            // text field takes the keyboard with its text selected.
+            // A text request can reach Properties when it is already shown.
             Some("focusText") => {
+                let showing = self.host.borrow().window.isKeyWindow()
+                    && self.shell.as_ref().and_then(|shell| shell.upgrade())
+                        .is_some_and(|shell| shell.read(cx).panel_rect("inspector").is_some());
+                if !showing {
+                    return;
+                }
                 let layer = request["layer"].as_str().unwrap_or_default().to_owned();
-                self.host
-                    .borrow()
-                    .send_command("panel:show:inspector", vec![]);
                 match self.builtins.views.get("inspector") {
                     Some(view) => view.update(cx, |v, cx| v.focus_text(layer, cx)),
                     None => self.extensions.focus_text = Some(layer),
                 }
             }
             Some("confirm") => {
+                let Some(view) = self.extensions.host.as_ref().map(ExtensionHost::view) else {
+                    return;
+                };
+                let project = self.extensions.project.clone();
                 let title = request["title"].as_str().unwrap_or_default();
                 let body = request["body"].as_str().unwrap_or_default();
-                let shell = self.host.borrow();
                 use crate::alert::{Alert, Button};
                 let answer = Alert::new(
                     title,
@@ -859,12 +958,14 @@ impl Controller {
                         Button::new("Cancel", false).cancel(),
                     ],
                 )
-                .sheet(&shell.window);
-                drop(shell);
+                .background_sheet(&self.host.borrow().window, cx);
                 cx.spawn(async move |this, cx| {
                     let confirmed = answer.recv().await == Ok(Some(true));
                     let _ = this.update(cx, |v, _| {
-                        if let Some(host) = &v.extensions.host {
+                        if let Some(host) = &v.extensions.host
+                            && host.view() == view
+                            && v.extensions.project == project
+                        {
                             host.answer(token, confirmed.into());
                         }
                     });
@@ -872,9 +973,14 @@ impl Controller {
                 .detach();
             }
             Some("unresponsive") => {
-                let Some(execution) = request["execution"].as_u64() else {
+                let (Some(view), Some(execution)) =
+                    (request["view"].as_u64(), request["execution"].as_u64())
+                else {
                     return;
                 };
+                if !self.extensions.host.as_ref().is_some_and(|host| host.view() == view) {
+                    return;
+                }
                 let restart = "You can wait for it to finish, or stop it and restart extensions. Open extension panels lose what they haven’t saved.";
                 let (title, mut body) = match request["name"].as_str() {
                     Some(name) if request["disables"] == true => (
@@ -904,43 +1010,19 @@ impl Controller {
                 }
                 crate::diag::line(serde_json::json!({"unresponsive": request["name"],
                     "where": request["where"], "seconds": request["seconds"]}));
-                let shell = self.host.borrow();
-                // A tab behind asks unseen: its tab is marked until the
-                // question is answered, and the window in front says so
-                // (PM-490: the window jumped to the asking project's tab).
-                let hidden = !shell.tab_shown();
-                if hidden {
-                    shell.set_attention(true);
-                }
                 use crate::alert::{Alert, Button};
-                let answer = Alert::new(
-                    title,
-                    body,
-                    vec![
-                        Button::new("Wait", false).default().cancel(),
-                        Button::new("Stop", true),
-                    ],
-                )
-                .sheet(&shell.window);
-                drop(shell);
-                self.extensions.unresponsive = Some(execution);
-                if hidden {
-                    let (asking, name) = (cx.entity_id(), self.project_name());
-                    cx.defer(move |cx| crate::session::tell_front_waiting(asking, &name, cx));
-                }
-                cx.spawn(async move |this, cx| {
-                    let stop = answer.recv().await == Ok(Some(true));
-                    let _ = this.update(cx, |v, _| {
-                        v.host.borrow().set_attention(false);
-                        if v.extensions.unresponsive == Some(execution) {
-                            v.extensions.unresponsive = None;
-                        }
-                        if let Some(host) = &v.extensions.host {
-                            host.answer_unresponsive(execution, stop);
-                        }
-                    });
-                })
-                .detach();
+                self.extensions.pending_busy = Some((
+                    (view, execution),
+                    Alert::new(
+                        title,
+                        body,
+                        vec![
+                            Button::new("Wait", false).default().cancel(),
+                            Button::new("Stop", true),
+                        ],
+                    ),
+                ));
+                self.present_busy_prompt(cx);
             }
             Some("import") => match request["file"].as_str().and_then(|t| t.parse::<u64>().ok()) {
                 Some(file) => {
@@ -1355,15 +1437,15 @@ impl Controller {
             self.extensions.surfaces.insert(id.clone(), (title, hash));
             let ticket = runtime.mount_extension(&id, &surface["graph"], None);
             self.await_panel(id.clone(), id.clone(), Task::ready(ticket), cx);
-            // A newly installed panel shows itself; one already in the
-            // workspace keeps its place, and the stack keeps its showing tab.
+            // Give a new panel a place without selecting it over the tab
+            // the user is working in.
             if self.extensions.mounted_once.insert(id.clone())
                 && self.extensions.booted
                 && !self.extensions.open_panels.contains(&id)
             {
                 self.host
                     .borrow()
-                    .send_command(&format!("panel:show:{id}"), vec![]);
+                    .send_command(&format!("panel:restore:{id}"), vec![]);
             }
         }
         self.extensions.booted |= ready;
@@ -1501,7 +1583,6 @@ impl Controller {
         }
         self.extensions.known_panels = known;
         if vanished {
-            self.extensions.restarted = Some(std::time::Instant::now());
             self.tell_panels_ready(false);
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(PARK_GRACE).await;
@@ -2921,10 +3002,6 @@ fn v4_entries(panel: &str, items: &Value) -> Vec<MenuEntry> {
 /// How long a panel whose extension left the registry keeps its place before
 /// it is parked (an extension restarting for a project open comes back sooner).
 const PARK_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
-/// How long after its extensions restart a window takes their panel opens as
-/// their start-up, not a request to show the panel (PM-427).
-const RESTART_SETTLE: std::time::Duration = std::time::Duration::from_secs(10);
-
 #[cfg(test)]
 mod recovered_runtime_tests {
     use super::Extensions;
