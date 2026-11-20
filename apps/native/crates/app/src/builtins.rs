@@ -872,7 +872,8 @@ impl Controller {
                 Some(Ok(ticket)) => Some(ticket.await.map(|_| ())),
                 Some(Err(error)) => Some(Err(error)),
                 None => None,
-            } {
+            } && error != pm_runtime_v8::Error::Superseded
+            {
                 eprintln!("Panel {PANEL} update: {error}");
             }
             let _ = this.update(cx, |v, cx| {
@@ -1156,7 +1157,9 @@ impl Controller {
                     Ok(ticket) => ticket.await.map(|_| ()),
                     Err(e) => Err(e),
                 };
-                if let Err(error) = result {
+                if let Err(error) = result
+                    && error != pm_runtime_v8::Error::Superseded
+                {
                     eprintln!("Panel {id} update: {error}");
                 }
             }

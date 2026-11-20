@@ -1474,7 +1474,7 @@ impl Controller {
         let (generation, revision, semantic) = (
             p.generation,
             p.surface.revision(),
-            semantic(node).map(str::to_owned),
+            semantic(node),
         );
         let listen = node.listeners.contains_key(event);
         let binding = node
@@ -1482,32 +1482,19 @@ impl Controller {
             .get("binding")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        let event = event.to_owned();
+        let ticket = if listen {
+            runtime.queue_activation(
+                "settings", generation, revision, id, semantic, event, detail, false,
+            )
+        } else if event == "change"
+            && let (Some(binding), Some(value)) = (binding, detail.value)
+        {
+            runtime.write("settings", &binding, value)
+        } else {
+            return;
+        };
         cx.spawn(async move |this, cx| {
-            let ticket = cx
-                .background_executor()
-                .spawn(async move {
-                    if listen {
-                        runtime.activate(
-                            "settings",
-                            generation,
-                            revision,
-                            id,
-                            semantic.as_deref(),
-                            &event,
-                            detail,
-                        )
-                    } else if event == "change"
-                        && let (Some(binding), Some(value)) = (binding, detail.value)
-                    {
-                        runtime.write("settings", &binding, value)
-                    } else {
-                        return None;
-                    }
-                    .ok()
-                })
-                .await;
-            if let Some(ticket) = ticket {
+            if let Ok(ticket) = ticket {
                 if let Err(error) = ticket.await {
                     eprintln!("Settings: {error}");
                 }

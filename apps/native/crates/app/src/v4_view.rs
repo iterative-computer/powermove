@@ -176,6 +176,15 @@ struct RangeSent {
     count: usize,
     published: (usize, usize),
 }
+#[derive(Clone, Copy, PartialEq)]
+enum RangeRequest {
+    List(RangeSent),
+    Outline {
+        rows: (usize, usize),
+        published: (usize, usize),
+    },
+}
+
 /// The only pointer the host models. Multi-touch reaches panels as gestures.
 const POINTER: u64 = 1;
 
@@ -349,7 +358,9 @@ pub struct SurfaceView {
     /// Each virtual list's last `rangechange` (range, width, its geometry):
     /// a wheel step within the same rows sends nothing, so the panel doesn't
     /// commit and draw again (PM-311).
-    sent_ranges: HashMap<Id, RangeSent>,
+    sent_ranges: HashMap<Id, RangeRequest>,
+    pending_ranges: HashMap<Id, (RangeRequest, Task<()>)>,
+    pending_samples: HashMap<Id, Task<()>>,
     scrub_gesture: Option<u64>,
     scrub_busy: bool,
     scrub_shown: Option<(Id, f64)>,
@@ -359,11 +370,10 @@ pub struct SurfaceView {
     /// Each easing curve's preview run and the curve its drag left, until
     /// the panel publishes it.
     ease: grade::EaseState,
-    move_busy: bool,
+    pointer_move: Option<Task<()>>,
     /// Last label of each `role="status"` node; `None` until the first frame,
     /// so a panel's opening state is not read out.
     statuses: Option<HashMap<Id, String>>,
-    queued_move: Option<(Id, EventDetail)>,
     /// Publications received, and the newest one compiled and shown.
     latest: u64,
     shown: u64,
@@ -374,7 +384,6 @@ pub struct SurfaceView {
     /// The newest compiled tree, kept when it finished while the view had no
     /// live window (a closed sheet); the next window installs it on attach.
     parked: Option<Compiled>,
-    requested: Option<(usize, usize)>,
     /// A text layer whose Properties text to focus once its row shows
     /// (`inspector.focusText`), until the moment passes.
     focus_text: Option<(String, std::time::Instant)>,
@@ -524,21 +533,21 @@ impl SurfaceView {
             dragging: None,
             list_widths: HashMap::new(),
             sent_ranges: HashMap::new(),
+            pending_ranges: HashMap::new(),
+            pending_samples: HashMap::new(),
             scrub_gesture: None,
             scrub_busy: false,
             scrub_shown: None,
             grade_drawn: Default::default(),
             grade_motion: Default::default(),
             ease: Default::default(),
-            move_busy: false,
+            pointer_move: None,
             statuses: None,
-            queued_move: None,
             latest: 0,
             shown: 0,
             handling: 0,
             wake_idle: false,
             parked: None,
-            requested: None,
             focus_text: None,
             focus_requested: None,
             reveal: None,
@@ -894,6 +903,8 @@ impl SurfaceView {
         self.disclosures.clear();
         self.sent_ranges.clear();
         self.list_widths.clear();
+        self.pending_ranges.clear();
+        self.pending_samples.clear();
         self.controls.clear();
         self.fields.clear();
         self.scrolls.clear();
@@ -906,7 +917,7 @@ impl SurfaceView {
         self.truncated.borrow_mut().clear();
         self.capture = None;
         self.scrub = None;
-        self.queued_move = None;
+        self.pointer_move = None;
         self.error = None;
     }
     fn reconcile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -928,6 +939,8 @@ impl SurfaceView {
         self.scrolls.retain(|id, _| prepared.node(*id).is_some_and(|n| n.scroll_y || n.scroll_x));
         self.sent_ranges.retain(|id, _| live(id));
         self.list_widths.retain(|id, _| live(id));
+        self.pending_ranges.retain(|id, _| live(id));
+        self.pending_samples.retain(|id, _| live(id));
         self.subscriptions.retain(|id, _| live(id));
         self.fields.retain(|id, _| {
             if !live(id) {
@@ -1775,13 +1788,14 @@ impl SurfaceView {
         }
         let (id, (first, count)) = (node.id, node.outline_window.unwrap());
         if rows.1 > rows.0
-            && (rows.0 < first || rows.1 > first + count)
-            && self.requested != Some(rows)
+            && (rows.0 < first || rows.1 > first + count || self.pending_ranges.contains_key(&id))
         {
-            self.requested = Some(rows);
-            self.pointer(
+            self.request_range(
                 id,
-                "rangechange",
+                RangeRequest::Outline {
+                    rows,
+                    published: (first, count),
+                },
                 EventDetail {
                     range: Some(rows),
                     ..Default::default()
@@ -2314,31 +2328,38 @@ impl SurfaceView {
         ticket: pm_runtime_v8::Result<pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>>,
         cx: &mut Context<Self>,
     ) {
-        match ticket {
-            Ok(ticket) => {
-                cx.spawn(async move |this, cx| {
-                    if let Err(error) = ticket.await {
-                        let _ = this.update(cx, |v, cx| {
-                            v.error = Some(error.to_string());
-                            cx.notify();
-                        });
-                    }
-                })
-                .detach();
-            }
-            Err(error) => {
-                self.error = Some(error.to_string());
-                cx.notify();
-            }
-        }
+        self.watch_ticket(ticket, true, cx).detach();
     }
+
+    fn watch_ticket(
+        &mut self,
+        ticket: pm_runtime_v8::Result<pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>>,
+        repaint_on_error: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            let result = match ticket {
+                Ok(ticket) => ticket.await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result
+                && error != pm_runtime_v8::Error::Superseded
+            {
+                let _ = this.update(cx, |v, cx| {
+                    v.error = Some(error.to_string());
+                    if repaint_on_error {
+                        cx.notify();
+                    }
+                });
+            }
+        })
+    }
+
     pub fn send(&mut self, id: Id, event: &str, detail: EventDetail, cx: &mut Context<Self>) {
         #[cfg(test)]
         self.log.push((id, event.into(), detail.clone()));
-        let runtime = self.runtime.clone();
-        let p = self.publication.clone();
-        let event = event.to_owned();
-        let semantic = self.prepared.node(id).and_then(|n| n.semantic.clone());
+        let p = &self.publication;
+        let semantic = self.prepared.node(id).and_then(|n| n.semantic.as_deref());
         let sent = crate::diag::enabled().then(|| {
             crate::diag::line(
                 serde_json::json!({"ui": "send", "panel": p.panel, "event": event,
@@ -2346,23 +2367,18 @@ impl SurfaceView {
             );
             std::time::Instant::now()
         });
+        let ticket = self.runtime.queue_activation(
+            &p.panel,
+            p.generation,
+            p.surface.revision(),
+            id,
+            semantic,
+            event,
+            detail,
+            false,
+        );
         self.handling += 1;
-        // Native planning can read model state. Keep its locks off the main thread.
         cx.spawn(async move |this, cx| {
-            let ticket = cx
-                .background_executor()
-                .spawn(async move {
-                    runtime.activate(
-                        &p.panel,
-                        p.generation,
-                        p.surface.revision(),
-                        id,
-                        semantic.as_deref(),
-                        &event,
-                        detail,
-                    )
-                })
-                .await;
             let error = match ticket {
                 Ok(ticket) => ticket.await.err().map(|e| e.to_string()),
                 Err(error) => Some(error.to_string()),
@@ -2394,7 +2410,7 @@ impl SurfaceView {
                 if let Some(error) = error {
                     v.error = Some(error);
                     cx.notify();
-                } else if v.handling == 0 && std::mem::take(&mut v.wake_idle) {
+                } else if v.idle() && std::mem::take(&mut v.wake_idle) {
                     cx.notify();
                 }
             });
@@ -2403,14 +2419,10 @@ impl SurfaceView {
     }
     /// Every event sent to the panel's script has been handled.
     pub fn idle(&self) -> bool {
-        self.handling == 0
+        self.handling == 0 && self.pending_samples.is_empty()
     }
-    /// Pointer stream events address the current tree: a publication landing
-    /// mid-drag must not lose the release. Moves coalesce to one in flight.
-    /// A list's rows and width (`rangechange`) go the same way: the list is
-    /// republished with every page, so an older tree's report would be
-    /// refused, and one that is lost anyway is sent again on the next frame
-    /// (a grid that never hears its width draws one column; PM-447).
+    /// A publication landing mid-drag must still let the current tree hear
+    /// the release. The realm keeps just the latest pending move.
     fn pointer(
         &mut self,
         id: Id,
@@ -2420,46 +2432,53 @@ impl SurfaceView {
     ) {
         #[cfg(test)]
         self.log.push((id, event.into(), detail.clone()));
+        let p = &self.publication;
+        let ticket = self
+            .runtime
+            .pointer_event(&p.panel, p.generation, id, event, detail);
+        // Reporting a pointer failure follows the existing frame cadence.
+        let task = self.watch_ticket(ticket, false, cx);
         if event == "pointermove" {
-            if self.move_busy {
-                self.queued_move = Some((id, detail));
-                return;
-            }
-            self.move_busy = true;
+            self.pointer_move = Some(task);
+        } else {
+            task.detach();
         }
-        let runtime = self.runtime.clone();
-        let p = self.publication.clone();
-        cx.spawn(async move |this, cx| {
-            let ticket = cx
-                .background_executor()
-                .spawn(
-                    async move { runtime.pointer_event(&p.panel, p.generation, id, event, detail) },
-                )
-                .await;
-            let result = match ticket {
-                Ok(ticket) => ticket.await.map(|_| ()),
-                Err(error) => Err(error),
-            };
-            let _ = this.update(cx, |v, cx| {
-                match result {
-                    // Asked again by the next frame (a refusal comes from a
-                    // newer publication, which draws one).
-                    Err(_) if event == "rangechange" => {
-                        v.sent_ranges.remove(&id);
-                        v.requested = None;
-                    }
-                    Err(error) => v.error = Some(error.to_string()),
-                    Ok(()) => {}
-                }
-                if event == "pointermove" {
-                    v.move_busy = false;
-                    if let Some((id, detail)) = v.queued_move.take() {
-                        v.pointer(id, "pointermove", detail, cx);
-                    }
+    }
+
+    fn request_range(
+        &mut self,
+        id: Id,
+        request: RangeRequest,
+        detail: EventDetail,
+        cx: &mut Context<Self>,
+    ) {
+        let previous = self
+            .pending_ranges
+            .get(&id)
+            .map(|(request, _)| request)
+            .or_else(|| self.sent_ranges.get(&id));
+        if previous == Some(&request) {
+            return;
+        }
+        #[cfg(test)]
+        self.log.push((id, "rangechange".into(), detail.clone()));
+        let p = &self.publication;
+        let Ok(ticket) =
+            self.runtime
+                .pointer_event(&p.panel, p.generation, id, "rangechange", detail)
+        else {
+            return;
+        };
+        let task = cx.spawn(async move |this, cx| {
+            let sent = ticket.await.is_ok();
+            let _ = this.update(cx, |v, _| {
+                v.pending_ranges.remove(&id);
+                if sent {
+                    v.sent_ranges.insert(id, request);
                 }
             });
-        })
-        .detach();
+        });
+        self.pending_ranges.insert(id, (request, task));
     }
     /// Where an anchor node was last drawn (window points).
     pub fn anchor_bounds(&self, id: Id) -> Option<Bounds<Pixels>> {
@@ -2549,6 +2568,62 @@ impl SurfaceView {
         self.colour = Some((id, picker, subscription));
         cx.notify();
     }
+
+    /// A local drag sends the newest absolute value. The usual change path
+    /// still handles commits and discrete choices.
+    fn change_sample(&mut self, id: Id, value: Value, cx: &mut Context<Self>) {
+        self.control_sample(id, "change", value, cx);
+    }
+
+    fn control_sample(&mut self, id: Id, event: &str, value: Value, cx: &mut Context<Self>) {
+        let p = &self.publication;
+        let Some(node) = p.surface.node(id) else {
+            return;
+        };
+        let ticket = if node.listeners.contains_key(event) {
+            let detail = EventDetail {
+                value: Some(value),
+                ..Default::default()
+            };
+            #[cfg(test)]
+            self.log.push((id, event.into(), detail.clone()));
+            self.runtime.queue_activation(
+                &p.panel,
+                p.generation,
+                p.surface.revision(),
+                id,
+                self.prepared.node(id).and_then(|n| n.semantic.as_deref()),
+                event,
+                detail,
+                true,
+            )
+        } else if event == "change"
+            && let Some(binding) = node.props.get("binding").and_then(Value::as_str)
+        {
+            self.runtime.write_sample(&p.panel, binding, value)
+        } else {
+            return;
+        };
+        let task = cx.spawn(async move |this, cx| {
+            let result = match ticket {
+                Ok(ticket) => ticket.await,
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |v, cx| {
+                v.pending_samples.remove(&id);
+                if let Err(error) = result
+                    && error != pm_runtime_v8::Error::Superseded
+                {
+                    v.error = Some(error.to_string());
+                    cx.notify();
+                } else if v.idle() && std::mem::take(&mut v.wake_idle) {
+                    cx.notify();
+                }
+            });
+        });
+        self.pending_samples.insert(id, task);
+    }
+
     fn activate(
         &mut self,
         id: Id,
@@ -2864,16 +2939,8 @@ impl SurfaceView {
                     .push_back(ScrubOp::Value(binding, json!(value)));
                 self.scrub_pump(cx);
             }
-            None if deferred => self.pointer(
-                id,
-                "input",
-                EventDetail {
-                    value: Some(json!(n.text(value))),
-                    ..Default::default()
-                },
-                cx,
-            ),
-            None => self.change(id, json!(value), cx),
+            None if deferred => self.control_sample(id, "input", json!(n.text(value)), cx),
+            None => self.change_sample(id, json!(value), cx),
         }
         if let Some(field) = self.fields.get(&id) {
             let text = n.text(value);
@@ -5556,12 +5623,9 @@ impl SurfaceView {
                 count: geometry.count,
                 published: geometry.range,
             };
-            if self.sent_ranges.insert(id, sent) == Some(sent) {
-                return;
-            }
-            self.pointer(
+            self.request_range(
                 id,
-                "rangechange",
+                RangeRequest::List(sent),
                 EventDetail {
                     range: Some(range),
                     width: Some(width as f64),
@@ -6155,6 +6219,85 @@ fn host_rows_source(node: &pm_surface::Node) -> Option<Value> {
 mod tests {
     use super::file_drop;
     use serde_json::json;
+
+    #[gpui::test]
+    fn queue_busy_range_is_marked_sent_only_after_ack(cx: &mut gpui::TestAppContext) {
+        use crate::v4_view_tests::{rig, settle, window};
+        use pm_surface::events::EventDetail;
+        use std::time::{Duration, Instant};
+
+        let rig = rig("timeline", 2);
+        rig.runtime.take_publications();
+        let panel = "synthetic-range";
+        let graph = json!({
+            "sources": {
+                "powermove:bundle": "export * from './index.tsx';",
+                "index.tsx": "import { jsx } from 'powermove/jsx-runtime';
+                    export function activate({commands}) {
+                        commands.register({id:'hold', title:'Hold'}, () =>
+                            new Promise(resolve => setTimeout(resolve, 1000)));
+                        commands.register({id:'fill', title:'Fill'}, () => {});
+                    }
+                    export function view() {
+                        return jsx('div', {id:'synthetic-list', onRangeChange: () => {}});
+                    }"
+            },
+            "edges": {
+                "powermove:bundle": {"./index.tsx":"index.tsx"},
+                "index.tsx": {"powermove/jsx-runtime":"runtime:powermove/jsx-runtime"}
+            }
+        });
+        let mut mount = rig.runtime.mount_extension(panel, &graph, None).unwrap();
+        pm_runtime_v8::wait_until(&mut mount, Instant::now() + Duration::from_secs(20))
+            .unwrap()
+            .unwrap();
+        let first = rig
+            .runtime
+            .take_publications()
+            .into_iter()
+            .find(|publication| publication.panel == panel)
+            .expect("fixture panel published");
+        let id = first
+            .surface
+            .nodes()
+            .values()
+            .find(|node| node.props.get("id") == Some(&json!("synthetic-list")))
+            .unwrap()
+            .id;
+        let (view, mut test_window) = window(cx, &rig, first, Default::default());
+        let _hold = rig.runtime.run_command(panel, "hold", &[]).unwrap();
+        for _ in 0..=pm_runtime_v8::Limits::default().queue_capacity {
+            rig.runtime.run_command(panel, "fill", &[]).unwrap();
+        }
+        assert!(
+            rig.runtime
+                .script_queue_stats(panel)
+                .unwrap()
+                .deferred_discrete
+                > 0
+        );
+        let rows = (5, 15);
+        let range = super::RangeRequest::Outline {
+            rows,
+            published: (0, 5),
+        };
+        view.update(&mut test_window, |v, cx| {
+            v.request_range(
+                id,
+                range,
+                EventDetail {
+                    range: Some(rows),
+                    ..Default::default()
+                },
+                cx,
+            );
+            assert!(!v.sent_ranges.contains_key(&id));
+            assert!(v.pending_ranges.contains_key(&id));
+        });
+        settle(cx, |cx| {
+            view.read_with(cx, |v, _| v.sent_ranges.get(&id) == Some(&range))
+        });
+    }
 
     /// Up and Down step a number field from what is typed (else its value),
     /// ten steps with Shift, on the step's grid, within the field's limits.

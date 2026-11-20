@@ -4,13 +4,12 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     future::Future,
     pin::Pin,
     sync::{
         Arc, Condvar, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     task::{Context, Poll, Waker},
     thread,
@@ -104,7 +103,7 @@ pub struct ActiveExecution {
 pub struct GenerationPin {
     pub generation: Generation,
     live: Option<Arc<()>>,
-    notifier: Weak<SyncSender<Command>>,
+    notifier: Weak<Mailbox>,
 }
 impl std::fmt::Debug for GenerationPin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -115,7 +114,7 @@ impl Drop for GenerationPin {
     fn drop(&mut self) {
         drop(self.live.take());
         if let Some(tx) = self.notifier.upgrade() {
-            let _ = tx.try_send(Command::Wake);
+            let _ = tx.send(Command::Wake, Delivery::Immediate);
         }
     }
 }
@@ -205,13 +204,14 @@ struct Control {
     decided: Condvar,
 }
 struct Inner {
-    tx: Arc<SyncSender<Command>>,
+    mailbox: Arc<Mailbox>,
     control: Arc<Control>,
     max_source: usize,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
         self.control.closing.store(true, Ordering::Release);
+        self.mailbox.close();
         self.control.wake.notify_all();
         if let Some(e) = &*self.control.active.lock().unwrap() {
             e.cancellation.cancel();
@@ -231,7 +231,7 @@ enum Command {
     Wake,
     Eval {
         id: u64,
-        source: String,
+        source: Source,
         expected: Option<Generation>,
         svelte: Option<(String, SvelteUnit)>,
         reply: SharedCompletion<Evaluation>,
@@ -251,6 +251,313 @@ enum Command {
         reply: SharedCompletion<Evaluation>,
     },
 }
+enum Source {
+    Text(String),
+    Prepare(Box<dyn FnOnce() -> Result<String> + Send>),
+}
+
+/// Use a stable key for each stream of replaceable observations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateChannel {
+    Publication,
+    ViewerFrame,
+    ExportProgress,
+    Pointer { panel: String, pointer: u64 },
+    Parameter(String),
+    Range { panel: String, target: u64 },
+    Control { panel: String, target: u64 },
+}
+
+enum Delivery {
+    Immediate,
+    Discrete(Option<StateChannel>),
+    Latest(StateChannel),
+    Notify(StateChannel),
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QueueStats {
+    pub busy_rejections: u64,
+    pub coalesced: u64,
+    pub deferred_discrete: u64,
+}
+
+struct Scheduled {
+    command: Command,
+    sequence: u64,
+}
+
+#[derive(Default)]
+struct Queued {
+    closed: bool,
+    sequence: u64,
+    ready: VecDeque<Scheduled>,
+    discrete: VecDeque<Scheduled>,
+    latest: VecDeque<(StateChannel, Scheduled)>,
+    stats: QueueStats,
+}
+
+impl Queued {
+    fn schedule(&mut self, command: Command) -> Scheduled {
+        self.sequence += 1;
+        Scheduled {
+            command,
+            sequence: self.sequence,
+        }
+    }
+
+    fn take_latest(&mut self, channel: &StateChannel) -> Option<(StateChannel, Scheduled)> {
+        let index = self.latest.iter().position(|(key, _)| key == channel)?;
+        self.latest.remove(index)
+    }
+
+    fn push_discrete(&mut self, command: Command, capacity: usize, count_event: bool) {
+        let work = self.schedule(command);
+        if self.ready.len() < capacity {
+            self.ready.push_back(work);
+        } else {
+            self.stats.deferred_discrete += u64::from(count_event);
+            self.discrete.push_back(work);
+        }
+    }
+}
+
+struct Mailbox {
+    capacity: usize,
+    queued: Mutex<Queued>,
+    work: Condvar,
+}
+
+impl Mailbox {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            queued: Mutex::default(),
+            work: Condvar::new(),
+        }
+    }
+
+    fn send(&self, command: Command, delivery: Delivery) -> Result<()> {
+        let mut queued = self.queued.lock().unwrap();
+        if queued.closed {
+            drop(queued);
+            return Err(Error::Closed);
+        }
+        // A barrier seals only its own stream. The sample and event enter
+        // the FIFO together, so a later sample cannot replace the sealed one.
+        if let Delivery::Discrete(Some(channel)) = &delivery
+            && let Some((_, sample)) = queued.take_latest(channel)
+        {
+            queued.push_discrete(sample.command, self.capacity, false);
+        }
+        let replaced = match delivery {
+            Delivery::Immediate if queued.ready.len() == self.capacity => {
+                queued.stats.busy_rejections += 1;
+                drop(queued);
+                return Err(Error::Busy);
+            }
+            Delivery::Discrete(_) => {
+                queued.push_discrete(command, self.capacity, true);
+                None
+            }
+            Delivery::Notify(ref channel)
+                if queued.latest.iter().any(|(key, _)| key == channel) =>
+            {
+                // An idempotent refresh can use the pending evaluation. Keep
+                // its acknowledgement for any caller already waiting for it.
+                queued.stats.coalesced += 1;
+                drop(queued);
+                return Ok(());
+            }
+            Delivery::Latest(channel) | Delivery::Notify(channel) => {
+                let replaced = queued.take_latest(&channel);
+                queued.stats.coalesced += u64::from(replaced.is_some());
+                let work = queued.schedule(command);
+                queued.latest.push_back((channel, work));
+                replaced
+            }
+            Delivery::Immediate => {
+                let work = queued.schedule(command);
+                queued.ready.push_back(work);
+                None
+            }
+        };
+        drop(queued);
+        self.work.notify_one();
+        if let Some((
+            _,
+            Scheduled {
+                command: Command::Eval { reply, .. },
+                ..
+            },
+        )) = replaced
+        {
+            complete(reply, Err(Error::Superseded));
+        }
+        Ok(())
+    }
+
+    fn receive(&self, deadline: Option<Instant>) -> std::result::Result<Option<Command>, Error> {
+        let idle = |q: &mut Queued| !q.closed && q.ready.is_empty() && q.latest.is_empty();
+        let queued = self.queued.lock().unwrap();
+        let mut queued = match deadline {
+            Some(at) => {
+                self.work
+                    .wait_timeout_while(queued, at.saturating_duration_since(Instant::now()), idle)
+                    .unwrap()
+                    .0
+            }
+            None => self.work.wait_while(queued, idle).unwrap(),
+        };
+        if queued.closed {
+            return Err(Error::Closed);
+        }
+        let latest_first = queued.latest.front().is_some_and(|(_, latest)| {
+            queued
+                .ready
+                .front()
+                .is_none_or(|ready| latest.sequence < ready.sequence)
+        });
+        if latest_first {
+            return Ok(queued.latest.pop_front().map(|(_, work)| work.command));
+        }
+        let ready = queued.ready.pop_front();
+        if ready.is_some()
+            && let Some(next) = queued.discrete.pop_front()
+        {
+            // Claim the slot for the oldest deferred discrete event before
+            // producers can take it.
+            queued.ready.push_back(next);
+        }
+        Ok(ready.map(|work| work.command))
+    }
+
+    fn close(&self) {
+        self.queued.lock().unwrap().closed = true;
+        self.work.notify_one();
+    }
+
+    fn take_closed(&self) -> impl Iterator<Item = Command> {
+        let mut queued = self.queued.lock().unwrap();
+        std::mem::take(&mut queued.ready)
+            .into_iter()
+            .chain(std::mem::take(&mut queued.discrete))
+            .chain(
+                std::mem::take(&mut queued.latest)
+                    .into_iter()
+                    .map(|(_, work)| work),
+            )
+            .map(|work| work.command)
+    }
+}
+
+#[cfg(test)]
+mod mailbox_tests {
+    use super::*;
+
+    fn eval_command(id: u64) -> (Command, Ticket<Evaluation>) {
+        let (ticket, reply) = ticket(id);
+        let command = Command::Eval {
+            id,
+            source: Source::Text("0".to_owned()),
+            expected: None,
+            svelte: None,
+            reply,
+        };
+        (command, ticket)
+    }
+
+    #[test]
+    fn ten_thousand_moves_keep_one_pending_value_per_channel() {
+        let mailbox = Mailbox::new(1);
+        mailbox.send(Command::Wake, Delivery::Immediate).unwrap();
+        assert!(matches!(
+            mailbox.send(Command::Wake, Delivery::Immediate),
+            Err(Error::Busy)
+        ));
+        let channel = StateChannel::Pointer {
+            panel: "test".to_owned(),
+            pointer: 1,
+        };
+        let mut previous: Option<Ticket<Evaluation>> = None;
+        for id in 0..10_000 {
+            let (command, ticket) = eval_command(id);
+            mailbox
+                .send(command, Delivery::Latest(channel.clone()))
+                .unwrap();
+            if let Some(old) = previous.replace(ticket) {
+                assert!(matches!(old.try_take(), Some(Err(Error::Superseded))));
+            }
+        }
+        {
+            let queued = mailbox.queued.lock().unwrap();
+            assert_eq!(queued.ready.len(), 1);
+            assert!(queued.discrete.is_empty());
+            assert_eq!(queued.latest.len(), 1);
+            assert_eq!(queued.stats.coalesced, 9_999);
+            assert_eq!(queued.stats.busy_rejections, 1);
+        }
+        assert!(matches!(mailbox.receive(None), Ok(Some(Command::Wake))));
+        assert!(matches!(
+            mailbox.receive(None),
+            Ok(Some(Command::Eval { id: 9_999, .. }))
+        ));
+    }
+
+    #[test]
+    fn a_refresh_notification_preserves_the_waiting_publication_ticket() {
+        let mailbox = Mailbox::new(1);
+        mailbox.send(Command::Wake, Delivery::Immediate).unwrap();
+        let (publication, ticket) = eval_command(1);
+        mailbox
+            .send(publication, Delivery::Latest(StateChannel::Publication))
+            .unwrap();
+        mailbox
+            .send(
+                eval_command(2).0,
+                Delivery::Notify(StateChannel::Publication),
+            )
+            .unwrap();
+        assert!(ticket.try_take().is_none());
+        assert!(matches!(mailbox.receive(None), Ok(Some(Command::Wake))));
+        assert!(matches!(
+            mailbox.receive(None),
+            Ok(Some(Command::Eval { id: 1, .. }))
+        ));
+    }
+
+    #[test]
+    fn a_barrier_seals_only_the_sample_on_its_own_channel() {
+        let mailbox = Mailbox::new(1);
+        let pointer = StateChannel::Pointer {
+            panel: "test".to_owned(),
+            pointer: 1,
+        };
+        let other = StateChannel::Publication;
+        mailbox.send(Command::Wake, Delivery::Immediate).unwrap();
+        for (id, delivery) in [
+            (1, Delivery::Latest(pointer.clone())),
+            (2, Delivery::Latest(other)),
+            (3, Delivery::Discrete(Some(pointer.clone()))),
+            (4, Delivery::Latest(pointer)),
+        ] {
+            mailbox.send(eval_command(id).0, delivery).unwrap();
+        }
+        {
+            let queued = mailbox.queued.lock().unwrap();
+            assert_eq!(queued.discrete.len(), 2);
+            assert_eq!(queued.latest.len(), 2);
+            assert_eq!(queued.stats.deferred_discrete, 1);
+        }
+        assert!(matches!(mailbox.receive(None), Ok(Some(Command::Wake))));
+        for want in [2, 1, 3, 4] {
+            assert!(
+                matches!(mailbox.receive(None), Ok(Some(Command::Eval { id, .. })) if id == want)
+            );
+        }
+    }
+}
+
 impl Realm {
     /// Waits up to `within` for the isolate's turn in the heap account:
     /// `None` while it still waits (others hold the room), else whether it
@@ -271,14 +578,84 @@ impl Realm {
         self.send(Command::MemoryPressure)
     }
     fn send(&self, command: Command) -> Result<()> {
-        if self.inner.control.closing.load(Ordering::Acquire) {
-            return Err(Error::Closed);
-        }
-        self.inner.tx.try_send(command).map_err(|e| match e {
-            TrySendError::Full(_) => Error::Busy,
-            TrySendError::Disconnected(_) => Error::Closed,
-        })
+        self.inner.mailbox.send(command, Delivery::Immediate)
     }
+
+    pub fn queue_stats(&self) -> QueueStats {
+        self.inner.mailbox.queued.lock().unwrap().stats
+    }
+
+    /// Retain a discrete evaluation until it can run, without waiting on the caller.
+    pub fn eval_discrete(&self, source: impl Into<String>) -> Result<Ticket<Evaluation>> {
+        let source = source.into();
+        self.check_source(&source)?;
+        self.queue_eval(Delivery::Discrete(None), Source::Text(source))
+    }
+
+    /// Seal a pending observation on this channel before applying the commit.
+    pub fn eval_barrier(
+        &self,
+        channel: StateChannel,
+        source: impl Into<String>,
+    ) -> Result<Ticket<Evaluation>> {
+        let source = source.into();
+        self.check_source(&source)?;
+        self.queue_eval(Delivery::Discrete(Some(channel)), Source::Text(source))
+    }
+
+    /// Replace any pending observation on this channel. The old ticket finishes
+    /// as Superseded. The owner wakes directly on work or when it frees a slot.
+    pub fn eval_latest(
+        &self,
+        channel: StateChannel,
+        source: impl Into<String>,
+    ) -> Result<Ticket<Evaluation>> {
+        let source = source.into();
+        self.check_source(&source)?;
+        self.queue_eval(Delivery::Latest(channel), Source::Text(source))
+    }
+
+    /// Request the same idempotent evaluation already pending on a channel.
+    /// The script reads the latest state when it runs.
+    pub fn notify_latest(&self, channel: StateChannel, source: impl Into<String>) -> Result<()> {
+        let source = source.into();
+        self.check_source(&source)?;
+        drop(self.queue_eval(Delivery::Notify(channel), Source::Text(source))?);
+        Ok(())
+    }
+
+    /// Plan native input in dispatch order, on the owner just before evaluation.
+    /// A planner must not wait on this realm or run JavaScript.
+    pub fn eval_input(
+        &self,
+        channel: StateChannel,
+        sample: bool,
+        prepare: impl FnOnce() -> Result<String> + Send + 'static,
+    ) -> Result<Ticket<Evaluation>> {
+        let delivery = if sample {
+            Delivery::Latest(channel)
+        } else {
+            Delivery::Discrete(Some(channel))
+        };
+        self.queue_eval(delivery, Source::Prepare(Box::new(prepare)))
+    }
+
+    fn queue_eval(&self, delivery: Delivery, source: Source) -> Result<Ticket<Evaluation>> {
+        let id = self.inner.control.ids.fetch_add(1, Ordering::Relaxed);
+        let (ticket, reply) = ticket(id);
+        self.inner.mailbox.send(
+            Command::Eval {
+                id,
+                source,
+                expected: None,
+                svelte: None,
+                reply,
+            },
+            delivery,
+        )?;
+        Ok(ticket)
+    }
+
     fn check_source(&self, source: &str) -> Result<()> {
         if source.len() > self.inner.max_source {
             Err(Error::Quota("source bytes"))
@@ -300,7 +677,7 @@ impl Realm {
         let (ticket, reply) = ticket(id);
         self.send(Command::Eval {
             id,
-            source,
+            source: Source::Text(source),
             expected,
             svelte: None,
             reply,
@@ -318,7 +695,7 @@ impl Realm {
         let (ticket, reply) = ticket(id);
         self.send(Command::Eval {
             id,
-            source,
+            source: Source::Text(source),
             expected: None,
             svelte: Some((filename, unit)),
             reply,
@@ -401,8 +778,8 @@ impl Realm {
     /// Nonblocking shutdown; disposal and all revocations happen on the owner.
     pub fn close(&self) {
         self.inner.control.closing.store(true, Ordering::Release);
+        self.inner.mailbox.close();
         self.inner.control.wake.notify_all();
-        let _ = self.inner.tx.try_send(Command::Wake);
         if let Some(e) = &*self.inner.control.active.lock().unwrap() {
             e.cancellation.cancel();
             e.handle.terminate_execution();
@@ -676,7 +1053,7 @@ impl RuntimePool {
         {
             return Ok(Realm { inner });
         }
-        let (tx, rx) = mpsc::sync_channel(self.config.limits.queue_capacity);
+        let mailbox = Arc::new(Mailbox::new(self.config.limits.queue_capacity));
         let control = Arc::new(Control {
             active: Mutex::new(None),
             closing: AtomicBool::new(false),
@@ -688,19 +1065,16 @@ impl RuntimePool {
             decided: Condvar::new(),
         });
         let inner = Arc::new(Inner {
-            tx: Arc::new(tx),
+            mailbox: mailbox.clone(),
             control: control.clone(),
             max_source: self.config.limits.max_source_bytes,
         });
         let name = format!("{}:{kind:?}", self.scope);
         let config = self.config.clone();
         let worker_kind = kind.clone();
-        let notifier = Arc::downgrade(&inner.tx);
         thread::Builder::new()
             .name("pm-v8-owner".into())
-            .spawn(move || {
-                worker(rx, control, name, worker_kind, config, notifier)
-            })
+            .spawn(move || worker(mailbox, control, name, worker_kind, config))
             .map_err(|e| Error::Host(e.to_string()))?;
         realms.insert(kind.clone(), Arc::downgrade(&inner));
         Ok(Realm { inner })
@@ -1151,21 +1525,43 @@ fn fail_generation(live: &mut Live, config: &Config) {
     config.kernel.revoke_generation(&live.generation);
     config.kernel.seal_open_gestures(&live.generation);
 }
+// Losing the worker closes admission even if it unwinds before disposal.
+struct CloseMailbox<'a>(&'a Mailbox);
+
+impl Drop for CloseMailbox<'_> {
+    fn drop(&mut self) {
+        let mailbox = self.0;
+        mailbox.close();
+        for command in mailbox.take_closed() {
+            match command {
+                Command::MemoryPressure => continue,
+                Command::Wake => continue,
+                Command::Measure { reply } => complete(reply, Err(Error::Closed)),
+                Command::Pin { reply } => complete(reply, Err(Error::Closed)),
+                Command::Eval { reply, .. }
+                | Command::Reload { reply, .. }
+                | Command::Retained { reply, .. } => complete(reply, Err(Error::Closed)),
+            }
+        }
+    }
+}
+
 fn worker(
-    rx: Receiver<Command>,
+    mailbox: Arc<Mailbox>,
     control: Arc<Control>,
     name: String,
     kind: RealmKind,
     config: Config,
-    notifier: Weak<SyncSender<Command>>,
 ) {
+    let receiver = CloseMailbox(&mailbox);
+    let notifier = Arc::downgrade(&mailbox);
     let _watchdog = WatchdogThread::new(&control, &config);
     let pressure_sender = notifier.clone();
     let memory = pm_memory::Registration::new(1, move |_, level| {
         if level != pm_memory::Pressure::Normal
             && let Some(tx) = pressure_sender.upgrade()
         {
-            let _ = tx.try_send(Command::MemoryPressure);
+            let _ = tx.send(Command::MemoryPressure, Delivery::Immediate);
         }
     });
     let generation = Generation {
@@ -1209,17 +1605,13 @@ fn worker(
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-        let received = match deadline {
-            Some(at) => rx.recv_timeout(at.saturating_duration_since(Instant::now())),
-            None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-        };
-        if received.is_ok() {
-            trim_at = Some(Instant::now() + IDLE_TRIM);
-        }
-        let command = match received {
-            Ok(command) => command,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
+        let command = match mailbox.receive(deadline) {
+            Ok(Some(command)) => {
+                trim_at = Some(Instant::now() + IDLE_TRIM);
+                command
+            }
+            Err(_) => break,
+            Ok(None) => {
                 if trim_at.is_some_and(|at| at <= Instant::now()) {
                     trim_at = None;
                     if let Ok(live) = &mut current {
@@ -1304,6 +1696,20 @@ fn worker(
                 svelte,
                 reply,
             } => {
+                let source = match source {
+                    Source::Text(source) => source,
+                    Source::Prepare(prepare) => match prepare() {
+                        Ok(source) if source.len() <= config.limits.max_source_bytes => source,
+                        Ok(_) => {
+                            complete(reply, Err(Error::Quota("source bytes")));
+                            continue;
+                        }
+                        Err(error) => {
+                            complete(reply, Err(error));
+                            continue;
+                        }
+                    },
+                };
                 let source = if let Some((filename, unit)) = svelte {
                     match crate::compiler::compile_expression(&source, &filename, unit) {
                         Ok(source) => source,
@@ -1498,17 +1904,7 @@ fn worker(
     drop(current);
     drop(retained);
     control.closing.store(true, Ordering::Release);
-    for command in rx.try_iter() {
-        match command {
-            Command::MemoryPressure => continue,
-            Command::Wake => continue,
-            Command::Measure { reply } => complete(reply, Err(Error::Closed)),
-            Command::Pin { reply } => complete(reply, Err(Error::Closed)),
-            Command::Eval { reply, .. }
-            | Command::Reload { reply, .. }
-            | Command::Retained { reply, .. } => complete(reply, Err(Error::Closed)),
-        }
-    }
+    drop(receiver);
     control.disposed.store(true, Ordering::Release);
 }
 /// How long an isolate that grew waits without work before it trims.

@@ -723,17 +723,9 @@ impl SurfaceView {
                 .borrow_mut()
                 .insert(id, (live, std::time::Instant::now()));
             if deferred {
-                self.pointer(
-                    id,
-                    "input",
-                    EventDetail {
-                        value: Some(value),
-                        ..Default::default()
-                    },
-                    cx,
-                );
+                self.control_sample(id, "input", value, cx);
             } else {
-                self.change(id, value, cx);
+                self.change_sample(id, value, cx);
             }
             cx.notify();
             return;
