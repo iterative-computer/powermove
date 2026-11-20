@@ -3456,9 +3456,9 @@ fn path_vertex_keys_stored_without_ids_are_shown_selected_and_moved() {
     assert_eq!(c.model.selection.keys(), [named(1)]);
 }
 /// PM-477 by hand: M, on top of the stack, rests on the lower lane because
-/// nothing overlaps it; E, on the lane above, slides into M's time. A Tracks
-/// edit leaves the stack as it is, so M is still drawn over E: M goes above
-/// E, where the picture puts it (PM-512), and every other clip keeps its lane.
+/// nothing overlaps it; E, on the lane above, slides into M's time. Each
+/// clip keeps the lane it showed on: E now composites over M, as its track
+/// says (the stack follows the lanes, as v1's track view writes it).
 #[test]
 fn a_slide_into_another_tracks_time_moves_no_clip_to_another_lane() {
     let project = parse(
@@ -3488,9 +3488,7 @@ fn a_slide_into_another_tracks_time_moves_no_clip_to_another_lane() {
     );
     edit(&mut c, vec![command.into()]);
     c.sync().unwrap();
-    let after = lanes(&c);
-    assert_eq!(after[1..], before[1..], "E, K and N keep their lanes");
-    assert!(after[0] > after[1], "M, drawn over E, shows above it: {after:?}");
+    assert_eq!(lanes(&c), before);
 }
 /// PM-477 by hand: in Tracks mode an edge trim that frees room on a lower
 /// lane leaves an untouched clip on its own: K rests on lane 2 because E
@@ -3526,9 +3524,7 @@ fn an_edge_trim_in_tracks_moves_no_untouched_clip_to_another_lane() {
 /// PM-477/PM-485: while the timeline shows tracks, the lanes it shows are the
 /// truth for every edit, whatever makes it (a timeline key or drag, a menu,
 /// Properties, an agent through the kernel): after each, no clip the edit
-/// did not touch is on another lane, unless it had to rise above a clip
-/// under it in the stack that the edit made it overlap (PM-512); a new clip
-/// takes a free lane.
+/// did not touch is on another lane; a new clip takes a free lane.
 #[test]
 fn in_tracks_no_edit_from_any_source_moves_an_untouched_clip() {
     use pm_kernel::commands::layers::{AddLayer, LayerPatch};
@@ -3563,22 +3559,9 @@ fn in_tracks_no_edit_from_any_source_moves_an_untouched_clip() {
                  touched: &[&str],
                  what: &str| {
         let after = lanes(c);
-        let index = &c.model.index;
-        let layout = pm_panel_timeline::tracks::layout(index, &c.model.reveal);
-        assert_tracks_follow_the_stack(index, &layout, what);
         for (id, lane) in before {
-            if !touched.contains(&id.as_str()) && after.contains_key(id) && after[id] != *lane {
-                // Its old lane would show it under a clip it is drawn over
-                // (or over one drawn over it).
-                let at = index.layers.iter().position(|l| &l.id == id).unwrap();
-                let l = &index.layers[at];
-                let contradicts = index.layers.iter().enumerate().any(|(j, o)| {
-                    j != at
-                        && o.from < l.from + l.duration - 1e-5
-                        && l.from < o.from + o.duration - 1e-5
-                        && ((j > at && after[&o.id] >= *lane) || (j < at && after[&o.id] <= *lane))
-                });
-                assert!(contradicts, "{what}: {id} moved from {lane} to {}", after[id]);
+            if !touched.contains(&id.as_str()) && after.contains_key(id) {
+                assert_eq!(after[id], *lane, "{what}: {id} moved");
             }
         }
     };
@@ -4040,97 +4023,6 @@ fn a_new_layer_in_tracks_goes_above_what_it_overlaps() {
     );
     // Nothing that was shown moves.
     assert_eq!([lane(&c, "still"), lane(&c, "a"), lane(&c, "b")], shown);
-}
-
-/// Every pair of clips that overlap in time, root layers of one area: the
-/// one higher in the stack (drawn over) is on the higher track.
-fn assert_tracks_follow_the_stack(index: &TimelineIndex, layout: &tracks::Layout, what: &str) {
-    let lanes: Vec<_> = index
-        .layers
-        .iter()
-        .map(|l| (l, layout.item(&l.id).unwrap().lane))
-        .collect();
-    for (i, (upper, upper_lane)) in lanes.iter().enumerate() {
-        for (lower, lower_lane) in &lanes[i + 1..] {
-            let overlap = upper.from < lower.from + lower.duration - 1e-5
-                && lower.from < upper.from + upper.duration - 1e-5;
-            if overlap && tracks::area(&upper.kind) == tracks::area(&lower.kind) {
-                assert!(
-                    upper_lane > lower_lane,
-                    "{what}: {} (stack above, lane {upper_lane}) is drawn over {} (lane {lower_lane}); lanes {:?}",
-                    upper.id,
-                    lower.id,
-                    lanes.iter().map(|(l, n)| (l.id.as_str(), l.from, l.duration, *n)).collect::<Vec<_>>()
-                );
-            }
-        }
-    }
-}
-
-/// PM-512: over many random Tracks layouts, and after random edits made
-/// while the timeline shows them (a restack, a retime, a new layer at any
-/// place in the stack), a clip's track order is its render order.
-#[test]
-fn track_order_matches_render_order_over_random_layouts() {
-    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
-    let mut next = |n: u64| {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        seed % n
-    };
-    let solid = |id: &str, from: u64, dur: u64, track: u64| {
-        format!(
-            r##"{{"id":"{id}","name":"{id}","type":"solid","from":{from},"dur":{dur},"on":true,"track":{track},"d":{{"color":"#ff0000","w":100,"h":100}},"p":{{}}}}"##
-        )
-    };
-    let project = |layers: &[String]| {
-        parse(&format!(
-            r##"{{"id":"P","compId":"C","name":"T","w":200,"h":100,"fps":30,"dur":40,"comps":{{}},"assets":{{}},"layers":[{}]}}"##,
-            layers.join(",")
-        ))
-        .unwrap()
-    };
-    for round in 0..300 {
-        let count = 3 + next(6) as usize;
-        let mut layers: Vec<String> = (0..count)
-            .map(|n| solid(&format!("c{n}"), next(20), 1 + next(8), next(4)))
-            .collect();
-        let mut m = model(project(&layers));
-        m.mode = TimelineMode::Tracks;
-        let shown = tracks::layout(&m.index, &m.reveal);
-        assert_tracks_follow_the_stack(&m.index, &shown, &format!("round {round}, fresh"));
-        let held = tracks::shown(&m.index, &m.reveal);
-        let edit = next(3);
-        match edit {
-            // Restack: one layer to another place in the stack.
-            0 => {
-                let moved = layers.remove(next(count as u64) as usize);
-                layers.insert(next(count as u64) as usize, moved);
-            }
-            // Retime: one layer to another start.
-            1 => {
-                let at = next(count as u64) as usize;
-                layers[at] = solid(&format!("c{at}"), next(20), 1 + next(8), next(4));
-            }
-            // A new layer anywhere in the stack, with no track chosen.
-            _ => {
-                let at = next(count as u64 + 1) as usize;
-                let added = solid("new", next(20), 1 + next(8), 0)
-                    .replace(r#","track":0"#, "");
-                layers.insert(at, added);
-            }
-        }
-        let mut after = model(project(&layers));
-        after.mode = TimelineMode::Tracks;
-        after.reveal.held = held;
-        let layout = tracks::layout(&after.index, &after.reveal);
-        assert_tracks_follow_the_stack(
-            &after.index,
-            &layout,
-            &format!("round {round}, after edit {edit}"),
-        );
-    }
 }
 
 /// The common Tracks gesture: a slide drag on a clip with a neighbour on one
