@@ -117,6 +117,53 @@
     padding: 0 var(--pm-gap);
   }
 
+  /* The shared legacy Row expects the editor's label and value columns.
+     The label id identifies that control without styling arbitrary rows. */
+  .row.split:has(> .k[id^="pm-control-label-"]):where(
+    :not(
+      [data-pm-style="none"],
+      [data-pm-style="none"] *,
+      [data-pm-style="tokens-only"],
+      [data-pm-style="tokens-only"] *
+    )
+  ) {
+    position: relative;
+    display: flex;
+    align-items: center;
+    height: var(--pm-row-h);
+    gap: var(--pm-gap);
+    padding: 0 var(--pm-inset);
+
+    > .k {
+      flex: 0 1 auto;
+      min-width: 0;
+      width: 64px;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    > .vwrap {
+      display: flex;
+      align-items: center;
+      flex: 1;
+      min-width: 0;
+      gap: var(--pm-gap);
+
+      > * {
+        min-width: 0;
+        max-width: 100%;
+      }
+
+      > .pair-group {
+        display: grid;
+        grid-auto-flow: column;
+        grid-auto-columns: minmax(0, 1fr);
+        flex: 1;
+      }
+    }
+  }
+
   /* Keep the actual input for label clicks, keyboard, and accessibility.
      Match the kit's 16px box, small corner, bezel and disabled opacity. */
   input[type="checkbox"]:where(
