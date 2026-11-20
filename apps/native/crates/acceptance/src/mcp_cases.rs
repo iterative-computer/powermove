@@ -176,14 +176,13 @@ pub fn manage() -> Check {
     Ok(())
 }
 
-/// Frozen kernel/glsl.ts admission, through the actual MCP body. No compilation
-/// or rendered pixels are implied by the tool's own definition-only result.
+/// Effect admission compiles the shader without registering it or editing the project.
 pub fn validate_effect() -> Check {
     let mut f = Fixture::new()?;
     let before = f.document()?;
     let revision = f.revision();
-    let definition = json!({"id":"Synthetic.effect","label":"Synthetic","group":"Synthetic","params":[{"k":"amount","def":1}],"frag":"outColor=vec4(1.);"});
-    let expected = json!({"valid":true,"id":"Synthetic.effect","parameterCount":1,"note":"Definition validation only. This does not register the effect or compile/render its shader."});
+    let definition = json!({"id":"Synthetic.effect","label":"Synthetic","group":"Synthetic","params":[{"k":"amount","def":1}],"frag":"o=vec4(1.);"});
+    let expected = json!({"valid":true,"id":"Synthetic.effect","parameterCount":1,"compiledPasses":1});
     assert_eq!(
         f.call("validate_effect", json!({"definition":definition}))?,
         expected
@@ -242,9 +241,29 @@ pub fn validate_effect() -> Check {
         )?["message"],
         "effect \"Synthetic.effect\": \"label\" is required"
     );
-    for (count, valid) in [(32768, true), (32769, false)] {
+    let mut invalid_shader = definition.clone();
+    invalid_shader["frag"] = json!("outColor=vec4(1.);");
+    let error = tool_error(
+        &mut f.session,
+        "validate_effect",
+        json!({"definition":invalid_shader}),
+    )?;
+    assert_eq!(error["code"], "invalid_arguments");
+    let diagnostic = error["message"].as_str().unwrap();
+    assert!(diagnostic.contains("GLSL compilation failed"), "{diagnostic}");
+    assert!(diagnostic.contains("line 1: 'outColor'"), "{diagnostic}");
+
+    // A legal comment exercises the exact legacy UTF-16 limit and still compiles.
+    let prefix = "o=vec4(1.); /*";
+    let suffix = "*/";
+    let fixed = prefix.len() + suffix.len();
+    for (units, valid) in [(65536, true), (65538, false)] {
+        let padding = " ".repeat((units - fixed) % 2);
+        let emoji = "😀".repeat((units - fixed) / 2);
+        let shader = format!("{prefix}{padding}{emoji}{suffix}");
+        assert_eq!(shader.encode_utf16().count(), units);
         let mut boundary = definition.clone();
-        boundary["frag"] = json!("😀".repeat(count));
+        boundary["frag"] = json!(shader);
         if valid {
             assert_eq!(
                 f.call("validate_effect", json!({"definition":boundary}))?,
