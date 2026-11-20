@@ -348,7 +348,7 @@ impl AgentButton {
 }
 pub(super) fn image(tone: Tone, t: &Tokens) -> Retained<NSImage> {
     let t = t.clone();
-    let block = block2::RcBlock::new(move |_: NSRect| -> objc2::runtime::Bool {
+    let block = block2::RcBlock::new(move |canvas: NSRect| -> objc2::runtime::Bool {
         NSGraphicsContext::saveGraphicsState_class();
         if tone == Tone::Attention {
             native_color(t.colors.warning).setFill();
@@ -358,8 +358,17 @@ pub(super) fn image(tone: Tone, t: &Tokens) -> Retained<NSImage> {
             ))
             .fill();
         } else {
-            let rect = NSRect::new(NSPoint::new(5., 5.), NSSize::new(14., 14.));
-            toolbar_symbol("sparkles", "Agent", &t).drawInRect(rect);
+            // The shared toolbar image already includes the glyph's optical padding.
+            let sparkle = toolbar_symbol("sparkles", "Agent", &t);
+            let size = sparkle.size();
+            let rect = NSRect::new(
+                NSPoint::new(
+                    canvas.origin.x + (canvas.size.width - size.width) / 2.,
+                    canvas.origin.y + (canvas.size.height - size.height) / 2.,
+                ),
+                size,
+            );
+            sparkle.drawInRect(rect);
             native_color(t.colors.muted).set();
             NSRectFillUsingOperation(rect, NSCompositingOperation::SourceAtop);
         }
@@ -368,6 +377,10 @@ pub(super) fn image(tone: Tone, t: &Tokens) -> Retained<NSImage> {
     });
     NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(24., 24.), false, &block)
 }
+#[cfg(test)]
+#[path = "agent_launcher_glyph_tests.rs"]
+mod glyph_tests;
+
 #[cfg(test)]
 mod captures {
     use super::*;
