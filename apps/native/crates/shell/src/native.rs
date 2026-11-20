@@ -10,7 +10,7 @@ use crate::{
     keyboard::{Class, Effect, Key, POINTER, Resolver},
     menu,
     native_control::{SEGMENT_MENU_INDICATOR, SegmentedControl},
-    transient::{Choice, Picker},
+    transient::{Choice, ComposerPicker, Picker, composer_picker_frame},
 };
 use foreign_types::ForeignType;
 use objc2::{
@@ -4256,7 +4256,7 @@ impl Host {
                                         | "escape"
                                         | "tab"
                                         | "shift+tab"
-                                ) || (key == "space" && p.row_focus)
+                                ) || (key == "space" && (p.row_focus || !p.searchable))
                                 {
                                     p.key(&key, e.isARepeat());
                                     return std::ptr::null_mut();
@@ -6804,6 +6804,7 @@ impl Host {
             let mut p = self.fields.borrow_mut();
             p.model.choices = field_choices();
             (p.anchor, p.model.page, p.dismiss) = (None, None, None);
+            p.configure_field(None);
             p.search
                 .setPlaceholderString(Some(&NSString::from_str(FIELD_PLACEHOLDER)));
         }
@@ -6825,12 +6826,19 @@ impl Host {
         page: Option<usize>,
         dismiss: Option<String>,
         placeholder: &str,
+        composer: Option<(ComposerPicker, bool)>,
     ) {
         if self.palette.borrow().model.open {
             self.palette.borrow_mut().hide();
         }
         if self.fields.borrow().model.open {
-            self.fields.borrow_mut().hide();
+            let mut menu = self.fields.borrow_mut();
+            if dismiss.as_deref() == Some("agentPick:") && menu.dismiss == dismiss {
+                // The panel already settled its previous request. Its late
+                // dismiss command must not close the new picker's request.
+                menu.dismiss = None;
+            }
+            menu.hide();
         }
         let owner = owner.unwrap_or_else(|| self.window.clone());
         let h = owner
@@ -6841,6 +6849,7 @@ impl Host {
         p.parent = owner;
         p.model.choices = choices;
         (p.anchor, p.model.page, p.dismiss) = (anchor, page, dismiss);
+        p.configure_field(composer);
         p.search
             .setPlaceholderString(Some(&NSString::from_str(placeholder)));
         p.toggle();
@@ -6848,15 +6857,27 @@ impl Host {
     /// Replaces the open field menu's rows in place (after a row that
     /// stays was chosen): no closing and reopening, the query kept. `false`
     /// when no menu is open any more.
-    pub fn update_menu(&mut self, choices: Vec<Choice>) -> bool {
+    pub fn update_menu(&mut self, choices: Vec<Choice>, search: Option<bool>) -> bool {
         let mut p = self.fields.borrow_mut();
         if !p.model.open {
             return false;
+        }
+        if let Some(searchable) = search
+            && p.composer.is_some()
+            && p.searchable != searchable
+        {
+            p.set_searchable(searchable);
+            p.search.setStringValue(&NSString::from_str(""));
+            p.focus_search();
         }
         p.model.choices = choices;
         let query = p.search.stringValue().to_string();
         p.model.search(query);
         p.refresh();
+        if p.composer.is_some() {
+            p.reveal_checked();
+            p.place_at_composer();
+        }
         true
     }
     pub fn system(&self, name: &str) -> bool {
@@ -7601,6 +7622,33 @@ fn popup_material(
 fn popup_highlight(t: &Tokens) -> Retained<NSColor> {
     native_color(t.colors.text).colorWithAlphaComponent(t.translucency.selected as f64)
 }
+fn popup_controls(
+    mtm: MainThreadMarker,
+    body: &NSView,
+    t: &Tokens,
+    placeholder: &str,
+) -> (Retained<NSSearchField>, Retained<NSScrollView>, Retained<PopupList>) {
+    let search = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), NSRect::ZERO);
+    search.setPlaceholderString(Some(&NSString::from_str(placeholder)));
+    search.setControlSize(NSControlSize::Large);
+    search.setFont(Some(&NSFont::systemFontOfSize(t.typography.title as f64)));
+    search.setFocusRingType(NSFocusRingType::None);
+    search.setAccessibilityLabel(Some(&NSString::from_str("Search")));
+    body.addSubview(&search);
+    let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), NSRect::ZERO);
+    scroll.setDrawsBackground(false);
+    scroll.setHasVerticalScroller(true);
+    scroll.setScrollerStyle(NSScrollerStyle::Overlay);
+    scroll.setAutohidesScrollers(true);
+    scroll.setAutomaticallyAdjustsContentInsets(false);
+    let list: Retained<PopupList> = unsafe {
+        msg_send![super(PopupList::alloc(mtm).set_ivars(RefCell::new(std::rc::Weak::new()))),
+            initWithFrame: NSRect::ZERO]
+    };
+    scroll.setDocumentView(Some(&list));
+    body.addSubview(&scroll);
+    (search, scroll, list)
+}
 /// The field menu's search placeholder (`fieldMenu`).
 const FIELD_PLACEHOLDER: &str = "Search fields";
 /// The field menu's own rows (`fieldMenu`).
@@ -7618,6 +7666,26 @@ fn popup_label(text: &str, size: f32, ink: u32, mtm: MainThreadMarker) -> Retain
     // The row's button speaks for it.
     label.setAccessibilityElement(false);
     label
+}
+fn popup_description(
+    text: &str,
+    size: f32,
+    ink: u32,
+    width: f64,
+    mtm: MainThreadMarker,
+) -> (Retained<NSTextField>, f64) {
+    let label = NSTextField::wrappingLabelWithString(&NSString::from_str(text), mtm);
+    label.setFont(Some(&NSFont::systemFontOfSize(size as f64)));
+    label.setTextColor(Some(&native_color(ink)));
+    label.setAccessibilityElement(false);
+    label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    label.setMaximumNumberOfLines(0);
+    label.setPreferredMaxLayoutWidth(width);
+    let bounds = NSRect::new(NSPoint::ZERO, NSSize::new(width, 4096.));
+    let height = label
+        .cell()
+        .map_or_else(|| label.fittingSize().height, |cell| cell.cellSizeForBounds(bounds).height);
+    (label, height.ceil())
 }
 /// Development builds: `PM_NATIVE_REVIEW_SLOW=8` runs a menu's motion that
 /// many times slower, so a capture can catch it on the way.
@@ -7697,6 +7765,8 @@ pub struct Popup {
     previous: Option<Retained<NSResponder>>,
     /// Tallest the panel may grow (`palette_height` / `field_menu_height`).
     max_height: f32,
+    composer: Option<ComposerPicker>,
+    searchable: bool,
     row_focus: bool,
     /// The appearance changed while the pop-up was hidden: its material and
     /// rows are built for it when it next shows, not with every window's
@@ -7752,34 +7822,11 @@ impl Popup {
         if let Some(layer) = mat.layer() {
             layer.setOpacity(0.);
         }
-        // The system's search field: its own magnifier and clear button. It
-        // is the menu's only input and always has the keyboard, so no ring
-        // (owner rule: no accent focus rings).
-        let search = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), NSRect::ZERO);
-        search.setPlaceholderString(Some(&NSString::from_str(if surface == Surface::Palette {
+        let (search, scroll, list) = popup_controls(mtm, &body, t, if surface == Surface::Palette {
             "Search commands"
         } else {
             FIELD_PLACEHOLDER
-        })));
-        search.setControlSize(NSControlSize::Large);
-        search.setFont(Some(&NSFont::systemFontOfSize(t.typography.title as f64)));
-        search.setFocusRingType(NSFocusRingType::None);
-        search.setAccessibilityLabel(Some(&NSString::from_str("Search")));
-        body.addSubview(&search);
-        let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), NSRect::ZERO);
-        scroll.setDrawsBackground(false);
-        scroll.setHasVerticalScroller(true);
-        scroll.setScrollerStyle(NSScrollerStyle::Overlay);
-        scroll.setAutohidesScrollers(true);
-        scroll.setAutomaticallyAdjustsContentInsets(false);
-        let list: Retained<PopupList> = unsafe {
-            msg_send![
-                super(PopupList::alloc(mtm).set_ivars(RefCell::new(std::rc::Weak::new()))),
-                initWithFrame: NSRect::ZERO
-            ]
-        };
-        scroll.setDocumentView(Some(&list));
-        body.addSubview(&scroll);
+        });
         let glider = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::ZERO);
         glider.setBoxType(NSBoxType::Custom);
         glider.setFillColor(&popup_highlight(t));
@@ -7814,6 +7861,8 @@ impl Popup {
             tokens: t.clone(),
             previous: None,
             max_height: height,
+            composer: None,
+            searchable: true,
             row_focus: false,
             stale: false,
             anchor: None,
@@ -7854,6 +7903,29 @@ impl Popup {
             TokenChange::Now => self.restyle(),
         }
     }
+    fn set_searchable(&mut self, on: bool) {
+        self.searchable = on;
+        self.search.setHidden(!on);
+    }
+    fn focus_search(&self) {
+        self.window.makeFirstResponder(if self.searchable { Some(&self.search) } else { None });
+    }
+    fn configure_field(&mut self, composer: Option<(ComposerPicker, bool)>) {
+        self.composer = composer.map(|(kind, _)| kind);
+        self.set_searchable(composer.is_none_or(|(_, on)| on));
+        let owner = self.parent.contentRectForFrameRect(self.parent.frame());
+        let m = self.tokens.metrics;
+        let mut frame = self.window.frame();
+        frame.size.width = self.composer.map_or(m.field_menu_width, |kind| {
+            kind.width().min(owner.size.width as f32)
+        }) as f64;
+        self.max_height = if self.composer.is_some() {
+            m.field_menu_height.min(owner.size.height as f32)
+        } else {
+            m.field_menu_height
+        };
+        self.window.setFrame_display(frame, false);
+    }
     /// Rebuilds the material and rows for the current tokens.
     fn restyle(&mut self) {
         self.stale = false;
@@ -7884,6 +7956,8 @@ impl Popup {
                 c.display_label(&self.model.query),
                 &c.command,
                 &c.category,
+                &c.detail,
+                c.is_default,
                 c.checked,
                 &c.font,
             )
@@ -7891,6 +7965,9 @@ impl Popup {
         }
         self.model.unlisted().hash(&mut h);
         self.model.note().hash(&mut h);
+        self.composer.map(|kind| kind as u8).hash(&mut h);
+        self.searchable.hash(&mut h);
+        (self.max_height as i64).hash(&mut h);
         (self.window.frame().size.width as i64).hash(&mut h);
         h.finish()
     }
@@ -7907,6 +7984,52 @@ impl Popup {
     }
     fn refresh(&mut self) {
         self.built = Some(self.rows_key());
+        let mut frame = self.window.frame();
+        let height = PopupLayout {
+            width: frame.size.width,
+            max_height: self.max_height,
+            composer: self.composer,
+            searchable: self.searchable,
+            tokens: &self.tokens,
+            surface: self.surface,
+            model: &self.model,
+            search: &self.search,
+            scroll: &self.scroll,
+            list: &self.list,
+            parts: &mut self.parts,
+            rows: &mut self.rows,
+            target: self.target.as_deref(),
+            shortcuts: &self.shortcuts,
+        }
+        .rebuild();
+        if (frame.size.height - height).abs() > 0.5 {
+            frame.origin.y += frame.size.height - height;
+            frame.size.height = height;
+            self.window.setFrame_display(frame, self.model.open);
+        }
+        self.light(false);
+    }
+}
+
+/// The field menu's AppKit view layout; does not need a window to paint.
+struct PopupLayout<'a> {
+    width: f64,
+    max_height: f32,
+    composer: Option<ComposerPicker>,
+    searchable: bool,
+    tokens: &'a Tokens,
+    surface: Surface,
+    model: &'a Picker,
+    search: &'a NSSearchField,
+    scroll: &'a NSScrollView,
+    list: &'a PopupList,
+    parts: &'a mut Vec<Retained<NSView>>,
+    rows: &'a mut Vec<PopupRow>,
+    target: Option<&'a PopupTarget>,
+    shortcuts: &'a HashMap<String, String>,
+}
+impl PopupLayout<'_> {
+    fn rebuild(self) -> f64 {
         for part in self.parts.drain(..) {
             part.removeFromSuperview();
         }
@@ -7914,8 +8037,8 @@ impl Popup {
             row.button.removeFromSuperview();
         }
         let mtm = MainThreadMarker::new().unwrap();
-        let t = self.tokens.clone();
-        let (m, shape) = (t.metrics, popup_shape(&t, self.surface));
+        let t = self.tokens;
+        let (m, shape) = (t.metrics, popup_shape(t, self.surface));
         let chosen: Vec<(usize, Choice)> = self
             .model
             .filtered()
@@ -7924,7 +8047,7 @@ impl Popup {
             .collect();
         // A long list (every installed font) shows a page; typing narrows it.
         let more_rows = Some(self.model.unlisted()).filter(|n| *n > 0);
-        let width = self.window.frame().size.width;
+        let width = self.width;
         let (inset, row_h) = (shape.inset as f64, shape.row as f64);
         let checks = chosen.iter().any(|(_, c)| c.checked.is_some());
         let sections = chosen.iter().any(|(_, c)| !c.category.is_empty());
@@ -7964,9 +8087,13 @@ impl Popup {
                     y += shape.heading as f64;
                 }
             }
+            let description = (!c.detail.is_empty() && self.composer == Some(ComposerPicker::Access))
+                .then(|| popup_description(&c.detail, caption, t.colors.secondary, (width - edge - lead).max(1.), mtm));
             let item_h = row_h
                 + if c.detail.is_empty() {
                     0.
+                } else if let Some((_, h)) = &description {
+                    h + t.space.sm as f64
                 } else {
                     caption as f64 + t.space.xs as f64
                 };
@@ -7984,6 +8111,14 @@ impl Popup {
                 self.list.addSubview(&hint);
                 self.parts
                     .push(Retained::into_super(Retained::into_super(hint)));
+            }
+            if c.is_default {
+                let hint = popup_label("Default", caption, t.colors.muted, mtm);
+                let w = hint.fittingSize().width.ceil();
+                centred(&hint, trailing - w, y, row_h, w);
+                trailing -= w + t.space.md as f64;
+                self.list.addSubview(&hint);
+                self.parts.push(Retained::into_super(Retained::into_super(hint)));
             }
             if c.checked == Some(true) {
                 let mark = NSImageView::imageViewWithImage(&symbol("checkmark", "Checked"), mtm);
@@ -8014,7 +8149,14 @@ impl Popup {
                 title.setFont(Some(&face));
             }
             centred(&title, lead, y, row_h, (trailing - lead).max(0.));
-            if !c.detail.is_empty() {
+            if let Some((detail, height)) = description {
+                detail.setFrame(NSRect::new(
+                    NSPoint::new(lead, y + row_h - t.space.xs as f64),
+                    NSSize::new((trailing - lead).max(1.), height),
+                ));
+                self.list.addSubview(&detail);
+                self.parts.push(Retained::into_super(Retained::into_super(detail)));
+            } else if !c.detail.is_empty() {
                 let detail = popup_label(&c.detail, caption, t.colors.secondary, mtm);
                 centred(
                     &detail,
@@ -8034,19 +8176,22 @@ impl Popup {
             let button = unsafe {
                 NSButton::buttonWithTitle_target_action(
                     &NSString::from_str(""),
-                    self.target.as_deref().map(|t| t as &AnyObject),
+                    self.target.map(|t| t as &AnyObject),
                     Some(sel!(pick:)),
                     mtm,
                 )
             };
             button.setTransparent(true);
-            button.setAccessibilityLabel(Some(&NSString::from_str(&display_label)));
+            let ax_label = if c.is_default { format!("{display_label}, Default") } else { display_label };
+            button.setAccessibilityLabel(Some(&NSString::from_str(&ax_label)));
             button.setAccessibilityIdentifier(Some(&NSString::from_str(&format!(
                 "shell.palette.{}",
                 c.command
             ))));
             if let Some(glyphs) = self.shortcuts.get(&c.command) {
                 button.setAccessibilityHelp(Some(&NSString::from_str(glyphs)));
+            } else if !c.detail.is_empty() {
+                button.setAccessibilityHelp(Some(&NSString::from_str(&c.detail)));
             }
             button.setTag(*index as isize);
             button.setFrame(rect);
@@ -8088,16 +8233,10 @@ impl Popup {
                 .push(Retained::into_super(Retained::into_super(none)));
             y = row_h;
         }
-        let field_h = self.search.fittingSize().height.ceil();
-        let above = inset * 2. + field_h;
+        let field_h = if self.searchable { self.search.fittingSize().height.ceil() } else { 0. };
+        let above = if self.searchable { inset * 2. + field_h } else { inset };
         let shown = y.min(self.max_height as f64 - above - inset).max(row_h);
         let height = above + shown + inset;
-        let mut frame = self.window.frame();
-        if (frame.size.height - height).abs() > 0.5 {
-            frame.origin.y += frame.size.height - height;
-            frame.size.height = height;
-            self.window.setFrame_display(frame, self.model.open);
-        }
         self.search.setFrame(NSRect::new(
             NSPoint::new(inset, height - inset - field_h),
             NSSize::new(width - inset * 2., field_h),
@@ -8137,8 +8276,133 @@ impl Popup {
             unsafe { layer.setMask(fade.as_deref().map(|f| &**f)) };
         }
         self.list.scrollPoint(NSPoint::ZERO);
-        self.light(false);
+        height
     }
+}
+
+fn reveal_popup_check(model: &Picker, rows: &[PopupRow], list: &PopupList, scroll: &NSScrollView) {
+    if let Some(row) = model.selected().and_then(|place| rows.get(place)) {
+        let mut rect = row.rect;
+        let room = scroll.frame().size.height;
+        rect.origin.y = (rect.origin.y - (room - rect.size.height) / 2.).max(0.);
+        rect.size.height = room;
+        list.scrollRectToVisible(rect);
+    }
+}
+
+fn popup_checked_offset(
+    model: &Picker,
+    rows: &[PopupRow],
+    scroll: &NSScrollView,
+    height: f64,
+    row_height: f32,
+) -> Option<f32> {
+    let row = model.selected().and_then(|place| rows.get(place))?;
+    let frame = scroll.frame();
+    let row_y = row.rect.origin.y - scroll.contentView().bounds().origin.y;
+    Some((height - frame.origin.y - frame.size.height + row_y + row_height as f64 / 2.) as f32)
+}
+
+/// Renders the same AppKit menu views against an opaque fallback material
+/// for review. The caller composites the bitmap over the panel capture at
+/// the returned screen-point frame. No Cocoa window or input is involved.
+#[doc(hidden)]
+pub fn capture_agent_picker(
+    t: &Tokens,
+    input: &serde_json::Value,
+    owner: crate::layout::Rect,
+    anchor: crate::layout::Rect,
+    query: &str,
+) -> Option<(Vec<u8>, crate::layout::Rect, Vec<String>)> {
+    use crate::layout::Rect;
+    let mtm = MainThreadMarker::new()?;
+    let kind = match input["picker"].as_str() {
+        Some("model") => Some(ComposerPicker::Model),
+        Some("effort") => Some(ComposerPicker::Effort),
+        Some("access") => Some(ComposerPicker::Access),
+        _ => None,
+    };
+    let searchable = kind.is_none() || input["search"] == true;
+    let surface = Surface::Menu;
+    let width = kind.map_or(t.metrics.field_menu_width, ComposerPicker::width).min(owner.w);
+    let shape = popup_shape(t, surface);
+    let root = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::ZERO);
+    root.setBoxType(NSBoxType::Custom);
+    root.setCornerRadius(shape.radius as f64);
+    root.setBorderWidth(1.);
+    root.setBorderColor(&native_color(t.colors.separator));
+    root.setFillColor(&native_color(t.colors.floating));
+    root.setContentViewMargins(NSSize::ZERO);
+    let appearance = NSAppearance::appearanceNamed(unsafe {
+        if t.scheme == Scheme::Dark { NSAppearanceNameDarkAqua } else { NSAppearanceNameAqua }
+    })?;
+    root.setAppearance(Some(&appearance));
+    let body = root.contentView()?;
+    let (search, scroll, list) = popup_controls(mtm, &body, t, input["placeholder"].as_str().unwrap_or_default());
+    search.setHidden(!searchable);
+    search.setStringValue(&NSString::from_str(query));
+    let mut model = Picker {
+        choices: input["options"].as_array()?.iter().enumerate().map(|(i, o)| {
+            let mut c = Choice::new(o["label"].as_str().unwrap_or_default(), i.to_string())
+                .within(o["category"].as_str().unwrap_or_default())
+                .detail(o["detail"].as_str().unwrap_or_default());
+            c.checked = o["checked"].as_bool();
+            c.is_default = o["default"] == true;
+            c.informational = o["informational"] == true;
+            c
+        }).collect(),
+        ..Default::default()
+    };
+    model.search(query.to_owned());
+    let mut parts = vec![];
+    let mut rows = vec![];
+    let height = PopupLayout {
+        width: width as f64,
+        max_height: t.metrics.field_menu_height.min(owner.h),
+        composer: kind,
+        searchable,
+        tokens: t,
+        surface,
+        model: &model,
+        search: &search,
+        scroll: &scroll,
+        list: &list,
+        parts: &mut parts,
+        rows: &mut rows,
+        target: None,
+        shortcuts: &HashMap::new(),
+    }.rebuild();
+    root.setFrameSize(NSSize::new(width as f64, height));
+    root.layoutSubtreeIfNeeded();
+    reveal_popup_check(&model, &rows, &list, &scroll);
+    let clipped = model.choices.iter().filter(|row| !row.detail.is_empty()).filter(|row| {
+        parts.iter().filter_map(|p| p.downcast_ref::<NSTextField>())
+            .find(|f| f.stringValue().to_string() == row.detail)
+            .is_some_and(|f| {
+                let frame = f.frame();
+                let (_, required) = popup_description(&row.detail, t.text(pm_design::Text::Caption).size, t.colors.secondary, frame.size.width, mtm);
+                required > frame.size.height + 0.5
+            })
+    }).map(|row| row.detail.clone()).collect();
+    let rect = root.bounds();
+    let bitmap = root.bitmapImageRepForCachingDisplayInRect(rect)?;
+    appearance.performAsCurrentDrawingAppearance(&block2::StackBlock::new(|| {
+        root.cacheDisplayInRect_toBitmapImageRep(rect, &bitmap);
+    }));
+    let png = unsafe {
+        bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &objc2_foundation::NSDictionary::new())
+    }?;
+    let h = height as f32;
+    let frame = if kind.is_some() {
+        composer_picker_frame(owner, anchor, (width, h), popup_checked_offset(&model, &rows, &scroll, height, shape.row))
+    } else {
+        // .18's unmeasured composer buttons used the palette's fallback.
+        Rect { x: owner.x + (owner.w - width) / 2., y: owner.y + owner.h - h - t.metrics.toolbar, w: width, h }
+    };
+    Some((unsafe { png.as_bytes_unchecked() }.to_vec(), frame, clipped))
+}
+
+impl Popup {
     /// Puts the highlight on the lit row. It appears where it lands when
     /// nothing was lit, glides there on the layout spring when `glide` (the
     /// pointer, or one key press), and fades when nothing is lit any more.
@@ -8291,11 +8555,32 @@ impl Popup {
         }
     }
     fn searched(&mut self) {
+        if !self.searchable {
+            return;
+        }
         let q = self.search.stringValue().to_string();
         if q != self.model.query {
             self.model.search(q);
             self.refresh();
+            if self.composer.is_some() {
+                self.place_at_composer();
+            }
         }
+    }
+    fn reveal_checked(&self) {
+        reveal_popup_check(&self.model, &self.rows, &self.list, &self.scroll);
+    }
+    fn place_at_composer(&self) {
+        let Some(anchor) = self.anchor else { return };
+        let p = self.parent.contentRectForFrameRect(self.parent.frame());
+        let size = self.window.frame().size;
+        let shape = popup_shape(&self.tokens, self.surface);
+        let checked = popup_checked_offset(&self.model, &self.rows, &self.scroll, size.height, shape.row);
+        let layout = |r: NSRect| crate::layout::Rect {
+            x: r.origin.x as f32, y: r.origin.y as f32, w: r.size.width as f32, h: r.size.height as f32,
+        };
+        let frame = composer_picker_frame(layout(p), layout(anchor), (size.width as f32, size.height as f32), checked);
+        self.window.setFrameOrigin(NSPoint::new(frame.x as f64, frame.y as f64));
     }
     fn toggle(&mut self) {
         if self.model.open {
@@ -8341,18 +8626,9 @@ impl Popup {
             ),
         };
         self.window.setFrameOrigin(origin);
-        // Opens on the current choice, in view (nothing lit).
-        if let Some(row) = self.rows.iter().find(|row| {
-            self.model
-                .filtered()
-                .get(row.place)
-                .is_some_and(|i| self.model.choices.get(*i).and_then(|c| c.checked) == Some(true))
-        }) {
-            let mut rect = row.rect;
-            let room = self.scroll.frame().size.height;
-            rect.origin.y = (rect.origin.y - (room - rect.size.height) / 2.).max(0.);
-            rect.size.height = room;
-            self.list.scrollRectToVisible(rect);
+        self.reveal_checked();
+        if self.composer.is_some() {
+            self.place_at_composer();
         }
         unsafe {
             let _: () = msg_send![NSObject::class(),cancelPreviousPerformRequestsWithTarget:&*self.window,selector:sel!(orderOut:),object:std::ptr::null::<AnyObject>()];
@@ -8360,7 +8636,7 @@ impl Popup {
         gpui_macos::child_window::attach(&self.window, &self.parent);
         // Only while the app is active, never over other apps (P-CHILD).
         gpui_macos::child_window::show(&self.window, true);
-        self.window.makeFirstResponder(Some(&self.search));
+        self.focus_search();
         animate_as(&self.window, true, true, &self.tokens, &mut self.spring);
         // Development builds: what an open costs (`PM_NATIVE_PALETTE_TRACE`).
         if cfg!(debug_assertions) && std::env::var_os("PM_NATIVE_PALETTE_TRACE").is_some() {
@@ -8443,13 +8719,13 @@ impl Popup {
                 self.model.keyed = next;
                 self.model.hover = None;
             } else {
-                self.window.makeFirstResponder(Some(&self.search));
+                self.focus_search();
             }
             self.light(false);
             self.reveal();
             return;
         }
-        let key = if key == "space" && self.row_focus {
+        let key = if key == "space" && (self.row_focus || !self.searchable) {
             "enter"
         } else if key == "space" {
             return;
@@ -8457,6 +8733,9 @@ impl Popup {
             key
         };
         let before = self.model.lit();
+        if before.is_none() && !self.searchable && matches!(key, "up" | "down" | "enter") {
+            self.model.keyed = self.model.selected();
+        }
         if let Some(name) = self.model.navigate(key) {
             // A row that stays leaves the menu open (`navigate` kept it so).
             self.picked = !self.model.open;

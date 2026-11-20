@@ -56,3 +56,7 @@ harness = false
 [[test]]
 name = "modal_sheets"
 harness = false
+
+[[example]]
+name = "capture-agent-pickers"
+path = "src/capture_agent_pickers.rs"

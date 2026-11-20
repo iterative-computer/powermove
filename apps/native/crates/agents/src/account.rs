@@ -302,11 +302,20 @@ impl Accounts {
                 }
             }
         }
-        let status = chatgpt_status(&mut peer)?;
+        let mut status = chatgpt_status(&mut peer)?;
         if status.state == State::Connected {
-            // A model list is a nicety. The provider's default still runs without it.
-            let models = chatgpt_models(&mut peer).unwrap_or_default();
-            self.set_models(Provider::Chatgpt, models);
+            self.slots.lock().unwrap().get_mut(Provider::Chatgpt.name()).unwrap().finding_models = true;
+            self.bump();
+            match chatgpt_models(&mut peer) {
+                Ok(models) => self.set_models(Provider::Chatgpt, models),
+                Err(_) => {
+                    status.detail = Some(if self.models(Provider::Chatgpt).is_empty() {
+                        "Couldn't load ChatGPT models. The provider's default is still available.".into()
+                    } else {
+                        "Couldn't refresh ChatGPT models. Showing the last known models.".into()
+                    });
+                }
+            }
         }
         Ok(status)
     }
@@ -425,7 +434,8 @@ fn chatgpt_models(peer: &mut Peer) -> Result<Vec<Model>, String> {
             params["cursor"] = json!(cursor);
         }
         let page = peer.request("model/list", params, REQUEST)?;
-        for entry in page["data"].as_array().into_iter().flatten() {
+        let entries = page["data"].as_array().ok_or("Codex returned an invalid model list.")?;
+        for entry in entries {
             let id = entry["model"].as_str().or(entry["id"].as_str());
             let Some(id) = id.filter(|id| is_valid_model_id(id)) else {
                 continue;
@@ -433,9 +443,15 @@ fn chatgpt_models(peer: &mut Peer) -> Result<Vec<Model>, String> {
             if entry["hidden"] == true || models.iter().any(|m| m.id == id) {
                 continue;
             }
+            let label = text(&entry["displayName"], 120).unwrap_or_else(|| id.into());
+            // Codex's picker presents the GPT-6.2 family with a space before the tier.
+            let label = match label.strip_prefix("GPT-6.2-") {
+                Some(tier) => format!("GPT-6.2 {tier}"),
+                None => label,
+            };
             models.push(Model {
                 id: id.into(),
-                label: text(&entry["displayName"], 120).unwrap_or_else(|| id.into()),
+                label,
                 efforts: entry["supportedReasoningEfforts"]
                     .as_array()
                     .into_iter()
@@ -447,13 +463,16 @@ fn chatgpt_models(peer: &mut Peer) -> Result<Vec<Model>, String> {
                 default_effort: text(&entry["defaultReasoningEffort"], 16),
             });
         }
-        cursor = text(&page["nextCursor"], 500).filter(|c| !seen.contains(c));
-        let Some(next) = cursor.clone() else {
-            break;
-        };
+        if page["nextCursor"].is_null() {
+            return if models.is_empty() { Err("Codex returned no usable models.".into()) } else { Ok(models) };
+        }
+        let next = text(&page["nextCursor"], 500)
+            .filter(|c| !seen.contains(c))
+            .ok_or("Codex returned an invalid model list cursor.")?;
+        cursor = Some(next.clone());
         seen.push(next);
     }
-    Ok(models)
+    Err("Codex returned too many model list pages.".into())
 }
 /// `None` once the login finished; otherwise why it didn't.
 fn wait_for_login(
@@ -1095,6 +1114,68 @@ for line in sys.stdin:
     elif i is not None:
         print(json.dumps({'id': i, 'result': {}}), flush=True)
 "#;
+    #[test]
+    fn chatgpt_discovery_keeps_the_installed_codex_catalog_across_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let fake = FakeClaude::new();
+        let codex = fake.0.join("codex");
+        let script = r#"#!/usr/bin/python3
+import json, os, sys
+for line in sys.stdin:
+    r = json.loads(line)
+    m, i = r.get('method'), r.get('id')
+    if i is None:
+        continue
+    answer = {'id': i, 'result': {}}
+    if m == 'account/read':
+        answer['result'] = {'account': {'type': 'chatgpt'}}
+    elif m == 'model/list':
+        mode = os.environ.get('DISCOVERY')
+        if mode == 'error':
+            del answer['result']
+            answer['error'] = {'code': -32601, 'message': 'no models'}
+        elif mode != 'malformed':
+            answer['result'] = {'data': [] if mode == 'empty' else [
+                {'model': 'gpt-6.2-sol', 'displayName': 'GPT-6.2-Sol', 'isDefault': True,
+                 'supportedReasoningEfforts': [{'reasoningEffort': 'low'}],
+                 'defaultReasoningEffort': 'low'},
+                {'model': 'gpt-6.2-astra', 'displayName': 'GPT-6.2-Astra', 'isDefault': False},
+                {'model': 'gpt-6.1-terra', 'displayName': 'GPT-6.1 Terra', 'isDefault': False}
+            ]}
+    print(json.dumps(answer), flush=True)
+"#;
+        std::fs::write(&codex, script).unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut accounts = Accounts::new(
+            Environment {
+                profile: fake.0.join("profile"),
+                vars: [("CODEX_BINARY".into(), codex.display().to_string())].into(),
+                ..Default::default()
+            },
+            Arc::new(|_| panic!("a refresh never opens a browser")),
+            Arc::new(|| {}),
+        );
+        let provider = Provider::Chatgpt;
+        let cancel = AtomicBool::default();
+        assert_eq!(accounts.run(provider, Job::Refresh, &cancel).state, State::Connected);
+        let good = accounts.models(provider);
+        assert_eq!(
+            good.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra"]
+        );
+        assert!(good[0].default);
+        assert_eq!(good[0].label, "GPT-6.2 Sol");
+        assert_eq!(good[0].efforts, ["low"]);
+        for mode in ["error", "empty", "malformed"] {
+            Arc::get_mut(&mut accounts)
+                .unwrap()
+                .environment
+                .vars
+                .insert("DISCOVERY".into(), mode.into());
+            assert_eq!(accounts.run(provider, Job::Refresh, &cancel).state, State::Connected);
+            assert_eq!(accounts.models(provider), good, "{mode}");
+        }
+    }
     #[test]
     fn a_sign_in_during_a_refresh_runs_after_it_and_a_missing_model_list_still_connects() {
         use std::os::unix::fs::PermissionsExt;

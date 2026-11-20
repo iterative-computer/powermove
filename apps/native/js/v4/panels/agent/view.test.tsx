@@ -268,8 +268,8 @@ test("provider and model share one menu; effort and access have their own; picks
   }
   // One place for each: the model menu has no effort rows.
   expect([...new Set(asked[0]!.map((o) => o.category))]).toEqual([
-    "Provider",
-    "Model",
+    "ChatGPT",
+    "Claude",
   ]);
   expect(asked[2]!.map((o) => [o.label, o.checked])).toEqual([
     ["Low", false],
@@ -346,7 +346,7 @@ test("the model picker lists only real models and names the one that runs", asyn
   expect(byId(root, "agent-model").props.label).toBe("Model, GPT-6.1-Sol");
   await root.drive(byId(root, "agent-model").id, "click");
   await Promise.resolve();
-  const models = asked[0]!.filter((o) => o.category === "Model");
+  const models = asked[0]!.filter((o) => o.category === "ChatGPT");
   expect(models.map((o) => [o.label, o.checked])).toEqual([
     ["GPT-6.1-Sol", true],
     ["GPT-6-Astra", false],
@@ -359,7 +359,7 @@ test("the model picker lists only real models and names the one that runs", asyn
   expect(byId(root, "agent-model").props.label).toBe("Model, ChatGPT");
   await root.drive(byId(root, "agent-model").id, "click");
   await Promise.resolve();
-  expect(asked[1]!.filter((o) => o.category === "Model")).toEqual([]);
+  expect(asked[1]!.filter((o) => o.category === "ChatGPT")).toEqual([]);
   expect(asked.flat().some((o) => /^Default/.test(o.label))).toBe(false);
   root.dispose();
 });
@@ -388,12 +388,8 @@ test("a provider pick keeps the model menu open and lists that provider's models
   await Promise.resolve();
   // Provider rows keep the menu up; model rows close it.
   const first = requests[0]!.options;
-  expect(
-    first.filter((o) => o.category === "Provider").every((o) => o.stays),
-  ).toBe(true);
-  expect(first.filter((o) => o.category === "Model").some((o) => o.stays)).toBe(
-    false,
-  );
+  expect(first.find((o) => o.value === "provider:claude")?.stays).toBe(true);
+  expect(first.find((o) => o.value === "model:gpt-6")?.stays).toBeUndefined();
   expect(actions).toEqual([{ type: "setProvider", provider: "claude" }]);
   // The switch publishes Claude's models: they go to the same open menu,
   // its default ticked, and a model pick there runs.
@@ -410,7 +406,7 @@ test("a provider pick keeps the model menu open and lists that provider's models
   expect(requests[1]!.update).toBe(true);
   expect(
     requests[1]!.options
-      .filter((o) => o.category === "Model")
+      .filter((o) => o.category === "Claude")
       .map((o) => [o.label, o.checked]),
   ).toEqual([
     ["Opus 5.5", true],
@@ -451,7 +447,7 @@ test("Claude discovery updates the already-open picker without reopening it", as
   await root.drive(byId(root, "agent-model").id, "click");
   expect(
     requests[0]!.options
-      .filter((o) => o.category === "Model")
+      .filter((o) => o.category === "Claude")
       .map((o) => [o.label, o.informational]),
   ).toEqual([
     ["Opus 5.5", undefined],
@@ -483,7 +479,7 @@ test("Claude discovery updates the already-open picker without reopening it", as
   expect(requests[3]!.refresh).toBe(true);
   expect(
     requests[3]!.options
-      .filter((o) => o.category === "Model")
+      .filter((o) => o.category === "Claude")
       .map((o) => [o.label, o.checked]),
   ).toEqual([
     ["Opus 5.5", true],
@@ -505,6 +501,65 @@ test("Claude discovery updates the already-open picker without reopening it", as
   expect(actions).toEqual([
     { type: "setModel", model: "sonnet", effort: p.snapshot.settings.effort },
   ]);
+  root.dispose();
+});
+test("composer pickers use the pressed anchor and enable search only for a long model list", async () => {
+  const { root } = mount();
+  const p = fixture();
+  const requests: Parameters<Menu>[0][] = [];
+  const menu: Menu = async (request) => {
+    requests.push(request);
+    return null;
+  };
+  const render = () => root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
+  await render();
+  for (const id of ["agent-model", "agent-effort", "agent-access"]) {
+    const button = byId(root, id);
+    await root.drive(button.id, "click");
+    expect(requests.at(-1)).toMatchObject({ anchor: button.id, search: false });
+    await Promise.resolve();
+  }
+  for (const length of [12, 13]) {
+    p.snapshot.catalog.models = Array.from({ length }, (_, i) => [`model-${i}`, `Model ${i}`]);
+    p.snapshot.settings.model = "model-0";
+    await render();
+    await root.drive(byId(root, "agent-model").id, "click");
+    expect(requests.at(-1)).toMatchObject({ search: length > 12, placeholder: "Search models" });
+  }
+  root.dispose();
+});
+test("model menu groups discovered choices by provider and switches directly to a model", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.settings.model = "gpt-6.2-sol";
+  p.snapshot.catalog.models = [["gpt-6.2-sol", "GPT-6.2 Sol"]];
+  p.snapshot.catalog.providers = [
+    ["chatgpt", "ChatGPT"], ["claude", "Claude"], ["compatible", "Qwen3.5"],
+  ];
+  p.native.modelGroups = {
+    chatgpt: [["gpt-6.2-sol", "GPT-6.2 Sol", true]],
+    claude: [["opus", "Opus 5.5", true], ["sonnet", "Sonnet 5.5", false]],
+    compatible: [["Qwen3.5", "Qwen3.5", true]],
+  };
+  const actions: Action[] = [];
+  const requests: Parameters<Menu>[0][] = [];
+  await root.render(<AgentView publication={p} send={(a) => actions.push(a)} menu={async (request) => {
+    requests.push(request);
+    return "other:claude:sonnet";
+  }} />);
+  const model = byId(root, "agent-model");
+  await root.drive(model.id, "keydown", { key: "Enter" });
+  expect(requests[0]!.options.map(({ label, category, checked, default: isDefault }) =>
+    [category, label, checked, isDefault ?? false],
+  )).toEqual([
+    ["ChatGPT", "GPT-6.2 Sol", true, true],
+    ["Claude", "Opus 5.5", false, true],
+    ["Claude", "Sonnet 5.5", false, false],
+    ["Qwen3.5", "Qwen3.5", false, true],
+  ]);
+  expect(actions).toEqual([{ type: "setProvider", provider: "claude", model: "sonnet" }]);
+  await root.drive(model.id, "keydown", { key: " " });
+  expect(requests).toHaveLength(2);
   root.dispose();
 });
 test("suggestions read as buttons: a raised fill with a hairline edge, the label in body text", async () => {
@@ -1221,7 +1276,7 @@ test("borderless attachment tiles expose remove on hover and keep the armed wash
   root.dispose();
 });
 
-test("kit pop-up triggers stay pressed and open while their searchable menu is up", async () => {
+test("composer pop-up triggers stay pressed and open while their menu is up", async () => {
   const { root } = mount();
   const p = fixture();
   p.snapshot.catalog.models = [["opus", "Opus 5.5 (1M context)"]];
@@ -1236,10 +1291,11 @@ test("kit pop-up triggers stay pressed and open while their searchable menu is u
   };
   await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
   const model = byId(root, "agent-model");
-  expect(model.props["data-pm-component"]).toBe("pop-up-button");
+  expect(model.props.metadata).toEqual({ menuAnchor: true });
   expect(model.props.role).toBe("button");
   expect(model.props.tabIndex).toBe(0);
-  expect((model.props.metadata as any).pmKit.display).toBe("Opus 5.5");
+  expect(model.props.title).toBe("Model");
+  expect(root.inspect().nodes.some((n) => n.text === "Opus 5.5")).toBe(true);
   await root.drive(model.id, "click");
   expect(byId(root, "agent-model").props.open).toBe(true);
   expect(byId(root, "agent-model").props["aria-expanded"]).toBe(true);
@@ -1251,6 +1307,7 @@ test("kit pop-up triggers stay pressed and open while their searchable menu is u
   ).toMatchObject({ label: "Opus 5.5", detail: "1M context" });
   close(null);
   for (let i = 0; i < 4; i++) await Promise.resolve();
+  await root.flush();
   expect(byId(root, "agent-model").props.open).toBe(false);
   p.snapshot.runId = "busy";
   await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);

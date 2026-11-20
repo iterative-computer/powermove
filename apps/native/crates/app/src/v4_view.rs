@@ -1813,9 +1813,9 @@ impl SurfaceView {
     pub fn semantic_ids(&self) -> Vec<String> {
         self.prepared.semantics.keys().cloned().collect()
     }
-    /// Development builds: `event` on the node whose semantic id is, or ends
-    /// with, `semantic` (`--open reviewPanel:settings:select:nav.general`).
-    #[cfg(debug_assertions)]
+    /// Review builds and capture tests: `event` on the node whose semantic id
+    /// is, or ends with, `semantic` (`--open reviewPanel:settings:select:nav.general`).
+    #[cfg(any(debug_assertions, test))]
     pub fn review_send(&mut self, semantic: &str, event: &str, cx: &mut Context<Self>) {
         // `semantic=<json>` carries a value (a pop-up's choice, a switch's state).
         // A link carries spaces and quotes percent-encoded (`="Make%20it%20so"`).
@@ -3692,6 +3692,42 @@ impl SurfaceView {
         }
         let mut element = div().id(("v4", id));
         *element.style() = node.style.clone();
+        if self.publication.surface.node(id).and_then(|node| node.props.get("metadata"))
+            .is_some_and(|m| m["wordEllipsis"] == true)
+        {
+            let label: SharedString = self.shown_text(id, 2).into();
+            let t = &self.table.tokens;
+            let mut text = window.text_style();
+            text.font_family = pm_design::TEXT_FONT.into();
+            text.refine(&node.style.text);
+            let font_size = text.font_size.to_pixels(window.rem_size());
+            let leading = font_size * t.typography.reading_leading;
+            let line = window.text_system().shape_line(label.clone(), font_size, &[text.to_run(label.len())]);
+            return Err(element.w(line.width).h(leading).min_w(px(0.))
+                .child(canvas(
+                    move |bounds, window, _| {
+                        if line.width <= bounds.size.width {
+                            return Some(line.clone());
+                        }
+                        let shape = |s: SharedString| {
+                            let run = text.to_run(s.len());
+                            window.text_system().shape_line(s, font_size, &[run])
+                        };
+                        // Remove complete trailing words; keep the full label in the button's AX name.
+                        label.rmatch_indices(char::is_whitespace)
+                            .map(|(at, _)| format!("{}…", label[..at].trim_end()).into())
+                            .chain(std::iter::once(SharedString::from("…")))
+                            .map(shape)
+                            .find(|line| line.width <= bounds.size.width)
+                    },
+                    move |bounds, line, window, cx| {
+                        if let Some(line) = line {
+                            let _ = line.paint(bounds.origin, leading, gpui::TextAlign::Left, None, window, cx);
+                        }
+                    },
+                ).absolute().inset_0())
+                .into_any_element());
+        }
         if let Some(build) = &self.panel_build {
             if id == 0 || node.parent == Some(0) {
                 element.style().background = None;
@@ -5093,7 +5129,11 @@ impl SurfaceView {
                 }
             }, |_, _, _, _| {}).absolute().inset_0());
         }
-        if self.prepared.anchors.contains(&node.id) || self.quote_owner(node.id) == Some(node.id) {
+        if self.prepared.anchors.contains(&node.id)
+            || self.quote_owner(node.id) == Some(node.id)
+            || self.publication.surface.node(node.id).and_then(|node| node.props.get("metadata"))
+                .is_some_and(|m| m["menuAnchor"] == true)
+        {
             let (id, anchors) = (node.id, self.anchors.clone());
             element = element.child(
                 canvas(
@@ -5992,6 +6032,11 @@ impl SurfaceView {
         let node = self.prepared.node(id)?;
         let shown = self.shown_text(id, 3);
         let props = self.publication.surface.node(id).map(|n| &n.props);
+        if props.is_some_and(|p| p.get("metadata").is_some_and(|m| m["menuAnchor"] == true)) {
+            return props
+                .filter(|p| p.get("aria-expanded").and_then(Value::as_bool) != Some(true))
+                .and_then(|_| node.title.clone());
+        }
         let menu_value = props.is_some_and(|p| p.contains_key("aria-haspopup"))
             && (!shown.trim().is_empty()
                 || props.is_some_and(|p| p.get("value").is_some_and(|v| !v.is_null())));

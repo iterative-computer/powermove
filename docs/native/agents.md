@@ -147,11 +147,11 @@ No Electron code is pruned: its consumers still exist.
   `Agent State/<safe-project>/threads/<thread>/session-v2[-provider]-<authority>.txt`
   spelling (ChatGPT omits the provider suffix). Replaced handles are archived.
 - `runtime` installs reviewed exact npm packages, never a mutable `latest` tag.
-  `bundled_pin` uses the public frozen `bun.lock`: Codex 0.159.1 and Claude
+  `bundled_pin` uses reviewed public npm archives: Codex 0.169.0 and Claude
   2.1.280, both macOS architectures. The HTTPS adapter uses system curl, disables
   curl configuration, supplies no auth and streams downloads. SHA-512 SRI,
   metadata/version and tar header/path checks precede native executable probing.
-  The native vendor tree retains code-mode/voice helpers, bundled shell, search
+  The native vendor tree retains code-mode/voice helpers, the search
   executable and shared libraries; no npm, Node launcher or Chromium ships.
   A synced version tree is activated through an atomic symlink; discovery reads
   its embedded receipt, surviving a crash before legacy metadata publication.
@@ -165,7 +165,7 @@ kernel actor and Rust MCP host; provider traffic grants no direct document lease
 
 ## Protocol conformance evidence
 
-The wire client builds JSON at its boundary for the shipped subset of the pinned
+The wire client builds JSON at its boundary for the subset captured from the
 Codex 0.159.1 App Server protocol: for example, the tag omits text_elements on
 text inputs. That omission is replayed as shipped; no provider protocol is
 guessed from a newer SDK.

@@ -808,6 +808,20 @@ impl Backend {
             .agent_link
             .accounts()
             .is_some_and(|a| a.finding_models(provider));
+        let model_groups: BTreeMap<_, Vec<_>> = [
+            pm_agents::Provider::Chatgpt,
+            pm_agents::Provider::Claude,
+            pm_agents::Provider::Compatible,
+        ]
+        .into_iter()
+        .map(|provider| {
+            let models = self.native.agent_link.model_choices(provider);
+            (
+                provider.name(),
+                models.into_iter().map(|m| (m.id, m.label, m.default)).collect(),
+            )
+        })
+        .collect();
         let needs_answer = session.needs_answer();
         // A docked panel fills its dock under the dock's own title; the
         // popover has a fixed width, its own title and the floating ground.
@@ -817,7 +831,7 @@ impl Backend {
             "docked"
         };
         Ok(
-            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"signedOut":signed_out,"findingModels":finding_models,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
+            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"signedOut":signed_out,"findingModels":finding_models,"modelGroups":model_groups,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
         )
     }
     pub(crate) fn settings_snapshot(&mut self) -> Result<Value, String> {

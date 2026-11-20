@@ -73,11 +73,6 @@ const Field = UI.TextField as (
     binding?: string;
   },
 ) => ReturnType<typeof UI.TextField>;
-const PopUp = UI.PopUpButton as (
-  props: Omit<Parameters<typeof UI.PopUpButton>[0], "binding"> & {
-    binding?: string;
-  },
-) => ReturnType<typeof UI.PopUpButton>;
 type Send = (action: Action) => void;
 type Style = Record<string, string | number | null | { token: string }>;
 type Obj = Record<string, Json>;
@@ -775,6 +770,7 @@ export interface MenuOption {
   value: string;
   checked?: boolean;
   detail?: string;
+  default?: boolean;
   /** The section it is listed under. */
   category?: string;
   /** Choosing it keeps the menu open (a provider: its models follow). */
@@ -782,12 +778,15 @@ export interface MenuOption {
   /** Quiet status text, not a choice. */
   informational?: boolean;
 }
-/** Opens the field menu under `anchor` (a node id); answers the chosen
+/** Opens the field menu at `anchor` (a node id); answers the chosen
  * value, or null when it closed unchosen. */
 export type Menu = (request: {
   anchor: number;
   placeholder: string;
   options: MenuOption[];
+  /** Composer pop-ups track their button rather than the legacy field menu. */
+  picker?: "model" | "effort" | "access";
+  search?: boolean;
   /** New rows for the menu still open after a row that stays was chosen. */
   update?: boolean;
   /** Change the open model menu's rows without replacing its pending choice. */
@@ -860,7 +859,8 @@ function Picker({
   text,
   disabled,
   opened,
-  fixed,
+  icon,
+  title,
   open,
 }: {
   id: string;
@@ -868,38 +868,54 @@ function Picker({
   text: string;
   disabled: boolean;
   opened: boolean;
-  fixed?: boolean;
+  icon?: string;
+  title: string;
   open: (anchor: number) => void;
 }) {
+  const ink = t(disabled ? "colors.muted" : icon ? "colors.secondary" : "colors.text");
   return (
-    <PopUp
+    <button
       id={id}
       role="button"
       tabIndex={0}
       label={label}
-      display={text}
-      value={text}
-      options={[{ v: text, label: text }]}
+      title={title}
       disabled={disabled}
       open={opened}
       aria-haspopup="menu"
       aria-expanded={opened}
-      metadata={{ manualMenu: true }}
+      metadata={{ menuAnchor: true }}
+      preventDefault={{ keydown: ["Enter", " "] }}
       onClick={(e) => {
         if (!disabled) open(Number(e.currentTarget));
       }}
+      onKeyDown={(e) => {
+        if (disabled || opened || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+        if (e.key === "Enter" || e.key === " ") open(Number(e.currentTarget));
+      }}
       style={{
         ...target,
+        ...row,
+        ...shrink,
+        gap: t("metrics.pill_inset"),
         height: t("metrics.control"),
-        ...(id === "agent-model"
-          ? { ...shrink, minWidth: t("metrics.agent_model_min") }
-          : { flexShrink: 0 }),
-        ...(fixed ? { width: t("metrics.agent_effort_width") } : {}),
-        background: t(opened ? "colors.selected_fill" : "colors.fill"),
+        paddingLeft: t("metrics.gap"),
+        paddingRight: t("metrics.gap"),
+        ...(opened || !icon ? { background: t(opened ? "colors.selected_fill" : "colors.raised") } : {}),
         borderRadius: t("metrics.control_radius"),
-        color: t("colors.text"),
+        color: ink,
       }}
-    />
+    >
+      {icon && <div metadata={{ symbol: icon }} style={{
+        flexShrink: 0, symbolSize: t("metrics.symbol_inline"), color: t("colors.muted"),
+      }} />}
+      <text metadata={{ wordEllipsis: true }} style={{ ...quiet, ...shrink, color: ink, whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+        {text}
+      </text>
+      <div metadata={{ symbol: "chevron.up.chevron.down" }} style={{
+        flexShrink: 0, symbolSize: t("metrics.symbol_inline"), color: t("colors.muted"),
+      }} />
+    </button>
   );
 }
 function Header({
@@ -2568,42 +2584,36 @@ function Composer({
   // menu; it closes on a model, Escape or a click outside.
   const latest = useRef(s);
   latest.current = s;
-  const findingModels = useRef(n.findingModels);
-  findingModels.current = n.findingModels;
+  const native = useRef(n);
+  native.current = n;
   const awaiting = useRef<{
     anchor: number;
     provider: string;
     epoch: number;
   } | null>(null);
-  const modelRows = (s: Snapshot): MenuOption[] => [
-    ...pairs(s.catalog.providers, s.settings.provider).map(({ v, label }) => ({
-      label,
-      value: `provider:${v}`,
-      checked: v === s.settings.provider,
-      category: "Provider",
-      stays: true,
-    })),
-    ...pairs(s.catalog.models, s.settings.model).map(({ v, label }) => ({
-      label: label.replace(/\s*\([^)]*context[^)]*\)/i, ""),
-      detail: label.match(/\(([^)]*context[^)]*)\)/i)?.[1],
-      value: `model:${v}`,
-      checked: v === s.settings.model,
-      category: "Model",
-    })),
-    ...(s.settings.provider === "claude" &&
-    findingModels.current &&
-    s.settings.model &&
-    s.catalog.models.every(([id]) => id === s.settings.model)
-      ? [
-          {
-            label: "Finding models…",
-            value: "",
-            category: "Model",
-            informational: true,
-          },
-        ]
-      : []),
-  ];
+  const modelRows = (s: Snapshot): MenuOption[] =>
+    s.catalog.providers.flatMap(([provider, category]) => {
+      const active = provider === s.settings.provider;
+      const group = native.current.modelGroups?.[provider];
+      const models = active
+        ? pairs(s.catalog.models, s.settings.model)
+        : (group ?? []).map(([v, label]) => ({ v, label }));
+      const defaults = new Set(group?.filter(([, , on]) => on).map(([id]) => id));
+      const rows: MenuOption[] = models.map(({ v, label }) => ({
+        label: label.replace(/\s*\([^)]*context[^)]*\)/i, ""),
+        detail: label.match(/\(([^)]*context[^)]*)\)/i)?.[1],
+        value: active ? `model:${v}` : `other:${provider}:${v}`,
+        checked: active && v === s.settings.model,
+        default: defaults.has(v) || undefined,
+        category,
+      }));
+      if (!rows.length && !active)
+        rows.push({ label: `Use ${category}`, category, value: `provider:${provider}`, stays: true });
+      if (active && native.current.findingModels && !s.catalog.models.some(([id]) => id !== s.settings.model))
+        rows.push({ label: "Finding models…", category, value: "", informational: true });
+      return rows;
+    });
+  const modelSearch = (s: Snapshot) => s.catalog.models.length > 12;
   const modelMenu = (
     anchor: number,
     update: boolean,
@@ -2611,6 +2621,8 @@ function Composer({
   ) =>
     void requestModelMenu({
       anchor,
+      picker: "model",
+      search: modelSearch(latest.current),
       placeholder: "Search models",
       options: modelRows(latest.current),
       ...(update ? { update } : {}),
@@ -2649,6 +2661,10 @@ function Composer({
           model: value,
           effort: now.settings.effort,
         });
+      } else if (kind === "other") {
+        const colon = value.indexOf(":");
+        setOpenPicker(null);
+        send({ type: "setProvider", provider: value.slice(0, colon), model: value.slice(colon + 1) });
       }
     });
   const openModels = (anchor: number) => {
@@ -2672,6 +2688,8 @@ function Composer({
     open.rows = rows;
     void menu?.({
       anchor: open.anchor,
+      picker: "model",
+      search: modelSearch(s),
       placeholder: "Search models",
       options,
       update: true,
@@ -2683,6 +2701,7 @@ function Composer({
     s.catalog.providers,
     s.catalog.models,
     n.findingModels,
+    n.modelGroups,
   ]);
   const sendLabel = working ? "Send direction" : "Send";
   // The shortcuts menu hangs from the composer, once per draft that asks
@@ -2964,12 +2983,9 @@ function Composer({
           paddingRight: t("metrics.gap"),
         }}
       >
-        {/* The original's three run choices and its access mode, each a
-            trigger for the window's searchable menu. */}
-        {/* Provider and model in one menu, the model's reasoning effort in
-            its own beside it: two siblings, each naming what runs. */}
         <Picker
           id="agent-model"
+          title="Model"
           label={`Model, ${modelName}`}
           text={modelName.replace(/\s*\([^)]*context[^)]*\)/i, "")}
           disabled={!menu || choicesLocked}
@@ -2979,9 +2995,10 @@ function Composer({
         {efforts.length > 0 && (
           <Picker
             id="agent-effort"
+            title="Reasoning effort"
             label={`Reasoning effort, ${effortName}`}
             text={effortName}
-            fixed
+            icon="brain"
             disabled={!menu || choicesLocked}
             opened={openPicker === "effort"}
             open={(anchor) => {
@@ -2990,12 +3007,13 @@ function Composer({
               setOpenPicker("effort");
               void menu?.({
                 anchor,
-                placeholder: "Search",
+                picker: "effort",
+                search: false,
+                placeholder: "",
                 options: efforts.map((value) => ({
                   label: effortLabel(value),
                   value,
                   checked: value === s.settings.effort,
-                  category: "Reasoning Effort",
                 })),
               }).then((choice) => {
                 if (menuEpoch.current !== epoch) return;
@@ -3010,11 +3028,12 @@ function Composer({
             }}
           />
         )}
-        <div style={{ flexGrow: 1 }} />
         <Picker
           id="agent-access"
-          label={`Agent access, ${ACCESS[s.settings.access].label}`}
+          title="Approvals"
+          label={`Approvals, ${ACCESS[s.settings.access].label}`}
           text={ACCESS[s.settings.access].label}
+          icon="checkmark.shield"
           disabled={!menu || working || s.composerDisabled}
           opened={openPicker === "access"}
           open={(anchor) => {
@@ -3023,13 +3042,14 @@ function Composer({
             setOpenPicker("access");
             void menu?.({
               anchor,
-              placeholder: "Search",
+              picker: "access",
+              search: false,
+              placeholder: "",
               options: (Object.keys(ACCESS) as Access[]).map((value) => ({
                 label: ACCESS[value].label,
                 detail: ACCESS[value].detail,
                 value,
                 checked: value === s.settings.access,
-                category: "How should agent actions be approved?",
               })),
             }).then((choice) => {
               if (menuEpoch.current !== epoch) return;

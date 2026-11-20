@@ -68,7 +68,8 @@ fn fake(provider: Runtime, name: &str, kind: u8) -> (Pin, Fake) {
     (p, f)
 }
 #[test]
-fn pinned_package_selection_matches_bundled_public_lock() {
+fn pinned_package_selection_matches_reviewed_archives() {
+    let layout: Value = serde_json::from_str(include_str!("../fixtures/runtime-layout.json")).unwrap();
     for provider in [Runtime::Codex, Runtime::Claude] {
         for arch in [Arch::Arm64, Arch::X64] {
             let p = runtime::bundled_pin(provider, arch);
@@ -78,6 +79,13 @@ fn pinned_package_selection_matches_bundled_public_lock() {
                     .starts_with("https://registry.npmjs.org/")
             );
             assert!(!p.registry_url().unwrap().contains("latest"));
+            let url = p.registry_url().unwrap().replace("%2F", "/");
+            assert!(layout["layouts"].as_array().unwrap().iter().any(|entry| {
+                let Some((package, version)) = entry["package"].as_str().and_then(|s| s.rsplit_once('@')) else {
+                    return false;
+                };
+                url.ends_with(&format!("/{package}/{version}")) && entry["integrity"] == p.integrity
+            }), "{url} must have reviewed archive evidence");
             assert_eq!(
                 STANDARD
                     .decode(p.integrity.strip_prefix("sha512-").unwrap())

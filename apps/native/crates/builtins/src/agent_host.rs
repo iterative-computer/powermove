@@ -222,6 +222,14 @@ impl AgentLink {
                 .collect()
         })
     }
+    pub fn model_choices(&self, provider: Provider) -> Vec<pm_agents::account::Model> {
+        if provider == Provider::Compatible {
+            self.compatible_models()
+        } else {
+            self.accounts()
+                .map_or_else(Vec::new, |accounts| accounts.models(provider))
+        }
+    }
     /// Providers this install can run, and the choices of the given one.
     pub fn catalog(&self, provider: Provider) -> Catalog {
         let environment = self.environment.shared();
@@ -237,16 +245,10 @@ impl AgentLink {
             }
         }
         drop(environment);
-        let compatible = self.compatible_models();
-        if !compatible.is_empty() || provider == Provider::Compatible {
-            providers.push(("compatible".into(), "Connected model".into()));
+        if let Some(saved) = self.compatible() {
+            providers.push(("compatible".into(), saved.model));
         }
-        let listed = if provider == Provider::Compatible {
-            compatible
-        } else {
-            self.accounts()
-                .map_or_else(Vec::new, |accounts| accounts.models(provider))
-        };
+        let listed = self.model_choices(provider);
         // Only real models: no choice reads as the provider's default model.
         let mut models = vec![];
         let mut resolves = vec![];

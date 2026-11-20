@@ -54,7 +54,7 @@ for name in codex claude; do
       || cp -L "$exe" "$app/Contents/Resources/$name/bin/$name"
   else
     echo "warning: no $name on PATH; the Agent panel will say its runtime is missing." >&2
-    echo "  install it, or set $(echo "$name" | tr a-z A-Z)_BINARY to an executable (release pins: Codex 0.159.1, Claude 2.1.280)" >&2
+    echo "  install it, or set $(echo "$name" | tr a-z A-Z)_BINARY to an executable (release pins: Codex 0.169.0, Claude 2.1.280)" >&2
   fi
 done
 # Review launches can hand the app environment, which LaunchServices does not
