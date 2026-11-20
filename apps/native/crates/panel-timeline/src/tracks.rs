@@ -222,7 +222,12 @@ fn pack(
     index: &TimelineIndex,
     held: &HashMap<String, crate::reveal::Held>,
 ) -> usize {
-    let holds: HashMap<usize, usize> = ids
+    // A clip shown before keeps its lane while its time is unchanged (an
+    // edited one asks for its stored track); a new one asks for its stored
+    // track. Either goes no lower than the stack allows (`pack_fresh`): the
+    // higher track is drawn on top, so the timeline never contradicts the
+    // picture (PM-512).
+    let wanted: HashMap<usize, usize> = ids
         .iter()
         .filter_map(|&i| {
             let u = &units[i];
@@ -231,63 +236,17 @@ fn pack(
                 .map(|h| (i, h.lane))
         })
         .collect();
-    if holds.is_empty() {
-        return pack_fresh(ids, units, index);
-    }
-    // Held clips first, each on its lane when free there (an edited clip
-    // keeps its lane only if its time is unchanged); then every other one
-    // above whatever it overlaps (a new clip, or one an edit moved).
-    let overlap = |a: &Unit, b: (f64, f64)| a.held().0 < b.1 - 1e-5 && b.0 < a.held().1 - 1e-5;
-    // Each placed unit: its held time, its lanes, and its place in the stack.
-    let mut placed: Vec<(f64, f64, usize, usize, usize)> = Vec::new();
-    let mut rest = Vec::new();
-    for &i in ids.iter().rev() {
-        let u = &units[i];
-        match holds.get(&i).copied() {
-            Some(lane)
-                if !placed.iter().any(|&(f, e, lo, hi, _)| {
-                    overlap(u, (f, e)) && lane < hi && lo < lane + u.height
-                }) =>
-            {
-                placed.push((u.held().0, u.held().1, lane, lane + u.height, i));
-                units[i].base = lane;
-            }
-            _ => rest.push(i),
-        }
-    }
-    for i in rest {
-        let u = &units[i];
-        // A clip getting its first lane (a new layer) goes above every clip
-        // it overlaps that is under it in the stack: the higher track is drawn
-        // on top, so the timeline never contradicts the picture. One an edit
-        // moved keeps its track where it can (nothing else re-packs).
-        let fresh = !held.contains_key(&index.layers[i].id);
-        let floor = placed
-            .iter()
-            .filter(|&&(f, e, _, _, at)| fresh && at > i && overlap(u, (f, e)))
-            .map(|&(_, _, _, hi, _)| hi)
-            .max()
-            .unwrap_or(0);
-        let mut base = floor.max(index.layers[i].preferred_track);
-        // Then the lowest lane from there free over its time.
-        loop {
-            let top = base + u.height;
-            match placed
-                .iter()
-                .filter(|&&(f, e, lo, hi, _)| overlap(u, (f, e)) && base < hi && lo < top)
-                .map(|&(_, _, _, hi, _)| hi)
-                .max()
-            {
-                Some(hi) => base = hi,
-                None => break,
-            }
-        }
-        placed.push((u.held().0, u.held().1, base, base + u.height, i));
-        units[i].base = base;
-    }
-    placed.iter().map(|&(_, _, _, hi, _)| hi).max().unwrap_or(0)
+    pack_fresh(ids, units, index, &wanted)
 }
-fn pack_fresh(ids: &[usize], units: &mut [Unit], index: &TimelineIndex) -> usize {
+/// Packs `ids` from the bottom of the stack up: each clip on its wanted lane
+/// (`wanted`, else its stored track), raised above every clip under it in the
+/// stack that it overlaps.
+fn pack_fresh(
+    ids: &[usize],
+    units: &mut [Unit],
+    index: &TimelineIndex,
+    wanted: &HashMap<usize, usize>,
+) -> usize {
     let mut starts: Vec<_> = ids.iter().map(|i| Total(units[*i].held().0)).collect();
     starts.sort();
     starts.dedup();
@@ -299,7 +258,10 @@ fn pack_fresh(ids: &[usize], units: &mut [Unit], index: &TimelineIndex) -> usize
         let u = &units[*i];
         let mut end_at = starts.partition_point(|v| v.0 < end - 1e-5) + size;
         let mut first = size;
-        let mut base = index.layers[*i].preferred_track;
+        let mut base = wanted
+            .get(i)
+            .copied()
+            .unwrap_or(index.layers[*i].preferred_track);
         while first < end_at {
             if first % 2 == 1 {
                 if let Some((_, h)) = tree[first]
