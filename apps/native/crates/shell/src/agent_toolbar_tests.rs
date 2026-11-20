@@ -56,16 +56,25 @@ fn pm546_capture_coedit_chip_without_windows() {
                 ..Default::default()
             };
             for (state, status, hover) in [
-                ("running", running.clone(), false),
-                ("hover", running.clone(), true),
-                ("done-undo", AgentStatus::default(), false),
+                ("idle", None, false),
+                ("running", Some(running.clone()), false),
+                ("hover", Some(running.clone()), true),
+                (
+                    "paused",
+                    Some(AgentStatus {
+                        paused: true,
+                        ..running.clone()
+                    }),
+                    false,
+                ),
+                ("done-undo", Some(AgentStatus::default()), false),
                 (
                     "two-runs",
-                    AgentStatus {
+                    Some(AgentStatus {
                         progress: Some("Checking the newest edit in the timeline".into()),
                         additional_runs: 1,
                         ..running
-                    },
+                    }),
                     false,
                 ),
             ] {
@@ -73,53 +82,83 @@ fn pm546_capture_coedit_chip_without_windows() {
                 let draw = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
                     native_color(tokens.colors.panel).setFill();
                     NSRectFill(rect);
-                    let chip = NSRect::new(
-                        NSPoint::new(8., 8.),
-                        NSSize::new(COEDIT_CHIP_WIDTH, COEDIT_CHIP_HEIGHT),
-                    );
-                    native_color(tokens.colors.field).setFill();
                     let radius = tokens.metrics.capsule_radius as f64;
-                    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(chip, radius, radius)
-                        .fill();
                     let font = NSFont::systemFontOfSize(13.);
-                    let title = coedit_presence_title(&status, &font, TITLE_BUDGET);
-                    let text_y = chip.origin.y + (COEDIT_CHIP_HEIGHT - title.size().height) / 2.;
-                    title.drawAtPoint(NSPoint::new(
-                        chip.origin.x + 4. + TITLE_INSET + (TITLE_BUDGET - title.size().width) / 2.,
-                        text_y,
-                    ));
-                    presence_light(&status, 0., &tokens).drawInRect(NSRect::new(
-                        NSPoint::new(
-                            chip.origin.x + 4.,
-                            chip.origin.y + (COEDIT_CHIP_HEIGHT - COEDIT_LIGHT_SIZE) / 2.,
-                        ),
-                        NSSize::new(COEDIT_LIGHT_SIZE, COEDIT_LIGHT_SIZE),
-                    ));
-                    if hover {
-                        let color = native_color(tokens.colors.text);
+                    let bezel = |x, width, color: u32| {
+                        native_color(color).setFill();
+                        NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                            NSRect::new(
+                                NSPoint::new(x, 8.),
+                                NSSize::new(width, COEDIT_CHIP_HEIGHT),
+                            ),
+                            radius,
+                            radius,
+                        )
+                        .fill();
+                    };
+                    let draw_label = |label: &str, x, y, width, color: &NSColor| {
                         let attrs = NSDictionary::from_slices(
                             &[unsafe { NSFontAttributeName }, unsafe {
                                 NSForegroundColorAttributeName
                             }],
-                            &[&*font as &AnyObject, &*color as &AnyObject],
+                            &[&*font as &AnyObject, color as &AnyObject],
                         );
-                        for (glyph, x) in [("Ⅱ", 200.), ("■", 224.)] {
-                            let title = NSString::from_str(glyph);
-                            unsafe {
-                                let width = title.sizeWithAttributes(Some(&attrs)).width;
-                                title.drawAtPoint_withAttributes(
-                                    NSPoint::new(chip.origin.x + x + (22. - width) / 2., text_y),
-                                    Some(&attrs),
+                        let label = NSString::from_str(label);
+                        unsafe {
+                            let ink_width = label.sizeWithAttributes(Some(&attrs)).width;
+                            label.drawAtPoint_withAttributes(
+                                NSPoint::new(x + (width - ink_width) / 2., y),
+                                Some(&attrs),
+                            );
+                        }
+                    };
+                    if let Some(status) = &status {
+                        let x = 8.;
+                        bezel(x, COEDIT_CHIP_WIDTH, tokens.colors.field);
+                        let title = coedit_presence_title(status, &font, TITLE_BUDGET);
+                        let text_y = 8. + (COEDIT_CHIP_HEIGHT - title.size().height) / 2.;
+                        title.drawAtPoint(NSPoint::new(
+                            x + 4. + TITLE_INSET + (TITLE_BUDGET - title.size().width) / 2.,
+                            text_y,
+                        ));
+                        presence_light(status, 0., &tokens).drawInRect(NSRect::new(
+                            NSPoint::new(
+                                x + 4.,
+                                8. + (COEDIT_CHIP_HEIGHT - COEDIT_LIGHT_SIZE) / 2.,
+                            ),
+                            NSSize::new(COEDIT_LIGHT_SIZE, COEDIT_LIGHT_SIZE),
+                        ));
+                        if hover {
+                            for (glyph, offset) in [("Ⅱ", 200.), ("■", 224.)] {
+                                draw_label(
+                                    glyph,
+                                    x + offset,
+                                    text_y,
+                                    22.,
+                                    &NSColor::controlTextColor(),
                                 );
                             }
                         }
                     }
+                    bezel(266., 30., tokens.colors.field);
                     launcher_native::image(Tone::Idle, &tokens)
                         .drawInRect(NSRect::new(NSPoint::new(269., 8.), NSSize::new(24., 24.)));
+                    bezel(304., 68., tokens.colors.accent);
+                    let export_icon = NSRect::new(NSPoint::new(313., 12.), NSSize::new(13., 16.));
+                    let symbol = toolbar_symbol("square.and.arrow.up", "Export", &tokens);
+                    let tint = block2::RcBlock::new(move |rect: NSRect| -> objc2::runtime::Bool {
+                        symbol.drawInRect(rect);
+                        NSColor::whiteColor().set();
+                        NSRectFillUsingOperation(rect, NSCompositingOperation::SourceAtop);
+                        objc2::runtime::Bool::YES
+                    });
+                    NSImage::imageWithSize_flipped_drawingHandler(export_icon.size, false, &tint)
+                        .drawInRect(export_icon);
+                    draw_label("Export", 328., 12., 39., &NSColor::whiteColor());
                     objc2::runtime::Bool::YES
                 });
                 let image = NSImage::imageWithSize_flipped_drawingHandler(
-                    NSSize::new(302., 40.),
+                    NSSize::new(380., 40.),
                     false,
                     &draw,
                 );
