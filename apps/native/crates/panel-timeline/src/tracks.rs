@@ -476,6 +476,31 @@ pub fn relative_lanes(index: &TimelineIndex, reveal: &RevealState) -> Vec<(Strin
         .map(|l| (l.id, u32::try_from(l.track).unwrap_or(u32::MAX)))
         .collect()
 }
+/// The track for a new layer at the top of the stack over `from..end`: the
+/// lowest one above every clip of its area it overlaps, a new one when that
+/// is past the last (PM-512). The higher track is drawn on top, so it agrees
+/// with the picture.
+pub fn top_track(
+    index: &TimelineIndex,
+    reveal: &RevealState,
+    kind: &str,
+    from: f64,
+    end: f64,
+) -> usize {
+    let area = area(kind);
+    layout(index, reveal)
+        .items
+        .iter()
+        .filter(|i| {
+            i.area == area
+                && i.parent.is_none()
+                && i.from < end - 1e-5
+                && from < i.from + i.duration - 1e-5
+        })
+        .map(|i| i.lane + 1)
+        .max()
+        .unwrap_or(0)
+}
 
 /// `command` as the Tracks timeline makes it: wrapped with the lanes it
 /// shows, so the kernel keeps every clip on its track.

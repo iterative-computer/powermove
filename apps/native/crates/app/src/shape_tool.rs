@@ -130,7 +130,7 @@ pub fn plan(published: &Published, shape: ShapeBox, time: f64, variant: &str) ->
         visible: None,
         shy: None,
         collapsed: None,
-        track: None,
+        track: crate::layer_commands::track_on_top(published, "shape", time, None),
         time,
     };
     Some(ShapePlan {
