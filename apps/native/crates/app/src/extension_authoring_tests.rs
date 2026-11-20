@@ -309,7 +309,7 @@ fn pm555_builtin_effect_reference_is_in_the_working_api_pack() {
     host.extensions = Some(Arc::new(AppExtensions::new(profile.clone())));
     let mut session = McpSession::new(Arc::new(Mutex::new(host)));
     let started = session
-        .dispatch("start_session", &json!({"prompt":"Read built-in effects"}))
+        .dispatch("start_session", &json!({"prompt":"Read built-in effects","includeExtensionStaging":true}))
         .unwrap();
     let path =
         PathBuf::from(started["apiPackDirectory"].as_str().unwrap()).join("builtin-effects.json");
@@ -341,7 +341,7 @@ fn pm555_publishing_checks_compat_and_v4_effect_shaders() {
     }));
     let mut session = McpSession::new(Arc::new(Mutex::new(host)));
     let started = session
-        .dispatch("start_session", &json!({"prompt":"Create an effect"}))
+        .dispatch("start_session", &json!({"prompt":"Create an effect","includeExtensionStaging":true}))
         .unwrap();
     let staging = PathBuf::from(started["stagingDirectory"].as_str().unwrap());
     for (id, api, entry, install) in [

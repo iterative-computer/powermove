@@ -623,7 +623,7 @@ mod tests {
             let mut session = McpSession::new(Arc::new(Mutex::new(automation)));
             let started = session.call(
                 "start_session",
-                json!({"context":"app","access":"editor","prompt":"Sweep a synthetic effect"}),
+                json!({"context":"app","access":"editor","prompt":"Sweep a synthetic effect","includeExtensionStaging":true}),
             );
             assert_eq!(started["isError"], false, "{started}");
             let result: Value =

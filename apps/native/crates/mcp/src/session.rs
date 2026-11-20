@@ -1555,9 +1555,6 @@ impl McpSession {
             ));
         }
         let context = args["context"].as_str().unwrap_or("project");
-        if context == "app" && access == "editor" && granted.is_none() {
-            return Err(Error::invalid("App sessions require project access."));
-        }
         // A run works in its thread's project, not whichever window is in front.
         let pinned = self
             .agent_token
@@ -1595,7 +1592,8 @@ impl McpSession {
         }
         let full = args["detail"] == "full";
         let include_extension_staging = args["includeExtensionStaging"] == true;
-        let has_workspace = access != "editor" || granted.is_some() || include_extension_staging;
+        let has_workspace =
+            access != "editor" || context == "app" || granted.is_some() || include_extension_staging;
         let input = if (has_workspace || full) && let Some(id) = &project {
             crate::memory::agent_snapshot_model(&host.read_document_model(id)?)
         } else {
