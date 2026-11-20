@@ -447,7 +447,6 @@ pub(crate) fn plan_cleaned_with_definitions(
 }
 
 /// Plans against the kernel's published snapshot (shared, never copied).
-#[cfg(test)]
 pub(crate) fn plan_snapshot(
     snapshot: &pm_kernel::Snapshot,
     selection: &[String],
