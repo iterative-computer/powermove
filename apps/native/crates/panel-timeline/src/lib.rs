@@ -398,6 +398,10 @@ impl TimelineModel {
                 .filter(|path| {
                     self.property_labels
                         .get(&(layer.id.clone(), (*path).clone()))
+                        .map(String::as_str)
+                        .or_else(|| {
+                            self.index.channel(&layer.id, path)?.vertex_label.as_deref()
+                        })
                         .unwrap_or(path)
                         .to_lowercase()
                         .contains(&query)
@@ -413,36 +417,44 @@ impl TimelineModel {
                     depth,
                 });
                 if !collapsed || !query.is_empty() {
-                    let mut effect_section = None;
+                    let mut current_section = None;
                     for path in if !query.is_empty() && !matching.is_empty() {
                         matching
                     } else {
                         properties
                     } {
-                        let effect = layer
-                            .effects
-                            .iter()
-                            .find(|(id, _)| path.starts_with(&format!("{id}.")));
-                        if let Some((id, _)) = effect {
-                            if effect_section.as_ref() != Some(id) {
-                                self.rows.push(Row {
-                                    id: RowId::Effect {
+                        let section = self
+                            .index
+                            .channel(&layer.id, &path)
+                            .and_then(|channel| channel.path_group.as_ref())
+                            .map(|group| RowId::Path {
+                                layer_id: layer.id.clone(),
+                                path: group.clone(),
+                            })
+                            .or_else(|| {
+                                layer
+                                    .effects
+                                    .iter()
+                                    .find(|(id, _)| path.starts_with(&format!("{id}.")))
+                                    .map(|(id, _)| RowId::Effect {
                                         layer_id: layer.id.clone(),
                                         effect: id.clone(),
-                                    },
-                                    depth: depth + 1,
-                                });
-                                effect_section = Some(id.clone());
-                            }
-                        } else {
-                            effect_section = None;
+                                    })
+                            });
+                        if section != current_section && let Some(id) = &section {
+                            self.rows.push(Row {
+                                id: id.clone(),
+                                depth: depth + 1,
+                            });
                         }
+                        let property_depth = depth + if section.is_some() { 2 } else { 1 };
+                        current_section = section;
                         self.rows.push(Row {
                             id: RowId::Property {
                                 layer_id: layer.id.clone(),
                                 channel: path,
                             },
-                            depth: depth + if effect.is_some() { 2 } else { 1 },
+                            depth: property_depth,
                         });
                     }
                 }
@@ -901,6 +913,12 @@ impl TimelineModel {
         )
         .with_txid(txid)
         .with_document(self.index.doc_id)
+    }
+    fn channel_label(&self, layer: &str, path: &str) -> String {
+        self.index
+            .channel(layer, path)
+            .and_then(|channel| channel.vertex_label.clone())
+            .unwrap_or_else(|| property_label(path))
     }
 }
 

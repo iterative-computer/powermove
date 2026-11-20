@@ -403,7 +403,7 @@ pub fn sample(
         }
         curves.push(Curve {
             id: format!("{layer_id}:{}", channel.path),
-            name: crate::property_label(&channel.path),
+            name: model.channel_label(layer_id, &channel.path),
             // v1's axis colours (`graphAxisColor`), in this appearance.
             color: t.graph_curve(&channel.path, curves.len()),
             focused: true,
@@ -483,7 +483,7 @@ pub fn sample(
         if !segments.is_empty() {
             curves = vec![Curve {
                 id: format!("{layer_id}:{path}"),
-                name: crate::property_label(&path),
+                name: model.channel_label(&layer_id, &path),
                 color: 0,
                 focused: true,
                 segments,

@@ -159,6 +159,7 @@ impl AgentInk {
                             let layer = match row {
                                 RowId::Layer(id)
                                 | RowId::Property { layer_id: id, .. }
+                                | RowId::Path { layer_id: id, .. }
                                 | RowId::Effect { layer_id: id, .. } => id,
                             };
                             let time = v.scroll_time

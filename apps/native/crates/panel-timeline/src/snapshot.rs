@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 pub enum RowId {
     Layer(String),
     Effect { layer_id: String, effect: String },
+    Path { layer_id: String, path: String },
     Property { layer_id: String, channel: String },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,6 +50,8 @@ pub struct Channel {
     pub value: Value,
     pub expression: Option<JsString>,
     pub keys: Vec<Key>,
+    pub(crate) path_group: Option<String>,
+    pub(crate) vertex_label: Option<String>,
 }
 /// A layer's transition at one edge, as the timeline draws and edits it.
 #[derive(Clone, Debug, PartialEq)]
@@ -84,6 +87,7 @@ pub struct Layer {
     pub scale_linked: bool,
     pub separate_dimensions: bool,
     pub effects: Vec<(String, String)>,
+    path_groups: HashMap<String, String>,
     /// The media asset an image, video or audio layer draws (`d.asset`).
     pub asset: Option<String>,
     /// Seconds of the media skipped before the layer starts (`d.trim`).
@@ -114,6 +118,10 @@ pub struct Layer {
     summary: std::sync::OnceLock<Arc<[crate::render::Key]>>,
 }
 impl Layer {
+    pub(crate) fn path_name(&self, path: &str) -> &str {
+        self.path_groups.get(path).map_or("Path", String::as_str)
+    }
+
     /// The collapsed row's key marks (see `summary`), made by `fill` once.
     pub(crate) fn summary(
         &self,
@@ -366,6 +374,7 @@ impl TimelineIndex {
     fn read_layer(layer: &Node) -> Option<Layer> {
         let id = string(layer.get("id"))?;
         let mut channels = Vec::new();
+        let mut path_groups = HashMap::new();
         collect_channels(layer.get("p"), "", &mut channels);
         collect_direct(layer.get("d"), "c", &mut channels);
         if let Some(NodeKind::Array(effects)) = layer.get("fx").map(Node::kind) {
@@ -387,7 +396,9 @@ impl TimelineIndex {
                             &mut channels,
                         );
                     }
-                    collect_path(mask.get("path"), &format!("mp.{id}"), &mut channels);
+                    if let Some(path) = mask.get("path") {
+                        collect_path(path, &format!("mp.{id}"), &mut channels, &mut path_groups);
+                    }
                 }
             }
         }
@@ -415,7 +426,7 @@ impl TimelineIndex {
         }
         for path in array(content.and_then(|d| d.get("paths"))) {
             if let Some(id) = string(path.get("id")) {
-                collect_path(Some(path), &format!("g.{id}"), &mut channels);
+                collect_path(path, &format!("g.{id}"), &mut channels, &mut path_groups);
             }
         }
         for (field, prefix) in [("animators", "ta"), ("styles", "ts")] {
@@ -552,6 +563,7 @@ impl TimelineIndex {
             definition: string(content.and_then(|d| d.get("definition"))),
             preferred_track: number(layer.get("track")).unwrap_or(0.).max(0.).floor() as usize,
             channels,
+            path_groups,
             rev: layer.rev(),
             channel_at: HashMap::new(),
             key_at: HashMap::new(),
@@ -724,6 +736,8 @@ fn collect_channels(node: Option<&Node>, prefix: &str, out: &mut Vec<Channel>) {
                 value: node.get("v").unwrap().to_value(),
                 expression: js_string(node.get("expr")),
                 keys,
+                path_group: None,
+                vertex_label: None,
             });
         } else if let NodeKind::Object(fields) = node.kind() {
             for (key, child) in fields.iter().rev() {
@@ -777,11 +791,32 @@ fn collect_direct(node: Option<&Node>, prefix: &str, out: &mut Vec<Channel>) {
         }
     }
 }
-fn collect_path(path: Option<&Node>, prefix: &str, out: &mut Vec<Channel>) {
-    collect_direct(path.and_then(|p| p.get("p")), prefix, out);
-    for vertex in array(path.and_then(|p| p.get("vertices"))) {
+fn collect_path(
+    path: &Node,
+    prefix: &str,
+    out: &mut Vec<Channel>,
+    groups: &mut HashMap<String, String>,
+) {
+    let first = out.len();
+    collect_direct(path.get("p"), prefix, out);
+    for (index, vertex) in array(path.get("vertices")).iter().enumerate() {
         if let Some(id) = string(vertex.get("id")) {
-            collect_direct(vertex.get("p"), &format!("{prefix}.v.{id}"), out);
+            let vertex_prefix = format!("{prefix}.v.{id}");
+            let first_vertex_channel = out.len();
+            collect_direct(vertex.get("p"), &vertex_prefix, out);
+            for channel in &mut out[first_vertex_channel..] {
+                let key = &channel.path[vertex_prefix.len() + 1..];
+                channel.vertex_label = Some(pm_eval::address::vertex_label(index + 1, key));
+            }
+        }
+    }
+    if first < out.len() {
+        let name = string(path.get("name"))
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "Path".into());
+        groups.insert(prefix.to_owned(), name);
+        for channel in &mut out[first..] {
+            channel.path_group = Some(prefix.to_owned());
         }
     }
 }
