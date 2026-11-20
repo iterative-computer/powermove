@@ -484,11 +484,30 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
                     .unwrap()
                     .starts_with(tool["description"].as_str().unwrap())
             );
+        } else if ["start_session", "fork_builtin_extension"]
+            .contains(&tool["name"].as_str().unwrap())
+        {
+            let source = include_bytes!("../../mcp/fixtures/extension-session-native-catalog.json");
+            assert_eq!(
+                pm_model::hash::sha256_hex(source),
+                "52d3cd3d7b7db1cf95a5e88239f98f1deae1cf20b3a0f6a2dcc2d13c8c9fbbe5"
+            );
+            let overlay: serde_json::Value = serde_json::from_slice(source).unwrap();
+            let pinned = overlay["tools"].as_array().unwrap().iter()
+                .find(|candidate| candidate["name"] == tool["name"]).unwrap();
+            assert_eq!(actual, pinned);
+            let mut schema = actual["inputSchema"].clone();
+            if tool["name"] == "start_session" {
+                let staging = schema["properties"].as_object_mut().unwrap()
+                    .remove("includeExtensionStaging").unwrap();
+                assert_eq!(staging["type"], "boolean");
+            }
+            assert_eq!(schema, tool["inputSchema"]);
         } else if tool["name"] == "validate_effect" {
             let viewer = include_bytes!("../../mcp/fixtures/viewer-handles-native-catalog.json");
             assert_eq!(
                 pm_model::hash::sha256_hex(viewer),
-                "166afbdea0e2053bca88ddcb8571a5ff966283facb2d8fbf8326cf813b39f470"
+                "8a91a83136fe5583fdc864670e713f0233d1cf9025cc7a50357c0f58b68d6293"
             );
             let viewer: serde_json::Value = serde_json::from_slice(viewer).unwrap();
             assert_eq!(actual, &viewer["tools"][0]);
