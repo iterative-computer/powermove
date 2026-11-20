@@ -49,6 +49,8 @@ pub(super) struct AudioState {
     base: Option<Arc<Frame>>,
     ops: Vec<Op>,
     meters: [Meter; 2],
+    // Font size and measured text width of the clock in the same header.
+    clock_width: Option<(f32, f32)>,
     sampled: Option<Instant>,
     tap: TapAge,
     painted: Option<Instant>,
@@ -559,10 +561,18 @@ impl TimelineSurface {
                 let _ = meter.step(0., 0., dt);
             }
         }
-        // The last 32 pt of the layer header belong to its routing button.
-        // Keep every meter pixel in this header, clear of the ruler/track area.
-        if frame.viewport.layer_column >= 200. {
-            let x = frame.viewport.layer_column - 120.;
+        // The meter stays between the transport controls and the column's
+        // routing button. Give the clock its full width when space is tight.
+        let m = &self.tokens.metrics;
+        let size = self.tokens.typography.timecode;
+        if self.audio.clock_width.is_none_or(|(previous, _)| previous != size) {
+            let slot = crate::playback::timecode_slot(&self.tokens);
+            self.audio.clock_width = Some((size, slot.w - m.border));
+        }
+        let clock_width = self.audio.clock_width.unwrap().1 + m.border;
+        let transport_end = m.inset + super::edit_tools_width(m) + m.hit + 2. * m.gap + clock_width;
+        let x = frame.viewport.layer_column - 120.;
+        if x - 4. >= f64::from(transport_end + m.gap) {
             let top = (self.tokens.metrics.ruler as f64 - 8.) / 2.;
             frame.ops.push(op(
                 "audio-meter-panel".into(),
@@ -1291,7 +1301,7 @@ mod gesture_tests {
         let mut s = stage_audio(cx);
         let origin = s.origin();
         s.surface.update(&mut s.vcx, |surface, cx| {
-            for column in [199., 200., 320.] {
+            for column in [199., 200., 320., 400.] {
                 let mut frame = AudioFrame {
                     viewport: surface.frame.as_ref().unwrap().viewport,
                     ops: Vec::new(),
@@ -1303,8 +1313,8 @@ mod gesture_tests {
                     .iter()
                     .filter(|o| o.id == "audio-meter-bg")
                     .collect();
-                if column < 200. {
-                    assert!(rails.is_empty());
+                if column <= 320. {
+                    assert!(rails.is_empty(), "the meter would cover the clock at {column}");
                     continue;
                 }
                 assert_eq!(rails.len(), 2);
