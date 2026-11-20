@@ -972,7 +972,7 @@ fn registry_definitions_back_effect_and_transition_commands() {
         generation: 1,
     };
     let def = |id: &str| {
-        Registration{token:format!("token-{id}"),owner,id:id.into(),definition:pm_model::json::parse(&json!({"id":id,"version":1,"label":"Synthetic definition","params":[{"k":"amount","type":"number","def":0.5}]}).to_string()).unwrap()}
+        Registration{project:None,token:format!("token-{id}"),owner,id:id.into(),definition:pm_model::json::parse(&json!({"id":id,"version":1,"label":"Synthetic definition","params":[{"k":"amount","type":"number","def":0.5}]}).to_string()).unwrap()}
     };
     let (state, _) = StateSnapshot::default()
         .stage(StateTransaction {
