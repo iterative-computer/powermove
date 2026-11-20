@@ -100,6 +100,10 @@ export interface NativeFacts {
   connection: "checking" | "waiting" | "connected" | "unavailable";
   /** Unavailable because nobody is signed in: offer to connect. */
   signedOut?: boolean;
+  /** The provider is currently discovering its models. */
+  findingModels?: boolean;
+  /** The discovered choices for each provider, including its default. */
+  modelGroups?: Record<string, [id: string, label: string, isDefault: boolean][]>;
   /** What to tell the user when `connection` isn't "connected". */
   reason: string;
   presentation: "popover" | "docked";
@@ -166,7 +170,7 @@ export type Action =
     }
   | { type: "disclose"; id: string; open: boolean }
   | { type: "setAccess"; access: Access }
-  | { type: "setProvider"; provider: string }
+  | { type: "setProvider"; provider: string; model?: string }
   | { type: "setModel"; model: string; effort: string }
   | { type: "retryConnection" }
   | { type: "chooseAnswer"; step: string; question: string; option: string }

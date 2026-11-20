@@ -13,7 +13,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-pub const CODEX_VERSION: &str = "0.159.1";
+pub const CODEX_VERSION: &str = "0.169.0";
 pub const CLAUDE_VERSION: &str = "2.1.280";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -419,8 +419,8 @@ pub fn newer(candidate: &str, current: &str) -> bool {
     parts(candidate) > parts(current)
 }
 
-/// Checksums are copied from the frozen repository's public npm lock, never
-/// discovered from runtime credentials or accepted from a mutable dist-tag.
+/// Checksums come from reviewed, versioned public npm packages, never from
+/// runtime credentials or a mutable dist-tag.
 pub fn bundled_pin(provider: Runtime, arch: Arch) -> Pin {
     let pins: Value = serde_json::from_str(include_str!("../fixtures/runtime-pins.json"))
         .expect("reviewed runtime pins");

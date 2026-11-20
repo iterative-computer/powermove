@@ -58,7 +58,6 @@ fn main() -> io::Result<()> {
                 for relative in [
                     "bin/codex-code-mode-host",
                     "codex-path/rg",
-                    "codex-resources/zsh/bin/zsh",
                     "codex-resources/voice/bin/codex-voice-host",
                 ] {
                     if !fs::metadata(tree.join(relative))?.is_file() {

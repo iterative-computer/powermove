@@ -153,7 +153,7 @@ pub struct Host {
     pub font_pick: Option<(Arc<Builtins>, u64)>,
     /// The Agent panel's open menu: its runtime, the request it answers,
     /// and the values of its rows.
-    pub agent_pick: Option<(Arc<Builtins>, u64, Vec<Value>)>,
+    agent_pick: Option<(Arc<Builtins>, u64, Vec<Value>, Option<pm_shell::transient::ComposerPicker>)>,
     /// The Agent panel is in the workspace's docks (pinned), and whether its
     /// toolbar item has parked it (hidden, its place kept).
     pub agent_docked: bool,
@@ -979,6 +979,7 @@ impl Controller {
             Some(FONT_PAGE),
             Some("fontPick:".into()),
             "Search fonts",
+            None,
         );
     }
     /// The Agent panel's pop-up menus (threads, model, access, slash): the
@@ -990,9 +991,14 @@ impl Controller {
         request: &pm_builtins::PlatformRequest,
         cx: &mut Context<Self>,
     ) {
-        if let Some((previous, id, _)) = self.builtins.agent_pick.take() {
-            previous.platform_reply(id, Ok(Value::Null));
-        }
+        use pm_shell::transient::ComposerPicker;
+        let picker = match request.input["picker"].as_str() {
+            Some("model") => Some(ComposerPicker::Model),
+            Some("effort") => Some(ComposerPicker::Effort),
+            Some("access") => Some(ComposerPicker::Access),
+            _ => None,
+        };
+        let search = picker.map(|kind| kind == ComposerPicker::Model && request.input["search"] == true);
         let options = request.input["options"]
             .as_array()
             .cloned()
@@ -1025,22 +1031,44 @@ impl Controller {
                 if let Some(on) = o["checked"].as_bool() {
                     c = c.checked(on);
                 }
+                c.informational = o["informational"] == true;
+                c.is_default = o["default"] == true;
                 // A provider row keeps the menu open: its models follow.
                 c.stays(o["stays"] == true)
             })
             .collect();
         let values = options.iter().map(|o| o["value"].clone()).collect();
+        if request.input["refresh"] == true {
+            // An account update can arrive while the user is choosing. Keep
+            // the existing reply id, and update its row indices along with the menu.
+            if let Some((owner, _, current, Some(ComposerPicker::Model))) = &mut self.builtins.agent_pick
+                && Arc::ptr_eq(owner, runtime)
+                && self.host.borrow_mut().update_menu(choices, search)
+            {
+                *current = values;
+            }
+            runtime.platform_reply(request.id, Ok(Value::Null));
+            return;
+        }
+        if let Some((previous, id, _, _)) = self.builtins.agent_pick.take() {
+            previous.platform_reply(id, Ok(Value::Null));
+        }
         // The rows of a menu still open after a row that stays was chosen:
         // they replace the open menu's in place, no closing and reopening.
         if request.input["update"] == true {
-            if self.host.borrow_mut().update_menu(choices) {
-                self.builtins.agent_pick = Some((runtime.clone(), request.id, values));
+            if self.host.borrow_mut().update_menu(choices, search) {
+                self.builtins.agent_pick = Some((runtime.clone(), request.id, values, picker));
             } else {
                 runtime.platform_reply(request.id, Ok(Value::Null));
             }
             return;
         }
-        self.builtins.agent_pick = Some((runtime.clone(), request.id, values));
+        // Composer menus are never displayed without a measured trigger.
+        if picker.is_some() && anchor.is_none() {
+            runtime.platform_reply(request.id, Ok(Value::Null));
+            return;
+        }
+        self.builtins.agent_pick = Some((runtime.clone(), request.id, values, picker));
         self.host.borrow_mut().open_menu(
             owner,
             choices,
@@ -1048,6 +1076,7 @@ impl Controller {
             None,
             Some("agentPick:".into()),
             request.input["placeholder"].as_str().unwrap_or("Search"),
+            picker.zip(search),
         );
     }
     /// The Agent popover's own window, while the panel is shown there (not
@@ -1062,7 +1091,7 @@ impl Controller {
     }
     /// The Agent menu's answer: a row's value, or none when it closed unchosen.
     pub fn agent_picked(&mut self, index: &str) {
-        if let Some((runtime, id, values)) = self.builtins.agent_pick.take() {
+        if let Some((runtime, id, values, _)) = self.builtins.agent_pick.take() {
             let value = index
                 .parse::<usize>()
                 .ok()

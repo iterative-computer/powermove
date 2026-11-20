@@ -1,9 +1,70 @@
 //! Platform-independent search/navigation state for the two pooled child windows.
+use crate::layout::Rect;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ComposerPicker {
+    Model,
+    Effort,
+    Access,
+}
+impl ComposerPicker {
+    pub fn width(self) -> f32 {
+        match self {
+            Self::Model => 260.,
+            Self::Effort => 156.,
+            Self::Access => 360.,
+        }
+    }
+}
+
+pub const COMPOSER_PICKER_MARGIN: f32 = 8.;
+
+/// Inset the owner's content rect before sizing and placing the menu.
+pub fn composer_picker_interior(owner: Rect) -> Rect {
+    let dx = COMPOSER_PICKER_MARGIN.min(owner.w / 2.);
+    let dy = COMPOSER_PICKER_MARGIN.min(owner.h / 2.);
+    Rect {
+        x: owner.x + dx,
+        y: owner.y + dy,
+        w: owner.w - 2. * dx,
+        h: owner.h - 2. * dy,
+    }
+}
+
+/// Cocoa screen points (y increases upward). Keep the checked title aligned
+/// with the button when it fits. Otherwise the menu stays against the
+/// button, opening upward and contained by the owner's content rect.
+pub fn composer_picker_frame(
+    owner: Rect,
+    anchor: Rect,
+    size: (f32, f32),
+    checked_from_top: Option<f32>,
+) -> Rect {
+    let owner = composer_picker_interior(owner);
+    let (w, h) = (size.0.min(owner.w), size.1.min(owner.h));
+    let top = anchor.y + anchor.h;
+    let aligned = checked_from_top.map(|row| anchor.y + anchor.h / 2. + row - h);
+    let min_y = owner.y;
+    let max_y = owner.y + owner.h - h;
+    let y = aligned
+        .filter(|y| (min_y..=max_y).contains(y))
+        .unwrap_or(top)
+        .clamp(min_y, max_y);
+    Rect {
+        x: anchor.x.clamp(owner.x, owner.x + owner.w - w),
+        y,
+        w,
+        h,
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Choice {
     pub label: String,
     /// Optional explanatory line below a searchable menu row.
     pub detail: String,
+    /// The provider's default model, independent of the current choice.
+    pub is_default: bool,
     pub command: String,
     /// The section it is listed under; empty for none.
     pub category: String,
@@ -15,6 +76,8 @@ pub struct Choice {
     /// Choosing it keeps the menu open (a provider row: its models follow
     /// in the same menu); the owner sends the menu's new rows.
     pub stays: bool,
+    /// Read-only text below the choices, outside keyboard and pointer selection.
+    pub informational: bool,
     /// Layer and effect rows require a name search unless recently run.
     pub search_only: bool,
     pub aliases: Vec<String>,
@@ -133,6 +196,17 @@ impl Picker {
         self.page
             .map_or(0, |page| self.matches().len().saturating_sub(page))
     }
+    pub fn note(&self) -> Option<&str> {
+        self.choices
+            .iter()
+            .find(|c| c.informational)
+            .map(|c| c.label.as_str())
+    }
+    pub fn selected(&self) -> Option<usize> {
+        self.filtered()
+            .iter()
+            .position(|i| self.choices[*i].checked == Some(true))
+    }
     fn matches(&self) -> Vec<usize> {
         let query = self.query.to_lowercase();
         let mut ranked: Vec<(u32, usize)> = self
@@ -140,6 +214,9 @@ impl Picker {
             .iter()
             .enumerate()
             .filter_map(|(i, c)| {
+                if c.informational {
+                    return None;
+                }
                 if c.search_only {
                     let query = self.query.trim().to_lowercase();
                     let name = if c.category == "Effect" {
@@ -251,6 +328,31 @@ impl Picker {
 }
 
 #[cfg(test)]
+mod composer_tests {
+    use super::*;
+
+    #[test]
+    fn menu_aligns_its_checked_row_and_stays_attached_at_window_edges() {
+        let owner = Rect { x: 100., y: 200., w: 318., h: 540. };
+        let anchor = Rect { x: 388., y: 210., w: 24., h: 24. };
+        let frame = composer_picker_frame(owner, anchor, (360., 116.), Some(104.));
+        assert_eq!(frame.x, owner.x + 8.);
+        assert_eq!(frame.w, owner.w - 16.);
+        assert_eq!(frame.y + frame.h - 104., anchor.y + anchor.h / 2.);
+        let frame = composer_picker_frame(owner, anchor, (156., 116.), Some(30.));
+        assert_eq!(frame.y, anchor.y + anchor.h);
+        assert_eq!(frame.x + frame.w, owner.x + owner.w - 8.);
+        let top = Rect { y: 710., ..anchor };
+        let frame = composer_picker_frame(owner, top, (156., 180.), None);
+        assert_eq!(frame.y + frame.h, owner.y + owner.h - 8.);
+        assert!(frame.y <= top.y);
+        let bottom = composer_picker_frame(owner, anchor, (360., 600.), None);
+        assert_eq!(bottom.y, owner.y + 8.);
+        assert_eq!(bottom.h, owner.h - 16.);
+    }
+}
+
+#[cfg(test)]
 mod palette_layer_tests {
     use super::*;
     #[test]
@@ -272,6 +374,27 @@ mod palette_layer_tests {
         );
         picker.search("private-id".into());
         assert!(picker.filtered().is_empty());
+    }
+
+    #[test]
+    fn informational_text_is_visible_but_not_a_choice() {
+        let mut picker = Picker {
+            choices: vec![
+                Choice::new("Opus 5.5", "model:opus"),
+                Choice {
+                    informational: true,
+                    ..Choice::new("Finding models", "")
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(picker.filtered(), vec![0]);
+        picker.navigate("end");
+        assert_eq!(picker.navigate("enter").as_deref(), Some("model:opus"));
+        picker.search("Finding".into());
+        assert_eq!(picker.note(), Some("Finding models"));
+        assert!(picker.filtered().is_empty());
+        assert_eq!(picker.navigate("enter"), None);
     }
 }
 

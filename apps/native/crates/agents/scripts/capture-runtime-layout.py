@@ -4,7 +4,7 @@ root=pathlib.Path(__file__).resolve().parents[5]
 manifest=json.loads((root/'apps/native/crates/agents/fixtures/runtime-pins.json').read_text())
 layouts=[]
 for provider,arch in [(p,a) for p in ['codex','claude'] for a in ['arm64','x64']]:
- version='0.159.1-darwin-'+arch if provider=='codex' else '2.1.280'
+ version=manifest['codex']+'-darwin-'+arch if provider=='codex' else manifest['claude']
  package='@openai/codex' if provider=='codex' else '@anthropic-ai/claude-code-darwin-'+arch
  metadata=json.load(urllib.request.urlopen('https://registry.npmjs.org/'+package.replace('/','%2F')+'/'+version))
  pin_name='@openai/codex-darwin-'+arch if provider=='codex' else package

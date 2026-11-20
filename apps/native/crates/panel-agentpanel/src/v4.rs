@@ -431,7 +431,7 @@ pub fn dispatch(
             panel.set_provider(
                 thread,
                 provider,
-                String::new(),
+                action["model"].as_str().unwrap_or_default().to_owned(),
                 (context.catalogs)(provider),
             )?;
             None

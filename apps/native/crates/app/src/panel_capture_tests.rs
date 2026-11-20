@@ -469,6 +469,20 @@ fn capture_agent_states() {
                     let pictures = window.update(&mut cx, |_, window, _| window.rendered_primitive_counts().3).unwrap();
                     assert!(pictures > 0, "{name}/{scheme_name}: attachment image was not painted");
                 }
+                let request = file.parent().unwrap().join("requests").join(file.file_name().unwrap());
+                if request.is_file() {
+                    let input: serde_json::Value = serde_json::from_slice(&std::fs::read(request).unwrap()).unwrap();
+                    if !input["picker"].is_null() {
+                        let id = input["anchor"].as_u64().unwrap();
+                        let frame = window.update(&mut cx, |frame, _, cx| frame.view.read(cx).anchor_bounds(id)).unwrap()
+                            .expect("composer picker anchored to a measured control");
+                        let rect = pm_shell::layout::Rect {
+                            x: f32::from(frame.origin.x), y: f32::from(frame.origin.y),
+                            w: f32::from(frame.size.width), h: f32::from(frame.size.height),
+                        };
+                        std::fs::write(format!("{dir}/{panel}-{name}-{scheme_name}-anchor.json"), serde_json::to_vec(&rect).unwrap()).unwrap();
+                    }
+                }
                 let image = cx.capture_screenshot(window.into()).unwrap();
                 image
                     .save(if timeline {

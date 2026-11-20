@@ -68,6 +68,7 @@ pub struct Model {
 struct Slot {
     status: Status,
     models: Vec<Model>,
+    finding_models: bool,
     worker: bool,
     /// What runs when the current worker finishes. A sign-out outranks a sign-in.
     next: Option<Job>,
@@ -107,6 +108,7 @@ impl Accounts {
         let slot = || Slot {
             status: Status::of(State::Checking, None),
             models: vec![],
+            finding_models: false,
             worker: false,
             next: None,
             cancel: Arc::default(),
@@ -135,6 +137,14 @@ impl Accounts {
             .unwrap()
             .get(provider.name())
             .map_or_else(Vec::new, |s| s.models.clone())
+    }
+    /// True during the model request, not while waiting for sign-in.
+    pub fn finding_models(&self, provider: Provider) -> bool {
+        self.slots
+            .lock()
+            .unwrap()
+            .get(provider.name())
+            .is_some_and(|s| s.finding_models)
     }
     pub fn refresh(self: &Arc<Self>, provider: Provider) {
         self.start(provider, Job::Refresh);
@@ -188,10 +198,12 @@ impl Accounts {
                 let next = {
                     let mut slots = this.slots.lock().unwrap();
                     let slot = slots.get_mut(provider.name()).unwrap();
+                    slot.status = status;
+                    slot.finding_models = false;
                     slot.worker = false;
                     slot.next.take()
                 };
-                this.publish(provider, status);
+                this.bump();
                 if let Some(next) = next {
                     this.start(provider, next);
                 }
@@ -207,7 +219,7 @@ impl Accounts {
     fn run(&self, provider: Provider, job: Job, cancel: &AtomicBool) -> Status {
         let result = match provider {
             Provider::Chatgpt => self.chatgpt(job, cancel),
-            Provider::Claude => self.claude(job, cancel),
+            Provider::Claude => self.claude(job, cancel, MODELS),
             Provider::Compatible => Ok(Status::of(State::Disconnected, None)),
         };
         result.unwrap_or_else(|detail| Status::of(State::Unavailable, Some(detail)))
@@ -225,6 +237,7 @@ impl Accounts {
     fn set_models(&self, provider: Provider, models: Vec<Model>) {
         if let Some(slot) = self.slots.lock().unwrap().get_mut(provider.name()) {
             slot.models = models;
+            slot.finding_models = false;
         }
         self.bump();
     }
@@ -289,72 +302,93 @@ impl Accounts {
                 }
             }
         }
-        let status = chatgpt_status(&mut peer)?;
+        let mut status = chatgpt_status(&mut peer)?;
         if status.state == State::Connected {
-            // A model list is a nicety. The provider's default still runs without it.
-            let models = chatgpt_models(&mut peer).unwrap_or_default();
-            self.set_models(Provider::Chatgpt, models);
+            self.slots.lock().unwrap().get_mut(Provider::Chatgpt.name()).unwrap().finding_models = true;
+            self.bump();
+            match chatgpt_models(&mut peer) {
+                Ok(models) => self.set_models(Provider::Chatgpt, models),
+                Err(_) => {
+                    status.detail = Some(if self.models(Provider::Chatgpt).is_empty() {
+                        "Couldn't load ChatGPT models. The provider's default is still available.".into()
+                    } else {
+                        "Couldn't refresh ChatGPT models. Showing the last known models.".into()
+                    });
+                }
+            }
         }
         Ok(status)
     }
-    fn claude(&self, job: Job, cancel: &AtomicBool) -> Result<Status, String> {
+    fn claude(
+        &self,
+        job: Job,
+        cancel: &AtomicBool,
+        discovery_timeout: Duration,
+    ) -> Result<Status, String> {
         let binary = self.binary(Runtime::Claude)?;
         let vars = self.environment.claude_vars()?;
-        match job {
-            Job::Refresh => {}
-            Job::Disconnect => {
-                let (code, output) = run(&binary, &["auth", "logout"], &vars, REQUEST, cancel)?;
-                if code != Some(0) {
-                    // Still signed in: say so rather than show a sign-out that didn't happen.
-                    let mut status = claude_status(&binary, &vars, cancel)?;
-                    let output = output.trim();
-                    status.detail = Some(if output.is_empty() {
-                        "Claude Code couldn't sign out.".to_owned()
-                    } else {
-                        format!("Claude Code couldn't sign out: {output}")
-                    });
-                    return Ok(status);
-                }
-                self.set_models(Provider::Claude, vec![]);
-                return Ok(Status::of(State::Disconnected, None));
+        if job == Job::Disconnect {
+            let (code, output) = run(&binary, &["auth", "logout"], &vars, REQUEST, cancel)?;
+            if code != Some(0) {
+                // Still signed in: say so rather than show a sign-out that didn't happen.
+                let mut status = claude_status(&binary, &vars, cancel)?;
+                let output = output.trim();
+                status.detail = Some(if output.is_empty() {
+                    "Claude Code couldn't sign out.".to_owned()
+                } else {
+                    format!("Claude Code couldn't sign out: {output}")
+                });
+                return Ok(status);
             }
-            Job::Connect => {
-                let status = claude_status(&binary, &vars, cancel)?;
-                if status.state != State::Disconnected {
-                    return Ok(status);
-                }
-                self.publish(
-                    Provider::Claude,
-                    Status::of(
-                        State::Connecting,
-                        Some("Finish signing in in the browser opened by Claude Code.".into()),
-                    ),
-                );
-                let login = ["auth", "login", "--claudeai"];
-                let (code, output) = match run(&binary, &login, &vars, LOGIN, cancel) {
-                    Ok(finished) => finished,
-                    Err(detail) => return Ok(Status::of(State::Disconnected, Some(detail))),
-                };
-                if code != Some(0) {
-                    let detail = output.trim();
-                    return Ok(Status::of(
-                        State::Disconnected,
-                        Some(if detail.is_empty() {
-                            "Claude sign-in was not completed.".to_owned()
-                        } else {
-                            detail.to_owned()
-                        }),
-                    ));
-                }
-            }
+            self.set_models(Provider::Claude, vec![]);
+            return Ok(Status::of(State::Disconnected, None));
         }
-        let status = claude_status(&binary, &vars, cancel)?;
-        if status.state == State::Connected {
-            // A model list is a nicety. The provider's default still runs without it.
-            self.set_models(
+        let mut status = claude_status(&binary, &vars, cancel)?;
+        if job == Job::Connect && status.state == State::Disconnected {
+            self.publish(
                 Provider::Claude,
-                claude_models(&binary, vars).unwrap_or_default(),
+                Status::of(
+                    State::Connecting,
+                    Some("Finish signing in in the browser opened by Claude Code.".into()),
+                ),
             );
+            let login = ["auth", "login", "--claudeai"];
+            let (code, output) = match run(&binary, &login, &vars, LOGIN, cancel) {
+                Ok(finished) => finished,
+                Err(detail) => return Ok(Status::of(State::Disconnected, Some(detail))),
+            };
+            if code != Some(0) {
+                let detail = output.trim();
+                return Ok(Status::of(
+                    State::Disconnected,
+                    Some(if detail.is_empty() {
+                        "Claude sign-in was not completed.".to_owned()
+                    } else {
+                        detail.to_owned()
+                    }),
+                ));
+            }
+            status = claude_status(&binary, &vars, cancel)?;
+        }
+        if status.state == State::Connected {
+            self.slots
+                .lock()
+                .unwrap()
+                .get_mut(Provider::Claude.name())
+                .unwrap()
+                .finding_models = true;
+            self.bump();
+            match claude_models(&binary, vars, discovery_timeout) {
+                Ok(models) => self.set_models(Provider::Claude, models),
+                Err(detail) => {
+                    let slots = self.slots.lock().unwrap();
+                    status.detail = Some(if slots[Provider::Claude.name()].models.is_empty() {
+                        detail
+                    } else {
+                        format!("{detail} Showing the last known models.")
+                    });
+                }
+            }
         }
         Ok(status)
     }
@@ -400,7 +434,8 @@ fn chatgpt_models(peer: &mut Peer) -> Result<Vec<Model>, String> {
             params["cursor"] = json!(cursor);
         }
         let page = peer.request("model/list", params, REQUEST)?;
-        for entry in page["data"].as_array().into_iter().flatten() {
+        let entries = page["data"].as_array().ok_or("Codex returned an invalid model list.")?;
+        for entry in entries {
             let id = entry["model"].as_str().or(entry["id"].as_str());
             let Some(id) = id.filter(|id| is_valid_model_id(id)) else {
                 continue;
@@ -408,9 +443,10 @@ fn chatgpt_models(peer: &mut Peer) -> Result<Vec<Model>, String> {
             if entry["hidden"] == true || models.iter().any(|m| m.id == id) {
                 continue;
             }
+            let name = text(&entry["displayName"], 120);
             models.push(Model {
                 id: id.into(),
-                label: text(&entry["displayName"], 120).unwrap_or_else(|| id.into()),
+                label: codex_model_label(name.as_deref().unwrap_or(id)),
                 efforts: entry["supportedReasoningEfforts"]
                     .as_array()
                     .into_iter()
@@ -422,13 +458,32 @@ fn chatgpt_models(peer: &mut Peer) -> Result<Vec<Model>, String> {
                 default_effort: text(&entry["defaultReasoningEffort"], 16),
             });
         }
-        cursor = text(&page["nextCursor"], 500).filter(|c| !seen.contains(c));
-        let Some(next) = cursor.clone() else {
-            break;
-        };
+        if page["nextCursor"].is_null() {
+            return if models.is_empty() { Err("Codex returned no usable models.".into()) } else { Ok(models) };
+        }
+        let next = text(&page["nextCursor"], 500)
+            .filter(|c| !seen.contains(c))
+            .ok_or("Codex returned an invalid model list cursor.")?;
+        cursor = Some(next.clone());
         seen.push(next);
     }
-    Ok(models)
+    Err("Codex returned too many model list pages.".into())
+}
+
+fn codex_model_label(label: &str) -> String {
+    let Some((_, rest)) = label.split_once('-').filter(|(family, _)| family.eq_ignore_ascii_case("gpt")) else {
+        return label.to_owned();
+    };
+    let (version, tier) = rest.split_once(['-', ' ']).unwrap_or((rest, ""));
+    if !version.split('.').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())) {
+        return label.to_owned();
+    }
+    let tier = tier.trim_start();
+    if let Some(first) = tier.chars().next() {
+        format!("GPT-{version} {}{}", first.to_ascii_uppercase(), &tier[first.len_utf8()..])
+    } else {
+        format!("GPT-{version}")
+    }
 }
 /// `None` once the login finished; otherwise why it didn't.
 fn wait_for_login(
@@ -493,9 +548,12 @@ fn claude_status(
     if matches!(code, Some(126 | 127)) {
         return Err("Claude could not be started. Check its installation and try again.".into());
     }
-    let value = serde_json::from_str::<Value>(output.trim()).unwrap_or_default();
-    if value["loggedIn"] != true {
-        return Ok(Status::of(State::Disconnected, None));
+    let value = serde_json::from_str::<Value>(output.trim())
+        .map_err(|_| "Claude Code did not return an account status.")?;
+    match value["loggedIn"].as_bool() {
+        Some(false) => return Ok(Status::of(State::Disconnected, None)),
+        Some(true) => {}
+        None => return Err("Claude Code did not return an account status.".into()),
     }
     Ok(Status {
         state: State::Connected,
@@ -507,7 +565,11 @@ fn claude_status(
     })
 }
 /// Claude Code answers an initialize control request without a user prompt.
-fn claude_models(binary: &PathBuf, vars: BTreeMap<String, String>) -> Result<Vec<Model>, String> {
+fn claude_models(
+    binary: &PathBuf,
+    vars: BTreeMap<String, String>,
+    timeout: Duration,
+) -> Result<Vec<Model>, String> {
     let mut peer = Peer::start(
         binary,
         &[
@@ -526,19 +588,32 @@ fn claude_models(binary: &PathBuf, vars: BTreeMap<String, String>) -> Result<Vec
     )?;
     peer.write(&json!({"type":"control_request","request_id":"models",
         "request":{"subtype":"initialize"}}))?;
-    let deadline = Instant::now() + MODELS;
+    let timed_out = "Claude model discovery timed out.";
+    let deadline = Instant::now() + timeout;
     loop {
-        let wait = deadline.saturating_duration_since(Instant::now());
-        let line = peer
-            .lines
-            .recv_timeout(wait)
-            .map_err(|_| "Claude model discovery timed out.".to_owned())?;
+        let wait = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(timed_out)?;
+        let line = peer.lines.recv_timeout(wait).map_err(|error| match error {
+            RecvTimeoutError::Timeout => timed_out,
+            RecvTimeoutError::Disconnected => "Claude Code exited before returning models.",
+        })?;
         let message = serde_json::from_str::<Value>(&line).unwrap_or_default();
         if message["type"] != "control_response" || message["response"]["request_id"] != "models" {
             continue;
         }
-        let list = message["response"]["response"]["models"].as_array();
-        return Ok(claude_listing(list.into_iter().flatten()));
+        let reply = &message["response"];
+        if reply["subtype"] != "success" {
+            return Err("Claude Code rejected the model discovery request.".into());
+        }
+        let list = reply["response"]["models"]
+            .as_array()
+            .ok_or("Claude Code's model discovery reply is missing the model list.")?;
+        let models = claude_listing(list.iter());
+        if models.is_empty() {
+            return Err("Claude Code returned no usable models.".into());
+        }
+        return Ok(models);
     }
 }
 /// The family and version a Claude model id names: `claude-opus-5-5` →
@@ -562,6 +637,13 @@ fn claude_version(id: &str) -> Option<(String, String)> {
 /// → "Opus 5.5 (1M context)"); a name that is not the family's, or already
 /// carries the version, stays as given.
 fn versioned(name: &str, family: &str, version: &str) -> String {
+    if let Some((first, suffix)) = name.split_once('-')
+        && first.eq_ignore_ascii_case(family)
+        && let Some(tail) = suffix.strip_prefix(version)
+        && (tail.is_empty() || tail.starts_with([' ', '(']))
+    {
+        return format!("{first} {version}{tail}");
+    }
     if name.contains(version) {
         return name.to_owned();
     }
@@ -640,7 +722,13 @@ fn claude_listing<'a>(entries: impl Iterator<Item = &'a Value>) -> Vec<Model> {
             0,
             Model {
                 id: d.clone(),
-                label: d,
+                label: claude_version(&d).map_or_else(
+                    || d.clone(),
+                    |(mut family, version)| {
+                        family[..1].make_ascii_uppercase();
+                        format!("{family} {version}")
+                    },
+                ),
                 efforts,
                 default: true,
                 aliases: vec![],
@@ -828,6 +916,7 @@ mod tests {
             claude_listing([e("opus[1m]", "claude-opus-5-5[1m]", "Opus (1M context)")].iter());
         assert_eq!(wide[0].label, "Opus 5.5 (1M context)");
         assert_eq!(wide[0].id, "opus[1m]");
+        assert_eq!(versioned("Opus-5.5 (1M context)", "opus", "5.5"), "Opus 5.5 (1M context)");
         assert_eq!(versioned("Best", "opus", "5.5"), "Best");
         assert_eq!(
             claude_version("claude-3-5-sonnet-20241022"),
@@ -838,6 +927,199 @@ mod tests {
             (only[0].id.as_str(), only[0].default),
             ("claude-next", true)
         );
+        let only = claude_listing([e("default", "claude-haiku-4-5", "Default (recommended)")].iter());
+        assert_eq!((only[0].id.as_str(), only[0].label.as_str()), ("claude-haiku-4-5", "Haiku 4.5"));
+    }
+
+    struct FakeClaude(PathBuf);
+    impl FakeClaude {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt;
+
+            let root = std::env::temp_dir().join(format!("pm-claude-{}", crate::runtime::unique()));
+            std::fs::create_dir(&root).unwrap();
+            let binary = root.join("claude");
+            std::fs::write(
+                &binary,
+                r#"#!/bin/sh
+if [ "$*" = "auth status" ]; then
+    printf '%s\n' '{"loggedIn":true,"subscriptionType":"pro"}'
+    exit
+fi
+IFS= read -r request
+case "$request" in *'"request_id":"models"'*'"subtype":"initialize"'*) ;; *) exit 2 ;; esac
+case "$DISCOVERY" in
+    slow) exec /bin/sleep 10 ;;
+    exit) exit 1 ;;
+    *) printf '%s\n' "$DISCOVERY" ;;
+esac
+"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            Self(root)
+        }
+        fn binary(&self) -> PathBuf {
+            self.0.join("claude")
+        }
+        fn vars(&self, answer: &str) -> BTreeMap<String, String> {
+            [("DISCOVERY".into(), answer.into())].into()
+        }
+    }
+    impl Drop for FakeClaude {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // The public model fields from Claude Code 2.1.325's initialize reply.
+    fn claude_reply() -> String {
+        let models: Vec<_> = [
+            ("default", "claude-opus-5-5", "Default (recommended)"),
+            ("opus", "claude-opus-5-5", "Opus 5.5"),
+            ("fable", "claude-fable-5-2", "Fable 5.2"),
+            ("sonnet", "claude-sonnet-5-5", "Sonnet 5.5"),
+            ("haiku", "claude-haiku-5-5", "Haiku 5.5"),
+            ("claude-fable-5-1", "claude-fable-5-1", "Fable 5.1"),
+            ("claude-haiku-4-5-20251001", "claude-haiku-4-5-20251001", "Haiku 4.5"),
+            ("claude-sonnet-5", "claude-sonnet-5", "Sonnet 5"),
+            ("claude-opus-5", "claude-opus-5", "Opus 5"),
+            ("claude-fable-5", "claude-fable-5", "Fable 5"),
+            ("claude-opus-4-8", "claude-opus-4-8", "Opus 4.8"),
+            ("claude-opus-4-7", "claude-opus-4-7", "Opus 4.7"),
+            ("claude-opus-4-6", "claude-opus-4-6", "Opus 4.6"),
+            ("claude-sonnet-4-6", "claude-sonnet-4-6", "Sonnet 4.6"),
+        ]
+        .map(|(value, resolved, name)| {
+            json!({"value":value,"resolvedModel":resolved,"displayName":name})
+        })
+        .into();
+        json!({"type":"control_response","response":{
+            "request_id":"models","subtype":"success","response":{"models":models}
+        }})
+        .to_string()
+    }
+
+    #[test]
+    fn claude_discovery_reads_all_real_models_and_marks_the_default() {
+        let fake = FakeClaude::new();
+        let models = claude_models(&fake.binary(), fake.vars(&claude_reply()), MODELS).unwrap();
+        assert_eq!(models.len(), 13);
+        assert_eq!(
+            (models[0].id.as_str(), models[0].label.as_str()),
+            ("opus", "Opus 5.5")
+        );
+        assert!(models[0].default);
+        assert!(!models[1..].iter().any(|model| model.default));
+        assert_eq!(models[1].label, "Fable 5.2");
+        assert_eq!(models[2].label, "Sonnet 5.5");
+        assert_eq!(models[3].label, "Haiku 5.5");
+        assert_eq!(models[12].id, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn claude_discovery_distinguishes_a_timeout_from_an_exited_process() {
+        let fake = FakeClaude::new();
+        let binary = fake.binary();
+        let slow = claude_models(&binary, fake.vars("slow"), Duration::from_millis(150));
+        assert!(slow.unwrap_err().contains("timed out"));
+        let exited = claude_models(&binary, fake.vars("exit"), MODELS);
+        assert!(exited.unwrap_err().contains("exited"));
+    }
+
+    #[test]
+    fn claude_publishes_discovery_progress_until_the_failure_status_arrives() {
+        let fake = FakeClaude::new();
+        let source = Arc::new(Mutex::new(std::sync::Weak::<Accounts>::new()));
+        let read = source.clone();
+        let (send, changes) = mpsc::channel();
+        let provider = Provider::Claude;
+        let accounts = Accounts::new(
+            Environment {
+                profile: fake.0.join("profile"),
+                vars: [
+                    ("CLAUDE_BINARY".into(), fake.binary().display().to_string()),
+                    ("DISCOVERY".into(), "exit".into()),
+                ]
+                .into(),
+                ..Default::default()
+            },
+            Arc::new(|_| panic!("a refresh never opens a browser")),
+            Arc::new(move || {
+                if let Some(accounts) = read.lock().unwrap().upgrade() {
+                    let _ = send.send((
+                        accounts.finding_models(provider),
+                        accounts.status(provider).detail,
+                    ));
+                }
+            }),
+        );
+        *source.lock().unwrap() = Arc::downgrade(&accounts);
+        accounts.refresh(provider);
+        let wait = Duration::from_secs(5);
+        assert_eq!(changes.recv_timeout(wait).unwrap(), (true, None));
+        let (finding, detail) = changes.recv_timeout(wait).unwrap();
+        assert!(!finding);
+        assert!(detail.unwrap().contains("exited"));
+    }
+
+    #[test]
+    fn claude_failed_refresh_keeps_the_last_good_catalog_and_reports_why() {
+        let fake = FakeClaude::new();
+        let mut accounts = Accounts::new(
+            Environment {
+                profile: fake.0.join("profile"),
+                vars: [
+                    ("CLAUDE_BINARY".into(), fake.binary().display().to_string()),
+                    ("DISCOVERY".into(), claude_reply()),
+                ]
+                .into(),
+                ..Default::default()
+            },
+            Arc::new(|_| panic!("a refresh never opens a browser")),
+            Arc::new(|| {}),
+        );
+        let cancel = AtomicBool::default();
+        let provider = Provider::Claude;
+        assert_eq!(
+            accounts.run(provider, Job::Refresh, &cancel).state,
+            State::Connected
+        );
+        let good = accounts.models(provider);
+        assert_eq!(good.len(), 13);
+        for (answer, reason) in [
+            ("exit", "exited"),
+            ("slow", "timed out"),
+            (
+                r#"{"type":"control_response","response":{"request_id":"models","subtype":"error"}}"#,
+                "rejected",
+            ),
+            (
+                r#"{"type":"control_response","response":{"request_id":"models","subtype":"success","response":{}}}"#,
+                "missing",
+            ),
+            (
+                r#"{"type":"control_response","response":{"request_id":"models","subtype":"success","response":{"models":[]}}}"#,
+                "no usable models",
+            ),
+        ] {
+            Arc::get_mut(&mut accounts)
+                .unwrap()
+                .environment
+                .vars
+                .insert("DISCOVERY".into(), answer.into());
+            let timeout = if answer == "slow" {
+                Duration::from_millis(150)
+            } else {
+                MODELS
+            };
+            let status = accounts.claude(Job::Refresh, &cancel, timeout).unwrap();
+            assert_eq!(accounts.models(provider), good, "{answer}");
+            assert_eq!(status.state, State::Connected);
+            let detail = status.detail.unwrap();
+            assert!(detail.contains(reason), "{detail}");
+            assert!(detail.contains("last known"), "{detail}");
+        }
     }
     /// App Server that answers slowly, has no model list, and signs in at once.
     const SLOW_CODEX: &str = r#"#!/usr/bin/python3
@@ -859,6 +1141,74 @@ for line in sys.stdin:
     elif i is not None:
         print(json.dumps({'id': i, 'result': {}}), flush=True)
 "#;
+    #[test]
+    fn chatgpt_discovery_keeps_the_installed_codex_catalog_across_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let fake = FakeClaude::new();
+        let codex = fake.0.join("codex");
+        let script = r#"#!/usr/bin/python3
+import json, os, sys
+for line in sys.stdin:
+    r = json.loads(line)
+    m, i = r.get('method'), r.get('id')
+    if i is None:
+        continue
+    answer = {'id': i, 'result': {}}
+    if m == 'account/read':
+        answer['result'] = {'account': {'type': 'chatgpt'}}
+    elif m == 'model/list':
+        mode = os.environ.get('DISCOVERY')
+        if mode == 'error':
+            del answer['result']
+            answer['error'] = {'code': -32601, 'message': 'no models'}
+        elif mode != 'malformed':
+            answer['result'] = {'data': [] if mode == 'empty' else [
+                {'model': 'gpt-6.2-sol', 'displayName': 'GPT-6.2-Sol', 'isDefault': True,
+                 'supportedReasoningEfforts': [{'reasoningEffort': 'low'}],
+                 'defaultReasoningEffort': 'low'},
+                {'model': 'gpt-6.2-astra', 'displayName': 'GPT-6.2-Astra', 'isDefault': False},
+                {'model': 'gpt-6.1-terra', 'displayName': 'GPT-6.1 Terra', 'isDefault': False},
+                {'model': 'gpt-6.1-sol', 'displayName': 'GPT-6.1-Sol'},
+                {'model': 'gpt-6-astra', 'displayName': 'GPT-6-Astra'},
+                {'model': 'gpt-5.6-terra'}
+            ]}
+    print(json.dumps(answer), flush=True)
+"#;
+        std::fs::write(&codex, script).unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut accounts = Accounts::new(
+            Environment {
+                profile: fake.0.join("profile"),
+                vars: [("CODEX_BINARY".into(), codex.display().to_string())].into(),
+                ..Default::default()
+            },
+            Arc::new(|_| panic!("a refresh never opens a browser")),
+            Arc::new(|| {}),
+        );
+        let provider = Provider::Chatgpt;
+        let cancel = AtomicBool::default();
+        assert_eq!(accounts.run(provider, Job::Refresh, &cancel).state, State::Connected);
+        let good = accounts.models(provider);
+        assert_eq!(
+            good.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra", "gpt-5.6-terra"]
+        );
+        assert!(good[0].default);
+        assert_eq!(
+            good.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
+            ["GPT-6.2 Sol", "GPT-6.2 Astra", "GPT-6.1 Terra", "GPT-6.1 Sol", "GPT-6 Astra", "GPT-5.6 Terra"],
+        );
+        assert_eq!(good[0].efforts, ["low"]);
+        for mode in ["error", "empty", "malformed"] {
+            Arc::get_mut(&mut accounts)
+                .unwrap()
+                .environment
+                .vars
+                .insert("DISCOVERY".into(), mode.into());
+            assert_eq!(accounts.run(provider, Job::Refresh, &cancel).state, State::Connected);
+            assert_eq!(accounts.models(provider), good, "{mode}");
+        }
+    }
     #[test]
     fn a_sign_in_during_a_refresh_runs_after_it_and_a_missing_model_list_still_connects() {
         use std::os::unix::fs::PermissionsExt;

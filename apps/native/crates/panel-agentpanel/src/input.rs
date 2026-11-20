@@ -179,7 +179,7 @@ impl Catalog {
                     .then(|| self.models.first().map(|(id, _)| id.as_str()))
                     .flatten()
             })
-            .unwrap_or(model)
+            .unwrap_or(key)
     }
     /// A choice a thread may save: a listed model, one it stands for, or none.
     pub fn accepts(&self, model: &str) -> bool {

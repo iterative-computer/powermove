@@ -2,38 +2,32 @@
   "source": "public pinned npm tarball headers; no executable launched",
   "layouts": [
     {
-      "package": "@openai/codex@0.159.1-darwin-arm64",
-      "integrity": "sha512-asbXtXQerzPO8CL3t/5++Whj00k+NkbE4ngT56pCwx2/5JJVCI0glEjCECGK8rA0v4zb94EAZonxAcfOd+/1MA==",
+      "package": "@openai/codex@0.169.0-darwin-arm64",
+      "integrity": "sha512-5WsWFBbVP78D+6FvNo1MMVxLPZdmcoQlqVJFrF4qx/TmvneLnMQKtLyXkUo54XOTDfoYKpNouTJ/F7gTVA8FnQ==",
       "entries": [
         {
           "name": "package/vendor/aarch64-apple-darwin/bin/codex",
           "kind": "0",
           "mode": "0o755",
-          "size": 240232512
+          "size": 280704736
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/bin/codex-code-mode-host",
           "kind": "0",
           "mode": "0o755",
-          "size": 65409392
+          "size": 70426256
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/bin/codex-voice-host",
           "kind": "0",
           "mode": "0o755",
-          "size": 9900192
+          "size": 9717888
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-path/rg",
           "kind": "0",
           "mode": "0o755",
           "size": 4030432
-        },
-        {
-          "name": "package/vendor/aarch64-apple-darwin/codex-resources/zsh/bin/zsh",
-          "kind": "0",
-          "mode": "0o755",
-          "size": 754208
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libffi.8.dylib",
@@ -45,31 +39,31 @@
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libgio-2.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 1866272
+          "size": 1903344
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libglib-2.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 1310992
+          "size": 1354064
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libgmodule-2.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 68912
+          "size": 68720
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libgobject-2.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 403088
+          "size": 417008
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libgstapp-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 152608
+          "size": 151984
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/plugins/libgstapp.dylib",
@@ -81,109 +75,109 @@
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libgstaudio-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 530400
+          "size": 560384
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/plugins/libgstaudioconvert.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 93824
+          "size": 93344
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/plugins/libgstaudioresample.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 91840
+          "size": 91696
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libgstbase-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 505968
+          "size": 520256
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/plugins/libgstcoreelements.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 446608
+          "size": 458832
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libgstnet-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 117008
+          "size": 115920
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/plugins/libgstopus.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 131680
+          "size": 131120
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libgstpbutils-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 309856
+          "size": 323568
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libgstreamer-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 1304704
+          "size": 1357856
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libgstrtp-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 205696
+          "size": 222192
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/plugins/libgstrtp.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 673888
+          "size": 674960
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/plugins/libgstrtpmanager.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 527568
+          "size": 538400
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libgsttag-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 283696
+          "size": 283280
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libgstvideo-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 903664
+          "size": 948944
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libintl.8.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 50112
+          "size": 50080
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libopus.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 504080
+          "size": 520480
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libpcre2-8.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 456816
+          "size": 456832
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-resources/voice/lib/libz.1.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 123312
+          "size": 139712
         },
         {
           "name": "package/vendor/aarch64-apple-darwin/codex-package.json",
@@ -272,26 +266,26 @@
       ]
     },
     {
-      "package": "@openai/codex@0.159.1-darwin-x64",
-      "integrity": "sha512-aCcslg6PejQSE/FhEFNk5JMQuiUYYTwWK2W/kAIZ18qSHFV0UHqqmSnHDSPOx1xClUGc9RhtAB6y9TO99hHk2Q==",
+      "package": "@openai/codex@0.169.0-darwin-x64",
+      "integrity": "sha512-K1FKSsSLl9v3z5TeagBQXyQRDBIGB5Jncy5dxsRxwT3aaTqN3AI8VrCfoxBxKMOOU9O2QX1vg7WkBwNVth/s9A==",
       "entries": [
         {
           "name": "package/vendor/x86_64-apple-darwin/bin/codex",
           "kind": "0",
           "mode": "0o755",
-          "size": 259317360
+          "size": 301125104
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/bin/codex-code-mode-host",
           "kind": "0",
           "mode": "0o755",
-          "size": 69399744
+          "size": 74491440
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/bin/codex-voice-host",
           "kind": "0",
           "mode": "0o755",
-          "size": 10412384
+          "size": 10433440
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-path/rg",
@@ -300,28 +294,22 @@
           "size": 4437184
         },
         {
-          "name": "package/vendor/x86_64-apple-darwin/codex-resources/zsh/bin/zsh",
-          "kind": "0",
-          "mode": "0o755",
-          "size": 762544
-        },
-        {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libffi.8.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 72912
+          "size": 77056
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libgio-2.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 1813696
+          "size": 1845984
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libglib-2.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 1303600
+          "size": 1344304
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libgmodule-2.0.0.dylib",
@@ -333,13 +321,13 @@
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libgobject-2.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 378608
+          "size": 386816
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libgstapp-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 119872
+          "size": 119840
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/plugins/libgstapp.dylib",
@@ -351,7 +339,7 @@
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libgstaudio-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 540192
+          "size": 585424
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/plugins/libgstaudioconvert.dylib",
@@ -369,13 +357,13 @@
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libgstbase-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 518288
+          "size": 526416
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/plugins/libgstcoreelements.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 442784
+          "size": 450800
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libgstnet-1.0.0.dylib",
@@ -387,19 +375,19 @@
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/plugins/libgstopus.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 94912
+          "size": 99008
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libgstpbutils-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 314064
+          "size": 326304
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libgstreamer-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 1288768
+          "size": 1325680
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libgstrtp-1.0.0.dylib",
@@ -411,25 +399,25 @@
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/plugins/libgstrtp.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 690352
+          "size": 710688
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/plugins/libgstrtpmanager.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 523680
+          "size": 531696
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libgsttag-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 259168
+          "size": 267344
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libgstvideo-1.0.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 895712
+          "size": 928288
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libintl.8.dylib",
@@ -441,19 +429,19 @@
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libopus.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 558400
+          "size": 558416
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libpcre2-8.0.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 465296
+          "size": 465312
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-resources/voice/lib/libz.1.dylib",
           "kind": "0",
           "mode": "0o755",
-          "size": 123360
+          "size": 127472
         },
         {
           "name": "package/vendor/x86_64-apple-darwin/codex-package.json",
