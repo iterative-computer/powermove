@@ -197,6 +197,8 @@ pub struct Controller {
     pub main_output: Rc<std::cell::Cell<Option<pm_engine_service::Output>>>,
     pub selected: Option<String>,
     pub message: String,
+    /// The revision [`RAW_ERROR_NOTE`] was shown at ([`Self::settle_message`]).
+    raw_note_at: Option<u64>,
     pub(crate) delete_toast: Option<Entity<crate::action_toast::ToastView>>,
     pub path: Option<PathBuf>,
     pub recent: Vec<(String, String)>,
@@ -997,8 +999,61 @@ fn raw_error(text: &str) -> bool {
         && ((rest.starts_with('(') && rest.ends_with(')'))
             || (rest.starts_with(" {") && rest.ends_with('}')))
 }
+/// The status line's sentence for a program's error value.
+const RAW_ERROR_NOTE: &str = "Something went wrong. Window ▸ Error Log has the details.";
+/// What a publication of document `revision` does to the status line's
+/// message ([`Controller::settle_message`]).
+#[derive(Debug, PartialEq)]
+enum Settle {
+    Keep,
+    /// A program's error value: it goes to the Error Log and the line says
+    /// [`RAW_ERROR_NOTE`].
+    Log(String),
+    /// [`RAW_ERROR_NOTE`] after a later edit: the failure was passing.
+    Clear,
+}
+fn settle(message: &str, noted_at: Option<u64>, revision: u64) -> Settle {
+    if raw_error(message) {
+        Settle::Log(message.to_owned())
+    } else if message == RAW_ERROR_NOTE && noted_at.is_some_and(|at| at != revision) {
+        Settle::Clear
+    } else {
+        Settle::Keep
+    }
+}
 #[cfg(test)]
 mod raw_error_tests {
+    /// PM-476: an error value is logged and read as a sentence; the next
+    /// edit (a later revision) clears it; nothing else is touched.
+    #[test]
+    fn an_error_value_is_logged_and_the_next_edit_clears_it() {
+        use super::{RAW_ERROR_NOTE, Settle, settle};
+        let raw = r#"Storage("Kernel state changed")"#;
+        assert_eq!(settle(raw, None, 7), Settle::Log(raw.into()));
+        assert_eq!(
+            settle(RAW_ERROR_NOTE, Some(7), 7),
+            Settle::Keep,
+            "same revision"
+        );
+        assert_eq!(
+            settle(RAW_ERROR_NOTE, Some(7), 8),
+            Settle::Clear,
+            "a later edit"
+        );
+        assert_eq!(
+            settle(RAW_ERROR_NOTE, Some(7), 1),
+            Settle::Clear,
+            "another document"
+        );
+        for kept in [
+            "Something went wrong; see the Error Log.",
+            "Select a layer to apply a LUT",
+            "Couldn’t write the caption file.",
+            "",
+        ] {
+            assert_eq!(settle(kept, Some(7), 8), Settle::Keep, "{kept}");
+        }
+    }
     #[test]
     fn a_program_error_value_never_reads_as_status() {
         for raw in [r#"Storage("Kernel state changed")"#, "GestureActive()", "Closed { id: 3 }", r#"Kernel("x")"#] {
@@ -1016,6 +1071,22 @@ mod raw_error_tests {
     }
 }
 impl Controller {
+    /// A program's error value left in the status line goes to the Error Log
+    /// and reads as [`RAW_ERROR_NOTE`] until the next edit (PM-476).
+    fn settle_message(&mut self, revision: u64) {
+        match settle(&self.message, self.raw_note_at, revision) {
+            Settle::Keep => {}
+            Settle::Log(raw) => {
+                self.errors.borrow_mut().push("Status", &raw);
+                self.message = RAW_ERROR_NOTE.into();
+                self.raw_note_at = Some(revision);
+            }
+            Settle::Clear => {
+                self.message.clear();
+                self.raw_note_at = None;
+            }
+        }
+    }
     /// A passing status note (v1's status toast): shown in the status line,
     /// then the line returns to Saved/Edited unless something replaced it.
     pub fn note(&mut self, text: String, cx: &mut Context<Self>) {
@@ -1060,7 +1131,7 @@ impl Controller {
             };
         let status = if raw_error(&status) {
             // Never a program's error value in the status line (PM-476).
-            "Something went wrong. Window ▸ Error Log has the details.".to_owned()
+            RAW_ERROR_NOTE.to_owned()
         } else {
             status
         };
@@ -1277,6 +1348,7 @@ impl Controller {
             selected: None,
             // The status bar holds facts, not instructions (review shell 2 #11).
             message: "No project".into(),
+            raw_note_at: None,
             delete_toast: None,
             path: None,
             recent: vec![],
@@ -1754,6 +1826,7 @@ impl Controller {
             self.offer_reopen(&p, cx);
         }
         self.follow_project_output();
+        self.settle_message(p.revision());
         let saving = p.saving || (self.save_pending && !self.choosing_save_path);
         if let Some(note) = save_note(self.saving_note, saving, p.dirty, &self.message) {
             self.message = note.into();
