@@ -1,6 +1,6 @@
 {
   "name": "render_effect_lab",
-  "description": "Render a built-in, installed, or staged effect with the native compositor. Returns one PNG contact sheet with cells numbered to match their parameter sets, and optional whole-image and shape-edge SSIM scores. Use Editor access or above. Open a project only for a composition backdrop. Image paths must be inside the agent or session workspace. Each cell can be 32 to 1280 pixels per side, up to 8 megapixels across the sweep.",
+  "description": "Render a built-in, installed, or staged effect with the native compositor. Returns one PNG contact sheet with each cell labeled with its number and changed parameter values. A reference adds a whole-image SSIM score to each label and both whole-image and shape-edge scores to the result. Use Editor access or above. Open a project only for a composition backdrop. Image paths must be inside the agent or session workspace. Each cell can be 32 to 1280 pixels per side, up to 8 megapixels across the sweep.",
   "inputSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -322,11 +322,15 @@
           "type": "object",
           "required": [
             "index",
+            "label",
             "parameters"
           ],
           "properties": {
             "index": {
               "type": "integer"
+            },
+            "label": {
+              "type": "string"
             },
             "parameters": {
               "type": "object"

@@ -3,6 +3,15 @@
 //! prepared here. One GPU renderer serves the entire sweep.
 use crate::mcp_services::{Rgba, decode_png, fit, image, png};
 use anyhow::{Result, anyhow, bail, ensure};
+use objc2::runtime::AnyObject;
+use objc2_app_kit::{
+    NSAttributedStringNSStringDrawing, NSColor, NSFont, NSFontAttributeName,
+    NSForegroundColorAttributeName, NSGraphicsContext,
+};
+use objc2_core_graphics::{
+    CGBitmapContextCreate, CGColorSpace, CGImageAlphaInfo, CGImageByteOrderInfo,
+};
+use objc2_foundation::{NSAttributedString, NSDictionary, NSPoint, NSString};
 use pm_mcp::effect_lab::{Backdrop, Context, Request, Shape};
 use pm_mcp::services::ToolOutput;
 use pm_protocol::{
@@ -62,7 +71,7 @@ pub(crate) fn render(
         _ => 0.0,
     };
     let ticks = Ticks::new(pm_time::ticks_from_seconds(seconds)?)?;
-    let mut sheet = Sheet::new(size, parameter_sets.len());
+    let mut sheet = Sheet::new(size, parameter_sets.len(), reference.is_some());
     let mut cells = Vec::new();
     for (index, parameters) in parameter_sets.iter().enumerate() {
         ensure!(!stop(), "The effect lab render timed out.");
@@ -106,8 +115,8 @@ pub(crate) fn render(
         let scores = reference
             .as_ref()
             .map(|reference| similarity(reference, &luma(&pixels), size, shape));
-        sheet.add(index, &pixels, scores);
-        let mut cell = json!({"index":index+1, "parameters":parameters});
+        let label = sheet.add(index, &pixels, &request.parameter_sets[index], scores)?;
+        let mut cell = json!({"index":index+1, "label":label, "parameters":parameters});
         if let Some([whole, edge]) = scores {
             cell["scores"] = json!({"wholeImage":whole,"edgeBand":edge});
         }
@@ -115,7 +124,7 @@ pub(crate) fn render(
     }
     ensure!(!stop(), "The effect lab render timed out.");
     let mut metadata = json!({"effectId":request.effect_id,"width":size.width,"height":size.height,
-        "columns":sheet.columns,"rows":sheet.rows,"labelHeight":LABEL_HEIGHT,"cells":cells});
+        "columns":sheet.columns,"rows":sheet.rows,"labelHeight":sheet.label_height,"cells":cells});
     if reference.is_some() {
         metadata["metric"] = json!("SSIM");
     }
@@ -422,35 +431,21 @@ fn similarity(a: &[f64], b: &[f64], size: Size, shape: Geometry) -> [f64; 2] {
     [scores[0] / counts[0] as f64, scores[1] / counts[1] as f64]
 }
 
-const LABEL_HEIGHT: u32 = 24;
-const GLYPHS: [[u8; 5]; 12] = [
-    [7, 5, 5, 5, 7],
-    [2, 6, 2, 2, 7],
-    [7, 1, 7, 4, 7],
-    [7, 1, 7, 1, 7],
-    [5, 5, 7, 1, 1],
-    [7, 4, 7, 1, 7],
-    [7, 4, 7, 5, 7],
-    [7, 1, 1, 1, 1],
-    [7, 5, 7, 5, 7],
-    [7, 5, 7, 1, 7],
-    [0, 0, 0, 0, 2],
-    [0, 0, 7, 0, 0],
-];
-
 struct Sheet {
     canvas: Vec<u8>,
     cell: Size,
     columns: u32,
     rows: u32,
+    label_height: u32,
 }
 
 impl Sheet {
-    fn new(cell: Size, count: usize) -> Self {
+    fn new(cell: Size, count: usize, scored: bool) -> Self {
         let columns = (count as f64).sqrt().ceil() as u32;
         let rows = (count as u32).div_ceil(columns);
+        let label_height = if scored && cell.width < 160 { 44 } else { 26 };
         let mut canvas =
-            vec![26; (cell.width * columns * (cell.height + LABEL_HEIGHT) * rows * 4) as usize];
+            vec![26; (cell.width * columns * (cell.height + label_height) * rows * 4) as usize];
         for alpha in canvas.iter_mut().skip(3).step_by(4) {
             *alpha = 255;
         }
@@ -459,53 +454,133 @@ impl Sheet {
             cell,
             columns,
             rows,
+            label_height,
         }
     }
 
     fn width(&self) -> u32 {
         self.cell.width * self.columns
     }
+
     fn height(&self) -> u32 {
-        (self.cell.height + LABEL_HEIGHT) * self.rows
+        (self.cell.height + self.label_height) * self.rows
     }
 
-    fn add(&mut self, index: usize, pixels: &[u8], scores: Option<[f64; 2]>) {
+    fn add(
+        &mut self,
+        index: usize,
+        pixels: &[u8],
+        overrides: &Map<String, Value>,
+        scores: Option<[f64; 2]>,
+    ) -> Result<String> {
         let x = (index as u32 % self.columns) * self.cell.width;
-        let y = (index as u32 / self.columns) * (self.cell.height + LABEL_HEIGHT);
+        let y = (index as u32 / self.columns) * (self.cell.height + self.label_height);
         let width = self.width() as usize;
         let line = self.cell.width as usize * 4;
-        for (j, row) in pixels.chunks_exact(line).enumerate() {
-            let at = ((y as usize + LABEL_HEIGHT as usize + j) * width + x as usize) * 4;
+        let mut title = (index + 1).to_string();
+        for (name, value) in overrides {
+            use std::fmt::Write;
+            let value = match value {
+                Value::String(value) => value.clone(),
+                Value::Array(stops) => format!("{} stops", stops.len()),
+                value => value.to_string(),
+            };
+            write!(title, " · {name} {value}")?;
+        }
+        let score = scores.map(|[whole, _]| format!("{whole:.2}"));
+        let (label_pixels, label) =
+            paint_label(self.cell.width, self.label_height, &title, score.as_deref())?;
+        for (j, row) in label_pixels
+            .chunks_exact(line)
+            .chain(pixels.chunks_exact(line))
+            .enumerate()
+        {
+            let at = ((y as usize + j) * width + x as usize) * 4;
             self.canvas[at..at + line].copy_from_slice(row);
         }
-        let mut label = (index + 1).to_string();
-        if let Some([whole, edge]) = scores {
-            let scored = format!("{label}  {whole:.3}  {edge:.3}");
-            if scored.len() * 8 + 12 <= self.cell.width as usize {
-                label = scored;
-            }
-        }
-        for (i, ch) in label.bytes().enumerate() {
-            let glyph = match ch {
-                b'0'..=b'9' => (ch - b'0') as usize,
-                b'.' => 10,
-                b'-' => 11,
-                _ => continue,
-            };
-            for (dy, bits) in GLYPHS[glyph].iter().enumerate() {
-                for dx in 0..3 {
-                    if bits & (4 >> dx) == 0 {
-                        continue;
-                    }
-                    let at =
-                        ((y as usize + 7 + dy * 2) * width + x as usize + 8 + i * 8 + dx * 2) * 4;
-                    for offset in [0, 4, width * 4, width * 4 + 4] {
-                        self.canvas[at + offset..at + offset + 4].copy_from_slice(&[255; 4]);
-                    }
-                }
-            }
-        }
+        Ok(label)
     }
+}
+
+/// AppKit paints the system font into a memory-only bitmap on the MCP worker.
+fn paint_label(
+    width: u32,
+    height: u32,
+    title: &str,
+    score: Option<&str>,
+) -> Result<(Vec<u8>, String)> {
+    let mut pixels = [26, 26, 26, 255].repeat((width * height) as usize);
+    let title = objc2::rc::autoreleasepool(|_| {
+        let space = CGColorSpace::new_device_rgb()
+            .ok_or_else(|| anyhow!("Could not create the contact sheet label color space."))?;
+        // The tightly packed RGBA buffer outlives both graphics contexts.
+        let bitmap = unsafe {
+            CGBitmapContextCreate(
+                pixels.as_mut_ptr().cast(),
+                width as usize,
+                height as usize,
+                8,
+                width as usize * 4,
+                Some(&space),
+                CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0,
+            )
+        }
+        .ok_or_else(|| anyhow!("Could not create the contact sheet label bitmap."))?;
+        let graphics = NSGraphicsContext::graphicsContextWithCGContext_flipped(&bitmap, false);
+
+        let font = NSFont::systemFontOfSize(if width < 64 { 12. } else { 15. });
+        let white = NSColor::whiteColor();
+        let values: [&AnyObject; 2] = [&font, &white];
+        // Both AppKit keys are initialized globals with the expected value types.
+        let keys = unsafe { [NSFontAttributeName, NSForegroundColorAttributeName] };
+        let attributes = NSDictionary::from_slices(&keys, &values);
+        let text = |s: &str| unsafe {
+            NSAttributedString::new_with_attributes(&NSString::from_str(s), &attributes)
+        };
+
+        let padding = if width < 64 { 3. } else { 8. };
+        let score_line = score.map(text);
+        let score_width = score_line.as_ref().map_or(0., |line| line.size().width);
+        let stacked = height == 44;
+        let mut max_width = f64::from(width) - 2. * padding;
+        if !stacked && score_line.is_some() {
+            max_width -= score_width + 8.;
+        }
+        let mut title = title.to_owned();
+        let mut title_line = text(&title);
+        if title_line.size().width > max_width {
+            let ends: Vec<_> = title.char_indices().map(|(offset, _)| offset).collect();
+            let keep = ends.partition_point(|end| {
+                text(&format!("{}…", &title[..*end])).size().width <= max_width
+            });
+            let end = ends.get(keep.saturating_sub(1)).copied().unwrap_or(0);
+            title.truncate(end);
+            title.push('…');
+            title_line = text(&title);
+        }
+
+        let previous = NSGraphicsContext::currentContext();
+        NSGraphicsContext::setCurrentContext(Some(&graphics));
+        let baseline = |line_height: f64, line: &NSAttributedString| {
+            ((line_height - line.size().height) / 2.).floor().max(0.)
+        };
+        let row_height = if stacked { 22. } else { f64::from(height) };
+        let y = baseline(row_height, &title_line) + if stacked { row_height } else { 0. };
+        title_line.drawAtPoint(NSPoint::new(padding, y));
+        if let Some(score) = &score_line {
+            let x = (f64::from(width) - padding - score_width).max(padding);
+            score.drawAtPoint(NSPoint::new(x, baseline(row_height, score)));
+        }
+        NSGraphicsContext::setCurrentContext(previous.as_deref());
+        Ok::<_, anyhow::Error>(title)
+    })?;
+    Ok((
+        pixels,
+        match score {
+            Some(score) => format!("{title} · {score}"),
+            None => title,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -599,12 +674,32 @@ mod tests {
     }
 
     #[test]
+    fn effect_lab_long_labels_keep_the_number_score_and_ellipsis() {
+        let (pixels, label) =
+            paint_label(48, 44, "12 · veryLongParameterName 0.84", Some("0.84")).unwrap();
+        assert_eq!(pixels.len(), 48 * 44 * 4);
+        assert!(label.starts_with("12"));
+        assert!(label.ends_with("… · 0.84"));
+        for row in pixels.chunks_exact(48 * 22 * 4) {
+            assert!(row.chunks_exact(4).any(|pixel| pixel[0] > 100));
+        }
+    }
+
+    #[test]
     fn effect_lab_blur_cells_differ_and_identical_reference_ranks_highest() {
         let mut fixture = Fixture::new();
         let mut args = json!({"effectId":"blur","backdrop":checker(),"width":128,"height":128,
             "parameterSets":[{"amount":0},{"amount":6},{"amount":32}]});
         let (metadata, output) = fixture.render(args.clone());
         let sheet = decode_png(&output).unwrap();
+        assert_eq!(metadata["cells"][1]["label"], "2 · amount 6");
+        assert_eq!(metadata["cells"][1]["parameters"]["amount"], 6);
+        let label_height = metadata["labelHeight"].as_u64().unwrap() as usize;
+        assert!(
+            (0..label_height)
+                .any(|y| (156..220).any(|x| { sheet.0[(y * sheet.1 as usize + x) * 4] > 100 })),
+            "Changed values must appear in the sheet, past the cell number"
+        );
         let [first, middle, last] =
             std::array::from_fn(|i| extract_cell(&sheet, &metadata, i as u32));
         let difference =
@@ -619,6 +714,7 @@ mod tests {
         args["referencePath"] = json!("inputs/reference.png");
         let (scores, _) = fixture.render(args);
         assert_eq!(scores["metric"], "SSIM");
+        assert_eq!(scores["cells"][1]["label"], "2 · amount 6 · 1.00");
         for name in ["wholeImage", "edgeBand"] {
             let score = |i: usize| scores["cells"][i]["scores"][name].as_f64().unwrap();
             assert!((score(1) - 1.).abs() < 1e-9);
