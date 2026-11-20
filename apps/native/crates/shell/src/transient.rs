@@ -288,7 +288,15 @@ impl Picker {
         {
             return selected.label.clone();
         }
-        members().count().to_string()
+        let count = if self.query.trim().is_empty() {
+            members().count()
+        } else {
+            self.filtered()
+                .into_iter()
+                .filter(|&i| &self.choices[i].provider == provider)
+                .count()
+        };
+        count.to_string()
     }
 
     pub fn toggle_provider(
@@ -787,6 +795,29 @@ mod provider_tests {
         assert!(!picker.provider_expanded(1));
         picker.choices.pop();
         assert_eq!(picker.rows(), vec![PickerRow::Choice(0)]);
+    }
+
+    #[test]
+    fn provider_summary_counts_only_matching_rows_during_search() {
+        let mut picker = menu();
+        picker.choices.extend([
+            Choice::new("Sonnet 5.5", "sonnet-5.5")
+                .within("Claude")
+                .for_provider("claude"),
+            Choice::new("Sonnet 5", "sonnet-5")
+                .within("Claude")
+                .for_provider("claude"),
+            Choice::new("Sonnet 4.6", "sonnet-4.6")
+                .within("Claude")
+                .for_provider("claude"),
+        ]);
+        assert_eq!(picker.provider_summary(1), "4");
+        picker.search("sonnet".into());
+        let matched = picker.filtered();
+        assert_eq!(matched.len(), 3);
+        assert_eq!(picker.provider_summary(matched[0]), "3");
+        picker.search(String::new());
+        assert_eq!(picker.provider_summary(1), "4");
     }
 
     #[test]

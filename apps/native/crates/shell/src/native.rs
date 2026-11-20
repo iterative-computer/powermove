@@ -7987,6 +7987,7 @@ impl PopupLayout<'_> {
                 0.
             };
         let caption = t.text(pm_design::Text::Caption).size;
+        let mut seen_provider = false;
         let mut y = 0.;
         let mut category: Option<String> = None;
         let centred = |view: &NSView, x: f64, top: f64, height: f64, width: f64| {
@@ -8002,6 +8003,29 @@ impl PopupLayout<'_> {
                 PickerRow::Provider(index) => (index, Some(self.model.provider_expanded(index))),
             };
             let c = &self.model.choices[index];
+            if disclosure.is_some() {
+                if seen_provider {
+                    let padding = f64::from(t.space.xs);
+                    let thickness = self.list.window().map_or(1., |window| {
+                        window.backingScaleFactor().recip()
+                    });
+                    let line = NSBox::initWithFrame(
+                        NSBox::alloc(mtm),
+                        NSRect::new(
+                            NSPoint::new(edge, y + padding),
+                            NSSize::new((width - 2. * edge).max(0.), thickness),
+                        ),
+                    );
+                    line.setBoxType(NSBoxType::Custom);
+                    line.setBorderWidth(0.);
+                    line.setFillColor(&native_color(t.colors.separator));
+                    line.setAccessibilityElement(false);
+                    self.list.addSubview(&line);
+                    self.parts.push(Retained::into_super(line));
+                    y += 2. * padding + thickness;
+                }
+                seen_provider = true;
+            }
             if sections && category.as_deref() != Some(c.category.as_str()) {
                 category = Some(c.category.clone());
                 if c.category.is_empty() {
@@ -8047,7 +8071,17 @@ impl PopupLayout<'_> {
                     .push(Retained::into_super(Retained::into_super(hint)));
             }
             if let Some(expanded) = disclosure {
-                let summary = popup_label(&self.model.provider_summary(index), caption, t.colors.secondary, mtm);
+                let tertiary = if t.accessibility.increase_contrast {
+                    t.colors.muted
+                } else {
+                    t.colors.faint
+                };
+                let summary = popup_label(
+                    &self.model.provider_summary(index),
+                    caption,
+                    tertiary,
+                    mtm,
+                );
                 summary.setAlignment(NSTextAlignment::Right);
                 let w = summary.fittingSize().width.ceil().min((trailing - lead).max(0.) / 2.);
                 centred(&summary, trailing - w, y, row_h, w);
@@ -8096,8 +8130,19 @@ impl PopupLayout<'_> {
             } else {
                 c.display_label(&self.model.query)
             };
-            let title = popup_label(&display_label, t.typography.body, t.colors.text, mtm);
-            if let Some(family) = &c.font
+            let title_color = if disclosure.is_some() {
+                t.colors.secondary
+            } else {
+                t.colors.text
+            };
+            let title_size = t.typography.body;
+            let title = popup_label(&display_label, title_size, title_color, mtm);
+            if disclosure.is_some() {
+                title.setFont(Some(&NSFont::systemFontOfSize_weight(
+                    f64::from(title_size),
+                    unsafe { NSFontWeightSemibold },
+                )));
+            } else if let Some(family) = &c.font
                 && let Some(face) = NSFontManager::sharedFontManager(mtm)
                     .fontWithFamily_traits_weight_size(
                         &NSString::from_str(family),
@@ -8108,7 +8153,12 @@ impl PopupLayout<'_> {
             {
                 title.setFont(Some(&face));
             }
-            centred(&title, lead, y, row_h, (trailing - lead).max(0.));
+            let title_lead = if disclosure.is_some() {
+                edge + f64::from(m.symbol_inline + t.space.xs)
+            } else {
+                lead
+            };
+            centred(&title, title_lead, y, row_h, (trailing - title_lead).max(0.));
             if let Some((detail, height)) = description {
                 detail.setFrame(NSRect::new(
                     NSPoint::new(lead, y + row_h - t.space.xs as f64),
@@ -8361,6 +8411,9 @@ pub fn capture_agent_picker(
         target: None,
         shortcuts: &HashMap::new(),
     }.rebuild();
+    if input["verifyProviderStyle"] == true {
+        verify_provider_layout(t, &model, &rows, &parts);
+    }
     root.setFrameSize(NSSize::new(width as f64, height));
     root.layoutSubtreeIfNeeded();
     reveal_popup_check(&model, &rows, &list, &scroll);
@@ -8391,6 +8444,51 @@ pub fn capture_agent_picker(
         Rect { x: owner.x + (owner.w - width) / 2., y: owner.y + owner.h - h - t.metrics.toolbar, w: width, h }
     };
     Some((unsafe { png.as_bytes_unchecked() }.to_vec(), frame, clipped))
+}
+
+/// Optional assertions for the window-free capture fixtures.
+fn verify_provider_layout(t: &Tokens, model: &Picker, rows: &[PopupRow], parts: &[Retained<NSView>]) {
+    let mut headers = Vec::new();
+    let mut correct_label_colors = true;
+    for row in rows {
+        let (label, color) = match row.kind {
+            PickerRow::Provider(index) => {
+                headers.push(row.rect);
+                (model.choices[index].category.clone(), t.colors.secondary)
+            }
+            PickerRow::Choice(index) => (
+                model.choices[index].display_label(&model.query),
+                t.colors.text,
+            ),
+        };
+        correct_label_colors &= parts
+            .iter()
+            .filter_map(|part| part.downcast_ref::<NSTextField>())
+            .any(|field| {
+                field.stringValue().to_string() == label
+                    && field.frame().origin.y >= row.rect.origin.y
+                    && field.frame().origin.y < row.rect.origin.y + row.rect.size.height
+                    && field.textColor().as_deref() == Some(&*native_color(color))
+            });
+    }
+    let separators: Vec<_> = parts
+        .iter()
+        .filter_map(|part| part.downcast_ref::<NSBox>())
+        .collect();
+    let expected = headers.len().saturating_sub(1);
+    let correct_separators = separators.len() == expected
+        && separators.iter().zip(headers.iter().skip(1)).all(|(line, header)| {
+            let frame = line.frame();
+            let below_line = header.origin.y - (frame.origin.y + frame.size.height);
+            *line.fillColor() == *native_color(t.colors.separator)
+                && (frame.size.height - 1.).abs() < 0.01
+                && (below_line - f64::from(t.space.xs)).abs() < 0.01
+        });
+    assert_eq!(
+        (correct_label_colors, correct_separators),
+        (true, true),
+        "provider label colors and separators (expected {expected} separators)"
+    );
 }
 
 impl Popup {
