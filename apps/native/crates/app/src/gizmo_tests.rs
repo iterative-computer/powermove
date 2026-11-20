@@ -3941,6 +3941,7 @@ fn agent_registered_shader_effect_stop_handle_drives_its_collection(cx: &mut Tes
             ops: vec![pm_kernel::state::StateOp::Register {
                 registry: "effects".into(),
                 entry: pm_kernel::state::Registration {
+                    project: Some(PROJECT.into()),
                     token: "test.agent.ramp".into(),
                     owner: Caller::native().writer,
                     id: "agent.ramp".into(),

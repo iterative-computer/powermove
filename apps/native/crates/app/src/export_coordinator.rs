@@ -235,7 +235,6 @@ impl Controller {
         let remember_destination = saved.is_none();
         let queue_id = saved.as_ref().and_then(|f| f.queue);
         let queue_store = crate::render_queue::store(&self.profile);
-        let without_offline = saved.as_ref().is_some_and(|f| f.without_offline);
         let (p, typed, media, playhead) = if let Some(frozen) = &saved {
             (
                 frozen.publication.clone(),
@@ -1387,7 +1386,8 @@ impl Frozen {
         json!({"name":name,
             "project": self.publication.project, "document": pm_model::json::to_canonical_string(&self.publication.snapshot.document.to_value().unwrap()),
             "options": self.options, "originals": self.media.originals, "proxies":self.media.proxies,
-            "resources":self.resources, "playhead":self.playhead, "destination":self.destination,
+            "resources":self.resources, "extensionBundle":self.extensions.queued(),
+            "playhead":self.playhead, "destination":self.destination,
             "replace": self.replace, "withoutOffline":self.without_offline})
     }
     fn restore(record: &Value, template: &pm_kernel::Published, id: u64) -> Result<Self, String> {
@@ -1401,6 +1401,7 @@ impl Frozen {
             media:pm_engine_service::MediaCatalog { originals:serde_json::from_value(record["originals"].clone()).map_err(|e|e.to_string())?,
                 proxies:serde_json::from_value(record["proxies"].clone()).map_err(|e|e.to_string())?, ..Default::default() },
             resources: Arc::new(serde_json::from_value(record["resources"].clone()).map_err(|e|e.to_string())?),
+            extensions: Arc::new(pm_mcp::project_extensions::Bundle::from_queue(&record["extensionBundle"])?),
             playhead: record["playhead"].as_f64().unwrap_or(0.), destination:serde_json::from_value(record["destination"].clone()).map_err(|e|e.to_string())?,
             replace:record["replace"] == true, without_offline:record["withoutOffline"] == true })
     }
@@ -1445,8 +1446,22 @@ mod frozen_queue_tests {
         options.format = Format::Json;
         let mut media = pm_engine_service::MediaCatalog::default();
         media.originals.insert("clip".into(), PathBuf::from("/media/clip.mov"));
+        let mut extensions = pm_mcp::project_extensions::Bundle::default();
+        extensions.entries.push(pm_mcp::project_extensions::Entry {
+            id: "test-effect".into(),
+            name: "Test Effect".into(),
+            version: "1.0".into(),
+            author: "Test".into(),
+            source: "local".into(),
+            store_id: None,
+            hash: None,
+            bytes: 0,
+            items: vec![],
+            status: pm_mcp::project_extensions::Status::Excluded,
+        });
         let frozen = Frozen { publication:publication.clone(), queue:None, options,
-            media, resources:Arc::default(), playhead:1.25, destination:PathBuf::from("/exports/Film.pmv"),
+            media, resources:Arc::default(), extensions:Arc::new(extensions),
+            playhead:1.25, destination:PathBuf::from("/exports/Film.pmv"),
             replace:false, without_offline:false };
         let record = frozen.record();
         let mut changed = (*publication).clone();
@@ -1458,5 +1473,9 @@ mod frozen_queue_tests {
         assert_eq!(restored.destination, frozen.destination);
         assert_eq!(restored.playhead, 1.25);
         assert_eq!(restored.queue, Some(42));
+        assert_eq!(restored.extensions.entries, frozen.extensions.entries);
+        let mut legacy = record;
+        legacy.as_object_mut().unwrap().remove("extensionBundle");
+        assert!(Frozen::restore(&legacy, &changed, 43).unwrap().extensions.entries.is_empty());
     }
 }

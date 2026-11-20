@@ -298,8 +298,7 @@ impl Bundle {
             .collect()
     }
 
-    pub fn add_to(&self, plan: &mut pm_kernel::SavePlan) -> Result<(), String> {
-        let entries = serde_json::to_value(&self.entries).map_err(|e| e.to_string())?;
+    fn encoded_parts(&self) -> (Option<Value>, Option<Value>) {
         let packages: BTreeMap<_, BTreeMap<_, _>> = self
             .packages
             .iter()
@@ -313,17 +312,36 @@ impl Bundle {
                 )
             })
             .collect();
+        (
+            (!self.entries.is_empty()).then(|| json!({"version":1,"entries":self.entries})),
+            (!packages.is_empty()).then(|| json!(packages)),
+        )
+    }
+
+    pub fn add_to(&self, plan: &mut pm_kernel::SavePlan) -> Result<(), String> {
+        let (manifest, files) = self.encoded_parts();
         plan.set_export_extension_bundle(
-            (!self.entries.is_empty())
-                .then(|| json!({"version":1,"entries":entries}))
-                .map(model_value)
-                .transpose()?,
-            (!packages.is_empty())
-                .then(|| json!(packages))
-                .map(model_value)
-                .transpose()?,
+            manifest.map(model_value).transpose()?,
+            files.map(model_value).transpose()?,
         );
         Ok(())
+    }
+
+    /// A pending export keeps the exact bundle selected at enqueue time.
+    pub fn queued(&self) -> Value {
+        let (manifest, files) = self.encoded_parts();
+        match manifest {
+            Some(manifest) => json!({MANIFEST: manifest, FILES: files}),
+            None => Value::Null,
+        }
+    }
+
+    pub fn from_queue(value: &Value) -> Result<Self, String> {
+        if value.is_null() {
+            return Ok(Self::default());
+        }
+        let value = model_value(value.clone())?;
+        Self::read(value.as_object().ok_or("Invalid queued extension bundle.")?)
     }
 
     pub fn read(extra: &pm_model::json::Map) -> Result<Self, String> {
