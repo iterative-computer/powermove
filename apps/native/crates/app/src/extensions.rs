@@ -597,7 +597,7 @@ fn extension_panel_verb(open: bool) -> &'static str {
 }
 
 #[cfg(test)]
-#[test]
+#[::core::prelude::v1::test]
 fn window_jumps_late_extension_panel_requests_are_passive() {
     assert_eq!(extension_panel_verb(true), "restore");
     assert_eq!(extension_panel_verb(false), "background-close");
@@ -617,7 +617,7 @@ fn watchdog_can_present(
 }
 
 #[cfg(test)]
-#[test]
+#[::core::prelude::v1::test]
 fn window_jumps_watchdog_stays_quiet_during_work_and_after_wait() {
     use std::time::Duration;
     assert!(!watchdog_can_present(false, false, None));

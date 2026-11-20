@@ -665,7 +665,7 @@ fn capture_utility_settings() {
 }
 
 #[cfg(test)]
-#[test]
+#[::core::prelude::v1::test]
 fn startup_restore_does_not_reselect_a_window_after_a_timer() {
     let restore = include_str!("macos.rs")
         .split_once("fn restore_session(")
