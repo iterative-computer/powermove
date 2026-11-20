@@ -5,7 +5,7 @@ use objc2_foundation::{NSAffineTransform, NSDictionary};
 
 const SIDE: f64 = 24.;
 
-fn raster(image: &NSImage, scale: u32) -> image::RgbaImage {
+fn raster(image: &NSImage, scale: u32, scheme: Scheme) -> image::RgbaImage {
     let side = SIDE as u32 * scale;
     let rep = unsafe {
         NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
@@ -26,10 +26,22 @@ fn raster(image: &NSImage, scale: u32) -> image::RgbaImage {
         NSCompositingOperation::Copy,
     );
     let size = image.size();
-    image.drawInRect(NSRect::new(
+    let rect = NSRect::new(
         NSPoint::new((SIDE - size.width) / 2., (SIDE - size.height) / 2.),
         size,
-    ));
+    );
+    image.drawInRect(rect);
+    // In a window AppKit tints the template images attached to toolbar controls.
+    // Apply that foreground in this offscreen context so we can compare the ink.
+    if image.isTemplate() {
+        let ink = if scheme == Scheme::Light {
+            NSColor::blackColor()
+        } else {
+            NSColor::whiteColor()
+        };
+        ink.setFill();
+        NSRectFillUsingOperation(rect, NSCompositingOperation::SourceAtop);
+    }
     context.flushGraphics();
     NSGraphicsContext::restoreGraphicsState_class();
     let png = unsafe {
@@ -52,6 +64,18 @@ fn ink_bounds(image: &image::RgbaImage) -> (u32, u32) {
         "toolbar glyph has no visible ink"
     );
     (right - left + 1, bottom - top + 1)
+}
+
+fn dominant_ink(image: &image::RgbaImage) -> [u8; 3] {
+    let mut counts = std::collections::BTreeMap::new();
+    for pixel in image.pixels().filter(|p| p[3] >= 248) {
+        *counts.entry([pixel[0], pixel[1], pixel[2]]).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .expect("toolbar glyph has no solid ink")
+        .0
 }
 
 #[test]
@@ -80,6 +104,7 @@ fn launcher_paints_toolbar_sized_sparkles() {
     for (theme, scheme) in [("light", Scheme::Light), ("dark", Scheme::Dark)] {
         let t = Tokens::new(scheme, Accessibility::default());
         let reference = toolbar_symbol("sparkles", "Agent", &t);
+        let gear = toolbar_symbol("gearshape", "Settings", &t);
         for (state, model, presence) in [
             ("idle", &idle, false),
             ("running", &working, true),
@@ -90,9 +115,11 @@ fn launcher_paints_toolbar_sized_sparkles() {
             let glyph = image(model.toolbar_tone(presence), &t);
             // Reuse the same image as a window would when it moves between displays.
             for (pass, scale) in [1, 2, 1].into_iter().enumerate() {
-                let painted = raster(&glyph, scale);
-                let expected = ink_bounds(&raster(&reference, scale));
+                let painted = raster(&glyph, scale, scheme);
+                let expected = ink_bounds(&raster(&reference, scale, scheme));
                 let actual = ink_bounds(&painted);
+                let expected_ink = dominant_ink(&raster(&gear, scale, scheme));
+                let actual_ink = dominant_ink(&painted);
                 if let Some(dir) = &output {
                     painted
                         .save(dir.join(format!("{theme}-{state}-{scale}x.png")))
@@ -103,20 +130,36 @@ fn launcher_paints_toolbar_sized_sparkles() {
                             ("grid", "square.grid.2x2"),
                             ("gear", "gearshape"),
                         ] {
-                            raster(&toolbar_symbol(symbol, name, &t), scale)
+                            raster(&toolbar_symbol(symbol, name, &t), scale, scheme)
                                 .save(dir.join(format!("{theme}-{name}-{scale}x.png")))
                                 .unwrap();
                         }
                     }
                 }
-                measurements.push((theme, state, pass, scale, actual, expected));
+                measurements.push((
+                    theme,
+                    state,
+                    pass,
+                    scale,
+                    actual,
+                    expected,
+                    actual_ink,
+                    expected_ink,
+                ));
             }
         }
     }
-    for (theme, state, pass, scale, actual, expected) in measurements {
+    for (theme, state, pass, scale, actual, expected, actual_ink, expected_ink) in measurements {
         assert!(
             actual.0.abs_diff(expected.0) <= 1 && actual.1.abs_diff(expected.1) <= 1,
             "{theme} {state} at {scale}x (pass {pass}): painted {actual:?} px, toolbar reference {expected:?} px"
+        );
+        assert!(
+            actual_ink
+                .iter()
+                .zip(expected_ink)
+                .all(|(a, b)| a.abs_diff(b) <= 2),
+            "{theme} {state} at {scale}x (pass {pass}): painted {actual_ink:?}, toolbar gear ink {expected_ink:?}"
         );
     }
 }

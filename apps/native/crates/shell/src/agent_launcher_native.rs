@@ -369,13 +369,15 @@ pub(super) fn image(tone: Tone, t: &Tokens) -> Retained<NSImage> {
                 size,
             );
             sparkle.drawInRect(rect);
-            native_color(t.colors.muted).set();
-            NSRectFillUsingOperation(rect, NSCompositingOperation::SourceAtop);
         }
         NSGraphicsContext::restoreGraphicsState_class();
         objc2::runtime::Bool::YES
     });
-    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(24., 24.), false, &block)
+    let image =
+        NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(24., 24.), false, &block);
+    // Let AppKit supply the same foreground as the other toolbar template images.
+    image.setTemplate(tone != Tone::Attention);
+    image
 }
 #[cfg(test)]
 #[path = "agent_launcher_glyph_tests.rs"]
