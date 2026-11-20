@@ -171,17 +171,24 @@ fn projected_extent(cube: &Value) -> (f64, [f64; 2]) {
     let r = norm(cross(f, [0., 1., 0.]));
     let u = cross(r, f);
     let t = 22.5f64.to_radians().tan();
-    let size = [
-        cube["d"]["data"]["object"]["source"]["parameters"]["width"]
-            .as_f64()
-            .unwrap_or(1.),
-        cube["d"]["data"]["object"]["source"]["parameters"]["height"]
-            .as_f64()
-            .unwrap_or(1.),
-        cube["d"]["data"]["object"]["source"]["parameters"]["depth"]
-            .as_f64()
-            .unwrap_or(1.),
-    ];
+    let source = &cube["d"]["data"]["object"]["source"];
+    let n = |k: &str| source["parameters"][k].as_f64();
+    let shape = pm_geom3d::primitives::Primitive::from_parameters(
+        source["primitive"].as_str().unwrap(),
+        &pm_geom3d::primitives::Parameters {
+            width: n("width"),
+            height: n("height"),
+            depth: n("depth"),
+            radius: n("radius"),
+            radius_top: n("radiusTop"),
+            radius_bottom: n("radiusBottom"),
+            tube: n("tube"),
+            segments: n("segments"),
+            detail: n("detail"),
+        },
+    )
+    .unwrap();
+    let positions = shape.geometry().positions;
     let scale = [v(cube, "scale.x"), v(cube, "scale.y"), v(cube, "scale.z")].map(|s| s / 100.);
     let (rx, ry, rz) = (
         (v(cube, "rotation.x") + v(cube, "orientation.x")).to_radians(),
@@ -194,11 +201,8 @@ fn projected_extent(cube: &Value) -> (f64, [f64; 2]) {
         v(cube, "position.z"),
     ];
     let (mut xs, mut ys) = (vec![], vec![]);
-    for i in 0..8 {
-        let mut p = [0usize, 1, 2].map(|k| {
-            let sign = if i >> k & 1 == 1 { 0.5 } else { -0.5 };
-            sign * size[k] * scale[k]
-        });
+    for v in positions.chunks_exact(3) {
+        let mut p = [0usize, 1, 2].map(|k| v[k] as f64 * scale[k]);
         // X, then Y, then Z rotation.
         p = [
             p[0],
@@ -292,4 +296,57 @@ fn a_cube_in_a_lit_3d_composition_adds_only_the_cube() {
     assert!(!matches!(ack.reply, Reply::Throw(_)), "{:?}", ack.reply);
     let after = layers(&a);
     assert_eq!(after.len(), before.len() + 1, "{:?}", names(&after));
+}
+
+/// Every menu shape, added first to a 2D composition, spans about the same
+/// share of the frame as the cube, centred.
+#[test]
+fn every_menu_shape_added_first_is_readable_and_centred() {
+    for kind in [
+        "box",
+        "sphere",
+        "plane",
+        "cylinder",
+        "cone",
+        "torus",
+        "capsule",
+        "icosahedron",
+    ] {
+        let a = fixture(two_d());
+        let before = layers(&a);
+        let published = a.handle().published("p").unwrap();
+        let (label, commands, _) =
+            pm_panel_studio3d::properties::add_layer(&published, 0., kind, "L1").unwrap();
+        let ack = a
+            .handle()
+            .call(
+                "p",
+                Request::new(
+                    Caller::native(),
+                    Call::Transact {
+                        label: Some(label),
+                        body: WriteBody::Commands(commands),
+                        expected_revision: None,
+                    },
+                ),
+            )
+            .wait()
+            .unwrap()
+            .unwrap();
+        assert!(!matches!(ack.reply, Reply::Throw(_)), "{kind}: {:?}", ack.reply);
+        let after = layers(&a);
+        let shape = after.iter().find(|l| l["id"] == "L1").unwrap();
+        let (extent, centre) = projected_extent(shape);
+        assert!(
+            (0.35..=0.40).contains(&extent),
+            "{kind}: largest projected dimension {:.1}% of the frame height",
+            extent * 100.
+        );
+        assert!(
+            centre[0].abs() < 0.05 && centre[1].abs() < 0.05,
+            "{kind}: centred: {centre:?}"
+        );
+        assert!(!after.iter().any(is_world), "{kind}: no world");
+        assert_eq!(after.len(), before.len() + 2, "{kind}: the shape and its key");
+    }
 }

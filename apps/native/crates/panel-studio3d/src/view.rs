@@ -1303,10 +1303,15 @@ pub fn add_layer(
     let mut args = args;
     // The first 3D layer is seen by the default camera at (3, 2, 6), which
     // already looks at it three-quarters on: a cube this size spans about
-    // 37% of the frame's height.
-    if kind == "box" && !layers.iter().any(|l| schema::role(l).is_some()) {
-        args["object"]["source"]["parameters"] =
-            json!({"width":FIRST_CUBE,"height":FIRST_CUBE,"depth":FIRST_CUBE});
+    // 37% of the frame's height, and the other shapes are scaled to match.
+    if !layers.iter().any(|l| schema::role(l).is_some()) {
+        if kind == "box" {
+            args["object"]["source"]["parameters"] =
+                json!({"width":FIRST_CUBE,"height":FIRST_CUBE,"depth":FIRST_CUBE});
+        } else if let Some(scale) = first_shape_scale(kind) {
+            let s = (scale * 100.).round() / 100.;
+            args["object"]["p"] = json!({"sx":s,"sy":s,"sz":s});
+        }
     }
     let mut commands = vec![scene(p, time, args)];
     if kind == "terrain" {
@@ -1425,6 +1430,46 @@ fn landscape_fog(layers: &[Value]) -> Option<Value> {
 }
 /// Side of the cube Layer ▸ Add 3D Layer adds to a composition with no 3D yet.
 const FIRST_CUBE: f64 = 1.55;
+/// The first shape's largest projected dimension, as a share of the frame's
+/// height: what [`FIRST_CUBE`] spans.
+const FIRST_SHAPE: f64 = 0.37;
+
+/// The uniform scale at which a menu primitive, as built, spans
+/// [`FIRST_SHAPE`] of the frame's height seen by the default camera (no
+/// camera layer: at (3, 2, 6), aimed at the origin, 45° vertical view).
+fn first_shape_scale(kind: &str) -> Option<f64> {
+    let shape = pm_geom3d::primitives::Primitive::from_parameters(kind, &Default::default())?;
+    let positions = shape.geometry().positions;
+    let eye = [3., 2., 6.];
+    let len = |a: [f64; 3]| (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let f = [-eye[0] / len(eye), -eye[1] / len(eye), -eye[2] / len(eye)];
+    let r = [-f[2], 0., f[0]].map(|x| x / len([-f[2], 0., f[0]]));
+    let u = [
+        r[1] * f[2] - r[2] * f[1],
+        r[2] * f[0] - r[0] * f[2],
+        r[0] * f[1] - r[1] * f[0],
+    ];
+    let t = (22.5f64).to_radians().tan();
+    let extent = |scale: f64| {
+        let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        for p in positions.chunks_exact(3) {
+            let d = [0, 1, 2].map(|k| p[k] as f64 * scale - eye[k]);
+            let (x, y) = (dot(d, r) / dot(d, f) / t, dot(d, u) / dot(d, f) / t);
+            (x0, x1, y0, y1) = (x0.min(x), x1.max(x), y0.min(y), y1.max(y));
+        }
+        (x1 - x0).max(y1 - y0) / 2.
+    };
+    let mut scale = 1.;
+    for _ in 0..4 {
+        let e = extent(scale);
+        if !(e > 0.) {
+            return None;
+        }
+        scale *= FIRST_SHAPE / e;
+    }
+    Some(scale)
+}
 
 /// A shape added from Layer ▸ Add 3D Layer to an unlit composition gets the
 /// key softbox and nothing else: no floor and no world over the
