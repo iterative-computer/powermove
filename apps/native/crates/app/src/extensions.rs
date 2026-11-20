@@ -193,6 +193,7 @@ pub struct Extensions {
     /// key, then each Store extension's own. Never shared.
     pages: BTreeMap<String, Page>,
     views: Rc<RefCell<BTreeMap<String, Rc<RefCell<MacDomHost>>>>>,
+    panel_snapshots: pm_compat_host::PanelSnapshotCache,
     data_stores: StoreDataStores,
     /// Panels drawn by a Store helper, with its id and run.
     pub(crate) stores: BTreeMap<String, (String, u64)>,
@@ -297,6 +298,7 @@ impl Default for Extensions {
             project: None,
             pages: BTreeMap::new(),
             views: Rc::default(),
+            panel_snapshots: Default::default(),
             data_stores: StoreDataStores::default(),
             stores: BTreeMap::new(),
             owners: Rc::default(),
@@ -2236,7 +2238,16 @@ impl Controller {
         if !exporting {
             let shell = self.host.borrow();
             host.install_below(&shell.native_container(), &shell.gpui);
-            host.enable_panel_renderers(&shell.native_container(), &shell.gpui);
+            host.enable_panel_renderers(
+                &shell.native_container(),
+                &shell.gpui,
+                self.extensions.panel_snapshots.clone(),
+            );
+            host.set_panel_document_revision(
+                self.published
+                    .as_ref()
+                    .map(|p| (p.snapshot.doc_id, p.snapshot.revision)),
+            );
         }
         let css = pm_compat_host::native_style::stylesheet(&light, &dark);
         host.update_renderer_style(&css, tokens.scheme);
@@ -2536,7 +2547,12 @@ impl Controller {
         };
         // The window's page that stopped applying, or whose process went.
         let mut stopped = None;
+        let revision = self
+            .published
+            .as_ref()
+            .map(|p| (p.snapshot.doc_id, p.snapshot.revision));
         for (key, page) in &mut self.extensions.pages {
+            page.host.borrow_mut().set_panel_document_revision(revision);
             for event in page.events.events.borrow_mut().drain(..) {
                 match event {
                     HostEvent::DockContent { id, height } => self

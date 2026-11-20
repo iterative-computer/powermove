@@ -76,7 +76,7 @@ impl Group {
         &self.tabs[self.active.min(self.tabs.len() - 1)]
     }
 }
-pub const MIN_TAB_WIDTH: f32 = 56.;
+pub const MIN_TAB_WIDTH: f32 = 72.;
 
 /// Widths in tab order. The caller reserves space for gaps and header tools.
 pub struct TabTrack {
@@ -2655,15 +2655,21 @@ mod tab_track_tests {
             collapsed: false,
         };
         let widths = [76., 100., 60., 46., 80.];
-        assert_eq!(group.tab_track(500., &widths).widths, [76., 100., 60., 56., 80.]);
-        assert_eq!(group.tab_track(300., &widths).widths, [56., 56., 56., 56., 76.]);
-        assert_eq!(group.tab_track(316., &widths).widths, [60., 60., 60., 56., 80.]);
+        assert_eq!(
+            group.tab_track(500., &widths).widths,
+            [76., 100., 72., 72., 80.]
+        );
+        assert_eq!(group.tab_track(350., &widths).widths, [72.; 5]);
+        assert_eq!(
+            group.tab_track(370., &widths).widths,
+            [73., 73., 72., 72., 80.]
+        );
         for available in 0..=450 {
             let available = available as f32;
             let track = group.tab_track(available, &widths);
             assert_eq!(track.widths.len(), widths.len());
-            assert!(track.widths.iter().all(|&w| w >= MIN_TAB_WIDTH));
-            assert_eq!(track.scroll, (280. - available).max(0.));
+            assert!(track.widths.iter().all(|&w| w >= 72.));
+            assert_eq!(track.scroll, (360. - available).max(0.));
             let total: f32 = track.widths.iter().sum();
             assert!(total <= available + track.scroll + 0.01);
             if track.scroll > 0. {

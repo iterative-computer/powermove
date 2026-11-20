@@ -223,8 +223,8 @@ fn dock_tabs_keep_every_tab_in_a_scrollable_track() {
     for width in [24., 144., 300., 1200.] {
         let track = group.tab_track(width, &widths);
         assert_eq!(track.widths.len(), group.tabs.len());
-        assert!(track.widths.iter().all(|w| *w >= 56.));
-        assert_eq!(track.scroll, (672_f32 - width).max(0.));
+        assert!(track.widths.iter().all(|w| *w >= 72.));
+        assert_eq!(track.scroll, (72. * group.tabs.len() as f32 - width).max(0.));
     }
     assert_eq!(group.tab_track(1200., &widths).widths[10], widths[10]);
 }

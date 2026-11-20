@@ -35,6 +35,15 @@ impl PanelAttachment {
         body: &NSView,
     ) -> Self {
         let aperture = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+        Self::with_aperture(parent, editor, body, aperture)
+    }
+
+    pub(crate) fn with_aperture(
+        parent: &NSView,
+        editor: &NSView,
+        body: &NSView,
+        aperture: Retained<NSView>,
+    ) -> Self {
         aperture.setWantsLayer(true);
         aperture
             .layer()

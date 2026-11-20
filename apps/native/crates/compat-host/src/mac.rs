@@ -1,5 +1,6 @@
 use crate::{
     contract::Panels,
+    panel_cache::{MAX_SNAPSHOT_BYTES, PanelSnapshotKey, PanelSnapshots},
     panel_document::PanelDocument,
     panel_renderers::{CanvasCache, PanelFeedback, PanelPageEvents, WarmPanels},
     panel_slot::{PanelAttachment, editor_rect},
@@ -13,7 +14,7 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::*;
-use objc2_core_graphics::CGMutablePath;
+use objc2_core_graphics::{CGImage, CGMutablePath};
 use objc2_foundation::*;
 use objc2_web_kit::*;
 use pm_remote_dom::protocol::Batch;
@@ -22,7 +23,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet, VecDeque},
     io::Read,
-    rc::Rc,
+    rc::{Rc, Weak},
 };
 
 type Task = Retained<ProtocolObject<dyn WKURLSchemeTask>>;
@@ -166,6 +167,13 @@ struct Shared {
     slot_dom_ready: Cell<bool>,
     slot_snapshot_pending: Cell<bool>,
     slot_painted: Cell<bool>,
+    #[cfg(feature = "macos-probes")]
+    first_panel_paint: RefCell<Option<Retained<NSImage>>>,
+    slot_applied: Cell<u64>,
+    slot_theme_applied: Cell<u64>,
+    slot_size: Cell<[u64; 2]>,
+    slot_paint_revision: Cell<u64>,
+    slot_snapshot_cache: RefCell<Option<(u64, Weak<PanelSnapshotEntries>)>>,
     geometry_dirty: Cell<bool>,
     closed: Cell<bool>,
     layouts: RefCell<BTreeMap<String, (u64, Rect, bool)>>,
@@ -182,6 +190,18 @@ struct Shared {
     fonts: RefCell<BTreeMap<String, std::sync::Arc<[u8]>>>,
 }
 impl Shared {
+    fn slot_paint_changed(&self) {
+        if let Some(id) = self.slot_owner.borrow().as_deref()
+            && let Some((realm, cache)) = self.slot_snapshot_cache.borrow().as_ref()
+            && let Some(cache) = cache.upgrade()
+        {
+            self.slot_paint_revision
+                .set(self.slot_paint_revision.get() + 1);
+            cache.borrow_mut().remove_panel(*realm, id);
+            self.handler.event(HostEvent::GeometryChanged);
+        }
+    }
+
     fn panel_safe_stage(&self, stage: Rect, frozen: &BTreeMap<String, Rect>) -> Vec<Rect> {
         let stale = self.stale_layouts.borrow();
         let retiring = self.retiring_layouts.borrow();
@@ -281,6 +301,9 @@ impl Shared {
         }
         if kind == "overscan_dirty" {
             if let Some(id) = m["payload"]["id"].as_str() {
+                if self.slot_owner.borrow().as_deref() == Some(id) {
+                    self.slot_paint_changed();
+                }
                 if let Some(snapshot) = self.snapshots.borrow_mut().get_mut(id) {
                     snapshot.revision += 1;
                 }
@@ -371,6 +394,15 @@ impl Shared {
             if self.slot_owner.borrow().as_deref() == Some(id) && !self.slot_dom_ready.replace(true)
             {
                 self.geometry_dirty.set(true);
+                self.handler.event(HostEvent::GeometryChanged);
+            }
+            return Ok(Value::Null);
+        }
+        if kind == "panel_theme_applied" {
+            if self.slot_owner.borrow().is_some()
+                && let Some(theme) = m["payload"].as_u64()
+            {
+                self.slot_theme_applied.set(theme);
                 self.handler.event(HostEvent::GeometryChanged);
             }
             return Ok(Value::Null);
@@ -469,6 +501,7 @@ impl Shared {
             "canvas_applied" => {
                 let resource = payload["resource"].as_u64().ok_or(Error::InvalidRequest)?;
                 self.canvases.borrow_mut().remove(resource)?;
+                self.slot_paint_changed();
                 if payload["failed"] == true {
                     self.handler
                         .event(HostEvent::Failure("compat_canvas_frame_unavailable"));
@@ -490,6 +523,20 @@ impl Shared {
                         payload["event"]
                     );
                     return Err(Error::Forbidden);
+                }
+                if self.slot_owner.borrow().is_some()
+                    && payload["kind"] == "applied"
+                    && let Some(sequence) = payload["seq"].as_u64()
+                {
+                    self.slot_applied.set(sequence);
+                }
+                if payload["kind"] == "event"
+                    && matches!(
+                        payload["event"].as_str(),
+                        Some("input" | "change" | "selectionchange")
+                    )
+                {
+                    self.slot_paint_changed();
                 }
                 if let Some(feedback) = self.panel_feedback.borrow().as_ref() {
                     feedback.received(None, payload)?;
@@ -1072,6 +1119,8 @@ struct PanelMirror {
     theme_applied: bool,
     batches: VecDeque<(Batch, Option<u64>)>,
     canvases: BTreeMap<u64, CanvasFrame>,
+    snapshot_pending: Rc<Cell<bool>>,
+    snapshot_attempt: RefCell<Option<(PanelSnapshotKey, u64)>>,
 }
 
 impl PanelMirror {
@@ -1080,12 +1129,16 @@ impl PanelMirror {
         id: &str,
         feedback: &PanelFeedback,
         theme: Option<&(String, pm_design::Scheme)>,
+        theme_revision: u64,
         fonts: &[PageFace],
     ) {
         if !self.theme_applied
             && let Some((css, scheme)) = theme
         {
-            self.theme_applied = self.page.set_native_style(css, *scheme).is_ok();
+            self.theme_applied = self
+                .page
+                .send_native_style(css, *scheme, Some(theme_revision))
+                .is_ok();
         }
         if !fonts.is_empty() {
             let _ = self.page.add_fonts(fonts);
@@ -1102,6 +1155,181 @@ impl PanelMirror {
             self.batches.pop_front();
         }
     }
+
+    fn remember_paint(&self, key: PanelSnapshotKey, renderers: &PanelSnapshotState, sequence: u64) {
+        let shared = &self.page.shared;
+        let paint = shared.slot_paint_revision.get();
+        if shared.slot_applied.get() != sequence
+            || sequence < renderers.minimum_sequence
+            || shared.slot_theme_applied.get() != key.theme
+            || !self.canvases.is_empty()
+            || !shared.canvases.borrow().is_empty()
+            || self
+                .snapshot_attempt
+                .borrow()
+                .as_ref()
+                .is_some_and(|(prior, epoch)| *prior == key && *epoch == paint)
+            || renderers.cache.0.borrow().contains(&key)
+            || self.snapshot_pending.replace(true)
+        {
+            return;
+        }
+        self.snapshot_attempt.replace(Some((key.clone(), paint)));
+        // Capture while the view is still in its slot. Its release can then
+        // drop WebKit immediately, including when the warm cache is full.
+        let shared = shared.clone();
+        let revision = renderers.revision.clone();
+        let cache = Rc::downgrade(&renderers.cache.0);
+        let pending = self.snapshot_pending.clone();
+        let complete = block2::RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+            pending.set(false);
+            if shared.closed.get() {
+                return;
+            }
+            if revision.get() != key.revision
+                || shared.slot_size.get() != key.size
+                || shared.slot_paint_revision.get() != paint
+            {
+                shared.handler.event(HostEvent::GeometryChanged);
+                return;
+            }
+            let (true, Some(cache), Some(image)) =
+                (error.is_null(), cache.upgrade(), unsafe { image.as_ref() })
+            else {
+                return;
+            };
+            let Some(bitmap) = (unsafe {
+                image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None)
+            }) else {
+                return;
+            };
+            let bytes = CGImage::bytes_per_row(Some(&bitmap))
+                .saturating_mul(CGImage::height(Some(&bitmap)));
+            if bytes == 0 || bytes > MAX_SNAPSHOT_BYTES {
+                return;
+            }
+            let size = NSSize::new(f64::from_bits(key.size[0]), f64::from_bits(key.size[1]));
+            let bitmap = NSImage::initWithCGImage_size(NSImage::alloc(), &bitmap, size);
+            cache.borrow_mut().insert(key.clone(), bytes, bitmap);
+            shared.handler.event(HostEvent::GeometryChanged);
+        });
+        unsafe {
+            self.page
+                .web
+                .takeSnapshotWithConfiguration_completionHandler(None, &complete)
+        };
+    }
+}
+
+/// One bounded cache shared by the compatibility realms of a window.
+#[derive(Clone, Default)]
+pub struct PanelSnapshotCache(Rc<PanelSnapshotEntries>);
+type PanelSnapshotEntries = RefCell<PanelSnapshots<Retained<NSImage>>>;
+
+struct PanelSnapshotState {
+    cache: PanelSnapshotCache,
+    realm: u64,
+    revision: Rc<Cell<u64>>,
+    document: Option<(u64, u64)>,
+    minimum_sequence: u64,
+    theme: u64,
+    overlays: BTreeMap<String, ColdPanelOverlay>,
+}
+
+impl PanelSnapshotState {
+    fn new(cache: PanelSnapshotCache) -> Self {
+        let realm = cache.0.borrow_mut().allocate_realm();
+        Self {
+            cache,
+            realm,
+            revision: Rc::default(),
+            document: None,
+            minimum_sequence: 0,
+            theme: 0,
+            overlays: BTreeMap::new(),
+        }
+    }
+
+    fn invalidate(&self) {
+        self.revision.set(self.revision.get() + 1);
+        self.cache.0.borrow_mut().remove_realm(self.realm);
+    }
+
+    fn key(&self, id: &str, body: Rect) -> PanelSnapshotKey {
+        PanelSnapshotKey {
+            realm: self.realm,
+            panel: id.to_owned(),
+            revision: self.revision.get(),
+            size: [body.w.to_bits(), body.h.to_bits()],
+            theme: self.theme,
+        }
+    }
+}
+
+impl Drop for PanelSnapshotState {
+    fn drop(&mut self) {
+        self.overlays.clear();
+        self.invalidate();
+    }
+}
+
+struct ColdPanelOverlay {
+    attachment: PanelAttachment,
+    view: Retained<SlotView>,
+    picture: Retained<NSImageView>,
+    geometry: Option<(Rect, Rect, f64, [f64; 2])>,
+    bitmap: Option<Rc<Retained<NSImage>>>,
+}
+
+impl ColdPanelOverlay {
+    fn new(mtm: MainThreadMarker, parent: &NSView, editor: &NSView) -> Self {
+        let view = SlotView::new(mtm, NSRect::ZERO);
+        let picture = NSImageView::initWithFrame(NSImageView::alloc(mtm), NSRect::ZERO);
+        picture.setImageScaling(NSImageScaling::ScaleNone);
+        picture.setImageAlignment(NSImageAlignment::AlignTopLeft);
+        picture.setAccessibilityElement(false);
+        view.addSubview(&picture);
+        let aperture: Retained<SnapshotView> =
+            unsafe { msg_send![super(SnapshotView::alloc(mtm).set_ivars(())), init] };
+        let attachment = PanelAttachment::with_aperture(
+            parent, editor, &view, Retained::into_super(aperture),
+        );
+        Self {
+            attachment,
+            view,
+            picture,
+            geometry: None,
+            bitmap: None,
+        }
+    }
+
+    fn present(
+        &mut self,
+        image: Rc<Retained<NSImage>>,
+        body: Rect,
+        clip: Rect,
+        radius: f64,
+        fade: [f64; 2],
+    ) -> bool {
+        let image_changed = self
+            .bitmap
+            .as_ref()
+            .is_none_or(|old| !Rc::ptr_eq(old, &image));
+        if image_changed {
+            self.picture.setImage(Some(&image));
+            self.bitmap = Some(image);
+        }
+        let geometry = (body, clip, radius, fade);
+        let placed = self.geometry != Some(geometry);
+        if placed && let Some(frame) = self.attachment.place(body, clip) {
+            self.view.setFrame(frame);
+            self.picture.setFrame(self.view.bounds());
+            let viewport = Rect::new(0., 0., body.w, body.h);
+            self.view.clip(vec![viewport], radius, &[(viewport, fade)]);
+            self.geometry = Some(geometry);
+        }
+        placed || image_changed
+    }
 }
 
 struct PanelRenderers {
@@ -1115,6 +1343,7 @@ struct PanelRenderers {
     canvases: CanvasCache,
     fonts: BTreeMap<String, PageFace>,
     theme: Option<(String, pm_design::Scheme)>,
+    snapshots: PanelSnapshotState,
 }
 
 struct Activity {
@@ -1216,6 +1445,13 @@ impl MacDomHost {
             slot_dom_ready: Cell::default(),
             slot_snapshot_pending: Cell::default(),
             slot_painted: Cell::default(),
+            #[cfg(feature = "macos-probes")]
+            first_panel_paint: RefCell::default(),
+            slot_applied: Cell::default(),
+            slot_theme_applied: Cell::default(),
+            slot_size: Cell::default(),
+            slot_paint_revision: Cell::default(),
+            slot_snapshot_cache: RefCell::default(),
             geometry_dirty: Cell::new(true),
             closed: Cell::new(false),
             layouts: RefCell::default(),
@@ -1329,13 +1565,24 @@ impl MacDomHost {
     }
     pub fn update_renderer_style(&mut self, css: &str, scheme: pm_design::Scheme) {
         if let Some(renderers) = self.renderers.as_mut() {
+            if renderers
+                .theme
+                .as_ref()
+                .is_none_or(|(previous, appearance)| previous != css || *appearance != scheme)
+            {
+                renderers.snapshots.theme += 1;
+                renderers.snapshots.invalidate();
+            }
             renderers.theme = Some((css.to_owned(), scheme));
             for mirror in renderers
                 .views
                 .values_mut()
                 .chain(renderers.warm.panes().map(|(_, pane)| pane))
             {
-                mirror.theme_applied = mirror.page.set_native_style(css, scheme).is_ok();
+                mirror.theme_applied = mirror
+                    .page
+                    .send_native_style(css, scheme, Some(renderers.snapshots.theme))
+                    .is_ok();
             }
         }
         let _ = self.set_native_style(css, scheme);
@@ -1343,9 +1590,19 @@ impl MacDomHost {
 
     /// Reuse a generated sheet across every rendering document in a window.
     pub fn set_native_style(&self, css: &str, scheme: pm_design::Scheme) -> Result<()> {
+        self.send_native_style(css, scheme, None)
+    }
+
+    fn send_native_style(
+        &self,
+        css: &str,
+        scheme: pm_design::Scheme,
+        revision: Option<u64>,
+    ) -> Result<()> {
         self.shared.send(serde_json::json!({
             "kind": "theme",
             "css": css,
+            "snapshot_revision": revision,
             "scheme": if scheme == pm_design::Scheme::Dark { "dark" } else { "light" },
         }))
     }
@@ -1519,6 +1776,9 @@ impl MacDomHost {
         if added.is_empty() {
             return Ok(());
         }
+        if let Some(renderers) = &self.renderers {
+            renderers.snapshots.invalidate();
+        }
         self.shared.send(json!({"kind":"fonts","faces":added}))
     }
     /// Keep the caller's frame on Backpressure; the page releases resources only
@@ -1544,6 +1804,8 @@ impl MacDomHost {
             "width":frame.width,"height":frame.height}));
         if result.is_err() {
             self.shared.canvases.borrow_mut().remove(resource)?;
+        } else if let Some(renderers) = &self.renderers {
+            renderers.snapshots.invalidate();
         }
         result
     }
@@ -1563,7 +1825,12 @@ impl MacDomHost {
     }
     /// Keep a stage page for window-level drawing and render visible
     /// contributions in independent, clipped pages of the same realm.
-    pub fn enable_panel_renderers(&mut self, parent: &NSView, editor: &NSView) {
+    pub fn enable_panel_renderers(
+        &mut self,
+        parent: &NSView,
+        editor: &NSView,
+        snapshots: PanelSnapshotCache,
+    ) {
         let feedback = Rc::new(PanelFeedback::new(self.shared.handler.clone()));
         self.shared.panel_feedback.replace(Some(feedback.clone()));
         self.renderers = Some(PanelRenderers {
@@ -1577,7 +1844,20 @@ impl MacDomHost {
             canvases: CanvasCache::default(),
             fonts: BTreeMap::new(),
             theme: None,
+            snapshots: PanelSnapshotState::new(snapshots),
         });
+    }
+
+    pub fn set_panel_document_revision(&mut self, revision: Option<(u64, u64)>) {
+        if let Some(renderers) = self.renderers.as_mut()
+            && renderers.snapshots.document != revision
+        {
+            if renderers.snapshots.document.is_some() {
+                renderers.snapshots.minimum_sequence = renderers.document.sequence() + 1;
+            }
+            renderers.snapshots.document = revision;
+            renderers.snapshots.invalidate();
+        }
     }
 
     pub fn present_panel_renderers(&mut self, placements: &[(String, Rect, Rect)]) -> bool {
@@ -1599,9 +1879,21 @@ impl MacDomHost {
             })
             .cloned()
             .collect();
-        let mut presented = !retired.is_empty();
+        let overlays = &mut renderers.snapshots.overlays;
+        let old_overlays = overlays.len();
+        overlays.retain(|id, _| {
+            placements
+                .iter()
+                .any(|(owner, _, clip)| owner == id && clip.w > 0. && clip.h > 0.)
+        });
+        let mut presented = !retired.is_empty() || overlays.len() != old_overlays;
         for id in retired {
             if let Some(mut mirror) = renderers.views.remove(&id) {
+                let [width, height] = mirror.page.shared.slot_size.get().map(f64::from_bits);
+                let key = renderers
+                    .snapshots
+                    .key(&id, Rect::new(0., 0., width, height));
+                renderers.snapshots.cache.0.borrow_mut().get(&key);
                 mirror.page.detach_panel_view();
                 renderers.feedback.retired(&id);
                 renderers.warm.retain(id, mirror, now);
@@ -1618,8 +1910,10 @@ impl MacDomHost {
                 renderers.feedback.opening(id);
                 renderers.views.insert(id.clone(), mirror);
             }
+            let mut live = false;
+            let key = renderers.snapshots.key(id, *body);
+            let fade = self.body_fades.iter().find(|(rect, _)| rect == clip);
             if let Some(mirror) = renderers.views.get_mut(id) {
-                let fade = self.body_fades.iter().find(|(rect, _)| rect == clip);
                 mirror.page.set_body_fades(
                     fade.into_iter()
                         .map(|(_, distances)| (Rect::new(0., 0., body.w, body.h), *distances))
@@ -1637,13 +1931,38 @@ impl MacDomHost {
                         presented |= attached != now_attached || changed && now_attached;
                     }
                 }
+                live = mirror.page.panel_is_attached();
+                if live {
+                    mirror.remember_paint(
+                        key.clone(),
+                        &renderers.snapshots,
+                        renderers.document.sequence(),
+                    );
+                }
             } else {
                 missing = true;
+            }
+            let image = (!live)
+                .then(|| renderers.snapshots.cache.0.borrow_mut().get(&key))
+                .flatten();
+            let overlays = &mut renderers.snapshots.overlays;
+            if let Some(image) = image {
+                let mtm = MainThreadMarker::from(&*renderers.editor);
+                let shown = overlays.entry(id.clone()).or_insert_with(|| {
+                    ColdPanelOverlay::new(mtm, &renderers.parent, &renderers.editor)
+                });
+                presented |= shown.present(
+                    image, *body, *clip, self.corner_radius,
+                    fade.map_or([0.; 2], |(_, fade)| *fade),
+                );
+            } else {
+                presented |= overlays.remove(id).is_some();
             }
         }
         if changed && (missing || renderers.warm.next_expiry().is_some()) {
             self.shared.handler.event(HostEvent::GeometryChanged);
         }
+        renderers.snapshots.cache.0.borrow_mut().discard_invalid();
         presented
     }
 
@@ -1655,6 +1974,31 @@ impl MacDomHost {
             .views
             .get(id)
             .map(|mirror| &*mirror.page)
+    }
+
+    #[cfg(feature = "macos-probes")]
+    #[doc(hidden)]
+    pub fn cached_panel_probe(&self, id: &str) -> Option<(Retained<NSView>, Retained<NSImage>)> {
+        let overlay = self.renderers.as_ref()?.snapshots.overlays.get(id)?;
+        Some((
+            Retained::into_super(overlay.view.clone()),
+            overlay.picture.image()?,
+        ))
+    }
+
+    #[cfg(feature = "macos-probes")]
+    #[doc(hidden)]
+    pub fn panel_bitmap_ready(&self, id: &str, body: Rect) -> bool {
+        self.renderers.as_ref().is_some_and(|renderers| {
+            let key = renderers.snapshots.key(id, body);
+            renderers.snapshots.cache.0.borrow().contains(&key)
+        })
+    }
+
+    #[cfg(feature = "macos-probes")]
+    #[doc(hidden)]
+    pub fn first_panel_paint(&self) -> Option<Retained<NSImage>> {
+        self.shared.first_panel_paint.borrow().clone()
     }
 
     pub fn warm_panels(&self) -> Vec<(String, std::time::Instant)> {
@@ -1712,6 +2056,10 @@ impl MacDomHost {
                 continue;
             };
             page.mirror_source = true;
+            page.shared.slot_snapshot_cache.replace(Some((
+                renderers.snapshots.realm,
+                Rc::downgrade(&renderers.snapshots.cache.0),
+            )));
             let preferences = unsafe { page.web.configuration().preferences() };
             if preferences.respondsToSelector(sel!(setInactiveSchedulingPolicy:)) {
                 unsafe {
@@ -1788,8 +2136,16 @@ impl MacDomHost {
                     .frames()
                     .map(|frame| (frame.node, frame.clone()))
                     .collect(),
+                snapshot_pending: Rc::default(),
+                snapshot_attempt: RefCell::default(),
             };
-            mirror.send_updates(id, &renderers.feedback, renderers.theme.as_ref(), &fonts);
+            mirror.send_updates(
+                id,
+                &renderers.feedback,
+                renderers.theme.as_ref(),
+                renderers.snapshots.theme,
+                &fonts,
+            );
             mirror.page.load();
             renderers.views.insert(id.clone(), mirror);
         }
@@ -1802,7 +2158,13 @@ impl MacDomHost {
             if !mirror.page.shared.ready.get() || mirror.page.prepare_panel_document(id).is_err() {
                 continue;
             }
-            mirror.send_updates(id, &renderers.feedback, renderers.theme.as_ref(), &fonts);
+            mirror.send_updates(
+                id,
+                &renderers.feedback,
+                renderers.theme.as_ref(),
+                renderers.snapshots.theme,
+                &fonts,
+            );
             if mirror.batches.is_empty() {
                 mirror.canvases.retain(|_, frame| {
                     let mut local = frame.clone();
@@ -1847,6 +2209,9 @@ impl MacDomHost {
             self.shared.slot_dom_ready.set(false);
             self.shared.slot_snapshot_pending.set(false);
             self.shared.slot_painted.set(false);
+            #[cfg(feature = "macos-probes")]
+            self.shared.first_panel_paint.borrow_mut().take();
+            self.shared.slot_applied.set(0);
         }
         Ok(())
     }
@@ -1863,8 +2228,11 @@ impl MacDomHost {
             }
             shared.slot_snapshot_pending.set(false);
             if error.is_null()
-                && unsafe { image.as_ref() }.is_some_and(|image| image.size().width > 0.)
+                && let Some(image) = unsafe { image.as_ref() }
+                && image.size().width > 0.
             {
+                #[cfg(feature = "macos-probes")]
+                shared.first_panel_paint.replace(Some(image.retain()));
                 shared.slot_painted.set(true);
                 shared.geometry_dirty.set(true);
                 shared.handler.event(HostEvent::GeometryChanged);
@@ -1885,6 +2253,9 @@ impl MacDomHost {
         let Some(attachment) = &self.panel_attachment else {
             return Err(Error::InvalidGeometry);
         };
+        self.shared
+            .slot_size
+            .set([body.w.to_bits(), body.h.to_bits()]);
         if !self.shared.ready.get() {
             return Ok(());
         }
@@ -2065,6 +2436,7 @@ impl MacDomHost {
     }
     pub fn forget_panel_snapshot(&mut self, id: &str) {
         if let Some(renderers) = &mut self.renderers {
+            renderers.snapshots.invalidate();
             if let Some(mirror) = renderers.views.get_mut(id) {
                 mirror.page.forget_panel_snapshot(id);
             }
@@ -2918,6 +3290,9 @@ impl DomPanelHost for MacDomHost {
             primary.caused_by = renderers.feedback.local_input(None, primary.caused_by);
             self.shared
                 .send(json!({"kind":"batch","panel":id,"batch":primary}))?;
+            if renderers.document.changes_paint(&admitted) {
+                renderers.snapshots.invalidate();
+            }
             renderers.document.apply(&admitted);
             for mirror in renderers
                 .views
@@ -3039,6 +3414,13 @@ mod admission_tests {
                 slot_dom_ready: Cell::default(),
                 slot_snapshot_pending: Cell::default(),
                 slot_painted: Cell::default(),
+                #[cfg(feature = "macos-probes")]
+                first_panel_paint: RefCell::default(),
+                slot_applied: Cell::default(),
+                slot_theme_applied: Cell::default(),
+                slot_size: Cell::default(),
+                slot_paint_revision: Cell::default(),
+                slot_snapshot_cache: RefCell::default(),
                 geometry_dirty: Cell::new(false),
                 closed: Cell::new(false),
                 layouts: RefCell::default(),

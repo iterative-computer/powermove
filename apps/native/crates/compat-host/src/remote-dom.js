@@ -121,6 +121,8 @@
     window.addEventListener(
       type,
       (event) => {
+        const id = event.target.closest?.('[data-pm-contribution]')?.getAttribute('data-pm-contribution');
+        if (id && id === slotOwner) call({kind:'overscan_dirty',panel:0,payload:{id}});
         if (resourceImages.has(event.target)) event.stopImmediatePropagation();
       },
       true,
@@ -430,6 +432,9 @@
       nativeScheme = event.scheme;
       nativeStyle(document);
       for (const child of sheets.values()) nativeStyle(child.document);
+      if (slotOwner !== null && Number.isSafeInteger(event.snapshot_revision)) {
+        call({kind:'panel_theme_applied',panel:0,payload:event.snapshot_revision});
+      }
     } else if (event.kind === "create") {
       if (panel !== null)
         throw Error("Dedicated remote DOM page already owns a panel");

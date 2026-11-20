@@ -33,6 +33,11 @@ pub(crate) struct CanvasResources {
 }
 #[cfg(any(target_os = "macos", test))]
 impl CanvasResources {
+    #[cfg(target_os = "macos")]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub fn insert(&mut self, frame: &CanvasFrame) -> Result<u64> {
         if frame.node == 0
             || frame.node > pm_remote_dom::protocol::MAX_ID

@@ -301,6 +301,10 @@ fn verify_native_style(host: &MacDomHost) {
 
 fn has_fixture_fill(png: &[u8], fill: &str) -> bool {
     let rep = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(png)).unwrap();
+    has_fixture_bitmap(&rep, fill)
+}
+
+fn has_fixture_bitmap(rep: &NSBitmapImageRep, fill: &str) -> bool {
     if rep.bitsPerSample() != 8 || rep.samplesPerPixel() != 4 {
         return false;
     }
@@ -348,7 +352,7 @@ fn verify_native_origin(host: &mut MacDomHost, mtm: MainThreadMarker) {
     root.addSubview(&anchor);
     host.install_below(&root, &anchor);
     if std::env::var_os("PM_DOCK_STACK_LEGACY").is_none() {
-        host.enable_panel_renderers(&root, &anchor);
+        host.enable_panel_renderers(&root, &anchor, PanelSnapshotCache::default());
     }
     host.present(Rect::new(0., 0., size.width, size.height))
         .unwrap();
@@ -614,7 +618,7 @@ fn verify_isolated_stack(
             "window.requestAnimationFrame = f => setTimeout(() => f(performance.now()), 8); return true;",
         );
     } else {
-        host.enable_panel_renderers(&root, &editor);
+        host.enable_panel_renderers(&root, &editor, PanelSnapshotCache::default());
     }
     let light = pm_design::Tokens::new(pm_design::Scheme::Light, Default::default());
     let dark = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
@@ -770,7 +774,54 @@ fn verify_isolated_stack(
         if !shown {
             assert!(labels.iter().all(|(id, ..)| host.panel_probe(id).is_none()));
             assert_eq!(host.warm_panels().len(), 2);
+            assert!(
+                labels
+                    .iter()
+                    .all(|(id, ..)| host.cached_panel_probe(id).is_none())
+            );
             continue;
+        }
+        let cold: Vec<_> = poses
+            .iter()
+            .filter(|(id, _, _)| frame == 8 && !warm.iter().any(|(warm_id, _)| warm_id == id))
+            .collect();
+        if frame == 8 {
+            println!(
+                "{theme}: four cold slots had content on their first presentation ({:.2} ms)",
+                started.elapsed().as_secs_f64() * 1000.
+            );
+            assert_eq!(cold.len(), 4);
+        }
+        for (id, rect, _) in &cold {
+            let (view, image) = host
+                .cached_panel_probe(id)
+                .expect("cold slot has a matching snapshot on its first frame");
+            let (_, _, fill) = labels.iter().find(|(owner, _, _)| owner == id).unwrap();
+            let bitmap =
+                NSBitmapImageRep::imageRepWithData(&image.TIFFRepresentation().unwrap()).unwrap();
+            assert!(
+                has_fixture_bitmap(&bitmap, fill),
+                "{id}: fallback has foreign or empty pixels"
+            );
+            let clip = unsafe { view.superview() }.unwrap();
+            assert_eq!(
+                clip.frame(),
+                NSRect::new(
+                    NSPoint::new(rect.x, viewport.height - rect.y - rect.h),
+                    NSSize::new(rect.w, rect.h),
+                )
+            );
+            assert!(clip.layer().unwrap().masksToBounds());
+        }
+        if frame == 9 {
+            assert!(
+                host.cached_panel_probe("anchor").is_none(),
+                "a never-seen tab has no cached pixels"
+            );
+            assert!(
+                host.cached_panel_probe("notes").is_none(),
+                "the old tab leaves its slot immediately"
+            );
         }
         for (id, _) in warm
             .iter()
@@ -782,9 +833,34 @@ fn verify_isolated_stack(
                 "warm re-show must paint on its first frame: {id}"
             );
         }
+        let mut checked_paints = BTreeSet::new();
         until(|| {
             host.service_panel_renderers();
             host.present_panel_renderers(&poses);
+            for (id, _, _) in &cold {
+                let cached = host.cached_panel_probe(id).is_some();
+                let live = host.panel_probe(id).filter(|page| page.panel_is_attached());
+                assert_ne!(
+                    cached,
+                    live.is_some(),
+                    "{id}: every frame presents either the snapshot or the live view"
+                );
+                if let Some(live) = live
+                    && checked_paints.insert(id)
+                {
+                    let (_, _, fill) = labels.iter().find(|(owner, _, _)| owner == id).unwrap();
+                    let image = live
+                        .first_panel_paint()
+                        .expect("handoff has a completed WebKit paint");
+                    let bitmap =
+                        NSBitmapImageRep::imageRepWithData(&image.TIFFRepresentation().unwrap())
+                            .unwrap();
+                    assert!(
+                        has_fixture_bitmap(&bitmap, fill),
+                        "{id}: first live frame lost its pixels"
+                    );
+                }
+            }
             poses.iter().all(|(id, _, _)| {
                 host.panel_probe(id)
                     .is_some_and(MacDomHost::panel_is_attached)
@@ -837,6 +913,31 @@ fn verify_isolated_stack(
                 "{id}, frame {frame}: foreign or empty pixels"
             );
         }
+        if frame == 6 {
+            until(|| {
+                host.service_panel_renderers();
+                host.present_panel_renderers(&poses);
+                poses
+                    .iter()
+                    .all(|(id, body, _)| host.panel_bitmap_ready(id, *body))
+            });
+        }
+    }
+    if !legacy {
+        // A previously painted owner can still miss the key after it is released.
+        host.present_panel_renderers(&[]);
+        for (id, _) in host.warm_panels() {
+            host.evict_warm_panel(&id);
+        }
+        let body = Rect::new(540., 22., 240., 42.);
+        let wider = Rect { w: 245., ..body };
+        host.present_panel_renderers(&[("pexels".into(), wider, wider)]);
+        assert!(host.cached_panel_probe("pexels").is_none());
+        host.present_panel_renderers(&[("pexels".into(), body, body)]);
+        assert!(host.cached_panel_probe("pexels").is_some());
+        host.set_panel_document_revision(Some((1, 2)));
+        host.present_panel_renderers(&[("pexels".into(), body, body)]);
+        assert!(host.cached_panel_probe("pexels").is_none());
     }
     host.present_panel_renderers(&[]);
     host.end_background_job();

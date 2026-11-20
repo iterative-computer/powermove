@@ -178,21 +178,39 @@ pub struct Editor {
 struct TabScroll {
     selected: String,
     viewport: f32,
-    active_span: (f32, f32),
-    offset: f32,
+    active: usize,
+    position: f32,
 }
 
 impl TabScroll {
-    fn reveal(&mut self, selected: &str, viewport: f32, span: (f32, f32), max: f32, fade: f32) {
-        if self.selected != selected || self.viewport != viewport || self.active_span != span {
+    fn reveal(
+        &mut self,
+        selected: &str,
+        active: usize,
+        viewport: f32,
+        visible: usize,
+        count: usize,
+    ) {
+        if self.selected != selected || self.viewport != viewport || self.active != active {
             self.selected = selected.to_owned();
             self.viewport = viewport;
-            self.active_span = span;
-            let padding = fade.min(((viewport - (span.1 - span.0)) / 2.).max(0.));
-            let left = span.0 - padding;
-            self.offset = self.offset.clamp((span.1 + padding - viewport).min(left), left);
+            self.active = active;
+            let first = self
+                .first()
+                .clamp((active + 1).saturating_sub(visible.max(1)), active);
+            self.position = first as f32;
         }
-        self.offset = self.offset.clamp(0., max);
+        self.position = self.position.min(count.saturating_sub(visible) as f32);
+    }
+
+    fn first(&self) -> usize {
+        self.position.round() as usize
+    }
+
+    fn scroll(&mut self, delta: f32, limit: usize) -> bool {
+        let first = self.first();
+        self.position = (self.position - delta / TAB_STEP).clamp(0., limit as f32);
+        self.first() != first
     }
 }
 
@@ -2574,6 +2592,14 @@ impl Editor {
 /// A token colour at an alpha (`translucency.*`, `Tokens::edge`, `Tokens::line`).
 /// Space between neighbouring tab pills.
 const TAB_SPACING: f32 = 2.;
+const TAB_STEP: f32 = layout::MIN_TAB_WIDTH + TAB_SPACING;
+const TAB_EDGE_FADE: f32 = 16.;
+
+fn whole_tabs(viewport: f32, count: usize) -> (usize, f32) {
+    let visible = (((viewport + TAB_SPACING) / TAB_STEP).floor() as usize).min(count);
+    let width = (visible as f32 * TAB_STEP - TAB_SPACING).max(0.);
+    (visible, width)
+}
 /// Width of a header title at `size` in the medium weight, as the tab strip draws it.
 fn title_width(text: &str, size: f32, window: &Window) -> f32 {
     let run = TextRun {
@@ -3584,23 +3610,23 @@ impl Editor {
                 let viewport = (p.rect.w - reserved - m.gap * (controls + 1) as f32).max(0.);
                 let gaps = TAB_SPACING * tabs.len().saturating_sub(1) as f32;
                 let track = group.tab_track(viewport - gaps, &widths);
-                let scroll_range = if multi {
-                    track.scroll + (gaps - viewport).max(0.)
+                let scrolling = multi && track.scroll > 0.;
+                let (visible, clip_width) = if scrolling {
+                    whole_tabs(viewport, tabs.len())
                 } else {
-                    0.
+                    (tabs.len(), viewport)
                 };
-                let fade = pm_design::DOCK_SCROLL_FADE.min(viewport / 3.);
+                let limit = tabs.len().saturating_sub(visible);
                 let tab_key = tabs[0].clone();
-                let offset = if scroll_range > 0. {
-                    let left = track.widths[..active].iter().sum::<f32>() + TAB_SPACING * active as f32;
-                    let right = left + track.widths[active];
+                let first = if scrolling {
                     let state = self.tab_scrolls.entry(tab_key.clone()).or_default();
-                    state.reveal(&id, viewport, (left, right), scroll_range, fade);
-                    state.offset
+                    state.reveal(&id, active, viewport, visible, tabs.len());
+                    state.first()
                 } else {
                     self.tab_scrolls.remove(&tab_key);
-                    0.
+                    0
                 };
+                let offset = first as f32 * TAB_STEP;
                 let mut row = div().flex().items_center().gap(px(TAB_SPACING));
                 let mut span_x = p.rect.x + if multi { -offset } else { m.inset };
                 let mut spans = vec![];
@@ -3609,10 +3635,23 @@ impl Editor {
                     let drawn = if multi { track.widths[ti] } else {
                         (p.rect.w - tools - m.inset - m.gap * 2.).max(0.)
                     };
-                    let label_width = if multi { drawn - close_slot - m.gap } else { drawn };
-                    let truncated = if multi { drawn < full } else {
-                        label_width < title_width(panels.title(tab), t.typography.title, w)
+                    let compact = multi && drawn < full;
+                    let label_size = if compact {
+                        t.typography.minimum
+                    } else {
+                        t.typography.title
                     };
+                    let padding = if compact {
+                        [t.space.xs; 2]
+                    } else {
+                        [close_slot, m.gap]
+                    };
+                    let label_width = if multi {
+                        drawn - padding[0] - padding[1]
+                    } else {
+                        drawn
+                    };
+                    let truncated = label_width < title_width(panels.title(tab), label_size, w);
                     let tab_left = span_x;
                     let span_width = if multi { drawn } else {
                         drawn.min(title_width(panels.title(tab), t.typography.title, w))
@@ -3653,8 +3692,8 @@ impl Editor {
                         .h(px(m.hit))
                         .when(multi, |s| {
                             let s = s
-                                .pl(px(close_slot))
-                                .pr(px(m.gap))
+                                .pl(px(padding[0]))
+                                .pr(px(padding[1]))
                                 .rounded(px(m.control_radius));
                             s.when(!dragging, |s| s.hover_style(|s| s.bg(rgb(c.hover))))
                         })
@@ -3671,11 +3710,11 @@ impl Editor {
                                 s.text_color(rgb(c.secondary))
                             })
                         })
-                        .text_size(px(t.typography.title))
+                        .text_size(px(label_size))
                         .font_weight(FontWeight(t.typography.medium_weight))
                         .whitespace_nowrap();
                     let label = if truncated {
-                        tab_label(&title, label_width, t.typography.title, w)
+                        tab_label(&title, label_width, label_size, w)
                     } else {
                         title.clone()
                     };
@@ -3685,7 +3724,8 @@ impl Editor {
                         .when(truncated && !dragging, |s| s.tooltip(tooltip(&t, &title)))
                         .child(div().min_w(px(0.)).truncate().child(label));
                     if closable && !dragging {
-                        // Mac tabs: the close button sits at the leading edge, on hover.
+                        // Compressed tabs give the label the leading space.
+                        // The close control covers its trailing edge on hover.
                         cell = cell.child(
                             div()
                                 .id(format!("close-{tab}"))
@@ -3694,7 +3734,8 @@ impl Editor {
                                 .tab_index(0)
                                 .focus_style(|s| s.opacity(1.))
                                 .absolute()
-                                .left_0()
+                                .when(compact, |button| button.right_0().bg(rgb(c.hover)))
+                                .when(!compact, |button| button.left_0())
                                 .top_0()
                                 .bottom_0()
                                 .w(px(close_slot))
@@ -3765,39 +3806,50 @@ impl Editor {
                         .w(px(viewport))
                         .flex_none()
                         .h(px(m.hit))
-                        .overflow_hidden()
-                        .overflow_fade(Edges::<AbsoluteLength> {
-                            left: px(offset.min(fade)).into(),
-                            right: px((scroll_range - offset).min(fade)).into(),
-                            top: px(0.).into(),
-                            bottom: px(0.).into(),
-                        })
-                        .child(row.absolute().top_0().left(px(-offset)))
-                        .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
-                            if scroll_range <= 0. || this.gesture.is_some()
-                                || event.modifiers.control || event.modifiers.platform
-                            {
-                                return;
-                            }
-                            let delta = event.delta.pixel_delta(px(16.));
-                            // Horizontal trackpad gestures and vertical wheel ticks both
-                            // work. A vertical trackpad gesture still scrolls the dock.
-                            let by = if delta.x.abs() >= delta.y.abs() {
-                                delta.x
-                            } else if matches!(event.delta, gpui::ScrollDelta::Lines(_)) || event.modifiers.shift {
-                                delta.y
-                            } else {
-                                return;
-                            };
-                            if let Some(state) = this.tab_scrolls.get_mut(&tab_key) {
-                                let offset = (state.offset - f32::from(by)).clamp(0., scroll_range);
-                                if offset != state.offset {
-                                    state.offset = offset;
+                        .child(
+                            div()
+                                .relative()
+                                .w(px(clip_width))
+                                .h(px(m.hit))
+                                .overflow_hidden()
+                                .overflow_fade(Edges::<AbsoluteLength> {
+                                    left: px(if first > 0 { TAB_EDGE_FADE } else { 0. }).into(),
+                                    right: px(if first < limit { TAB_EDGE_FADE } else { 0. })
+                                        .into(),
+                                    top: px(0.).into(),
+                                    bottom: px(0.).into(),
+                                })
+                                .child(row.absolute().top_0().left(px(-offset))),
+                        )
+                        .on_scroll_wheel(cx.listener(
+                            move |this, event: &ScrollWheelEvent, _, cx| {
+                                if !scrolling
+                                    || this.gesture.is_some()
+                                    || event.modifiers.control
+                                    || event.modifiers.platform
+                                {
+                                    return;
+                                }
+                                let delta = event.delta.pixel_delta(px(16.));
+                                // Horizontal trackpad gestures and vertical wheel ticks both
+                                // work. A vertical trackpad gesture still scrolls the dock.
+                                let by = if delta.x.abs() >= delta.y.abs() {
+                                    delta.x
+                                } else if matches!(event.delta, gpui::ScrollDelta::Lines(_))
+                                    || event.modifiers.shift
+                                {
+                                    delta.y
+                                } else {
+                                    return;
+                                };
+                                if let Some(state) = this.tab_scrolls.get_mut(&tab_key)
+                                    && state.scroll(f32::from(by), limit)
+                                {
                                     cx.notify();
                                 }
-                            }
-                            cx.stop_propagation();
-                        }));
+                                cx.stop_propagation();
+                            },
+                        ));
                     header = header.child(strip);
                 } else {
                     header = header.child(row);
@@ -6043,19 +6095,43 @@ mod tests {
     #[::core::prelude::v1::test]
     fn dock_tabs_selection_reveals_the_active_tab() {
         let mut scroll = super::TabScroll::default();
-        scroll.reveal("pexels", 180., (224., 280.), 100., 0.);
-        assert_eq!(scroll.offset, 100.);
-        scroll.offset = 20.;
-        scroll.reveal("pexels", 180., (224., 280.), 100., 0.);
-        assert_eq!(scroll.offset, 20., "manual scrolling can browse other tabs");
-        scroll.reveal("voiceover", 180., (168., 224.), 100., 0.);
-        assert_eq!(scroll.offset, 44.);
-        scroll.reveal("voiceover", 142., (168., 224.), 138., 0.);
-        assert_eq!(scroll.offset, 82.);
-        scroll.reveal("properties", 142., (0., 56.), 138., 0.);
-        assert_eq!(scroll.offset, 0.);
-        scroll.reveal("voiceover", 142., (168., 224.), 138., 28.);
-        assert_eq!(scroll.offset, 110.);
+        scroll.reveal("pexels", 4, 250., 3, 5);
+        assert_eq!(scroll.first(), 2);
+        assert!(!scroll.scroll(16., 2));
+        assert!(scroll.scroll(24., 2));
+        scroll.reveal("pexels", 4, 250., 3, 5);
+        assert_eq!(scroll.first(), 1, "manual scrolling can browse other tabs");
+        scroll.reveal("voiceover", 3, 250., 3, 5);
+        assert_eq!(scroll.first(), 1);
+        scroll.reveal("voiceover", 3, 150., 2, 5);
+        assert_eq!(scroll.first(), 2);
+        scroll.reveal("properties", 0, 150., 2, 5);
+        assert_eq!(scroll.first(), 0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn dock_tabs_scroll_exposes_only_whole_tabs_outside_the_fade() {
+        let mut scroll = super::TabScroll::default();
+        let count = 5;
+        for viewport in [72., 105., 146., 188., 258., 366.] {
+            let (visible, clip_width) = super::whole_tabs(viewport, count);
+            assert!(clip_width <= viewport);
+            for active in 0..count {
+                scroll.reveal("selected", active, viewport, visible, count);
+                let first = scroll.first();
+                let left = first as f32 * super::TAB_STEP;
+                let right = left + clip_width;
+                assert!((first..first + visible).contains(&active));
+                for index in 0..count {
+                    let start = index as f32 * super::TAB_STEP;
+                    let end = start + 72.;
+                    assert!(
+                        end <= left || start >= right || (start >= left && end <= right),
+                        "tab {index} leaves a sliver at viewport {viewport}, offset {left}"
+                    );
+                }
+            }
+        }
     }
 
     #[::core::prelude::v1::test]
