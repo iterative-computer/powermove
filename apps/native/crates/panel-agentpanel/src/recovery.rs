@@ -254,6 +254,7 @@ mod tests {
             images: vec!["original.png".into()],
             files: vec![json!({"name":"original.txt"})],
             role: Some("original-role".into()),
+            project: Some("p".into()),
         };
         p.host_admitted_request("t", "old", &req, &settings)
             .unwrap();
