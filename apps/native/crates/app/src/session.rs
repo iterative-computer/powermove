@@ -2838,7 +2838,7 @@ impl Controller {
         let Some(session) = self.session.clone() else {
             return;
         };
-        let asked = self.kernel.shell(ShellCall::CopiesOf(session));
+        let asked = self.kernel.shell(ShellCall::CopiesOf(session.clone()));
         cx.spawn(async move |this, cx| {
             let Some(Ok(ShellReply::Copies(rows))) = asked.await else {
                 return;
