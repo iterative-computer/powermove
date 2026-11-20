@@ -46,6 +46,64 @@ fn model(value: Value) -> TimelineModel {
 fn fixture() -> Value {
     parse(FIXTURE).unwrap()
 }
+
+#[test]
+fn vertex_rows_use_their_path_name_and_authored_vertex_number() {
+    let vertex = |id: &str| {
+        serde_json::json!({
+            "id": id,
+            "p": {
+                "x": {"v": 0, "kf": [{"i": format!("{id}-x"), "t": 1, "v": 10}]},
+                "y": {"v": 0, "kf": [{"i": format!("{id}-y"), "t": 1, "v": 20}]}
+            }
+        })
+    };
+    let document = serde_json::json!({
+        "id": "P", "compId": "C", "name": "Vertex rows",
+        "w": 200, "h": 100, "fps": 30, "dur": 3, "layers": [{
+            "id": "shape", "name": "Shape", "type": "shape", "from": 0,
+            "dur": 3, "collapsed": false, "p": {},
+            "d": {"paths": [
+                {"id": "outer", "name": "Outline", "vertices": [vertex("z"), vertex("a")]},
+                {"id": "inner", "name": "Cutout", "vertices": [vertex("c")]},
+                {"id": "unnamed", "vertices": [vertex("d")]}
+            ]}
+        }]
+    });
+    let mut model = model(parse(&document.to_string()).unwrap());
+    let expected = [
+        (Some("heading"), Some(1), Some("Outline")),
+        (Some("property"), Some(2), Some("Vertex 1 x")),
+        (Some("property"), Some(2), Some("Vertex 1 y")),
+        (Some("property"), Some(2), Some("Vertex 2 x")),
+        (Some("property"), Some(2), Some("Vertex 2 y")),
+        (Some("heading"), Some(1), Some("Cutout")),
+        (Some("property"), Some(2), Some("Vertex 1 x")),
+        (Some("property"), Some(2), Some("Vertex 1 y")),
+        (Some("heading"), Some(1), Some("Path")),
+        (Some("property"), Some(2), Some("Vertex 1 x")),
+        (Some("property"), Some(2), Some("Vertex 1 y")),
+    ];
+    for mode in [TimelineMode::Layers, TimelineMode::Tracks] {
+        model.mode = mode;
+        let window = v4::project_window(&model, 0, 32).unwrap();
+        let rows: Vec<_> = window["window"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| matches!(row["kind"].as_str(), Some("heading" | "property")))
+            .map(|row| {
+                (
+                    row["kind"].as_str(),
+                    row["depth"].as_u64(),
+                    row["label"].as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(rows, expected, "{mode:?}");
+    }
+}
+
 fn client_with(value: Value) -> (KernelActor, TimelineClient) {
     let actor = KernelActor::spawn(KernelConfig::default());
     let k = actor.handle();

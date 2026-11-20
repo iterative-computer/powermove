@@ -447,6 +447,7 @@ impl Scene {
             let layer = match &id {
                 crate::RowId::Layer(id) => id,
                 crate::RowId::Property { layer_id, .. }
+                | crate::RowId::Path { layer_id, .. }
                 | crate::RowId::Effect { layer_id, .. } => layer_id,
             };
             let Some(offset) = offsets.get(layer) else {
@@ -601,7 +602,7 @@ impl Scene {
                             selected.contains(id.as_str()),
                         )
                     }
-                    RowId::Effect { .. } => (
+                    RowId::Effect { .. } | RowId::Path { .. } => (
                         RowContent::Property {
                             state: KeyState::Static,
                             keys: vec![],
@@ -621,9 +622,22 @@ impl Scene {
                         (RowContent::Property { state, keys }, false)
                     }
                 };
+                let accessibility_label = match &row.id {
+                    RowId::Path { layer_id, path } => model
+                        .index
+                        .layer(layer_id)
+                        .map_or("Path", |layer| layer.path_name(path))
+                        .to_owned(),
+                    RowId::Property { layer_id, channel } => model
+                        .index
+                        .channel(layer_id, channel)
+                        .and_then(|channel| channel.vertex_label.clone())
+                        .unwrap_or_else(|| p.accessibility_label(&row.id)),
+                    _ => p.accessibility_label(&row.id),
+                };
                 Ok(PaintRow {
                     id: crate::v4::row_id(&row.id),
-                    accessibility_label: p.accessibility_label(&row.id),
+                    accessibility_label,
                     depth: row.depth,
                     selected: is_selected,
                     hovered: false,
@@ -669,7 +683,8 @@ impl Scene {
             }
             let mut properties: HashMap<(Area, usize), Vec<PaintRow>> = HashMap::new();
             for row in rows {
-                if let Ok(crate::RowId::Property { layer_id, .. }) = crate::v4::parse_row(&row.id)
+                if let Ok(crate::RowId::Property { layer_id, .. } | crate::RowId::Path { layer_id, .. }) =
+                    crate::v4::parse_row(&row.id)
                     && let Some(lane) = lane_by_layer.get(layer_id.as_str())
                 {
                     properties.entry(*lane).or_default().push(row);
@@ -2494,6 +2509,9 @@ fn on_layer((row, key): (String, String)) -> Option<(String, String)> {
         | crate::RowId::Effect {
             layer_id: layer, ..
         }
+        | crate::RowId::Path {
+            layer_id: layer, ..
+        }
         | crate::RowId::Property {
             layer_id: layer, ..
         } => Some((layer, key)),
@@ -3143,7 +3161,7 @@ mod drop_tests {
                 clip: None,
                 summary: std::sync::Arc::from([]),
             },
-            RowId::Property { .. } | RowId::Effect { .. } => RowContent::Property {
+            RowId::Property { .. } | RowId::Effect { .. } | RowId::Path { .. } => RowContent::Property {
                 state: KeyState::Static,
                 keys: vec![],
             },

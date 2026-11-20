@@ -520,6 +520,64 @@ fn a_vanished_media_source_fails_the_save_cleanly() {
 }
 
 #[test]
+fn undoing_track_lock_then_track_visibility_returns_to_saved_content() {
+    use pm_kernel::commands::layers::{LayerCommand, LayerPatch};
+
+    let dir = TempDir::new("track-switch-undo");
+    let path = dir.path("Track.pmv");
+    let root = parse(
+        r#"{
+        "id":"P", "compId":"C", "w":200, "h":100, "fps":30, "dur":4,
+        "layers":[{"id":"clip","type":"shape","from":0,"dur":4,"lock":false,"on":true,"p":{}}]
+    }"#,
+    )
+    .unwrap();
+    let mut store = DocumentStore::new_untitled(root);
+    save_as(&mut store, &path).unwrap();
+    let saved = store.root().unwrap().to_value();
+    assert!(!store.is_dirty());
+
+    for (label, patch) in [
+        (
+            "Lock Track",
+            LayerPatch {
+                locked: Some(true),
+                ..Default::default()
+            },
+        ),
+        (
+            "Hide Track",
+            LayerPatch {
+                visible: Some(false),
+                ..Default::default()
+            },
+        ),
+    ] {
+        store
+            .transact(
+                label,
+                Origin::Interface,
+                &[LayerCommand::Set {
+                    layer_id: "clip".into(),
+                    patch,
+                }
+                .into()],
+            )
+            .unwrap()
+            .unwrap();
+        assert!(store.is_dirty(), "{label} should be marked Edited");
+        store.undo().unwrap();
+        assert_eq!(store.root().unwrap().to_value(), saved);
+        assert!(!store.is_dirty(), "undoing {label} should be marked Saved");
+        assert_eq!(
+            store.history().labels(),
+            [label],
+            "only the latest redo remains"
+        );
+    }
+}
+
+#[test]
 fn edits_during_a_save_stay_dirty() {
     let dir = TempDir::new("during");
     let (path, mut store) = edited_copy(&dir);

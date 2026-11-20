@@ -62,6 +62,7 @@ pub fn parse_timecode(text: &str, fps: f64) -> Option<f64> {
 pub fn row_id(row: &RowId) -> String {
     match row {
         RowId::Effect { layer_id, effect } => json!(["effect", layer_id, effect]).to_string(),
+        RowId::Path { layer_id, path } => json!(["path", layer_id, path]).to_string(),
         RowId::Layer(id) => json!(["layer", id]).to_string(),
         RowId::Property { layer_id, channel } => json!(["property", layer_id, channel]).to_string(),
     }
@@ -85,6 +86,12 @@ pub fn parse_row(id: &str) -> Result<RowId, Error> {
             Ok(RowId::Effect {
                 layer_id: layer_id.clone(),
                 effect: effect.clone(),
+            })
+        }
+        [kind, layer_id, path] if kind == "path" && !layer_id.is_empty() && !path.is_empty() => {
+            Ok(RowId::Path {
+                layer_id: layer_id.clone(),
+                path: path.clone(),
             })
         }
         _ => Err(Error::InvalidIntent("row id")),
@@ -238,7 +245,9 @@ pub async fn dispatch(
                     .ok_or(Error::InvalidIntent("modifiers"))?,
             )?;
             let calls = match row {
-                RowId::Effect { .. } => return Err(Error::InvalidIntent("section row")),
+                RowId::Effect { .. } | RowId::Path { .. } => {
+                    return Err(Error::InvalidIntent("section row"));
+                }
                 RowId::Layer(id) => {
                     if client.model.mode == TimelineMode::Tracks {
                         client.model.select_track_layer(&id, m)?.0
@@ -545,9 +554,8 @@ pub async fn dispatch(
     Ok(effects)
 }
 
-/// Model-owned window facts for a native presentation/kit adapter. This does not
-/// invent property labels, units, timecode formatting, media readiness or copy.
-/// A native presenter supplies those via its schema/evaluation/media services.
+/// Rows and authored labels for a native presentation/kit adapter.
+/// A native presenter supplies units, readouts, timecode and media readiness.
 /// Ordinal windows use exactly one viewport of overscan on each side.
 pub fn window(client: &mut TimelineClient, first: usize, visible: usize) -> Result<Value, Error> {
     if visible == 0 {
@@ -583,6 +591,7 @@ pub fn project_window(
         .map(|row| {
             let mut value = json!({ "id": row_id(&row.id), "depth": row.depth });
             match &row.id {
+                RowId::Path { layer_id, path } => return path_heading(model, row, layer_id, path),
                 RowId::Effect { layer_id, effect } => {
                     let layer = model
                         .index
@@ -637,6 +646,7 @@ pub fn project_window(
                     value["kind"] = json!("property");
                     value["layer"] = json!(layer_id);
                     value["path"] = json!(channel);
+                    value["label"] = json!(model.channel_label(layer_id, channel));
                     value["locked"] = json!(
                         model
                             .index
@@ -662,6 +672,23 @@ pub fn project_window(
         })
         .collect::<Result<Vec<_>, Error>>()?;
     Ok(frame_facts(model, window.first, window.total, rows))
+}
+
+fn path_heading(
+    model: &crate::TimelineModel,
+    row: &crate::Row,
+    layer_id: &str,
+    path: &str,
+) -> Result<Value, Error> {
+    let layer = model
+        .index
+        .layer(layer_id)
+        .ok_or_else(|| ModelError::UnknownId(layer_id.to_owned()))?;
+    Ok(json!({
+        "id": row_id(&row.id), "depth": row.depth, "kind": "heading",
+        "layer": layer_id, "locked": layer.effectively_locked, "selected": false,
+        "label": layer.path_name(path),
+    }))
 }
 /// Lanes in the renderer's order, so outline rows and painted rows share ordinals.
 fn track_window(
@@ -703,6 +730,11 @@ fn track_window(
             "locked": clips.iter().all(|l| l.effectively_locked) && !clips.is_empty(),
         }));
         for row in model.rows() {
+            if let RowId::Path { layer_id, path } = &row.id
+                && clips.iter().any(|l| l.id == *layer_id)
+            {
+                rows.push(path_heading(model, row, layer_id, path)?);
+            }
             let RowId::Property { layer_id, channel } = &row.id else {
                 continue;
             };
@@ -710,6 +742,7 @@ fn track_window(
                 rows.push(json!({
                     "id": row_id(&row.id), "depth": row.depth, "kind": "property",
                     "layer": layer_id, "path": channel, "selected": false,
+                    "label": model.channel_label(layer_id, channel),
                     "locked": model.index.layer(layer_id).is_none_or(|l| l.effectively_locked),
                     "channels": model.track_channels(layer_id, channel).iter()
                         .map(|c| c.path.as_str()).collect::<Vec<_>>(),

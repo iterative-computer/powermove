@@ -296,6 +296,11 @@ fn entries_or_empty(value: Option<&Node>) -> Vec<(JsString, Got<'_>)> {
     }
 }
 
+/// Display an authored vertex's one-based number and channel.
+pub fn vertex_label(number: usize, key: &str) -> String {
+    format!("Vertex {number} {key}")
+}
+
 /// `collect(path, prefix)` of `structuredProperties`.
 fn collect_path<'a>(
     out: &mut Vec<PropEntry<'a>>,
@@ -324,7 +329,7 @@ fn collect_path<'a>(
         let vid = item_member_string(vertex, "id");
         for (k, prop) in entries_or_empty(vp) {
             if node::is_property(prop.node()) {
-                let label = format!("Vertex {} {}", index + 1, k.to_string_lossy());
+                let label = vertex_label(index + 1, &k.to_string_lossy());
                 out.push(PropEntry {
                     key: cat(&[prefix, &s(".v."), &vid, &s("."), &k]),
                     prop,

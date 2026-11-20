@@ -29,6 +29,18 @@ impl Kind {
 }
 /// A property's display name from its track id: `position.x` reads `Position X`.
 pub fn property_label(track: &str) -> String {
+    // The sheet's key walker addresses array members by their stored index.
+    let vertex = track
+        .strip_prefix(".d.paths.")
+        .and_then(|rest| rest.split_once(".vertices."))
+        .or_else(|| track.strip_prefix(".masks.")?.split_once(".path.vertices."));
+    if let Some((_, vertex)) = vertex
+        && let Some((index, channel)) = vertex.split_once(".p.")
+        && let Ok(index) = index.parse::<usize>()
+        && let Some(number) = index.checked_add(1)
+    {
+        return pm_eval::address::vertex_label(number, channel);
+    }
     track
         .rsplit("p.")
         .next()
@@ -239,5 +251,11 @@ mod tests {
     fn property_labels_read_like_the_inspector() {
         assert_eq!(property_label("position.x"), "Position X");
         assert_eq!(property_label("p.opacity"), "Opacity");
+    }
+
+    #[test]
+    fn vertex_keyframe_labels_use_the_authored_vertex_index() {
+        assert_eq!(property_label(".d.paths.1.vertices.2.p.x"), "Vertex 3 x");
+        assert_eq!(property_label(".masks.0.path.vertices.1.p.y"), "Vertex 2 y");
     }
 }

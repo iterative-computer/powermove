@@ -358,8 +358,7 @@ impl Backend {
                 });
             } else {
                 let path = row["path"].as_str().ok_or("property path")?.to_owned();
-                let label = property_label(&path);
-                row["label"] = json!(label);
+                let label = row["label"].as_str().ok_or("property label")?.to_owned();
                 let channels = client.model.track_channels(&layer, &path);
                 let mut values = Vec::new();
                 let mut numeric = Vec::new();
@@ -1134,10 +1133,6 @@ impl Backend {
         None
     }
 }
-fn property_label(path: &str) -> String {
-    pm_panel_timeline::property_label(path)
-}
-
 /// A timeline row's name, or the header time, open for typing.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TimelineEditor {
