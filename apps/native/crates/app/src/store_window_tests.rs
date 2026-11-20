@@ -1392,7 +1392,10 @@ fn a_made_extension_with_a_broken_manifest_says_why() {
     assert_eq!(made.len(), 1);
     let why = made[0].broken.clone().expect("listed as broken");
     assert!(why.contains("author") && why.contains("\"user\""), "{why}");
-    assert!(crate::store_window::broken_status(&why).starts_with("Its manifest has a problem"));
+    assert_eq!(
+        crate::store_window::broken_status(&why),
+        "Author is invalid. Open Details."
+    );
 }
 
 #[::core::prelude::v1::test]
@@ -1401,7 +1404,7 @@ fn words_signed_out_publish_offers_sign_in_in_an_app_window() {
     assert_eq!(publish_sign_in_message(true, true), (crate::publish::SIGN_IN, true));
     assert_eq!(publish_sign_in_message(true, false).1, false);
     assert_eq!(publish_sign_in_message(false, true), (
-        "Sign in to publish. The account service is unavailable in this build.",
+        "Publishing needs a Powermove account, which isn't available in this build yet.",
         false,
     ));
 }
@@ -1428,6 +1431,23 @@ fn words_a_manifest_lists_each_invalid_field() {
     .unwrap();
     let made = crate::store_window::yours(profile.path());
     let issues = made[0].broken.as_deref().expect("listed as broken");
+    use crate::store_window::broken_status;
+    assert_eq!(
+        broken_status(issues),
+        "Name is missing or invalid. Open Details."
+    );
+    assert_eq!(
+        broken_status(r#"invalid "displayName""#),
+        "Name is missing or invalid. Open Details."
+    );
+    assert_eq!(
+        broken_status(r#"invalid "version" (x.y.z)"#),
+        "Version is missing or invalid. Open Details."
+    );
+    assert_eq!(
+        broken_status("unexpected end of input"),
+        "This extension needs a fix. Open Details."
+    );
     assert_eq!(issues.lines().count(), 3);
     for field in ["name", "version", "author"] {
         assert!(issues.contains(&format!("\"{field}\"")), "{issues}");

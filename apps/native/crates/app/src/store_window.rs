@@ -1185,7 +1185,7 @@ fn problem_text(
 pub(crate) fn publish_sign_in_message(service: bool, window: bool) -> (&'static str, bool) {
     if !service {
         (
-            "Sign in to publish. The account service is unavailable in this build.",
+            "Publishing needs a Powermove account, which isn't available in this build yet.",
             false,
         )
     } else if !window {
@@ -1209,9 +1209,18 @@ fn load_error(error: pm_services::ServiceError) -> String {
     }
     .into()
 }
-/// A broken card's line: what is wrong with its manifest, in a sentence.
-pub(crate) fn broken_status(why: &str) -> String {
-    format!("Its manifest has a problem: {why}.")
+/// The card summarizes the first issue. Details shows the full diagnostics.
+pub(crate) fn broken_status(why: &str) -> &'static str {
+    let first = why.lines().next().unwrap_or_default();
+    if first.starts_with(r#"invalid "name""#) || first.starts_with(r#"invalid "displayName""#) {
+        "Name is missing or invalid. Open Details."
+    } else if first.starts_with(r#"invalid "version""#) {
+        "Version is missing or invalid. Open Details."
+    } else if first.starts_with(r#"invalid "author""#) {
+        "Author is invalid. Open Details."
+    } else {
+        "This extension needs a fix. Open Details."
+    }
 }
 fn uuid_like(s: &str) -> bool {
     s.len() == 36 && s.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-')
@@ -2500,9 +2509,7 @@ impl StoreWindow {
             },
             div()
                 .text_color(rgb(c.warning))
-                .child(div().truncate().child(
-                    why.lines().next().map_or_else(String::new, broken_status),
-                )),
+                .child(div().truncate().child(broken_status(why))),
             corner,
         )
         .into_any_element()

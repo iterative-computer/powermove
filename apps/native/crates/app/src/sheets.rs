@@ -5,7 +5,7 @@ use crate::dialogs::{NativePiece, Surface, sheet_layout::native::Sheet};
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
     rc::Retained,
-    runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject},
+    runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel},
     sel,
 };
 use objc2_app_kit::{
@@ -14,10 +14,11 @@ use objc2_app_kit::{
     NSUserInterfaceItemIdentification, NSWindow,
 };
 use objc2_foundation::{NSNotification, NSRect, NSString};
-use std::collections::BTreeMap;
+use std::{cell::Cell, collections::BTreeMap};
 
 pub struct TargetState {
     tx: async_channel::Sender<String>,
+    sheet_keys: Cell<bool>,
 }
 define_class!(
     #[unsafe(super(NSObject))]
@@ -36,6 +37,21 @@ define_class!(
             if let Some(id) = id {
                 let _ = self.ivars().tx.try_send(format!("changed:{id}"));
             }
+        }
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn command(&self, _: &NSControl, _: &NSTextView, selector: Sel) -> bool {
+            if !self.ivars().sheet_keys.get() {
+                return false;
+            }
+            let action = if selector == sel!(insertNewline:) {
+                "apply"
+            } else if selector == sel!(cancelOperation:) {
+                "cancel"
+            } else {
+                return false;
+            };
+            let _ = self.ivars().tx.try_send(action.into());
+            true
         }
     }
     unsafe impl NSTextFieldDelegate for Target {}
@@ -61,11 +77,13 @@ define_class!(
         }
     }
 );
+pub type SheetParts = (Sheet, BTreeMap<String, Retained<NSTextField>>);
+
 /// A presented sheet, its target and its stream of control ids.
 pub struct OpenSheet {
     pub sheet: Sheet,
     owner: Retained<NSWindow>,
-    _target: Retained<Target>,
+    target: Retained<Target>,
     /// What each colour well showed when the sheet opened.
     seeded: BTreeMap<String, String>,
     /// Each field's description line, which can change while the sheet is open.
@@ -74,7 +92,7 @@ pub struct OpenSheet {
 }
 impl OpenSheet {
     pub fn present(
-        (sheet, descriptions): (Sheet, BTreeMap<String, Retained<NSTextField>>),
+        (sheet, descriptions): SheetParts,
         owner: &NSWindow,
         first: Option<&str>,
     ) -> Self {
@@ -83,7 +101,7 @@ impl OpenSheet {
         let cancelled = tx.clone();
         let target: Retained<Target> = unsafe {
             msg_send![
-                super(Target::alloc(mtm).set_ivars(TargetState { tx })),
+                super(Target::alloc(mtm).set_ivars(TargetState { tx, sheet_keys: Cell::new(false) })),
                 init
             ]
         };
@@ -108,12 +126,17 @@ impl OpenSheet {
         Self {
             sheet,
             owner: owner.into(),
-            _target: target,
+            target,
             seeded,
             descriptions,
             actions,
         }
     }
+    /// Sends the sheet's Return and Escape actions from its text editor.
+    pub fn use_sheet_keys(&self) {
+        self.target.ivars().sheet_keys.set(true);
+    }
+
     /// Rewrites a field's description line (its reserved height stays).
     pub fn describe(&self, id: &str, text: &str, rgb: u32) {
         if let Some(label) = self.descriptions.get(id) {
@@ -231,10 +254,7 @@ const EXPRESSION_LINES: usize = 7;
 /// `Surface` forms: labelled controls in spec order and its footer buttons.
 /// A multi-value number field makes one well per value: `{id}.0`, `{id}.1`.
 /// Returns the sheet and its fields' description lines.
-pub fn from_surface(
-    surface: &Surface,
-    tokens: &pm_design::Tokens,
-) -> (Sheet, BTreeMap<String, Retained<NSTextField>>) {
+pub fn from_surface(surface: &Surface, tokens: &pm_design::Tokens) -> SheetParts {
     let mtm = MainThreadMarker::new().unwrap();
     let mut descriptions = BTreeMap::new();
     // An expression editor is the wide sheet: its field holds a line of source.
@@ -342,6 +362,15 @@ pub fn from_surface(
             tokens.typography.minimum.into(),
             tokens.colors.warning,
         );
+    }
+    if let Some(result) = &surface.result_line {
+        let ink = if surface.result_error {
+            tokens.colors.warning
+        } else {
+            tokens.colors.muted
+        };
+        let label = sheet.line_reserving(result, "\n", tokens.typography.label.into(), ink);
+        descriptions.insert("result".into(), label);
     }
     let mut order = Vec::new();
     for button in &surface.buttons {

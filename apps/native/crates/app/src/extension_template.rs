@@ -1,5 +1,8 @@
 //! The two shipped starter extensions, installed into the current profile.
-use crate::dialogs::{DialogId, Field, NativePiece, Surface, WindowId};
+use crate::{
+    dialogs::{DialogId, Field, NativePiece, Surface, WindowId, sheet_layout::native::colour},
+    sheets::{OpenSheet, SheetParts},
+};
 use gpui::App;
 use objc2_app_kit::NSWindow;
 use pm_compat_runner::manifest;
@@ -103,7 +106,7 @@ fn write_template(folder: &Path, value: &Value, entry: &str, source: &str) -> Re
 
 pub(crate) fn surface() -> Surface {
     let name = Field {
-        description: Some(" ".into()),
+        placeholder: Some("My Extension"),
         ..Field::new("name", "Name", NativePiece::TextField, vec![String::new()])
     };
     let kind = Field::new(
@@ -112,13 +115,31 @@ pub(crate) fn surface() -> Surface {
         NativePiece::PopUpButton,
         vec!["Panel".into(), "Effect".into()],
     );
-    Surface::sheet(
+    let mut surface = Surface::sheet(
         DialogId("new-extension".into()),
         WindowId("extension-owner".into()),
         "New Extension",
         vec![name, kind],
         "Create",
-    )
+    );
+    surface.buttons[1].enabled = false;
+    surface.result_line = Some(String::new());
+    surface
+}
+
+pub(crate) fn native_sheet(tokens: &Tokens) -> SheetParts {
+    let parts = crate::sheets::from_surface(&surface(), tokens);
+    parts.0.buttons["apply"].setBezelColor(Some(&colour(tokens.colors.accent)));
+    parts
+}
+
+fn name_text(sheet: &OpenSheet) -> String {
+    sheet
+        .sheet
+        .fields
+        .get("name")
+        .and_then(|field| field.currentEditor())
+        .map_or_else(|| sheet.text("name"), |editor| editor.string().to_string())
 }
 
 pub(crate) fn open(
@@ -131,20 +152,23 @@ pub(crate) fn open(
     if owner.attachedSheet().is_some() {
         return;
     }
-    let sheet = crate::sheets::OpenSheet::present(
-        crate::sheets::from_surface(&surface(), tokens),
-        owner,
-        Some("name"),
-    );
+    let sheet = OpenSheet::present(native_sheet(tokens), owner, Some("name"));
+    sheet.use_sheet_keys();
     let warning = tokens.colors.warning;
     let executor = cx.background_executor().clone();
     cx.spawn(async move |cx| {
         while let Ok(action) = sheet.actions.recv().await {
             match action.as_str() {
                 "cancel" => break,
-                "changed:name" => sheet.describe("name", " ", warning),
+                "changed:name" => {
+                    sheet.describe("result", "", warning);
+                    sheet.enable("apply", !name_text(&sheet).trim().is_empty());
+                }
                 "apply" => {
-                    let name = sheet.text("name");
+                    let name = name_text(&sheet);
+                    if name.trim().is_empty() {
+                        continue;
+                    }
                     let kind = if sheet.popup("kind") == Some(1) {
                         Kind::Effect
                     } else {
@@ -161,7 +185,7 @@ pub(crate) fn open(
                             cx.update(created);
                             return;
                         }
-                        Err(error) => sheet.describe("name", &error, warning),
+                        Err(error) => sheet.describe("result", &error, warning),
                     }
                 }
                 _ => {}
