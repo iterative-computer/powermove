@@ -787,7 +787,7 @@ fn only_agent_stills_draw_offline_cards() {
 /// window already shows stays there, and MCP never closes a window's project
 /// underneath it (the window does, once it shows the new one).
 #[test]
-fn each_window_owns_its_project_and_mcp_targets_the_key_window() {
+fn window_jumps_import_completion_keeps_the_key_windows_project() {
     let root = tempfile::tempdir().unwrap();
     let profile = root.path().join("profile");
     let actor = KernelActor::spawn(KernelConfig {
@@ -836,6 +836,26 @@ fn each_window_owns_its_project_and_mcp_targets_the_key_window() {
         Some(beta.clone()),
         "MCP means the key window's"
     );
+    // A real import finishes in window 1 after window 2 took focus.
+    let still = host.profile.join("focus-test.png");
+    std::fs::write(&still, crate::mcp_services::png(&[20, 40, 60, 255], 1, 1).unwrap()).unwrap();
+    let panels = pm_builtins::Builtins::new(actor.handle(), &alpha.project, || {}).unwrap();
+    let outcome = panels
+        .import_media(
+            actor.handle().published(&alpha.project).unwrap().snapshot.doc_id,
+            &host.profile,
+            pm_builtins::media_import::ImportRequest {
+                paths: vec![still],
+                ..Default::default()
+            },
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(outcome.imported, ["focus-test.png"]);
+    // The window reports its own session when applying the publication.
+    host.bind_window(1, Some(alpha.clone()));
+    assert_eq!(host.current(), Some(beta.clone()));
+    assert!(!woke(&first) && !woke(&second));
     // Tools find a project in whichever window shows it.
     assert_eq!(host.session_of("alpha"), Some(alpha.clone()));
     // open_project of a project window 1 shows: window 1 becomes MCP's, nothing

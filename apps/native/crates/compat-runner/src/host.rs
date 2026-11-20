@@ -464,6 +464,7 @@ struct Shared {
     /// isolate admission (its boot or the Svelte compiler) stops waiting
     /// at once, before it could read the queued close.
     closing: AtomicBool,
+    watchdog: Mutex<Option<(u64, Realm)>>,
     published: Mutex<Published>,
     changed: Condvar,
     /// What the confined helpers registered, in contribution-list form.
@@ -975,6 +976,7 @@ impl ExtensionHost {
             published: Mutex::default(),
             changed: Condvar::new(),
             closing: AtomicBool::new(false),
+            watchdog: Mutex::default(),
             store: Mutex::new(json!({})),
             sessions: Mutex::default(),
             reader: AtomicU64::new(0),
@@ -1130,6 +1132,12 @@ impl ExtensionHost {
     }
     pub fn answer(&self, token: u64, value: Value) {
         let _ = self.inbox.send(Input::Answer(token, value));
+    }
+    /// The reported execution, if the realm is still running it.
+    pub fn unresponsive_execution(&self) -> Option<u64> {
+        let report = self.shared.watchdog.lock().unwrap();
+        let (id, realm) = report.as_ref()?;
+        realm.active_execution().filter(|active| active.execution == *id).map(|_| *id)
     }
     /// The answer to an `unresponsive` request: stop that task (the realm is
     /// rebuilt without the extension that was activating), or keep waiting.
@@ -1345,6 +1353,24 @@ fn forward_mailbox(kernel: &KernelHandle, writer: Writer, inbox: Sender<Input>) 
     });
 }
 
+fn watchdog_can_ask(execution: u64, asking: Option<u64>) -> bool {
+    asking != Some(execution)
+}
+
+fn watchdog_after_answer(asking: Option<u64>, stop: bool) -> Option<u64> {
+    asking.filter(|_| !stop)
+}
+
+#[cfg(test)]
+#[test]
+fn watchdog_asks_once_per_unresponsive_execution_even_after_wait() {
+    assert!(watchdog_can_ask(1, None));
+    assert!(!watchdog_can_ask(1, Some(1)));
+    // Wait dismisses the sheet without clearing the host's last asked task.
+    assert!(!watchdog_can_ask(1, watchdog_after_answer(Some(1), false)));
+    assert!(watchdog_can_ask(2, Some(1)));
+}
+
 struct Live {
     realm: Realm,
     pool: RuntimePool,
@@ -1412,8 +1438,7 @@ struct Owner {
     /// Every shell fact the services report, replayed into a rebuilt realm.
     shell: serde_json::Map<String, Value>,
     restarts: usize,
-    /// The task the user is being asked about, so one hang asks once at a time.
-    /// The task the D11 sheet asks about, and the extension running it.
+    /// The last execution we asked about, retained after Wait.
     asking: Option<u64>,
     asking_culprit: Option<String>,
     /// The last command's task and the extension that registered it.
@@ -1514,6 +1539,7 @@ impl Owner {
         self.router = None;
         self.asking = None;
         self.asking_culprit = None;
+        *self.shared.watchdog.lock().unwrap() = None;
         self.dom_waiting.clear();
         self.deferred.clear();
         self.canvases.clear();
@@ -1773,22 +1799,18 @@ impl Owner {
                 self.restart(culprit)
             }
             Input::Unresponsive(generation, execution)
-                if generation == self.writer.generation && self.asking != Some(execution) =>
+                if generation == self.writer.generation && watchdog_can_ask(execution, self.asking) =>
             {
                 self.ask_unresponsive(execution)
             }
-            Input::StopTask(execution, stop) => {
-                let culprit = if self.asking == Some(execution) {
-                    self.asking = None;
-                    self.asking_culprit.take()
-                } else {
-                    None
-                };
-                let stopped = stop && self.realm.as_ref().is_some_and(|l| l.realm.stop(execution));
-                if stopped {
+            Input::StopTask(execution, stop) if self.asking == Some(execution) => {
+                self.asking = watchdog_after_answer(self.asking, stop);
+                if stop && self.realm.as_ref().is_some_and(|l| l.realm.stop(execution)) {
+                    let culprit = self.asking_culprit.take();
                     self.restart(culprit);
                 }
             }
+            Input::StopTask(..) => (),
             Input::Realm(..)
             | Input::Page(..)
             | Input::ReplayPage(_)
@@ -2865,6 +2887,9 @@ impl Owner {
     /// rebuilt realm doesn't run into the same hang again.
     fn ask_unresponsive(&mut self, execution: u64) {
         let Some(live) = &self.realm else { return };
+        let Some(active) = live.realm.active_execution().filter(|active| active.execution == execution) else {
+            return;
+        };
         let activating = live.events.activating.lock().unwrap().clone();
         let command = self
             .running
@@ -2888,14 +2913,11 @@ impl Owner {
         let disables = culprit.is_some();
         // What it was doing: its innermost frames, and for how long.
         let place = live.realm.culprit_place(execution);
-        let seconds = live
-            .realm
-            .active_execution()
-            .filter(|active| active.execution == execution)
-            .map(|active| (active.elapsed.as_secs_f64() * 10.).round() / 10.);
+        let seconds = (active.elapsed.as_secs_f64() * 10.).round() / 10.;
+        *self.shared.watchdog.lock().unwrap() = Some((execution, live.realm.clone()));
         self.asking = Some(execution);
         self.asking_culprit = culprit;
-        let request = json!({"kind":"unresponsive","execution":execution,"name":name,
+        let request = json!({"kind":"unresponsive","execution":execution,"view":self.writer.generation,"name":name,
             "disables":disables,"where":place,"seconds":seconds});
         self.shared.update(|p| p.requests.push(request));
     }
@@ -5018,14 +5040,18 @@ mod tests {
         fixture.until("entry open", |_| {
             fixture.kernel.published("window").unwrap().entry.is_some()
         });
-        // Wait keeps it running; the watchdog asks again later, and Stop ends it.
         let asked = fixture.answer_unresponsive(Some("synthetic-stuck"));
         fixture.host.answer_unresponsive(asked, false);
         assert_eq!(fixture.host.view(), view);
-        let again = fixture.answer_unresponsive(Some("synthetic-stuck"));
-        assert_eq!(again, asked, "the same task, asked again");
-        fixture.host.answer_unresponsive(again, true);
+        fixture.host.inbox.send(Input::Unresponsive(view as u32, asked)).unwrap();
+        // The same inbox delivers Wait, the watchdog's repeated tick, then
+        // Stop, so the stopped publication proves all three were handled.
+        fixture.host.answer_unresponsive(asked, true);
         fixture.until("third rebuild", |host| host.view() == 4 && host.is_ready());
+        assert!(
+            !fixture.host.take_requests().iter().any(|r| r["kind"] == "unresponsive"),
+            "Wait must not prompt again for the same task"
+        );
         let published = fixture.kernel.published("window").unwrap();
         assert!(published.entry.is_none(), "the open entry was sealed");
     }
