@@ -3,12 +3,9 @@
 //!
 //! The feed and the What's New marker are read and written off the main
 //! thread; the sheets are native alerts with the notes in a scrolling text view.
-//! A build routes to a feed only through `TransitionGate`: shipped builds wait
-//! for the release lane's verified transition receipt and stay Gated until
-//! then. Development builds read a local fixture, `<profile>/update-feed.json`
-//! (as `cage-report.json` turns on the cage report), and never touch the network.
-//! Nothing here downloads or installs: staging belongs to the release
-//! updater, so Install Update reports that the update couldn't be downloaded.
+//! Stable bundles check the signed policy and matching Sparkle appcast on a
+//! worker, then use the update sheet to offer a manual download. Development
+//! builds keep their local fixture and never use the production feed.
 use crate::alert::{Alert, Button};
 use gpui::*;
 use objc2::{
@@ -16,6 +13,7 @@ use objc2::{
 };
 use objc2_app_kit::{NSAlert, NSColor, NSFont, NSScrollView, NSTextView, NSWindow};
 use objc2_foundation::{NSPoint, NSRange, NSRect, NSSize, NSString};
+use pm_distribution::{UpdateClient, download::Notice};
 use pm_services::{
     Result as ServiceResult, ServiceErrorCode,
     storage::ServiceStorage,
@@ -24,6 +22,7 @@ use pm_services::{
     },
     updater::{FeedMetadata, FeedRoute, TransitionGate, UpdateFeed},
 };
+use pm_update_policy::update_distribution::{Architecture, PRODUCTION_ID};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -103,6 +102,7 @@ struct State {
     updates: Updates,
     whats_new: WhatsNew,
     loaded: bool,
+    native_check_active: bool,
 }
 impl Global for State {}
 
@@ -114,6 +114,9 @@ fn say(window: &NSWindow, message: &str, informative: &str, critical: bool) {
 
 /// Powermove ▸ Check for Updates…
 pub fn check_now(profile: PathBuf, window: Retained<NSWindow>, cx: &mut App) {
+    if crate::platform::bundle_id().as_deref() == Some(PRODUCTION_ID) {
+        return check_native(true, profile, window, cx);
+    }
     let state = cx.default_global::<State>();
     if matches!(state.updates.state, UpdateState::Ready { .. }) {
         return say(
@@ -171,6 +174,117 @@ pub fn check_now(profile: PathBuf, window: Retained<NSWindow>, cx: &mut App) {
     .detach();
 }
 
+fn check_native(manual: bool, profile: PathBuf, window: Retained<NSWindow>, cx: &mut App) {
+    let state = cx.default_global::<State>();
+    if state.native_check_active {
+        return;
+    }
+    state.native_check_active = true;
+    let current = current_version();
+    let macos = macos_major();
+    let bundle = objc2_foundation::NSBundle::mainBundle();
+    let resources = bundle
+        .resourcePath()
+        .map(|value| PathBuf::from(value.to_string()));
+    let appcast = bundle
+        .objectForInfoDictionaryKey(&NSString::from_str("SUFeedURL"))
+        .and_then(|value| value.downcast::<NSString>().ok())
+        .map(|value| value.to_string());
+    let check_version = current.clone();
+    let work = cx.background_executor().spawn(async move {
+        let resources = resources.ok_or_else(|| anyhow::anyhow!("missing update resources"))?;
+        let config: pm_update_policy::update_distribution::UpdateConfig =
+            serde_json::from_slice(&std::fs::read(resources.join("update-config.json"))?)?;
+        anyhow::ensure!(config.enabled, "native update policy is disabled");
+        let appcast = url::Url::parse(&appcast.ok_or_else(|| anyhow::anyhow!("missing appcast"))?)?;
+        let architecture = if cfg!(target_arch = "aarch64") {
+            Architecture::Arm64
+        } else {
+            Architecture::X86_64
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        let offer = UpdateClient::new(config)?.check_download(
+            &appcast,
+            macos,
+            &check_version,
+            architecture,
+            now,
+        )?;
+        let skipped = storage(&profile)
+            .ok()
+            .and_then(|s| s.setting(SKIPPED).ok().flatten());
+        Ok::<_, anyhow::Error>(offer.filter(|offer| {
+            manual
+                || skipped.as_ref().and_then(serde_json::Value::as_str)
+                    != Some(offer.version.as_str())
+        }))
+    });
+    cx.spawn(async move |cx| {
+        let result = work.await;
+        cx.update(|cx| {
+            if (!manual && window.attachedSheet().is_some()) || !window.isVisible() {
+                cx.global_mut::<State>().native_check_active = false;
+                return;
+            }
+            if let Ok(Some(notice)) = result {
+                show_download(notice, &current, &window, cx);
+                return;
+            }
+            cx.global_mut::<State>().native_check_active = false;
+            if manual {
+                if result.is_ok() {
+                    say(
+                        &window,
+                        "Powermove is up to date.",
+                        &format!("You’re running {current}."),
+                        false,
+                    );
+                } else {
+                    say(
+                        &window,
+                        "Couldn’t check for updates.",
+                        "Try again later. You can keep using Powermove.",
+                        false,
+                    );
+                }
+            }
+        });
+    })
+    .detach();
+}
+
+fn show_download(notice: Notice, current: &str, window: &NSWindow, cx: &mut App) {
+    let answer = Alert::new(
+        "A New Version of Powermove Is Available",
+        format!(
+            "Powermove {} is now available. You have {current}.",
+            notice.version
+        ),
+        vec![
+            Button::new("Download", Choice::Download).default(),
+            Button::new("Remind Me Later", Choice::Later).cancel(),
+            Button::new("Skip This Version", Choice::Skip),
+        ],
+    )
+    .sheet(window);
+    cx.spawn(async move |cx| {
+        let choice = answer.recv().await.ok().flatten();
+        cx.update(|cx| {
+            cx.global_mut::<State>().native_check_active = false;
+            match choice {
+                Some(Choice::Download) => {
+                    crate::platform::open_url(notice.download_url.as_str());
+                }
+                Some(Choice::Skip) => persist(SKIPPED, serde_json::json!(notice.version), cx),
+                _ => {}
+            }
+        });
+    })
+    .detach();
+}
+
 fn show(
     failure: Option<ServiceErrorCode>,
     state: UpdateState,
@@ -209,6 +323,7 @@ fn show(
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Choice {
+    Download,
     Install,
     Later,
     Skip,
@@ -304,6 +419,17 @@ pub fn after_launch(profile: PathBuf, window: Retained<NSWindow>, cx: &mut App) 
         return;
     }
     cx.set_global(Profile(profile.clone()));
+    if crate::platform::bundle_id().as_deref() == Some(PRODUCTION_ID) {
+        let profile = profile.clone();
+        let window = window.clone();
+        cx.spawn(async move |cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(30))
+                .await;
+            cx.update(|cx| check_native(false, profile, window, cx));
+        })
+        .detach();
+    }
     let source = fixture(&profile);
     let work = cx.background_executor().spawn(async move {
         let seen = storage(&profile)

@@ -270,12 +270,36 @@ pub fn check(
     transport: &mut impl Transport,
     verifier: &impl SignatureVerifier,
 ) -> Result<Check> {
-    let Some(endpoint) = config.endpoint()? else {
-        return Ok(Check::Gated);
-    };
+    // Validate enabled config even when installation readiness is closed.
+    config.validate()?;
     if !eligibility.allows_native() {
         return Ok(Check::Gated);
     }
+    check_for_download(
+        config,
+        eligibility.macos_major,
+        current,
+        architecture,
+        now,
+        transport,
+        verifier,
+    )
+}
+
+/// Verify the next release for display only. This grants no staging or install
+/// permission; those entry points still require the live installation gate.
+pub fn check_for_download(
+    config: &UpdateConfig,
+    macos_major: u32,
+    current: &str,
+    architecture: Architecture,
+    now: u64,
+    transport: &mut impl Transport,
+    verifier: &impl SignatureVerifier,
+) -> Result<Check> {
+    let Some(endpoint) = config.endpoint()? else {
+        return Ok(Check::Gated);
+    };
     let current = Version::parse(current)?;
     let bytes = read_bounded(transport.open(&endpoint)?, MAX_POLICY)?;
     let offer = verify_policy(&bytes, verifier)?;
@@ -287,7 +311,7 @@ pub fn check(
     ensure!(release.expires_unix > now, "expired update policy");
     let offered = Version::parse(&release.version)?;
     if offered <= current
-        || release.minimum_macos > eligibility.macos_major
+        || release.minimum_macos > macos_major
         || (config.channel != Channel::Beta && !offered.pre.is_empty())
     {
         return Ok(Check::Current);

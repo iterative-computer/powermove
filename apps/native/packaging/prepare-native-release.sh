@@ -33,7 +33,7 @@ HASHES
       --channel latest --version "${PM_NATIVE_VERSION:?}" --build "$PM_NATIVE_VERSION" \
       --electron-tag "${PM_ELECTRON_TAG:?}" --update-config "$stage/update-config.json" \
       --sparkle-framework "$stage/sparkle/Sparkle.framework" \
-      --sparkle-feed 'https://github.com/iterative-computer/powermove/releases/download/native-feed/appcast.xml' \
+      --sparkle-feed 'https://cloud.trypowermove.com/native/latest/appcast.xml' \
       --sparkle-key "$public_key" --claude-runtime "$stage/runtime/claude" \
       --codex-vendor "$stage/runtime/codex"
     cp "$stage/ffmpeg/lib/"*.dylib "$app/Contents/Frameworks/"

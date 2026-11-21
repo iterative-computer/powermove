@@ -67,6 +67,7 @@ pm-native-migrate = { path = "../migrate" }
 pm-services = { path = "../services" }
 pm-captions = { path = "../../../../engine/crates/pm-captions" }
 pm-transcribe = { path = "../transcribe" }
+pm-distribution = { path = "../../packaging" }
 pm-update-policy = { path = "../update-policy" }
 pm-panel-agentpanel = { path = "../panel-agentpanel" }
 objc2-user-notifications = "0.3"

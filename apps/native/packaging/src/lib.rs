@@ -6,7 +6,9 @@ use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signature, VerifyingKey};
 use std::{io::Read, time::Duration};
-use update_distribution::{SignatureVerifier, Transport};
+use update_distribution::{Architecture, SignatureVerifier, Transport};
+
+pub mod download;
 use url::Url;
 
 /// A key pinned in the signed app configuration, never supplied by the feed.
@@ -36,12 +38,15 @@ impl SignatureVerifier for Ed25519Verifier {
 pub struct HttpsTransport(reqwest::blocking::Client);
 impl HttpsTransport {
     pub fn new() -> Result<Self> {
+        Self::with_timeout(Duration::from_secs(30 * 60))
+    }
+    fn with_timeout(timeout: Duration) -> Result<Self> {
         Ok(Self(
             reqwest::blocking::Client::builder()
                 .https_only(true)
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(15))
-                .timeout(Duration::from_secs(30 * 60))
+                .timeout(timeout)
                 .build()?,
         ))
     }
@@ -101,6 +106,28 @@ impl UpdateClient {
             architecture,
             now,
             &mut self.transport,
+            verifier,
+        )
+    }
+    pub fn check_download(
+        &self,
+        appcast: &Url,
+        macos_major: u32,
+        current: &str,
+        architecture: Architecture,
+        now: u64,
+    ) -> Result<Option<download::Notice>> {
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Ok(None);
+        };
+        download::check(
+            &self.config,
+            appcast,
+            macos_major,
+            current,
+            architecture,
+            now,
+            &mut HttpsTransport::with_timeout(Duration::from_secs(20))?,
             verifier,
         )
     }

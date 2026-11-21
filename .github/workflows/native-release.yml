@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Request publishing (disabled during release prep)
+        description: Publish the signed native feeds and files from a native-v release tag
         type: boolean
         default: false
 
@@ -35,17 +35,16 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$REQUESTED_PUBLISH" == true ]]; then
-            if [[ "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF_NAME" != native-v* ]]; then
-              echo "::error::Publishing requires a native-v tag."
-            else
-              echo "::error::Native publishing is disabled during release prep."
-            fi
-            exit 1
+            test "$GITHUB_EVENT_NAME" = workflow_dispatch
+            test "$GITHUB_REF_TYPE" = tag
+            [[ "$GITHUB_REF_NAME" =~ ^native-v[1-9][0-9]*[.][0-9]+[.][0-9]+$ ]]
+          else
+            test "$GITHUB_REF" = refs/heads/chike/native-release-dry
           fi
-          test "$GITHUB_REF" = refs/heads/chike/native-release-dry
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$(uname -m)" = arm64
           {
+            printf 'PM_NATIVE_PUBLISH=%s\n' "$REQUESTED_PUBLISH"
             printf 'PM_NATIVE_STAGE=%s/native-release\n' "$RUNNER_TEMP"
             printf 'PM_FFMPEG_OUT=%s/pm-ffmpeg/out\n' "$RUNNER_TEMP"
             printf 'PM_FFMPEG_DOWNLOADS=%s/pm-ffmpeg/downloads\n' "$RUNNER_TEMP"
@@ -70,6 +69,9 @@ jobs:
           [[ "$tag" =~ ^v([0-9]+)\.[0-9]+\.[0-9]+$ ]]
           # A dry-run placeholder above Electron. The actual release uses the approved tag.
           version="$((10#${BASH_REMATCH[1]} + 1)).0.0"
+          if [[ "$PM_NATIVE_PUBLISH" == true ]]; then
+            version="${GITHUB_REF_NAME#native-v}"
+          fi
           {
             printf 'PM_ELECTRON_TAG=%s\n' "$tag"
             printf 'PM_NATIVE_VERSION=%s\n' "$version"
@@ -163,6 +165,18 @@ jobs:
             ${{ runner.temp }}/native-release/evidence/notarization.json
           if-no-files-found: error
           retention-days: 7
+
+      - name: Publish verified native files to R2
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true' && github.ref_type == 'tag' && startsWith(github.ref_name, 'native-v')
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.NATIVE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.NATIVE_R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_PAGER: ''
+        run: |
+          set -euo pipefail
+          command -v aws >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install awscli
+          bash apps/native/packaging/publish-native-update.sh
 
       - name: Remove the candidate and temporary inputs
         if: always()

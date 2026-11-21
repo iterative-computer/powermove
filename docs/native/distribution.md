@@ -68,6 +68,21 @@ value remains readable for pre-release policy fixtures and existing bundles.
 Stable packaging takes the latest Electron release tag and requires both
 `CFBundleShortVersionString` and `CFBundleVersion` to be numerically higher.
 
+## First stable update delivery
+
+The stable bundle checks the signed policy and matches its version, archive URL,
+length, and EdDSA signature to the appcast over HTTPS. The quiet update notice
+has a Download button that opens the versioned DMG on
+`cloud.trypowermove.com`. This release uses the download path. The native
+installer remains gated because Sparkle 2.10.1 removes the previous app as part
+of its cleanup, so the required retained-bundle recovery cannot be proven.
+
+The Worker serves `/native/latest/appcast.xml` and `/native/latest/policy.json`
+through the existing R2 binding. Versioned DMGs and update ZIPs are streamed
+directly. The release workflow publishes only after an explicit publish request
+on the stable native release tag, and advances the shared feed pointer after
+the versioned files have been written and checked.
+
 ## Local bundle tooling
 
 `apps/native/packaging/package.py` is Python build tooling, never app runtime.

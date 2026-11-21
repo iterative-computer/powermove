@@ -17,7 +17,7 @@ from xml.etree import ElementTree as XML
 from package import HERE, NATIVE, info, verify_release_versions
 
 IDENTITY = "Developer ID Application"
-RELEASE_ROOT = "https://github.com/iterative-computer/powermove/releases/download"
+RELEASE_ROOT = "https://cloud.trypowermove.com/native"
 DOMAIN = b"Powermove Native update policy v1\0"
 SPARKLE = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 SECRET_ENV = {
@@ -128,7 +128,7 @@ def generate_updates(stage, work, archive, version):
         "-rawin", "-in", archive, "-sigfile", signature_file,
     ])
 
-    archive_url = f"{RELEASE_ROOT}/native-v{version}/Powermove-Native-{version}-mac-arm64.zip"
+    archive_url = f"{RELEASE_ROOT}/{version}/Powermove-Native-{version}-mac-arm64.zip"
     size = archive.stat().st_size
     XML.register_namespace("sparkle", SPARKLE)
     rss = XML.Element("rss", version="2.0")
@@ -150,12 +150,16 @@ def generate_updates(stage, work, archive, version):
                    expiresUnix=int(time.time()) + 30 * 24 * 3600)
     payload = json.dumps(release, separators=(",", ":")).encode()
     envelope = {"payload": payload.decode(), "signature": policy_signature(payload, work, public_keys["policyPublicKey"])}
-    (stage / "latest.json").write_text(json.dumps(envelope) + "\n")
+    (stage / "policy.json").write_text(json.dumps(envelope) + "\n")
 
 
 def run_release(stage, work):
     version = os.environ["PM_NATIVE_VERSION"]
     electron_tag = os.environ["PM_ELECTRON_TAG"]
+    publish = os.environ.get("PM_NATIVE_PUBLISH") == "true"
+    if publish and (os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+                    or os.environ.get("GITHUB_REF") != f"refs/tags/native-v{version}"):
+        raise ValueError("Native release files can be retained only by the approved tag run")
     verify_release_versions(version, version, electron_tag)
     app = stage / "Powermove.app"
     metadata = plistlib.loads((app / "Contents/Info.plist").read_bytes())
@@ -208,12 +212,12 @@ def run_release(stage, work):
         dmg_gatekeeper = gatekeeper("DMG", dmg, "open")
         checked("DMG codesign verification", ["codesign", "--verify", "--strict", dmg])
         dmg_hash = digest(dmg)
-        dmg.unlink()
-
-        archive = stage / "update.zip"
+        archive = stage / f"Powermove-Native-{version}-mac-arm64.zip"
         checked("Sparkle update ZIP", [sys.executable, HERE / "package.py", "transition-zip", app, archive])
         generate_updates(stage, work, archive, version)
-        archive.unlink()
+        if not publish:
+            dmg.unlink()
+            archive.unlink()
     finally:
         checked("Temporary keychain cleanup", ["security", "delete-keychain", keychain])
 
@@ -221,7 +225,7 @@ def run_release(stage, work):
                  previousElectronTag=electron_tag, architecture="arm64", runtimes=runtimes,
                  appGatekeeper=app_gatekeeper, dmgGatekeeper=dmg_gatekeeper, codesign="verified",
                  appStapler="validated", dmgStapler="validated", dmgSha256=dmg_hash,
-                 updateMetadata="generated and signed", mode="dry-run")
+                 updateMetadata="generated and signed", mode="publish" if publish else "dry-run")
     evidence = stage / "evidence"
     evidence.mkdir()
     # Only serialize expected fields after their strict parsers or exact comparisons.

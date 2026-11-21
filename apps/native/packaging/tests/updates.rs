@@ -1516,3 +1516,65 @@ fn sparkle_build_number_is_independent_of_display_semver_and_legacy_policies_sta
         );
     }
 }
+
+#[test]
+fn download_notice_requires_one_appcast_enclosure_matching_signed_policy() {
+    use pm_distribution::download;
+
+    let mut fixture = Fixture::new();
+    fixture.config.feed_url = Some("https://updates.invalid/native/latest/policy.json".into());
+    fixture.release.archive_url =
+        "https://updates.invalid/native/2.0.0/Powermove-Native-2.0.0-mac-arm64.zip".into();
+    let appcast = Url::parse("https://updates.invalid/native/latest/appcast.xml").unwrap();
+    let item = format!(
+        r#"<item><sparkle:version>{build}</sparkle:version>
+        <sparkle:shortVersionString>{version}</sparkle:shortVersionString>
+        <enclosure url="{url}" length="{length}" sparkle:edSignature="{signature}" /></item>"#,
+        build = fixture.release.sparkle_version(),
+        version = fixture.release.version,
+        url = fixture.release.archive_url,
+        length = fixture.release.size,
+        signature = fixture.release.sparkle_signature,
+    );
+    let feed = |items: &str| {
+        format!(
+        r#"<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+        <channel>{items}</channel></rss>"#
+    ).into_bytes()
+    };
+    let verifier = fixture.verifier();
+    let check = |transport: &mut LocalFeed| {
+        download::check(
+            &fixture.config,
+            &appcast,
+            14,
+            "1.3.2",
+            Architecture::Arm64,
+            NOW,
+            transport,
+            &verifier,
+        )
+    };
+    let mut valid = LocalFeed::new([fixture.policy(), feed(&item)]);
+    let notice = check(&mut valid).unwrap().unwrap();
+    assert_eq!(notice.version, "2.0.0");
+    assert_eq!(
+        notice.download_url.as_str(),
+        "https://cloud.trypowermove.com/native/2.0.0/Powermove-Native-2.0.0-mac-arm64.dmg"
+    );
+    assert_eq!(valid.calls, 2);
+
+    for bad in [
+        item.replace(
+            &fixture.release.archive_url,
+            "https://wrong.invalid/update.zip",
+        ),
+        item.replace("2.0.0</sparkle:version>", "3.0.0</sparkle:version>"),
+        format!("{item}{item}"),
+    ] {
+        assert!(check(&mut LocalFeed::new([fixture.policy(), feed(&bad)])).is_err());
+    }
+    let mut bad_policy = LocalFeed::new([b"unsigned policy".to_vec()]);
+    assert!(check(&mut bad_policy).is_err());
+    assert_eq!(bad_policy.calls, 1);
+}

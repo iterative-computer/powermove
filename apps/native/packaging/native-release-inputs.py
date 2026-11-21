@@ -47,7 +47,7 @@ def main(stage):
     policy_key = public_key(key_data["policyPublicKey"])
     if policy_key == public_key(key_data["sparklePublicKey"]):
         raise ValueError("The archive and policy must use independent keys")
-    policy_url = "https://github.com/iterative-computer/powermove/releases/download/native-feed/latest.json"
+    policy_url = "https://cloud.trypowermove.com/native/latest/policy.json"
     config = dict(version=1, enabled=True, feedURL=policy_url, publicKey=policy_key, channel="latest")
     (stage / "update-config.json").write_text(json.dumps(config) + "\n")
 
