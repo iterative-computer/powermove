@@ -356,7 +356,7 @@ function groupedToolRow(work: Step[]): ToolsRow {
           str(v.detail) && str(v.detail) !== str(v.toolName)
             ? str(v.detail)
             : "",
-          typeof v.output === "string" ? v.output : "",
+          task?.status === "cancelled" ? "" : str(v.output),
         ]
           .filter(Boolean)
           .join("\n\n"),
@@ -468,6 +468,19 @@ export type Entry =
   | { kind: "work"; key: string; label: string; items: Message[] }
   | { kind: "working"; key: string; label: string };
 
+// These messages were saved as errors by earlier desktop versions.
+const savedCompletionPlaceholders = new Set([
+  "The run was stopped.",
+  "The task was stopped.",
+  "Agent runtime stopped.",
+  "The model run ended.",
+  "Stopped.",
+  "The Codex run was cancelled.",
+  "The Claude run was cancelled.",
+  "ChatGPT generation completed without a result.",
+  "Claude generation completed without a result.",
+]);
+
 /** Archived steps carry their trace message; group them back into it. */
 export function messages(s: Snapshot): Message[] {
   const out: Message[] = [];
@@ -531,6 +544,12 @@ export function messages(s: Snapshot): Message[] {
       continue;
     }
     const role = v.role === "user" ? "user" : "assistant";
+    if (
+      role === "assistant" &&
+      v.error === true &&
+      savedCompletionPlaceholders.has(str(v.text).trim())
+    )
+      continue;
     out.push({
       key: row.id,
       rowId: row.id,

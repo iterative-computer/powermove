@@ -940,9 +940,8 @@ test("typing / opens the original's shortcuts in the window's menu; a pick reach
   expect(actions).toContainEqual({ type: "focus", focused: true });
   root.dispose();
 });
-test("a run the person stopped reads plainly, with Try Again", async () => {
+test("a saved cancellation has no transcript message or retry button", async () => {
   const { root, commits } = mount();
-  const actions: Action[] = [];
   const rows: Row[] = [
     turn()[0]!,
     {
@@ -957,18 +956,12 @@ test("a run the person stopped reads plainly, with Try Again", async () => {
       },
     },
   ];
-  await root.render(
-    <AgentView publication={withRows(rows)} send={(a) => actions.push(a)} />,
+  await root.render(<AgentView publication={withRows(rows)} send={() => {}} />);
+  const result = assertWire(commits);
+  expect(JSON.stringify(result.nodes)).not.toContain(
+    "The Codex run was cancelled.",
   );
-  expect(
-    has(root, "Something needs attention. The Codex run was cancelled."),
-  ).toBe(false);
-  expect(
-    root.inspect().nodes.some((n) => n.text === "The Codex run was cancelled."),
-  ).toBe(true);
-  await root.drive(byId(root, "error-history:c-retry").id, "click");
-  expect(actions).toEqual([{ type: "retry", id: "history:c" }]);
-  assertWire(commits);
+  expect(has(root, "Try Again")).toBe(false);
   root.dispose();
 });
 test("media and visual replies a streamed reply names get their cards", async () => {
@@ -1495,4 +1488,113 @@ test("child thread menus nest under their parent and the path returns to each an
     "    ↳ Polish · Working…",
   ]);
   root.dispose();
+});
+
+test("saved stop and empty completion placeholders stay out of the transcript", async () => {
+  const { root } = mount();
+  const messages = [
+    { role: "user", text: "Check the opening shot." },
+    { role: "assistant", text: "I found the opening shot." },
+    { role: "assistant", error: true, text: "The run was stopped." },
+    { role: "assistant", error: true, text: "The task was stopped." },
+    { role: "assistant", error: true, text: "Agent runtime stopped." },
+    {
+      role: "assistant",
+      error: true,
+      text: "ChatGPT generation completed without a result.",
+    },
+    {
+      role: "assistant",
+      error: true,
+      text: "The provider stopped accepting requests. Sign in and try again.",
+    },
+    { role: "assistant", text: "Done." },
+  ];
+  const publication = withRows(
+    messages
+      .slice(1)
+      .flatMap((value) => [messages[0]!, value])
+      .map((value, index) => ({
+        id: `history:${index}`,
+        commandId: "",
+        chosen: {},
+        open: false,
+        value,
+      })),
+  );
+  try {
+    await root.render(<AgentView publication={publication} send={() => {}} />);
+    const transcript = JSON.stringify(root.inspect().nodes);
+    for (const { text } of messages.slice(2, 6))
+      expect(transcript).not.toContain(text);
+    expect(transcript).toContain(messages[1]!.text);
+    expect(transcript).toContain(messages[6]!.text);
+    expect(transcript).toContain(messages[7]!.text);
+    expect(
+      root.inspect().nodes.filter((n) => n.props.label === "Try Again"),
+    ).toHaveLength(1);
+  } finally {
+    root.dispose();
+  }
+});
+
+test("saved cancelled tasks keep their status and omit generated output", async () => {
+  const { root } = mount();
+  const publication = withRows([
+    {
+      id: "history:task",
+      commandId: "",
+      chosen: {},
+      open: false,
+      value: {
+        kind: "tool",
+        id: "task",
+        toolName: "delegate_task",
+        label: "Check the cut",
+        status: "done",
+        output: "The task was stopped.",
+        task: { taskId: "task", status: "cancelled", title: "Check the cut" },
+      },
+    },
+  ]);
+  try {
+    await root.render(<AgentView publication={publication} send={() => {}} />);
+    await root.drive(byLabel(root, "1 task").id, "click");
+    expect(root.inspect().nodes.some((n) => n.text === "Stopped")).toBe(true);
+    expect(
+      root
+        .inspect()
+        .nodes.some(
+          (n) => n.props.label === "Check the cut" && n.type === "button",
+        ),
+    ).toBe(false);
+  } finally {
+    root.dispose();
+  }
+});
+
+test("a rendered result keeps the change card without placeholder prose", async () => {
+  const { root } = mount();
+  const publication = withRows([
+    {
+      id: "history:result",
+      commandId: "",
+      chosen: {},
+      open: false,
+      value: {
+        role: "assistant",
+        text: "",
+        nativeResult: { runId: "r", changed: true },
+      },
+    },
+  ]);
+  try {
+    await root.render(<AgentView publication={publication} send={() => {}} />);
+    expect(has(root, "Rendered result")).toBe(true);
+    expect(JSON.stringify(root.inspect().nodes)).not.toContain(
+      "The rendered change is ready.",
+    );
+  } finally {
+    root.dispose();
+  }
 });
