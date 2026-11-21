@@ -77,6 +77,7 @@ impl Group {
     }
 }
 pub const MIN_TAB_WIDTH: f32 = 72.;
+pub const MAX_ACTIVE_TAB_FLOOR: f32 = 120.;
 
 /// Widths in tab order. The caller reserves space for gaps and header tools.
 pub struct TabTrack {
@@ -90,20 +91,27 @@ impl Group {
             return TabTrack { widths: Vec::new(), scroll: 0. };
         };
         let count = self.tabs.len();
-        let floor = MIN_TAB_WIDTH * count as f32;
+        let active_natural = widths.get(active).copied().unwrap_or(MIN_TAB_WIDTH);
+        let active_floor = active_natural.min(MAX_ACTIVE_TAB_FLOOR);
+        let inactive_floor = MIN_TAB_WIDTH * (count - 1) as f32;
+        let floor = inactive_floor + active_floor;
         let mut widths: Vec<_> = (0..count)
             .map(|i| widths.get(i).copied().unwrap_or(MIN_TAB_WIDTH).max(MIN_TAB_WIDTH))
             .collect();
         let available = available.max(0.);
         if available <= floor {
             widths.fill(MIN_TAB_WIDTH);
-            return TabTrack { widths, scroll: floor - available };
+            widths[active] = active_floor;
+            return TabTrack {
+                widths,
+                scroll: floor - available,
+            };
         }
 
         // Reserve the active label as long as all the inactive tabs can still
         // have their minimum. Share the rest, returning surplus from short tabs
         // to their neighbours with longer names.
-        widths[active] = widths[active].min(available - floor + MIN_TAB_WIDTH);
+        widths[active] = active_natural.min(available - inactive_floor);
         let mut remaining = available - widths[active];
         let mut inactive: Vec<_> = (0..widths.len()).filter(|&i| i != active).collect();
         inactive.sort_by(|&a, &b| widths[a].total_cmp(&widths[b]));
@@ -2645,6 +2653,27 @@ mod restored_panel_title_tests {
 mod tab_track_tests {
     use super::*;
     #[test]
+    fn dock_tabs_reach_each_floor_before_scrolling() {
+        let mut group = Group {
+            tabs: (0..5).map(|index| index.to_string()).collect(),
+            active: 4,
+            size: None,
+            collapsed: false,
+        };
+        let widths = [89., 104., 152., 128., 64.];
+        let all = group.tab_track(352., &widths);
+        assert_eq!(all.widths, [72., 72., 72., 72., 64.]);
+        assert_eq!(all.scroll, 0.);
+        assert_eq!(group.tab_track(351., &widths).scroll, 1.);
+        group.active = 2;
+        let above_floor = group.tab_track(433., &widths);
+        assert_eq!(above_floor.widths, [72., 72., 145., 72., 72.]);
+        assert_eq!(above_floor.scroll, 0.);
+        let beyond_floor = group.tab_track(392., &widths);
+        assert_eq!(beyond_floor.widths, [72., 72., 120., 72., 72.]);
+        assert_eq!(beyond_floor.scroll, 16.);
+    }
+    #[test]
     fn dock_tabs_compress_in_order_and_scroll_only_at_the_minimum() {
         let group = Group {
             tabs: ["Properties", "Anchor Point", "Pexels", "Pong", "Voiceover"]
@@ -2659,7 +2688,10 @@ mod tab_track_tests {
             group.tab_track(500., &widths).widths,
             [76., 100., 72., 72., 80.]
         );
-        assert_eq!(group.tab_track(350., &widths).widths, [72.; 5]);
+        assert_eq!(
+            group.tab_track(350., &widths).widths,
+            [72., 72., 72., 72., 80.]
+        );
         assert_eq!(
             group.tab_track(370., &widths).widths,
             [73., 73., 72., 72., 80.]
@@ -2669,11 +2701,11 @@ mod tab_track_tests {
             let track = group.tab_track(available, &widths);
             assert_eq!(track.widths.len(), widths.len());
             assert!(track.widths.iter().all(|&w| w >= 72.));
-            assert_eq!(track.scroll, (360. - available).max(0.));
+            assert_eq!(track.scroll, (368. - available).max(0.));
             let total: f32 = track.widths.iter().sum();
             assert!(total <= available + track.scroll + 0.01);
             if track.scroll > 0. {
-                assert_eq!(track.widths, [MIN_TAB_WIDTH; 5]);
+                assert_eq!(track.widths, [72., 72., 72., 72., 80.]);
             }
         }
     }

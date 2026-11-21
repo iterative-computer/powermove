@@ -16,6 +16,7 @@ use std::{
     rc::Rc,
     time::Duration,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 #[path = "still_drag.rs"]
 mod still_drag;
@@ -171,6 +172,8 @@ pub struct Editor {
     resize_live: bool,
     resize_geometry: Option<Geometry>,
     tab_scrolls: HashMap<String, TabScroll>,
+    #[cfg(test)]
+    rendered_tab_labels: HashMap<(usize, usize), Vec<RenderedTabLabel>>,
     deferred_panel_commands: Vec<String>,
 }
 
@@ -182,25 +185,37 @@ struct TabScroll {
     position: f32,
 }
 
+#[cfg(test)]
+struct RenderedTabLabel {
+    left: f32,
+    right: f32,
+    font_size: f32,
+    tab_width: f32,
+    floor: f32,
+}
+
 impl TabScroll {
     fn reveal(
         &mut self,
         selected: &str,
         active: usize,
         viewport: f32,
-        visible: usize,
-        count: usize,
+        widths: &[f32],
+        limit: usize,
     ) {
         if self.selected != selected || self.viewport != viewport || self.active != active {
             self.selected = selected.to_owned();
             self.viewport = viewport;
             self.active = active;
-            let first = self
-                .first()
-                .clamp((active + 1).saturating_sub(visible.max(1)), active);
+            let mut first = self.first().min(active).min(limit);
+            while first < active
+                && first + whole_tabs(viewport, widths[first..].iter().copied()).0 <= active
+            {
+                first += 1;
+            }
             self.position = first as f32;
         }
-        self.position = self.position.min(count.saturating_sub(visible) as f32);
+        self.position = self.position.min(limit as f32);
     }
 
     fn first(&self) -> usize {
@@ -307,6 +322,8 @@ impl Editor {
             resize_live: false,
             resize_geometry: None,
             tab_scrolls: HashMap::new(),
+            #[cfg(test)]
+            rendered_tab_labels: HashMap::new(),
             deferred_panel_commands: Vec::new(),
         }
     }
@@ -2594,19 +2611,32 @@ impl Editor {
 const TAB_SPACING: f32 = 2.;
 const TAB_STEP: f32 = layout::MIN_TAB_WIDTH + TAB_SPACING;
 const TAB_EDGE_FADE: f32 = 16.;
+const TAB_PADDING: f32 = 12.;
 
-fn whole_tabs(viewport: f32, count: usize) -> (usize, f32) {
-    let visible = (((viewport + TAB_SPACING) / TAB_STEP).floor() as usize).min(count);
-    let width = (visible as f32 * TAB_STEP - TAB_SPACING).max(0.);
-    (visible, width)
+fn whole_tabs(viewport: f32, widths: impl IntoIterator<Item = f32>) -> (usize, f32) {
+    let mut count = 0;
+    let mut width = 0.;
+    for tab in widths {
+        let next = width + tab + if count > 0 { TAB_SPACING } else { 0. };
+        if next > viewport {
+            break;
+        }
+        count += 1;
+        width = next;
+    }
+    (count, width)
 }
 /// Width of a header title at `size` in the medium weight, as the tab strip draws it.
 fn title_width(text: &str, size: f32, window: &Window) -> f32 {
+    measure_tab_text(text, size, FontWeight::MEDIUM, window)
+}
+
+fn measure_tab_text(text: &str, size: f32, weight: FontWeight, window: &Window) -> f32 {
     let run = TextRun {
         len: text.len(),
         font: Font {
             family: pm_design::TEXT_FONT.into(),
-            weight: FontWeight::MEDIUM,
+            weight,
             ..window.text_style().font()
         },
         color: Hsla::default(),
@@ -2620,18 +2650,80 @@ fn title_width(text: &str, size: f32, window: &Window) -> f32 {
         .shape_line(text.to_string().into(), px(size), &[run]);
     f32::from(line.width).ceil()
 }
-/// Keep a whole-word prefix if it fits before the ellipsis. A single long
-/// word falls back to the text element's grapheme-safe end truncation.
-fn tab_label(title: &str, room: f32, size: f32, window: &Window) -> String {
+/// Measure the string that will actually paint so adjacent labels can keep
+/// the same gap even when a tab has room left over after truncation.
+fn tab_label(title: &str, natural: f32, room: f32, measure: impl Fn(&str) -> f32) -> (String, f32) {
+    if natural <= room {
+        return (title.to_owned(), natural);
+    }
+    let ellipsis = measure("…");
+    if ellipsis > room {
+        return (String::new(), 0.);
+    }
+    let fits = |prefix: &str| {
+        let label = format!("{}…", prefix.trim_end());
+        let width = measure(&label);
+        (width <= room).then_some((label, width))
+    };
     let mut prefix = title;
     while let Some((words, _)) = prefix.rsplit_once(char::is_whitespace) {
         prefix = words.trim_end();
-        let label = format!("{prefix}…");
-        if title_width(&label, size, window) <= room {
+        if let Some(label) = fits(prefix) {
             return label;
         }
     }
-    title.to_owned()
+    title
+        .grapheme_indices(true)
+        .rev()
+        .find_map(|(index, _)| fits(&title[..index]))
+        .unwrap_or_else(|| ("…".to_owned(), ellipsis))
+}
+
+/// Keep hit targets fixed. Distribute the space left by truncation between
+/// the labels, with each label still inside the tab that owns it.
+fn tab_label_insets(widths: &[f32], labels: &[(String, f32)]) -> Vec<f32> {
+    let mut tab_left = 0.;
+    let mut packed = 0.;
+    // Subtract the preceding label widths. Each remaining interval constrains
+    // the first label position plus one copy of the gap per preceding tab.
+    let starts: Vec<_> = widths
+        .iter()
+        .zip(labels)
+        .map(|(&width, (_, label))| {
+            let left = tab_left - packed;
+            tab_left += width + TAB_SPACING;
+            packed += label;
+            (left, left + (width - label).max(0.))
+        })
+        .collect();
+    let mut minimum = 0f32;
+    let mut maximum = f32::INFINITY;
+    for (i, &(left, right)) in starts.iter().enumerate() {
+        for (j, &(next_left, next_right)) in starts.iter().enumerate().skip(i + 1) {
+            let steps = (j - i) as f32;
+            minimum = minimum.max((next_left - right) / steps);
+            maximum = maximum.min((next_right - left) / steps);
+        }
+    }
+    if minimum > maximum {
+        return widths
+            .iter()
+            .zip(labels)
+            .map(|(&width, (_, label))| (width - label) / 2.)
+            .collect();
+    }
+    let gap = (2. * TAB_PADDING + TAB_SPACING).clamp(minimum, maximum);
+    let mut first = (0f32, f32::INFINITY);
+    for (index, &(left, right)) in starts.iter().enumerate() {
+        first.0 = first.0.max(left - index as f32 * gap);
+        first.1 = first.1.min(right - index as f32 * gap);
+    }
+    let first = TAB_PADDING.clamp(first.0, first.1.max(first.0));
+    starts
+        .iter()
+        .enumerate()
+        .map(|(i, (left, _))| first + i as f32 * gap - left)
+        .collect()
 }
 
 fn panel_switcher_entries(group: &layout::Group, panels: &layout::Panels) -> Vec<MenuEntry> {
@@ -3417,6 +3509,8 @@ impl Editor {
         let mut native_fades = vec![];
         // Where each header's tabs are drawn, for drops over a header.
         let mut tab_spans: HashMap<(usize, usize), Vec<(usize, f32, f32)>> = HashMap::new();
+        #[cfg(test)]
+        self.rendered_tab_labels.clear();
         for p in ordered {
             let group = &self.layout.docks[p.dock].groups[p.group];
             let id = group.active().to_string();
@@ -3434,17 +3528,13 @@ impl Editor {
             let active = group.active.min(tabs.len() - 1);
             // Folded to its header (a double-click on the header).
             let collapsed = group.collapsed && !is_viewer;
-            // Quiet text tabs (language §9): each takes its title's width plus
-            // the leading close slot, trailing padding and the pill spacing.
-            // The leading close slot is the panel inset, and tab groups start
-            // flush, so the first title lands on the inset like a single title.
-            let close_slot = m.inset;
+            let label_size = t.typography.title;
+            let label_weight = FontWeight(t.typography.medium_weight);
             let widths: Vec<f32> = tabs
                 .iter()
                 .map(|tab| {
-                    title_width(panels.title(tab), t.typography.title, w)
-                        + close_slot
-                        + m.gap
+                    measure_tab_text(panels.title(tab), label_size, label_weight, w)
+                        + 2. * TAB_PADDING
                 })
                 .collect();
             let header_rect = self.geometry.header_rect(&p, &t);
@@ -3596,7 +3686,7 @@ impl Editor {
                 header = header.px(px(0.));
             }
             if multi {
-                header = header.pl(px(0.));
+                header = header.pl(px(0.)).pr(px(t.space.hair)).gap(px(t.space.xs));
             }
             if multi || custom.is_none() {
                 // Quiet text tabs (language §9): the active title in `text`, the
@@ -3607,61 +3697,98 @@ impl Editor {
                 let restore = self.maximized_panel.is_some();
                 let controls = 1 + usize::from(tools > 0.) + usize::from(restore);
                 let reserved = tools + m.hit + if restore { m.symbol_inline } else { 0. };
-                let viewport = (p.rect.w - reserved - m.gap * (controls + 1) as f32).max(0.);
+                let viewport = (p.rect.w - reserved - t.space.xs * controls as f32 - t.space.hair).max(0.);
                 let gaps = TAB_SPACING * tabs.len().saturating_sub(1) as f32;
                 let track = group.tab_track(viewport - gaps, &widths);
                 let scrolling = multi && track.scroll > 0.;
-                let (visible, clip_width) = if scrolling {
-                    whole_tabs(viewport, tabs.len())
-                } else {
-                    (tabs.len(), viewport)
-                };
-                let limit = tabs.len().saturating_sub(visible);
+                let limit = tabs.len().saturating_sub(
+                    whole_tabs(viewport, track.widths.iter().rev().copied())
+                        .0
+                        .max(1),
+                );
                 let tab_key = tabs[0].clone();
                 let first = if scrolling {
                     let state = self.tab_scrolls.entry(tab_key.clone()).or_default();
-                    state.reveal(&id, active, viewport, visible, tabs.len());
+                    state.reveal(&id, active, viewport, &track.widths, limit);
                     state.first()
                 } else {
                     self.tab_scrolls.remove(&tab_key);
                     0
                 };
-                let offset = first as f32 * TAB_STEP;
+                let (visible, clip_width) = if scrolling {
+                    whole_tabs(viewport, track.widths[first..].iter().copied())
+                } else {
+                    (tabs.len(), viewport)
+                };
+                let offset = track.widths[..first].iter().sum::<f32>() + first as f32 * TAB_SPACING;
+                let single_width = (p.rect.w - tools - m.inset - m.gap * 2.).max(0.);
+                let measure_label =
+                    |label: &str| measure_tab_text(label, label_size, label_weight, w);
+                let labels: Vec<_> = tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tab)| {
+                        let room = if multi {
+                            track.widths[index] - 2. * TAB_PADDING
+                        } else {
+                            single_width
+                        };
+                        tab_label(
+                            panels.title(tab),
+                            widths[index] - 2. * TAB_PADDING,
+                            room,
+                            measure_label,
+                        )
+                    })
+                    .collect();
+                let mut insets = vec![0.; tabs.len()];
+                let window = first..first + visible;
+                if multi {
+                    insets[window.clone()].copy_from_slice(&tab_label_insets(
+                        &track.widths[window.clone()],
+                        &labels[window.clone()],
+                    ));
+                }
                 let mut row = div().flex().items_center().gap(px(TAB_SPACING));
                 let mut span_x = p.rect.x + if multi { -offset } else { m.inset };
                 let mut spans = vec![];
                 for (ti, tab) in tabs.iter().enumerate() {
-                    let full = widths[ti];
-                    let drawn = if multi { track.widths[ti] } else {
-                        (p.rect.w - tools - m.inset - m.gap * 2.).max(0.)
-                    };
-                    let compact = multi && drawn < full;
-                    let label_size = if compact {
-                        t.typography.minimum
+                    let drawn = if multi {
+                        track.widths[ti]
                     } else {
-                        t.typography.title
+                        single_width
                     };
-                    let padding = if compact {
-                        [t.space.xs; 2]
-                    } else {
-                        [close_slot, m.gap]
-                    };
-                    let label_width = if multi {
-                        drawn - padding[0] - padding[1]
-                    } else {
-                        drawn
-                    };
-                    let truncated = label_width < title_width(panels.title(tab), label_size, w);
+                    let (label, label_width) = &labels[ti];
+                    let inset = insets[ti];
+                    let truncated = label.as_str() != panels.title(tab);
                     let tab_left = span_x;
-                    let span_width = if multi { drawn } else {
-                        drawn.min(title_width(panels.title(tab), t.typography.title, w))
-                    };
+                    let span_width = if multi { drawn } else { *label_width };
                     spans.push((ti, span_x, span_x + span_width));
                     span_x += drawn + TAB_SPACING;
                     // A tab given a new place in its strip slides to it.
-                    let slide =
-                        self.tab_slides
-                            .offset(tab, tab_left + offset + shown.x - p.rect.x, p.rect.y, &t);
+                    let slide = self.tab_slides.offset(
+                        tab,
+                        tab_left + offset + shown.x - p.rect.x,
+                        p.rect.y,
+                        &t,
+                    );
+                    #[cfg(test)]
+                    if window.contains(&ti) {
+                        self.rendered_tab_labels
+                            .entry((p.dock, p.group))
+                            .or_default()
+                            .push(RenderedTabLabel {
+                                left: tab_left + inset + slide,
+                                right: tab_left + inset + slide + *label_width,
+                                font_size: label_size,
+                                tab_width: drawn,
+                                floor: if ti == active {
+                                    widths[ti].min(layout::MAX_ACTIVE_TAB_FLOOR)
+                                } else {
+                                    layout::MIN_TAB_WIDTH
+                                },
+                            });
+                    }
                     let tabid = tab.clone();
                     let menu_id = tab.clone();
                     let selected = ti == active;
@@ -3691,10 +3818,7 @@ impl Editor {
                         .items_center()
                         .h(px(m.hit))
                         .when(multi, |s| {
-                            let s = s
-                                .pl(px(padding[0]))
-                                .pr(px(padding[1]))
-                                .rounded(px(m.control_radius));
+                            let s = s.rounded(px(m.control_radius));
                             s.when(!dragging, |s| s.hover_style(|s| s.bg(rgb(c.hover))))
                         })
                         .when(slide != 0., |s| s.left(px(slide)))
@@ -3711,21 +3835,16 @@ impl Editor {
                             })
                         })
                         .text_size(px(label_size))
-                        .font_weight(FontWeight(t.typography.medium_weight))
+                        .font_family(pm_design::TEXT_FONT)
+                        .font_weight(label_weight)
                         .whitespace_nowrap();
-                    let label = if truncated {
-                        tab_label(&title, label_width, label_size, w)
-                    } else {
-                        title.clone()
-                    };
                     cell = cell
                         .when(multi, |s| s.w(px(drawn)))
                         .when(!multi, |s| s.max_w(px(drawn)))
                         .when(truncated && !dragging, |s| s.tooltip(tooltip(&t, &title)))
-                        .child(div().min_w(px(0.)).truncate().child(label));
+                        .child(div().ml(px(inset)).flex_none().child(label.clone()));
                     if closable && !dragging {
-                        // Compressed tabs give the label the leading space.
-                        // The close control covers its trailing edge on hover.
+                        let leading = inset >= TAB_PADDING;
                         cell = cell.child(
                             div()
                                 .id(format!("close-{tab}"))
@@ -3734,11 +3853,11 @@ impl Editor {
                                 .tab_index(0)
                                 .focus_style(|s| s.opacity(1.))
                                 .absolute()
-                                .when(compact, |button| button.right_0().bg(rgb(c.hover)))
-                                .when(!compact, |button| button.left_0())
+                                .when(leading, |button| button.left_0())
+                                .when(!leading, |button| button.right_0().bg(rgb(c.hover)))
                                 .top_0()
                                 .bottom_0()
-                                .w(px(close_slot))
+                                .w(px(TAB_PADDING))
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -3814,8 +3933,12 @@ impl Editor {
                                 .overflow_hidden()
                                 .overflow_fade(Edges::<AbsoluteLength> {
                                     left: px(if first > 0 { TAB_EDGE_FADE } else { 0. }).into(),
-                                    right: px(if first < limit { TAB_EDGE_FADE } else { 0. })
-                                        .into(),
+                                    right: px(if first + visible < tabs.len() {
+                                        TAB_EDGE_FADE
+                                    } else {
+                                        0.
+                                    })
+                                    .into(),
                                     top: px(0.).into(),
                                     bottom: px(0.).into(),
                                 })
@@ -6095,40 +6218,44 @@ mod tests {
     #[::core::prelude::v1::test]
     fn dock_tabs_selection_reveals_the_active_tab() {
         let mut scroll = super::TabScroll::default();
-        scroll.reveal("pexels", 4, 250., 3, 5);
+        let widths = [72., 72., 72., 72., 64.];
+        scroll.reveal("pexels", 4, 250., &widths, 2);
         assert_eq!(scroll.first(), 2);
         assert!(!scroll.scroll(16., 2));
         assert!(scroll.scroll(24., 2));
-        scroll.reveal("pexels", 4, 250., 3, 5);
+        scroll.reveal("pexels", 4, 250., &widths, 2);
         assert_eq!(scroll.first(), 1, "manual scrolling can browse other tabs");
-        scroll.reveal("voiceover", 3, 250., 3, 5);
+        scroll.reveal("voiceover", 3, 250., &widths, 2);
         assert_eq!(scroll.first(), 1);
-        scroll.reveal("voiceover", 3, 150., 2, 5);
+        scroll.reveal("voiceover", 3, 150., &widths, 3);
         assert_eq!(scroll.first(), 2);
-        scroll.reveal("properties", 0, 150., 2, 5);
+        scroll.reveal("properties", 0, 150., &widths, 3);
         assert_eq!(scroll.first(), 0);
     }
 
     #[::core::prelude::v1::test]
     fn dock_tabs_scroll_exposes_only_whole_tabs_outside_the_fade() {
         let mut scroll = super::TabScroll::default();
-        let count = 5;
-        for viewport in [72., 105., 146., 188., 258., 366.] {
-            let (visible, clip_width) = super::whole_tabs(viewport, count);
-            assert!(clip_width <= viewport);
-            for active in 0..count {
-                scroll.reveal("selected", active, viewport, visible, count);
+        let widths = [72., 72., 120., 72., 64.];
+        for viewport in [120., 146., 188., 258., 366.] {
+            let limit = widths.len() - super::whole_tabs(viewport, widths.iter().rev().copied()).0;
+            for active in 0..widths.len() {
+                scroll.reveal("selected", active, viewport, &widths, limit);
                 let first = scroll.first();
-                let left = first as f32 * super::TAB_STEP;
+                let (visible, clip_width) =
+                    super::whole_tabs(viewport, widths[first..].iter().copied());
+                assert!(clip_width <= viewport);
+                let left = widths[..first].iter().sum::<f32>() + first as f32 * super::TAB_SPACING;
                 let right = left + clip_width;
                 assert!((first..first + visible).contains(&active));
-                for index in 0..count {
-                    let start = index as f32 * super::TAB_STEP;
-                    let end = start + 72.;
+                let mut start = 0.;
+                for (index, tab) in widths.into_iter().enumerate() {
+                    let end = start + tab;
                     assert!(
                         end <= left || start >= right || (start >= left && end <= right),
                         "tab {index} leaves a sliver at viewport {viewport}, offset {left}"
                     );
+                    start = end + super::TAB_SPACING;
                 }
             }
         }
@@ -7214,6 +7341,42 @@ mod dock_tab_capture_tests {
                     cx.notify();
                 }).unwrap();
                 cx.run_until_parked();
+                window
+                    .update(&mut cx, |editor, _, _| {
+                        let (dock, group, _) = editor.layout.find("pexels").unwrap();
+                        let labels = &editor.rendered_tab_labels[&(dock, group)];
+                        assert!(
+                            labels
+                                .iter()
+                                .all(|label| label.font_size == editor.tokens.typography.title)
+                        );
+                        if index < 2 {
+                            assert_eq!(labels.len(), 5, "all five labels fit at {width} pt");
+                        }
+                        if labels.len() < 5 {
+                            assert!(
+                                labels
+                                    .iter()
+                                    .all(|label| label.tab_width <= label.floor + 0.01),
+                                "compressed width at {width} pt"
+                            );
+                        }
+                        let gaps: Vec<_> = labels
+                            .windows(2)
+                            .map(|pair| pair[1].left - pair[0].right)
+                            .collect();
+                        let spread = if gaps.is_empty() {
+                            0.
+                        } else {
+                            let tightest = gaps.iter().copied().fold(f32::INFINITY, f32::min);
+                            let widest = gaps.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                            widest - tightest
+                        };
+                        assert!(spread <= 1., "label gaps at {width} pt: {gaps:?}");
+                        println!("{name} {width:.0} pt: {} visible tabs, {:.0} pt labels, {spread:.2} pt gap spread",
+                            labels.len(), editor.tokens.typography.title);
+                    })
+                    .unwrap();
                 if index == 4 {
                     let menu = window.update(&mut cx, |editor, _, cx| {
                         let (dock, group, _) = editor.layout.find("pexels").unwrap();
