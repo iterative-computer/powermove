@@ -1533,9 +1533,15 @@ impl McpSession {
                     "Extension staging is inert: nothing here activates."
                 });
             }
-            result["instructions"] = json!(
-                "Read get_project_state before edits. Its compositions list includes every composition; pass optional compositionId to composition tools to work inside a precomp without switching the editor. Omit it for the open composition. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. api/mcp-tools.json lists the public contract. A tool this build lacks returns an error naming what is missing, so report that instead of retrying."
-            );
+            const INSTRUCTIONS: &str = "Read get_project_state before edits. Its compositions list includes every composition; pass optional compositionId to composition tools to work inside a precomp without switching the editor. Omit it for the open composition. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. api/mcp-tools.json lists the public contract. A tool this build lacks returns an error naming what is missing, so report that instead of retrying.";
+            result["instructions"] = Value::String(if project.is_some() && access != "editor" {
+                format!(
+                    "{INSTRUCTIONS}\n\n{}",
+                    include_str!("../../../js/compat/api-pack/HANDOFF.md").trim_end(),
+                )
+            } else {
+                INSTRUCTIONS.into()
+            });
             Some(root)
         };
         let stage = match (&workspace, host.extensions.clone()) {

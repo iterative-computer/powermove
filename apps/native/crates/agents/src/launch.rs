@@ -15,13 +15,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const INSTRUCTIONS: &str = "You are the agent inside Powermove, a motion graphics and video editor. Start with start_session. If the task needs a project and none is open, call create_project first. Read get_project_state before editing. Make editable changes with apply_commands or edit_layer_strips and keep them with finish_session commit:true.
-
-For effect requests, check installed effects in the staging copy (ask for includeExtensionStaging:true in start_session) or in get_workspace_state. Search the Store with store_search before writing a new effect. Reuse or adapt an existing effect when it fits. Render with render_frames. When matching a look, score the first render against the reference and use the score to guide revisions. If Powermove's renderer is out of reach, tell the user instead of building a stand-in renderer.
+const INSTRUCTIONS: &str = concat!(
+    "You are the agent inside Powermove, a motion graphics and video editor. Use the powermove tools. Start with start_session. If the task needs a project and none is open, call create_project first. Read get_project_state before editing. Make editable changes with apply_commands or edit_layer_strips and keep them with finish_session commit:true.\n\n",
+    include_str!("../../../js/compat/api-pack/HANDOFF.md"),
+    "\nFor effect requests, check installed effects in the staging copy (ask for includeExtensionStaging:true in start_session) or in get_workspace_state. Search the Store with store_search before writing a new effect. Reuse or adapt an existing effect when it fits. Render with render_frames. When matching a look, score the first render against the reference and use the score to guide revisions. If Powermove's renderer is out of reach, tell the user instead of building a stand-in renderer.
 
 Before authoring a new panel, read get_panel_layout and call panel_begin with its placement and planned controls. Tell the user where you placed it. Send panel_build plan and commit events as you commit controls. After publishing, send ready with its registered panelId, or cancel or error if building stops.
 
-Report plainly what changed. Mention extensions only if this run staged, published or failed to publish one. When a tool says it is unavailable, tell the user instead of working around it.";
+Report plainly what changed. Mention extensions only if this run staged, published or failed to publish one. When a tool says it is unavailable, tell the user instead of working around it."
+);
 /// Main's `AGENT_ORCHESTRATION_INSTRUCTIONS`, given to every run with tools.
 pub const ORCHESTRATION: &str = "SUBAGENTS
 Powermove owns subagent tasks across providers. Use orchestrator_capabilities to discover connected providers, models and their options from the same catalog as the model picker. Use delegate_task for child work, including other providers; native agent tools do not list all connected models.
@@ -681,6 +683,13 @@ mod exec_reply_tests {
 #[cfg(test)]
 mod instruction_tests {
     use super::INSTRUCTIONS;
+
+    #[test]
+    fn launch_prompt_includes_hand_editing_guidance() {
+        let guide = include_str!("../../../js/compat/api-pack/HANDOFF.md").trim_end();
+        assert!(guide.starts_with("## Leave the project ready for hand editing"));
+        assert!(INSTRUCTIONS.contains(&format!("\n\n{guide}\n\nFor effect requests,")));
+    }
 
     #[test]
     fn effect_and_extension_guidance() {

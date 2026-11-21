@@ -4,6 +4,8 @@ Everything in Powermove is an extension, including the built-in panels. You can
 add a panel, change a built-in one, or replace it, by writing an extension and
 publishing it. The app loads it while it runs; there is no rebuild or restart.
 
+For composition work, see [Leave the project ready for hand editing](HANDOFF.md).
+
 ## Start a new panel in its workspace slot
 
 Before writing a new panel, read `get_panel_layout`, choose a sensible location,

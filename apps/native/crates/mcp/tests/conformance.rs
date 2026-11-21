@@ -45,6 +45,108 @@ fn value(result: Value) -> Value {
 fn start(s: &mut McpSession) {
     value(s.call("start_session", json!({"prompt":"Synthetic test"})));
 }
+
+#[test]
+fn project_session_includes_hand_editing_guidance() {
+    let fixture = Fixture::new();
+    fixture.create();
+    let guide = include_str!("../../../js/compat/api-pack/HANDOFF.md").trim_end();
+    assert!(guide.starts_with("## Leave the project ready for hand editing"));
+    for args in [
+        json!({"prompt":"Make a 5 s title card"}),
+        json!({"prompt":"Make a 5 s title card","includeExtensionStaging":true}),
+    ] {
+        let opened = value(fixture.session().call("start_session", args));
+        let instructions = opened["instructions"].as_str().unwrap();
+        assert_eq!(instructions.split_once("\n\n").unwrap().1, guide);
+    }
+    for args in [
+        json!({"prompt":"Inspect the composition","access":"editor"}),
+        json!({"prompt":"Set up the app","context":"app"}),
+    ] {
+        let opened = value(fixture.session().call("start_session", args));
+        assert!(
+            !opened["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Leave the project ready for hand editing")
+        );
+    }
+    let start_tool = catalog::spec("start_session").unwrap();
+    assert!(
+        start_tool["description"]
+            .as_str()
+            .unwrap()
+            .contains("hand-editing guidance")
+    );
+}
+
+#[test]
+fn scripted_agent_commits_a_five_second_title_card_ready_for_hand_editing() {
+    let fixture = Fixture::new();
+    fixture.create();
+    let mut rpc = Rpc::new(fixture.session());
+    let initialized = rpc
+        .handle(json!({
+            "jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}
+        }))
+        .unwrap();
+    assert_eq!(initialized["result"]["serverInfo"]["name"], "powermove");
+    let mut id = 1;
+    let mut tool = |name, arguments| {
+        id += 1;
+        let response = rpc
+            .handle(json!({
+                "jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}
+            }))
+            .unwrap();
+        assert!(response.get("error").is_none(), "{response}");
+        value(response["result"].clone())
+    };
+
+    // A deterministic agent peer reads the brief and uses the real MCP tools.
+    let session = tool("start_session", json!({"prompt":"Make a 5 s title card"}));
+    let instructions = session["instructions"].as_str().unwrap();
+    assert!(instructions.contains("## Leave the project ready for hand editing"));
+    assert!(instructions.contains("group_layers"));
+    assert!(instructions.contains("add_marker"));
+    tool("get_project_state", json!({"indexOnly":true}));
+    tool(
+        "apply_commands",
+        json!({"commands":[
+            {"type":"set_composition","patch":{"name":"Title card","duration":5}},
+            {"type":"add_layer","id":"plate","name":"Title plate","layerType":"shape","duration":5,
+                "content":{"shape":"rect","w":600,"h":140}},
+            {"type":"add_layer","id":"title","name":"Title text","layerType":"text","duration":5,
+                "content":{"text":"Opening title"}},
+            {"type":"group_layers","targets":["plate","title"],"name":"Headline"},
+            {"type":"add_marker","time":0,"name":"Title appears"}
+        ]}),
+    );
+    tool("finish_session", json!({"commit":true}));
+    tool(
+        "start_session",
+        json!({"prompt":"Verify the finished title card","access":"editor"}),
+    );
+    let state = tool("get_project_state", json!({}));
+    assert_eq!(state["composition"]["duration"].as_f64(), Some(5.0));
+    let layers = state["layers"].as_array().unwrap();
+    assert_eq!(layers.len(), 3);
+    let group = layers
+        .iter()
+        .find(|layer| layer["name"] == "Headline")
+        .unwrap();
+    assert_eq!(group["type"], "group");
+    assert!(group["group"].is_null());
+    for (name, kind) in [("Title plate", "shape"), ("Title text", "text")] {
+        let layer = layers.iter().find(|layer| layer["name"] == name).unwrap();
+        assert_eq!(layer["type"], kind);
+        assert_eq!(layer["group"], group["id"]);
+    }
+    assert_eq!(state["markers"][0]["name"], "Title appears");
+    tool("finish_session", json!({"commit":true}));
+}
+
 fn add(s: &mut McpSession, id: &str) {
     value(s.call("apply_commands",json!({"commands":[{"type":"add_layer","id":id,"layerType":"solid","name":"Synthetic solid"}]})));
 }

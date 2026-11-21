@@ -21,6 +21,19 @@ fn write(dir: &Path, manifest: Value, files: &[(&str, &str)]) -> Value {
 }
 
 #[test]
+fn shipped_api_pack_includes_hand_editing_guidance() {
+    for (index, path) in [
+        ("EXTENSIONS.md", "HANDOFF.md"),
+        ("v3/EXTENSIONS.md", "v3/HANDOFF.md"),
+    ] {
+        let read = |path| PACK.iter().find(|entry| entry.0 == path).unwrap().1;
+        assert!(read(index).contains("[Leave the project ready for hand editing](HANDOFF.md)"));
+        assert!(read(path).starts_with("## Leave the project ready for hand editing"));
+        assert_eq!(read(path), HANDOFF_GUIDE);
+    }
+}
+
+#[test]
 fn the_shipped_sample_and_a_v3_extension_pass_and_broken_code_reports_why() {
     let root = scratch("pm-authoring-check");
     let sample = PACK
