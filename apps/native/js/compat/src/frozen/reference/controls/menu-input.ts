@@ -24,20 +24,31 @@ export function bindMenuDismissal(
     event.stopImmediatePropagation();
     close();
     if (anchor.isConnected) anchor.focus({ preventScroll: true });
-    // The browser may still produce a click after a cancelled pointerdown.
-    // Retire the handler on the next physical gesture if there is no click.
+    // A cancelled pointerdown can still produce a click or context menu.
+    // Retire the handlers when an unrelated gesture starts.
+    const contextPress = event.button === 2 || (event.button === 0 && event.ctrlKey);
     function clear(): void {
       doc.removeEventListener("click", swallowClick, true);
+      doc.removeEventListener("auxclick", swallowClick, true);
+      doc.removeEventListener("contextmenu", swallowContextMenu, true);
       doc.removeEventListener("pointerdown", clear, true);
+      doc.removeEventListener("keydown", clear, true);
+    }
+    function swallowContextMenu(context: MouseEvent): void {
+      context.preventDefault();
+      context.stopImmediatePropagation();
     }
     function swallowClick(click: MouseEvent): void {
-      if (click.detail === 0) return;
+      if (click.button !== event.button || (click.type === "click" && click.detail === 0)) return;
       clear();
       click.preventDefault();
       click.stopImmediatePropagation();
     }
     doc.addEventListener("click", swallowClick, true);
+    doc.addEventListener("auxclick", swallowClick, true);
+    if (contextPress) doc.addEventListener("contextmenu", swallowContextMenu, true);
     doc.addEventListener("pointerdown", clear, true);
+    doc.addEventListener("keydown", clear, true);
   }
 
   doc.addEventListener("pointerdown", onPress, true);

@@ -32,8 +32,10 @@ test("compat SelectField toggles, consumes an outside click, and returns focus o
     page.document.body.append(outside);
     let clicks = 0;
     outside.addEventListener("click", () => clicks++);
-    const press = (target: typeof outside | typeof a.trigger) =>
-      target.dispatchEvent(new page.MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+    const press = (target: typeof outside | typeof a.trigger, button = 0) =>
+      target.dispatchEvent(
+        new page.MouseEvent("pointerdown", { bubbles: true, cancelable: true, button }),
+      );
     const click = (target: typeof outside | typeof a.trigger) =>
       target.dispatchEvent(new page.MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }));
     const open = (target: typeof a.trigger) => target.getAttribute("aria-expanded") === "true";
@@ -66,6 +68,21 @@ test("compat SelectField toggles, consumes an outside click, and returns focus o
     press(outside);
     click(outside);
     expect(clicks).toBe(1);
+
+    const secondary = (type: string, button: number) =>
+      outside.dispatchEvent(new page.MouseEvent(type, { bubbles: true, cancelable: true, button }));
+    click(a.trigger);
+    expect(press(outside, 2)).toBe(false);
+    expect(open(a.trigger)).toBe(false);
+    expect(secondary("contextmenu", 2)).toBe(false);
+    expect(secondary("auxclick", 2)).toBe(false);
+    press(outside, 2);
+    expect(secondary("contextmenu", 2)).toBe(true);
+
+    click(a.trigger);
+    expect(press(outside, 1)).toBe(false);
+    expect(open(a.trigger)).toBe(false);
+    expect(secondary("auxclick", 1)).toBe(false);
     a.dispose();
     b.dispose();
   } finally {
