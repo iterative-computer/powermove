@@ -773,6 +773,8 @@ export interface MenuOption {
   default?: boolean;
   /** The section it is listed under. */
   category?: string;
+  /** Stable provider ID for model rows. */
+  provider?: string;
   /** Choosing it keeps the menu open (a provider: its models follow). */
   stays?: boolean;
   /** Quiet status text, not a choice. */
@@ -2597,6 +2599,7 @@ function Composer({
         checked: active && v === s.settings.model,
         default: defaults.has(v) || undefined,
         category,
+        provider,
       }));
       if (!rows.length && !active)
         rows.push({ label: `Use ${category}`, category, value: `provider:${provider}`, stays: true });
