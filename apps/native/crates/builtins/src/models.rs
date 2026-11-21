@@ -824,6 +824,10 @@ impl Backend {
             )
         })
         .collect();
+        let connected_model_name = model_groups
+            .get(pm_agents::Provider::Compatible.name())
+            .and_then(|models| models.iter().find(|(_, _, is_default)| *is_default))
+            .map(|(id, _, _)| pm_agents::account::codex_model_label(id));
         let needs_answer = session.needs_answer();
         // A docked panel fills its dock under the dock's own title; the
         // popover has a fixed width, its own title and the floating ground.
@@ -833,7 +837,7 @@ impl Backend {
             "docked"
         };
         Ok(
-            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"signedOut":signed_out,"findingModels":finding_models,"modelGroups":model_groups,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
+            json!({"generation":self.identity.generation,"sequence":self.native.agent_link.sequence(),"snapshot":snapshot,"native":{"connection":connection,"signedOut":signed_out,"findingModels":finding_models,"modelGroups":model_groups,"connectedModelName":connected_model_name,"reason":reason,"presentation":presentation,"atMinimumDockWidth":false,"visible":true,"extensionContext":false,"loadingHistory":false,"dropTarget":false,"needsAnswer":needs_answer,"keyboardFocus":null,"textSelected":false,"hoverRow":null,"increaseContrast":false,"reduceTransparency":false,"reduceMotion":false,"slashCopy":{},"bindings":{"access":"agent.access","model":"agent.model"}}}),
         )
     }
     pub(crate) fn settings_snapshot(&mut self) -> Result<Value, String> {

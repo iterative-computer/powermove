@@ -2598,7 +2598,7 @@ function Composer({
       const active = provider === s.settings.provider;
       const group = native.current.modelGroups?.[provider];
       const category = provider === "compatible"
-        ? (group?.find(([, , isDefault]) => isDefault)?.[1] ?? providerName)
+        ? (native.current.connectedModelName ?? providerName)
         : providerName;
       const models = active
         ? pairs(s.catalog.models, s.settings.model)
@@ -2708,6 +2708,7 @@ function Composer({
     s.catalog.models,
     n.findingModels,
     n.modelGroups,
+    n.connectedModelName,
   ]);
   const sendLabel = working ? "Send direction" : "Send";
   // The shortcuts menu hangs from the composer, once per draft that asks

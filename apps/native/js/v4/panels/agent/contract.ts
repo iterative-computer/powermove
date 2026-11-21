@@ -104,6 +104,8 @@ export interface NativeFacts {
   findingModels?: boolean;
   /** The discovered choices for each provider, including its default. */
   modelGroups?: Record<string, [id: string, label: string, isDefault: boolean][]>;
+  /** The configured compatible model's display name for its menu heading. */
+  connectedModelName?: string | null;
   /** What to tell the user when `connection` isn't "connected". */
   reason: string;
   presentation: "popover" | "docked";

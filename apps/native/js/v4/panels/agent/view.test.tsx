@@ -539,8 +539,9 @@ test("model menu groups discovered choices by provider and switches directly to 
   p.native.modelGroups = {
     chatgpt: [["gpt-6.2-sol", "GPT-6.2 Sol", true]],
     claude: [["opus", "Opus 5.5", true], ["sonnet", "Sonnet 5.5", false]],
-    compatible: [["gpt-6-astra", "GPT-6 Astra", true]],
+    compatible: [["gpt-6-astra", "gpt-6-astra", true]],
   };
+  p.native.connectedModelName = "GPT-6 Astra";
   const actions: Action[] = [];
   const requests: Parameters<Menu>[0][] = [];
   await root.render(<AgentView publication={p} send={(a) => actions.push(a)} menu={async (request) => {
@@ -555,7 +556,7 @@ test("model menu groups discovered choices by provider and switches directly to 
     ["ChatGPT", "GPT-6.2 Sol", true, true],
     ["Claude", "Opus 5.5", false, true],
     ["Claude", "Sonnet 5.5", false, false],
-    ["GPT-6 Astra", "GPT-6 Astra", false, true],
+    ["GPT-6 Astra", "gpt-6-astra", false, true],
   ]);
   expect(actions).toEqual([{ type: "setProvider", provider: "claude", model: "sonnet" }]);
   await root.drive(model.id, "keydown", { key: " " });
