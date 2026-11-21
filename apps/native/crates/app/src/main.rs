@@ -154,6 +154,8 @@ mod v4_quote;
 mod v4_view;
 #[cfg(test)]
 mod v4_view_tests;
+#[cfg(test)]
+mod ui_latency_bench;
 mod studio_panes;
 mod studio_estimate_probe;
 mod viewer2;
