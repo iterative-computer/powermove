@@ -41,6 +41,7 @@ describe('external Powermove MCP sessions', () => {
     await expect(session.call('apply_commands', {})).rejects.toThrow('start_session');
     const opened: any = await session.call('start_session', { prompt: 'Create a video' });
     expect(opened).toMatchObject({ projectId: 'project-one', access: 'project' });
+    expect(opened.instructions).toContain('## Leave the project ready for hand editing');
     expect(attach.mock.calls[0]?.[0]).toMatchObject({ access: 'project', mode: 'autonomous' });
     expect((await stat(opened.stagingDirectory)).isDirectory()).toBe(true);
     await mkdir(path.join(opened.stagingDirectory, 'bad-effect'));

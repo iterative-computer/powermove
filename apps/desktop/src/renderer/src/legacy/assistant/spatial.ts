@@ -23,7 +23,7 @@ import { isAgentImageAttachment, mountPromptAttachments, readPromptAttachment, r
 import { intersectingPanels, NATIVE_PANEL_DESIGN, panelFocusContext, panelFocusPrompt, panelScope, type PanelFocusContext } from '../../panels/agent/panel-focus';
 import { AgentThreads, conversationForAgent, conversationContextForAgent, normalizeGeneratedThreadTitle, threadTitle, threadMessageText } from '../../panels/agent/threads';
 import { AGENT_EDITOR_TESTING_INSTRUCTIONS } from '../../../../shared/agent-testing';
-import { AGENT_TASK_GUIDANCE, agentTaskProfile, creativeTaskGuidance, resultVerificationPrompt } from '../../../../shared/agent-guidance';
+import { AGENT_TASK_GUIDANCE, HAND_EDITING_GUIDANCE, agentTaskProfile, creativeTaskGuidance, resultVerificationPrompt } from '../../../../shared/agent-guidance';
 import { EFFECT_AUTHORING_INSTRUCTIONS, EDITOR_EXTENSION_INSTRUCTIONS } from '../../../../shared/effect-authoring';
 import { AGENT_RESPONSE_STYLE } from '../../../../shared/response-style';
 import { AGENT_MODELS, REASONING_EFFORTS, modelEfforts, modelEffort, setDiscoveredClaudeModels, setDiscoveredCodexModels } from '../../../../shared/agent-models';
@@ -3028,6 +3028,8 @@ function agentPrompt(request: any, observation: any, steering: any = false, focu
 ${AGENT_EDITOR_TESTING_INSTRUCTIONS}
 
 ${AGENT_TASK_GUIDANCE}
+
+${HAND_EDITING_GUIDANCE}
 
 ${creativeTaskGuidance(String(request))}
 

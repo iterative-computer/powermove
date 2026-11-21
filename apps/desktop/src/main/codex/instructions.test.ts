@@ -15,6 +15,27 @@ function normalizeText(value: string): string {
 }
 
 describe('autonomous agent contract', () => {
+  it('includes hand-editing guidance in composition runs', () => {
+    const base = { projectName: 'Project', artifactPath: 'artifacts/run', access: 'project' as const, extensionsDir: '/stage' };
+    const instructions = agentInstructions({ ...base, request: 'Make a 5 s title card' });
+    expect(instructions).toContain('## Leave the project ready for hand editing');
+    expect(instructions).toContain('group_layers');
+    expect(instructions).toContain('add_marker');
+    expect(agentInstructions({ ...base, context: 'app' })).not.toContain('Leave the project ready for hand editing');
+  });
+
+  it('ships the same hand-editing guidance in the API pack', async () => {
+    const manual = await readFile(path.join(process.cwd(), 'docs/EXTENSIONS.md'), 'utf8');
+    const heading = '## Leave the project ready for hand editing';
+    const section = manual.split(heading)[1]?.split('\n## ')[0]?.trim();
+    expect(section).toBeTruthy();
+    const instructions = agentInstructions({
+      projectName: 'Project', artifactPath: 'artifacts/run', access: 'project',
+      extensionsDir: '/stage', request: 'Make a 5 s title card'
+    });
+    expect(instructions).toContain(heading + '\n\n' + section?.replaceAll('`', ''));
+  });
+
   it('keeps simple animation focused while supplying procedures for extension and footage tasks', () => {
     const base = { projectName: 'Project', artifactPath: 'artifacts/run', access: 'project' as const, extensionsDir: '/stage' };
     const animation = agentInstructions({ ...base, request: 'Animate the title' });

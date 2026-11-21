@@ -53,7 +53,7 @@ This connects to the running app without opening a second editor. A CLI can also
 ## Agent workflow
 
 1. `list_projects`, `create_project`, or `open_project` selects the project.
-2. `start_session` with the user's task returns a private workspace, staged extensions, API documentation and harness instructions. `access: "editor"` creates a planning session that can only inspect.
+2. `start_session` with the user's task returns a private workspace, staged extensions, API documentation and harness instructions, including [Leave the project ready for hand editing](EXTENSIONS.md#leave-the-project-ready-for-hand-editing). `access: "editor"` creates a planning session that can only inspect.
 3. `import_media` imports host-local footage/audio/images. `apply_commands`, `edit_video` and `edit_3d` build the composition. Use `get_project_state` for IDs and channels, source-media tools to inspect footage, and `render_frames`/`get_workspace_state` to verify the result.
 4. If extensions are needed, edit their private staging directory and call `publish_extensions`. It compiles, scans and promotes them with the normal validation. The returned staging path is the new baseline. Verify the loaded extension before continuing.
 5. `save_project` writes an editable `.pmv` including its media. `export_video` writes MP4 or ProRes with audio and returns the actual saved path and stage timings after encoding completes. An export still running after about 20 minutes returns `{status: "running", jobId, progress}` and continues in the background; call `export_video` with only that `jobId` to keep waiting.

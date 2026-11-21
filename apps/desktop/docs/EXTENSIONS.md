@@ -4,6 +4,18 @@ Powermove is a kernel plus extensions. The built-in editor (timeline, effects,
 theme, keymap, panels) is itself a set of extensions. You extend or replace any
 of them by writing a new extension — never by editing the app bundle.
 
+## Leave the project ready for hand editing
+
+Match existing structure and names when editing.
+
+- Use `group_layers` by object or idea (Logo, Headline). Keep a few top-level groups or scene sections in story order. Only background and audio may sit loose.
+- Name layers, groups, precomps, effects and markers plainly. Use shallow precomps for reusable units and scenes.
+- Set natural pivots with `set_property` (`anchor.x/y/z`), preserving pose. Animate the highest sensible group or parent. Share motion via `set_layer` parenting or nulls.
+- Use sparse keys with `set_easing` presets. Explain necessary baked keys in a marker or layer comment. Keep parameters, text and shapes live. Rasterize only on request.
+- Share looks via adjustment layers or named group effects. Centralize a small palette/font set where supported.
+- Use `add_marker` for scene and music beats. Remove hidden or unused layers. Put helpers in a locked Guides group. Lock backgrounds. Match stacking and story.
+- In the final reply, list top-level groups and their roles.
+
 ## Choose the requested contribution
 
 A request for an effect means a registered effect in **Effects & Presets**, with

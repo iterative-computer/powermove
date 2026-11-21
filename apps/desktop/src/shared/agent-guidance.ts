@@ -9,6 +9,18 @@ Relevant procedures only. Never replace effects with panels or simple keyframes 
 export const AGENT_CREATIVE_GUIDANCE = `CREATIVE JUDGMENT
 Follow the brief/references/style with one clear visual idea: coherent type scale, restrained color, consistent spacing, focal point, legible text/readable holds. Make entrances/exits/easing/rhythm purposeful; avoid gratuitous motion/dead time. Inspect beginning/middle/end/transitions. Fix visible defects; valid source alone is not visual quality.`;
 
+export const HAND_EDITING_GUIDANCE = `## Leave the project ready for hand editing
+
+Match existing structure and names when editing.
+
+- Use group_layers by object or idea (Logo, Headline). Keep a few top-level groups or scene sections in story order. Only background and audio may sit loose.
+- Name layers, groups, precomps, effects and markers plainly. Use shallow precomps for reusable units and scenes.
+- Set natural pivots with set_property (anchor.x/y/z), preserving pose. Animate the highest sensible group or parent. Share motion via set_layer parenting or nulls.
+- Use sparse keys with set_easing presets. Explain necessary baked keys in a marker or layer comment. Keep parameters, text and shapes live. Rasterize only on request.
+- Share looks via adjustment layers or named group effects. Centralize a small palette/font set where supported.
+- Use add_marker for scene and music beats. Remove hidden or unused layers. Put helpers in a locked Guides group. Lock backgrounds. Match stacking and story.
+- In the final reply, list top-level groups and their roles.`;
+
 export function agentTaskProfile(request = ''): { extensions: boolean; footage: boolean; creative: boolean } {
   // Callers pass the current request before appended history. Unknown tasks
   // still have the complete API pack and tools; this only reduces prompt noise.

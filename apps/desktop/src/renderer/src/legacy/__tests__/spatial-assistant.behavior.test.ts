@@ -776,6 +776,18 @@ function placementHarness() {
 const placementMessage = 'POWERMOVE_UI_TARGET {"kind":"panel","id":"timeline","label":"Timeline controls"}';
 const emptyAgentResult = { text: JSON.stringify({ summary: 'Done', commands: [], artifacts: [], externalActions: [], notes: [] }) };
 
+it('includes hand-editing guidance when planning an editable composition change', async () => {
+  const { PM, jobs } = placementHarness();
+  PM.AgentUI.setProvider('chatgpt');
+  PM.AgentUI.setAccess('editor');
+  PM.AgentUI.submit('Make a 5 s title card');
+  await vi.waitFor(() => assert.equal(jobs.length, 1));
+  expect(jobs[0].prompt).toContain('## Leave the project ready for hand editing');
+  expect(jobs[0].prompt).toContain('Use group_layers by object or idea');
+  jobs[0].resolve(JSON.stringify({ operation: 'noop', message: 'Fixture complete.' }));
+  await vi.waitFor(() => assert.ok(PM.AgentUI.state.conversation.some(turn => turn.text === 'Fixture complete.')));
+});
+
 it.each(['claude', 'chatgpt', 'compatible'])('preserves an effect-authoring request in Editor mode until Project access is chosen with %s', async (provider) => {
   const { PM, jobs } = placementHarness();
   PM.AgentUI.setProvider(provider);
