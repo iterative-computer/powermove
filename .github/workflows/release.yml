@@ -88,6 +88,8 @@ jobs:
       - name: Build, sign, notarize, and verify
         run: bun run dist:release
         env:
+          # Leave unset until the website cutover time is approved (UTC ISO 8601).
+          VITE_POWERMOVE_NATIVE_LAUNCH_AT: ${{ vars.VITE_POWERMOVE_NATIVE_LAUNCH_AT }}
           CSC_NAME: Developer ID Application
           CSC_KEYCHAIN: ${{ runner.temp }}/signing.keychain-db
           APPLE_API_KEY: ${{ runner.temp }}/notary.p8

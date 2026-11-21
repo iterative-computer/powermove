@@ -281,7 +281,7 @@ input::placeholder,textarea::placeholder{color:var(--tx-4)}
 .pv-tc{font-size:var(--fs-sm);color:var(--tx-2);font-variant-numeric:tabular-nums}
 
 /* ── docks ─────────────────────────────────────────────── */
-#body{flex:1;display:flex;min-height:0;padding:0 var(--pad) 4px;gap:var(--gap)}
+#body{anchor-name:--editor-body;flex:1;display:flex;min-height:0;padding:0 var(--pad) 4px;gap:var(--gap)}
 @media (min-width:1200px){
   #body{transition:margin-left var(--dur-3) cubic-bezier(.3,.9,.35,1)}
 }
@@ -1341,6 +1341,8 @@ body.agent-frame-capturing #agent-popover,body.agent-frame-picking #agent-popove
 /* The titlebar and sidebar share the window colour as one piece of chrome; the library itself is an inset panel. */
 #projects-screen{position:fixed;inset:44px 0 0;z-index:35;background:transparent;display:none;min-height:0;padding:0 10px 10px 0}
 #projects-screen.on{display:flex}
+/* Full-window screens start at the editor body, below the announcement when shown. */
+:root:has(#native-release-banner > aside) :is(#projects-screen,#settings-screen){top:anchor(--editor-body top,44px)}
 /* The editor panels under the home screen start at the titlebar's edge, and their hairline ring peeks above it. Don't paint them. */
 /* The screen's canvas is the window material, so it can't cover what sits
    beneath it. Hide the editor and its status line instead of painting over them. */

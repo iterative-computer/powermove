@@ -2,6 +2,7 @@ import { flushSync, mount, unmount } from 'svelte';
 
 import type { PMRegistry } from '../legacy/registry';
 import Shell from './Shell.svelte';
+import NativeReleaseBanner from './NativeReleaseBanner.svelte';
 
 let mounted: Array<ReturnType<typeof mount>> = [];
 
@@ -19,6 +20,11 @@ export function installShell(PM: PMRegistry): void {
     mount(Shell, { target: titlebar, props: { PM, part: 'titlebar' } }),
     mount(Shell, { target: status, props: { PM, part: 'status' } })
   ];
+  const banner = window.document.getElementById('native-release-banner');
+  const launch = import.meta.env.VITE_POWERMOVE_NATIVE_LAUNCH_AT;
+  if (banner && launch) {
+    mounted.push(mount(NativeReleaseBanner, { target: banner, props: { launch } }));
+  }
   flushSync();
 }
 
