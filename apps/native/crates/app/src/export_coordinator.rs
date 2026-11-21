@@ -468,8 +468,14 @@ impl Controller {
                 replace,
                 without_offline,
             };
+            let record = if enqueue || queue_id.is_none() {
+                let frozen = frozen.clone();
+                Some(cx.background_executor().spawn(async move { frozen.record() }).await)
+            } else {
+                None
+            };
             if enqueue {
-                let added = queue_store.lock().unwrap().add(frozen.record());
+                let added = queue_store.lock().unwrap().add(record.unwrap());
                 let _ = this.update(cx, |v, cx| {
                     v.builtins.export_job = None;
                     if let Err(error) = added { v.message = error; }
@@ -498,7 +504,7 @@ impl Controller {
             }
             let history_id = if let Some(id) = queue_id { Some(id) } else {
                 let mut queue = queue_store.lock().unwrap();
-                match queue.add(frozen.record()).and_then(|id| queue.finish(id, "Rendering", String::new()).map(|_|id)) {
+                match queue.add(record.unwrap()).and_then(|id| queue.finish(id, "Rendering", String::new()).map(|_|id)) {
                     Ok(id) => Some(id),
                     Err(error) => { let _ = this.update(cx, |v,_|v.message = error); None }
                 }

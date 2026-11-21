@@ -670,6 +670,7 @@ fn main() -> Result<()> {
     );
     broker.close();
     std::thread::spawn(move || {
+        render_queue::shutdown();
         drop(server.lock().map(|mut s| s.take()));
         drop(engine);
         actor.shutdown();
