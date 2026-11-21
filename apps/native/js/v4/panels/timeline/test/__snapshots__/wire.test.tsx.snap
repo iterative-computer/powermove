@@ -22984,37 +22984,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                           },
                           "type": "button",
                         },
-                        {
-                          "props": {
-                            "aria-pressed": true,
-                            "data-pm-component": "toolbar-item",
-                            "id": "timeline:snap",
-                            "label": "Snapping",
-                            "metadata": {
-                              "designTodo": "T1",
-                              "requiredSymbol": "arrow.right.and.line.vertical.and.arrow.left",
-                            },
-                            "style": {
-                              "background": {
-                                "token": "colors.selected_fill",
-                              },
-                              "color": {
-                                "token": "colors.text",
-                              },
-                              "minHeight": {
-                                "token": "metrics.hit",
-                              },
-                              "minWidth": {
-                                "token": "metrics.hit",
-                              },
-                              "symbolSize": {
-                                "token": "metrics.symbol_panel",
-                              },
-                            },
-                            "title": "Snap Clips to Edges, Markers and the Playhead",
-                          },
-                          "type": "button",
-                        },
                       ],
                       "props": {
                         "style": {

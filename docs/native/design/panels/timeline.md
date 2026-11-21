@@ -19,7 +19,7 @@ Behaviour source (wins on behaviour and keys):
 | `TimelineView` | `DopeSheet` · `DopeSheetAndGraph` · `Graph` | v1.2.0 three view buttons |
 | `GraphType` | `Value` · `Speed` | graph options menu |
 | `graph_merge` | bool | "Merge Selected Curves" |
-| `snap` | bool | magnet; Shift inverts during a gesture |
+| `snap` | bool | View → Snapping. Shift inverts during a gesture. |
 | `open_comps` / `active_comp` | ids | composition tabs |
 | `rows` | `Layer{id, depth, open}` · `Property{layer, path, axes}` · `Track{id, kind}` | flattened, virtualised |
 | `selection` | `layers: Set`, `keys: Set<(layer, path, key)>`, `clips: Set` | ids, not row flags |
@@ -64,8 +64,9 @@ Left to right; leading inset `m.inset`, items separated by `m.gap`.
 | Mode control | GPUI segmented control (README §2 tab group recipe), labels `Layers` · `Tracks`, `t.minimum` `t.medium_weight`. Tooltips `Use layer timeline (After Effects)` / `Use track timeline (Premiere)`. |
 | View control | GPUI segmented control, three icon segments at `m.symbol_inline`: Dope Sheet (`chart.bar.doc.horizontal`), Dope Sheet and Graph (`rectangle.split.1x2`), Graph Editor (custom `bezier` symbol). Selected segment per README; **not** an accent fill (v1.2.0 filled the active view in accent — dropped, accent is a mark). Tooltips `Dope Sheet`, `Dope Sheet and Graph`, `Graph Editor (⇧F3)`. |
 | Graph options | borderless icon button `ellipsis.circle`, shown only when view ≠ Dope Sheet. Opens an `NSMenu`: `Value Graph` ✓ / `Speed Graph` ✓ (radio), separator, `Merge Selected Curves` ✓ (disabled with < 2 curves), `Fit Selected Curves` (disabled with no graph). Tooltip `Graph Options`. |
-| Snap | borderless toggle button, custom `magnet` symbol at `m.symbol_panel`; off `c.secondary`, on `c.accent` (active-state glyph rule, language §8). Tooltip `Snap Clips to Edges, Markers and the Playhead` + detail line `Hold Shift to invert`. |
 | Trailing inset | README §2 trailing rule |
+
+In Tracks mode, use **View → Snapping** to toggle clip snapping. Hold Shift to temporarily invert it.
 
 ### Layer column (`m.layer_column` default, `c.panel_secondary`)
 
@@ -287,7 +288,6 @@ Return seeks, Esc restores.
 | Current time | text field | label `Current time`, value spoken as `0 hours 0 minutes 4 seconds 15 frames` |
 | Tabs | tab group `Open compositions`; tabs | composition name; selected; close button `Close {composition}` |
 | Mode, View | radio group | `Timeline mode` (`Layers`, `Tracks`); `Timeline view` (`Dope Sheet`, `Dope Sheet and Graph`, `Graph Editor`) |
-| Snap | toggle button | `Snapping`, on/off |
 | Track area | outline `Layers` (`AXRowCount` = all rows) | layer row: `Headline, text layer, 0:00 to 0:10` + `selected`, `locked`, `hidden`, `soloed`; property row: `Scale, 100 by 100 percent, animated, keyframe at playhead` |
 | Clip (Tracks mode) | cell | `Headline, V1, 0:00 to 0:10` |
 | Keyframe | button | `Keyframe at 0:00:12, Scale, selected` ; actions `Press` (select), `Delete` |

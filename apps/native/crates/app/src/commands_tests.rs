@@ -647,14 +647,12 @@ fn timeline_keys_add_a_marker_zoom_and_fit_and_the_menu_toggles_report_their_sta
     run(&mut s, cx, "resetWorkArea", &[]);
     press(&mut s, cx, "shift+home");
     assert_eq!(*s.recorder.time.borrow(), 0.);
-    // View > Timeline in Tracks and Snapping carry their state.
+    // View > Timeline in Tracks carries its state.
     let toggles = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.toggles());
     assert_eq!(toggles(&s), (false, true));
     run(&mut s, cx, "timeline.toggleMode", &[]);
-    run(&mut s, cx, "timeline.toggleSnapping", &[]);
-    assert_eq!(toggles(&s), (true, false));
+    assert_eq!(toggles(&s), (true, true));
     run(&mut s, cx, "timeline.toggleMode", &[]);
-    run(&mut s, cx, "timeline.toggleSnapping", &[]);
     assert_eq!(toggles(&s), (false, true));
     // Every new row is in a menu, the keyed ones with their keys.
     let menus = pm_shell::menu::menus();
@@ -682,6 +680,21 @@ fn timeline_keys_add_a_marker_zoom_and_fit_and_the_menu_toggles_report_their_sta
         assert_eq!(row("View", command), "");
     }
 }
+#[gpui::test]
+fn view_menu_snapping_toggles_tracks_snapping(cx: &mut TestAppContext) {
+    let mut s = stage(cx, 2);
+    run(&mut s, cx, "timeline.toggleMode", &[]);
+    let menus = pm_shell::menu::menus();
+    let (_, view) = menus.iter().find(|(title, _)| *title == "View").unwrap();
+    let snapping = view.iter().find(|item| item.label == "Snapping").unwrap();
+    let toggles = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.toggles());
+    assert_eq!(toggles(&s), (true, true));
+    run(&mut s, cx, &snapping.command, &snapping.args);
+    assert_eq!(toggles(&s), (true, false));
+    run(&mut s, cx, &snapping.command, &snapping.args);
+    assert_eq!(toggles(&s), (true, true));
+}
+
 /// Option-Command-H (After Effects) holds the selected keyframes and lets
 /// them go again.
 #[gpui::test]
