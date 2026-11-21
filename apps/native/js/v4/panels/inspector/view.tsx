@@ -140,15 +140,6 @@ export const distributeButtons: {
     symbol: "distribute.vertical.center",
   },
 ];
-export const newLayerItems = [
-  "Text",
-  "Shape",
-  "Solid",
-  "Adjustment Layer",
-  "Null",
-  null,
-  "Import Media…",
-];
 export { rowMenu } from "./property-menu";
 import { rowMenu } from "./property-menu";
 
@@ -187,11 +178,9 @@ function Action(props: {
           symbol ??
           (props.id === "inspector:add-effect"
             ? "wand.and.rays"
-            : props.id === "inspector:new-layer"
-              ? "plus"
-              : props.id.startsWith("key:")
-                ? "diamond"
-                : ""),
+            : props.id.startsWith("key:")
+              ? "diamond"
+              : ""),
       }}
       title={tooltip ?? props.label}
       onClick={(event) => {
@@ -1076,36 +1065,22 @@ export function InspectorPanel({
         >
           Properties
         </text>
-        <div style={horizontal}>
-          {!effects &&
-          target.kind === "layers" &&
-          target.first.acceptsEffects ? (
-            <Action
-              id="inspector:add-effect"
-              label="Add Effect"
-              disabled={target.first.locked}
-              onActivate={(event) =>
-                session.nativeRequest({
-                  type: "add-effect-menu",
-                  anchor: event.currentTarget,
-                  target: target.first.id,
-                })
-              }
-            />
-          ) : null}
+        {!effects &&
+        target.kind === "layers" &&
+        target.first.acceptsEffects ? (
           <Action
-            id="inspector:new-layer"
-            label="New Layer"
-            disabled={target.kind === "no-project"}
+            id="inspector:add-effect"
+            label="Add Effect"
+            disabled={target.first.locked}
             onActivate={(event) =>
               session.nativeRequest({
-                type: "new-layer-menu",
+                type: "add-effect-menu",
                 anchor: event.currentTarget,
-                items: newLayerItems,
+                target: target.first.id,
               })
             }
           />
-        </div>
+        ) : null}
       </div>
       <scroll
         id="inspector:content"

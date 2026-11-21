@@ -243,7 +243,6 @@ test("selection identity, axes, order, unit actions and checkbox AX semantics", 
     );
     expect(focus).toEqual([
       "inspector:add-effect",
-      "inspector:new-layer",
       "align:left",
       "Transform",
       "key:position",
@@ -277,7 +276,11 @@ test("header/menu anchors, alignment roving focus and exact effect destination",
   await f.session.start();
   try {
     await p.render(<InspectorPanel session={f.session} />);
-    await p.drive("inspector:new-layer", "keydown", { key: "Enter" });
+    expect(
+      Object.values(p.result.nodes).some(
+        (node) => node.props.id === "inspector:new-layer",
+      ),
+    ).toBe(false);
     await p.drive("inspector:add-effect", "click");
     await p.drive("align:left", "keydown", { key: "ArrowRight" });
     expect(
@@ -296,19 +299,6 @@ test("header/menu anchors, alignment roving focus and exact effect destination",
     });
     await f.session.settled();
     expect(f.native).toEqual([
-      {
-        type: "new-layer-menu",
-        anchor: p.node("inspector:new-layer").id,
-        items: [
-          "Text",
-          "Shape",
-          "Solid",
-          "Adjustment Layer",
-          "Null",
-          null,
-          "Import Media…",
-        ],
-      },
       {
         type: "add-effect-menu",
         anchor: p.node("inspector:add-effect").id,
