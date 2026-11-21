@@ -160,6 +160,112 @@ pub(crate) fn install(
     Some(chrome)
 }
 
+/// Settings › Project's poster: the first of `candidates` that exists, keyed
+/// by its modification time. Reads the file system: call it off the main
+/// thread when it can be (`FactsIo`).
+pub(crate) struct PosterIo {
+    pub(crate) candidates: [std::path::PathBuf; 2],
+    pub(crate) id: String,
+}
+impl PosterIo {
+    pub(crate) fn resolve(self) -> Option<String> {
+        let id = self.id;
+        self.candidates
+            .into_iter()
+            .find(|f| f.exists())
+            .map(|file| {
+                // Its key names the file it shows: a picture written since is a
+                // new key, never the cached one.
+                let stamp = std::fs::metadata(&file)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_millis());
+                let key = format!("settings/poster/{id}/{stamp}");
+                crate::media_thumbs::register(&key, file);
+                key
+            })
+    }
+}
+/// The parts of the built-in panels' facts that read the file system
+/// (Settings › Storage, Settings › Project's poster). `Controller::facts`
+/// leaves them null; `resolve` fills them in, on a worker for the
+/// publication path, so a click or a drag step never waits on the disk.
+pub(crate) struct FactsIo {
+    pub(crate) storage: crate::storage::StorageIo,
+    pub(crate) poster: Option<PosterIo>,
+}
+impl FactsIo {
+    pub(crate) fn resolve(self, facts: &mut Value) {
+        facts["storageSettings"] = self.storage.resolve();
+        if let Some(poster) = self.poster
+            && facts["settingsHeader"].is_object()
+        {
+            facts["settingsHeader"]["poster"] = json!(poster.resolve());
+        }
+    }
+}
+#[cfg(test)]
+mod facts_io_tests {
+    use super::{FactsIo, PosterIo};
+    use crate::storage::StorageIo;
+    use serde_json::{Value, json};
+    /// The facts a worker completes are the ones `Controller::facts` made on
+    /// the main thread: Storage's rows, and the header's poster keyed by the
+    /// first picture that exists (registered for the panel to load).
+    #[test]
+    fn resolving_off_the_main_thread_fills_what_facts_left_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let (home, last) = (dir.path().join("home.png"), dir.path().join("last.png"));
+        std::fs::write(&last, b"png").unwrap();
+        let stamp = std::fs::metadata(&last)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let storage = || StorageIo {
+            generated: Some(42),
+            electron: None,
+        };
+        let mut facts = json!({"storageSettings": null,
+            "settingsHeader": {"path": null, "poster": null, "projects": []}});
+        FactsIo {
+            storage: storage(),
+            poster: Some(PosterIo {
+                candidates: [home.clone(), last.clone()],
+                id: "p1".into(),
+            }),
+        }
+        .resolve(&mut facts);
+        // Rows are `storage::rows` of the last measurement (a global other
+        // tests replace while this runs): their shape, not their text.
+        let rows = facts["storageSettings"]["rows"].as_array().unwrap();
+        assert!(!rows.is_empty());
+        let key = format!("settings/poster/p1/{stamp}");
+        assert_eq!(facts["settingsHeader"]["poster"], json!(key));
+        assert_eq!(crate::media_thumbs::resolve(&key), Some(last.clone()));
+        // The Home poster wins once it exists.
+        std::fs::write(&home, b"png").unwrap();
+        let picked = PosterIo {
+            candidates: [home.clone(), last],
+            id: "p1".into(),
+        }
+        .resolve()
+        .unwrap();
+        assert_eq!(crate::media_thumbs::resolve(&picked), Some(home));
+        // No project: the header stays null and nothing is looked up.
+        let mut facts = json!({"storageSettings": null, "settingsHeader": null});
+        FactsIo {
+            storage: storage(),
+            poster: None,
+        }
+        .resolve(&mut facts);
+        assert_eq!(facts["settingsHeader"], Value::Null);
+        assert!(facts["storageSettings"]["rows"].is_array());
+    }
+}
 impl Controller {
     /// Settings is the key window.
     pub(crate) fn settings_in_front(&self, cx: &App) -> bool {
@@ -188,28 +294,22 @@ impl Controller {
     }
     /// Settings › Project's header: this project's poster and path, and the
     /// projects open in every editor for the picker (listed only by the
-    /// editor hosting Settings).
-    pub(crate) fn settings_header(&self, cx: &App) -> Value {
+    /// editor hosting Settings). Its poster is left null for `PosterIo`:
+    /// built-in facts are made on every publication, and the look-up runs
+    /// on the worker that hands them to the panels (`FactsIo::resolve`).
+    pub(crate) fn settings_header_deferred(&self, cx: &App) -> (Value, Option<PosterIo>) {
         let Some(session) = &self.session else {
-            return Value::Null;
+            return (Value::Null, None);
         };
         let id = &session.project;
         // Its Home poster, else the picture its viewer last showed (kept
         // for every project opened here), else none.
         let (file, _) = crate::poster::files(&self.profile.join("caches").join("thumbnails"), id);
         let (last, _) = crate::poster::last_frame_files(&self.profile, id);
-        let poster = [file, last].into_iter().find(|f| f.exists()).map(|file| {
-            // Its key names the file it shows: a picture written since is a
-            // new key, never the cached one.
-            let stamp = std::fs::metadata(&file)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_millis());
-            let key = format!("settings/poster/{id}/{stamp}");
-            crate::media_thumbs::register(&key, file);
-            key
-        });
+        let poster = PosterIo {
+            candidates: [file, last],
+            id: id.clone(),
+        };
         let this = json!({ "id": id, "name": self.project_name() });
         let projects: Vec<Value> = match self.builtins.settings_me {
             Some(me) => crate::entry::editor_windows(cx)
@@ -232,7 +332,8 @@ impl Controller {
                 None => path.display().to_string(),
             }
         });
-        json!({ "path": path, "poster": poster, "projects": projects })
+        let header = json!({ "path": path, "poster": Value::Null, "projects": projects });
+        (header, Some(poster))
     }
     /// The header's picker: Settings shows project `id`, so the editor that
     /// has it open takes the window over.

@@ -764,6 +764,19 @@ impl Controller {
         .detach();
     }
     fn facts(&self, cx: &App) -> Value {
+        let (mut facts, io) = self.facts_deferred(cx);
+        io.resolve(&mut facts);
+        facts
+    }
+    /// `facts` with Settings' file-system reads (Storage's original-app
+    /// lock, the Project header's poster) left for `FactsIo::resolve`,
+    /// which `update_builtins` runs on its worker.
+    fn facts_deferred(&self, cx: &App) -> (Value, crate::settings_window::FactsIo) {
+        let (header, poster) = self.settings_header_deferred(cx);
+        let io = crate::settings_window::FactsIo {
+            storage: self.storage_settings_io(),
+            poster,
+        };
         let status = self.viewer.as_ref().map(|v| v.status());
         let playing = status.as_ref().is_some_and(|s| {
             s.clock
@@ -786,12 +799,13 @@ impl Controller {
             .map(|s| s.effective_quality)
             .filter(|q| *q > 0.)
             .unwrap_or(1.);
-        json!({"time":self.time(),"playing":playing,"looping":self.playback.looping,
+        let facts = json!({"time":self.time(),"playing":playing,"looping":self.playback.looping,
             "channels":crate::viewer2::CHANNELS.iter().find(|(m, _, _)| *m == self.channels).map_or("viewer.showRGB", |(_, _, c)| c),"effectiveQuality":effective,"layerFailures":failures,"studioRefineProgress":status.as_ref().and_then(|s|s.refine_progress),"studioExportEstimate":status.as_ref().map(|s|&s.export_estimate),"studioDenoiser":if pm_engine_service::studio::OIDN{"oidn"}else{"guided"},"focusPart":self.part_focus.as_ref().map(|(layer,slot,seq)|json!({"layer":layer,"slot":slot,"seq":seq})),"stage":self.view.stage,"timelineShown":self.timeline_shown,"light":self.host.borrow().tokens.scheme==pm_design::Scheme::Light,
-            "mediaSettings":self.media_settings_fact(),"storageSettings":self.storage_settings_fact(),"skimming":self.skimming.on,"shortcuts":self.shortcuts_page,"settingsHeader":self.settings_header(cx),"settingsVersion":crate::updates::current_version(),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
+            "mediaSettings":self.media_settings_fact(),"storageSettings":Value::Null,"skimming":self.skimming.on,"shortcuts":self.shortcuts_page,"settingsHeader":header,"settingsVersion":crate::updates::current_version(),"cloud":crate::cloud::fact(cx),"provider":crate::providers::fact(cx),"agentClients":crate::agent_clients::fact(cx),
             // The Agent panel is a popover while its own window is open, a docked panel otherwise.
             "agentPopover":self.builtins.opening_windows.contains("agent")
-                || self.builtins.windows.get("agent").is_some_and(|w| cx.windows().contains(w))})
+                || self.builtins.windows.get("agent").is_some_and(|w| cx.windows().contains(w))});
+        (facts, io)
     }
     /// Paused, panels follow the playhead. Playing, only Properties does
     /// (`follow_playback`): the playhead and timecode are CALayers fed from
@@ -1166,7 +1180,7 @@ impl Controller {
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
-        let facts = self.facts(cx);
+        let (facts, io) = self.facts_deferred(cx);
         let originals = self.media.originals.clone();
         let observed = self.rendition_runtime();
         let show_missing = std::mem::take(&mut self.builtins.show_missing);
@@ -1176,6 +1190,8 @@ impl Controller {
             let tickets = cx
                 .background_executor()
                 .spawn(async move {
+                    let mut facts = facts;
+                    io.resolve(&mut facts);
                     runtime.update_facts(facts);
                     runtime.update_media(originals, observed);
                     if show_missing {
