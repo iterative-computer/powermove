@@ -1,6 +1,7 @@
 //! Color metadata (section 13 probe item 2) and its interpretation under
 //! section 9's rules for sources that are untagged.
 
+use super::camera_log::CameraLog;
 use crate::ff::CodecInfo;
 use crate::interpret::Origin;
 use crate::sys::ffmpeg as ff;
@@ -62,11 +63,18 @@ pub fn video_reading(tagged: &TaggedColor, width: u32, height: u32) -> VideoRead
 /// primaries Rec.709. The importer converts sRGB stills with FFmpeg's BT.601
 /// default; renditions written before it tagged them carry no colour tags.
 pub fn frame_reading(color: &ColorInfo, sequence: bool) -> ColorDescription {
-    let mut desc = color.interpreted;
-    if sequence && color.tagged.matrix.is_none() {
+    sequence_reading(color.interpreted, &color.tagged, sequence)
+}
+
+fn sequence_reading(
+    mut desc: ColorDescription,
+    tags: &TaggedColor,
+    sequence: bool,
+) -> ColorDescription {
+    if sequence && tags.matrix.is_none() {
         desc.matrix = MatrixCoefficients::Bt601;
     }
-    if sequence && color.tagged.primaries.is_none() {
+    if sequence && tags.primaries.is_none() {
         desc.primaries = Primaries::Bt709;
     }
     desc
@@ -86,7 +94,12 @@ pub fn frame_reading(color: &ColorInfo, sequence: bool) -> ColorDescription {
 /// values and relabels them Rec.709 before grading. Keep the input YUV matrix
 /// (decode those values first); suppress only the gamut/transfer conversion.
 pub fn electron_frame_reading(color: &ColorInfo, codec: &str, sequence: bool) -> ColorDescription {
-    let mut desc = frame_reading(color, sequence);
+    let mut desc = color.interpreted;
+    if let Some((primaries, transfer)) = color.before_camera_log {
+        desc.primaries = primaries;
+        desc.transfer = transfer;
+    }
+    desc = sequence_reading(desc, &color.tagged, sequence);
     let opaque_vp9 = cfg!(target_os = "macos")
         && codec == "vp9"
         && !sequence
@@ -180,6 +193,9 @@ pub struct ColorInfo {
     pub tagged: TaggedColor,
     /// Section 9's reading (Interpret Footage can override it).
     pub interpreted: ColorDescription,
+    /// V1 projects keep the legacy reading, including for known camera logs.
+    #[serde(skip)]
+    before_camera_log: Option<(Primaries, Transfer)>,
     /// One line per rule that filled in an untagged value.
     pub defaults_applied: Vec<String>,
     /// Where each value of `interpreted` came from (Interpret Footage shows
@@ -231,6 +247,16 @@ pub fn interpret(
     colr: Option<&[u8]>,
     side: &SideData,
     alpha: Option<AlphaMode>,
+) -> ColorInfo {
+    interpret_with_camera_log(info, colr, side, alpha, None)
+}
+
+pub(crate) fn interpret_with_camera_log(
+    info: &CodecInfo,
+    colr: Option<&[u8]>,
+    side: &SideData,
+    alpha: Option<AlphaMode>,
+    camera_log: Option<CameraLog>,
 ) -> ColorInfo {
     let mut tagged = TaggedColor {
         primaries: tag(info.color_primaries, &[2, 0]),
@@ -350,6 +376,19 @@ pub fn interpret(
             });
             Transfer::DisplayE
         }
+    };
+    // A camera log tag can replace generic SDR placeholders but never a
+    // declared HDR signal. Matrix and range describe the stored codes.
+    let camera_log = camera_log
+        .filter(|_| side.dovi.is_none() && !matches!(transfer, Transfer::Pq | Transfer::Hlg));
+    let before_camera_log = camera_log.map(|_| (primaries, transfer));
+    let (primaries, transfer) = if let Some(log) = camera_log {
+        defaults.clear();
+        from[0] = Some(file(log.source));
+        from[1] = Some(file(log.source));
+        (log.primaries, log.transfer)
+    } else {
+        (primaries, transfer)
     };
     let matrix = if rgb_format {
         from[2] = Some(file("RGB pixel format"));
@@ -472,6 +511,7 @@ pub fn interpret(
     };
     ColorInfo {
         tagged,
+        before_camera_log,
         interpreted: ColorDescription {
             primaries,
             transfer,
@@ -691,6 +731,22 @@ mod interpret_tests {
                 );
                 assert_eq!(frame_reading(&c, true).primaries, Primaries::Bt709);
             }
+        }
+    }
+
+    #[test]
+    fn conflicting_camera_metadata_does_not_override_hdr_tags() {
+        let log = Some(CameraLog {
+            primaries: Primaries::Bt2020,
+            transfer: Transfer::AppleLog,
+            source: "QuickTime logs",
+        });
+        for tag in [16, 18] {
+            let codec = info("hevc", 1920, 1080, [9, tag, 9]);
+            assert_eq!(
+                interpret_with_camera_log(&codec, None, &SideData::default(), None, log),
+                interpret(&codec, None, &SideData::default(), None)
+            );
         }
     }
 }

@@ -204,6 +204,9 @@ pub struct CodecConfig {
     pub height: u16,
     /// MOV/MP4: the sample entry's child atoms (`avcC`, `hvcC`, `colr`, `fiel`, ...).
     pub atoms: Vec<([u8; 4], Vec<u8>)>,
+    /// Gamut paired with S-Log3 in a single-video Sony XAVC movie's metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sony_log_gamut: Option<pm_protocol::color::Primaries>,
     /// Matroska CodecID and CodecPrivate.
     pub codec_id: Option<String>,
     pub codec_private: Option<Vec<u8>>,
