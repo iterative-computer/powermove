@@ -227,7 +227,7 @@ fn current_mcp_catalog(reference: &Observations) -> Observations {
         ),
         (
             include_bytes!("../../mcp/fixtures/extension-session-native-catalog.json"),
-            "52d3cd3d7b7db1cf95a5e88239f98f1deae1cf20b3a0f6a2dcc2d13c8c9fbbe5",
+            "7d2bca96086ef06bc0807fb55e0fddfe79d295e66cd2f6f9772686d4519b1b06",
         ),
     ];
     for (source, digest) in authoring {
