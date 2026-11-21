@@ -6,6 +6,7 @@
 //! engine's monitor solo, a listening aid that is never saved.
 use crate::session::Controller;
 use gpui::{prelude::*, *};
+use pm_engine_service::audio::GainPreview;
 use pm_kernel::{Call, Caller, Command, Published, Reply, Request, WriteBody};
 use pm_services::surface_backing::mixer::{
     self as backing, Kind, Listening, Meter, MixerSource, Silence, Strip,
@@ -80,6 +81,13 @@ struct Drag {
     strip: Option<Strip>,
     at: f64,
     gain: f64,
+    gesture: u64,
+}
+
+impl Drag {
+    fn command(&self) -> Option<Command> {
+        kernel_command(&backing::level_command(self.strip.as_ref(), self.gain, self.at).ok()?)
+    }
 }
 
 #[derive(Default)]
@@ -204,7 +212,25 @@ impl Controller {
 
     /// One edit as one Undo step.
     fn mixer_apply(&mut self, label: &str, commands: Vec<Command>, cx: &mut Context<Self>) {
-        let Some(session) = &self.session else { return };
+        self.mixer_write(label, commands, None, cx);
+    }
+
+    fn mixer_write(
+        &mut self,
+        label: &str,
+        commands: Vec<Command>,
+        gesture: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = &self.session else {
+            if let Some(gesture) = gesture {
+                self.audio_gain_preview(GainPreview::Finish {
+                    gesture,
+                    revision: None,
+                });
+            }
+            return;
+        };
         let revision = self.published.as_ref().map(|p| p.revision());
         let call = Call::Transact {
             label: Some(label.into()),
@@ -216,16 +242,27 @@ impl Controller {
             .call(&session.project, Request::new(Caller::native(), call));
         cx.spawn(async move |this, cx| {
             let result = pending.await;
-            let _ = this.update(cx, |v, cx| match result {
-                Some(Ok(ack)) => {
-                    if let Reply::Throw(e) = ack.reply {
-                        v.message = e.to_string();
-                    }
-                    cx.notify();
+            let _ = this.update(cx, |v, cx| {
+                if let Some(gesture) = gesture {
+                    let revision = match &result {
+                        Some(Ok(ack)) if !matches!(ack.reply, Reply::Throw(_)) => {
+                            Some(ack.revision)
+                        }
+                        _ => None,
+                    };
+                    v.audio_gain_preview(GainPreview::Finish { gesture, revision });
                 }
-                _ => {
-                    v.message = "Couldn’t change the level".into();
-                    cx.notify();
+                match result {
+                    Some(Ok(ack)) => {
+                        if let Reply::Throw(e) = ack.reply {
+                            v.message = e.to_string();
+                        }
+                        cx.notify();
+                    }
+                    _ => {
+                        v.message = "Couldn’t change the level".into();
+                        cx.notify();
+                    }
                 }
             });
         })
@@ -246,6 +283,14 @@ impl Controller {
             return;
         };
         drag.gain = backing::db_to_gain(db);
+        if let Some(command) = drag.command() {
+            let gesture = drag.gesture;
+            self.audio_gain_preview(GainPreview::Sample {
+                gesture,
+                base_revision: None,
+                commands: vec![command],
+            });
+        }
         cx.notify();
     }
 
@@ -253,12 +298,32 @@ impl Controller {
         let Some(drag) = self.mixer.drag.take() else {
             return;
         };
-        if let Ok(command) = backing::level_command(drag.strip.as_ref(), drag.gain, drag.at)
-            && let Some(command) = kernel_command(&command)
-        {
-            self.mixer_apply(level_label(drag.strip.as_ref()), vec![command], cx);
+        if let Some(command) = drag.command() {
+            self.mixer_write(
+                level_label(drag.strip.as_ref()),
+                vec![command],
+                Some(drag.gesture),
+                cx,
+            );
+        } else {
+            self.audio_gain_preview(GainPreview::Finish {
+                gesture: drag.gesture,
+                revision: None,
+            });
         }
         cx.notify();
+    }
+
+    pub(crate) fn mixer_cancel(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = self.mixer.drag.take() else {
+            return false;
+        };
+        self.audio_gain_preview(GainPreview::Finish {
+            gesture: drag.gesture,
+            revision: None,
+        });
+        cx.notify();
+        true
     }
 
     /// The engine hears exactly the soloed strips (or every strip).
@@ -328,6 +393,7 @@ fn start(cx: &mut Context<Controller>) {
                     v.mixer.running = false;
                     v.mixer.listening.panel_shown = false;
                     v.mixer.listening.solo.clear();
+                    v.mixer_cancel(cx);
                     v.mixer_monitor();
                     return false;
                 }
@@ -707,7 +773,7 @@ fn strip_view(
                 cx.listener(move |v, e: &MouseDownEvent, _, cx| {
                     if e.click_count >= 2 {
                         // Double-click returns to 0 dB as one step.
-                        v.mixer.drag = None;
+                        v.mixer_cancel(cx);
                         if let Ok(command) =
                             backing::level_command(drag_strip.as_ref(), 1., v.time())
                             && let Some(command) = kernel_command(&command)
@@ -718,6 +784,7 @@ fn strip_view(
                     }
                     let at = v.time();
                     v.mixer.drag = Some(Drag {
+                        gesture: GainPreview::gesture(),
                         strip: drag_strip.clone(),
                         at,
                         gain: drag_strip.as_ref().map_or(1., |s| s.gain),

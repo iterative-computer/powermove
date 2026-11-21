@@ -39,15 +39,17 @@ impl From<ModelError> for ClientError {
     }
 }
 
-/// An immutable, disposable frame. Only scalar layer starts differ from the
-/// authoritative document; keys and every other subtree stay shared.
+/// An immutable frame for a local clip move or audio gain edit. Its snapshot
+/// is never published to the project's kernel.
 #[derive(Clone, Debug)]
 pub struct LayerPreviewFrame {
     pub starts: std::sync::Arc<[(String, f64)]>,
     pub snapshot: pm_kernel::Snapshot,
+    pub gain_commands: Option<std::sync::Arc<[pm_kernel::Command]>>,
 }
 struct LayerPreview {
     drag: Drag,
+    gain: bool,
     commands: Vec<pm_kernel::Command>,
     frame: Option<LayerPreviewFrame>,
     serial: u64,
@@ -280,24 +282,72 @@ impl TimelineClient {
         self.active = Some((id, drag));
         Ok(())
     }
-    /// Native Layers-mode bar moves preview locally. No writer lease, history,
-    /// document revision or JS publication changes until mouse-up.
+    /// Native clip moves and gain drags preview locally. The writer, history
+    /// and published document are used only at mouse-up.
     pub fn begin_preview_drag(&mut self, kind: DragKind) -> Result<(), ClientError> {
         if self.active.is_some() || self.preview.is_some() {
             return Err(ClientError::GestureActive);
         }
-        if !matches!(kind, DragKind::Layers { .. }) {
+        self.sync()?;
+        let gain = self.is_gain_drag(&kind);
+        if !gain && !matches!(kind, DragKind::Layers { .. }) {
             return Err(ModelError::InvalidGesture.into());
         }
-        self.sync()?;
+        let mut drag = Drag::begin(&self.model, kind)?;
+        if let DragKind::Property { targets, time } = &drag.kind {
+            let published = self
+                .kernel
+                .published(&self.project)
+                .ok_or(ClientError::Closed)?;
+            let mut mirror = pm_kernel::QueryMirror::new(&published);
+            for (layer, path) in targets {
+                let value = mirror
+                    .queries()
+                    .evaluate_property(self.model.index.comp_id.as_deref(), layer, path, *time)
+                    .map_err(|e| ClientError::Kernel(e.to_string()))?
+                    .as_f64()
+                    .filter(|v| v.is_finite())
+                    .ok_or(ModelError::InvalidNumber)?;
+                drag.property_values
+                    .insert((layer.clone(), path.clone()), value);
+            }
+        }
         self.preview = Some(LayerPreview {
-            drag: Drag::begin(&self.model, kind)?,
+            drag,
+            gain,
             commands: vec![],
             frame: None,
             serial: 0,
             sample: None,
         });
         Ok(())
+    }
+    pub fn is_gain_drag(&self, kind: &DragKind) -> bool {
+        let is_gain = |path: &str| matches!(path, "c.gain" | "c.audioGain");
+        let gain_key = |id: &str| {
+            self.model
+                .index
+                .key(id)
+                .is_some_and(|(_, channel, _)| is_gain(&channel.path))
+        };
+        match kind {
+            DragKind::Keys { ids }
+            | DragKind::GraphKeys { ids }
+            | DragKind::StretchKeys { ids, .. }
+            | DragKind::TransformKeys { ids, .. } => {
+                !ids.is_empty() && ids.iter().all(|id| gain_key(id))
+            }
+            DragKind::QuickOffsetKeys { groups, .. } => {
+                let mut keys = groups.iter().flatten().peekable();
+                keys.peek().is_some() && keys.all(|id| gain_key(id))
+            }
+            DragKind::Handle { id, .. } => gain_key(id),
+            DragKind::Gain { .. } => true,
+            DragKind::Property { targets, .. } => {
+                !targets.is_empty() && targets.iter().all(|(_, path)| is_gain(path))
+            }
+            _ => false,
+        }
     }
     pub fn layer_preview(&self) -> Option<&LayerPreviewFrame> {
         self.preview.as_ref().and_then(|p| p.frame.as_ref())
@@ -314,7 +364,40 @@ impl TimelineClient {
         {
             return Err(ClientError::DocumentChanged);
         }
+        if preview.gain && p.revision() != preview.drag.start.revision {
+            return Err(ClientError::ConcurrentRelativeGesture);
+        }
         let commands = preview.drag.commands(sample)?;
+        if preview.gain {
+            let mut document = Document::from_root(
+                p.snapshot.root().cloned(),
+                p.revision() + preview.serial + 1,
+            );
+            for command in &commands {
+                let ops = command
+                    .plan(
+                        document.root().ok_or(ClientError::Closed)?,
+                        self.caller.origin,
+                    )
+                    .map_err(|e| ClientError::Rejected(e.to_string()))?;
+                document
+                    .apply_ops(&ops)
+                    .map_err(|e| ClientError::Kernel(e.to_string()))?;
+            }
+            preview.serial = document.revision() - p.revision();
+            preview.frame = Some(LayerPreviewFrame {
+                starts: [].into(),
+                snapshot: pm_kernel::Snapshot {
+                    doc_id: p.snapshot.doc_id,
+                    revision: document.revision(),
+                    document: std::sync::Arc::new(document),
+                },
+                gain_commands: Some(commands.clone().into()),
+            });
+            preview.sample = Some(sample);
+            preview.commands = commands;
+            return Ok(preview_ack(p.revision()));
+        }
         let starts: Vec<_> = commands
             .iter()
             .filter_map(|c| match c {
@@ -361,22 +444,14 @@ impl TimelineClient {
         preview.commands = commands;
         preview.frame = Some(LayerPreviewFrame {
             starts: starts.into(),
+            gain_commands: None,
             snapshot: pm_kernel::Snapshot {
                 doc_id: p.snapshot.doc_id,
                 revision,
                 document: std::sync::Arc::new(document),
             },
         });
-        Ok(Ack {
-            txid: None,
-            revision: p.revision(),
-            folded: None,
-            notice: None,
-            reply: Reply::Applied {
-                revision: p.revision(),
-                changed: false,
-            },
-        })
+        Ok(preview_ack(p.revision()))
     }
     pub async fn drag(&mut self, sample: DragSample) -> Result<Ack, ClientError> {
         if self.preview.is_some() {
@@ -436,7 +511,7 @@ impl TimelineClient {
                     .call(Call::Transact {
                         label: Some(preview.drag.label().into()),
                         body: WriteBody::Commands(preview.commands),
-                        expected_revision: None,
+                        expected_revision: preview.gain.then_some(preview.drag.start.revision),
                     })
                     .await;
             }
@@ -552,5 +627,18 @@ impl TimelineClient {
             .as_ref()
             .map(|p| &p.drag)
             .or_else(|| self.active.as_ref().map(|(_, d)| d))
+    }
+}
+
+fn preview_ack(revision: u64) -> Ack {
+    Ack {
+        txid: None,
+        revision,
+        folded: None,
+        notice: None,
+        reply: Reply::Applied {
+            revision,
+            changed: false,
+        },
     }
 }

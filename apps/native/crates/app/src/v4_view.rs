@@ -4,6 +4,7 @@
 use crate::v4_compile::{Kit, NodeView, Prepared, TokenTable};
 use gpui::{prelude::*, *};
 use pm_builtins::{Builtins, Publication};
+use pm_engine_service::audio::GainPreview;
 use pm_shell::text::{TextEvent, TextField, TextKind};
 use pm_surface::{
     Id,
@@ -26,10 +27,23 @@ pub mod agent;
 pub struct Natives {
     pub views: Rc<RefCell<BTreeMap<String, AnyView>>>,
     pub outline: Rc<Outline>,
+    pub gain_preview: Rc<RefCell<Option<WeakEntity<crate::session::Controller>>>>,
     pub sample_color: Rc<RefCell<Option<crate::colour_picker::SampleSource>>>,
     /// The window's latest publication: what host-listed pop-up rows
     /// (`HostRows`) are read from when a menu opens.
     pub published: Rc<RefCell<Option<Arc<pm_kernel::Published>>>>,
+}
+impl Natives {
+    fn send_gain_preview(&self, message: GainPreview, cx: &App) {
+        if let Some(controller) = self
+            .gain_preview
+            .borrow()
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+        {
+            controller.read(cx).audio_gain_preview(message);
+        }
+    }
 }
 /// Scroll and column geometry the timeline surface shares with its JSX outline.
 /// The outline row window stays JS; its position follows native scroll at once.
@@ -234,6 +248,12 @@ struct ScrubDrag {
     // Local input previews, then one change on release; opt-in controls only.
     local_commit: Option<(Value, Value)>,
 }
+struct GainScrub {
+    gesture: u64,
+    binding: SharedString,
+    value: f64,
+    request: pm_kernel::Request,
+}
 /// An undo step's name from a control's label: the label without the
 /// accessibility suffix a colour control carries.
 fn undo_name_of(label: &str) -> Option<String> {
@@ -346,6 +366,7 @@ pub struct SurfaceView {
     targets: Rc<RefCell<HashMap<Id, Bounds<Pixels>>>>,
     capture: Option<Capture>,
     scrub: Option<ScrubDrag>,
+    gain_scrub: Option<GainScrub>,
     wheel_scrub: Option<(Id, pm_surface::kit::HorizontalScrub, bool)>,
     wheel_tick: u64,
     wheel_lifted: bool,
@@ -488,6 +509,21 @@ impl SurfaceView {
         use raw_window_handle::HasWindowHandle;
         let table = Arc::new(TokenTable::new(tokens));
         let prepared = Rc::new(Prepared::new(publication.surface.clone(), &table));
+        cx.on_release(|view, cx| {
+            if let Some(scrub) = view.gain_scrub.take() {
+                let natives = view.natives.clone();
+                cx.defer(move |cx| {
+                    natives.send_gain_preview(
+                        GainPreview::Finish {
+                            gesture: scrub.gesture,
+                            revision: None,
+                        },
+                        cx,
+                    )
+                });
+            }
+        })
+        .detach();
         let mut this = Self {
             panel_build: None,
             build_painted: Cell::new(u64::MAX),
@@ -526,6 +562,7 @@ impl SurfaceView {
             targets: Default::default(),
             capture: None,
             scrub: None,
+            gain_scrub: None,
             wheel_scrub: None,
             wheel_tick: 0,
             wheel_lifted: false,
@@ -2745,13 +2782,163 @@ impl SurfaceView {
         self.pointer(id, "pointerdown", detail, cx);
     }
     fn wheel_finish(&mut self, commit: bool, cx: &mut Context<Self>) {
-        if let Some((_, _, bound)) = self.wheel_scrub.take() {
-            if bound {
+        if let Some((id, _, bound)) = self.wheel_scrub.take() {
+            if !self.finish_gain_scrub(id, commit, cx) && bound {
                 self.scrub_ops.push_back(ScrubOp::Finish(commit));
                 self.scrub_pump(cx);
             }
         }
     }
+    fn begin_gain_scrub(
+        &mut self,
+        binding: Option<&SharedString>,
+        value: f64,
+        name: Option<&str>,
+    ) -> bool {
+        let Some(binding) = binding.filter(|_| self.natives.gain_preview.borrow().is_some()) else {
+            return false;
+        };
+        let Some(mut request) =
+            self.runtime
+                .gain_scrub_request(&self.publication.panel, binding.as_ref(), value)
+        else {
+            return false;
+        };
+        if let pm_kernel::Call::Transact { label, .. } = &mut request.call {
+            *label = Some(name.unwrap_or("Change Property").into());
+        }
+        self.gain_scrub = Some(GainScrub {
+            gesture: GainPreview::gesture(),
+            binding: binding.clone(),
+            value,
+            request,
+        });
+        true
+    }
+
+    fn sample_gain_scrub(&mut self, value: f64, cx: &mut Context<Self>) -> bool {
+        let Some(scrub) = &mut self.gain_scrub else {
+            return false;
+        };
+        if value == scrub.value {
+            return true;
+        }
+        let pm_kernel::Call::Transact {
+            body: pm_kernel::WriteBody::Commands(commands),
+            ..
+        } = &mut scrub.request.call
+        else {
+            unreachable!("gain scrub resolves a command transaction");
+        };
+        let time = self
+            .natives
+            .gain_preview
+            .borrow()
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .map(|controller| controller.read(cx).time());
+        for command in &mut *commands {
+            match command {
+                pm_kernel::Command::Property(pm_kernel::PropertyCommand::Set(set)) => {
+                    set.value = pm_model::Value::Number(value);
+                    if let Some(time) = time {
+                        set.time = time;
+                    }
+                }
+                pm_kernel::Command::Content(pm_kernel::ContentCommand::Set {
+                    patch,
+                    time: at,
+                    ..
+                }) => {
+                    let key = if patch.get("gain").is_some() {
+                        "gain"
+                    } else {
+                        "audioGain"
+                    };
+                    patch.insert(key, pm_model::Value::Number(value));
+                    if let Some(time) = time {
+                        *at = time;
+                    }
+                }
+                _ => unreachable!("gain scrub resolves only gain commands"),
+            }
+        }
+        scrub.value = value;
+        self.natives.send_gain_preview(
+            GainPreview::Sample {
+                gesture: scrub.gesture,
+                base_revision: None,
+                commands: commands.clone(),
+            },
+            cx,
+        );
+        true
+    }
+
+    fn finish_gain_scrub(&mut self, id: Id, commit: bool, cx: &mut Context<Self>) -> bool {
+        let Some(scrub) = self.gain_scrub.take() else {
+            return false;
+        };
+        self.scrub_shown = None;
+        if !commit {
+            self.restore_gain_field(id, cx);
+            let natives = self.natives.clone();
+            cx.defer(move |cx| {
+                natives.send_gain_preview(
+                    GainPreview::Finish {
+                        gesture: scrub.gesture,
+                        revision: None,
+                    },
+                    cx,
+                )
+            });
+            cx.notify();
+            return true;
+        }
+        // Check the lease again and commit the exact last sample, including
+        // the playhead time that sample used for an animated channel.
+        let pending = self
+            .runtime
+            .gain_scrub_request(&self.publication.panel, scrub.binding.as_ref(), scrub.value)
+            .map(|_| self.runtime.commit_gain_scrub(scrub.request));
+        let natives = self.natives.clone();
+        let gesture = scrub.gesture;
+        cx.spawn(async move |this, cx| {
+            let result = match pending {
+                Some(pending) => match pending.await {
+                    Some(Ok(ack)) => match ack.reply {
+                        pm_kernel::Reply::Throw(error) => Err(error.to_string()),
+                        _ => Ok(ack.revision),
+                    },
+                    Some(Err(error)) => Err(error.to_string()),
+                    None => Err("Kernel closed".into()),
+                },
+                None => Err("The gain control is no longer active".into()),
+            };
+            let revision = result.as_ref().ok().copied();
+            cx.update(|cx| {
+                natives.send_gain_preview(GainPreview::Finish { gesture, revision }, cx)
+            });
+            let _ = this.update(cx, |view, cx| {
+                if let Err(error) = result {
+                    view.error = Some(error);
+                    view.restore_gain_field(id, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        true
+    }
+
+    fn restore_gain_field(&self, id: Id, cx: &mut Context<Self>) {
+        if let Some(number) = self.prepared.node(id).and_then(|node| node.number)
+            && let Some(field) = self.fields.get(&id)
+        {
+            field.update(cx, |f, cx| f.set_value(&number.text(number.value), cx));
+        }
+    }
+
     fn wheel_number(
         &mut self,
         id: Id,
@@ -2818,8 +3005,8 @@ impl SurfaceView {
         if active.is_none() {
             self.wheel_finish(true, cx);
             self.wheel_scrub = Some((id, HorizontalScrub::new(n.value), binding.is_some()));
-            if binding.is_some() {
-                let name = self.undo_name(id);
+            let name = self.undo_name(id);
+            if !self.begin_gain_scrub(binding.as_ref(), n.value, name.as_deref()) && binding.is_some() {
                 self.scrub_ops.push_back(ScrubOp::Begin(name));
             }
         }
@@ -2835,12 +3022,14 @@ impl SurfaceView {
             (n.min, n.max),
         );
         self.scrub_shown = Some((id, value));
-        if let Some(binding) = binding {
-            self.scrub_ops
-                .push_back(ScrubOp::Value(binding, json!(value)));
-            self.scrub_pump(cx);
-        } else {
-            self.change(id, json!(value), cx);
+        if !self.sample_gain_scrub(value, cx) {
+            if let Some(binding) = binding {
+                self.scrub_ops
+                    .push_back(ScrubOp::Value(binding, json!(value)));
+                self.scrub_pump(cx);
+            } else {
+                self.change(id, json!(value), cx);
+            }
         }
         if let Some(field) = self.fields.get(&id) {
             field.update(cx, |f, cx| f.set_value(&n.text(value), cx));
@@ -2919,28 +3108,34 @@ impl SurfaceView {
         ) else {
             return;
         };
-        if !drag.active {
-            drag.active = true;
-            if drag.binding.is_some() {
-                self.scrub_ops.push_back(ScrubOp::Begin(name));
-            }
-        }
+        let began = !drag.active;
+        drag.active = true;
         let id = drag.id;
+        let binding = drag.binding.clone();
         let deferred = if let Some((_, last)) = &mut drag.local_commit {
             *last = json!(value);
             true
         } else {
             false
         };
+        let live_gain = (began && self.begin_gain_scrub(binding.as_ref(), n.value, name.as_deref()))
+            || self.gain_scrub.is_some();
         self.scrub_shown = Some((id, value));
-        match drag.binding.clone() {
-            Some(binding) => {
-                self.scrub_ops
-                    .push_back(ScrubOp::Value(binding, json!(value)));
-                self.scrub_pump(cx);
+        if live_gain {
+            self.sample_gain_scrub(value, cx);
+        } else {
+            match binding {
+                Some(binding) => {
+                    if began {
+                        self.scrub_ops.push_back(ScrubOp::Begin(name));
+                    }
+                    self.scrub_ops
+                        .push_back(ScrubOp::Value(binding, json!(value)));
+                    self.scrub_pump(cx);
+                }
+                None if deferred => self.control_sample(id, "input", json!(n.text(value)), cx),
+                None => self.change_sample(id, json!(value), cx),
             }
-            None if deferred => self.control_sample(id, "input", json!(n.text(value)), cx),
-            None => self.change_sample(id, json!(value), cx),
         }
         if let Some(field) = self.fields.get(&id) {
             let text = n.text(value);
@@ -2952,6 +3147,9 @@ impl SurfaceView {
         let Some(drag) = self.scrub.take() else {
             return;
         };
+        if self.finish_gain_scrub(drag.id, commit, cx) {
+            return;
+        }
         if let Some((from, live)) = drag.local_commit {
             if !drag.active && drag.grade.is_none() {
                 if commit && let Some(field) = self.fields.get(&drag.id) {

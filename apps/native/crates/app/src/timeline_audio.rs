@@ -46,6 +46,7 @@ pub(super) struct AudioState {
     #[cfg(test)]
     baseline_capture: bool,
     drag: Option<Drag>,
+    pub(super) pending_gain: Option<u64>,
     base: Option<Arc<Frame>>,
     ops: Vec<Op>,
     meters: [Meter; 2],
@@ -84,6 +85,7 @@ struct Drag {
     y: f64,
     duration: f64,
     moved: bool,
+    gesture: Option<u64>,
 }
 fn op(id: String, bounds: Rect, color: u32) -> Op {
     Op {
@@ -159,7 +161,7 @@ fn content_value(q: &mut pm_kernel::QueryContext, id: &str, path: &str, time: f6
     request.insert("prop", raw);
     q.query(&pm_model::Value::Object(request)).ok()?.as_f64()
 }
-fn edit(layer: &str, path: &str, time: f64, value: f64, key: bool, revision: u64) -> Plan {
+fn level_command(layer: &str, path: &str, time: f64, value: f64, key: bool) -> pm_kernel::Command {
     let mut set = pm_kernel::commands::properties::SetProperty::new(
         layer,
         path,
@@ -170,7 +172,10 @@ fn edit(layer: &str, path: &str, time: f64, value: f64, key: bool, revision: u64
     if key {
         set.mode = pm_kernel::commands::properties::KeyMode::Keyframe;
     }
-    Plan::edit(vec![pm_kernel::PropertyCommand::Set(set).into()], revision)
+    pm_kernel::PropertyCommand::Set(set).into()
+}
+fn edit(layer: &str, path: &str, time: f64, value: f64, key: bool, revision: u64) -> Plan {
+    Plan::edit(vec![level_command(layer, path, time, value, key)], revision)
 }
 impl TimelineSurface {
     pub(super) fn invalidate_audio(&mut self) {
@@ -179,13 +184,34 @@ impl TimelineSurface {
     }
 
     pub(super) fn audio_cancel(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.audio.drag.take().is_none() {
+        if self.audio.drag.is_none() {
             return false;
         }
+        self.release_gain_preview(cx);
+        self.audio.drag = None;
         self.audio.base = None;
         self.rows = None;
         cx.notify();
         true
+    }
+    pub(super) fn release_gain_preview(&mut self, cx: &mut App) {
+        if let Some(gesture) = self
+            .audio
+            .drag
+            .as_mut()
+            .and_then(|drag| drag.gesture.take())
+        {
+            let delegate = self.delegate.clone();
+            cx.defer(move |cx| {
+                delegate.audio_gain_preview(
+                    GainPreview::Finish {
+                        gesture,
+                        revision: None,
+                    },
+                    cx,
+                )
+            });
+        }
     }
     pub(super) fn audio_overlay(&self, cx: &Context<Self>) -> AnyElement {
         let weak = cx.entity().downgrade();
@@ -258,7 +284,10 @@ impl TimelineSurface {
         self.audio.base = Some(base);
     }
     fn audio_controls(&self, frame: &mut AudioFrame) {
-        if let Some(published) = self.kernel.published(&self.project) {
+        if let Some(mut published) = self.kernel.published(&self.project) {
+            if let Some(snapshot) = &self.gain_picture {
+                Arc::make_mut(&mut published).snapshot = snapshot.clone();
+            }
             let mut mirror = QueryMirror::new(&published);
             let mut q = mirror.queries();
             let clips: Vec<_> = frame
@@ -709,6 +738,7 @@ impl TimelineSurface {
             y,
             duration: layer.duration,
             moved: false,
+            gesture: None,
         });
         cx.notify();
         true
@@ -719,6 +749,7 @@ impl TimelineSurface {
             return false;
         };
         d.moved |= (x - d.x).abs() + (y - d.y).abs() > 2.;
+        let previous = d.value;
         d.value = if d.path.contains("fade") {
             let seconds = (x - d.x) / self.view.pps;
             (d.initial
@@ -731,6 +762,21 @@ impl TimelineSurface {
         } else {
             dragged_gain(d.initial, y - d.y, event.modifiers.shift)
         };
+        if d.moved
+            && matches!(d.path.as_str(), "c.gain" | "c.audioGain")
+            && (d.gesture.is_none() || d.value != previous)
+        {
+            let gesture = *d.gesture.get_or_insert_with(GainPreview::gesture);
+            let command = level_command(&d.layer, &d.path, d.time, d.value, false);
+            self.delegate.audio_gain_preview(
+                GainPreview::Sample {
+                    gesture,
+                    base_revision: None,
+                    commands: vec![command],
+                },
+                cx,
+            );
+        }
         self.audio.base = None;
         self.rows = None;
         cx.notify();
@@ -741,14 +787,21 @@ impl TimelineSurface {
             return false;
         };
         if d.moved {
-            self.queue.push_back(Job::Apply(edit(
+            let plan = edit(
                 &d.layer,
                 &d.path,
                 d.time,
                 d.value,
                 false,
                 self.model.index.revision,
-            )));
+            );
+            self.queue.push_back(match d.gesture {
+                Some(gesture) => {
+                    self.audio.pending_gain = Some(gesture);
+                    Job::CommitGain(plan, gesture)
+                }
+                None => Job::Apply(plan),
+            });
             self.pump(cx);
         }
         self.audio.base = None;
@@ -1206,6 +1259,11 @@ mod gesture_tests {
     fn audio_level_pointer_drag_commits_on_release_and_undo_restores(cx: &mut TestAppContext) {
         let project = r##"{"id":"integration","compId":"c","w":640,"h":360,"fps":30,"dur":8,"bg":"#000000","assets":{},"comps":{},"layers":[{"id":"audio","name":"Music","type":"audio","from":0,"dur":8,"on":true,"d":{"gain":1,"fadeIn":0,"fadeOut":0},"p":{},"fx":[]}]}"##;
         let mut s = crate::timeline_tests::stage_project(cx, project.into());
+        let before = s
+            .rig
+            .kernel
+            .published(crate::v4_view_tests::PROJECT)
+            .unwrap();
         let origin = s.origin();
         let from = origin + point(px(600.), px(50.));
         s.surface.update(&mut s.vcx, |surface, cx| {
@@ -1237,11 +1295,30 @@ mod gesture_tests {
                 cx
             ));
         });
+        let previews = s.recorder.audio_gain_previews.borrow();
+        assert!(
+            matches!(
+                previews.last().and_then(|preview| match preview {
+                    GainPreview::Sample { commands, .. } => Some(commands.as_slice()),
+                    _ => None,
+                }),
+                Some([pm_kernel::Command::Property(pm_kernel::PropertyCommand::Set(set))])
+                    if set.layer_id == "audio"
+                        && set.channel == "c.gain"
+                        && (set.value.as_f64().unwrap() - 10f64.powf(-6. / 20.)).abs() < 1e-9
+            ),
+            "the live mix must receive the drag before release: {previews:?}"
+        );
+        drop(previews);
+        assert!(s.recorder.timing_previews.borrow().is_empty());
+        assert!(s.recorder.seeks.borrow().is_empty());
         let published = s
             .rig
             .kernel
             .published(crate::v4_view_tests::PROJECT)
             .unwrap();
+        assert_eq!(published.revision(), before.revision());
+        assert_eq!(published.history.entries, before.history.entries);
         assert_eq!(
             content_value(
                 QueryMirror::new(&published).queries(),
@@ -1266,6 +1343,10 @@ mod gesture_tests {
             .abs()
                 < 1e-9
         );
+        assert_eq!(p.history.entries, before.history.entries + 1);
+        assert_eq!(p.history.applied, before.history.applied + 1);
+        assert!(matches!(s.recorder.audio_gain_previews.borrow().last(),
+            Some(GainPreview::Finish { revision: Some(revision), .. }) if *revision == p.revision()));
         s.undo(cx);
         let p = s
             .rig
@@ -1276,6 +1357,60 @@ mod gesture_tests {
             content_value(QueryMirror::new(&p).queries(), "audio", "c.gain", 0.),
             Some(1.)
         );
+    }
+    #[gpui::test]
+    fn audio_level_escape_discards_live_gain_without_an_edit(cx: &mut TestAppContext) {
+        let mut s = stage_audio(cx);
+        let before = s
+            .rig
+            .kernel
+            .published(crate::v4_view_tests::PROJECT)
+            .unwrap();
+        let from = s.origin() + point(px(600.), px(50.));
+        s.surface.update(&mut s.vcx, |surface, cx| {
+            let mut line = op(
+                "audio-level:audio".into(),
+                Rect::new(599., 49., 3., 1.),
+                0xffffff,
+            );
+            line.detail =
+                serde_json::json!({"layer":"audio","path":"c.gain","gain":1.,"interactive":true});
+            surface.audio.ops.push(line);
+            assert!(surface.audio_down(
+                &MouseDownEvent {
+                    position: from,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                },
+                cx
+            ));
+            assert!(surface.audio_move(
+                &MouseMoveEvent {
+                    position: from + point(px(0.), px(12.)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Modifiers::none(),
+                },
+                cx
+            ));
+            assert!(surface.cancel(cx));
+        });
+        s.idle(cx);
+        assert!(matches!(
+            s.recorder.audio_gain_previews.borrow().as_slice(),
+            [GainPreview::Sample { gesture: began, .. }, GainPreview::Finish { gesture: ended, revision: None }]
+                if began == ended
+        ));
+        let after = s
+            .rig
+            .kernel
+            .published(crate::v4_view_tests::PROJECT)
+            .unwrap();
+        assert_eq!(after.revision(), before.revision());
+        assert_eq!(after.history.entries, before.history.entries);
+        assert!(s.recorder.timing_previews.borrow().is_empty());
+        assert!(s.recorder.seeks.borrow().is_empty());
     }
     fn stage_audio(cx: &mut TestAppContext) -> crate::timeline_tests::Stage {
         let mut project: serde_json::Value =

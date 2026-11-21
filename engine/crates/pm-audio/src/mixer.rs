@@ -1169,6 +1169,21 @@ impl Mixer {
         self.install(doc, graph);
     }
 
+    pub(crate) fn glide_levels_to(
+        &mut self,
+        doc: Arc<Document>,
+        graph: Arc<MixGraph>,
+        solo: Option<HashSet<String>>,
+    ) {
+        // Several gain samples can arrive while the device ring is full.
+        // Replace the unheard destination and keep the audible glide origin.
+        if self.outgoing.last().is_some_and(|glide| glide.done == 0) {
+            self.install(doc, graph);
+        } else {
+            self.glide_to(doc, graph, solo);
+        }
+    }
+
     /// Ends retune glides at once (a seek or a new run starts on the
     /// current mix).
     pub fn end_glides(&mut self) {

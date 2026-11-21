@@ -11,7 +11,8 @@
 //! `requestContextWarmup` opens its AudioContext on idle the same way), so
 //! the first Play does not wait for the device to open. A new revision
 //! reaches the mixer at most every [`PROJECT_INTERVAL`] while edits stream
-//! in (pm-audio glides from what played into the new mix).
+//! in (pm-audio glides from what played into the new mix). A gain gesture
+//! auditions its commands on a disposable mix and bypasses that throttle.
 //!
 //! When no output device opens, [`AudioLink::failed`] says so and the
 //! presenter runs its line on the host clock instead.
@@ -38,6 +39,11 @@ use crate::media::MediaMap;
 
 /// The shortest interval between two mixes of new revisions.
 pub const PROJECT_INTERVAL: Duration = Duration::from_millis(30);
+
+/// Shorter render-ahead for interactive faders. The ring still grows with
+/// callback size to maintain its device-specific refill reserve.
+#[cfg(feature = "kernel")]
+const INTERACTIVE_AHEAD_MS: u32 = 24;
 
 /// Levels go to the renderer this often while playing (the mixer panel
 /// draws at the display rate and steps its own ballistics in between).
@@ -166,7 +172,62 @@ struct ProjectTiming {
     status_done_us: u64,
 }
 
+/// Disposable mixer edits. A gesture holds its last sample until the audio
+/// mirror catches up to the committed revision, so release never dips back.
+#[cfg(feature = "kernel")]
+#[derive(Debug, Clone)]
+pub enum GainPreview {
+    Sample {
+        gesture: u64,
+        /// Relative key moves are valid only against their starting revision.
+        base_revision: Option<u64>,
+        commands: Vec<pm_kernel::Command>,
+    },
+    Finish {
+        gesture: u64,
+        revision: Option<u64>,
+    },
+}
+
+#[cfg(feature = "kernel")]
+impl GainPreview {
+    pub fn gesture() -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(feature = "kernel")]
+struct ActiveGain {
+    gesture: u64,
+    base_revision: Option<u64>,
+    commands: Vec<pm_kernel::Command>,
+    commit: Option<u64>,
+}
+
+#[cfg(feature = "kernel")]
+impl ActiveGain {
+    fn preview_document(&self, doc: &pm_model::Document) -> Option<Arc<pm_model::Document>> {
+        if self
+            .base_revision
+            .is_some_and(|base| base != doc.revision())
+        {
+            return None;
+        }
+        let mut preview = doc.clone();
+        for command in &self.commands {
+            let ops = command
+                .plan(preview.root()?, pm_kernel::Origin::Interface)
+                .ok()?;
+            preview.apply_ops(&ops).ok()?;
+        }
+        Some(Arc::new(preview))
+    }
+}
+
 pub enum AudioCtl {
+    #[cfg(feature = "kernel")]
+    GainPreview(GainPreview),
     Document {
         root: Option<pm_model::Node>,
         revision: pm_protocol::common::Revision,
@@ -341,6 +402,8 @@ impl AudioLink {
                     warm_due: None,
                     paused_at: 0,
                     transport_running: false,
+                    #[cfg(feature = "kernel")]
+                    gain: None,
                     open_device: default_device_opener(),
                 }
                 .run()
@@ -353,6 +416,11 @@ impl AudioLink {
             status,
             thread: Some(thread),
         })
+    }
+
+    #[cfg(feature = "kernel")]
+    pub(crate) fn preview_sender(&self) -> Sender<AudioCtl> {
+        self.tx.clone()
     }
 
     pub fn send(&self, ctl: AudioCtl) {
@@ -450,6 +518,8 @@ struct Control {
     paused_at: i64,
     transport_running: bool,
     open_device: DeviceOpener,
+    #[cfg(feature = "kernel")]
+    gain: Option<ActiveGain>,
 }
 
 impl Control {
@@ -507,7 +577,17 @@ impl Control {
                 )
             });
             let _priority = starting.then(pm_audio::playback::StartPriority::new);
-            for (ctl, received_us) in controls {
+            let mut controls = controls.into_iter().peekable();
+            while let Some((ctl, received_us)) = controls.next() {
+                #[cfg(feature = "kernel")]
+                if matches!(&ctl, AudioCtl::GainPreview(GainPreview::Sample { .. }))
+                    && matches!(
+                        controls.peek(),
+                        Some((AudioCtl::GainPreview(GainPreview::Sample { .. }), _))
+                    )
+                {
+                    continue;
+                }
                 if !self.apply(ctl, received_us) {
                     self.shutdown();
                     return;
@@ -657,6 +737,43 @@ impl Control {
     /// Returns false on shutdown.
     fn apply(&mut self, ctl: AudioCtl, received_us: Option<u64>) -> bool {
         match ctl {
+            #[cfg(feature = "kernel")]
+            AudioCtl::GainPreview(update) => {
+                match update {
+                    GainPreview::Sample {
+                        gesture,
+                        base_revision,
+                        commands,
+                    } => {
+                        if self.gain.as_ref().is_some_and(|g| {
+                            g.gesture == gesture
+                                && g.base_revision == base_revision
+                                && g.commands == commands
+                        }) {
+                            return true;
+                        }
+                        self.gain = Some(ActiveGain {
+                            gesture,
+                            base_revision,
+                            commands,
+                            commit: None,
+                        });
+                    }
+                    GainPreview::Finish { gesture, revision } => {
+                        let Some(gain) = self.gain.as_mut().filter(|g| g.gesture == gesture) else {
+                            return true;
+                        };
+                        gain.commit = revision;
+                        if revision.is_some_and(|r| self.doc.revision() < r) {
+                            return true;
+                        }
+                        self.gain = None;
+                    }
+                }
+                // Separate from the document throttling. Nothing goes to the
+                // frame renderer and no transport command is sent.
+                self.apply_gain_preview();
+            }
             AudioCtl::Transport(command) => {
                 // Counted before anything can fail, as the ingress numbers them.
                 if matches!(command, TransportCommand::Play { .. }) {
@@ -988,6 +1105,13 @@ impl Control {
 
     /// Opens the output device. False (and a reported error) when none opens.
     fn open(&mut self) -> bool {
+        #[cfg(feature = "kernel")]
+        let config = PlaybackConfig {
+            ahead_ms: INTERACTIVE_AHEAD_MS,
+            ..PlaybackConfig::default()
+        };
+        #[cfg(not(feature = "kernel"))]
+        let config = PlaybackConfig::default();
         let rate = pm_audio::mixer::project_sample_rate(&self.doc);
         let cache = SourceCache::new(SOURCE_BUDGET, DECODE_WORKERS);
         let started = if std::env::var(SIM_AUDIO_ENV).as_deref() == Ok("1") {
@@ -995,7 +1119,7 @@ impl Control {
             Playback::start_headless(
                 MixFormat::stereo(rate),
                 cache,
-                PlaybackConfig::default(),
+                config.clone(),
                 SimDevice::RATE,
                 2,
                 latency_us,
@@ -1005,7 +1129,7 @@ impl Control {
                 playback
             })
         } else {
-            (self.open_device)(MixFormat::stereo(rate), cache, PlaybackConfig::default())
+            (self.open_device)(MixFormat::stereo(rate), cache, config)
         };
         match started {
             Ok(playback) => {
@@ -1043,6 +1167,19 @@ impl Control {
         }
     }
 
+    #[cfg(feature = "kernel")]
+    fn gain_document(&self) -> Option<Arc<pm_model::Document>> {
+        self.gain.as_ref()?.preview_document(&self.doc)
+    }
+
+    #[cfg(feature = "kernel")]
+    fn apply_gain_preview(&self) {
+        if let Some(playback) = &self.playback {
+            let doc = self.gain_document().unwrap_or_else(|| self.doc.clone());
+            let _ = playback.preview_levels(doc, &self.composition, &self.media);
+        }
+    }
+
     fn set_project(&mut self) -> Option<ProjectTiming> {
         let Some(playback) = &self.playback else {
             return None;
@@ -1057,6 +1194,18 @@ impl Control {
             return profiled.then_some(timing);
         }
         self.dirty = false;
+        #[cfg(feature = "kernel")]
+        if self
+            .gain
+            .as_ref()
+            .and_then(|g| g.commit)
+            .is_some_and(|r| self.doc.revision() >= r)
+        {
+            self.gain = None;
+        }
+        #[cfg(feature = "kernel")]
+        let doc = self.gain_document().unwrap_or_else(|| self.doc.clone());
+        #[cfg(not(feature = "kernel"))]
         let doc = self.doc.clone();
         timing.clone_done_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
         let result = playback.set_project(doc, &self.composition, &self.media);
@@ -1156,6 +1305,359 @@ mod tests {
         )
     }
 
+    /// Drive actual playback PCM without opening an output device.
+    #[cfg(feature = "kernel")]
+    fn gain_capture(
+        source: &Path,
+        embedded: bool,
+        reference: Option<&Path>,
+        ahead_ms: u32,
+        callback_patience: Duration,
+        script: impl Fn(&mut Control, usize),
+    ) -> Vec<Vec<f32>> {
+        use pm_audio::clock::host_now_us;
+        const RATE: u32 = 48_000;
+        const BUFFER: usize = 512;
+        let mut layers = if embedded {
+            format!(
+                r#"{{"id":"tone","type":"video","from":0,"dur":4,"on":true,"d":{{"asset":"a","embeddedAudio":true,"audioGain":1}}}}"#
+            )
+        } else {
+            format!(
+                r#"{{"id":"tone","type":"audio","from":0,"dur":4,"on":true,"d":{{"asset":"a","gain":1}}}}"#
+            )
+        };
+        let cache = SourceCache::new(24 << 20, 2);
+        let blocks = (RATE as usize * 4).div_ceil(pm_audio::source::BLOCK) as u64;
+        let mut paths =
+            std::collections::BTreeMap::from([("a".to_owned(), Some(source.to_path_buf()))]);
+        if let Some(reference) = reference {
+            layers.push(',');
+            layers.push_str(&clip("reference", "b").replace(r#""dur":1"#, r#""dur":4"#));
+            paths.insert("b".into(), Some(reference.to_path_buf()));
+            let decoded = cache.open(reference, None).unwrap();
+            for block in 0..blocks {
+                cache.block(&decoded, block, true).unwrap();
+            }
+        }
+        let project = format!(
+            r#"{{"id":"P","compId":"C","w":320,"h":180,"fps":30,"dur":4,"layers":[{layers}],"comps":{{}},"assets":{{}}}}"#,
+        );
+        let media = MediaMap(Arc::new(paths));
+        let decoded = cache.open(source, None).unwrap();
+        for block in 0..blocks {
+            cache.block(&decoded, block, true).unwrap();
+        }
+        let (playback, mut side) = Playback::start_headless(
+            MixFormat::stereo(RATE),
+            cache.clone(),
+            PlaybackConfig {
+                ahead_ms,
+                preroll_ms: 0,
+                ..PlaybackConfig::default()
+            },
+            RATE,
+            2,
+            0,
+        )
+        .unwrap();
+        let (_tx, rx) = channel();
+        let mut control = Control {
+            rx,
+            clock: Default::default(),
+            status: Default::default(),
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    parse(&project).unwrap(),
+                )),
+                1,
+            )),
+            composition: "C".into(),
+            media,
+            playback: Some(playback),
+            sim: None,
+            plays: 0,
+            pending_commands: VecDeque::new(),
+            dirty: true,
+            broken: false,
+            loop_range: None,
+            last_project: None,
+            audio_scrub: false,
+            skim: Default::default(),
+            solo: None,
+            levels: Box::new(|_| {}),
+            last_levels: None,
+            levels_running: false,
+            watch_until: None,
+            warm: false,
+            warm_due: None,
+            paused_at: 0,
+            transport_running: false,
+            open_device: default_device_opener(),
+            gain: None,
+        };
+        control.set_project();
+        control
+            .playback
+            .as_ref()
+            .unwrap()
+            .command(TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        // Clock time advances on the device independently of the test
+        // scheduler. Keep each callback a full 512 samples, except the
+        // final sample count of the exported fixture.
+        let mut out = [0.0; BUFFER * 2];
+        let mut capture = vec![Vec::new(), Vec::new()];
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while side.queued_frames() < BUFFER && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(side.queued_frames() >= BUFFER);
+        let host = host_now_us();
+        let tick = Duration::from_micros(BUFFER as u64 * 1_000_000 / u64::from(RATE));
+        let mut epoch = None;
+        for sample in (0..RATE as usize * 2).step_by(BUFFER) {
+            let deadline = Instant::now() + callback_patience;
+            while side.queued_frames() < BUFFER && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                side.queued_frames() >= BUFFER,
+                "dropout at frame {sample}: {:?}, {:?}",
+                control.playback.as_ref().unwrap().stats(),
+                control.playback.as_ref().unwrap().take_errors()
+            );
+            script(&mut control, sample);
+            let at = host + sample as u64 * 1_000_000 / u64::from(RATE);
+            side.callback(&mut out, 2, at);
+            let clock = control.playback.as_ref().unwrap().clock().unwrap();
+            assert_eq!(clock.state, TransportState::Playing);
+            assert_eq!(
+                clock.epoch,
+                *epoch.get_or_insert(clock.epoch),
+                "restarted playback"
+            );
+            let ticks_per_frame = pm_time::TICKS_PER_SECOND / i64::from(RATE);
+            let media = clock
+                .media_time_at(pm_protocol::common::HostMicros::new(at).unwrap())
+                .get();
+            assert!(
+                (media - sample as i64 * ticks_per_frame).abs() <= ticks_per_frame,
+                "playhead jumped at frame {sample}: {media} ticks"
+            );
+            let n = BUFFER.min(RATE as usize * 2 - sample);
+            for (i, dst) in capture.iter_mut().enumerate() {
+                dst.extend(out.chunks_exact(2).take(n).map(|frame| frame[i]));
+            }
+            // A delayed test thread cannot emulate missed callbacks by
+            // issuing them back-to-back and draining the ring.
+            std::thread::sleep(tick);
+        }
+        control.shutdown();
+        drop(side);
+        cache.shutdown();
+        capture
+    }
+
+    #[cfg(feature = "kernel")]
+    fn gain_sample(control: &mut Control, embedded: bool, value: f64) {
+        let path = if embedded { "c.audioGain" } else { "c.gain" };
+        let command = pm_kernel::commands::properties::SetProperty::new(
+            "tone",
+            path,
+            pm_model::Value::Number(value),
+            0.0,
+        );
+        control.apply(
+            AudioCtl::GainPreview(GainPreview::Sample {
+                gesture: 1,
+                base_revision: None,
+                commands: vec![pm_kernel::PropertyCommand::Set(command).into()],
+            }),
+            None,
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "kernel")]
+    fn live_gain_key_delta_is_applied_once_when_commit_arrives_before_finish() {
+        let project = parse(
+            r#"{"id":"P","compId":"C","w":320,"h":180,"fps":30,"dur":4,"comps":{},"layers":[
+                {"id":"tone","type":"audio","from":0,"dur":4,"on":true,"d":{"gain":{
+                    "v":1,"kf":[{"i":"first","t":0,"v":1},{"i":"second","t":2,"v":1}]
+                }}}
+            ]}"#,
+        )
+        .unwrap();
+        let base =
+            pm_model::Document::new(Some(pm_model::canonical::canonical_project(project)), 1);
+        let edit = ActiveGain {
+            gesture: 1,
+            base_revision: Some(base.revision()),
+            commands: vec![
+                pm_kernel::KeyframeCommand::GraphMove {
+                    key_ids: vec!["first".into()],
+                    delta: 0.,
+                    value_delta: -0.25,
+                }
+                .into(),
+            ],
+            commit: None,
+        };
+        let committed = edit.preview_document(&base).unwrap();
+        assert!(committed.revision() > base.revision());
+        assert!(edit.preview_document(&committed).is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "kernel")]
+    fn live_gain_changes_playing_audio_smoothly_and_escape_restores_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("constant.wav");
+        let reference = directory.path().join("reference.wav");
+        write_wav(
+            &file,
+            48_000,
+            &[vec![0.5; 48_000 * 4], vec![0.0; 48_000 * 4]],
+        );
+        write_wav(
+            &reference,
+            48_000,
+            &[vec![0.0; 48_000 * 4], vec![0.2; 48_000 * 4]],
+        );
+        for embedded in [false, true] {
+            let start = 512 * 48;
+            let cancel = 512 * 96;
+            let capture = gain_capture(
+                &file,
+                embedded,
+                Some(&reference),
+                INTERACTIVE_AHEAD_MS,
+                Duration::ZERO,
+                |control, sample| {
+                    match sample {
+                        sample if sample == start => gain_sample(control, embedded, 0.25),
+                        sample if sample == cancel => {
+                            control.apply(
+                                AudioCtl::GainPreview(GainPreview::Finish {
+                                    gesture: 1,
+                                    revision: None,
+                                }),
+                                None,
+                            );
+                        }
+                        _ => (),
+                    }
+                    assert_eq!(control.doc.revision(), 1);
+                },
+            );
+            let wave = &capture[0];
+            let ramp = &wave[start..start + 2_400];
+            let onset = ramp
+                .iter()
+                .position(|v| *v < 0.4999)
+                .expect("audible gain must respond within 50 ms");
+            let settled = wave[start + onset..start + 3_000]
+                .iter()
+                .position(|v| (*v - 0.125).abs() < 1e-4)
+                .expect("the ramp must reach the selected gain");
+            assert!(
+                (480..=672).contains(&settled),
+                "ramp lasts {settled} frames"
+            );
+            eprintln!(
+                "embedded={embedded}, onset={:.2} ms, ramp={:.2} ms",
+                onset as f64 / 48.,
+                settled as f64 / 48.,
+            );
+            assert!(capture[1][start..].iter().all(|v| (*v - 0.2).abs() < 1e-4));
+            assert!(
+                ramp.windows(2).all(|v| (v[1] - v[0]).abs() < 0.002),
+                "the gain must ramp"
+            );
+            assert!(
+                wave[start + 3_000..cancel]
+                    .iter()
+                    .all(|&v| (v - 0.125).abs() < 1e-4)
+            );
+            let back = &wave[cancel..cancel + 2_400];
+            assert!(
+                back.iter().any(|&v| v > 0.13),
+                "Escape must restore the previous mix"
+            );
+            assert!(back.windows(2).all(|v| (v[1] - v[0]).abs() < 0.002));
+            assert!(
+                wave[cancel + 3_000..]
+                    .iter()
+                    .all(|&v| (v - 0.5).abs() < 1e-4)
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "kernel")]
+    fn live_gain_records_two_seconds_of_interactive_audio_when_requested() {
+        let Some(path) = std::env::var_os("PM_LIVE_GAIN_CAPTURE") else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        let source = tempfile::tempdir().unwrap();
+        let file = source.path().join("sine.wav");
+        let tone: Vec<f32> = (0..192_000)
+            .map(|i| (i as f64 * 440.0 * std::f64::consts::TAU / 48_000.0).sin() as f32 * 0.5)
+            .collect();
+        write_wav(&file, 48_000, &[tone.clone(), tone]);
+        let capture = gain_capture(
+            &file,
+            false,
+            None,
+            INTERACTIVE_AHEAD_MS,
+            Duration::from_secs(1),
+            |control, sample| {
+                let distance = sample.saturating_sub(12_288);
+                if (12_288..60_288).contains(&sample) && sample % 1024 == 0 {
+                    gain_sample(
+                        control,
+                        false,
+                        10f64.powf(-12.0 * distance as f64 / (20. * 48_000.)),
+                    );
+                }
+                if sample == 60_416 {
+                    let gain = 10f64.powf(-12. / 20.);
+                    gain_sample(control, false, gain);
+                    control.apply(
+                        AudioCtl::GainPreview(GainPreview::Finish {
+                            gesture: 1,
+                            revision: Some(2),
+                        }),
+                        None,
+                    );
+                    let mut next = control.doc.as_ref().clone();
+                    let loc = pm_kernel::model::find_layer(next.root().unwrap(), "tone").unwrap();
+                    let mut path = loc.path();
+                    path.extend(["d".into(), "gain".into()]);
+                    next.apply_ops(&[pm_model::Op::Leaf(pm_model::Patch::set(
+                        path,
+                        pm_model::Value::Number(gain),
+                    ))])
+                    .unwrap();
+                    control.apply(
+                        AudioCtl::Document {
+                            root: next.root().cloned(),
+                            revision: pm_protocol::common::Revision::new(2).unwrap(),
+                        },
+                        None,
+                    );
+                    control.set_project();
+                    assert!(control.gain.is_none());
+                }
+            },
+        );
+        write_wav(&path.join("after.wav"), 48_000, &capture);
+    }
+
     #[test]
     fn queued_controls_report_ordered_errors_and_shutdown_drains() {
         struct ShutdownCache(Arc<SourceCache>);
@@ -1207,6 +1709,8 @@ mod tests {
             warm_due: None,
             paused_at: 0,
             transport_running: false,
+            #[cfg(feature = "kernel")]
+            gain: None,
             open_device: default_device_opener(),
         };
         let invalid_loop = TransportCommand::SetLoop {
@@ -1334,6 +1838,8 @@ mod tests {
                 warm_due: None,
                 paused_at: 0,
                 transport_running: false,
+                #[cfg(feature = "kernel")]
+                gain: None,
                 open_device: Box::new(move |format, cache, config| {
                     opened_caches.lock().unwrap().push(cache.clone());
                     let (playback, side) =
@@ -1447,6 +1953,8 @@ mod tests {
             warm_due: None,
             paused_at: 0,
             transport_running: false,
+            #[cfg(feature = "kernel")]
+            gain: None,
             open_device: Box::new(move |format, cache, config| {
                 opened_caches.lock().unwrap().push(cache.clone());
                 let (playback, side) = Playback::start_headless(format, cache, config, rate, 2, 0)?;
@@ -1660,6 +2168,8 @@ mod skim_tests {
             warm_due: None,
             paused_at: 0,
             transport_running: false,
+            #[cfg(feature = "kernel")]
+            gain: None,
             open_device: default_device_opener(),
         };
         (control, cache)
