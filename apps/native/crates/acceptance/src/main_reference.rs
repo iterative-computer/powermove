@@ -79,7 +79,7 @@ pub fn expected_catalog() -> Value {
     let extensions = include_bytes!("../../mcp/fixtures/extension-session-native-catalog.json");
     assert_eq!(
         pm_model::hash::sha256_hex(extensions),
-        "52d3cd3d7b7db1cf95a5e88239f98f1deae1cf20b3a0f6a2dcc2d13c8c9fbbe5"
+        "7d2bca96086ef06bc0807fb55e0fddfe79d295e66cd2f6f9772686d4519b1b06"
     );
     let extensions: Value = serde_json::from_slice(extensions).unwrap();
     for overlay in viewer["tools"].as_array().unwrap().iter()

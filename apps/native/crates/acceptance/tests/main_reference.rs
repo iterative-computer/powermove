@@ -490,7 +490,7 @@ fn studio_overlays_preserve_all_main_operations_and_unrelated_contracts() {
             let source = include_bytes!("../../mcp/fixtures/extension-session-native-catalog.json");
             assert_eq!(
                 pm_model::hash::sha256_hex(source),
-                "52d3cd3d7b7db1cf95a5e88239f98f1deae1cf20b3a0f6a2dcc2d13c8c9fbbe5"
+                "7d2bca96086ef06bc0807fb55e0fddfe79d295e66cd2f6f9772686d4519b1b06"
             );
             let overlay: serde_json::Value = serde_json::from_slice(source).unwrap();
             let pinned = overlay["tools"].as_array().unwrap().iter()
