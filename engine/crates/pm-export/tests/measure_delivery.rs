@@ -488,6 +488,7 @@ fn export_throughput() {
     for (i, (name, format, alpha, w, h, extra)) in cases.into_iter().enumerate() {
         let ext = match format {
             ExportFormat::ProRes { .. }
+            | ExportFormat::H264Mov
             | ExportFormat::Hevc {
                 container: WireContainer::Mov,
                 ..

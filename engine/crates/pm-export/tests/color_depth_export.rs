@@ -114,7 +114,7 @@ fn settings(format: ExportFormat, alpha: AlphaOutput) -> ExportSettings {
     let image = format.is_image();
     let eight_bit_output = match format {
         ExportFormat::ProRes { .. } => false,
-        ExportFormat::H264 | ExportFormat::Webm { .. } => true,
+        ExportFormat::H264 | ExportFormat::H264Mov | ExportFormat::Webm { .. } => true,
         ExportFormat::Hevc { ten_bit, .. } => !ten_bit,
         ExportFormat::PngSequence { sixteen_bit } | ExportFormat::PngStill { sixteen_bit } => {
             !sixteen_bit
@@ -383,6 +383,14 @@ fn depth8_project_exports_every_shipped_format() {
             format: ExportFormat::H264,
             alpha: AlphaOutput::None,
             ext: "mp4",
+            codec: "h264",
+            depth: 8,
+        },
+        Case {
+            name: "h264-mov",
+            format: ExportFormat::H264Mov,
+            alpha: AlphaOutput::None,
+            ext: "mov",
             codec: "h264",
             depth: 8,
         },
