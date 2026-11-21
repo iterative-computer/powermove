@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage the pinned npm agent runtimes and bundled public update policy."""
+"""Stage the pinned npm runtimes and bundled public update policy."""
 import base64
 import hashlib
 import json
@@ -24,17 +24,17 @@ def stage_runtime(root, package, version, integrity, prefix, destination):
             digest.update(chunk)
     actual = "sha512-" + base64.b64encode(digest.digest()).decode()
     if actual != integrity:
-        raise ValueError("Pinned agent runtime SHA-512 mismatch")
+        raise ValueError("Pinned runtime SHA-512 mismatch")
 
     with tarfile.open(archive) as tar:
-        if destination.name == "claude":
+        if not prefix.endswith("/"):
             members = [(tar.getmember(prefix), destination)]
         else:
             members = [(member, destination / member.name[len(prefix):])
                        for member in tar.getmembers() if member.name.startswith(prefix)]
         for member, path in members:
             if not member.isfile() or not path.resolve().is_relative_to(root.resolve()):
-                raise ValueError("Unexpected agent runtime archive entry")
+                raise ValueError("Unexpected runtime archive entry")
             path.parent.mkdir(parents=True, exist_ok=True)
             with tar.extractfile(member) as source, path.open("xb") as output:
                 shutil.copyfileobj(source, output)
@@ -60,6 +60,10 @@ def main(stage):
     stage_runtime(root, claude, pins["claude"], integrity[claude], "package/claude", root / "claude")
     stage_runtime(root, "@openai/codex", pins["codex"] + "-darwin-arm64", integrity[codex],
                   "package/vendor/aarch64-apple-darwin/", root / "codex")
+    # Same pinned macOS build as Electron's lockfile and the Rust ABI check.
+    stage_runtime(root, "@transcribe-cpp/darwin-arm64-metal", "0.3.1",
+                  "sha512-Fk6crfpnFmbelnDNIVJ8NzJbQHMwQIZcd3ZquVMTjNxPIoU1xqABKV5iKPcCnxtRk48g6QRDgH2tEIN8nTp7qw==",
+                  "package/", root / "transcribe")
 
 
 if __name__ == "__main__":

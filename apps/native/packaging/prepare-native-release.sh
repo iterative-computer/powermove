@@ -36,6 +36,7 @@ HASHES
       --sparkle-feed 'https://cloud.trypowermove.com/native/latest/appcast.xml' \
       --sparkle-key "$public_key" --claude-runtime "$stage/runtime/claude" \
       --codex-vendor "$stage/runtime/codex"
+    cp -R "$stage/runtime/transcribe" "$app/Contents/Resources/"
     cp "$stage/ffmpeg/lib/"*.dylib "$app/Contents/Frameworks/"
     mkdir "$app/Contents/Resources/ffmpeg"
     cp -R "$stage/ffmpeg/share" "$stage/ffmpeg/NOTICE.txt" "$stage/ffmpeg/manifest.json" \
