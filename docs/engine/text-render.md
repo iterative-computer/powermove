@@ -1,8 +1,8 @@
 # Text rendering
 
 Native text uses exact outline coverage in output pixels followed by ordered
-float paint. Legacy text retains Canvas2D's source pixel grid, mask coverage
-and texture filtering so an imported project keeps its authored appearance.
+float paint. Legacy text retains Canvas2D's layout and mask weight; resting
+and perspective-projected text also retains its source pixel grid and filtering.
 The font registry and layout contract
 are described in [text.md](text.md).
 
@@ -15,10 +15,14 @@ seeds are unchanged. Range typography and animator poses still come from
 `pm-eval`. Level 2 uses the shared Parley frame for layout, carets, bounds,
 picks and painting.
 
-Level 1 paints into the authored layer canvas at the compositor's continuous
-quarter-step density, including its ceil-rounded dimensions and anchor, then
-samples that texture through the world transform. Fractional output movement
-therefore does not change the glyph strike or baseline phase. Level 2 uses
+Level 1 resting text paints into the authored layer canvas at the compositor's
+continuous quarter-step density, including its ceil-rounded dimensions and
+anchor, then samples that texture through the world transform. Resting means
+uniform positive scale within 5% of 100%, without rotation or skew; fractional
+translation keeps the local glyph strike and baseline phase. Other affine
+transforms paint directly at output resolution, including 3D planes whose
+projected homography is affine and in front of the camera. Perspective planes
+keep the local canvas and project it through their homography. Level 2 uses
 `Quad::Device`: transforms affect its outlines at the requested output size.
 
 Layout is an exact gate independent of pixels. Raster improvements must
@@ -127,9 +131,11 @@ scratch, one texture per chunk.
 **TEXT-RASTER-1:** exact outline coverage remains the native and explicit
 Exact painter. Legacy macOS fills use the Canvas masks described above to
 preserve authored pixels. Neither path changes font selection or layout.
-Legacy text and captions retain the same local canvas density and bilinear
-sampling on 2D layers and 3D planes. Native level-2 planes retain their
-perspective-density raster and output resampler.
+Legacy text and captions use the same resting-versus-device-coverage decision
+on 2D layers and affine 3D planes, using the projected transform for planes.
+Resting cases and perspective planes retain local canvas density and bilinear
+sampling. Native level-2 planes retain their perspective-density raster and
+output resampler.
 
 **TEXT-SMOOTH-1:** frames draw with the authored platform weight by default
 (`TextWeight::Smoothed`): legacy macOS fills use the Canvas masks above;
