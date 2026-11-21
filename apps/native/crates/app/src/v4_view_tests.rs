@@ -2895,3 +2895,68 @@ fn project_inline_rename_uses_text_geometry(cx: &mut TestAppContext) {
         assert!(field.style.padding.right.is_none());
     });
 }
+
+#[gpui::test]
+fn user_transcript_ring_requires_keyboard_focus(cx: &mut TestAppContext) {
+    let rig = rig("agent", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1,
+        0,
+        "div",
+        json!({
+            "id": "quote-source-prompt",
+            "tabIndex": 0,
+            "metadata": {"quoteSource": "thread:prompt", "userMessage": true},
+            "style": {"width": 160, "height": 32}
+        }),
+        &["keydown", "select"],
+    );
+    ops.extend(node_ops(2, 1, "text", json!({}), &[]));
+    ops.extend(node_ops(3, 2, "text", json!({}), &[]));
+    ops.push(Op::SetText {
+        id: 3,
+        text: "Investigate my properties panel".into(),
+    });
+    let mut first = synthetic(&rig, ops);
+    first.panel = "agent".into();
+    let (view, mut vcx) = window(cx, &rig, first, Default::default());
+    vcx.update(|window, _| window.activate());
+    let has_ring = |vcx: &mut VisualTestContext| {
+        vcx.run_until_parked();
+        vcx.update(|window, _| {
+            window.painted_quads().iter().any(|quad| {
+                quad.border_widths.top > Default::default()
+                    && quad.border_widths.bottom > Default::default()
+                    && quad.border_widths.left > Default::default()
+                    && quad.border_widths.right > Default::default()
+            })
+        })
+    };
+    assert!(!has_ring(&mut vcx), "unfocused transcript");
+    vcx.simulate_keystrokes("tab");
+    vcx.update(|window, cx| window.focus_next(cx));
+    assert_eq!(
+        view.update_in(&mut vcx, |v, window, _| v.focused_node(window)),
+        Some(1)
+    );
+    assert!(has_ring(&mut vcx), "keyboard focused transcript");
+    let text = bounds(&mut vcx, "quote-source-prompt");
+    let inside_text = text.origin + point(px(10.), px(8.));
+    vcx.simulate_click(inside_text, Modifiers::default());
+    assert_eq!(
+        view.update_in(&mut vcx, |v, window, _| v.focused_node(window)),
+        Some(1)
+    );
+    assert!(!has_ring(&mut vcx), "pointer focused transcript");
+    vcx.simulate_keystrokes("a");
+    assert!(!has_ring(&mut vcx), "typing after a click leaves the ring hidden");
+    vcx.update(|window, cx| window.blur(cx));
+    vcx.run_until_parked();
+    vcx.simulate_click(inside_text, Modifiers::default());
+    assert_eq!(
+        view.update_in(&mut vcx, |v, window, _| v.focused_node(window)),
+        Some(1)
+    );
+    assert!(!has_ring(&mut vcx), "clicking into the transcript leaves the ring hidden");
+}
