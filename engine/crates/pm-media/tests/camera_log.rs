@@ -258,7 +258,7 @@ fn mxf_camera_log_uses_the_picture_descriptor() {
             "-f",
             "lavfi",
             "-i",
-            "testsrc2=s=720x576:r=25",
+            "testsrc2=s=720x576:r=25,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709",
         ])
         .args([
             "-frames:v",
@@ -267,14 +267,6 @@ fn mxf_camera_log_uses_the_picture_descriptor() {
             "mpeg2video",
             "-pix_fmt",
             "yuv422p",
-        ])
-        .args([
-            "-color_primaries",
-            "bt709",
-            "-color_trc",
-            "bt709",
-            "-colorspace",
-            "bt709",
         ])
         .arg(&source)
         .output()
