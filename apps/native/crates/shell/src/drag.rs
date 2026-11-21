@@ -1,6 +1,6 @@
 //! Panel dragging: the motion constants and the pointer rules that don't
 //! need a window (threshold, steady target choice, edge auto-scroll, tab
-//! slides). Workspace motion is reserved for a committed drop.
+//! slides for layout commands). Drag changes take effect in their input frame.
 use crate::layout::{DropPreview, DropTarget};
 use pm_design::{
     Tokens,
@@ -15,15 +15,11 @@ use std::{
 /// Panels, tabs and extension bodies are at rest this long after a layout
 /// change, for a move of about a panel's width (critically damped: no
 /// overshoot). Longer moves take a few frames more.
-pub const MOVE: f64 = 0.22;
+const MOVE: f64 = 0.22;
 /// The spring's own settling time (to 0.3 % of the way) that brings a
 /// 100 pt move fully to rest (a twentieth of a point, half a point a
 /// second) inside [`MOVE`]. Most of the way is covered in about 120 ms.
 const MOVE_SETTLING: f64 = MOVE * 0.6;
-/// The drag chip fades in over this at pick-up.
-pub const LIFT: f32 = 0.12;
-/// On cancellation the chip glides home and fades.
-pub const SETTLE: f32 = 0.15;
 /// A new target is taken once the pointer is this clear of the current one.
 pub const HYSTERESIS: f32 = 5.;
 /// A drag held this near a scrolling column's top or bottom scrolls it ...
@@ -49,19 +45,6 @@ pub fn move_spring(t: &Tokens) -> Spring {
         Spring::settling(MOVE_SETTLING)
     }
 }
-/// Standard ease-out for the timed fades and glides (0–1 in, 0–1 out).
-pub fn ease_out(progress: f32) -> f32 {
-    1. - (1. - progress.clamp(0., 1.)).powi(3)
-}
-/// How far a timed transition that began at `since` and lasts `seconds` has
-/// come, eased; 1 under Reduce Motion.
-pub fn progress(since: Instant, seconds: f32, t: &Tokens) -> f32 {
-    if t.accessibility.reduce_motion {
-        return 1.;
-    }
-    ease_out(now().saturating_duration_since(since).as_secs_f32() / seconds)
-}
-
 thread_local! {
     static FRAME_TIME: Cell<Option<Instant>> = const { Cell::new(None) };
 }
@@ -130,7 +113,7 @@ pub fn autoscroll(y: f32, top: f32, bottom: f32) -> f32 {
 }
 
 /// Tabs sliding along their strip to the places a layout change gave them
-/// (a tab dragged between its neighbours): each tab's horizontal offset from
+/// (a layout command that reorders tabs): each tab's horizontal offset from
 /// its new place, arriving on [`move_spring`]. A tab that came from another
 /// header appears in place.
 #[derive(Default)]
@@ -140,24 +123,20 @@ pub struct TabSlides {
     seen: HashMap<String, (f32, f32)>,
     moving: HashMap<String, Animated<1>>,
     clock: Clock,
-    drop_deadline: Option<Instant>,
     /// The next frame follows a discrete change: tabs that moved slide.
     pub armed: bool,
     arming: bool,
 }
 impl TabSlides {
-    pub(crate) fn arm_drop(&mut self) {
-        self.armed = true;
-        self.drop_deadline = Some(now() + Duration::from_secs_f64(MOVE));
+    pub(crate) fn snap(&mut self) {
+        self.armed = false;
+        self.arming = false;
+        self.moving.clear();
+        self.clock.rest();
     }
     /// Start of a frame: steps what is under way.
     pub fn begin(&mut self) {
         let now = now();
-        if self.drop_deadline.is_some_and(|deadline| now >= deadline) {
-            self.drop_deadline = None;
-            self.moving.clear();
-            self.armed = false;
-        }
         let dt = self.clock.tick(now);
         self.moving.retain(|_, slide| slide.step(dt));
         self.arming = std::mem::take(&mut self.armed);
