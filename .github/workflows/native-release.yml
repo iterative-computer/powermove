@@ -27,10 +27,6 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: '14.0'
       CARGO_BUILD_JOBS: '3'
       CARGO_INCREMENTAL: '0'
-      PM_NATIVE_STAGE: ${{ runner.temp }}/native-release
-      PM_FFMPEG_OUT: ${{ runner.temp }}/pm-ffmpeg/out
-      PM_FFMPEG_DOWNLOADS: ${{ runner.temp }}/pm-ffmpeg/downloads
-      PM_FFMPEG_WORK: ${{ runner.temp }}/pm-ffmpeg/work
 
     steps:
       - name: Check run authorization
@@ -49,6 +45,12 @@ jobs:
           test "$GITHUB_REF" = refs/heads/chike/native-release-dry
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$(uname -m)" = arm64
+          {
+            printf 'PM_NATIVE_STAGE=%s/native-release\n' "$RUNNER_TEMP"
+            printf 'PM_FFMPEG_OUT=%s/pm-ffmpeg/out\n' "$RUNNER_TEMP"
+            printf 'PM_FFMPEG_DOWNLOADS=%s/pm-ffmpeg/downloads\n' "$RUNNER_TEMP"
+            printf 'PM_FFMPEG_WORK=%s/pm-ffmpeg/work\n' "$RUNNER_TEMP"
+          } >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v4
         with:
