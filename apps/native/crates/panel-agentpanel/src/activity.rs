@@ -248,10 +248,12 @@ impl Trace {
                     "failed" | "interrupted" => "error",
                     _ => "done",
                 };
-                let summary = task["summary"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| task["progress"].as_str().unwrap_or_default());
+                let summary = match task["status"].as_str() {
+                    Some("queued" | "running" | "waiting") => task["progress"].as_str(),
+                    Some("cancelled") => None,
+                    _ => task["summary"].as_str(),
+                }
+                .unwrap_or_default();
                 let output = serde_json::from_str::<Value>(summary)
                     .ok()
                     .filter(|v| v["summary"].is_string())
@@ -453,6 +455,10 @@ impl TranscriptIndex {
     pub fn build(messages: &Rows) -> Self {
         let mut out = Self::default();
         for message in &messages.order {
+            // Older archives stored the host's rollback notice as a reply.
+            if message.value["role"] == "assistant" && message.value["rolledBack"] == true {
+                continue;
+            }
             if message.value["role"] == "trace"
                 && let Some(steps) = message.value["steps"].as_array()
             {

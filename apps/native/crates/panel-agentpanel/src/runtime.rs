@@ -570,7 +570,7 @@ impl ProviderRuns {
                     Ok(event) => Some(event),
                     Err(TryRecvError::Empty) => None,
                     Err(TryRecvError::Disconnected) => {
-                        Some(Event::Stopped("Agent runtime stopped.".into()))
+                        Some(Event::Stopped(pm_agents::RUNTIME_STOPPED.into()))
                     }
                 };
             }

@@ -278,22 +278,13 @@ impl Session {
     }
     fn archive_result(&mut self) -> Result<()> {
         if let Some(result) = self.result.clone() {
-            let text = [
-                result["summary"].as_str().unwrap_or("Agent result"),
-                result["verificationError"].as_str().unwrap_or(""),
-            ]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
             if let Some(id) = &self.result_message {
                 self.conversation.update(id, |v| {
                     v["nativeResult"] = result;
-                    v["text"] = json!(text);
                 })?;
             } else {
                 self.result_message = Some(
-                    self.append(json!({"role":"assistant","text":text,"nativeResult":result}))?,
+                    self.append(json!({"role":"assistant","nativeResult":result}))?,
                 );
             }
         }
@@ -623,25 +614,6 @@ impl Panel {
         }
         Ok(())
     }
-    /// The run `run`'s edits were rolled back after it ended (it did not
-    /// keep them): its thread says so after whatever the run said, so a
-    /// "Done" never stands beside a project that lost the change (PM-507).
-    /// `false`: no thread here had that run.
-    pub fn note_rolled_back(&mut self, run: &str, text: &str) -> Result<bool> {
-        let Some(id) = self
-            .sessions
-            .iter()
-            .find(|(_, s)| {
-                s.last_run.as_deref() == Some(run) || s.run.as_ref().is_some_and(|r| r.id == run)
-            })
-            .map(|(id, _)| id.clone())
-        else {
-            return Ok(false);
-        };
-        self.session_mut(&id)?
-            .append(json!({"role":"assistant","text":text,"rolledBack":true}))?;
-        Ok(true)
-    }
     pub fn save(&mut self, store: &mut impl Store, now: u64) -> Result<()> {
         let ids: Vec<_> = self.sessions.keys().cloned().collect();
         for id in ids {
@@ -759,13 +731,13 @@ impl Panel {
                     pm_agents::RunResult::Failure {
                         error, cancelled, ..
                     } => Update::Complete {
-                        text: error.clone(),
+                        text: pm_agents::runtime_exit_error(error).to_owned(),
                         error: true,
                         cancelled: *cancelled,
                     },
                 }),
                 pm_agents::Event::Stopped(reason) if run.is_some() => Some(Update::Complete {
-                    text: reason.clone(),
+                    text: pm_agents::runtime_exit_error(reason).to_owned(),
                     error: true,
                     cancelled: false,
                 }),
@@ -1256,7 +1228,8 @@ impl Panel {
                 error,
                 cancelled,
             } => {
-                let recovery_record = if error && s.resume_request.is_some() {
+                let failed = error && !cancelled;
+                let recovery_record = if failed && s.resume_request.is_some() {
                     json!({"lastRunId":run_id,"nativeRunRequest":s.admitted_request,"nativeLiveTrace":s.trace.rows.values().cloned().collect::<Vec<_>>(),"conversation":s.conversation.values().cloned().collect::<Vec<_>>()})
                 } else {
                     Value::Null
@@ -1292,8 +1265,9 @@ impl Panel {
                 for id in held {
                     s.change_question(&id, |q| q["status"] = json!("closed"))?;
                 }
-                // A failure is retained even if partial text was streamed.
-                if error || !spoke && !text.is_empty() {
+                // Cancelled runs keep their archived trace. Only actual reply
+                // text or an actionable failure gets its own transcript row.
+                if !cancelled && (error || !spoke && !text.trim().is_empty()) {
                     s.append(json!({"role":"assistant","text":text,"error":error}))?;
                 }
                 self.retired_runs.insert(run_id.into());
@@ -1308,7 +1282,7 @@ impl Panel {
                     Phase::Prompt
                 };
                 s.stop_error = None;
-                if error && s.resume_request.is_some() {
+                if failed && s.resume_request.is_some() {
                     s.recovery = Some(recovery::notice(&recovery_record));
                 }
                 s.resume_request = None;

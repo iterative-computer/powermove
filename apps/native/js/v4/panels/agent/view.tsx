@@ -1482,7 +1482,6 @@ const UserMessage = memo(
   (a, b) =>
     a.answering === b.answering && JSON.stringify(a.m) === JSON.stringify(b.m),
 );
-const STOPPED = /\b(cancell?ed|stopped)\b/i;
 const MEDIA_KIND: Record<string, string> = {
   image: "Image",
   video: "Video",
@@ -1501,29 +1500,6 @@ function AssistantMessageView({
   const v = m.value;
   const text = str(v.text);
   const working = s.runId !== null;
-  // A run the person stopped is not a fault: it reads as a plain line with
-  // the retry it still deserves (the original's plain notice).
-  if (v.error === true && STOPPED.test(text) && text.length < 200)
-    return (
-      <div
-        role="listitem"
-        label={text}
-        metadata={{ rowId: m.rowId }}
-        style={{ ...column, gap: t("metrics.text_padding") }}
-      >
-        <text style={{ ...quiet, ...shrink }}>{plain(text)}</text>
-        <div style={row}>
-          <UI.PushButton
-            id={`error-${m.key}-retry`}
-            label="Try Again"
-            disabled={working}
-            onClick={
-              working ? undefined : () => send({ type: "retry", id: m.rowId })
-            }
-          />
-        </div>
-      </div>
-    );
   if (v.error === true)
     return (
       <div
@@ -1714,6 +1690,13 @@ function PlanPreview({ s, send }: { s: Snapshot; send: Send }) {
     </div>
   );
 }
+const generatedResultSummaries = new Set([
+  "Agent result",
+  "Agent changes",
+  "Applied agent plan",
+  "This plan made no changes.",
+]);
+
 function Result({
   s,
   send,
@@ -1729,18 +1712,26 @@ function Result({
   const ready =
     current && s.phase === "result" && s.runId === null && !s.composerDisabled;
   const extensions = Array.isArray(result.extensions) ? result.extensions : [];
+  const warning = str(result.verificationError);
+  const summary = str(result.summary);
+  // Earlier receipts combined the summary and the warning into saved prose.
+  const textWithoutWarning =
+    warning && text.endsWith(`\n\n${warning}`)
+      ? text.slice(0, -(warning.length + 2))
+      : text === warning
+        ? ""
+        : text;
+  const prose = textWithoutWarning || summary;
   return (
     <div role="listitem" label="Rendered result" style={card}>
       <text style={{ ...faint, fontWeight: t("typography.semibold_weight") }}>
         Rendered result
       </text>
       <text style={strong}>Review the actual result</text>
-      <Prose
-        text={text || str(result.summary) || "The rendered change is ready."}
-      />
-      {str(result.verificationError) && (
+      {prose && !generatedResultSummaries.has(prose) && <Prose text={prose} />}
+      {warning && (
         <text role="status" style={quiet}>
-          {str(result.verificationError)}
+          {warning}
         </text>
       )}
       {extensions.map((entry, index) => {

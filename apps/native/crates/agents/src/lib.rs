@@ -59,6 +59,18 @@ impl Provider {
     }
 }
 
+/// Lifecycle fallback when a runtime has no specific exit diagnostic.
+pub const RUNTIME_STOPPED: &str = "Agent runtime stopped.";
+
+/// Display a diagnostic when an unfinished run receives the generic marker.
+pub fn runtime_exit_error(reason: &str) -> &str {
+    if reason == RUNTIME_STOPPED {
+        "Agent runtime exited without a result."
+    } else {
+        reason
+    }
+}
+
 /// Public result shape emitted by the clients (shared/ipc.ts).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]

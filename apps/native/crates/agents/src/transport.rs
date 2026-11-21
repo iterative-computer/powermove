@@ -289,7 +289,7 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
         let now = || start.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let mut lines = Lines::new(1024 * 1024);
         let mut closing = None;
-        let mut reason = "Agent runtime stopped.".to_string();
+        let mut reason = crate::RUNTIME_STOPPED.to_owned();
         let mut eof = false;
         let mut initial = Effects {
             outgoing: initial,
@@ -399,6 +399,13 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
             for e in client.exited(status, message).events {
                 let _ = etx.try_send(e);
             }
+        }
+        if eof
+            && reason == crate::RUNTIME_STOPPED
+            && let Ok(Some(status)) = child.try_wait()
+            && !status.success()
+        {
+            reason = format!("Agent runtime exited without a result ({status}).");
         }
         terminate(&mut child);
         // A slow subscriber cannot keep the runtime alive. After termination the

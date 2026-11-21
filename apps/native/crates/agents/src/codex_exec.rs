@@ -215,13 +215,13 @@ impl Client {
     pub fn exited(&mut self, code: Option<i32>, output: Option<String>) -> Effects {
         let mut e = Effects::default();
         let value = output.unwrap_or_else(|| self.final_text.clone());
-        let result = if code == Some(0) && !value.is_empty() {
-            RunResult::success(value, self.access)
-        } else {
-            RunResult::failure(
-                "Codex generation failed or completed without a result.",
+        let result = match code {
+            Some(0) => RunResult::success(value, self.access),
+            Some(code) => RunResult::failure(
+                format!("Codex exited without a result (exit code {code})."),
                 false,
-            )
+            ),
+            None => RunResult::failure("Codex exited without a result.", false),
         };
         self.finish(result, &mut e);
         e

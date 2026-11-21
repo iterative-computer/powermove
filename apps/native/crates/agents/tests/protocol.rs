@@ -382,11 +382,8 @@ fn item_without_turn_identity_cannot_become_the_answer() {
     assert!(e.events.iter().all(|e| !matches!(e, Event::Trace { .. })));
     let e=c.receive(json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"completed"}}}),0);
     assert!(matches!(
-        &e.events[0],
-        Event::Completed {
-            result: RunResult::Failure { .. },
-            ..
-        }
+        e.events.as_slice(),
+        [Event::Completed { result: RunResult::Success { text, .. }, .. }] if text.is_empty()
     ));
 }
 #[test]
@@ -493,4 +490,53 @@ fn cancellation_settles_questions_in_authored_arrival_order_after_interrupt() {
         ]
     );
     assert_eq!(completed(&e), 1);
+}
+
+#[test]
+fn provider_turns_that_complete_without_text_are_successful() {
+    let codex = started().receive(
+        json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"completed"}}}),
+        0,
+    );
+    let claude = claude(Access::Editor).receive(json!({"type":"result","subtype":"success"}));
+    let mut exec = pm_agents::codex_exec::Client::new(
+        "a".into(),
+        Authority::new(Access::Editor, ApprovalMode::Supervised, false).unwrap(),
+        0,
+    );
+    let exited = exec.exited(Some(0), None);
+    for effect in [codex, claude, exited] {
+        assert!(matches!(
+            effect.events.as_slice(),
+            [Event::Completed { result: RunResult::Success { text, .. }, .. }] if text.is_empty()
+        ), "{:?}", effect.events);
+    }
+}
+
+#[test]
+fn nonzero_exec_exit_stays_a_failure() {
+    let mut exec = pm_agents::codex_exec::Client::new(
+        "a".into(),
+        Authority::new(Access::Editor, ApprovalMode::Supervised, false).unwrap(),
+        0,
+    );
+    assert!(matches!(
+        exec.exited(Some(1), None).events.as_slice(),
+        [Event::Completed { result: RunResult::Failure { cancelled: false, .. }, .. }]
+    ));
+}
+
+#[test]
+fn actual_provider_failure_keeps_its_diagnostic() {
+    let mut client = started();
+    let failure = "The provider stopped responding and timed out.";
+    let effect = client.receive(
+        json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"failed","error":{"message":failure}}}}),
+        0,
+    );
+    assert!(matches!(
+        effect.events.as_slice(),
+        [Event::Completed { result: RunResult::Failure { error, cancelled: false, .. }, .. }]
+            if error == failure
+    ));
 }

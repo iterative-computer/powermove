@@ -339,56 +339,6 @@ impl AgentState {
 }
 pub(crate) type SharedAgent = Arc<Mutex<AgentState>>;
 
-/// Every live Agent panel, for news that arrives from outside its window
-/// (a run's tool session closing).
-type Registered = (
-    std::sync::Weak<Mutex<AgentState>>,
-    std::sync::Weak<AgentLink>,
-    KernelHandle,
-    bool,
-);
-static AGENTS: Mutex<Vec<Registered>> = Mutex::new(Vec::new());
-pub(crate) fn register(
-    state: &SharedAgent,
-    link: &Arc<AgentLink>,
-    kernel: &KernelHandle,
-    application: bool,
-) {
-    let mut agents = AGENTS.lock().unwrap_or_else(|e| e.into_inner());
-    agents.retain(|(state, ..)| state.strong_count() > 0);
-    agents.push((
-        Arc::downgrade(state),
-        Arc::downgrade(link),
-        kernel.clone(),
-        application,
-    ));
-}
-/// What a thread says when its run's edits were rolled back after it ended.
-pub const ROLLED_BACK: &str = "This run's changes were rolled back: it ended without keeping them, so the project is as it was before the run. Edit › Undo brings them back.";
-/// A run's tool session closed without keeping its edits and rolled them
-/// back (PM-507): the thread whose run it was says so, at once, whether or
-/// not the run is still delivering. Any thread may call this.
-pub fn rolled_back(run: &str) {
-    let agents: Vec<Registered> = AGENTS.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    for (state, link, kernel, application) in agents {
-        let Some(state) = state.upgrade() else {
-            continue;
-        };
-        let mut state = state.shared();
-        if !matches!(state.panel.note_rolled_back(run, ROLLED_BACK), Ok(true)) {
-            continue;
-        }
-        let _ = state
-            .panel
-            .save(&mut KernelStore::new(kernel, application), now());
-        drop(state);
-        if let Some(link) = link.upgrade() {
-            link.touch();
-            link.publish_now();
-        }
-        return;
-    }
-}
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
