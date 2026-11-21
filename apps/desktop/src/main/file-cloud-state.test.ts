@@ -1,6 +1,14 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { inspectFileCloudState, requireLocalMedia } from './file-cloud-state';
+const addon = vi.hoisted(() => ({ cloudFileState: vi.fn() }));
+vi.mock('@powermove/macos-haptics', () => ({ default: addon }));
 afterEach(() => vi.useRealTimers());
+
+it.skipIf(process.platform !== 'darwin')('reads cloud state from the packaged CommonJS addon', async () => {
+  addon.cloudFileState.mockResolvedValue('icloud');
+  await expect(inspectFileCloudState('/synthetic.pmv')).resolves.toBe('icloud');
+  expect(addon.cloudFileState).toHaveBeenCalledWith('/synthetic.pmv');
+});
 
 it.each(['icloud', 'cloud'] as const)('explains that %s media needs a download before conversion', async state => {
   const inspect = vi.fn().mockResolvedValue(state);
