@@ -1284,7 +1284,6 @@ fn place(key: usize, apply: bool) -> bool {
             }
         }
         // From GPUI's frame in its parent (P-EMBED).
-        let g = state.gpui.frame();
         let visible = intersection(bounds, clip);
         let hidden = visible.size.width <= 0.
             || visible.size.height <= 0.
@@ -1295,13 +1294,7 @@ fn place(key: usize, apply: bool) -> bool {
         // present: a panel of number fields made every frame of its scroll
         // one.
         let unseen = hidden && state.wrapper.isHidden();
-        let frame = NSRect::new(
-            NSPoint::new(
-                g.origin.x + visible.origin.x,
-                g.origin.y + g.size.height - visible.origin.y - visible.size.height,
-            ),
-            visible.size,
-        );
+        let frame = crate::composition::hosted_rect(&state.gpui, &state.wrapper, visible);
         if state.wrapper.frame() != frame {
             moved |= !unseen;
             if apply {
@@ -1364,18 +1357,11 @@ fn place(key: usize, apply: bool) -> bool {
             }
         }
         if let Some((host, indicator)) = &state.caret {
-            let g = state.gpui.frame();
             let focused = state.editing.get();
             match state.caret_staged.get().filter(|_| focused) {
                 Some((rect, clip)) => {
                     let shown = intersection(rect, clip);
-                    let frame = NSRect::new(
-                        NSPoint::new(
-                            g.origin.x + rect.origin.x,
-                            g.origin.y + g.size.height - rect.origin.y - rect.size.height,
-                        ),
-                        rect.size,
-                    );
+                    let frame = crate::composition::hosted_rect(&state.gpui, host, rect);
                     let visible = shown.size.width > 0. && shown.size.height > 0.;
                     if host.frame() != frame {
                         moved = true;

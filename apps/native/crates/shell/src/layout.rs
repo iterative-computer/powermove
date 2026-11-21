@@ -76,57 +76,51 @@ impl Group {
         &self.tabs[self.active.min(self.tabs.len() - 1)]
     }
 }
-/// Content-width tab titles. Tabs that do not fit fold into the trailing More
-/// Panels menu, whose hit square is always reserved; the active tab always
-/// stays shown beside the leading tabs that fit. A title truncates only when
-/// the active tab alone is wider than the room left beside More Panels
-/// (`active_limit`).
-/// The caller reserves space for header tools before asking for this track.
-#[derive(Clone, Debug, PartialEq)]
+pub const MIN_TAB_WIDTH: f32 = 72.;
+pub const MAX_ACTIVE_TAB_FLOOR: f32 = 120.;
+
+/// Widths in tab order. The caller reserves space for gaps and header tools.
 pub struct TabTrack {
-    pub visible: Vec<usize>,
-    pub overflow: Vec<usize>,
-    /// Width the active tab must fit in, when it cannot take its full title.
-    pub active_limit: Option<f32>,
+    pub widths: Vec<f32>,
+    pub scroll: f32,
 }
+
 impl Group {
-    /// `widths[i]` is the room tab `i` takes, padding and spacing included.
-    pub fn tab_track(&self, available: f32, widths: &[f32], tokens: &Tokens) -> TabTrack {
-        let n = self.tabs.len();
-        let width = |i: usize| widths.get(i).copied().unwrap_or(tokens.metrics.hit * 3.);
-        if n == 0 || (0..n).map(width).sum::<f32>() <= available {
+    pub fn tab_track(&self, available: f32, widths: &[f32]) -> TabTrack {
+        let Some(active) = self.tabs.len().checked_sub(1).map(|last| self.active.min(last)) else {
+            return TabTrack { widths: Vec::new(), scroll: 0. };
+        };
+        let count = self.tabs.len();
+        let active_natural = widths.get(active).copied().unwrap_or(MIN_TAB_WIDTH);
+        let active_floor = active_natural.min(MAX_ACTIVE_TAB_FLOOR);
+        let inactive_floor = MIN_TAB_WIDTH * (count - 1) as f32;
+        let floor = inactive_floor + active_floor;
+        let mut widths: Vec<_> = (0..count)
+            .map(|i| widths.get(i).copied().unwrap_or(MIN_TAB_WIDTH).max(MIN_TAB_WIDTH))
+            .collect();
+        let available = available.max(0.);
+        if available <= floor {
+            widths.fill(MIN_TAB_WIDTH);
+            widths[active] = active_floor;
             return TabTrack {
-                visible: (0..n).collect(),
-                overflow: vec![],
-                active_limit: None,
+                widths,
+                scroll: floor - available,
             };
         }
-        // The More Panels chevron takes one hit square.
-        let room = (available - tokens.metrics.hit).max(0.);
-        let active = self.active.min(n - 1);
-        let active_width = width(active);
-        let mut remaining = room - active_width;
-        let mut first_hidden = 0;
-        for i in 0..n {
-            if i != active {
-                let tab_width = width(i);
-                if tab_width > remaining {
-                    break;
-                }
-                remaining -= tab_width;
-            }
-            first_hidden = i + 1;
+
+        // Reserve the active label as long as all the inactive tabs can still
+        // have their minimum. Share the rest, returning surplus from short tabs
+        // to their neighbours with longer names.
+        widths[active] = active_natural.min(available - inactive_floor);
+        let mut remaining = available - widths[active];
+        let mut inactive: Vec<_> = (0..widths.len()).filter(|&i| i != active).collect();
+        inactive.sort_by(|&a, &b| widths[a].total_cmp(&widths[b]));
+        for (index, i) in inactive.iter().copied().enumerate() {
+            let share = remaining / (inactive.len() - index) as f32;
+            widths[i] = widths[i].min(share.max(MIN_TAB_WIDTH));
+            remaining -= widths[i];
         }
-        let mut visible: Vec<_> = (0..first_hidden).collect();
-        if active >= first_hidden {
-            visible.push(active);
-        }
-        let overflow = (first_hidden..n).filter(|&i| i != active).collect();
-        TabTrack {
-            visible,
-            overflow,
-            active_limit: (active_width > room).then_some(room),
-        }
+        TabTrack { widths, scroll: 0. }
     }
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2672,10 +2666,29 @@ mod restored_panel_title_tests {
 #[cfg(test)]
 mod tab_track_tests {
     use super::*;
-    use pm_design::{Accessibility, Scheme};
-
     #[test]
-    fn dock_tab_resize_keeps_the_leading_run_and_the_active_tab() {
+    fn dock_tabs_reach_each_floor_before_scrolling() {
+        let mut group = Group {
+            tabs: (0..5).map(|index| index.to_string()).collect(),
+            active: 4,
+            size: None,
+            collapsed: false,
+        };
+        let widths = [89., 104., 152., 128., 64.];
+        let all = group.tab_track(352., &widths);
+        assert_eq!(all.widths, [72., 72., 72., 72., 64.]);
+        assert_eq!(all.scroll, 0.);
+        assert_eq!(group.tab_track(351., &widths).scroll, 1.);
+        group.active = 2;
+        let above_floor = group.tab_track(433., &widths);
+        assert_eq!(above_floor.widths, [72., 72., 145., 72., 72.]);
+        assert_eq!(above_floor.scroll, 0.);
+        let beyond_floor = group.tab_track(392., &widths);
+        assert_eq!(beyond_floor.widths, [72., 72., 120., 72., 72.]);
+        assert_eq!(beyond_floor.scroll, 16.);
+    }
+    #[test]
+    fn dock_tabs_compress_in_order_and_scroll_only_at_the_minimum() {
         let group = Group {
             tabs: ["Properties", "Anchor Point", "Pexels", "Pong", "Voiceover"]
                 .map(str::to_owned)
@@ -2684,31 +2697,30 @@ mod tab_track_tests {
             size: None,
             collapsed: false,
         };
-        let t = Tokens::new(Scheme::Dark, Accessibility::default());
         let widths = [76., 100., 60., 46., 80.];
-        let mut previous_count = 0;
-        for available in 30..=450 {
+        assert_eq!(
+            group.tab_track(500., &widths).widths,
+            [76., 100., 72., 72., 80.]
+        );
+        assert_eq!(
+            group.tab_track(350., &widths).widths,
+            [72., 72., 72., 72., 80.]
+        );
+        assert_eq!(
+            group.tab_track(370., &widths).widths,
+            [73., 73., 72., 72., 80.]
+        );
+        for available in 0..=450 {
             let available = available as f32;
-            let track = group.tab_track(available, &widths, &t);
-            assert!(track.visible.len() >= previous_count, "{available}px");
-            previous_count = track.visible.len();
-            let leading = [180., 280., 340.]
-                .iter()
-                .take_while(|&&threshold| available >= threshold)
-                .count();
-            let expected: Vec<_> = if available >= 362. {
-                (0..5).collect()
-            } else {
-                (0..leading).chain([4]).collect()
-            };
-            let overflow: Vec<_> = (0..5).filter(|i| !expected.contains(i)).collect();
-            assert_eq!(track.visible, expected, "{available}px");
-            assert_eq!(track.overflow, overflow, "{available}px");
-            assert_eq!(
-                track.active_limit,
-                (available < 104.).then_some((available - 24.).max(0.)),
-                "{available}px",
-            );
+            let track = group.tab_track(available, &widths);
+            assert_eq!(track.widths.len(), widths.len());
+            assert!(track.widths.iter().all(|&w| w >= 72.));
+            assert_eq!(track.scroll, (368. - available).max(0.));
+            let total: f32 = track.widths.iter().sum();
+            assert!(total <= available + track.scroll + 0.01);
+            if track.scroll > 0. {
+                assert_eq!(track.widths, [72., 72., 72., 72., 80.]);
+            }
         }
     }
 }

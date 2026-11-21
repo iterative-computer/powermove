@@ -8,8 +8,28 @@
 //! unpaced async nextDrawable path exhausted the three-drawable pool on screen.
 use objc2::{MainThreadMarker, class, msg_send, rc::Retained};
 use objc2_app_kit::NSView;
-use objc2_foundation::NSPoint;
+use objc2_foundation::{NSPoint, NSRect};
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
+/// Convert a paint-space rect, whose y runs down from the editor's top, to
+/// the actual AppKit parent that owns the hosted view.
+pub(crate) fn hosted_rect(editor: &NSView, view: &NSView, rect: NSRect) -> NSRect {
+    let bounds = editor.bounds();
+    let local = NSRect::new(
+        NSPoint::new(
+            bounds.origin.x + rect.origin.x,
+            bounds.origin.y + if editor.isFlipped() {
+                rect.origin.y
+            } else {
+                bounds.size.height - rect.origin.y - rect.size.height
+            },
+        ),
+        rect.size,
+    );
+    // Lazy control wrappers use the editor's parent on their first paint.
+    let parent = unsafe { view.superview().or_else(|| editor.superview()) };
+    editor.convertRect_toView(local, parent.as_deref())
+}
 
 /// What a host's present callback did to native slot geometry this frame.
 ///

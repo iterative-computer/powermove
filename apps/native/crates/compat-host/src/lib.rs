@@ -13,7 +13,17 @@ pub use transport::*;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(target_os = "macos")]
-pub use mac::{MacDomHost, SheetCall, SheetGate, StoreDataStores, set_sheet_gate};
+pub use mac::{
+    MacDomHost, PanelSnapshotCache, SheetCall, SheetGate, StoreDataStores, set_sheet_gate,
+};
+#[cfg(target_os = "macos")]
+mod panel_cache;
+#[cfg(target_os = "macos")]
+mod panel_document;
+#[cfg(target_os = "macos")]
+mod panel_renderers;
+#[cfg(target_os = "macos")]
+mod panel_slot;
 #[cfg(target_os = "macos")]
 pub mod visual;
 
