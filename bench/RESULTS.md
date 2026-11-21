@@ -11,7 +11,7 @@ On this VM, **Native wins cold launch, memory and edit-scene exports; Electron w
 - **Export, scene B (video edit):** Native is about 2.9× faster for H.264 (3.9 s vs 11.1 s, 0.35×) and 2.3× faster for ProRes 4444 (6.6 s vs 15.3 s).
 - **Export, scenes A and C (graphics/effects):** Native is slower. A: H.264 1.9× slower (17.2 s vs 8.9 s). C: H.264 3.4× slower (63.7 s vs 18.7 s), ProRes 4444 3.8× slower.
 - **Memory:** Native uses less in almost every case, most on the video edit. Scene B: 578 MB idle vs 1322 MB (0.44×), 342 MB vs 2405 MB peak during H.264 export (0.14×). The one exception is scene A playback (706 vs 689 MB, 1.02×).
-- **Bugs that affect use:** Electron can't open `.pmv` files from disk in this production build. Native's ProRes exports drop the audio track.
+- **Bug that affects use:** Electron can't open `.pmv` files from disk in this production build.
 
 
 **After Effects: not run (owner decision).** The owner's Adobe sign-in goes through a school SSO portal that does not work on this VM, and the owner then decided not to run AE anywhere. Every AE column below says so. `bench/ae/build_scenes.jsx` (an untested ExtendScript port of the three scenes) is kept in case AE is ever added later.
@@ -134,17 +134,18 @@ All **99** renders checked are 1920×1080, exactly **300 frames**, **10.00 s**. 
 | Electron H.264 | H.264 High | yuv420p | AAC |
 | Electron ProRes | ProRes 4444 | yuv444p12le | PCM 24-bit |
 | Native H.264 | H.264 High | yuv420p | AAC |
-| Native ProRes 422 | ProRes 422 (Standard) | yuv422p10le | **none** (bug) |
-| Native ProRes 4444 | ProRes 4444 | yuv444p12le | **none** (bug) |
+| Native ProRes 422 | ProRes 422 (Standard) | yuv422p10le | PCM 24-bit in follow-up |
+| Native ProRes 4444 | ProRes 4444 | yuv444p12le | PCM 24-bit in follow-up |
+
+**Audio correction:** We retract the missing-audio finding because the verifier read a blank CSV line before the PCM codec name. The .19 build produced audible, synchronized 24-bit PCM in ProRes 422 and 4444 in a local follow-up using JSON probing and audio decoding. The original VM CSV is retained as recorded.
 
 Scenes A and C have no audio tracks, so their renders have no audio in either app (as expected). I compared the contact sheets by eye: Electron and Native outputs of the same scene match frame for frame (layout, precomps, blur, crossfades at 3.2 s and 6.5 s, glow, levels, adjustment layer). I found no wrong renders.
 
 ## Bugs found
 
 1. **Electron v1: opening any `.pmv` from disk fails** in the production build (`main` @ `ea49609cb`). Both macOS open-file and the renderer's file-open path (`PM.openFiles`) show the toast *"Could not open project: (intermediate value).cloudFileState is not a function"*, and the project is not opened. The cause: `src/main/file-cloud-state.ts` calls `(await import('@powermove/macos-haptics')).cloudFileState(file)`, but that package is CommonJS and exports an object literal with method shorthand (`module.exports = { cloudFileState(...) {...} }`). Node's CJS named-export detection does not see that, so the function exists only on `.default`. Repro: build with `electron-builder --mac --dir`, launch, File → Open… any `.pmv` (or `open -a Powermove.app scene.pmv`). Workaround used here: open from the project library (see Method).
-2. **Native: ProRes exports drop the audio.** `export_video {format:"prores", profile:"422"|"4444", audio:true}` of scene B gives a `.mov` with no audio stream, in all 13 Native ProRes renders of scene B. The H.264 export of the same project has AAC audio. Repro: open `scene-B.pmv` in Native, export ProRes with audio on, then run `ffprobe -show_streams`.
-3. **Native playback skips frames on this VM.** It renders about 11 fps of 30 in every scene, including the simple video edit. The engine trace shows content frames advancing 2–6 frames at a time. This is recorded as a result, not as a crash.
-4. Not a bug, but a limitation: Electron's ProRes export is hard-coded to ProRes 4444 (`src/main/render-encoder.ts`, `-profile:v 4`), so it cannot produce ProRes 422.
+2. **Native playback skips frames on this VM.** It renders about 11 fps of 30 in every scene, including the simple video edit. The engine trace shows content frames advancing 2–6 frames at a time. This is recorded as a result, not as a crash.
+3. Not a bug, but a limitation: Electron's ProRes export is hard-coded to ProRes 4444 (`src/main/render-encoder.ts`, `-profile:v 4`), so it cannot produce ProRes 422.
 
 No crashes or hangs in either app over the 36 app-runs (6 runs × 3 scenes × 2 apps, warm-ups included).
 
