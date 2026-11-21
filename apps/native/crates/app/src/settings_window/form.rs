@@ -1,5 +1,7 @@
 //! AppKit presentation of the Settings panel's semantic tree. The panel
 //! still owns its values, search results, actions and change listeners.
+mod agent_app_icons;
+
 use crate::{session::Controller, v4_compile::number_facts};
 use gpui::Context;
 use gpui_macos::native_text::{NativeTextSlot, TextEvent};
@@ -40,6 +42,7 @@ pub(crate) struct Form {
     publication: Option<Publication>,
     reveal: Option<String>,
     recorder: Option<Id>,
+    app_icon: agent_app_icons::AppIcon,
 }
 
 impl Form {
@@ -88,6 +91,7 @@ impl Form {
             publication: None,
             reveal: None,
             recorder: None,
+            app_icon: agent_app_icons::installed_app_icon,
         }
     }
 
@@ -150,6 +154,7 @@ impl Form {
             recorder: None,
             tokens,
             cx,
+            app_icon: self.app_icon,
         };
         let views = detail
             .map(|node| render.children(&node.children))
@@ -236,7 +241,13 @@ pub(crate) fn capture(inputs: &std::path::Path, output: &std::path::Path) -> any
                 scroll.setAppearance(Some(&appearance));
                 scroll.setDrawsBackground(true);
                 scroll.setBackgroundColor(&pm_shell::settings_window::form_background(false));
-                let form = std::cell::RefCell::new(Form::new(&scroll));
+                let mut form = Form::new(&scroll);
+                if name.ends_with("-apps-installed") {
+                    form.app_icon = agent_app_icons::capture_app_icon;
+                } else if name.ends_with("-apps-not-installed") {
+                    form.app_icon = |_| None;
+                }
+                let form = std::cell::RefCell::new(form);
                 let tokens = Tokens::new(scheme, Accessibility::default());
                 appearance.performAsCurrentDrawingAppearance(&block2::StackBlock::new(|| {
                     form.borrow_mut().layout(&publication, &tokens, None);
@@ -573,25 +584,48 @@ struct Row {
     body: Pile,
     line: Pile,
     space: Retained<NSView>,
+    app: Option<agent_app_icons::LeadingIcon>,
+    app_copy: Option<Pile>,
 }
 
 impl Row {
-    fn new(mtm: objc2::MainThreadMarker) -> Self {
-        let body = Pile::new(mtm, false, 2., ROW_INSET, ROW_PADDING);
-        let line = Pile::new(mtm, true, 8., 0., 0.);
+    fn new(
+        mtm: objc2::MainThreadMarker,
+        agent_app: Option<&str>,
+        app_icon: agent_app_icons::AppIcon,
+    ) -> Self {
+        let (padding, gap, line_height) = if agent_app.is_some() {
+            // AppKit's button alignment rect excludes part of its frame.
+            // Leave room for that inset so the text clears the button by 12 pt.
+            (10., 16., agent_app_icons::SIZE)
+        } else {
+            (ROW_PADDING, 8., ROW_HEIGHT - 2. * ROW_PADDING)
+        };
+        let body = Pile::new(mtm, false, 2., ROW_INSET, padding);
+        let line = Pile::new(mtm, true, gap, 0., 0.);
         line.stack
             .heightAnchor()
-            .constraintGreaterThanOrEqualToConstant(ROW_HEIGHT - 2. * ROW_PADDING)
+            .constraintGreaterThanOrEqualToConstant(line_height)
             .setActive(true);
+        let app = agent_app
+            .map(|id| agent_app_icons::LeadingIcon::new(mtm, id, app_icon, &body.stack, ROW_INSET));
         Self {
             body,
             line,
             space: flexible_space(mtm),
+            app,
+            app_copy: agent_app.map(|_| Pile::new(mtm, false, 2., 0., 0.)),
         }
     }
 
+    fn view(&self) -> &NSView {
+        self.app
+            .as_ref()
+            .map_or(&self.body.stack, |app| &app.container)
+    }
+
     fn set(
-        &self,
+        &mut self,
         leading: Option<Retained<NSView>>,
         trailing: Vec<Retained<NSView>>,
         footers: Vec<Retained<NSView>>,
@@ -603,6 +637,27 @@ impl Row {
                 NSLayoutConstraintOrientation::Horizontal,
             );
             views.push(leading);
+        }
+        if let Some(copy) = &self.app_copy {
+            views.extend(footers);
+            copy.set(&views);
+            let mut views = vec![Retained::into_super(copy.stack.clone())];
+            for view in &trailing {
+                if let Some(stack) = view.downcast_ref::<NSStackView>() {
+                    // Let the description use the remaining width at the
+                    // action's intrinsic size before it starts wrapping.
+                    for control in stack.arrangedSubviews().iter() {
+                        control.setContentHuggingPriority_forOrientation(
+                            NSLayoutPriorityDefaultHigh,
+                            NSLayoutConstraintOrientation::Horizontal,
+                        );
+                    }
+                }
+            }
+            views.extend(trailing);
+            self.line.set(&views);
+            self.body.set(&[Retained::into_super(self.line.stack.clone())]);
+            return;
         }
         views.push(self.space.clone());
         views.extend(trailing);
@@ -774,7 +829,7 @@ impl Widget {
         match self {
             Self::Pile(value) | Self::Header(value, ..) => &value.stack,
             Self::Group(value) => &value.box_view,
-            Self::Row(value) => &value.body.stack,
+            Self::Row(value) => value.view(),
             Self::Virtual(value) => &value.scroll,
             Self::Control(value) => value.view(),
             Self::Text { container, .. } => container,
@@ -796,6 +851,7 @@ struct Render<'a, 'cx> {
     recorder: Option<Id>,
     tokens: &'a pm_design::Tokens,
     cx: Option<&'a mut Context<'cx, Controller>>,
+    app_icon: agent_app_icons::AppIcon,
 }
 
 impl Render<'_, '_> {
@@ -993,7 +1049,11 @@ impl Render<'_, '_> {
             return self.control(node, kind, &value, options);
         }
         match layout(node) {
-            "row" => Widget::Row(Row::new(mtm)),
+            "row" => Widget::Row(Row::new(
+                mtm,
+                metadata(node)["agentApp"].as_str(),
+                self.app_icon,
+            )),
             "header" => Widget::Header(
                 Pile::new(mtm, true, ROW_INSET, ROW_INSET, ROW_INSET),
                 flexible_space(mtm),
