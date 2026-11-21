@@ -1,18 +1,18 @@
 #!/bin/bash
 # The versioned files go first. A single pointer exposes the appcast and policy.
 set -euo pipefail
-[[ "${PM_NATIVE_PUBLISH:-}" == true && "${GITHUB_EVENT_NAME:-}" == workflow_dispatch ]]
+[[ "${PM_NATIVE_PUBLISH:-}" == true && "${GITHUB_EVENT_NAME:-}" == workflow_dispatch ]] || exit 1
 version="${PM_NATIVE_VERSION:?}"
-[[ "$version" =~ ^[1-9][0-9]*[.][0-9]+[.][0-9]+$ ]]
-[[ "${GITHUB_REF:-}" == "refs/tags/native-v$version" ]]
-[[ "${AWS_DEFAULT_REGION:-}" == auto ]]
+[[ "$version" =~ ^[1-9][0-9]*[.][0-9]+[.][0-9]+$ ]] || exit 1
+[[ "${GITHUB_REF:-}" == "refs/tags/native-v$version" ]] || exit 1
+[[ "${AWS_DEFAULT_REGION:-}" == auto ]] || exit 1
 : "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
 stage="${PM_NATIVE_STAGE:?}"
 bucket=powermove-tars
 endpoint=https://98dbb6e46f4901896327e5ff4035d637.r2.cloudflarestorage.com
 prefix="native/$version"
 asset="Powermove-Native-$version-mac-arm64"
-[[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["mode"])' "$stage/evidence/verification.json")" == publish ]]
+[[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["mode"])' "$stage/evidence/verification.json")" == publish ]] || exit 1
 for file in "$asset.dmg" "$asset.zip" appcast.xml policy.json; do
   test -s "$stage/$file"
 done
@@ -26,14 +26,14 @@ put_versioned() {
   if [[ "$prior" == "$key" ]]; then
     echo "Checking existing $file"
   else
-    [[ -z "$prior" || "$prior" == None ]]
+    [[ -z "$prior" || "$prior" == None ]] || exit 1
     aws --endpoint-url "$endpoint" s3 cp "$stage/$file" "s3://$bucket/$key" \
       --content-type "$mime" --metadata "sha256=$sha" --only-show-errors
   fi
   [[ "$(aws --endpoint-url "$endpoint" s3api head-object --bucket "$bucket" --key "$key" \
-    --query 'Metadata.sha256' --output text)" == "$sha" ]]
+    --query 'Metadata.sha256' --output text)" == "$sha" ]] || exit 1
   [[ "$(aws --endpoint-url "$endpoint" s3api head-object --bucket "$bucket" --key "$key" \
-    --query 'ContentLength' --output text)" == "$size" ]]
+    --query 'ContentLength' --output text)" == "$size" ]] || exit 1
 }
 
 put_versioned "$asset.dmg" application/x-apple-diskimage
