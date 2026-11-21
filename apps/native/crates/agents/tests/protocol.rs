@@ -382,11 +382,8 @@ fn item_without_turn_identity_cannot_become_the_answer() {
     assert!(e.events.iter().all(|e| !matches!(e, Event::Trace { .. })));
     let e=c.receive(json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"completed"}}}),0);
     assert!(matches!(
-        &e.events[0],
-        Event::Completed {
-            result: RunResult::Failure { .. },
-            ..
-        }
+        e.events.as_slice(),
+        [Event::Completed { result: RunResult::Success { text, .. }, .. }] if text.is_empty()
     ));
 }
 #[test]
