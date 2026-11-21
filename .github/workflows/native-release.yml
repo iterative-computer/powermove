@@ -56,7 +56,7 @@ jobs:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: '1.3.14'
+          bun-version: '1.4.5'
 
       - name: Check packaged version against latest stable Electron release
         env:
@@ -77,6 +77,13 @@ jobs:
             printf 'PM_NATIVE_VERSION=%s\n' "$version"
           } >> "$GITHUB_ENV"
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s apps/native/packaging/tests -p 'test_*.py'
+
+      - name: Install locked JavaScript packages
+        run: |
+          set -euo pipefail
+          for package in v4 compat remote-dom; do
+            (cd "apps/native/js/$package" && bun install --frozen-lockfile)
+          done
 
       - uses: actions/download-artifact@v4
         with:
@@ -109,24 +116,25 @@ jobs:
           command -v bun
           python3 -c 'import shutil; assert shutil.disk_usage("/").free >= 8 * 1024**3, "Need 8 GiB of build space"'
 
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         id: ffmpeg
         with:
           path: ${{ runner.temp }}/pm-ffmpeg/downloads
           key: native-ffmpeg-sources-${{ hashFiles('engine/third_party/ffmpeg/sources.lock') }}
 
-      - name: Build pinned FFmpeg and prepare framework inputs
-        run: |
-          set -euo pipefail
-          engine/third_party/ffmpeg/build.sh
-          bash apps/native/packaging/prepare-native-release.sh inputs
+      - name: Build pinned FFmpeg
+        env:
+          PM_FFMPEG_JOBS: '3'
+        run: engine/third_party/ffmpeg/build.sh
 
-      - name: Install locked JavaScript packages
-        run: |
-          set -euo pipefail
-          for package in v4 compat remote-dom; do
-            (cd "apps/native/js/$package" && bun install --frozen-lockfile)
-          done
+      - uses: actions/cache/save@v4
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/pm-ffmpeg/downloads
+          key: ${{ steps.ffmpeg.outputs.cache-primary-key }}
+
+      - name: Prepare verified framework inputs
+        run: bash apps/native/packaging/prepare-native-release.sh inputs
 
       - name: Build the release app and helper binaries
         working-directory: apps/native
