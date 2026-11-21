@@ -585,6 +585,7 @@ struct Row {
     line: Pile,
     space: Retained<NSView>,
     app: Option<agent_app_icons::LeadingIcon>,
+    app_copy: Option<Pile>,
 }
 
 impl Row {
@@ -593,11 +594,18 @@ impl Row {
         agent_app: Option<&str>,
         app_icon: agent_app_icons::AppIcon,
     ) -> Self {
-        let body = Pile::new(mtm, false, 2., ROW_INSET, ROW_PADDING);
-        let line = Pile::new(mtm, true, 8., 0., 0.);
+        let (padding, gap, line_height) = if agent_app.is_some() {
+            // AppKit's button alignment rect excludes part of its frame.
+            // Leave room for that inset so the text clears the button by 12 pt.
+            (10., 16., agent_app_icons::SIZE)
+        } else {
+            (ROW_PADDING, 8., ROW_HEIGHT - 2. * ROW_PADDING)
+        };
+        let body = Pile::new(mtm, false, 2., ROW_INSET, padding);
+        let line = Pile::new(mtm, true, gap, 0., 0.);
         line.stack
             .heightAnchor()
-            .constraintGreaterThanOrEqualToConstant(ROW_HEIGHT - 2. * ROW_PADDING)
+            .constraintGreaterThanOrEqualToConstant(line_height)
             .setActive(true);
         let app = agent_app
             .map(|id| agent_app_icons::LeadingIcon::new(mtm, id, app_icon, &body.stack, ROW_INSET));
@@ -606,6 +614,7 @@ impl Row {
             line,
             space: flexible_space(mtm),
             app,
+            app_copy: agent_app.map(|_| Pile::new(mtm, false, 2., 0., 0.)),
         }
     }
 
@@ -621,11 +630,6 @@ impl Row {
         trailing: Vec<Retained<NSView>>,
         footers: Vec<Retained<NSView>>,
     ) {
-        let icon_title = self.app.as_ref().map(|_| {
-            leading
-                .clone()
-                .unwrap_or_else(|| Retained::into_super(self.line.stack.clone()))
-        });
         let mut views = Vec::new();
         if let Some(leading) = leading {
             leading.setContentCompressionResistancePriority_forOrientation(
@@ -633,6 +637,27 @@ impl Row {
                 NSLayoutConstraintOrientation::Horizontal,
             );
             views.push(leading);
+        }
+        if let Some(copy) = &self.app_copy {
+            views.extend(footers);
+            copy.set(&views);
+            let mut views = vec![Retained::into_super(copy.stack.clone())];
+            for view in &trailing {
+                if let Some(stack) = view.downcast_ref::<NSStackView>() {
+                    // Let the description use the remaining width at the
+                    // action's intrinsic size before it starts wrapping.
+                    for control in stack.arrangedSubviews().iter() {
+                        control.setContentHuggingPriority_forOrientation(
+                            NSLayoutPriorityDefaultHigh,
+                            NSLayoutConstraintOrientation::Horizontal,
+                        );
+                    }
+                }
+            }
+            views.extend(trailing);
+            self.line.set(&views);
+            self.body.set(&[Retained::into_super(self.line.stack.clone())]);
+            return;
         }
         views.push(self.space.clone());
         views.extend(trailing);
@@ -642,9 +667,6 @@ impl Row {
                 .chain(footers)
                 .collect::<Vec<_>>(),
         );
-        if let (Some(app), Some(title)) = (&mut self.app, icon_title) {
-            app.align_with_title(&title);
-        }
     }
 }
 

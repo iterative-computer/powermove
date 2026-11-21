@@ -1,14 +1,13 @@
 //! The icon next to a client in Settings › Agents › Other Agent Apps.
 use objc2::runtime::Bool;
-use objc2::{AnyThread, MainThreadMarker, Message, rc::Retained};
+use objc2::{AnyThread, MainThreadMarker, rc::Retained};
 use objc2_app_kit::{
     NSAccessibility, NSBezierPath, NSColor, NSImage, NSImageNameActionTemplate, NSImageScaling,
-    NSImageView, NSLayoutConstraint, NSView, NSWorkspace,
+    NSImageView, NSView, NSWorkspace,
 };
 use objc2_foundation::{NSBundle, NSData, NSPoint, NSRect, NSSize, NSString};
 
-// Measured from the title top through the first description line in an Agent row.
-const SIZE: f64 = 38.;
+pub(super) const SIZE: f64 = 42.;
 const GAP: f64 = 12.;
 
 struct Mark {
@@ -104,13 +103,38 @@ fn image_view(mtm: MainThreadMarker, id: &str, app: AppIcon) -> Retained<NSImage
     view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
     view.setContentTintColor(Some(&NSColor::labelColor()));
     view.setAccessibilityElement(false);
+    center_painted_icon(&view);
     view
+}
+
+fn center_painted_icon(view: &NSImageView) {
+    // Measure the icon as AppKit draws it, including transparent padding and
+    // symbol alignment insets. Keep the original image for onscreen drawing.
+    let bounds = view.bounds();
+    let Some(bitmap) = view.bitmapImageRepForCachingDisplayInRect(bounds) else {
+        return;
+    };
+    view.cacheDisplayInRect_toBitmapImageRep(bounds, &bitmap);
+    let width = bitmap.pixelsWide();
+    let height = bitmap.pixelsHigh();
+    let painted = |y| {
+        (0..width).any(|x| {
+            bitmap
+                .colorAtX_y(x, y)
+                .is_some_and(|color| color.alphaComponent() > 0.)
+        })
+    };
+    let Some(top) = (0..height).find(|&y| painted(y)) else {
+        return;
+    };
+    let bottom = (top..height).rev().find(|&y| painted(y)).unwrap_or(top);
+    // Bitmap rows count down from the top; the containing view's y axis points up.
+    let offset = (top + bottom + 1 - height) as f64 * SIZE / (2. * height as f64);
+    view.setFrameOrigin(NSPoint::new(0., offset));
 }
 
 pub(super) struct LeadingIcon {
     pub(super) container: Retained<NSView>,
-    slot: Retained<NSView>,
-    alignment: Option<(Retained<NSView>, Retained<NSLayoutConstraint>)>,
 }
 
 impl LeadingIcon {
@@ -134,6 +158,8 @@ impl LeadingIcon {
                 .constraintEqualToAnchor_constant(&container.leadingAnchor(), inset),
             icon.widthAnchor().constraintEqualToConstant(SIZE),
             icon.heightAnchor().constraintEqualToConstant(SIZE),
+            icon.centerYAnchor()
+                .constraintEqualToAnchor(&container.centerYAnchor()),
             body.leadingAnchor()
                 .constraintEqualToAnchor_constant(&container.leadingAnchor(), SIZE + GAP),
             body.trailingAnchor()
@@ -143,30 +169,7 @@ impl LeadingIcon {
             body.bottomAnchor()
                 .constraintEqualToAnchor(&container.bottomAnchor()),
         ]);
-        Self {
-            container,
-            slot: icon,
-            alignment: None,
-        }
-    }
-
-    pub(super) fn align_with_title(&mut self, title: &NSView) {
-        if self
-            .alignment
-            .as_ref()
-            .is_some_and(|(previous, _)| std::ptr::eq(&**previous, title))
-        {
-            return;
-        }
-        if let Some((_, constraint)) = self.alignment.take() {
-            constraint.setActive(false);
-        }
-        let constraint = self
-            .slot
-            .topAnchor()
-            .constraintEqualToAnchor(&title.topAnchor());
-        constraint.setActive(true);
-        self.alignment = Some((title.retain(), constraint));
+        Self { container }
     }
 }
 
