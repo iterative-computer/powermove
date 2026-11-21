@@ -15,11 +15,19 @@ fn main() -> anyhow::Result<()> {
     let mut args = std::env::args_os().skip(1).map(PathBuf::from);
     let states = args.next().context("fixture directory")?;
     let captures = args.next().context("capture directory")?;
-    for state in ["model", "effort", "access", "long-model", "model-search"] {
-        let request = states.join("requests").join(format!("{state}.json"));
-        if !request.is_file() {
+    let mut requests = fs::read_dir(states.join("requests"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    requests.sort();
+    for request in requests {
+        if request.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
+        let state = request
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .context("fixture name")?
+            .to_owned();
         let request: serde_json::Value = serde_json::from_slice(&fs::read(request)?)?;
         let baseline = request["picker"].is_null();
         for (theme, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
@@ -48,11 +56,13 @@ fn main() -> anyhow::Result<()> {
                         ..frame
                     }
                 };
-                let query = if state == "model-search" {
-                    "sonnet"
-                } else {
-                    ""
-                };
+                let query = request["query"]
+                    .as_str()
+                    .unwrap_or(if state == "model-search" {
+                        "sonnet"
+                    } else {
+                        ""
+                    });
                 let (png, at, clipped) =
                     pm_shell::capture_agent_picker(&tokens, &request, owner, anchor, query)
                         .context("paint detached AppKit menu")?;
@@ -78,13 +88,17 @@ fn main() -> anyhow::Result<()> {
                     ensure!(attached, "menu {at:?} detached from {anchor:?}");
                     let margin = COMPOSER_PICKER_MARGIN;
                     ensure!(
-                        at.x >= owner.x + margin && at.y >= owner.y + margin
+                        at.x >= owner.x + margin
+                            && at.y >= owner.y + margin
                             && at.x + at.w <= owner.x + owner.w - margin
                             && at.y + at.h <= owner.y + owner.h - margin,
                         "menu {at:?} violates the {margin}pt inset of {owner:?}",
                     );
                     ensure!(clipped.is_empty(), "clipped descriptions: {clipped:?}");
-                    println!("{name}: anchor attached, 8pt inset, no clipped descriptions");
+                    println!(
+                        "{name}: bottom {:.0}pt, height {:.0}pt, anchor attached, 8pt inset",
+                        at.y, at.h
+                    );
                 }
                 let bitmap = image::load_from_memory(&png)?.into_rgba8();
                 let scale = panel.width() as f32 / owner.w;

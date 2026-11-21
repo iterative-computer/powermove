@@ -1023,6 +1023,11 @@ impl Controller {
                     o["label"].as_str().unwrap_or_default(),
                     format!("agentPick:{i}"),
                 );
+                if picker == Some(ComposerPicker::Model)
+                    && let Some(provider) = o["provider"].as_str()
+                {
+                    c = c.for_provider(provider);
+                }
                 if let Some(category) = o["category"].as_str() {
                     c = c.within(category);
                 }
@@ -1070,7 +1075,11 @@ impl Controller {
             return;
         }
         self.builtins.agent_pick = Some((runtime.clone(), request.id, values, picker));
-        self.host.borrow_mut().open_menu(
+        let mut host = self.host.borrow_mut();
+        if picker == Some(ComposerPicker::Model) {
+            host.set_model_picker_profile(&self.profile);
+        }
+        host.open_menu(
             owner,
             choices,
             anchor,
