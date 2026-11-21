@@ -27,10 +27,14 @@ SECRET_ENV = {
 }
 
 
-def checked(label, args, *, env=None, data=None):
+def capture(args, *, env=None, data=None):
     child_env = {key: value for key, value in (os.environ if env is None else env).items()
                  if key not in SECRET_ENV}
-    result = subprocess.run(args, check=False, capture_output=True, env=child_env, input=data)
+    return subprocess.run(args, check=False, capture_output=True, env=child_env, input=data)
+
+
+def checked(label, args, *, env=None, data=None):
+    result = capture(args, env=env, data=data)
     if result.returncode:
         raise ValueError(f"{label} failed (exit {result.returncode})")
     return result.stdout, result.stderr
@@ -55,19 +59,113 @@ def verify_runtime_versions(app, scratch):
     return {name: pins[name] for name in ("codex", "claude")}
 
 
-def notarize(path, credentials):
-    output, _ = checked("Notary submission", [
-        "xcrun", "notarytool", "submit", path, "--wait", "--output-format", "json", *credentials,
-    ])
-    result = json.loads(output)
-    request = str(UUID(result["id"]))
-    output, _ = checked("Notary log retrieval", ["xcrun", "notarytool", "log", request, *credentials])
-    log = json.loads(output)
-    if (result["status"] != "Accepted" or log["status"] != "Accepted"
-            or str(UUID(log["jobId"])) != request or log.get("issues")):
-        raise ValueError("Notarization verification did not return clean Accepted proof")
-    # Apple responses can include paths, request details and free-form messages.
-    return {"id": request, "status": "Accepted", "statusCode": 0, "issues": []}
+NOTARY_STATES = ("Accepted", "Invalid", "Rejected", "In Progress")
+NOTARY_ISSUES = {
+    "not signed with a valid Developer ID": "invalid Developer ID signature",
+    "valid Developer ID certificate": "invalid Developer ID signature",
+    "secure timestamp": "missing secure timestamp",
+    "hardened runtime": "missing hardened runtime",
+    "disallowed entitlement": "disallowed entitlement",
+}
+
+
+def notary_credentials(work):
+    private_key, key_id, issuer = (
+        os.environ.pop(name, "").strip()
+        for name in ("APPLE_API_KEY_P8", "APPLE_API_KEY_ID", "APPLE_API_ISSUER_ID")
+    )
+    if not private_key or not key_id or not issuer:
+        raise ValueError("Apple notarization team credentials are incomplete")
+    key = work / "notary.p8"
+    key.write_text(private_key + "\n")
+    return ["--key", key, "--key-id", key_id, "--issuer", issuer]
+
+
+def notary_result_json(result):
+    try:
+        value = json.loads(result.stdout)
+        return value if isinstance(value, dict) else {}
+    except (UnicodeError, ValueError):
+        return {}
+
+
+def notary_failure(result):
+    # Transport errors can contain signed upload URLs or the API key path.
+    # Return only fixed labels and numeric protocol codes.
+    raw = result.stderr + b"\n" + result.stdout
+    http = re.search(rb"(?i)(?:HTTP(?: status(?: code)?| error)?|statusCode)[: ]+([45][0-9]{2})\b", raw)
+    if http:
+        return f"HTTP {http[1].decode()}"
+    for label, marker in (("invalid API credentials", b"invalid credentials"),
+                          ("Apple rejected the API key", b"could not validate the key"),
+                          ("upload timed out", b"timed out"),
+                          ("storage upload failed", b"amazon s3"),
+                          ("notary API unavailable", b"service unavailable")):
+        if marker in raw.lower():
+            return label
+    return f"exit {result.returncode}"
+
+
+def summarize_issues(log):
+    issues = log.get("issues")
+    if not issues:
+        return []
+    if not isinstance(issues, list):
+        return [{"category": "other notarization issue", "severity": "unknown"}]
+    summary = []
+    for issue in issues[:25]:
+        if not isinstance(issue, dict):
+            summary.append({"category": "other notarization issue", "severity": "unknown"})
+            continue
+        message = issue.get("message", "")
+        kind = next((label for marker, label in NOTARY_ISSUES.items()
+                     if isinstance(message, str) and marker.lower() in message.lower()), "other notarization issue")
+        severity = issue.get("severity")
+        summary.append({"category": kind, "severity": severity if severity in ("error", "warning") else "unknown"})
+    return summary
+
+
+def notarize(label, path, credentials, evidence):
+    command = ["xcrun", "notarytool"]
+    result = capture([*command, "submit", path, "--wait", "--no-progress", "--output-format", "json", *credentials])
+    submission = notary_result_json(result)
+    try:
+        request = str(UUID(submission["id"]))
+    except (KeyError, ValueError, TypeError, AttributeError):
+        raise ValueError(f"{label} notarization did not return a request ID ({notary_failure(result)})") from None
+
+    submitted_status = submission.get("status")
+    status = submitted_status if submitted_status in NOTARY_STATES else "Unknown"
+    log_result = capture([*command, "log", request, *credentials])
+    log = notary_result_json(log_result)
+    try:
+        matches = str(UUID(log["jobId"])) == request
+    except (KeyError, ValueError, TypeError, AttributeError):
+        matches = False
+    if not log_result.returncode and matches:
+        status = log.get("status") if log.get("status") in NOTARY_STATES else "Unknown"
+    record = {"id": request, "status": status, "logRetrieved": not log_result.returncode and matches,
+              "issues": summarize_issues(log) if matches else []}
+    prior = json.loads(evidence.read_text()) if evidence.exists() else {}
+    prior[label] = record
+    evidence.write_text(json.dumps(prior, indent=2) + "\n")
+    print(f"{label} notarization {status}, request {request}.")
+    if (result.returncode or submitted_status != "Accepted" or status != "Accepted"
+            or not record["logRetrieved"] or log.get("issues")):
+        reason = "incomplete acceptance or log"
+        if result.returncode:
+            reason = notary_failure(result)
+        elif log_result.returncode:
+            reason = "log retrieval: " + notary_failure(log_result)
+        raise ValueError(f"{label} notarization did not return clean Accepted proof ({reason})")
+
+
+def check_notary_auth(work):
+    credentials = notary_credentials(work)
+    result = capture(["xcrun", "notarytool", "history", "--no-progress", "--output-format", "json", *credentials])
+    if result.returncode:
+        raise ValueError(f"Apple notarization credential check failed ({notary_failure(result)})")
+    print("Apple notarization credentials can reach the service.")
 
 
 def staple(label, path):
@@ -169,13 +267,13 @@ def run_release(stage, work):
             raise ValueError("Bundle identity or version differs from the reviewed metadata")
 
     p12 = work / "certificate.p12"
-    p8 = work / "notary.p8"
     keychain = work / "native-signing.keychain-db"
     keychain_password = secrets.token_hex(24)
     p12.write_bytes(base64.b64decode("".join(os.environ.pop("APPLE_CERTIFICATE_P12").split()), validate=True))
-    p8.write_text(os.environ.pop("APPLE_API_KEY_P8"))
-    credentials = ["--key", p8, "--key-id", os.environ.pop("APPLE_API_KEY_ID"),
-                   "--issuer", os.environ.pop("APPLE_API_ISSUER_ID")]
+    credentials = notary_credentials(work)
+    evidence = stage / "evidence"
+    evidence.mkdir()
+    notarization_log = evidence / "notarization.json"
     checked("Temporary keychain creation", ["security", "create-keychain", "-p", keychain_password, keychain])
     try:
         checked("Temporary keychain setup", ["security", "set-keychain-settings", "-lut", "7200", keychain])
@@ -198,7 +296,7 @@ def run_release(stage, work):
 
         submit = stage / "app-for-notary.zip"
         checked("App notarization archive", [sys.executable, HERE / "package.py", "transition-zip", app, submit])
-        app_log = notarize(submit, credentials)
+        notarize("app", submit, credentials, notarization_log)
         submit.unlink()
         staple("App", app)
         app_gatekeeper = gatekeeper("App", app, "execute")
@@ -207,7 +305,7 @@ def run_release(stage, work):
         dmg = stage / f"Powermove-Native-{version}-mac-arm64.dmg"
         checked("DMG assembly", ["sh", HERE / "build-dmg.sh", app, dmg])
         checked("DMG signing", ["codesign", "--force", "--timestamp", "--sign", IDENTITY, dmg])
-        dmg_log = notarize(dmg, credentials)
+        notarize("dmg", dmg, credentials, notarization_log)
         staple("DMG", dmg)
         dmg_gatekeeper = gatekeeper("DMG", dmg, "open")
         checked("DMG codesign verification", ["codesign", "--verify", "--strict", dmg])
@@ -226,11 +324,8 @@ def run_release(stage, work):
                  appGatekeeper=app_gatekeeper, dmgGatekeeper=dmg_gatekeeper, codesign="verified",
                  appStapler="validated", dmgStapler="validated", dmgSha256=dmg_hash,
                  updateMetadata="generated and signed", mode="publish" if publish else "dry-run")
-    evidence = stage / "evidence"
-    evidence.mkdir()
     # Only serialize expected fields after their strict parsers or exact comparisons.
     (evidence / "verification.json").write_text(json.dumps(proof, indent=2) + "\n")
-    (evidence / "notarization.json").write_text(json.dumps({"app": app_log, "dmg": dmg_log}, indent=2) + "\n")
     print("Developer ID app and DMG accepted, stapled, and verified; signed update metadata generated.")
 
 
@@ -239,7 +334,12 @@ if __name__ == "__main__":
     try:
         os.umask(0o077)
         with tempfile.TemporaryDirectory(prefix="signing-", dir=os.environ["RUNNER_TEMP"]) as scratch:
-            run_release(Path(os.environ["PM_NATIVE_STAGE"]), Path(scratch))
+            if sys.argv[1:] == ["--check-notary-auth"]:
+                check_notary_auth(Path(scratch))
+            elif not sys.argv[1:]:
+                run_release(Path(os.environ["PM_NATIVE_STAGE"]), Path(scratch))
+            else:
+                raise ValueError("unexpected native signing arguments")
     except ValueError as error:
         # checked() only exposes our fixed labels and exit codes. JSON parser
         # messages carry offsets only. No raw subprocess output is forwarded.
