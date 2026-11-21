@@ -280,12 +280,15 @@ function SettingRow({
   model: SettingsModel;
   key?: string;
 }) {
+  const agentApp = row.section === "agents" && row.id.startsWith("agents.")
+    ? row.id.slice("agents.".length)
+    : undefined;
   return (
     <div
       id={`settings.row.${row.id}`}
       role="group"
       label={row.label}
-      metadata={{ settingsLayout: "row" }}
+      metadata={{ settingsLayout: "row", ...(agentApp && { agentApp }) }}
     >
       <RowCopy
         title={row.label}
