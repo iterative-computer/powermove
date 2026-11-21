@@ -621,12 +621,10 @@ impl Row {
         trailing: Vec<Retained<NSView>>,
         footers: Vec<Retained<NSView>>,
     ) {
-        let copy_bounds = self.app.as_ref().map(|_| {
-            let first = leading
+        let icon_title = self.app.as_ref().map(|_| {
+            leading
                 .clone()
-                .unwrap_or_else(|| Retained::into_super(self.line.stack.clone()));
-            let last = footers.first().unwrap_or(&first).clone();
-            (first, last)
+                .unwrap_or_else(|| Retained::into_super(self.line.stack.clone()))
         });
         let mut views = Vec::new();
         if let Some(leading) = leading {
@@ -644,8 +642,8 @@ impl Row {
                 .chain(footers)
                 .collect::<Vec<_>>(),
         );
-        if let (Some(app), Some((first, last))) = (&mut self.app, copy_bounds) {
-            app.align_with(&first, &last);
+        if let (Some(app), Some(title)) = (&mut self.app, icon_title) {
+            app.align_with_title(&title);
         }
     }
 }

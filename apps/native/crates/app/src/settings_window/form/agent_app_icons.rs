@@ -3,26 +3,27 @@ use objc2::runtime::Bool;
 use objc2::{AnyThread, MainThreadMarker, Message, rc::Retained};
 use objc2_app_kit::{
     NSAccessibility, NSBezierPath, NSColor, NSImage, NSImageNameActionTemplate, NSImageScaling,
-    NSImageView, NSLayoutConstraint, NSLayoutGuide, NSView, NSWorkspace,
+    NSImageView, NSLayoutConstraint, NSView, NSWorkspace,
 };
 use objc2_foundation::{NSBundle, NSData, NSPoint, NSRect, NSSize, NSString};
 
-const SIZE: f64 = 24.;
+// Measured from the title top through the first description line in an Agent row.
+const SIZE: f64 = 38.;
 const GAP: f64 = 12.;
 
 struct Mark {
     svg: &'static [u8],
-    size: f64,
+    scale: f64,
 }
 
 const OPENAI: Mark = Mark {
     svg: include_bytes!("../../../assets/settings-agent-icons/openai-blossom.svg"),
     // The official SVG already contains clear space around the mark.
-    size: SIZE,
+    scale: 1.,
 };
 const OPENCODE: Mark = Mark {
     svg: include_bytes!("../../../assets/settings-agent-icons/opencode.svg"),
-    size: 16.,
+    scale: 2. / 3.,
 };
 
 fn resolve<T>(
@@ -70,11 +71,14 @@ fn bundle_icon(path: &NSString) -> Option<Retained<NSImage>> {
 
 fn bundled_mark(mark: &Mark) -> Option<Retained<NSImage>> {
     let logo = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(mark.svg))?;
-    let size = mark.size;
+    let scale = mark.scale;
     let draw = block2::RcBlock::new(move |rect: NSRect| -> Bool {
         // A neutral light tile keeps both original marks legible in either appearance.
         NSColor::colorWithWhite_alpha(0.95, 1.).setFill();
-        NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, 5., 5.).fill();
+        let tile_size = rect.size.width.min(rect.size.height);
+        let radius = tile_size * (5. / 24.);
+        NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius).fill();
+        let size = tile_size * scale;
         let origin = NSPoint::new(rect.mid().x - size / 2., rect.mid().y - size / 2.);
         logo.drawInRect(NSRect::new(origin, NSSize::new(size, size)));
         Bool::YES
@@ -105,15 +109,8 @@ fn image_view(mtm: MainThreadMarker, id: &str, app: AppIcon) -> Retained<NSImage
 
 pub(super) struct LeadingIcon {
     pub(super) container: Retained<NSView>,
-    copy: Retained<NSLayoutGuide>,
-    anchors: Option<CopyAnchors>,
-}
-
-struct CopyAnchors {
-    first: Retained<NSView>,
-    last: Retained<NSView>,
-    top: Retained<NSLayoutConstraint>,
-    bottom: Retained<NSLayoutConstraint>,
+    slot: Retained<NSView>,
+    alignment: Option<(Retained<NSView>, Retained<NSLayoutConstraint>)>,
 }
 
 impl LeadingIcon {
@@ -132,18 +129,11 @@ impl LeadingIcon {
         icon.addSubview(&image_view(mtm, id, app));
         container.addSubview(&icon);
         container.addSubview(body);
-        let copy = NSLayoutGuide::new();
-        container.addLayoutGuide(&copy);
         super::constraints(&[
             icon.leadingAnchor()
                 .constraintEqualToAnchor_constant(&container.leadingAnchor(), inset),
             icon.widthAnchor().constraintEqualToConstant(SIZE),
             icon.heightAnchor().constraintEqualToConstant(SIZE),
-            icon.centerYAnchor()
-                .constraintEqualToAnchor(&copy.centerYAnchor()),
-            copy.leadingAnchor()
-                .constraintEqualToAnchor(&icon.leadingAnchor()),
-            copy.widthAnchor().constraintEqualToConstant(SIZE),
             body.leadingAnchor()
                 .constraintEqualToAnchor_constant(&container.leadingAnchor(), SIZE + GAP),
             body.trailingAnchor()
@@ -155,37 +145,28 @@ impl LeadingIcon {
         ]);
         Self {
             container,
-            copy,
-            anchors: None,
+            slot: icon,
+            alignment: None,
         }
     }
 
-    pub(super) fn align_with(&mut self, first: &NSView, last: &NSView) {
-        if self.anchors.as_ref().is_some_and(|anchors| {
-            std::ptr::eq(&*anchors.first, first) && std::ptr::eq(&*anchors.last, last)
-        }) {
+    pub(super) fn align_with_title(&mut self, title: &NSView) {
+        if self
+            .alignment
+            .as_ref()
+            .is_some_and(|(previous, _)| std::ptr::eq(&**previous, title))
+        {
             return;
         }
-        if let Some(old) = self.anchors.take() {
-            old.top.setActive(false);
-            old.bottom.setActive(false);
+        if let Some((_, constraint)) = self.alignment.take() {
+            constraint.setActive(false);
         }
-        let top = self
-            .copy
+        let constraint = self
+            .slot
             .topAnchor()
-            .constraintEqualToAnchor(&first.topAnchor());
-        let bottom = self
-            .copy
-            .bottomAnchor()
-            .constraintEqualToAnchor(&last.bottomAnchor());
-        top.setActive(true);
-        bottom.setActive(true);
-        self.anchors = Some(CopyAnchors {
-            first: first.retain(),
-            last: last.retain(),
-            top,
-            bottom,
-        });
+            .constraintEqualToAnchor(&title.topAnchor());
+        constraint.setActive(true);
+        self.alignment = Some((title.retain(), constraint));
     }
 }
 
@@ -194,7 +175,7 @@ pub(super) fn capture_app_icon(name: &str) -> Option<Retained<NSImage>> {
     // Known system bundles provide app-shaped stand-ins for the capture.
     let path = match name {
         "Claude" => "/System/Applications/Books.app",
-        "Codex" => "/System/Applications/Shortcuts.app",
+        "Codex" => "/System/Applications/Calculator.app",
         "Gemini" => "/System/Applications/Maps.app",
         "OpenCode" => "/System/Applications/Utilities/Terminal.app",
         _ => return None,
