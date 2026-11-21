@@ -7,7 +7,7 @@ import {
 } from "../../src";
 import { fixture, initial } from "./fixtures";
 import { ExportSheet, workAreaLabel } from "./panel";
-import type { ExportSnapshot } from "./model";
+import type { ExportSnapshot, Options } from "./model";
 import { replay } from "./wire";
 
 async function mounted(seed = initial()) {
@@ -61,6 +61,45 @@ function tree(row: ReturnType<typeof replay>[number], id = 0): unknown {
     children: n.children.map((id: number) => tree(row, id)),
   };
 }
+test("delivery controls only appear for bitrate, alpha and audio choices", async () => {
+  const cases: [Partial<Options>, boolean, boolean, boolean][] = [
+    [
+      { format: "prores", videoCodec: "prores", profile: "4444" },
+      false,
+      true,
+      true,
+    ],
+    [
+      { format: "prores", videoCodec: "prores", profile: "422hq" },
+      false,
+      false,
+      true,
+    ],
+    [{ format: "prores", videoCodec: "h264" }, true, false, true],
+    [{ format: "prores", videoCodec: "hevc" }, true, true, true],
+    [{ format: "mp4", videoCodec: "h264" }, true, false, false],
+    [{ format: "mp4", videoCodec: "hevc" }, true, true, false],
+    [{ format: "mp4", videoCodec: "hevc10" }, true, false, false],
+    [{ format: "webm", videoCodec: "vp8" }, true, true, false],
+    [{ format: "webm", videoCodec: "vp9" }, true, true, false],
+    [{ format: "png" }, false, true, false],
+    [{ format: "json" }, false, false, false],
+  ];
+  for (const [options, quality, alpha, audio] of cases) {
+    const seed = initial();
+    Object.assign(seed.options, options);
+    const f = await mounted(seed);
+    const has = (id: string) =>
+      [...f.root.host.nodes.values()].some((n) => n.props.id === id);
+    expect(has("export.quality")).toBe(quality);
+    expect(has("export.alphaMode")).toBe(alpha);
+    expect(has("export.audioCoding")).toBe(audio);
+    if (audio)
+      expect(named(f.root, "export.audioCoding").props.options).toHaveLength(4);
+    await f.root.dispose();
+  }
+});
+
 const cases: [string, (s: ExportSnapshot) => void][] = [
   [
     "empty (no project, sheet absent)",
@@ -222,7 +261,7 @@ test("hover/focus use system controls; op tree stays stable, with one selected k
   const order = after.focusOrder.map((id: number) => after.nodes[id].props.id);
   expect(order.slice(1)).toEqual([
     "export.format",
-    "export.codec",
+    "export.videoCodec",
     "export.scale",
     "export.fps",
     "export.range",
@@ -292,12 +331,12 @@ test("keyboard kind navigation and popup/checkbox interactions reach the model a
   await new Promise((r) => setTimeout(r, 0));
   await f.root.flush();
   expect(f.model.options.format).toBe("png");
-  await event(f.root, named(f.root, "export.alpha").id, "change", {
-    value: true,
+  await event(f.root, named(f.root, "export.alphaMode").id, "change", {
+    value: "straight",
   });
   await new Promise((r) => setTimeout(r, 0));
   await f.root.flush();
-  expect(f.model.options.alpha).toBe(true);
+  expect(f.model.options.alphaMode).toBe("straight");
   check(replay(f.commits));
   await f.root.dispose();
 });

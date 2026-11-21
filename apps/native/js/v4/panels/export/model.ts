@@ -2,6 +2,10 @@ import { HostClient, json, type Json } from "../../src";
 import {
   actions,
   audioCodings,
+  alphaOptions,
+  codecOptions,
+  selectedAlpha,
+  videoCodecs,
   codecs,
   colorTags,
   extensions,
@@ -16,6 +20,8 @@ import {
   type Format,
   type Kind,
   type Profile,
+  type VideoCodec,
+  type AlphaMode,
 } from "./spec";
 
 /** A projection of pm-promedia + engine facts, never a writable project mirror.
@@ -36,6 +42,9 @@ export type Options = {
   captionsSidecar: "none" | "srt" | "vtt";
   profile: Profile;
   codec: Codec;
+  videoCodec?: VideoCodec;
+  alphaMode?: AlphaMode;
+  timecodeTrack?: boolean;
   depth: 8 | 16;
   /** Absent from options saved before HDR delivery: read as SDR. */
   dynamicRange: "sdr" | "pq" | "hlg";
@@ -166,6 +175,11 @@ function validOptions(x: unknown): x is Options {
       )) &&
     (x.profile === undefined || profiles.some((p) => p.v === x.profile)) &&
     (x.codec === undefined || codecs.some((c) => c.v === x.codec)) &&
+    (x.videoCodec === undefined ||
+      videoCodecs.some((c) => c.v === x.videoCodec)) &&
+    (x.alphaMode === undefined ||
+      ["none", "straight", "premultiplied"].includes(x.alphaMode as string)) &&
+    (x.timecodeTrack === undefined || typeof x.timecodeTrack === "boolean") &&
     (x.depth === undefined || x.depth === 8 || x.depth === 16) &&
     (x.colorTag === undefined || colorTags.some((c) => c.v === x.colorTag)) &&
     (x.timecode === undefined || typeof x.timecode === "string") &&
@@ -484,6 +498,22 @@ export class ExportModel {
   set<K extends keyof Options>(key: K, value: Options[K]) {
     if (this.locked || this.disposed) return;
     const next = { ...this.options, [key]: value };
+    if (key === "format") {
+      delete next.videoCodec;
+      delete next.alphaMode;
+    }
+    if (
+      ["videoCodec", "profile", "dynamicRange"].includes(String(key)) &&
+      !alphaOptions(next).some(({ v }) => v === selectedAlpha(next))
+    )
+      next.alphaMode = "none";
+    if (
+      key === "videoCodec" &&
+      !codecOptions(next).some(({ v }) => v === value)
+    )
+      throw new TypeError("Invalid export codec");
+    if (key === "alphaMode" && !alphaOptions(next).some(({ v }) => v === value))
+      throw new TypeError("Invalid alpha mode");
     if (!validOptions(next)) throw new TypeError("Invalid export option");
     if (key === "format" && !this.current.capabilities[next.format].available)
       return;
@@ -501,6 +531,8 @@ export class ExportModel {
     // Changing kind must still expose an unavailable remembered format, with
     // its reason and a disabled default action; never choose a fallback codec.
     this.options = { ...this.options, format: this.remembered[kind] };
+    delete this.options.videoCodec;
+    delete this.options.alphaMode;
     this.draftVersion++;
     this.readyPlanVersion = -1;
     this.validateSize();

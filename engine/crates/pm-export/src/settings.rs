@@ -176,6 +176,13 @@ impl Codec {
         }
     }
 
+    pub fn supports_alpha_output(self, alpha: AlphaOutput) -> bool {
+        alpha == AlphaOutput::None
+            || (self.supports_alpha()
+                && (alpha != AlphaOutput::Premultiplied
+                    || !matches!(self, Self::Png { .. } | Self::Vp9 { .. } | Self::Vp8 { .. })))
+    }
+
     /// Whether the codec writes Y′CbCr (limited range); PNG writes full-range RGB.
     pub fn is_ycbcr(self) -> bool {
         !matches!(self, Codec::Png { .. })
@@ -653,12 +660,7 @@ impl ExportSpec {
                 _ => "alpha needs ProRes 4444, ProRes 4444 XQ, HEVC, WebM, or PNG",
             });
         }
-        if self.alpha == AlphaOutput::Premultiplied
-            && matches!(
-                self.codec,
-                Codec::Png { .. } | Codec::Vp9 { .. } | Codec::Vp8 { .. }
-            )
-        {
+        if !self.codec.supports_alpha_output(self.alpha) {
             return invalid("PNG and WebM carry straight alpha");
         }
         if self.tags.is_image() != matches!(self.codec, Codec::Png { .. }) {

@@ -4,6 +4,7 @@ import catalog from "../../../../crates/mcp/fixtures/studio3d-native-catalog.jso
 import {
   audioCodings,
   codecs,
+  videoCodecs,
   colorTags,
   dynamicRanges,
   fields,
@@ -64,6 +65,8 @@ test("export_video offers every choice the sheet does", () => {
     list.map((o) => String(o.v));
   expect(choices("profile")).toEqual(values(profiles));
   expect(choices("codec")).toEqual(values(codecs));
+  expect(choices("videoCodec")).toEqual(values(videoCodecs));
+  expect(choices("alphaMode")).toEqual(["none", "straight", "premultiplied"]);
   expect(choices("quality")).toEqual(values(qualities));
   expect(choices("colorTag")).toEqual(values(colorTags));
   expect(choices("audioCoding")).toEqual(values(audioCodings));

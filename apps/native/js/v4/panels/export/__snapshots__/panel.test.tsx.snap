@@ -259,7 +259,7 @@ exports[`wire snapshot: selected video 1`] = `
                 {
                   "children": [],
                   "props": {},
-                  "text": "MP4, WebM or ProRes for delivery and editing.",
+                  "text": "QuickTime, MP4 or WebM for delivery and editing.",
                   "type": "text",
                 },
               ],
@@ -402,17 +402,17 @@ exports[`wire snapshot: selected video 1`] = `
                                         "menu": [
                                           {
                                             "disabled": false,
-                                            "label": "QuickTime · ProRes",
+                                            "label": "QuickTime (.mov)",
                                             "v": "prores",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "MP4 · H.264 or HEVC",
+                                            "label": "MP4",
                                             "v": "mp4",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "WebM · VP9",
+                                            "label": "WebM",
                                             "v": "webm",
                                           },
                                         ],
@@ -421,17 +421,17 @@ exports[`wire snapshot: selected video 1`] = `
                                     "options": [
                                       {
                                         "disabled": false,
-                                        "label": "QuickTime · ProRes",
+                                        "label": "QuickTime (.mov)",
                                         "v": "prores",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "MP4 · H.264 or HEVC",
+                                        "label": "MP4",
                                         "v": "mp4",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "WebM · VP9",
+                                        "label": "WebM",
                                         "v": "webm",
                                       },
                                     ],
@@ -562,7 +562,7 @@ exports[`wire snapshot: selected video 1`] = `
                                     {
                                       "children": [],
                                       "props": {},
-                                      "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                      "text": "Video coding and bit depth of the exported file.",
                                       "type": "text",
                                     },
                                   ],
@@ -599,34 +599,42 @@ exports[`wire snapshot: selected video 1`] = `
                                 {
                                   "children": [],
                                   "props": {
-                                    "binding": "fixture:export:codec",
+                                    "binding": "fixture:export:videoCodec",
                                     "control": "select",
                                     "data-pm-component": "pop-up-button",
                                     "disabled": false,
-                                    "id": "export.codec",
+                                    "id": "export.videoCodec",
                                     "label": "Codec",
                                     "metadata": {
                                       "pmKit": {
                                         "menu": [
                                           {
-                                            "label": "H.264",
+                                            "label": "H.264 (High)",
                                             "v": "h264",
                                           },
                                           {
-                                            "label": "HEVC · 10-bit",
+                                            "label": "HEVC (Main)",
                                             "v": "hevc",
+                                          },
+                                          {
+                                            "label": "HEVC 10-bit (Main10)",
+                                            "v": "hevc10",
                                           },
                                         ],
                                       },
                                     },
                                     "options": [
                                       {
-                                        "label": "H.264",
+                                        "label": "H.264 (High)",
                                         "v": "h264",
                                       },
                                       {
-                                        "label": "HEVC · 10-bit",
+                                        "label": "HEVC (Main)",
                                         "v": "hevc",
+                                      },
+                                      {
+                                        "label": "HEVC 10-bit (Main10)",
+                                        "v": "hevc10",
                                       },
                                     ],
                                     "style": {
@@ -652,7 +660,7 @@ exports[`wire snapshot: selected video 1`] = `
                                         "token": "metrics.hit",
                                       },
                                     },
-                                    "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                    "title": "Video coding and bit depth of the exported file.",
                                     "value": "h264",
                                   },
                                   "text": "",
@@ -3130,7 +3138,7 @@ exports[`wire snapshot: selected video 1`] = `
                     {
                       "children": [],
                       "props": {},
-                      "text": "Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.",
+                      "text": "Color: sRGB. Video uses tagged BT.709 primaries and sRGB transfer.",
                       "type": "text",
                     },
                   ],
@@ -3670,7 +3678,7 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                 {
                   "children": [],
                   "props": {},
-                  "text": "MP4, WebM or ProRes for delivery and editing.",
+                  "text": "QuickTime, MP4 or WebM for delivery and editing.",
                   "type": "text",
                 },
               ],
@@ -3815,17 +3823,17 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                                         "menu": [
                                           {
                                             "disabled": false,
-                                            "label": "QuickTime · ProRes",
+                                            "label": "QuickTime (.mov)",
                                             "v": "prores",
                                           },
                                           {
                                             "disabled": true,
-                                            "label": "MP4 · H.264 or HEVC",
+                                            "label": "MP4",
                                             "v": "mp4",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "WebM · VP9",
+                                            "label": "WebM",
                                             "v": "webm",
                                           },
                                         ],
@@ -3834,17 +3842,17 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                                     "options": [
                                       {
                                         "disabled": false,
-                                        "label": "QuickTime · ProRes",
+                                        "label": "QuickTime (.mov)",
                                         "v": "prores",
                                       },
                                       {
                                         "disabled": true,
-                                        "label": "MP4 · H.264 or HEVC",
+                                        "label": "MP4",
                                         "v": "mp4",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "WebM · VP9",
+                                        "label": "WebM",
                                         "v": "webm",
                                       },
                                     ],
@@ -3975,7 +3983,7 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                                     {
                                       "children": [],
                                       "props": {},
-                                      "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                      "text": "Video coding and bit depth of the exported file.",
                                       "type": "text",
                                     },
                                   ],
@@ -4012,34 +4020,42 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                                 {
                                   "children": [],
                                   "props": {
-                                    "binding": "fixture:export:codec",
+                                    "binding": "fixture:export:videoCodec",
                                     "control": "select",
                                     "data-pm-component": "pop-up-button",
                                     "disabled": false,
-                                    "id": "export.codec",
+                                    "id": "export.videoCodec",
                                     "label": "Codec",
                                     "metadata": {
                                       "pmKit": {
                                         "menu": [
                                           {
-                                            "label": "H.264",
+                                            "label": "H.264 (High)",
                                             "v": "h264",
                                           },
                                           {
-                                            "label": "HEVC · 10-bit",
+                                            "label": "HEVC (Main)",
                                             "v": "hevc",
+                                          },
+                                          {
+                                            "label": "HEVC 10-bit (Main10)",
+                                            "v": "hevc10",
                                           },
                                         ],
                                       },
                                     },
                                     "options": [
                                       {
-                                        "label": "H.264",
+                                        "label": "H.264 (High)",
                                         "v": "h264",
                                       },
                                       {
-                                        "label": "HEVC · 10-bit",
+                                        "label": "HEVC (Main)",
                                         "v": "hevc",
+                                      },
+                                      {
+                                        "label": "HEVC 10-bit (Main10)",
+                                        "v": "hevc10",
                                       },
                                     ],
                                     "style": {
@@ -4065,7 +4081,7 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                                         "token": "metrics.hit",
                                       },
                                     },
-                                    "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                    "title": "Video coding and bit depth of the exported file.",
                                     "value": "h264",
                                   },
                                   "text": "",
@@ -6543,7 +6559,7 @@ exports[`wire snapshot: known capabilities (loading N/A) 1`] = `
                     {
                       "children": [],
                       "props": {},
-                      "text": "Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.",
+                      "text": "Color: sRGB. Video uses tagged BT.709 primaries and sRGB transfer.",
                       "type": "text",
                     },
                   ],
@@ -7084,7 +7100,7 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                 {
                   "children": [],
                   "props": {},
-                  "text": "MP4, WebM or ProRes for delivery and editing.",
+                  "text": "QuickTime, MP4 or WebM for delivery and editing.",
                   "type": "text",
                 },
               ],
@@ -7227,17 +7243,17 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                                         "menu": [
                                           {
                                             "disabled": false,
-                                            "label": "QuickTime · ProRes",
+                                            "label": "QuickTime (.mov)",
                                             "v": "prores",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "MP4 · H.264 or HEVC",
+                                            "label": "MP4",
                                             "v": "mp4",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "WebM · VP9",
+                                            "label": "WebM",
                                             "v": "webm",
                                           },
                                         ],
@@ -7246,17 +7262,17 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                                     "options": [
                                       {
                                         "disabled": false,
-                                        "label": "QuickTime · ProRes",
+                                        "label": "QuickTime (.mov)",
                                         "v": "prores",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "MP4 · H.264 or HEVC",
+                                        "label": "MP4",
                                         "v": "mp4",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "WebM · VP9",
+                                        "label": "WebM",
                                         "v": "webm",
                                       },
                                     ],
@@ -7387,7 +7403,7 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                                     {
                                       "children": [],
                                       "props": {},
-                                      "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                      "text": "Video coding and bit depth of the exported file.",
                                       "type": "text",
                                     },
                                   ],
@@ -7424,34 +7440,42 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                                 {
                                   "children": [],
                                   "props": {
-                                    "binding": "fixture:export:codec",
+                                    "binding": "fixture:export:videoCodec",
                                     "control": "select",
                                     "data-pm-component": "pop-up-button",
                                     "disabled": false,
-                                    "id": "export.codec",
+                                    "id": "export.videoCodec",
                                     "label": "Codec",
                                     "metadata": {
                                       "pmKit": {
                                         "menu": [
                                           {
-                                            "label": "H.264",
+                                            "label": "H.264 (High)",
                                             "v": "h264",
                                           },
                                           {
-                                            "label": "HEVC · 10-bit",
+                                            "label": "HEVC (Main)",
                                             "v": "hevc",
+                                          },
+                                          {
+                                            "label": "HEVC 10-bit (Main10)",
+                                            "v": "hevc10",
                                           },
                                         ],
                                       },
                                     },
                                     "options": [
                                       {
-                                        "label": "H.264",
+                                        "label": "H.264 (High)",
                                         "v": "h264",
                                       },
                                       {
-                                        "label": "HEVC · 10-bit",
+                                        "label": "HEVC (Main)",
                                         "v": "hevc",
+                                      },
+                                      {
+                                        "label": "HEVC 10-bit (Main10)",
+                                        "v": "hevc10",
                                       },
                                     ],
                                     "style": {
@@ -7477,7 +7501,7 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                                         "token": "metrics.hit",
                                       },
                                     },
-                                    "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                    "title": "Video coding and bit depth of the exported file.",
                                     "value": "h264",
                                   },
                                   "text": "",
@@ -9955,7 +9979,7 @@ exports[`wire snapshot: disabled audio and unset work area 1`] = `
                     {
                       "children": [],
                       "props": {},
-                      "text": "Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.",
+                      "text": "Color: sRGB. Video uses tagged BT.709 primaries and sRGB transfer.",
                       "type": "text",
                     },
                   ],
@@ -10495,7 +10519,7 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                 {
                   "children": [],
                   "props": {},
-                  "text": "MP4, WebM or ProRes for delivery and editing.",
+                  "text": "QuickTime, MP4 or WebM for delivery and editing.",
                   "type": "text",
                 },
               ],
@@ -10638,17 +10662,17 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                                         "menu": [
                                           {
                                             "disabled": false,
-                                            "label": "QuickTime · ProRes",
+                                            "label": "QuickTime (.mov)",
                                             "v": "prores",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "MP4 · H.264 or HEVC",
+                                            "label": "MP4",
                                             "v": "mp4",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "WebM · VP9",
+                                            "label": "WebM",
                                             "v": "webm",
                                           },
                                         ],
@@ -10657,17 +10681,17 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                                     "options": [
                                       {
                                         "disabled": false,
-                                        "label": "QuickTime · ProRes",
+                                        "label": "QuickTime (.mov)",
                                         "v": "prores",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "MP4 · H.264 or HEVC",
+                                        "label": "MP4",
                                         "v": "mp4",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "WebM · VP9",
+                                        "label": "WebM",
                                         "v": "webm",
                                       },
                                     ],
@@ -10943,6 +10967,216 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                             "data-pm-component": "form-row",
                             "id": "export.row.profile",
                             "label": "Profile",
+                            "role": "group",
+                            "style": {
+                              "alignItems": "center",
+                              "display": "flex",
+                              "flexDirection": "row",
+                              "gap": {
+                                "token": "metrics.inset",
+                              },
+                              "justifyContent": "space-between",
+                              "minHeight": {
+                                "token": "metrics.form_row",
+                              },
+                              "paddingBottom": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingTop": {
+                                "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Codec",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.title",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Video coding and bit depth of the exported file.",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.label",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "label",
+                                "style": {
+                                  "display": "flex",
+                                  "flexDirection": "column",
+                                  "flexGrow": 1,
+                                  "gap": {
+                                    "token": "metrics.border",
+                                  },
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [],
+                                  "props": {
+                                    "binding": "fixture:export:videoCodec",
+                                    "control": "select",
+                                    "data-pm-component": "pop-up-button",
+                                    "disabled": false,
+                                    "id": "export.videoCodec",
+                                    "label": "Codec",
+                                    "metadata": {
+                                      "pmKit": {
+                                        "menu": [
+                                          {
+                                            "label": "ProRes",
+                                            "v": "prores",
+                                          },
+                                          {
+                                            "label": "H.264 (High)",
+                                            "v": "h264",
+                                          },
+                                          {
+                                            "label": "HEVC (Main)",
+                                            "v": "hevc",
+                                          },
+                                          {
+                                            "label": "HEVC 10-bit (Main10)",
+                                            "v": "hevc10",
+                                          },
+                                        ],
+                                      },
+                                    },
+                                    "options": [
+                                      {
+                                        "label": "ProRes",
+                                        "v": "prores",
+                                      },
+                                      {
+                                        "label": "H.264 (High)",
+                                        "v": "h264",
+                                      },
+                                      {
+                                        "label": "HEVC (Main)",
+                                        "v": "hevc",
+                                      },
+                                      {
+                                        "label": "HEVC 10-bit (Main10)",
+                                        "v": "hevc10",
+                                      },
+                                    ],
+                                    "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.control",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                    "title": "Video coding and bit depth of the exported file.",
+                                    "value": "prores",
+                                  },
+                                  "text": "",
+                                  "type": "button",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "control",
+                                "style": {
+                                  "alignItems": "center",
+                                  "display": "flex",
+                                  "flexShrink": 0,
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "form-row",
+                            "id": "export.row.codec",
+                            "label": "Codec",
                             "role": "group",
                             "style": {
                               "alignItems": "center",
@@ -11842,6 +12076,169 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                                     {
                                       "children": [],
                                       "props": {},
+                                      "text": "Timecode Track",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.title",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
+                                      "text": "Write the composition's timecode, or a custom start timecode, in the QuickTime movie.",
+                                      "type": "text",
+                                    },
+                                  ],
+                                  "props": {
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.label",
+                                      },
+                                    },
+                                  },
+                                  "text": "",
+                                  "type": "text",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "label",
+                                "style": {
+                                  "display": "flex",
+                                  "flexDirection": "column",
+                                  "flexGrow": 1,
+                                  "gap": {
+                                    "token": "metrics.border",
+                                  },
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                            {
+                              "children": [
+                                {
+                                  "children": [],
+                                  "props": {
+                                    "aria-checked": true,
+                                    "binding": "fixture:export:timecodeTrack",
+                                    "control": "toggle",
+                                    "data-pm-component": "switch",
+                                    "disabled": false,
+                                    "id": "export.timecodeTrack",
+                                    "label": "Timecode Track",
+                                    "role": "switch",
+                                    "style": {
+                                      "color": {
+                                        "token": "colors.text",
+                                      },
+                                      "fontSize": {
+                                        "token": "typography.body",
+                                      },
+                                      "minHeight": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                    "title": "Write the composition's timecode, or a custom start timecode, in the QuickTime movie.",
+                                    "value": true,
+                                  },
+                                  "text": "",
+                                  "type": "button",
+                                },
+                              ],
+                              "props": {
+                                "data-pm-slot": "control",
+                                "style": {
+                                  "alignItems": "center",
+                                  "display": "flex",
+                                  "flexShrink": 0,
+                                },
+                              },
+                              "text": "",
+                              "type": "div",
+                            },
+                          ],
+                          "props": {
+                            "data-pm-component": "form-row",
+                            "id": "export.row.timecodeTrack",
+                            "label": "Timecode Track",
+                            "role": "group",
+                            "style": {
+                              "alignItems": "center",
+                              "display": "flex",
+                              "flexDirection": "row",
+                              "gap": {
+                                "token": "metrics.inset",
+                              },
+                              "justifyContent": "space-between",
+                              "minHeight": {
+                                "token": "metrics.form_row",
+                              },
+                              "paddingBottom": {
+                                "token": "metrics.gap",
+                              },
+                              "paddingLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingRight": {
+                                "token": "metrics.inset",
+                              },
+                              "paddingTop": {
+                                "token": "metrics.gap",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [],
+                          "props": {
+                            "style": {
+                              "background": {
+                                "token": "colors.separator",
+                              },
+                              "height": {
+                                "token": "metrics.border",
+                              },
+                              "marginLeft": {
+                                "token": "metrics.inset",
+                              },
+                              "marginRight": {
+                                "token": "metrics.inset",
+                              },
+                            },
+                          },
+                          "text": "",
+                          "type": "div",
+                        },
+                        {
+                          "children": [
+                            {
+                              "children": [
+                                {
+                                  "children": [
+                                    {
+                                      "children": [],
+                                      "props": {},
                                       "text": "Start Timecode",
                                       "type": "text",
                                     },
@@ -12459,6 +12856,10 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                                             "label": "32-bit float PCM",
                                             "v": "pcmFloat",
                                           },
+                                          {
+                                            "label": "AAC",
+                                            "v": "aac",
+                                          },
                                         ],
                                       },
                                     },
@@ -12474,6 +12875,10 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                                       {
                                         "label": "32-bit float PCM",
                                         "v": "pcmFloat",
+                                      },
+                                      {
+                                        "label": "AAC",
+                                        "v": "aac",
                                       },
                                     ],
                                     "style": {
@@ -12581,7 +12986,7 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                                     {
                                       "children": [],
                                       "props": {},
-                                      "text": "Transparent Background",
+                                      "text": "Alpha",
                                       "type": "text",
                                     },
                                   ],
@@ -12603,7 +13008,7 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                                     {
                                       "children": [],
                                       "props": {},
-                                      "text": "Keep the background see-through, with straight alpha.",
+                                      "text": "How transparency is stored in the exported picture.",
                                       "type": "text",
                                     },
                                   ],
@@ -12640,20 +13045,59 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                                 {
                                   "children": [],
                                   "props": {
-                                    "aria-checked": true,
-                                    "binding": "fixture:export:alpha",
-                                    "control": "toggle",
-                                    "data-pm-component": "switch",
+                                    "binding": "fixture:export:alphaMode",
+                                    "control": "select",
+                                    "data-pm-component": "pop-up-button",
                                     "disabled": false,
-                                    "id": "export.alpha",
-                                    "label": "Transparent Background",
-                                    "role": "switch",
+                                    "id": "export.alphaMode",
+                                    "label": "Alpha",
+                                    "metadata": {
+                                      "pmKit": {
+                                        "menu": [
+                                          {
+                                            "label": "None",
+                                            "v": "none",
+                                          },
+                                          {
+                                            "label": "Straight",
+                                            "v": "straight",
+                                          },
+                                          {
+                                            "label": "Premultiplied",
+                                            "v": "premultiplied",
+                                          },
+                                        ],
+                                      },
+                                    },
+                                    "options": [
+                                      {
+                                        "label": "None",
+                                        "v": "none",
+                                      },
+                                      {
+                                        "label": "Straight",
+                                        "v": "straight",
+                                      },
+                                      {
+                                        "label": "Premultiplied",
+                                        "v": "premultiplied",
+                                      },
+                                    ],
                                     "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
                                       "color": {
                                         "token": "colors.text",
                                       },
                                       "fontSize": {
                                         "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.control",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -12662,8 +13106,8 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                                         "token": "metrics.hit",
                                       },
                                     },
-                                    "title": "Keep the background see-through, with straight alpha.",
-                                    "value": true,
+                                    "title": "How transparency is stored in the exported picture.",
+                                    "value": "straight",
                                   },
                                   "text": "",
                                   "type": "button",
@@ -12683,8 +13127,8 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                           ],
                           "props": {
                             "data-pm-component": "form-row",
-                            "id": "export.row.alpha",
-                            "label": "Transparent Background",
+                            "id": "export.row.alphaMode",
+                            "label": "Alpha",
                             "role": "group",
                             "style": {
                               "alignItems": "center",
@@ -13739,7 +14183,7 @@ exports[`wire snapshot: ProRes alpha 1`] = `
                     {
                       "children": [],
                       "props": {},
-                      "text": "Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.",
+                      "text": "Color: sRGB. Video uses tagged BT.709 primaries and sRGB transfer.",
                       "type": "text",
                     },
                   ],
@@ -14422,12 +14866,12 @@ exports[`wire snapshot: PNG sequence 1`] = `
                                         "menu": [
                                           {
                                             "disabled": false,
-                                            "label": "PNG sequence",
+                                            "label": "PNG Sequence",
                                             "v": "png",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "Still frame (PNG)",
+                                            "label": "Still Frame (PNG)",
                                             "v": "still",
                                           },
                                         ],
@@ -14436,12 +14880,12 @@ exports[`wire snapshot: PNG sequence 1`] = `
                                     "options": [
                                       {
                                         "disabled": false,
-                                        "label": "PNG sequence",
+                                        "label": "PNG Sequence",
                                         "v": "png",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "Still frame (PNG)",
+                                        "label": "Still Frame (PNG)",
                                         "v": "still",
                                       },
                                     ],
@@ -15586,7 +16030,7 @@ exports[`wire snapshot: PNG sequence 1`] = `
                                     {
                                       "children": [],
                                       "props": {},
-                                      "text": "Transparent Background",
+                                      "text": "Alpha",
                                       "type": "text",
                                     },
                                   ],
@@ -15608,7 +16052,7 @@ exports[`wire snapshot: PNG sequence 1`] = `
                                     {
                                       "children": [],
                                       "props": {},
-                                      "text": "Keep the background see-through, with straight alpha.",
+                                      "text": "How transparency is stored in the exported picture.",
                                       "type": "text",
                                     },
                                   ],
@@ -15645,20 +16089,51 @@ exports[`wire snapshot: PNG sequence 1`] = `
                                 {
                                   "children": [],
                                   "props": {
-                                    "aria-checked": false,
-                                    "binding": "fixture:export:alpha",
-                                    "control": "toggle",
-                                    "data-pm-component": "switch",
+                                    "binding": "fixture:export:alphaMode",
+                                    "control": "select",
+                                    "data-pm-component": "pop-up-button",
                                     "disabled": false,
-                                    "id": "export.alpha",
-                                    "label": "Transparent Background",
-                                    "role": "switch",
+                                    "id": "export.alphaMode",
+                                    "label": "Alpha",
+                                    "metadata": {
+                                      "pmKit": {
+                                        "menu": [
+                                          {
+                                            "label": "None",
+                                            "v": "none",
+                                          },
+                                          {
+                                            "label": "Straight",
+                                            "v": "straight",
+                                          },
+                                        ],
+                                      },
+                                    },
+                                    "options": [
+                                      {
+                                        "label": "None",
+                                        "v": "none",
+                                      },
+                                      {
+                                        "label": "Straight",
+                                        "v": "straight",
+                                      },
+                                    ],
                                     "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
                                       "color": {
                                         "token": "colors.text",
                                       },
                                       "fontSize": {
                                         "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.control",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -15667,8 +16142,8 @@ exports[`wire snapshot: PNG sequence 1`] = `
                                         "token": "metrics.hit",
                                       },
                                     },
-                                    "title": "Keep the background see-through, with straight alpha.",
-                                    "value": false,
+                                    "title": "How transparency is stored in the exported picture.",
+                                    "value": "none",
                                   },
                                   "text": "",
                                   "type": "button",
@@ -15688,8 +16163,8 @@ exports[`wire snapshot: PNG sequence 1`] = `
                           ],
                           "props": {
                             "data-pm-component": "form-row",
-                            "id": "export.row.alpha",
-                            "label": "Transparent Background",
+                            "id": "export.row.alphaMode",
+                            "label": "Alpha",
                             "role": "group",
                             "style": {
                               "alignItems": "center",
@@ -16542,7 +17017,7 @@ exports[`wire snapshot: PNG sequence 1`] = `
                     {
                       "children": [],
                       "props": {},
-                      "text": "Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.",
+                      "text": "Color: sRGB. Video uses tagged BT.709 primaries and sRGB transfer.",
                       "type": "text",
                     },
                   ],
@@ -17225,12 +17700,12 @@ exports[`wire snapshot: still 1`] = `
                                         "menu": [
                                           {
                                             "disabled": false,
-                                            "label": "PNG sequence",
+                                            "label": "PNG Sequence",
                                             "v": "png",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "Still frame (PNG)",
+                                            "label": "Still Frame (PNG)",
                                             "v": "still",
                                           },
                                         ],
@@ -17239,12 +17714,12 @@ exports[`wire snapshot: still 1`] = `
                                     "options": [
                                       {
                                         "disabled": false,
-                                        "label": "PNG sequence",
+                                        "label": "PNG Sequence",
                                         "v": "png",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "Still frame (PNG)",
+                                        "label": "Still Frame (PNG)",
                                         "v": "still",
                                       },
                                     ],
@@ -17953,7 +18428,7 @@ exports[`wire snapshot: still 1`] = `
                                     {
                                       "children": [],
                                       "props": {},
-                                      "text": "Transparent Background",
+                                      "text": "Alpha",
                                       "type": "text",
                                     },
                                   ],
@@ -17975,7 +18450,7 @@ exports[`wire snapshot: still 1`] = `
                                     {
                                       "children": [],
                                       "props": {},
-                                      "text": "Keep the background see-through, with straight alpha.",
+                                      "text": "How transparency is stored in the exported picture.",
                                       "type": "text",
                                     },
                                   ],
@@ -18012,20 +18487,51 @@ exports[`wire snapshot: still 1`] = `
                                 {
                                   "children": [],
                                   "props": {
-                                    "aria-checked": false,
-                                    "binding": "fixture:export:alpha",
-                                    "control": "toggle",
-                                    "data-pm-component": "switch",
+                                    "binding": "fixture:export:alphaMode",
+                                    "control": "select",
+                                    "data-pm-component": "pop-up-button",
                                     "disabled": false,
-                                    "id": "export.alpha",
-                                    "label": "Transparent Background",
-                                    "role": "switch",
+                                    "id": "export.alphaMode",
+                                    "label": "Alpha",
+                                    "metadata": {
+                                      "pmKit": {
+                                        "menu": [
+                                          {
+                                            "label": "None",
+                                            "v": "none",
+                                          },
+                                          {
+                                            "label": "Straight",
+                                            "v": "straight",
+                                          },
+                                        ],
+                                      },
+                                    },
+                                    "options": [
+                                      {
+                                        "label": "None",
+                                        "v": "none",
+                                      },
+                                      {
+                                        "label": "Straight",
+                                        "v": "straight",
+                                      },
+                                    ],
                                     "style": {
+                                      "background": {
+                                        "token": "colors.field",
+                                      },
+                                      "borderRadius": {
+                                        "token": "metrics.control_radius",
+                                      },
                                       "color": {
                                         "token": "colors.text",
                                       },
                                       "fontSize": {
                                         "token": "typography.body",
+                                      },
+                                      "height": {
+                                        "token": "metrics.control",
                                       },
                                       "minHeight": {
                                         "token": "metrics.hit",
@@ -18034,8 +18540,8 @@ exports[`wire snapshot: still 1`] = `
                                         "token": "metrics.hit",
                                       },
                                     },
-                                    "title": "Keep the background see-through, with straight alpha.",
-                                    "value": false,
+                                    "title": "How transparency is stored in the exported picture.",
+                                    "value": "none",
                                   },
                                   "text": "",
                                   "type": "button",
@@ -18055,8 +18561,8 @@ exports[`wire snapshot: still 1`] = `
                           ],
                           "props": {
                             "data-pm-component": "form-row",
-                            "id": "export.row.alpha",
-                            "label": "Transparent Background",
+                            "id": "export.row.alphaMode",
+                            "label": "Alpha",
                             "role": "group",
                             "style": {
                               "alignItems": "center",
@@ -18747,7 +19253,7 @@ exports[`wire snapshot: still 1`] = `
                     {
                       "children": [],
                       "props": {},
-                      "text": "Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.",
+                      "text": "Color: sRGB. Video uses tagged BT.709 primaries and sRGB transfer.",
                       "type": "text",
                     },
                   ],
@@ -19916,7 +20422,7 @@ exports[`wire snapshot: no captions 1`] = `
                 {
                   "children": [],
                   "props": {},
-                  "text": "MP4, WebM or ProRes for delivery and editing.",
+                  "text": "QuickTime, MP4 or WebM for delivery and editing.",
                   "type": "text",
                 },
               ],
@@ -20059,17 +20565,17 @@ exports[`wire snapshot: no captions 1`] = `
                                         "menu": [
                                           {
                                             "disabled": false,
-                                            "label": "QuickTime · ProRes",
+                                            "label": "QuickTime (.mov)",
                                             "v": "prores",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "MP4 · H.264 or HEVC",
+                                            "label": "MP4",
                                             "v": "mp4",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "WebM · VP9",
+                                            "label": "WebM",
                                             "v": "webm",
                                           },
                                         ],
@@ -20078,17 +20584,17 @@ exports[`wire snapshot: no captions 1`] = `
                                     "options": [
                                       {
                                         "disabled": false,
-                                        "label": "QuickTime · ProRes",
+                                        "label": "QuickTime (.mov)",
                                         "v": "prores",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "MP4 · H.264 or HEVC",
+                                        "label": "MP4",
                                         "v": "mp4",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "WebM · VP9",
+                                        "label": "WebM",
                                         "v": "webm",
                                       },
                                     ],
@@ -20219,7 +20725,7 @@ exports[`wire snapshot: no captions 1`] = `
                                     {
                                       "children": [],
                                       "props": {},
-                                      "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                      "text": "Video coding and bit depth of the exported file.",
                                       "type": "text",
                                     },
                                   ],
@@ -20256,34 +20762,42 @@ exports[`wire snapshot: no captions 1`] = `
                                 {
                                   "children": [],
                                   "props": {
-                                    "binding": "fixture:export:codec",
+                                    "binding": "fixture:export:videoCodec",
                                     "control": "select",
                                     "data-pm-component": "pop-up-button",
                                     "disabled": false,
-                                    "id": "export.codec",
+                                    "id": "export.videoCodec",
                                     "label": "Codec",
                                     "metadata": {
                                       "pmKit": {
                                         "menu": [
                                           {
-                                            "label": "H.264",
+                                            "label": "H.264 (High)",
                                             "v": "h264",
                                           },
                                           {
-                                            "label": "HEVC · 10-bit",
+                                            "label": "HEVC (Main)",
                                             "v": "hevc",
+                                          },
+                                          {
+                                            "label": "HEVC 10-bit (Main10)",
+                                            "v": "hevc10",
                                           },
                                         ],
                                       },
                                     },
                                     "options": [
                                       {
-                                        "label": "H.264",
+                                        "label": "H.264 (High)",
                                         "v": "h264",
                                       },
                                       {
-                                        "label": "HEVC · 10-bit",
+                                        "label": "HEVC (Main)",
                                         "v": "hevc",
+                                      },
+                                      {
+                                        "label": "HEVC 10-bit (Main10)",
+                                        "v": "hevc10",
                                       },
                                     ],
                                     "style": {
@@ -20309,7 +20823,7 @@ exports[`wire snapshot: no captions 1`] = `
                                         "token": "metrics.hit",
                                       },
                                     },
-                                    "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                    "title": "Video coding and bit depth of the exported file.",
                                     "value": "h264",
                                   },
                                   "text": "",
@@ -22389,7 +22903,7 @@ exports[`wire snapshot: no captions 1`] = `
                     {
                       "children": [],
                       "props": {},
-                      "text": "Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.",
+                      "text": "Color: sRGB. Video uses tagged BT.709 primaries and sRGB transfer.",
                       "type": "text",
                     },
                   ],
@@ -22929,7 +23443,7 @@ exports[`wire snapshot: multiple captions 1`] = `
                 {
                   "children": [],
                   "props": {},
-                  "text": "MP4, WebM or ProRes for delivery and editing.",
+                  "text": "QuickTime, MP4 or WebM for delivery and editing.",
                   "type": "text",
                 },
               ],
@@ -23072,17 +23586,17 @@ exports[`wire snapshot: multiple captions 1`] = `
                                         "menu": [
                                           {
                                             "disabled": false,
-                                            "label": "QuickTime · ProRes",
+                                            "label": "QuickTime (.mov)",
                                             "v": "prores",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "MP4 · H.264 or HEVC",
+                                            "label": "MP4",
                                             "v": "mp4",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "WebM · VP9",
+                                            "label": "WebM",
                                             "v": "webm",
                                           },
                                         ],
@@ -23091,17 +23605,17 @@ exports[`wire snapshot: multiple captions 1`] = `
                                     "options": [
                                       {
                                         "disabled": false,
-                                        "label": "QuickTime · ProRes",
+                                        "label": "QuickTime (.mov)",
                                         "v": "prores",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "MP4 · H.264 or HEVC",
+                                        "label": "MP4",
                                         "v": "mp4",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "WebM · VP9",
+                                        "label": "WebM",
                                         "v": "webm",
                                       },
                                     ],
@@ -23232,7 +23746,7 @@ exports[`wire snapshot: multiple captions 1`] = `
                                     {
                                       "children": [],
                                       "props": {},
-                                      "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                      "text": "Video coding and bit depth of the exported file.",
                                       "type": "text",
                                     },
                                   ],
@@ -23269,34 +23783,42 @@ exports[`wire snapshot: multiple captions 1`] = `
                                 {
                                   "children": [],
                                   "props": {
-                                    "binding": "fixture:export:codec",
+                                    "binding": "fixture:export:videoCodec",
                                     "control": "select",
                                     "data-pm-component": "pop-up-button",
                                     "disabled": false,
-                                    "id": "export.codec",
+                                    "id": "export.videoCodec",
                                     "label": "Codec",
                                     "metadata": {
                                       "pmKit": {
                                         "menu": [
                                           {
-                                            "label": "H.264",
+                                            "label": "H.264 (High)",
                                             "v": "h264",
                                           },
                                           {
-                                            "label": "HEVC · 10-bit",
+                                            "label": "HEVC (Main)",
                                             "v": "hevc",
+                                          },
+                                          {
+                                            "label": "HEVC 10-bit (Main10)",
+                                            "v": "hevc10",
                                           },
                                         ],
                                       },
                                     },
                                     "options": [
                                       {
-                                        "label": "H.264",
+                                        "label": "H.264 (High)",
                                         "v": "h264",
                                       },
                                       {
-                                        "label": "HEVC · 10-bit",
+                                        "label": "HEVC (Main)",
                                         "v": "hevc",
+                                      },
+                                      {
+                                        "label": "HEVC 10-bit (Main10)",
+                                        "v": "hevc10",
                                       },
                                     ],
                                     "style": {
@@ -23322,7 +23844,7 @@ exports[`wire snapshot: multiple captions 1`] = `
                                         "token": "metrics.hit",
                                       },
                                     },
-                                    "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                    "title": "Video coding and bit depth of the exported file.",
                                     "value": "h264",
                                   },
                                   "text": "",
@@ -25800,7 +26322,7 @@ exports[`wire snapshot: multiple captions 1`] = `
                     {
                       "children": [],
                       "props": {},
-                      "text": "Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.",
+                      "text": "Color: sRGB. Video uses tagged BT.709 primaries and sRGB transfer.",
                       "type": "text",
                     },
                   ],
@@ -26340,7 +26862,7 @@ exports[`wire snapshot: custom size 1`] = `
                 {
                   "children": [],
                   "props": {},
-                  "text": "MP4, WebM or ProRes for delivery and editing.",
+                  "text": "QuickTime, MP4 or WebM for delivery and editing.",
                   "type": "text",
                 },
               ],
@@ -26483,17 +27005,17 @@ exports[`wire snapshot: custom size 1`] = `
                                         "menu": [
                                           {
                                             "disabled": false,
-                                            "label": "QuickTime · ProRes",
+                                            "label": "QuickTime (.mov)",
                                             "v": "prores",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "MP4 · H.264 or HEVC",
+                                            "label": "MP4",
                                             "v": "mp4",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "WebM · VP9",
+                                            "label": "WebM",
                                             "v": "webm",
                                           },
                                         ],
@@ -26502,17 +27024,17 @@ exports[`wire snapshot: custom size 1`] = `
                                     "options": [
                                       {
                                         "disabled": false,
-                                        "label": "QuickTime · ProRes",
+                                        "label": "QuickTime (.mov)",
                                         "v": "prores",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "MP4 · H.264 or HEVC",
+                                        "label": "MP4",
                                         "v": "mp4",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "WebM · VP9",
+                                        "label": "WebM",
                                         "v": "webm",
                                       },
                                     ],
@@ -26643,7 +27165,7 @@ exports[`wire snapshot: custom size 1`] = `
                                     {
                                       "children": [],
                                       "props": {},
-                                      "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                      "text": "Video coding and bit depth of the exported file.",
                                       "type": "text",
                                     },
                                   ],
@@ -26680,34 +27202,42 @@ exports[`wire snapshot: custom size 1`] = `
                                 {
                                   "children": [],
                                   "props": {
-                                    "binding": "fixture:export:codec",
+                                    "binding": "fixture:export:videoCodec",
                                     "control": "select",
                                     "data-pm-component": "pop-up-button",
                                     "disabled": false,
-                                    "id": "export.codec",
+                                    "id": "export.videoCodec",
                                     "label": "Codec",
                                     "metadata": {
                                       "pmKit": {
                                         "menu": [
                                           {
-                                            "label": "H.264",
+                                            "label": "H.264 (High)",
                                             "v": "h264",
                                           },
                                           {
-                                            "label": "HEVC · 10-bit",
+                                            "label": "HEVC (Main)",
                                             "v": "hevc",
+                                          },
+                                          {
+                                            "label": "HEVC 10-bit (Main10)",
+                                            "v": "hevc10",
                                           },
                                         ],
                                       },
                                     },
                                     "options": [
                                       {
-                                        "label": "H.264",
+                                        "label": "H.264 (High)",
                                         "v": "h264",
                                       },
                                       {
-                                        "label": "HEVC · 10-bit",
+                                        "label": "HEVC (Main)",
                                         "v": "hevc",
+                                      },
+                                      {
+                                        "label": "HEVC 10-bit (Main10)",
+                                        "v": "hevc10",
                                       },
                                     ],
                                     "style": {
@@ -26733,7 +27263,7 @@ exports[`wire snapshot: custom size 1`] = `
                                         "token": "metrics.hit",
                                       },
                                     },
-                                    "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                    "title": "Video coding and bit depth of the exported file.",
                                     "value": "h264",
                                   },
                                   "text": "",
@@ -29495,7 +30025,7 @@ exports[`wire snapshot: custom size 1`] = `
                     {
                       "children": [],
                       "props": {},
-                      "text": "Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.",
+                      "text": "Color: sRGB. Video uses tagged BT.709 primaries and sRGB transfer.",
                       "type": "text",
                     },
                   ],
@@ -30035,7 +30565,7 @@ exports[`wire snapshot: inline invalid size 1`] = `
                 {
                   "children": [],
                   "props": {},
-                  "text": "MP4, WebM or ProRes for delivery and editing.",
+                  "text": "QuickTime, MP4 or WebM for delivery and editing.",
                   "type": "text",
                 },
               ],
@@ -30178,17 +30708,17 @@ exports[`wire snapshot: inline invalid size 1`] = `
                                         "menu": [
                                           {
                                             "disabled": false,
-                                            "label": "QuickTime · ProRes",
+                                            "label": "QuickTime (.mov)",
                                             "v": "prores",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "MP4 · H.264 or HEVC",
+                                            "label": "MP4",
                                             "v": "mp4",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "WebM · VP9",
+                                            "label": "WebM",
                                             "v": "webm",
                                           },
                                         ],
@@ -30197,17 +30727,17 @@ exports[`wire snapshot: inline invalid size 1`] = `
                                     "options": [
                                       {
                                         "disabled": false,
-                                        "label": "QuickTime · ProRes",
+                                        "label": "QuickTime (.mov)",
                                         "v": "prores",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "MP4 · H.264 or HEVC",
+                                        "label": "MP4",
                                         "v": "mp4",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "WebM · VP9",
+                                        "label": "WebM",
                                         "v": "webm",
                                       },
                                     ],
@@ -30338,7 +30868,7 @@ exports[`wire snapshot: inline invalid size 1`] = `
                                     {
                                       "children": [],
                                       "props": {},
-                                      "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                      "text": "Video coding and bit depth of the exported file.",
                                       "type": "text",
                                     },
                                   ],
@@ -30375,34 +30905,42 @@ exports[`wire snapshot: inline invalid size 1`] = `
                                 {
                                   "children": [],
                                   "props": {
-                                    "binding": "fixture:export:codec",
+                                    "binding": "fixture:export:videoCodec",
                                     "control": "select",
                                     "data-pm-component": "pop-up-button",
                                     "disabled": false,
-                                    "id": "export.codec",
+                                    "id": "export.videoCodec",
                                     "label": "Codec",
                                     "metadata": {
                                       "pmKit": {
                                         "menu": [
                                           {
-                                            "label": "H.264",
+                                            "label": "H.264 (High)",
                                             "v": "h264",
                                           },
                                           {
-                                            "label": "HEVC · 10-bit",
+                                            "label": "HEVC (Main)",
                                             "v": "hevc",
+                                          },
+                                          {
+                                            "label": "HEVC 10-bit (Main10)",
+                                            "v": "hevc10",
                                           },
                                         ],
                                       },
                                     },
                                     "options": [
                                       {
-                                        "label": "H.264",
+                                        "label": "H.264 (High)",
                                         "v": "h264",
                                       },
                                       {
-                                        "label": "HEVC · 10-bit",
+                                        "label": "HEVC (Main)",
                                         "v": "hevc",
+                                      },
+                                      {
+                                        "label": "HEVC 10-bit (Main10)",
+                                        "v": "hevc10",
                                       },
                                     ],
                                     "style": {
@@ -30428,7 +30966,7 @@ exports[`wire snapshot: inline invalid size 1`] = `
                                         "token": "metrics.hit",
                                       },
                                     },
-                                    "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                    "title": "Video coding and bit depth of the exported file.",
                                     "value": "h264",
                                   },
                                   "text": "",
@@ -33212,7 +33750,7 @@ exports[`wire snapshot: inline invalid size 1`] = `
                     {
                       "children": [],
                       "props": {},
-                      "text": "Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.",
+                      "text": "Color: sRGB. Video uses tagged BT.709 primaries and sRGB transfer.",
                       "type": "text",
                     },
                   ],
@@ -33755,7 +34293,7 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                 {
                   "children": [],
                   "props": {},
-                  "text": "MP4, WebM or ProRes for delivery and editing.",
+                  "text": "QuickTime, MP4 or WebM for delivery and editing.",
                   "type": "text",
                 },
               ],
@@ -33898,17 +34436,17 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                                         "menu": [
                                           {
                                             "disabled": false,
-                                            "label": "QuickTime · ProRes",
+                                            "label": "QuickTime (.mov)",
                                             "v": "prores",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "MP4 · H.264 or HEVC",
+                                            "label": "MP4",
                                             "v": "mp4",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "WebM · VP9",
+                                            "label": "WebM",
                                             "v": "webm",
                                           },
                                         ],
@@ -33917,17 +34455,17 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                                     "options": [
                                       {
                                         "disabled": false,
-                                        "label": "QuickTime · ProRes",
+                                        "label": "QuickTime (.mov)",
                                         "v": "prores",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "MP4 · H.264 or HEVC",
+                                        "label": "MP4",
                                         "v": "mp4",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "WebM · VP9",
+                                        "label": "WebM",
                                         "v": "webm",
                                       },
                                     ],
@@ -34058,7 +34596,7 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                                     {
                                       "children": [],
                                       "props": {},
-                                      "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                      "text": "Video coding and bit depth of the exported file.",
                                       "type": "text",
                                     },
                                   ],
@@ -34095,34 +34633,42 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                                 {
                                   "children": [],
                                   "props": {
-                                    "binding": "fixture:export:codec",
+                                    "binding": "fixture:export:videoCodec",
                                     "control": "select",
                                     "data-pm-component": "pop-up-button",
                                     "disabled": true,
-                                    "id": "export.codec",
+                                    "id": "export.videoCodec",
                                     "label": "Codec",
                                     "metadata": {
                                       "pmKit": {
                                         "menu": [
                                           {
-                                            "label": "H.264",
+                                            "label": "H.264 (High)",
                                             "v": "h264",
                                           },
                                           {
-                                            "label": "HEVC · 10-bit",
+                                            "label": "HEVC (Main)",
                                             "v": "hevc",
+                                          },
+                                          {
+                                            "label": "HEVC 10-bit (Main10)",
+                                            "v": "hevc10",
                                           },
                                         ],
                                       },
                                     },
                                     "options": [
                                       {
-                                        "label": "H.264",
+                                        "label": "H.264 (High)",
                                         "v": "h264",
                                       },
                                       {
-                                        "label": "HEVC · 10-bit",
+                                        "label": "HEVC (Main)",
                                         "v": "hevc",
+                                      },
+                                      {
+                                        "label": "HEVC 10-bit (Main10)",
+                                        "v": "hevc10",
                                       },
                                     ],
                                     "style": {
@@ -34148,7 +34694,7 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                                         "token": "metrics.hit",
                                       },
                                     },
-                                    "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                    "title": "Video coding and bit depth of the exported file.",
                                     "value": "h264",
                                   },
                                   "text": "",
@@ -36626,7 +37172,7 @@ exports[`wire snapshot: choosing destination (no progress) 1`] = `
                     {
                       "children": [],
                       "props": {},
-                      "text": "Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.",
+                      "text": "Color: sRGB. Video uses tagged BT.709 primaries and sRGB transfer.",
                       "type": "text",
                     },
                   ],
@@ -38499,7 +39045,7 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                 {
                   "children": [],
                   "props": {},
-                  "text": "MP4, WebM or ProRes for delivery and editing.",
+                  "text": "QuickTime, MP4 or WebM for delivery and editing.",
                   "type": "text",
                 },
               ],
@@ -38642,17 +39188,17 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                                         "menu": [
                                           {
                                             "disabled": false,
-                                            "label": "QuickTime · ProRes",
+                                            "label": "QuickTime (.mov)",
                                             "v": "prores",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "MP4 · H.264 or HEVC",
+                                            "label": "MP4",
                                             "v": "mp4",
                                           },
                                           {
                                             "disabled": false,
-                                            "label": "WebM · VP9",
+                                            "label": "WebM",
                                             "v": "webm",
                                           },
                                         ],
@@ -38661,17 +39207,17 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                                     "options": [
                                       {
                                         "disabled": false,
-                                        "label": "QuickTime · ProRes",
+                                        "label": "QuickTime (.mov)",
                                         "v": "prores",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "MP4 · H.264 or HEVC",
+                                        "label": "MP4",
                                         "v": "mp4",
                                       },
                                       {
                                         "disabled": false,
-                                        "label": "WebM · VP9",
+                                        "label": "WebM",
                                         "v": "webm",
                                       },
                                     ],
@@ -38802,7 +39348,7 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                                     {
                                       "children": [],
                                       "props": {},
-                                      "text": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                      "text": "Video coding and bit depth of the exported file.",
                                       "type": "text",
                                     },
                                   ],
@@ -38839,34 +39385,42 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                                 {
                                   "children": [],
                                   "props": {
-                                    "binding": "fixture:export:codec",
+                                    "binding": "fixture:export:videoCodec",
                                     "control": "select",
                                     "data-pm-component": "pop-up-button",
                                     "disabled": false,
-                                    "id": "export.codec",
+                                    "id": "export.videoCodec",
                                     "label": "Codec",
                                     "metadata": {
                                       "pmKit": {
                                         "menu": [
                                           {
-                                            "label": "H.264",
+                                            "label": "H.264 (High)",
                                             "v": "h264",
                                           },
                                           {
-                                            "label": "HEVC · 10-bit",
+                                            "label": "HEVC (Main)",
                                             "v": "hevc",
+                                          },
+                                          {
+                                            "label": "HEVC 10-bit (Main10)",
+                                            "v": "hevc10",
                                           },
                                         ],
                                       },
                                     },
                                     "options": [
                                       {
-                                        "label": "H.264",
+                                        "label": "H.264 (High)",
                                         "v": "h264",
                                       },
                                       {
-                                        "label": "HEVC · 10-bit",
+                                        "label": "HEVC (Main)",
                                         "v": "hevc",
+                                      },
+                                      {
+                                        "label": "HEVC 10-bit (Main10)",
+                                        "v": "hevc10",
                                       },
                                     ],
                                     "style": {
@@ -38892,7 +39446,7 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                                         "token": "metrics.hit",
                                       },
                                     },
-                                    "title": "HEVC is 10-bit and smaller than H.264 at the same quality.",
+                                    "title": "Video coding and bit depth of the exported file.",
                                     "value": "h264",
                                   },
                                   "text": "",
@@ -41370,7 +41924,7 @@ exports[`hover/focus use system controls; op tree stays stable, with one selecte
                     {
                       "children": [],
                       "props": {},
-                      "text": "Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.",
+                      "text": "Color: sRGB. Video uses tagged BT.709 primaries and sRGB transfer.",
                       "type": "text",
                     },
                   ],

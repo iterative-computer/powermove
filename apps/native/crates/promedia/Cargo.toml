@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 pm-color = { path = "../../../../engine/crates/pm-color" }
+pm-export = { path = "../../../../engine/crates/pm-export", default-features = false }
 pm-time = { path = "../../../../engine/crates/pm-time" }
 pm-protocol = { path = "../../../../engine/crates/pm-protocol" }
 blake3 = "1"

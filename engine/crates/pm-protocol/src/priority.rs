@@ -392,6 +392,7 @@ pub enum ExportFormat {
         profile: ProResProfile,
     },
     H264,
+    H264Mov,
     /// 8 or 10-bit SDR; alpha only at 8-bit (confirmed in S2).
     Hevc {
         ten_bit: bool,
@@ -420,7 +421,7 @@ impl ExportFormat {
     pub const fn supports_alpha(self) -> bool {
         match self {
             ExportFormat::ProRes { profile } => profile.supports_alpha(),
-            ExportFormat::H264 => false,
+            ExportFormat::H264 | ExportFormat::H264Mov => false,
             ExportFormat::Hevc { ten_bit, .. } => !ten_bit,
             ExportFormat::Webm { .. }
             | ExportFormat::PngSequence { .. }
@@ -432,7 +433,10 @@ impl ExportFormat {
     pub const fn uses_bitrate(self) -> bool {
         matches!(
             self,
-            ExportFormat::H264 | ExportFormat::Hevc { .. } | ExportFormat::Webm { .. }
+            ExportFormat::H264
+                | ExportFormat::H264Mov
+                | ExportFormat::Hevc { .. }
+                | ExportFormat::Webm { .. }
         )
     }
 }
@@ -534,6 +538,8 @@ pub struct DeliveryOptions {
     /// `None`: the composition's own timecode at the export's first frame
     /// (drop-frame at 29.97 and 59.94), no reel.
     pub timecode: Option<ExportTimecode>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub without_timecode: bool,
     /// Leaves captions layers out of the picture (a caption file is delivered
     /// instead); captions are burned in otherwise, as today.
     pub hide_captions: bool,
@@ -561,6 +567,7 @@ impl ExportFormat {
         matches!(
             self,
             ExportFormat::ProRes { .. }
+                | ExportFormat::H264Mov
                 | ExportFormat::Hevc {
                     container: Container::Mov,
                     ..
@@ -1170,6 +1177,16 @@ mod tests {
         assert!(with(prores, pcm(AudioCoding::PcmFloat)).validate().is_ok());
         assert!(with(prores, pcm(AudioCoding::Aac)).validate().is_ok());
         assert!(
+            with(ExportFormat::H264Mov, pcm(AudioCoding::Pcm16))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            with(ExportFormat::H264Mov, pcm(AudioCoding::Aac))
+                .validate()
+                .is_ok()
+        );
+        assert!(
             with(ExportFormat::H264, pcm(AudioCoding::Pcm16))
                 .validate()
                 .is_err(),
@@ -1200,6 +1217,11 @@ mod tests {
             ..DeliveryOptions::default()
         };
         assert!(with(prores, tc("01:00:00:00", false)).validate().is_ok());
+        assert!(
+            with(ExportFormat::H264Mov, tc("01:00:00:00", false))
+                .validate()
+                .is_ok()
+        );
         assert!(
             with(prores, tc("01:00:00;00", true)).validate().is_err(),
             "drop-frame at 23.976"

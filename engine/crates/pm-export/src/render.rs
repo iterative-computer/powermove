@@ -33,8 +33,7 @@ use pm_model::{Document, Node, NodeKind};
 use pm_protocol::color::{OutputColor, Precision, QuickTimeTag};
 use pm_protocol::common::{PixelRect, Size, TICKS_PER_SECOND, Ticks};
 use pm_protocol::priority::{
-    AlphaOutput as WireAlpha, AudioCoding, Container as WireContainer, ExportFormat,
-    ExportSettings, ProResProfile as WireProRes, WebmCodec,
+    AlphaOutput as WireAlpha, ExportSettings,
 };
 use pm_render::{OutputKind, RenderError, RenderRequest, Renderer};
 use pm_time::Rate;
@@ -44,7 +43,7 @@ use crate::convert::{Chroma, WorkingFrame};
 use crate::pipeline::{Pipeline, Sink};
 use crate::settings::{
     AlphaOutput, AudioCodec, AudioSpec, Codec, ColorTags, Container, Dither, ExportSpec,
-    HdrMetadata, Overwrite, ProResProfile, WorkingEncoding,
+    HdrMetadata, Overwrite, WorkingEncoding,
 };
 
 /// Output rows per slicing unit while the interactive engine plays.
@@ -724,44 +723,9 @@ fn rate_of(settings: &ExportSettings) -> Result<Rate, JobError> {
         .map_err(|e| JobError::Invalid(format!("frame rate {}/{}: {e}", fr.num, fr.den)))
 }
 
-/// The encoder and container for `settings` (section 17, "Formats at cutover").
+/// The encoder and container for the frozen export settings.
 pub fn codec_of(settings: &ExportSettings) -> Result<(Codec, Container), JobError> {
-    let bitrate_bps = settings.quality.bitrate_mbps() * 1_000_000;
-    Ok(match settings.format {
-        ExportFormat::ProRes { profile } => (
-            Codec::ProRes(match profile {
-                WireProRes::Proxy => ProResProfile::Proxy,
-                WireProRes::Lt => ProResProfile::Lt,
-                WireProRes::Standard => ProResProfile::Standard,
-                WireProRes::Hq => ProResProfile::Hq,
-                WireProRes::P4444 => ProResProfile::P4444,
-                WireProRes::P4444Xq => ProResProfile::P4444Xq,
-            }),
-            Container::Mov,
-        ),
-        ExportFormat::H264 => (Codec::H264 { bitrate_bps }, Container::Mp4),
-        ExportFormat::Hevc { ten_bit, container } => (
-            Codec::Hevc {
-                bitrate_bps,
-                ten_bit,
-            },
-            match container {
-                WireContainer::Mp4 => Container::Mp4,
-                WireContainer::Mov => Container::Mov,
-            },
-        ),
-        ExportFormat::Webm { codec } => (
-            match codec {
-                WebmCodec::Vp9 => Codec::Vp9 { bitrate_bps },
-                WebmCodec::Vp8 => Codec::Vp8 { bitrate_bps },
-            },
-            Container::Webm,
-        ),
-        ExportFormat::PngSequence { sixteen_bit } => {
-            (Codec::Png { sixteen_bit }, Container::PngSequence)
-        }
-        ExportFormat::PngStill { sixteen_bit } => (Codec::Png { sixteen_bit }, Container::PngStill),
-    })
+    Ok(crate::wire::codec_of(settings))
 }
 
 /// HDR reference white in delivered light (BT.2408).
@@ -815,19 +779,7 @@ fn set_hdr_metadata(tags: &mut ColorTags, value: HdrMetadata) {
     }
 }
 
-/// The audio coding of an export: the delivery option, or today's audio for
-/// the container (24-bit PCM in MOV, AAC in MP4, Opus in WebM).
-pub fn audio_codec_of(settings: &ExportSettings, container: Container) -> AudioCodec {
-    match (container, settings.delivery.audio_coding) {
-        (Container::Webm, _) => AudioCodec::Opus,
-        (_, Some(AudioCoding::Pcm16)) => AudioCodec::Pcm16,
-        (_, Some(AudioCoding::Pcm24)) => AudioCodec::Pcm24,
-        (_, Some(AudioCoding::PcmFloat)) => AudioCodec::PcmF32,
-        (_, Some(AudioCoding::Aac)) => AudioCodec::Aac,
-        (Container::Mov, None) => AudioCodec::Pcm24,
-        _ => AudioCodec::Aac,
-    }
-}
+pub use crate::wire::audio_codec_of;
 
 /// The `tmcd` track of a MOV export: the start timecode and reel the user
 /// chose (section 17, "Comfort"), or the composition's own timecode at the
@@ -1446,7 +1398,7 @@ fn plan_export_checked(
             channels: 2,
             codec: audio_codec,
         }),
-        timecode: if container == Container::Mov {
+        timecode: if container == Container::Mov && !s.delivery.without_timecode {
             Some(timecode_of(s, &timeline)?)
         } else {
             None

@@ -7,17 +7,17 @@ export const kinds = [
   { id: "project", label: "Project" },
 ];
 export const descriptions: Record<Kind, string> = {
-  video: "MP4, WebM or ProRes for delivery and editing.",
+  video: "QuickTime, MP4 or WebM for delivery and editing.",
   images: "A single frame, or every frame as a PNG sequence.",
   project: "An editable .pmv with every layer and its media.",
 };
 export const formats: { v: Format; label: string }[] = [
-  { v: "prores", label: "QuickTime · ProRes" },
-  { v: "mp4", label: "MP4 · H.264 or HEVC" },
-  { v: "webm", label: "WebM · VP9" },
-  { v: "png", label: "PNG sequence" },
-  { v: "still", label: "Still frame (PNG)" },
-  { v: "json", label: "Project file (.pmv)" },
+  { v: "prores", label: "QuickTime (.mov)" },
+  { v: "mp4", label: "MP4" },
+  { v: "webm", label: "WebM" },
+  { v: "png", label: "PNG Sequence" },
+  { v: "still", label: "Still Frame (PNG)" },
+  { v: "json", label: "Project File (.pmv)" },
 ];
 export const kindOf = (format: Format): Kind =>
   format === "json"
@@ -25,8 +25,93 @@ export const kindOf = (format: Format): Kind =>
     : format === "png" || format === "still"
       ? "images"
       : "video";
-export type Profile = "422proxy" | "422lt" | "422" | "422hq" | "4444" | "4444xq";
+export type Profile =
+  | "422proxy"
+  | "422lt"
+  | "422"
+  | "422hq"
+  | "4444"
+  | "4444xq";
 export type Codec = "h264" | "hevc";
+export type VideoCodec = "prores" | "h264" | "hevc" | "hevc10" | "vp9" | "vp8";
+export type AlphaMode = "none" | "straight" | "premultiplied";
+export const videoCodecs: { v: VideoCodec; label: string }[] = [
+  { v: "prores", label: "ProRes" },
+  { v: "h264", label: "H.264 (High)" },
+  { v: "hevc", label: "HEVC (Main)" },
+  { v: "hevc10", label: "HEVC 10-bit (Main10)" },
+  { v: "vp9", label: "VP9" },
+  { v: "vp8", label: "VP8" },
+];
+type Selection = {
+  format: Format;
+  profile?: string;
+  codec?: Codec;
+  videoCodec?: VideoCodec;
+  alpha?: boolean;
+  alphaMode?: AlphaMode;
+  dynamicRange?: string;
+};
+export const codecOptions = (o: Selection) =>
+  videoCodecs.filter(
+    ({ v }) =>
+      (o.format === "prores"
+        ? ["prores", "h264", "hevc", "hevc10"]
+        : o.format === "mp4"
+          ? ["h264", "hevc", "hevc10"]
+          : o.format === "webm"
+            ? ["vp9", "vp8"]
+            : []
+      ).includes(v) &&
+      (!(
+        o.dynamicRange &&
+        o.dynamicRange !== "sdr" &&
+        ["prores", "mp4"].includes(o.format)
+      ) ||
+        ["prores", "hevc10"].includes(v)),
+  );
+export function selectedCodec(o: Selection): VideoCodec {
+  const codec =
+    o.videoCodec ??
+    (o.format === "prores"
+      ? "prores"
+      : o.format === "webm"
+        ? "vp9"
+        : o.codec === "hevc"
+          ? "hevc10"
+          : "h264");
+  return o.dynamicRange &&
+    o.dynamicRange !== "sdr" &&
+    ["prores", "mp4"].includes(o.format) &&
+    codec !== "prores"
+    ? "hevc10"
+    : codec;
+}
+export function alphaOptions(o: Selection): { v: AlphaMode; label: string }[] {
+  const codec = selectedCodec(o);
+  const image = o.format === "png" || o.format === "still";
+  const straight =
+    image ||
+    (kindOf(o.format) === "video" &&
+      (codec === "prores"
+        ? (o.profile ?? "4444").startsWith("4444")
+        : ["hevc", "vp9", "vp8"].includes(codec)));
+  return [
+    { v: "none", label: "None" },
+    ...(straight ? [{ v: "straight" as const, label: "Straight" }] : []),
+    ...(straight && !image && ["prores", "hevc"].includes(codec)
+      ? [{ v: "premultiplied" as const, label: "Premultiplied" }]
+      : []),
+  ];
+}
+export function selectedAlpha(o: Selection): AlphaMode {
+  if (o.alphaMode) return o.alphaMode;
+  return o.alpha &&
+    ["prores", "png", "still"].includes(o.format) &&
+    alphaOptions(o).length > 1
+    ? "straight"
+    : "none";
+}
 export const profiles: { v: Profile; label: string }[] = [
   { v: "422proxy", label: "ProRes 422 Proxy" },
   { v: "422lt", label: "ProRes 422 LT" },
@@ -44,7 +129,7 @@ export const depths = [
   { v: 16, label: "16-bit" },
 ];
 export type ColorTag = "rec709QuickTime" | "rec709";
-export type AudioCoding = "pcm24" | "pcm16" | "pcmFloat";
+export type AudioCoding = "pcm24" | "pcm16" | "pcmFloat" | "aac" | "opus";
 /** The label an SDR video carries; the picture is the same codes either way. */
 export const colorTags: { v: ColorTag; label: string }[] = [
   { v: "rec709QuickTime", label: "Rec.709 (QuickTime and Safari)" },
@@ -54,7 +139,21 @@ export const audioCodings: { v: AudioCoding; label: string }[] = [
   { v: "pcm24", label: "24-bit PCM" },
   { v: "pcm16", label: "16-bit PCM" },
   { v: "pcmFloat", label: "32-bit float PCM" },
+  { v: "aac", label: "AAC" },
+  { v: "opus", label: "Opus" },
 ];
+export const audioOptions = (o: { format: Format }) =>
+  audioCodings.filter(({ v }) =>
+    o.format === "prores"
+      ? v !== "opus"
+      : v === (o.format === "webm" ? "opus" : "aac"),
+  );
+export const selectedAudio = (o: {
+  format: Format;
+  audioCoding?: AudioCoding;
+}) =>
+  audioOptions(o).find(({ v }) => v === o.audioCoding)?.v ??
+  (o.format === "prores" ? "pcm24" : o.format === "webm" ? "opus" : "aac");
 /** Settings saved before these fields existed mean today's output. */
 export const fieldDefaults = {
   profile: "4444",
@@ -67,6 +166,8 @@ export const fieldDefaults = {
 export type Field =
   | "profile"
   | "codec"
+  | "videoCodec"
+  | "alphaMode"
   | "depth"
   | "scale"
   | "fps"
@@ -78,23 +179,27 @@ export type Field =
   | "useProxies"
   | "colorTag"
   | "timecode"
+  | "timecodeTrack"
   | "audioCoding";
 export const fields: Record<Format, readonly Field[]> = {
   prores: [
+    "videoCodec",
     "profile",
     "scale",
     "fps",
     "range",
+    "quality",
     "colorTag",
+    "timecodeTrack",
     "timecode",
     "mblur",
     "audio",
     "audioCoding",
-    "alpha",
+    "alphaMode",
     "useProxies",
   ],
   mp4: [
-    "codec",
+    "videoCodec",
     "scale",
     "fps",
     "range",
@@ -102,20 +207,42 @@ export const fields: Record<Format, readonly Field[]> = {
     "colorTag",
     "mblur",
     "audio",
+    "audioCoding",
+    "alphaMode",
     "useProxies",
   ],
-  webm: ["scale", "fps", "range", "quality", "mblur", "audio", "useProxies"],
-  png: ["depth", "scale", "fps", "range", "mblur", "alpha", "useProxies"],
-  still: ["depth", "scale", "mblur", "alpha"],
+  webm: [
+    "videoCodec",
+    "scale",
+    "fps",
+    "range",
+    "quality",
+    "mblur",
+    "audio",
+    "audioCoding",
+    "alphaMode",
+    "useProxies",
+  ],
+  png: ["depth", "scale", "fps", "range", "mblur", "alphaMode", "useProxies"],
+  still: ["depth", "scale", "mblur", "alphaMode"],
   json: [],
 };
 /** Whether the sheet shows `field`: ProRes 422 has no alpha channel. */
-export const shows = (
-  o: { format: Format; profile?: string },
-  field: Field,
-) =>
-  fields[o.format].includes(field) &&
-  !(field === "alpha" && o.format === "prores" && !o.profile?.startsWith("4444"));
+export const shows = (o: Selection, field: Field) => {
+  if (field === "videoCodec" || field === "codec")
+    return kindOf(o.format) === "video";
+  if (field === "profile")
+    return o.format === "prores" && selectedCodec(o) === "prores";
+  if (field === "alpha" || field === "alphaMode")
+    return alphaOptions(o).length > 1;
+  if (field === "audioCoding") return audioOptions(o).length > 1;
+  if (field === "quality")
+    return (
+      kindOf(o.format) === "video" &&
+      ["h264", "hevc", "hevc10", "vp8", "vp9"].includes(selectedCodec(o))
+    );
+  return fields[o.format].includes(field);
+};
 export const actions: Record<Format, string> = {
   prores: "Export Video",
   mp4: "Export Video",
@@ -215,8 +342,16 @@ export const rows = {
     "Profile",
     "422 HQ for editing and delivery, 4444 to keep transparency.",
   ],
-  codec: ["Codec", "HEVC is 10-bit and smaller than H.264 at the same quality."],
-  depth: ["Depth", "16-bit keeps smooth gradients for grading and compositing."],
+  codec: ["Codec", "Video coding and bit depth of the exported file."],
+  alphaMode: ["Alpha", "How transparency is stored in the exported picture."],
+  timecodeTrack: [
+    "Timecode Track",
+    "Write the composition's timecode, or a custom start timecode, in the QuickTime movie.",
+  ],
+  depth: [
+    "Depth",
+    "16-bit keeps smooth gradients for grading and compositing.",
+  ],
   scale: [
     "Resolution",
     "Rendered size relative to the composition, or any pixel size.",
@@ -226,10 +361,7 @@ export const rows = {
   range: ["Range", "Export the work area or the whole composition."],
   quality: ["Quality", "Video bitrate used for video exports."],
   mblur: ["Motion Blur", "Render motion blur for moving layers."],
-  studioQuality: [
-    "3D Quality",
-    "Cleaner 3D takes longer per frame.",
-  ],
+  studioQuality: ["3D Quality", "Cleaner 3D takes longer per frame."],
   studioTime: ["Render Time", "Measured on this Mac for this scene and size."],
   studioReducedSize: [
     "Render at 75% Size",
@@ -267,6 +399,6 @@ export const rows = {
 export const sizeError = "Enter a size from 16 to 8192 px.";
 /** With the Rec.709 label chosen for an SDR ProRes or MP4. */
 export const colorNoteRec709 =
-  "Color: Rec.709. The file is tagged BT.709 primaries and BT.709 transfer. Transparent output uses straight alpha.";
+  "Color: Rec.709. The file is tagged BT.709 primaries and BT.709 transfer.";
 export const colorNote =
-  "Color: sRGB. ProRes uses tagged BT.709 primaries and sRGB transfer. Transparent output uses straight alpha.";
+  "Color: sRGB. Video uses tagged BT.709 primaries and sRGB transfer.";

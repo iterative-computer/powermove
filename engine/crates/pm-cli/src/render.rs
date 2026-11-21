@@ -145,6 +145,7 @@ fn format_of(name: &str, ext: &str) -> Result<ExportFormat, Failure> {
 pub fn extension_of(format: ExportFormat) -> Option<&'static str> {
     match format {
         ExportFormat::ProRes { .. }
+        | ExportFormat::H264Mov
         | ExportFormat::Hevc {
             container: Container::Mov,
             ..
@@ -528,6 +529,7 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
         format,
         ExportFormat::H264
             | ExportFormat::Hevc { ten_bit: false, .. }
+            | ExportFormat::H264Mov
             | ExportFormat::Webm { .. }
             | ExportFormat::PngSequence { sixteen_bit: false }
             | ExportFormat::PngStill { sixteen_bit: false }
@@ -570,6 +572,7 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
                 .flatten(),
             compat: Vec::new(),
             without_dolby_vision: false,
+            without_timecode: false,
         },
     })
 }

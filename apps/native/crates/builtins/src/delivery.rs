@@ -130,7 +130,13 @@ pub struct Plan {
 /// v1's line under the summary: a video's rough size at its data rate, how
 /// many PNG files; ProRes says nothing (its profile row does).
 fn note(options: &Options, seconds: f64, frames: u64) -> String {
-    let transparent = if options.alpha { " · transparent" } else { "" };
+    let transparent = if options.alpha_mode.map_or(options.alpha, |mode| {
+        mode != pm_promedia::export_panel::AlphaMode::None
+    }) {
+        " · transparent"
+    } else {
+        ""
+    };
     let mbps = match options.quality.as_str() {
         "draft" => 4.,
         "max" => 40.,
@@ -142,20 +148,41 @@ fn note(options: &Options, seconds: f64, frames: u64) -> String {
     };
     match options.format {
         Format::Mp4 => size(
-            if options.codec == pm_promedia::export_panel::Codec::Hevc
-                || options.dynamic_range != pm_promedia::export_panel::DynamicRange::Sdr
-            {
+            if matches!(
+                options.effective_codec(),
+                Some(
+                    pm_promedia::export_panel::VideoCodec::Hevc
+                        | pm_promedia::export_panel::VideoCodec::Hevc10
+                )
+            ) {
                 "HEVC"
             } else {
                 "H.264"
             },
         ),
-        Format::Webm => size("VP9"),
+        Format::Webm => size(
+            if options.effective_codec() == Some(pm_promedia::export_panel::VideoCodec::Vp8) {
+                "VP8"
+            } else {
+                "VP9"
+            },
+        ),
         Format::Png => format!(
             "{frames} PNG file{}{transparent}",
             if frames == 1 { "" } else { "s" }
         ),
         Format::Still => format!("Single PNG{transparent}"),
+        Format::Prores
+            if options.effective_codec() != Some(pm_promedia::export_panel::VideoCodec::Prores) =>
+        {
+            size(
+                if options.effective_codec() == Some(pm_promedia::export_panel::VideoCodec::H264) {
+                    "H.264"
+                } else {
+                    "HEVC"
+                },
+            )
+        }
         Format::Prores | Format::Json => String::new(),
     }
 }
@@ -503,6 +530,10 @@ pub fn capabilities(
     ] {
         let check = (|| -> Result<(), String> {
             let mut options = options.clone();
+            if options.format != format {
+                options.video_codec = None;
+                options.alpha_mode = None;
+            }
             options.format = format;
             let planned = plan(snapshot, &options, time)?;
             if format == Format::Json {

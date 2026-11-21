@@ -1,0 +1,270 @@
+[
+  {
+    "options": {
+      "format": "prores",
+      "videoCodec": "prores",
+      "profile": "422proxy"
+    },
+    "alphaModes": [
+      "none"
+    ],
+    "audioCodings": [
+      "pcm24",
+      "pcm16",
+      "pcmFloat",
+      "aac"
+    ],
+    "timecode": true
+  },
+  {
+    "options": {
+      "format": "prores",
+      "videoCodec": "prores",
+      "profile": "422lt"
+    },
+    "alphaModes": [
+      "none"
+    ],
+    "audioCodings": [
+      "pcm24",
+      "pcm16",
+      "pcmFloat",
+      "aac"
+    ],
+    "timecode": true
+  },
+  {
+    "options": {
+      "format": "prores",
+      "videoCodec": "prores",
+      "profile": "422"
+    },
+    "alphaModes": [
+      "none"
+    ],
+    "audioCodings": [
+      "pcm24",
+      "pcm16",
+      "pcmFloat",
+      "aac"
+    ],
+    "timecode": true
+  },
+  {
+    "options": {
+      "format": "prores",
+      "videoCodec": "prores",
+      "profile": "422hq"
+    },
+    "alphaModes": [
+      "none"
+    ],
+    "audioCodings": [
+      "pcm24",
+      "pcm16",
+      "pcmFloat",
+      "aac"
+    ],
+    "timecode": true
+  },
+  {
+    "options": {
+      "format": "prores",
+      "videoCodec": "prores",
+      "profile": "4444"
+    },
+    "alphaModes": [
+      "none",
+      "straight",
+      "premultiplied"
+    ],
+    "audioCodings": [
+      "pcm24",
+      "pcm16",
+      "pcmFloat",
+      "aac"
+    ],
+    "timecode": true
+  },
+  {
+    "options": {
+      "format": "prores",
+      "videoCodec": "prores",
+      "profile": "4444xq"
+    },
+    "alphaModes": [
+      "none",
+      "straight",
+      "premultiplied"
+    ],
+    "audioCodings": [
+      "pcm24",
+      "pcm16",
+      "pcmFloat",
+      "aac"
+    ],
+    "timecode": true
+  },
+  {
+    "options": {
+      "format": "prores",
+      "videoCodec": "h264",
+      "profile": "4444"
+    },
+    "alphaModes": [
+      "none"
+    ],
+    "audioCodings": [
+      "pcm24",
+      "pcm16",
+      "pcmFloat",
+      "aac"
+    ],
+    "timecode": true
+  },
+  {
+    "options": {
+      "format": "prores",
+      "videoCodec": "hevc",
+      "profile": "4444"
+    },
+    "alphaModes": [
+      "none",
+      "straight",
+      "premultiplied"
+    ],
+    "audioCodings": [
+      "pcm24",
+      "pcm16",
+      "pcmFloat",
+      "aac"
+    ],
+    "timecode": true
+  },
+  {
+    "options": {
+      "format": "prores",
+      "videoCodec": "hevc10",
+      "profile": "4444"
+    },
+    "alphaModes": [
+      "none"
+    ],
+    "audioCodings": [
+      "pcm24",
+      "pcm16",
+      "pcmFloat",
+      "aac"
+    ],
+    "timecode": true
+  },
+  {
+    "options": {
+      "format": "mp4",
+      "videoCodec": "h264",
+      "profile": "4444"
+    },
+    "alphaModes": [
+      "none"
+    ],
+    "audioCodings": [
+      "aac"
+    ],
+    "timecode": false
+  },
+  {
+    "options": {
+      "format": "mp4",
+      "videoCodec": "hevc",
+      "profile": "4444"
+    },
+    "alphaModes": [
+      "none",
+      "straight",
+      "premultiplied"
+    ],
+    "audioCodings": [
+      "aac"
+    ],
+    "timecode": false
+  },
+  {
+    "options": {
+      "format": "mp4",
+      "videoCodec": "hevc10",
+      "profile": "4444"
+    },
+    "alphaModes": [
+      "none"
+    ],
+    "audioCodings": [
+      "aac"
+    ],
+    "timecode": false
+  },
+  {
+    "options": {
+      "format": "webm",
+      "videoCodec": "vp9",
+      "profile": "4444"
+    },
+    "alphaModes": [
+      "none",
+      "straight"
+    ],
+    "audioCodings": [
+      "opus"
+    ],
+    "timecode": false
+  },
+  {
+    "options": {
+      "format": "webm",
+      "videoCodec": "vp8",
+      "profile": "4444"
+    },
+    "alphaModes": [
+      "none",
+      "straight"
+    ],
+    "audioCodings": [
+      "opus"
+    ],
+    "timecode": false
+  },
+  {
+    "options": {
+      "format": "png",
+      "profile": "4444"
+    },
+    "alphaModes": [
+      "none",
+      "straight"
+    ],
+    "audioCodings": [],
+    "timecode": false
+  },
+  {
+    "options": {
+      "format": "still",
+      "profile": "4444"
+    },
+    "alphaModes": [
+      "none",
+      "straight"
+    ],
+    "audioCodings": [],
+    "timecode": false
+  },
+  {
+    "options": {
+      "format": "json",
+      "profile": "4444"
+    },
+    "alphaModes": [
+      "none"
+    ],
+    "audioCodings": [],
+    "timecode": false
+  }
+]

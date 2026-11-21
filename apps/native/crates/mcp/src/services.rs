@@ -99,9 +99,12 @@ pub struct VideoOptions {
     pub replace: bool,
 }
 /// The Export sheet's options an agent gives under the sheet's own names.
-pub const SHEET_OPTIONS: [&str; 15] = [
+pub const SHEET_OPTIONS: [&str; 18] = [
     "profile",
     "codec",
+    "videoCodec",
+    "alphaMode",
+    "timecodeTrack",
     "quality",
     "scale",
     "width",

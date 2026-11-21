@@ -26,21 +26,24 @@ test("format support matches tagged contract and no web export is offered", () =
     "json",
   ]);
   expect(fields.prores).toEqual([
+    "videoCodec",
     "profile",
     "scale",
     "fps",
     "range",
+    "quality",
     "colorTag",
+    "timecodeTrack",
     "timecode",
     "mblur",
     "audio",
     "audioCoding",
-    "alpha",
+    "alphaMode",
     "useProxies",
   ]);
   // MP4 carries the color tag; a timecode track and PCM are QuickTime's.
   expect(fields.mp4).toEqual([
-    "codec",
+    "videoCodec",
     "scale",
     "fps",
     "range",
@@ -48,18 +51,23 @@ test("format support matches tagged contract and no web export is offered", () =
     "colorTag",
     "mblur",
     "audio",
+    "audioCoding",
+    "alphaMode",
     "useProxies",
   ]);
   expect(fields.webm).toEqual([
+    "videoCodec",
     "scale",
     "fps",
     "range",
     "quality",
     "mblur",
     "audio",
+    "audioCoding",
+    "alphaMode",
     "useProxies",
   ]);
-  expect(fields.still).toEqual(["depth", "scale", "mblur", "alpha"]);
+  expect(fields.still).toEqual(["depth", "scale", "mblur", "alphaMode"]);
   expect(fields.json).toEqual([]);
   expect(rates[0].v).toBe(24000 / 1001);
   expect(rates[3].v).toBe(30000 / 1001);
@@ -589,7 +597,7 @@ test("color tag, start timecode and audio format are options of the export, and 
   f.model.set("timecode", "01:00:00:00");
   f.model.set("audioCoding", "pcm16");
   expect(() => f.model.set("colorTag", "p3" as "rec709")).toThrow();
-  expect(() => f.model.set("audioCoding", "aac" as "pcm16")).toThrow();
+  expect(() => f.model.set("audioCoding", "unknown" as "pcm16")).toThrow();
   for (const field of ["colorTag", "timecode", "audioCoding"] as const)
     expect(shows(f.model.options, field)).toBe(true);
   // The planner (the host) checks the timecode against the frame rate.

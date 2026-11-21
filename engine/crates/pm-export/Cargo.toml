@@ -11,13 +11,14 @@ publish.workspace = true
 default = ["engine"]
 # Renderer/media integration needs the macOS engine. The encoding core can be
 # built and tested on Linux with the default features, or with no default features.
-engine = ["dep:pm-gpu", "dep:pm-protocol", "dep:pm-model", "dep:pm-eval", "dep:pm-render", "dep:pm-audio", "dep:pm-media", "dep:wgpu"]
+engine = ["dep:pm-gpu", "dep:pm-model", "dep:pm-eval", "dep:pm-render", "dep:pm-audio", "dep:pm-media", "dep:wgpu"]
 # Test-only sinks (in-memory and raw-file encoder-input sinks) for other crates' tests.
 test-sinks = []
 
 [dependencies]
 pm-color = { path = "../pm-color" }
 pm-time = { path = "../pm-time" }
+pm-protocol = { path = "../pm-protocol" }
 png = "0.18"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 serde_json.workspace = true
@@ -28,7 +29,6 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 # Job renderer/audio and bundled FFmpeg bindings are macOS integration only.
 pm-gpu = { path = "../pm-gpu", optional = true }
-pm-protocol = { path = "../pm-protocol", optional = true }
 pm-model = { path = "../pm-model", optional = true }
 pm-eval = { path = "../pm-eval", optional = true }
 pm-render = { path = "../pm-render", optional = true }

@@ -28,9 +28,9 @@ impl Format {
     /// The format's menu label (v1's).
     pub fn label(self) -> &'static str {
         match self {
-            Self::Prores => "QuickTime · ProRes 4444",
-            Self::Mp4 => "MP4 · H.264",
-            Self::Webm => "WebM · VP9",
+            Self::Prores => "QuickTime (.mov)",
+            Self::Mp4 => "MP4",
+            Self::Webm => "WebM",
             Self::Png => "PNG Sequence",
             Self::Still => "Still Frame (PNG)",
             Self::Json => "Project File (.pmv)",
@@ -39,17 +39,19 @@ impl Format {
     pub fn video(self) -> bool {
         matches!(self, Self::Prores | Self::Mp4 | Self::Webm)
     }
-    /// Whether an export in this format uses the option `field` (v1
+    /// Whether this format's default codec uses the option `field` (v1
     /// `exportFieldSupport`). The others stay stored, dormant, and show dimmed.
     pub fn reads(self, field: &str) -> bool {
         match field {
             "scale" | "fps" | "range" | "mblur" => self != Self::Json,
             "quality" => matches!(self, Self::Mp4 | Self::Webm),
             "audio" => self.video(),
-            "alpha" => matches!(self, Self::Prores | Self::Png | Self::Still),
+            "alpha" => matches!(self, Self::Prores | Self::Webm | Self::Png | Self::Still),
             "colorTag" => matches!(self, Self::Prores | Self::Mp4),
             // A timecode track and PCM are QuickTime's.
-            "timecode" | "audioCoding" => self == Self::Prores,
+            "timecode" => self == Self::Prores,
+            "audioCoding" => self == Self::Prores,
+            "codec" => self.video(),
             _ => true,
         }
     }
@@ -100,6 +102,23 @@ pub enum Codec {
     #[default]
     H264,
     Hevc,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoCodec {
+    Prores,
+    H264,
+    Hevc,
+    Hevc10,
+    Vp9,
+    Vp8,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AlphaMode {
+    None,
+    Straight,
+    Premultiplied,
 }
 fn eight() -> u8 {
     8
@@ -153,6 +172,10 @@ pub enum AudioCoding {
     Pcm24,
     #[serde(rename = "pcmFloat")]
     PcmFloat,
+    #[serde(rename = "aac")]
+    Aac,
+    #[serde(rename = "opus")]
+    Opus,
 }
 impl AudioCoding {
     pub fn is_default(&self) -> bool {
@@ -184,6 +207,12 @@ pub struct Options {
     pub profile: Profile,
     #[serde(default)]
     pub codec: Codec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_codec: Option<VideoCodec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alpha_mode: Option<AlphaMode>,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub timecode_track: bool,
     /// PNG bits per channel, 8 or 16.
     #[serde(default = "eight")]
     pub depth: u8,
@@ -230,6 +259,9 @@ impl Options {
             captions_sidecar: "none".into(),
             profile: Profile::default(),
             codec: Codec::default(),
+            video_codec: None,
+            alpha_mode: None,
+            timecode_track: true,
             depth: eight(),
             dynamic_range: DynamicRange::default(),
             use_proxies: false,
@@ -240,11 +272,104 @@ impl Options {
             opaque: BTreeMap::new(),
         }
     }
+    pub fn effective_codec(&self) -> Option<VideoCodec> {
+        let codec = self.video_codec.or(match self.format {
+            Format::Prores => Some(VideoCodec::Prores),
+            Format::Mp4 => Some(match self.codec {
+                Codec::H264 => VideoCodec::H264,
+                Codec::Hevc => VideoCodec::Hevc10,
+            }),
+            Format::Webm => Some(VideoCodec::Vp9),
+            _ => None,
+        });
+        if !self.dynamic_range.is_sdr()
+            && matches!(self.format, Format::Prores | Format::Mp4)
+            && codec != Some(VideoCodec::Prores)
+        {
+            Some(VideoCodec::Hevc10)
+        } else {
+            codec
+        }
+    }
+    pub fn engine_codec(&self) -> pm_export::Codec {
+        use pm_export::{Codec as C, ProResProfile as P};
+        match self.effective_codec() {
+            Some(VideoCodec::Prores) => C::ProRes(match self.profile {
+                Profile::Proxy => P::Proxy,
+                Profile::Lt => P::Lt,
+                Profile::Standard => P::Standard,
+                Profile::Hq => P::Hq,
+                Profile::P4444 => P::P4444,
+                Profile::P4444Xq => P::P4444Xq,
+            }),
+            Some(VideoCodec::H264) => C::H264 {
+                bitrate_bps: 16_000_000,
+            },
+            Some(VideoCodec::Hevc) => C::Hevc {
+                bitrate_bps: 16_000_000,
+                ten_bit: false,
+            },
+            Some(VideoCodec::Hevc10) => C::Hevc {
+                bitrate_bps: 16_000_000,
+                ten_bit: true,
+            },
+            Some(VideoCodec::Vp9) => C::Vp9 {
+                bitrate_bps: 16_000_000,
+            },
+            Some(VideoCodec::Vp8) => C::Vp8 {
+                bitrate_bps: 16_000_000,
+            },
+            None => C::Png {
+                sixteen_bit: self.depth == 16,
+            },
+        }
+    }
+    pub fn alpha_modes(&self) -> Vec<AlphaMode> {
+        use pm_export::AlphaOutput as A;
+        [
+            (AlphaMode::None, A::None),
+            (AlphaMode::Straight, A::Straight),
+            (AlphaMode::Premultiplied, A::Premultiplied),
+        ]
+        .into_iter()
+        .filter(|(_, alpha)| {
+            *alpha == A::None
+                || (self.format != Format::Json
+                    && self.engine_codec().supports_alpha_output(*alpha))
+        })
+        .map(|(mode, _)| mode)
+        .collect()
+    }
+    pub fn reads(&self, field: &str) -> bool {
+        match field {
+            "quality" => self.format.video() && self.engine_codec().bitrate_bps().is_some(),
+            "alpha" | "alphaMode" => self.alpha_modes().len() > 1,
+            "audioCoding" => self.format == Format::Prores,
+            _ => self.format.reads(field),
+        }
+    }
     pub fn validate(&self) -> Result<(), String> {
         // Portable project export does not read rendering fields. Retain dormant
         // settings even when they cannot describe an encodable raster.
         if self.format == Format::Json && self.fps.is_finite() {
             return Ok(());
+        }
+        if let Some(codec) = self.video_codec {
+            let fits = match self.format {
+                Format::Prores => matches!(
+                    codec,
+                    VideoCodec::Prores | VideoCodec::H264 | VideoCodec::Hevc | VideoCodec::Hevc10
+                ),
+                Format::Mp4 => matches!(
+                    codec,
+                    VideoCodec::H264 | VideoCodec::Hevc | VideoCodec::Hevc10
+                ),
+                Format::Webm => matches!(codec, VideoCodec::Vp9 | VideoCodec::Vp8),
+                _ => false,
+            };
+            if !fits {
+                return Err("codec does not fit the export container".into());
+            }
         }
         let scale = match &self.scale {
             Scale::Preset(n) => [0.5, 1., 2.].contains(n),
@@ -307,19 +432,25 @@ impl Options {
             } else {
                 ColorTag::default()
             },
-            timecode: if f.reads("timecode") && !self.timecode.is_empty() {
+            timecode: if f.reads("timecode") && self.timecode_track && !self.timecode.is_empty() {
                 Some(self.start_timecode()?)
             } else {
                 None
             },
-            audio_coding: if f.reads("audioCoding") && audio {
+            audio_coding: if f == Format::Prores && audio {
                 self.audio_coding
             } else {
                 AudioCoding::default()
             },
-            straight_alpha: f.reads("alpha")
-                && (f != Format::Prores || self.profile.engine().supports_alpha())
-                && self.alpha,
+            straight_alpha: self.alpha_mode == Some(AlphaMode::Straight)
+                || (self.alpha_mode.is_none()
+                    && matches!(f, Format::Prores | Format::Png | Format::Still)
+                    && (if self.video_codec.is_some() {
+                        self.engine_codec().supports_alpha()
+                    } else {
+                        f != Format::Prores || self.profile.engine().supports_alpha()
+                    })
+                    && self.alpha),
             motion_blur: f.reads("mblur") && self.mblur,
             burn_captions: f != Format::Json && caption_layers > 0 && self.captions_burn,
             sidecar: if f.video() && caption_layers > 0 {
@@ -428,6 +559,38 @@ impl Intent {
             Format::Png => ExportFormat::PngSequence { sixteen_bit },
             Format::Still => ExportFormat::PngStill { sixteen_bit },
         };
+        if self.options.video_codec.is_some() {
+            let container = if self.options.format == Format::Prores {
+                Container::Mov
+            } else {
+                Container::Mp4
+            };
+            planned.format = match self
+                .options
+                .effective_codec()
+                .ok_or("missing video codec")?
+            {
+                VideoCodec::Prores => ExportFormat::ProRes {
+                    profile: self.options.profile.engine(),
+                },
+                VideoCodec::H264 if container == Container::Mov => ExportFormat::H264Mov,
+                VideoCodec::H264 => ExportFormat::H264,
+                VideoCodec::Hevc => ExportFormat::Hevc {
+                    ten_bit: false,
+                    container,
+                },
+                VideoCodec::Hevc10 => ExportFormat::Hevc {
+                    ten_bit: true,
+                    container,
+                },
+                VideoCodec::Vp9 => ExportFormat::Webm {
+                    codec: WebmCodec::Vp9,
+                },
+                VideoCodec::Vp8 => ExportFormat::Webm {
+                    codec: WebmCodec::Vp8,
+                },
+            };
+        }
         planned.color = match self.dynamic_range {
             DynamicRange::Sdr if self.color_tag == ColorTag::Rec709 => {
                 pm_protocol::color::OutputColor::Rec709Broadcast
@@ -441,6 +604,16 @@ impl Intent {
         } else {
             AlphaOutput::None
         };
+        if let Some(mode) = self.options.alpha_mode {
+            planned.alpha = match mode {
+                AlphaMode::None => AlphaOutput::None,
+                AlphaMode::Straight => AlphaOutput::Straight,
+                AlphaMode::Premultiplied => AlphaOutput::Premultiplied,
+            };
+            if !self.options.alpha_modes().contains(&mode) {
+                return Err("alpha mode is not supported by this codec".into());
+            }
+        }
         planned.quality = match self.options.quality.as_str() {
             "draft" => QualityTier::Draft,
             "high" => QualityTier::High,
@@ -461,10 +634,14 @@ impl Intent {
             && self.options.format == Format::Mp4
             && self.dynamic_range == DynamicRange::Hlg;
         planned.delivery.timecode = self.timecode.clone();
+        planned.delivery.without_timecode =
+            self.options.format == Format::Prores && !self.options.timecode_track;
         planned.delivery.audio_coding = match self.audio_coding {
             AudioCoding::Pcm24 => None,
             AudioCoding::Pcm16 => Some(pm_protocol::priority::AudioCoding::Pcm16),
             AudioCoding::PcmFloat => Some(pm_protocol::priority::AudioCoding::PcmFloat),
+            AudioCoding::Aac => Some(pm_protocol::priority::AudioCoding::Aac),
+            AudioCoding::Opus => None,
         };
         planned.delivery.hide_captions = !self.burn_captions;
         planned.delivery.preview = true;

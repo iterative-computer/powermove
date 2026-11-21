@@ -549,6 +549,7 @@ pub fn export_settings() -> ExportSettings {
             sequence_name: None,
             compat: vec![crate::snapshot::CompatSource::RasterOverride],
             without_dolby_vision: false,
+            without_timecode: false,
         },
     }
 }

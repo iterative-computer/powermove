@@ -4,8 +4,12 @@ import type { SurfaceEvent } from "../../src";
 import * as UI from "../../src/components";
 import { ExportModel, isProgress, progress, type Options } from "./model";
 import {
-  audioCodings,
-  codecs,
+  audioOptions,
+  alphaOptions,
+  codecOptions,
+  selectedCodec,
+  selectedAlpha,
+  selectedAudio,
   colorNote,
   colorNoteRec709,
   colorTags,
@@ -218,15 +222,21 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
         }
         binding={s.bindings[key]}
         value={
-          key === "dynamicRange"
-            ? (o[key] ?? "sdr")
-            : key === "studioQuality"
-              ? (o[key] ?? "composition")
-              : key === "colorTag" || key === "audioCoding"
-                ? (o[key] ?? fieldDefaults[key])
-                : key === "fps"
-                  ? listedRate(o.fps)
-                  : (o[key] ?? null)
+          key === "videoCodec"
+            ? selectedCodec(o)
+            : key === "alphaMode"
+              ? selectedAlpha(o)
+              : key === "audioCoding"
+                ? selectedAudio(o)
+                : key === "dynamicRange"
+                  ? (o[key] ?? "sdr")
+                  : key === "studioQuality"
+                    ? (o[key] ?? "composition")
+                    : key === "colorTag" || key === "audioCoding"
+                      ? (o[key] ?? fieldDefaults[key])
+                      : key === "fps"
+                        ? listedRate(o.fps)
+                        : (o[key] ?? null)
         }
         options={options}
         disabled={busy}
@@ -239,6 +249,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
       | "mblur"
       | "audio"
       | "alpha"
+      | "timecodeTrack"
       | "captionsBurn"
       | "useProxies"
       | "studioReducedSize"
@@ -250,7 +261,7 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
         label={rows[key][0]}
         title={help(key)}
         binding={s.bindings[key]}
-        value={o[key] ?? key === "dolbyVision"}
+        value={o[key] ?? (key === "dolbyVision" || key === "timecodeTrack")}
         disabled={busy || (key === "audio" && !p.hasAudio)}
         onChange={(e) => edit(key, e.value as boolean)}
       />
@@ -526,9 +537,8 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   )}
                   {shows(o, "profile") ? select("profile", profiles) : null}
                   {/* HDR MP4 is always HEVC 10-bit: H.264 carries no HDR. */}
-                  {shows(o, "codec") &&
-                  !(p.hdr && (o.dynamicRange ?? "sdr") !== "sdr")
-                    ? select("codec", codecs)
+                  {shows(o, "videoCodec")
+                    ? select("videoCodec", codecOptions(o), "codec")
                     : null}
                   {shows(o, "depth") ? select("depth", depths) : null}
                   {shows(o, "scale")
@@ -599,7 +609,8 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   !(p.hdr && (o.dynamicRange ?? "sdr") !== "sdr")
                     ? select("colorTag", colorTags)
                     : null}
-                  {shows(o, "timecode") ? (
+                  {shows(o, "timecode") ? toggle("timecodeTrack") : null}
+                  {shows(o, "timecode") && o.timecodeTrack !== false ? (
                     <FormRow name="timecode" help={help("timecode")}>
                       <UI.TextField
                         id="export.timecode"
@@ -651,9 +662,11 @@ export function ExportSheet({ model, anchor }: ExportSheetProps) {
                   {shows(o, "mblur") ? toggle("mblur") : null}
                   {shows(o, "audio") ? toggle("audio") : null}
                   {shows(o, "audioCoding") && p.hasAudio && o.audio
-                    ? select("audioCoding", audioCodings)
+                    ? select("audioCoding", audioOptions(o))
                     : null}
-                  {shows(o, "alpha") ? toggle("alpha") : null}
+                  {shows(o, "alphaMode")
+                    ? select("alphaMode", alphaOptions(o))
+                    : null}
                   {shows(o, "useProxies") ? toggle("useProxies") : null}
                 </Group>
                 {p.captionLayers ? (
