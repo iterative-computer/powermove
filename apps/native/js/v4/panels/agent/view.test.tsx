@@ -92,8 +92,8 @@ test("the user message keeps a fill and radius without a border while working an
       background: { token: "colors.field" },
       borderRadius: { token: "metrics.panel_radius" },
     });
-    expect(Object.keys(bubble.props.style)).not.toContain("borderWidth");
-    expect(Object.keys(bubble.props.style)).not.toContain("borderColor");
+    expect(bubble.props.style).not.toHaveProperty("borderWidth");
+    expect(bubble.props.style).not.toHaveProperty("borderColor");
   }
   root.dispose();
 });
