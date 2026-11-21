@@ -2537,6 +2537,28 @@ impl SurfaceView {
         (time.left() + width <= right.min(transport.right()) && time.size.height > px(0.))
             .then_some(time)
     }
+
+    /// Enabled menu buttons in this surface, in the same coordinates as its anchors.
+    pub fn other_menu_triggers(&self, anchor: Id) -> Vec<pm_shell::layout::Rect> {
+        let anchors = self.anchors.borrow();
+        self.publication
+            .surface
+            .nodes()
+            .values()
+            .filter(|node| {
+                node.id != anchor
+                    && node.props.get("aria-haspopup").and_then(Value::as_str) == Some("menu")
+                    && self.prepared.node(node.id).is_some_and(|n| !n.disabled)
+            })
+            .filter_map(|node| anchors.get(&node.id))
+            .map(|bounds| pm_shell::layout::Rect {
+                x: f32::from(bounds.origin.x),
+                y: f32::from(bounds.origin.y),
+                w: f32::from(bounds.size.width),
+                h: f32::from(bounds.size.height),
+            })
+            .collect()
+    }
     pub fn change(&mut self, id: Id, value: Value, cx: &mut Context<Self>) {
         let Some(node) = self.publication.surface.node(id) else {
             return;
@@ -4688,7 +4710,7 @@ impl SurfaceView {
             origin
         };
         let id = node.id;
-        let mut wrapper = div().occlude().child(element);
+        let mut wrapper = div().id(("v4-popup", id)).occlude().child(element);
         if own_window && !self.fitted_sheet(node, window) {
             // A sheet with no body of its own fits its window to its content.
             wrapper = wrapper.child(
@@ -4708,17 +4730,28 @@ impl SurfaceView {
             );
         }
         if dismiss {
-            wrapper = wrapper.on_mouse_down_out(cx.listener(move |v, _, _, cx| {
-                v.send(
-                    id,
-                    "keydown",
-                    EventDetail {
-                        key: Some("Escape".into()),
-                        ..Default::default()
-                    },
-                    cx,
-                );
-            }));
+            let view = cx.entity().downgrade();
+            let peers = self.other_menu_triggers(anchor.unwrap_or(id)).into_iter()
+                .map(|r| Bounds::new(point(px(r.x), px(r.y)), size(px(r.w), px(r.h))))
+                .collect();
+            wrapper = pm_shell::kit::dismiss_menu_on_press(
+                wrapper,
+                anchor.and_then(|id| self.anchor_bounds(id)),
+                peers,
+                move |_, cx| {
+                    let _ = view.update(cx, |v, cx| {
+                        v.send(
+                            id,
+                            "keydown",
+                            EventDetail {
+                                key: Some("Escape".into()),
+                                ..Default::default()
+                            },
+                            cx,
+                        );
+                    });
+                },
+            );
         }
         deferred(
             anchored()
@@ -5236,6 +5269,16 @@ impl SurfaceView {
         {
             window.prevent_default();
             cx.stop_propagation();
+        }
+        if key == "Escape" {
+            let mut at = Some(id);
+            while let Some(node) = at.and_then(|id| self.prepared.node(id)) {
+                if let Kit::Anchored { anchor: Some(trigger), dismiss: true, .. } = node.kit {
+                    self.focus_pressed(trigger, window, cx);
+                    break;
+                }
+                at = node.parent;
+            }
         }
         self.send(
             id,

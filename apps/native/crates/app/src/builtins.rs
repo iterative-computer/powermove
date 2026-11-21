@@ -977,8 +977,9 @@ impl Controller {
             None,
             choices,
             anchor,
+            Vec::new(),
             Some(FONT_PAGE),
-            Some("fontPick:".into()),
+            Some(format!("dismissFontPicker:{}", request.id)),
             "Search fonts",
             None,
         );
@@ -1049,7 +1050,7 @@ impl Controller {
             // the existing reply id, and update its row indices along with the menu.
             if let Some((owner, _, current, Some(ComposerPicker::Model))) = &mut self.builtins.agent_pick
                 && Arc::ptr_eq(owner, runtime)
-                && self.host.borrow_mut().update_menu(choices, search)
+                && self.host.borrow_mut().update_menu(choices, search, None)
             {
                 *current = values;
             }
@@ -1061,8 +1062,9 @@ impl Controller {
         }
         // The rows of a menu still open after a row that stays was chosen:
         // they replace the open menu's in place, no closing and reopening.
+        let dismiss = Some(format!("dismissAgentPicker:{}", request.id));
         if request.input["update"] == true {
-            if self.host.borrow_mut().update_menu(choices, search) {
+            if self.host.borrow_mut().update_menu(choices, search, dismiss) {
                 self.builtins.agent_pick = Some((runtime.clone(), request.id, values, picker));
             } else {
                 runtime.platform_reply(request.id, Ok(Value::Null));
@@ -1075,6 +1077,13 @@ impl Controller {
             return;
         }
         self.builtins.agent_pick = Some((runtime.clone(), request.id, values, picker));
+        let other_triggers = request.input["anchor"]
+            .as_u64()
+            .and_then(|id| {
+                let view = self.builtins.views.get(&request.panel)?;
+                Some(view.read(cx).other_menu_triggers(id))
+            })
+            .unwrap_or_default();
         let mut host = self.host.borrow_mut();
         if picker == Some(ComposerPicker::Model) {
             host.set_model_picker_profile(&self.profile);
@@ -1083,8 +1092,9 @@ impl Controller {
             owner,
             choices,
             anchor,
+            other_triggers,
             None,
-            Some("agentPick:".into()),
+            dismiss,
             request.input["placeholder"].as_str().unwrap_or("Search"),
             picker.zip(search),
         );
@@ -1098,6 +1108,17 @@ impl Controller {
             .flatten()
             .and_then(|w| w.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
             .flatten()
+    }
+    /// Ignore a dismissal that belonged to a picker the caller replaced.
+    pub fn dismiss_agent_picker(&mut self, id: u64) {
+        if self.builtins.agent_pick.as_ref().is_some_and(|pending| pending.1 == id) {
+            self.agent_picked("");
+        }
+    }
+    pub fn dismiss_font_picker(&mut self, id: u64) {
+        if self.builtins.font_pick.as_ref().is_some_and(|pending| pending.1 == id) {
+            self.font_picked("");
+        }
     }
     /// The Agent menu's answer: a row's value, or none when it closed unchosen.
     pub fn agent_picked(&mut self, index: &str) {

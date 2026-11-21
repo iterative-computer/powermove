@@ -987,6 +987,12 @@ fn a_library_card_turns_its_extension_off_and_on_and_has_a_menu() {
     assert_eq!(rows[0], "Check for Updates", "{rows:?}");
     assert_eq!(rows.last().map(String::as_str), Some("Uninstall…"), "{rows:?}");
     assert!(!rows.iter().any(|r| r.starts_with("Turn")), "the switch is the corner: {rows:?}");
+    click(cx, "store-more-soft-glow");
+    assert!(view.read_with(cx, |v, _| v.card_menu_rows().is_empty()));
+    click(cx, "store-more-soft-glow");
+    click(cx, "store-switch-soft-glow");
+    assert!(view.read_with(cx, |v, _| v.card_menu_rows().is_empty()));
+    assert!(running(&f), "the outside press only dismissed the menu");
 }
 
 /// PM-503: Turn Off / Turn On (the card menu's rows, the switch) never waits

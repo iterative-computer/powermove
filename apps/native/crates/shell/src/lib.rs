@@ -31,6 +31,7 @@ pub mod layout;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod menu;
+pub mod menu_input;
 #[cfg(target_os = "macos")]
 pub mod motion;
 #[cfg(target_os = "macos")]

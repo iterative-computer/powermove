@@ -556,13 +556,14 @@ test("model menu groups discovered choices by provider and switches directly to 
   p.snapshot.settings.model = "gpt-6.2-sol";
   p.snapshot.catalog.models = [["gpt-6.2-sol", "GPT-6.2 Sol"]];
   p.snapshot.catalog.providers = [
-    ["chatgpt", "ChatGPT"], ["claude", "Claude"], ["compatible", "Qwen3.5"],
+    ["chatgpt", "ChatGPT"], ["claude", "Claude"], ["compatible", "gpt-6-astra"],
   ];
   p.native.modelGroups = {
     chatgpt: [["gpt-6.2-sol", "GPT-6.2 Sol", true]],
     claude: [["opus", "Opus 5.5", true], ["sonnet", "Sonnet 5.5", false]],
-    compatible: [["Qwen3.5", "Qwen3.5", true]],
+    compatible: [["gpt-6-astra", "gpt-6-astra", true]],
   };
+  p.native.connectedModelName = "GPT-6 Astra";
   const actions: Action[] = [];
   const requests: Parameters<Menu>[0][] = [];
   await root.render(<AgentView publication={p} send={(a) => actions.push(a)} menu={async (request) => {
@@ -577,7 +578,7 @@ test("model menu groups discovered choices by provider and switches directly to 
     ["ChatGPT", "GPT-6.2 Sol", true, true],
     ["Claude", "Opus 5.5", false, true],
     ["Claude", "Sonnet 5.5", false, false],
-    ["Qwen3.5", "Qwen3.5", false, true],
+    ["GPT-6 Astra", "gpt-6-astra", false, true],
   ]);
   expect(actions).toEqual([{ type: "setProvider", provider: "claude", model: "sonnet" }]);
   await root.drive(model.id, "keydown", { key: " " });
@@ -1328,6 +1329,34 @@ test("composer pop-up triggers stay pressed and open while their menu is up", as
   await root.render(<AgentView publication={p} menu={menu} send={() => {}} />);
   for (const id of ["agent-model", "agent-effort", "agent-access"])
     expect(byId(root, id).props.disabled).toBe(true);
+  root.dispose();
+});
+
+test("Space and Return reach the shell toggle for open composer pickers", async () => {
+  const { root } = mount();
+  const requests: Parameters<Menu>[0][] = [];
+  let settle: ((value: unknown) => void) | undefined;
+  const menu: Menu = (request) => {
+    requests.push(request);
+    if (settle) {
+      settle(null);
+      settle = undefined;
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => { settle = resolve; });
+  };
+  await root.render(<AgentView publication={fixture()} menu={menu} send={() => {}} />);
+  for (const [id, key] of [["agent-model", "Enter"], ["agent-effort", " "], ["agent-access", "Enter"]]) {
+    const trigger = byId(root, id);
+    await root.drive(trigger.id, "keydown", { key });
+    expect(byId(root, id).props["aria-expanded"]).toBe(true);
+    await root.drive(trigger.id, "keydown", { key });
+    await root.flush();
+    expect(byId(root, id).props["aria-expanded"]).toBe(false);
+  }
+  expect(requests.map(({ picker }) => picker)).toEqual([
+    "model", "model", "effort", "effort", "access", "access",
+  ]);
   root.dispose();
 });
 

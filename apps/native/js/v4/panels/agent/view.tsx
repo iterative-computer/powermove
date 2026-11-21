@@ -895,7 +895,7 @@ function Picker({
         if (!disabled) open(Number(e.currentTarget));
       }}
       onKeyDown={(e) => {
-        if (disabled || opened || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+        if (disabled || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
         if (e.key === "Enter" || e.key === " ") open(Number(e.currentTarget));
       }}
       style={{
@@ -2561,9 +2561,12 @@ function Composer({
     epoch: number;
   } | null>(null);
   const modelRows = (s: Snapshot): MenuOption[] =>
-    s.catalog.providers.flatMap(([provider, category]) => {
+    s.catalog.providers.flatMap(([provider, providerName]) => {
       const active = provider === s.settings.provider;
       const group = native.current.modelGroups?.[provider];
+      const category = provider === "compatible"
+        ? (native.current.connectedModelName ?? providerName)
+        : providerName;
       const models = active
         ? pairs(s.catalog.models, s.settings.model)
         : (group ?? []).map(([v, label]) => ({ v, label }));
@@ -2672,6 +2675,7 @@ function Composer({
     s.catalog.models,
     n.findingModels,
     n.modelGroups,
+    n.connectedModelName,
   ]);
   const sendLabel = working ? "Send direction" : "Send";
   // The shortcuts menu hangs from the composer, once per draft that asks

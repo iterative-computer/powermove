@@ -4166,6 +4166,14 @@ impl Controller {
             self.font_picked(family);
             return true;
         }
+        if let Some(id) = cmd.name.strip_prefix("dismissAgentPicker:").and_then(|id| id.parse().ok()) {
+            self.dismiss_agent_picker(id);
+            return true;
+        }
+        if let Some(id) = cmd.name.strip_prefix("dismissFontPicker:").and_then(|id| id.parse().ok()) {
+            self.dismiss_font_picker(id);
+            return true;
+        }
         if let Some(index) = cmd.name.strip_prefix("agentPick:") {
             self.agent_picked(index);
             return true;

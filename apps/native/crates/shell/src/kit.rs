@@ -21,6 +21,34 @@ use pm_design::{
 };
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
+/// Install the shared dismissal rules on a menu drawn inside a GPUI window.
+pub fn dismiss_menu_on_press(
+    element: Stateful<Div>,
+    trigger: Option<Bounds<Pixels>>,
+    other_triggers: Vec<Bounds<Pixels>>,
+    close: impl Fn(&mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    use crate::menu_input::{Press, Response, press_response};
+
+    element.on_mouse_down_out(move |event, window, cx| {
+        let press = if trigger.is_some_and(|bounds| bounds.contains(&event.position)) {
+            Press::Trigger
+        } else if event.button == MouseButton::Left
+            && other_triggers.iter().any(|bounds| bounds.contains(&event.position))
+        {
+            Press::OtherTrigger
+        } else {
+            Press::Outside
+        };
+        let response = press_response(press);
+        if response == Response::DismissAndConsume {
+            window.prevent_default();
+            cx.stop_propagation();
+        }
+        close(window, cx);
+    })
+}
+
 /// A token colour at an alpha.
 pub fn ink(rgb: u32, alpha: f32) -> Rgba {
     rgba((rgb << 8) | (alpha.clamp(0., 1.) * 255.).round() as u32)

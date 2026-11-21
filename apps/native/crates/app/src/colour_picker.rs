@@ -1,5 +1,6 @@
 //! Anchored v2 colour editor. Pointer work stays native; no JS round trip.
 use crate::colour_model::Color;
+const SETTINGS_STOP: usize = 3;
 const NOTATION_STOP: usize = 21;
 const VALUE_STOP: usize = 22;
 const VALUE_COPY_STOP: usize = 23;
@@ -7,7 +8,7 @@ const STOP_COUNT: usize = 24;
 thread_local! {static PREFERENCES: std::cell::Cell<(bool, &'static str, u8)> = const { std::cell::Cell::new((false,"Hex",0)) };}
 use gpui::{prelude::*, *};
 use pm_shell::{
-    kit::{Button, Kit, Recipes},
+    kit::{Button, Kit, Recipes, dismiss_menu_on_press},
     text::{TextEvent, TextField, TextKind},
 };
 
@@ -46,6 +47,7 @@ pub struct Picker {
     draft: Option<(usize, String)>,
     window: AnyWindowHandle,
     menu: Option<bool>,
+    menu_anchors: std::rc::Rc<std::cell::RefCell<[Option<Bounds<Pixels>>; 2]>>,
     menu_index: usize,
     active: bool,
     p3: bool,
@@ -90,6 +92,7 @@ impl Picker {
             draft: None,
             window: window.window_handle(),
             menu: None,
+            menu_anchors: Default::default(),
             menu_index: 0,
             active: false,
             p3,
@@ -332,6 +335,12 @@ impl Picker {
         } else {
             &["OKLCH", "HSL", "RGB", "Hex"]
         }
+    }
+    fn toggle_menu(&mut self, settings: bool, cx: &mut Context<Self>) {
+        self.apply_active(cx);
+        self.menu = (self.menu != Some(settings)).then_some(settings);
+        self.menu_index = 0;
+        cx.notify();
     }
     fn choose_menu(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.menu == Some(true) {
@@ -876,6 +885,15 @@ impl Render for Picker {
         let focus_color = t.colors.focus;
         let focus_width = t.metrics.border;
         let kit = Kit::new(&t, &self.motion, |p| &mut p.motion, window, cx);
+        let menu_anchor = |settings: bool| {
+            let anchors = self.menu_anchors.clone();
+            canvas(
+                move |bounds, _, _| anchors.borrow_mut()[usize::from(settings)] = Some(bounds),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full()
+        };
         let weak = cx.entity().downgrade();
         let tracking = canvas(
             |_, _, _| {},
@@ -1060,15 +1078,9 @@ impl Render for Picker {
                         .focus_visible_style(move |s| {
                             s.border(px(focus_width)).border_color(rgb(focus_color))
                         })
-                        .on_click(cx.listener(|p, _, _, cx| {
-                            p.apply_active(cx);
-                            p.menu = if p.menu == Some(false) {
-                                None
-                            } else {
-                                Some(false)
-                            };
-                            cx.notify();
-                        })),
+                        .relative()
+                        .child(menu_anchor(false))
+                        .on_click(cx.listener(|p, _, _, cx| p.toggle_menu(false, cx))),
                 )
                 .child(
                     div()
@@ -1129,14 +1141,22 @@ impl Render for Picker {
             .text_size(px(t.typography.body))
             .corner(&t, t.metrics.popover_radius)
             .elevated(&t, pm_design::Elevation::Menu)
-            .on_key_down(cx.listener(|p, e: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|p, e: &KeyDownEvent, window, cx| {
+                let key = e.keystroke.key.as_str();
+                if matches!(key, "enter" | "space")
+                    && (p.stops[NOTATION_STOP].is_focused(window) || p.stops[SETTINGS_STOP].is_focused(window))
+                {
+                    return;
+                }
                 cx.stop_propagation();
-                match e.keystroke.key.as_str() {
+                match key {
                     "tab" => {
                         p.navigate(if e.keystroke.modifiers.shift { -1 } else { 1 }, cx);
                     }
                     "escape" => {
-                        if p.menu.take().is_some() {
+                        if let Some(settings) = p.menu.take() {
+                            let stop = if settings { SETTINGS_STOP } else { NOTATION_STOP };
+                            p.stops[stop].focus(window, cx);
                             cx.notify();
                         } else if p.sampling {
                             p.cancel_sample(cx);
@@ -1145,6 +1165,7 @@ impl Render for Picker {
                         }
                     }
                     "up" | "down" if p.menu.is_some() => {
+                        p.focus.focus(window, cx);
                         let n = p.modes().len();
                         p.menu_index =
                             (p.menu_index + n + if e.keystroke.key == "up" { n - 1 } else { 1 })
@@ -1153,16 +1174,6 @@ impl Render for Picker {
                     }
                     "enter" | "space" if p.menu.is_some() => p.choose_menu(p.menu_index, cx),
                     "enter" if p.focus_index == VALUE_COPY_STOP => p.copy_value(cx),
-                    "enter" if p.focus_index == NOTATION_STOP => {
-                        p.menu = Some(false);
-                        p.menu_index = 0;
-                        cx.notify();
-                    }
-                    "enter" if p.focus_index == 3 => {
-                        p.menu = Some(true);
-                        p.menu_index = 0;
-                        cx.notify();
-                    }
                     "enter" if matches!(p.focus_index, 12 | 16 | 20) => {
                         p.copy_row((p.focus_index - 12) / 4, cx)
                     }
@@ -1262,19 +1273,13 @@ impl Render for Picker {
                             "Picker settings",
                             self.menu == Some(true),
                         )
-                        .track_focus(&self.stops[3])
+                        .track_focus(&self.stops[SETTINGS_STOP])
                         .focus_visible_style(move |s| {
                             s.border(px(focus_width)).border_color(rgb(focus_color))
                         })
-                        .on_click(cx.listener(|p, _, _, cx| {
-                            p.apply_active(cx);
-                            p.menu = if p.menu == Some(true) {
-                                None
-                            } else {
-                                Some(true)
-                            };
-                            cx.notify();
-                        })),
+                        .relative()
+                        .child(menu_anchor(true))
+                        .on_click(cx.listener(|p, _, _, cx| p.toggle_menu(true, cx))),
                     )
                     .child(
                         kit.icon_button("close-color", "xmark", "Close", false)
@@ -1310,7 +1315,21 @@ impl Render for Picker {
                 } else {
                     &["OKLCH", "HSL", "RGB", "Hex"]
                 };
-                let mut menu = kit.menu().absolute().right(px(t.space.md));
+                let anchors = self.menu_anchors.borrow();
+                let view = cx.entity().downgrade();
+                let mut menu = dismiss_menu_on_press(
+                    kit.menu().id("colour-picker-menu"),
+                    anchors[usize::from(settings)],
+                    anchors[usize::from(!settings)].into_iter().collect(),
+                    move |_, cx| {
+                        let _ = view.update(cx, |p, cx| {
+                            p.menu = None;
+                            cx.notify();
+                        });
+                    },
+                )
+                .absolute()
+                .right(px(t.space.md));
                 menu = if settings {
                     menu.top(px(t.metrics.control + t.space.md))
                 } else {
