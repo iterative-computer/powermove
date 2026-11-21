@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchDownload, fetchStars, formatStars } from './releases';
+import { fetchDownload, fetchDownloads, fetchStars, formatStars } from './releases';
 
 function mockFetch(body: unknown, status = 200) {
   return (async () => new Response(JSON.stringify(body), { status })) as typeof fetch;
@@ -45,5 +45,31 @@ describe('GitHub stars', () => {
     assert.equal(formatStars(1000), '1k');
     assert.equal(formatStars(1240), '1.2k');
     assert.equal(formatStars(12400), '12k');
+  });
+});
+
+describe('native release cutover', () => {
+  const electron = { draft: false, tag_name: 'v1.3.2', assets: [asset('Powermove-1.3.2-mac-arm64.dmg')] };
+  const native = { draft: false, tag_name: 'native-v3.0.0', assets: [asset('Powermove-Native-3.0.0-mac-arm64.dmg')] };
+
+  test('uses the published native DMG and keeps the last stable Electron DMG', async () => {
+    const result = await fetchDownloads(mockFetch([
+      { ...native, tag_name: 'native-v3.1.0', assets: [asset('different-arm64.dmg')] },
+      { ...electron, tag_name: 'v1.4.0-beta.1', prerelease: true },
+      electron,
+      native,
+    ]));
+    assert.deepEqual(result, {
+      download: { href: native.assets[0].browser_download_url, version: '3.0.0' },
+      previousDownload: { href: electron.assets[0].browser_download_url, version: '1.3.2' },
+    });
+  });
+
+  test('keeps Electron primary until the native DMG is publicly available', async () => {
+    for (const unavailable of [{ ...native, draft: true }, { ...native, prerelease: true }, { ...native, assets: [] }]) {
+      assert.deepEqual(await fetchDownloads(mockFetch([unavailable, electron])), {
+        download: { href: electron.assets[0].browser_download_url, version: '1.3.2' },
+      });
+    }
   });
 });

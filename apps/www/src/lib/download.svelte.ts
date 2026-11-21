@@ -1,13 +1,14 @@
 import { page } from '$app/state';
-import { fetchDownload, fetchStars, formatStars, type Download } from './releases';
+import { fetchDownloads, fetchStars, formatStars, type Downloads } from './releases';
 
-let latest = $state<Download | undefined>();
+let latest = $state<Downloads | undefined>();
 let latestStars = $state<number | null | undefined>();
 
 /** Use the prerendered release immediately, then refresh for newly published builds. */
 export const download = {
-  get href() { return (latest ?? page.data.download).href; },
-  get version() { return (latest ?? page.data.download).version; },
+  get href() { return (latest ?? page.data).download.href; },
+  get previousHref() { return (latest ?? page.data).previousDownload?.href; },
+  get version() { return (latest ?? page.data).download.version; },
 };
 
 /** Prerendered GitHub star count, refreshed on the client. Empty string when unknown. */
@@ -25,7 +26,7 @@ export async function resolveDownload() {
   started = true;
   void fetchStars(fetch).then((count) => { if (count !== null) latestStars = count; });
   try {
-    latest = await fetchDownload(fetch);
+    latest = await fetchDownloads(fetch);
   } catch {
     /* Keep the fully populated release embedded in the page. */
   }

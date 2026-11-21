@@ -117,7 +117,25 @@
 
 <p class="hero-description"><span class="strong">The video editor you customize with AI.</span> Connect Claude or Codex and ask for an extension, a restyled interface, or a new effect.</p>
 
-<div class="hero-cta">
+<div class="hero-cta" id="download">
   <a class="pill light" href={download.href}>Download for Mac</a>
   <a class="pill glass" href={GITHUB} target="_blank" rel="noopener">Star on GitHub{#if stars.label} <span class="pill-count tabular">{stars.label}</span>{/if}</a>
 </div>
+{#if download.previousHref}
+  <a class="previous-download" href={download.previousHref}>Looking for the previous version?</a>
+{/if}
+
+<style>
+  #download { scroll-margin-top: 80px; }
+
+  .previous-download {
+    display: inline-block;
+    margin-top: 12px;
+    font-size: 13px;
+    color: rgb(255 255 255 / .72);
+    text-decoration: underline;
+    text-underline-offset: .2em;
+  }
+
+  .previous-download:hover { color: #fff; }
+</style>
