@@ -252,13 +252,15 @@ impl<H: Host> Workspace<H> {
                     || !args["commands"]
                         .as_array()
                         .is_some_and(|a| a.len() <= 80 && a.iter().all(Value::is_string))
-                    || args["extensions"].as_array().is_none_or(|a| a.len() > 32)
+                    || args
+                        .get("extensions")
+                        .is_some_and(|v| v.as_array().is_none_or(|a| a.len() > 32))
                     || !["artifacts", "notes", "externalActions"]
                         .iter()
                         .all(|k| args[k].is_array())
                 {
                     return Err(error(
-                        "complete_task requires summary, commands, artifacts, extensions, notes and externalActions matching its schema.",
+                        "complete_task requires summary, commands, artifacts, notes and externalActions matching its schema. If provided, extensions must be an array of at most 32 items.",
                     ));
                 }
                 if self.app_context

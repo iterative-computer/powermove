@@ -31,13 +31,21 @@ Applying an existing effect is a separate `add_effect` project command. Panels
 are appropriate when requested or needed for a separate workflow; the panel
 examples and style rules below do not imply that every extension needs one.
 
-Start effect authoring with the complete [Gradient Tint sample](samples/gradient-tint/README.md).
+For an effect request, check installed effects in the staging copy and search
+the Store with `store_search` (category `effects`). Ask for
+`includeExtensionStaging: true` in `start_session` to get the staging folder.
+Reuse or adapt a matching effect. For a new effect, start with the complete [Gradient Tint sample](samples/gradient-tint/README.md).
 Call the agent tool `validate_effect` with the complete definition before
 returning staged changes. It uses the real registration validator, including
 the **32-parameter maximum**, unique keys matching `/^[a-z][a-zA-Z0-9]*$/`,
 1–8 passes, and a non-empty fragment limited to 65,536 characters. It does not
 register or render the effect. After loading, check `get_workspace_state` for
-extension health and `registeredEffects`, then verify the requested rendering.
+extension health and `registeredEffects`.
+
+If no project is open, call `create_project` before starting a project session.
+Render with `render_frames`. When matching a look, score the first render against
+the reference and use the score to guide revisions. If Powermove's renderer is
+out of reach, tell the user instead of building a stand-in renderer.
 
 ## Where extensions live
 

@@ -64,6 +64,12 @@ fn only_pinned_native_overlays_change_the_frozen_catalog() {
         serde_json::from_str(include_str!("../fixtures/project-native-catalog.json")).unwrap();
     let speed: Value =
         serde_json::from_str(include_str!("../fixtures/mcp-speed-catalog.json")).unwrap();
+    let extensions: Value =
+        serde_json::from_str(include_str!("../fixtures/extension-session-native-catalog.json"))
+            .unwrap();
+    let viewer: Value =
+        serde_json::from_str(include_str!("../fixtures/viewer-handles-native-catalog.json"))
+            .unwrap();
     assert_eq!(catalog::tools().len(), 68);
     for tool in catalog::tools() {
         let name = tool["name"].as_str().unwrap();
@@ -111,6 +117,14 @@ fn only_pinned_native_overlays_change_the_frozen_catalog() {
             );
         } else if name == "open_project" {
             assert_eq!(tool, &projects["tools"][0]);
+        } else if let Some(extension) = extensions["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(viewer["tools"].as_array().unwrap())
+            .find(|t| t["name"] == name)
+        {
+            assert_eq!(tool, extension);
         } else if ["import_media", "import_media_to_timeline", "replace_media"].contains(&name) {
             // The media importer takes an image sequence (additive).
             let media: Value =

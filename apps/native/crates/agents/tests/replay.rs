@@ -219,19 +219,29 @@ fn current_mcp_catalog(reference: &Observations) -> Observations {
             .expect("existing composition-relative tool");
         tool["inputSchema"]["properties"]["compositionId"] = source["compositionId"].clone();
     }
-    // Viewer-handle authoring extends the live description; the frozen main
-    // catalog remains byte-identical and the complete live delta stays pinned.
-    let source = include_bytes!("../../mcp/fixtures/viewer-handles-native-catalog.json");
-    assert_eq!(replay::sha256(source), "166afbdea0e2053bca88ddcb8571a5ff966283facb2d8fbf8326cf813b39f470");
-    let source: Value = serde_json::from_slice(source).unwrap();
-    for replacement in source["tools"].as_array().unwrap() {
-        let tool = catalog["tools"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|tool| tool["name"] == replacement["name"])
-            .expect("existing viewer-handle authoring tool");
-        *tool = replacement.clone();
+    // Native authoring overrides are pinned independently of the live catalog.
+    let authoring: [(&[u8], &str); 2] = [
+        (
+            include_bytes!("../../mcp/fixtures/viewer-handles-native-catalog.json"),
+            "166afbdea0e2053bca88ddcb8571a5ff966283facb2d8fbf8326cf813b39f470",
+        ),
+        (
+            include_bytes!("../../mcp/fixtures/extension-session-native-catalog.json"),
+            "52d3cd3d7b7db1cf95a5e88239f98f1deae1cf20b3a0f6a2dcc2d13c8c9fbbe5",
+        ),
+    ];
+    for (source, digest) in authoring {
+        assert_eq!(replay::sha256(source), digest);
+        let source: Value = serde_json::from_slice(source).unwrap();
+        for replacement in source["tools"].as_array().unwrap() {
+            let tool = catalog["tools"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|tool| tool["name"] == replacement["name"])
+                .expect("existing authoring tool");
+            *tool = replacement.clone();
+        }
     }
     let source = include_bytes!("../../mcp/fixtures/native-tools.json");
     assert_eq!(

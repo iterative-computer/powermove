@@ -150,6 +150,9 @@ fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
                 let speed: Value =
                     serde_json::from_str(include_str!("../fixtures/mcp-speed-catalog.json"))
                         .unwrap();
+                let extensions: Value =
+                    serde_json::from_str(include_str!("../fixtures/extension-session-native-catalog.json"))
+                        .unwrap();
                 for replacement in studio["tools"]
                     .as_array()
                     .unwrap()
@@ -157,6 +160,7 @@ fn captured_installed_stdio_pairs_replay_with_owner_3d_contract() {
                     .chain(projects["tools"].as_array().unwrap())
                     .chain(media["tools"].as_array().unwrap())
                     .chain(viewer["tools"].as_array().unwrap())
+                    .chain(extensions["tools"].as_array().unwrap())
                 {
                     *tools
                         .iter_mut()
@@ -1167,7 +1171,10 @@ fn internal_editor_receives_staging_workspace() {
     f.create();
     let mut s = internal_editor(&f);
     value(s.call("finish_session", json!({"commit":true})));
-    let started = value(s.call("start_session", json!({"prompt":"Build"})));
+    let started = value(s.call(
+        "start_session",
+        json!({"prompt":"Build","includeExtensionStaging":true}),
+    ));
     for key in [
         "workspace",
         "stagingDirectory",
@@ -1348,4 +1355,54 @@ fn paired_cut_transition_add_and_remove_uses_v1_edge_objects() {
             assert!(b["transitionIn"].is_null());
         }
     }
+}
+
+#[test]
+fn project_session_omits_extension_staging_by_default() {
+    let f = Fixture::new();
+    f.create();
+    for args in [
+        json!({"prompt":"Trim a clip"}),
+        json!({"prompt":"Trim a clip","includeExtensionStaging":false}),
+    ] {
+        let started = value(f.session().call("start_session", args));
+        for field in ["stagingDirectory", "apiPackDirectory", "extensionGuide"] {
+            assert!(started.get(field).is_none(), "{field} should be absent");
+        }
+        assert!(
+            !started["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("stagingDirectory")
+        );
+    }
+}
+
+#[test]
+fn project_session_can_request_extension_staging() {
+    let f = Fixture::new();
+    f.create();
+    let args = json!({"prompt":"Reuse an installed effect","includeExtensionStaging":true});
+    let invalid = json!({"prompt":"Reuse an installed effect","includeExtensionStaging":"true"});
+    assert!(catalog::validate("start_session", &invalid).is_err());
+    assert!(f.session().dispatch("start_session", &invalid).is_err());
+    catalog::validate("start_session", &args).unwrap();
+    let mut session = f.session();
+    let started = value(session.call("start_session", args));
+    for field in ["stagingDirectory", "apiPackDirectory"] {
+        assert!(
+            std::path::Path::new(started[field].as_str().unwrap()).is_dir(),
+            "{field}"
+        );
+    }
+    assert!(started["extensionGuide"].is_string());
+}
+
+#[test]
+fn fork_tool_description_explains_the_next_step() {
+    let description = catalog::spec("fork_builtin_extension").unwrap()["description"]
+        .as_str()
+        .unwrap();
+    assert!(!description.contains("extensions array"), "{description}");
+    assert!(description.contains("publish_extensions"), "{description}");
 }
