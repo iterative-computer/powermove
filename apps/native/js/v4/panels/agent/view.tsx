@@ -1071,7 +1071,17 @@ function SubthreadBar({ s, send }: { s: Snapshot; send: Send }) {
 
 // ── Empty state and connection ───────────────────────────────────────────
 
-function Welcome({ s, n, send }: { s: Snapshot; n: NativeFacts; send: Send }) {
+function Welcome({
+  s,
+  n,
+  send,
+  compact,
+}: {
+  s: Snapshot;
+  n: NativeFacts;
+  send: Send;
+  compact: boolean;
+}) {
   const explanation = n.extensionContext
     ? "Build and improve your extensions."
     : s.settings.access === "editor"
@@ -1084,18 +1094,33 @@ function Welcome({ s, n, send }: { s: Snapshot; n: NativeFacts; send: Send }) {
       label="Make your next move"
       style={{
         ...column,
-        flexGrow: 1,
-        justifyContent: "center",
-        gap: t("metrics.inset"),
+        flexShrink: 0,
+        paddingTop: t("metrics.agent_gap"),
+        paddingBottom: t("metrics.inset"),
+        gap: t(compact ? "space.hair" : "metrics.inset"),
       }}
     >
       <div style={{ ...column, gap: t("metrics.gap") }}>
-        <text style={{ ...strong, fontSize: t("typography.heading") }}>
+        <text
+          id="agent-welcome-title"
+          style={{
+            ...strong,
+            fontSize: t(compact ? "typography.title" : "typography.heading"),
+            ...(compact ? { lineHeight: t("typography.dense_leading") } : {}),
+          }}
+        >
           Make your next move
         </text>
-        <text style={quiet}>{explanation}</text>
+        {!compact && (
+          <text id="agent-welcome-description" style={quiet}>
+            {explanation}
+          </text>
+        )}
       </div>
-      <div style={{ ...column, gap: t("metrics.gap") }}>
+      <div
+        id="agent-suggestions"
+        style={{ ...column, gap: t(compact ? "space.hair" : "metrics.gap") }}
+      >
         {suggestions(s.settings.access, n.extensionContext).map(
           ([label, prompt]) => (
             <button
@@ -1119,9 +1144,10 @@ function Welcome({ s, n, send }: { s: Snapshot; n: NativeFacts; send: Send }) {
                 ...target,
                 ...row,
                 gap: t("metrics.gap"),
-                minHeight: t("metrics.control"),
-                paddingTop: t("metrics.gap"),
-                paddingBottom: t("metrics.gap"),
+                flexShrink: 0,
+                minHeight: t(compact ? "metrics.hit" : "metrics.control"),
+                paddingTop: t(compact ? "space.hair" : "metrics.gap"),
+                paddingBottom: t(compact ? "space.hair" : "metrics.gap"),
                 paddingLeft: t("metrics.text_padding"),
                 paddingRight: t("metrics.text_padding"),
                 background: t("colors.raised"),
@@ -3086,6 +3112,8 @@ export function AgentView({
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [typed, setTyped] = useState<Record<string, string>>({});
   const [away, setAway] = useState(false);
+  const [compactWelcome, setCompactWelcome] = useState(false);
+  useLayoutEffect(() => setAway(false), [s.threadId]);
   const [jumps, setJumps] = useState(0);
   // Each change of where the panel is shown (the popover opening, a dock)
   // counts as a new showing.
@@ -3157,6 +3185,7 @@ export function AgentView({
   // Nothing to keep yet: the connection is the whole panel.
   const setup = gate && empty && !s.draft.text && !s.attachments.length;
   const popover = n.presentation === "popover";
+  const welcome = empty && !setup;
   const content = (
     <div
       id="agent-panel"
@@ -3171,121 +3200,158 @@ export function AgentView({
       }}
     >
       <Header s={s} n={n} send={send} menu={menu} />
-      <SubthreadBar s={s} send={send} />
-      {s.saveError && (
-        <div
-          role="status"
-          label="Thread history couldn’t be saved. Keep this window open."
-          style={{
-            ...row,
-            gap: t("metrics.gap"),
-            paddingLeft: t("metrics.inset"),
-            paddingRight: t("metrics.inset"),
-            paddingBottom: t("metrics.gap"),
-          }}
-        >
-          <div
-            metadata={{ symbol: "exclamationmark.triangle.fill" }}
-            style={{
-              color: t("colors.warning"),
-              symbolSize: t("metrics.symbol_inline"),
-              flexShrink: 0,
-            }}
-          />
-          <text style={{ ...quiet, ...shrink, color: t("colors.warning") }}>
-            Thread history couldn’t be saved. Keep this window open.
-          </text>
-        </div>
-      )}
       <div
-        id="agent-conversation"
-        role="group"
-        label={setup ? "Agent setup" : "Agent conversation"}
-        tabIndex={0}
-        onScroll={(e) => setAway(obj(e.value).away === true)}
-        metadata={{
-          count: s.rows.count,
-          range: s.rows.range as unknown as Json,
-          // Bottom anchored: new content keeps the latest in view unless
-          // the person scrolled up; a new token goes back to the end.
-          scrollAnchor: "end",
-          scrollToken: `${s.threadId}:${jumps}`,
-        }}
         style={{
           ...column,
-          ...target,
+          overflow: "hidden",
           flexGrow: 1,
-          overflow: "scroll",
-          gap: t("metrics.agent_gap"),
-          paddingTop: t("metrics.gap"),
-          paddingBottom: t("metrics.inset"),
-          paddingLeft: t("metrics.agent_gap"),
-          paddingRight: t("metrics.agent_gap"),
+          flexShrink: 1,
+          position: "relative",
         }}
       >
-        {gate && <Gate s={s} n={n} send={send} compact={!setup} />}
-        {!setup &&
-          (n.loadingHistory ? (
-            <UI.ProgressRow label="Loading earlier messages…" />
-          ) : null)}
-        {!setup &&
-          (empty ? (
-            <Welcome s={s} n={n} send={send} />
-          ) : (
-            <Conversation s={s} send={send} local={local} />
-          ))}
-      </div>
-      {s.stopError && (
         <div
-          role="status"
-          label="Couldn’t stop this task."
+          id="agent-conversation"
+          role="group"
+          label={setup ? "Agent setup" : "Agent conversation"}
+          tabIndex={0}
+          onScroll={(e) => {
+            const { away, compact } = obj(e.value);
+            if (typeof away === "boolean") setAway(away);
+            if (typeof compact === "boolean") setCompactWelcome(compact);
+          }}
+          metadata={{
+            count: s.rows.count,
+            range: s.rows.range as unknown as Json,
+            ...(welcome
+              ? {
+                  scrollAnchor: "start",
+                  scrollToken: s.threadId,
+                  scrollCompactBelow: 120,
+                }
+              : { scrollAnchor: "end", scrollToken: `${s.threadId}:${jumps}` }),
+          }}
           style={{
-            ...row,
-            gap: t("metrics.gap"),
+            ...column,
+            ...target,
+            overflow: "scroll",
+            gap: t("metrics.agent_gap"),
             paddingLeft: t("metrics.agent_gap"),
             paddingRight: t("metrics.agent_gap"),
-            paddingBottom: t("metrics.gap"),
           }}
         >
           <div
-            metadata={{ symbol: "exclamationmark.triangle.fill" }}
+            id="agent-conversation-content"
             style={{
-              color: t("colors.danger"),
-              symbolSize: t("metrics.symbol_inline"),
+              ...column,
               flexShrink: 0,
+              gap: t("metrics.agent_gap"),
+              ...(welcome
+                ? {}
+                : {
+                    paddingTop: t("metrics.gap"),
+                    paddingBottom: t("metrics.inset"),
+                  }),
             }}
-          />
-          <text style={{ ...quiet, ...shrink, color: t("colors.danger") }}>
-            Couldn’t stop this task.
-          </text>
+          >
+            <SubthreadBar s={s} send={send} />
+            {s.saveError && (
+              <div
+                role="status"
+                label="Thread history couldn’t be saved. Keep this window open."
+                style={{
+                  ...row,
+                  gap: t("metrics.gap"),
+                  paddingLeft: t("metrics.inset"),
+                  paddingRight: t("metrics.inset"),
+                  paddingBottom: t("metrics.gap"),
+                }}
+              >
+                <div
+                  metadata={{ symbol: "exclamationmark.triangle.fill" }}
+                  style={{
+                    color: t("colors.warning"),
+                    symbolSize: t("metrics.symbol_inline"),
+                    flexShrink: 0,
+                  }}
+                />
+                <text
+                  style={{ ...quiet, ...shrink, color: t("colors.warning") }}
+                >
+                  Thread history couldn’t be saved. Keep this window open.
+                </text>
+              </div>
+            )}
+            {gate && <Gate s={s} n={n} send={send} compact={!setup} />}
+            {!setup &&
+              (n.loadingHistory ? (
+                <UI.ProgressRow label="Loading earlier messages…" />
+              ) : null)}
+            {!setup &&
+              (empty ? (
+                <Welcome s={s} n={n} send={send} compact={compactWelcome} />
+              ) : (
+                <Conversation s={s} send={send} local={local} />
+              ))}
+            {s.stopError && (
+              <div
+                role="status"
+                label="Couldn’t stop this task."
+                style={{
+                  ...row,
+                  gap: t("metrics.gap"),
+                  paddingLeft: t("metrics.agent_gap"),
+                  paddingRight: t("metrics.agent_gap"),
+                  paddingBottom: t("metrics.gap"),
+                }}
+              >
+                <div
+                  metadata={{ symbol: "exclamationmark.triangle.fill" }}
+                  style={{
+                    color: t("colors.danger"),
+                    symbolSize: t("metrics.symbol_inline"),
+                    flexShrink: 0,
+                  }}
+                />
+                <text
+                  style={{ ...quiet, ...shrink, color: t("colors.danger") }}
+                >
+                  Couldn’t stop this task.
+                </text>
+              </div>
+            )}
+            {!setup && <PlanPreview s={s} send={send} />}
+          </div>
         </div>
-      )}
-      {!setup && away && (
-        <div
-          style={{
-            ...row,
-            justifyContent: "center",
-            paddingBottom: t("metrics.gap"),
-          }}
-        >
-          <UI.ToolbarItem
-            id="agent-jump"
-            label="Scroll to latest"
-            title="Scroll to latest"
-            metadata={{ symbol: "chevron.down" }}
-            onClick={() => {
-              setAway(false);
-              setJumps(jumps + 1);
-            }}
+        {!empty && !setup && away && (
+          <div
             style={{
-              background: t("colors.fill"),
-              borderRadius: t("metrics.popover_radius"),
-              symbolSize: t("metrics.symbol_inline"),
+              ...row,
+              justifyContent: "center",
+              position: "absolute",
+              left: 0,
+              right: 0,
+              bottom: 0,
+              paddingBottom: t("metrics.gap"),
             }}
-          />
-        </div>
-      )}
-      {!setup && <PlanPreview s={s} send={send} />}
+          >
+            <UI.ToolbarItem
+              id="agent-jump"
+              label="Scroll to latest"
+              title="Scroll to latest"
+              metadata={{ symbol: "chevron.down" }}
+              onClick={() => {
+                setAway(false);
+                setJumps(jumps + 1);
+              }}
+              style={{
+                background: t("colors.fill"),
+                borderRadius: t("metrics.popover_radius"),
+                symbolSize: t("metrics.symbol_inline"),
+              }}
+            />
+          </div>
+        )}
+      </div>
       {!setup && (
         <Composer
           s={s}

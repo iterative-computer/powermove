@@ -713,11 +713,10 @@ impl Layout {
                 && matches!(self.docks[divider.dock].id.as_str(), "left" | "right");
             let groups = &self.docks[divider.dock].groups;
             let least = |g: &Group| {
-                let floor = group_least(g, t);
-                if side && !g.collapsed && g.size.is_none() {
-                    floor.max(200.)
+                if side {
+                    side_group_resize_floor(g, t, None)
                 } else {
-                    floor
+                    group_least(g, t)
                 }
             };
             let (least_a, least_b) = (least(&groups[i]), least(&groups[j]));
@@ -1889,14 +1888,15 @@ impl Layout {
         self.move_panel_to(id, target)
     }
 }
-/// The least height a group of `tabs` keeps: the timeline its ruler and
-/// three rows, any other panel `panel_least` (the original app's 88 pt).
+/// Minimum height for any tab that could be shown in this group.
 pub fn least_height(tabs: &[String], t: &Tokens) -> f32 {
-    if tabs.iter().any(|id| id == "timeline") {
-        t.metrics.header + 2. * t.metrics.ruler + 3. * t.metrics.track_row
-    } else {
-        t.metrics.panel_least
-    }
+    tabs.iter().fold(t.metrics.panel_least, |least, id| {
+        least.max(match id.as_str() {
+            "timeline" => t.metrics.header + 2. * t.metrics.ruler + 3. * t.metrics.track_row,
+            "agent" => t.agent_panel_minimum_height(),
+            _ => t.metrics.panel_least,
+        })
+    })
 }
 /// A group's least height: its header alone while it is folded.
 pub fn group_least(g: &Group, t: &Tokens) -> f32 {
@@ -1922,14 +1922,34 @@ fn dock_floor(d: &Dock, t: &Tokens) -> f32 {
 /// Electron's minimum for a fluid side panel, before content preference.
 pub const SIDE_FLUID_FLOOR: f32 = 200.;
 
+/// Threads reports its pinned composer's height, including when a draft grows.
+fn side_group_minimum(g: &Group, t: &Tokens, measured: Option<f32>) -> f32 {
+    let minimum = group_least(g, t);
+    if !g.collapsed && g.active() == "agent" {
+        minimum.max(measured.unwrap_or(0.))
+    } else {
+        minimum
+    }
+}
+
+fn side_group_resize_floor(g: &Group, t: &Tokens, measured: Option<f32>) -> f32 {
+    let minimum = side_group_minimum(g, t, measured);
+    if g.collapsed || g.size.is_some() || g.active() == "agent" {
+        minimum
+    } else {
+        minimum.max(SIDE_FLUID_FLOOR)
+    }
+}
+
 /// The automatic floor includes useful content space, capped before long lists
 /// take over the window. A saved splitter basis or fixed size remains authoritative.
 pub fn side_group_floor(g: &Group, window_height: f32, t: &Tokens, natural: Option<f32>) -> f32 {
+    let minimum = side_group_minimum(g, t, natural);
     if g.collapsed {
-        return t.metrics.header;
+        return minimum;
     }
     if let Some(size) = g.size {
-        return size.max(group_least(g, t));
+        return size.max(minimum);
     }
     let initial = match g.active() {
         "inspector" | "properties" => 360.,
@@ -1937,13 +1957,14 @@ pub fn side_group_floor(g: &Group, window_height: f32, t: &Tokens, natural: Opti
         "easing" | "assets" | "project" | "layer-effects" => 320.,
         _ => SIDE_FLUID_FLOOR,
     };
-    natural
-        .filter(|h| h.is_finite() && *h > 0.)
+    let preferred = natural.filter(|h| g.active() != "agent" && h.is_finite() && *h > 0.);
+    preferred
         .unwrap_or(initial)
         .clamp(
             SIDE_FLUID_FLOOR,
             (window_height * 0.6).max(SIDE_FLUID_FLOOR),
         )
+        .max(minimum)
 }
 
 fn side_group_heights(
@@ -1957,16 +1978,13 @@ fn side_group_heights(
     let mut heights: Vec<f32> = groups
         .iter()
         .map(|g| {
-            if !g.collapsed && g.size.is_none() {
-                bases
-                    .get(&g.tabs[0])
-                    .copied()
-                    .unwrap_or_else(|| {
-                        side_group_floor(g, window_height, t, natural.get(g.active()).copied())
-                    })
-                    .max(SIDE_FLUID_FLOOR)
+            let measured = natural.get(g.active()).copied();
+            if !g.collapsed && g.size.is_none()
+                && let Some(basis) = bases.get(&g.tabs[0])
+            {
+                basis.max(side_group_resize_floor(g, t, measured))
             } else {
-                side_group_floor(g, window_height, t, natural.get(g.active()).copied())
+                side_group_floor(g, window_height, t, measured)
             }
         })
         .collect();
@@ -1983,6 +2001,31 @@ fn side_group_heights(
         }
     }
     heights
+}
+
+#[cfg(test)]
+#[test]
+fn agent_floor_follows_the_composer_even_after_resizing() {
+    let t = Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility::default());
+    let idle = t.agent_panel_minimum_height();
+    let tall = idle + 72.;
+    let mut group = Group {
+        tabs: vec!["agent".into()],
+        active: 0,
+        collapsed: false,
+        size: Some(88.),
+    };
+    assert_eq!(group_least(&group, &t), idle);
+    assert_eq!(side_group_floor(&group, 600., &t, Some(tall)), tall);
+    group.size = None;
+    let short_basis = BTreeMap::from([("agent".to_owned(), 88.)]);
+    assert_eq!(
+        side_group_heights(&[group.clone()], 100., 600., &t, &BTreeMap::new(), &short_basis),
+        [idle]
+    );
+    let natural = BTreeMap::from([("agent".to_owned(), tall)]);
+    let bases = BTreeMap::from([("agent".to_owned(), 200.)]);
+    assert_eq!(side_group_heights(&[group], 100., 600., &t, &natural, &bases), [tall]);
 }
 
 fn group_heights(groups: &[Group], space: f32, t: &Tokens) -> Vec<f32> {

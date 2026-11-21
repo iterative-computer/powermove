@@ -515,7 +515,11 @@ impl pm_shell::integration::Integration for Bridge {
     fn natural_panel_height(&self, id: &str, cx: &App) -> Option<f32> {
         let controller = self.0.read(cx);
         let view = controller.builtins.views.get(id)?;
-        let height = view.read(cx).natural_body_height();
+        let view = view.read(cx);
+        if id == "agent" {
+            return Some(view.agent_panel_minimum_height());
+        }
+        let height = view.natural_body_height();
         (height > 0.).then(|| height + controller.host.borrow().tokens.metrics.header)
     }
     fn panel(

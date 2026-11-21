@@ -76,6 +76,39 @@ const byLabel = (root: ReturnType<typeof mount>["root"], label: string) =>
 const has = (root: ReturnType<typeof mount>["root"], label: string) =>
   root.inspect().nodes.some((n) => n.props.label === label);
 
+test("the empty thread starts at the top of the conversation above the pinned composer", async () => {
+  const { root } = mount();
+  await root.render(<AgentView publication={fixture()} send={() => {}} />);
+  const scroll = byId(root, "agent-conversation");
+  const welcome = byId(root, "agent-welcome");
+  const composer = byId(root, "agent-composer");
+  expect(composer.props.style.flexShrink).toBe(0);
+  expect(scroll.props.style.overflow).toBe("scroll");
+  expect(scroll.props.metadata.scrollAnchor).toBe("start");
+  const content = byId(root, "agent-conversation-content");
+  expect(scroll.children).toContain(content.id);
+  expect(content.children).toContain(welcome.id);
+  expect(byId(root, "agent-panel").children).toContain(composer.id);
+  expect(welcome.props.style.paddingTop).toEqual({ token: "metrics.agent_gap" });
+  expect(welcome.props.style.flexGrow).toBeUndefined();
+  expect(welcome.props.style.justifyContent).toBeUndefined();
+  for (const label of ["Animate a title", "Shape the scene", "Arrange my workspace"]) {
+    expect(byId(root, "agent-suggestions").children).toContain(byLabel(root, label).id);
+  }
+  expect(byId(root, "agent-welcome-description")).toBeDefined();
+  await root.drive(scroll.id, "scroll", { value: { compact: true } });
+  expect(byId(root, "agent-welcome-description")).toBeUndefined();
+  const compactTitle = byId(root, "agent-welcome-title").props.style;
+  expect(compactTitle.fontSize).toEqual({ token: "typography.title" });
+  expect(compactTitle.lineHeight).toEqual({ token: "typography.dense_leading" });
+  expect(byId(root, "agent-welcome").props.style.gap).toEqual({ token: "space.hair" });
+  expect(has(root, "Arrange my workspace")).toBe(true);
+  expect(byLabel(root, "Arrange my workspace").props.style.minHeight).toEqual({ token: "metrics.hit" });
+  await root.drive(scroll.id, "scroll", { value: { compact: false } });
+  expect(byId(root, "agent-welcome-description")).toBeDefined();
+  root.dispose();
+});
+
 test("focus order follows the thread bar, conversation and composer as the original panel's", async () => {
   const { root, commits } = mount();
   const p = states.selected();

@@ -364,6 +364,49 @@ impl gpui::Render for Frame {
     }
 }
 
+/// The Threads body and its separately hosted header, as in the live panel.
+struct ThreadsCaptureFrame {
+    view: gpui::Entity<SurfaceView>,
+    header: gpui::Entity<crate::v4_view::HeaderView>,
+    fill: u32,
+    height: f32,
+    header_height: f32,
+    before: bool,
+}
+impl gpui::Render for ThreadsCaptureFrame {
+    fn render(
+        &mut self,
+        _: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::prelude::*;
+        let height = self.height - self.header_height;
+        let body = if self.before {
+            let content = self.view.read(cx).in_body(height);
+            gpui::div()
+                .id("old-agent-scroll-body")
+                .size_full()
+                .overflow_y_scroll()
+                .child(self.view.clone().cached(content))
+                .into_any_element()
+        } else {
+            crate::builtins::fixed_body_view("agent", &self.view)
+        };
+        gpui::div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(gpui::rgb(self.fill))
+            .font_family(pm_design::TEXT_FONT)
+            .child(
+                gpui::div()
+                    .h(px(self.header_height))
+                    .child(self.header.clone()),
+            )
+            .child(gpui::div().h(px(height)).overflow_hidden().child(body))
+    }
+}
+
 /// Headless pictures of Agent panel states for design review: each
 /// `<state>.json` in `PM_AGENT_STATES` holds the panel's own commits (the
 /// JS view rendered from a fixture publication), painted here at the
@@ -780,5 +823,274 @@ fn capture_keyframe_reveal_from_properties() {
             .unwrap()
             .save(format!("{dir}/keyframe-{phase}-{scheme_name}.png"))
             .unwrap();
+    }
+}
+
+/// Replays the .19 and updated Agent surfaces in their native fixed and
+/// growing body hosts. The updated surface's compact commit is applied only
+/// when the renderer reports the actual viewport crossing the threshold.
+#[test]
+#[ignore = "writes PNGs; set PM_THREADS_CAPTURE_STATES and PM_PANEL_CAPTURE"]
+fn capture_threads_layout() {
+    #[derive(serde::Deserialize)]
+    struct Fixture {
+        initial: Vec<pm_surface::Commit>,
+        compact: Vec<pm_surface::Commit>,
+    }
+    let states = std::env::var("PM_THREADS_CAPTURE_STATES").unwrap();
+    let dir = std::env::var("PM_PANEL_CAPTURE").unwrap();
+    let before = std::env::var("PM_THREADS_CAPTURE_PHASE").unwrap() == "before";
+    std::fs::create_dir_all(&dir).unwrap();
+    // The panel publications are synthetic. No Agent account or profile is needed.
+    let rig = rig("viewer", 1);
+    let mut failures = Vec::new();
+    for hosting in ["docked", "floating", "popover"] {
+        let fixture: Fixture = serde_json::from_reader(
+            std::fs::File::open(format!("{states}/{hosting}.json")).unwrap(),
+        )
+        .unwrap();
+        let mut initial = pm_surface::Surface::default();
+        for commit in fixture.initial {
+            initial.apply(commit).unwrap();
+        }
+        let mut compact = initial.clone();
+        for commit in fixture.compact {
+            compact.apply(commit).unwrap();
+        }
+        let initial = Arc::new(initial);
+        let compact = Arc::new(compact);
+        let title_selector = initial
+            .nodes()
+            .values()
+            .find(|node| node.text == "Make your next move")
+            .map(|node| format!("n{}", node.parent.unwrap_or(node.id)))
+            .unwrap();
+        let suggestion_selector = initial
+            .nodes()
+            .values()
+            .find(|node| {
+                node.props.get("label").and_then(serde_json::Value::as_str)
+                    == Some("Find useful footage")
+            })
+            .map(|node| format!("n{}", node.id))
+            .unwrap();
+        for (theme, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
+            let tokens = Tokens::new(scheme, Accessibility::default());
+            let minimum = tokens.agent_panel_minimum_height();
+            let heights = match (hosting, before) {
+                ("docked", false) => {
+                    vec![minimum, minimum + 20., 200., 220., 270., 360., 640., 900.]
+                }
+                // .19 allowed slots shorter than the composer's new minimum.
+                ("docked", true) => vec![120., 220., 360., 640.],
+                ("floating", _) => vec![360.],
+                _ if before => vec![],
+                _ => vec![minimum, 220., 900.],
+            };
+            for h in heights {
+                objc2::rc::autoreleasepool(|_| {
+                    let mut cx = HeadlessAppContext::with_platform(
+                        Arc::new(
+                            gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                                .with_automatic_optical_sizing(),
+                        ),
+                        Arc::new(()),
+                        || {
+                            Some(Box::new(
+                                gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                            ))
+                        },
+                    );
+                    let w = if hosting == "docked" {
+                        320.
+                    } else {
+                        tokens.metrics.agent_width
+                    };
+                    let header_height = tokens.metrics.header;
+                    let fill = if hosting == "docked" {
+                        tokens.colors.panel
+                    } else {
+                        tokens.colors.floating
+                    };
+                    let publication = |surface| pm_builtins::Publication {
+                        panel: "agent".into(),
+                        generation: 1,
+                        surface,
+                    };
+                    let window = cx
+                        .open_window(size(px(w), px(h)), |window, cx| {
+                            let view = cx.new(|cx| {
+                                let mut view = SurfaceView::new(
+                                    rig.runtime.clone(),
+                                    publication(initial.clone()),
+                                    tokens.clone(),
+                                    Natives::default(),
+                                    window,
+                                    cx,
+                                );
+                                view.grows = before;
+                                view
+                            });
+                            let header =
+                                cx.new(|cx| crate::v4_view::HeaderView::new(view.clone(), cx));
+                            cx.new(|_| ThreadsCaptureFrame {
+                                view,
+                                header,
+                                fill,
+                                height: h,
+                                header_height,
+                                before,
+                            })
+                        })
+                        .unwrap();
+                    let view = window
+                        .update(&mut cx, |frame, _, _| frame.view.clone())
+                        .unwrap();
+                    let window = gpui::AnyWindowHandle::from(window);
+                    let draw = |cx: &mut HeadlessAppContext| {
+                        cx.update_window(window, |_, window, _| window.refresh())
+                            .unwrap();
+                        let screenshot = cx.capture_screenshot(window).unwrap();
+                        cx.run_until_parked();
+                        screenshot
+                    };
+                    let mut screenshot = draw(&mut cx);
+                    // In .19 the growing body's first pass feeds its next height.
+                    if before {
+                        let _ = draw(&mut cx);
+                        screenshot = draw(&mut cx);
+                    }
+                    let compact_signal = cx.update(|cx| {
+                        let view = view.read(cx);
+                        view.log.iter().rev().find_map(|(_, name, detail)| {
+                            (name == "scroll").then_some(())?;
+                            detail.value.as_ref()?["compact"].as_bool()
+                        })
+                    });
+                    if compact_signal == Some(true) {
+                        cx.update(|cx| {
+                            view.update(cx, |view, cx| {
+                                view.publish(publication(compact.clone()), cx)
+                            })
+                        });
+                        cx.run_until_parked();
+                        screenshot = draw(&mut cx);
+                    }
+
+                    let tag = format!("threads-{hosting}-{}-{theme}", h.round());
+                    let mut bounds = |id: &str| cx.debug_bounds(window, id).unwrap();
+                    let header = bounds("agent-header").expect("separate header");
+                    let scroll = bounds("agent-conversation");
+                    let composer = bounds("agent-composer");
+                    let pinned = composer.is_some_and(|composer| {
+                        composer.top() >= header.bottom() - px(0.5)
+                            && (f32::from(composer.bottom()) - (h - 8.)).abs() <= 0.5
+                            && ["agent-field", "agent-model", "agent-effort", "agent-access"]
+                                .into_iter()
+                                .all(|id| {
+                                    bounds(id).is_some_and(|part| {
+                                        part.top() >= composer.top()
+                                            && part.bottom() <= composer.bottom()
+                                            && part.left() >= composer.left()
+                                            && part.right() <= composer.right()
+                                    })
+                                })
+                            && scroll
+                                .is_none_or(|scroll| scroll.bottom() <= composer.top() + px(0.5))
+                    });
+                    if !pinned {
+                        failures.push(format!("{tag}: composer or picker clipped: {composer:?}"));
+                    }
+                    if let Some(scroll) = scroll.filter(|scroll| scroll.size.height > px(36.)) {
+                        let title =
+                            bounds("agent-welcome-title").or_else(|| bounds(&title_selector));
+                        let top = title.map(|title| f32::from(title.top() - header.bottom()));
+                        if top.is_none_or(|top| (top - 16.).abs() > 0.5) {
+                            failures.push(format!("{tag}: welcome inset {top:?}, expected 16 pt"));
+                        }
+                        if !before {
+                            let description = bounds("agent-welcome-description");
+                            let should_compact = scroll.size.height < px(120.);
+                            if compact_signal != Some(should_compact)
+                                || should_compact == description.is_some()
+                            {
+                                failures.push(format!("{tag}: incorrect compact layout for {scroll:?}, event={compact_signal:?}"));
+                            }
+                            let suggestions =
+                                bounds("agent-suggestions").expect("suggestion list laid out");
+                            let mut last = title.expect("welcome title laid out");
+                            for next in description.into_iter().chain([suggestions]) {
+                                let gap = f32::from(next.top() - last.bottom());
+                                if !(-0.5..=16.5).contains(&gap) {
+                                    failures
+                                        .push(format!("{tag}: {gap} pt between welcome elements"));
+                                }
+                                last = next;
+                            }
+                            if hosting == "docked" && h == 220. {
+                                if bounds(&suggestion_selector)
+                                    .is_none_or(|row| row.bottom() > scroll.bottom() + px(0.5))
+                                {
+                                    failures.push(format!("{tag}: first suggestion is clipped"));
+                                }
+                                let (offset, _, max) = cx.update(|cx| {
+                                    let view = view.read(cx);
+                                    view.test_scroll_state(
+                                        view.prepared.semantics["agent-conversation"],
+                                    )
+                                    .unwrap()
+                                });
+                                if offset.y != px(0.) || max.y <= px(0.) {
+                                    failures.push(format!("{tag}: suggestions have no scroll range from the top: {offset:?}, {max:?}"));
+                                }
+                                cx.update(|cx| {
+                                    view.update(cx, |view, cx| {
+                                        view.review_scroll_to(f32::from(max.y), cx)
+                                    })
+                                });
+                                let _ = draw(&mut cx);
+                                let scrolled = cx
+                                    .debug_bounds(window, "agent-suggestions")
+                                    .unwrap()
+                                    .unwrap();
+                                if scrolled.bottom() > scroll.bottom() + px(0.5) {
+                                    failures.push(format!(
+                                        "{tag}: bottom of suggestions cannot be reached"
+                                    ));
+                                }
+                                if cx.debug_bounds(window, "agent-composer").unwrap() != composer {
+                                    failures.push(format!("{tag}: composer moved while scrolling"));
+                                }
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "{tag}: header={header:?}, scroll={scroll:?}, composer={composer:?}, compact={compact_signal:?}"
+                    );
+                    if (hosting == "docked" && [220., 360., 640.].contains(&h))
+                        || hosting == "floating"
+                    {
+                        screenshot.save(format!("{dir}/{tag}.png")).unwrap();
+                    }
+                });
+            }
+        }
+    }
+    if before {
+        for failure in &failures {
+            eprintln!("Expected .19 failure: {failure}");
+        }
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("composer or picker clipped"))
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure.contains("welcome inset"))
+        );
+    } else {
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
