@@ -21,6 +21,7 @@ HERE = Path(__file__).resolve().parent
 NATIVE = HERE.parent
 ROOT = NATIVE.parents[1]
 IDS = {
+    "latest": "com.zellzoi.powermove",
     "cutover": "com.zellzoi.powermove",
     "beta": "com.zellzoi.powermove.native-beta",
     "dev": "com.powermove.native.dev",
@@ -72,6 +73,22 @@ def config(path, channel):
     return value
 
 
+def verify_release_versions(version, build, electron_tag):
+    match = re.fullmatch(r"v([0-9]+\.[0-9]+\.[0-9]+)", electron_tag or "")
+    if not match:
+        raise ValueError("expected the latest stable Electron release tag (vX.Y.Z)")
+
+    def version_tuple(value):
+        if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", value):
+            raise ValueError("expected a numeric bundle version")
+        return tuple(map(int, (value + ".0.0").split(".")[:3]))
+
+    previous = version_tuple(match[1])
+    for name, value in (("CFBundleShortVersionString", version), ("CFBundleVersion", build)):
+        if version_tuple(value) <= previous:
+            raise ValueError(f"{name} must be newer than Electron {electron_tag}")
+
+
 def info(channel, version, build, sparkle_feed=None, sparkle_key=None):
     if channel not in IDS or not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ValueError("explicit channel and numeric macOS bundle version required")
@@ -92,7 +109,7 @@ def info(channel, version, build, sparkle_feed=None, sparkle_key=None):
         "NSPrincipalClass": "NSApplication", "CFBundleIconFile": "icon.icns",
     }
     # Beta/dev remain isolated; only production takes the shipped associations.
-    if channel == "cutover":
+    if channel in ("latest", "cutover"):
         value["CFBundleURLTypes"] = [{"CFBundleURLName": "Powermove", "CFBundleURLSchemes": ["powermove"]}]
         value["CFBundleDocumentTypes"] = [{
             "CFBundleTypeName": "Powermove Project", "CFBundleTypeRole": "Editor",
@@ -137,8 +154,12 @@ HELPERS = ("pm-store-helper", "pm-glsl-compiler")
 
 def bundle(executable, destination, channel, version, build, update_config,
            sparkle_framework=None, sparkle_feed=None, sparkle_key=None, compile_assets=True,
-           glsl_compiler=None, claude_runtime=None, codex_vendor=None):
+           glsl_compiler=None, claude_runtime=None, codex_vendor=None, electron_tag=None):
     metadata = info(channel, version, build, sparkle_feed, sparkle_key)
+    if channel == "latest":
+        verify_release_versions(version, build, electron_tag)
+        if Path(destination).name != "Powermove.app":
+            raise ValueError("the stable native release must be named Powermove.app")
     updates = config(update_config, "cutover" if channel == "dev" else channel)
     if updates["enabled"] and not all((sparkle_framework, sparkle_feed, sparkle_key)):
         raise ValueError("enabled updates require the reviewed Sparkle framework/feed/key")
@@ -335,6 +356,7 @@ def main():
     create.add_argument("--channel", choices=IDS, required=True)
     create.add_argument("--version", required=True)
     create.add_argument("--build", required=True)
+    create.add_argument("--electron-tag", help="Latest stable Electron tag; required for latest")
     create.add_argument("--update-config", default=HERE / "update-config.json", type=Path)
     create.add_argument("--sparkle-framework", type=Path)
     create.add_argument("--sparkle-feed")
@@ -354,7 +376,7 @@ def main():
     if args.command == "bundle":
         bundle(args.executable, args.destination, args.channel, args.version, args.build,
                args.update_config, args.sparkle_framework, args.sparkle_feed, args.sparkle_key,
-               not args.layout_only, args.glsl_compiler, args.claude_runtime, args.codex_vendor)
+               not args.layout_only, args.glsl_compiler, args.claude_runtime, args.codex_vendor, args.electron_tag)
     elif args.command == "verify-sparkle-archive":
         verify_sparkle_archive(args.artifact)
     elif args.command == "sign":

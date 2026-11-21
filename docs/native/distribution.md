@@ -49,6 +49,25 @@ the packaging command. `verify-sparkle-archive` hashes an operator-provided arch
 metadata alone is not an artifact-authentication substitute: verify the archive
 first, extract privately, then pass that framework to the builder.
 
+## Stable download and rollback
+
+The Electron and native downloads are available side by side on the website. They
+are separate downloads for the same installation. Both use `com.zellzoi.powermove`
+and `Powermove.app`. A user who drags the native app into Applications replaces
+the Electron app at that path. This keeps the production document and URL
+registrations and the existing Keychain identity.
+
+On first launch, the native app reads the original Electron data in
+`Application Support/Powermove` and imports it into a separate native profile.
+The original data stays on disk for rollback. Reinstalling Electron from the
+previous-version download reopens that profile. Changes made only in the native
+profile stay there.
+
+Stable distribution uses `latest`. Prereleases use `beta`. The old `cutover`
+value remains readable for pre-release policy fixtures and existing bundles.
+Stable packaging takes the latest Electron release tag and requires both
+`CFBundleShortVersionString` and `CFBundleVersion` to be numerically higher.
+
 ## Local bundle tooling
 
 `apps/native/packaging/package.py` is Python build tooling, never app runtime.
@@ -97,7 +116,8 @@ Local macOS command shapes, **not executed by this lane**:
 python3 apps/native/packaging/package.py verify-sparkle-archive "$SPARKLE_ARCHIVE"
 python3 apps/native/packaging/package.py bundle \
   --executable "$NATIVE_BINARY" --destination "$NEW_APP" \
-  --channel cutover --version "$BUNDLE_VERSION" --build "$BUILD_NUMBER" \
+  --channel latest --version "$BUNDLE_VERSION" --build "$BUILD_NUMBER" \
+  --electron-tag "$LATEST_ELECTRON_TAG" \
   --update-config "$BUNDLED_UPDATE_CONFIG" \
   --sparkle-framework "$VERIFIED_SPARKLE_FRAMEWORK" \
   --sparkle-feed "$SPARKLE_APPCAST_HTTPS_URL" --sparkle-key "$SPARKLE_PUBLIC_KEY"
@@ -161,7 +181,7 @@ Unknown or duplicate structured fields are errors. Payload fields are:
 | Field | Contract |
 | --- | --- |
 | `schema` | Exactly 1. |
-| `channel` | `cutover` or `beta`, matched to bundled config. |
+| `channel` | `latest` or `beta`, matched to bundled config. |
 | `version` | Display SemVer, strictly newer than installed; stable never offers a prerelease. |
 | `sparkleVersion` | Optional signed numeric `CFBundleVersion` / appcast `sparkle:version`, independent of display SemVer. New packaging uses this build number; absent legacy fields fall back to `version`. |
 | `architecture` | `arm64` or `x86_64`, matched to the running app. |

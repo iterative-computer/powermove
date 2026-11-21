@@ -1,0 +1,170 @@
+name: Native macOS signing proof
+
+on:
+  push:
+    branches: ['chike/native-release-dry']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Request publishing (disabled during release prep)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: native-signing-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  signing-proof:
+    if: github.repository == 'iterative-computer/powermove'
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+      CARGO_BUILD_JOBS: '3'
+      CARGO_INCREMENTAL: '0'
+      PM_NATIVE_STAGE: ${{ runner.temp }}/native-release
+      PM_FFMPEG_OUT: ${{ runner.temp }}/pm-ffmpeg/out
+      PM_FFMPEG_DOWNLOADS: ${{ runner.temp }}/pm-ffmpeg/downloads
+      PM_FFMPEG_WORK: ${{ runner.temp }}/pm-ffmpeg/work
+
+    steps:
+      - name: Check run authorization
+        env:
+          REQUESTED_PUBLISH: ${{ github.event.inputs.publish }}
+        run: |
+          set -euo pipefail
+          if [[ "$REQUESTED_PUBLISH" == true ]]; then
+            if [[ "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF_NAME" != native-v* ]]; then
+              echo "::error::Publishing requires a native-v tag."
+            else
+              echo "::error::Native publishing is disabled during release prep."
+            fi
+            exit 1
+          fi
+          test "$GITHUB_REF" = refs/heads/chike/native-release-dry
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(uname -m)" = arm64
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+
+      - name: Check packaged version against latest stable Electron release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false and (.tag_name | test("^v[0-9]+[.][0-9]+[.][0-9]+$"))) | .tag_name' \
+            | python3 -c 'import sys; print(max(map(str.strip, sys.stdin), key=lambda v: tuple(map(int, v[1:].split(".")))))')"
+          [[ "$tag" =~ ^v([0-9]+)\.[0-9]+\.[0-9]+$ ]]
+          # A dry-run placeholder above Electron. The actual release uses the approved tag.
+          version="$((10#${BASH_REMATCH[1]} + 1)).0.0"
+          {
+            printf 'PM_ELECTRON_TAG=%s\n' "$tag"
+            printf 'PM_NATIVE_VERSION=%s\n' "$version"
+          } >> "$GITHUB_ENV"
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s apps/native/packaging/tests -p 'test_*.py'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rusty-v8-152.2.0-sandbox-aarch64-apple-darwin
+          run-id: 44457245189
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/pm-v8
+
+      - name: Verify the pinned sandbox V8 inputs
+        working-directory: ${{ runner.temp }}/pm-v8
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c <<'HASHES'
+          0cc50754a6bb75fa5fbf3d8e1742723a745ab47e2de260711a77ac2aa1519ea9  librusty_v8.a
+          6da40ff4a76e455222ddf2a902ab60d2e0d69a76b652d90267de4a33e47ff31f  src_binding.rs
+          HASHES
+          {
+            printf 'RUSTY_V8_ARCHIVE=%s/librusty_v8.a\n' "$PWD"
+            printf 'RUSTY_V8_SRC_BINDING_PATH=%s/src_binding.rs\n' "$PWD"
+          } >> "$GITHUB_ENV"
+
+      - name: Install Rust and FFmpeg build tools
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_UPGRADE: '1'
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.1 --profile minimal
+          brew install cmake ninja pkgconf autoconf automake libtool openssl@3
+          command -v bun
+          python3 -c 'import shutil; assert shutil.disk_usage("/").free >= 8 * 1024**3, "Need 8 GiB of build space"'
+
+      - uses: actions/cache@v4
+        id: ffmpeg
+        with:
+          path: ${{ runner.temp }}/pm-ffmpeg/downloads
+          key: native-ffmpeg-sources-${{ hashFiles('engine/third_party/ffmpeg/sources.lock') }}
+
+      - name: Build pinned FFmpeg and prepare framework inputs
+        run: |
+          set -euo pipefail
+          engine/third_party/ffmpeg/build.sh
+          bash apps/native/packaging/prepare-native-release.sh inputs
+
+      - name: Install locked JavaScript packages
+        run: |
+          set -euo pipefail
+          for package in v4 compat remote-dom; do
+            (cd "apps/native/js/$package" && bun install --frozen-lockfile)
+          done
+
+      - name: Build the release app and helper binaries
+        working-directory: apps/native
+        run: |
+          set -euo pipefail
+          unset V8_FROM_SOURCE
+          cargo +1.96.1 build --locked --release \
+            -p pm-native-app -p pm-glsl -p pm-runtime-v8 \
+            --features pm-engine-service/studio-oidn,pm-update-policy/sparkle-macos \
+            --bin powermove-native --bin pm-glsl-compiler --bin pm-store-helper
+        env:
+          OIDN_DIR: ${{ runner.temp }}/native-release/oidn
+          PM_FFMPEG_DIR: ${{ runner.temp }}/pm-ffmpeg/out
+          PM_SPARKLE_FRAMEWORK: ${{ runner.temp }}/native-release/sparkle/Sparkle.framework
+
+      - name: Assemble unsigned release bundle
+        run: bash apps/native/packaging/prepare-native-release.sh bundle
+
+      - name: Sign, notarize, staple and verify
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          POWERMOVE_UPDATE_POLICY_KEY: ${{ secrets.POWERMOVE_UPDATE_POLICY_KEY }}
+        run: python3 apps/native/packaging/verify-native-release.py
+
+      - name: Upload checked verification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-signing-verification
+          path: |
+            ${{ runner.temp }}/native-release/evidence/verification.json
+            ${{ runner.temp }}/native-release/evidence/notarization.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove the candidate and temporary inputs
+        if: always()
+        run: |
+          test -n "$RUNNER_TEMP"
+          rm -rf -- "$RUNNER_TEMP/native-release" \
+            "$RUNNER_TEMP/pm-v8" "$RUNNER_TEMP/pm-ffmpeg/out" "$RUNNER_TEMP/pm-ffmpeg/work"

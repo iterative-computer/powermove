@@ -66,11 +66,11 @@ impl Fixture {
                 enabled: true,
                 feed_url: Some("https://updates.invalid/native/policy.json".into()),
                 public_key: Some(STANDARD.encode(key.verifying_key().as_bytes())),
-                channel: Channel::Cutover,
+                channel: Channel::Latest,
             },
             release: Release {
                 schema: 1,
-                channel: Channel::Cutover,
+                channel: Channel::Latest,
                 version: "2.0.0".into(),
                 sparkle_version: None,
                 architecture: Architecture::Arm64,

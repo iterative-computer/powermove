@@ -332,5 +332,20 @@ class AdhocProofSafetyTests(unittest.TestCase):
                 self.assertEqual(sign[sign.index("--sign") + 1], "-")
 
 
+
+class ReleaseVersionTests(unittest.TestCase):
+    def test_both_native_version_fields_must_exceed_the_latest_electron_tag(self):
+        for version, build in (("1.3.2", "2.0.0"), ("2.0.0", "1.3.2"), ("1.2.9", "2.0.0"), ("2.0.0", "1.3")):
+            with self.subTest(version=version, build=build), self.assertRaisesRegex(ValueError, "newer than Electron"):
+                package.verify_release_versions(version, build, "v1.3.2")
+        package.verify_release_versions("1.10.0", "1.10.17", "v1.3.2")
+
+    def test_latest_channel_keeps_powermove_identity_and_associations(self):
+        info = package.info("latest", "2.0.0", "2.0.0")
+        self.assertEqual(info["CFBundleIdentifier"], "com.zellzoi.powermove")
+        self.assertEqual(info["CFBundleURLTypes"][0]["CFBundleURLSchemes"], ["powermove"])
+        self.assertEqual(info["CFBundleDocumentTypes"][0]["CFBundleTypeExtensions"], ["pmv"])
+
+
 if __name__ == "__main__":
     unittest.main()

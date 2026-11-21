@@ -21,13 +21,14 @@ pub const BETA_ID: &str = "com.zellzoi.powermove.native-beta";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Channel {
+    Latest,
     Cutover,
     Beta,
 }
 impl Channel {
     pub fn bundle_id(self) -> &'static str {
         match self {
-            Self::Cutover => PRODUCTION_ID,
+            Self::Latest | Self::Cutover => PRODUCTION_ID,
             Self::Beta => BETA_ID,
         }
     }
@@ -287,7 +288,7 @@ pub fn check(
     let offered = Version::parse(&release.version)?;
     if offered <= current
         || release.minimum_macos > eligibility.macos_major
-        || (config.channel == Channel::Cutover && !offered.pre.is_empty())
+        || (config.channel != Channel::Beta && !offered.pre.is_empty())
     {
         return Ok(Check::Current);
     }
