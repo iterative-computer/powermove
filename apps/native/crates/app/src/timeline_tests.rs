@@ -220,14 +220,49 @@ impl Stage {
         let surface = self.surface.clone();
         settle(cx, |cx| surface.read_with(cx, |s, _| s.idle()));
         self.vcx.run_until_parked();
-        for (_, ticket) in self.rig.runtime.publish() {
-            let ticket = ticket.unwrap();
-            let deadline = std::time::Instant::now() + Duration::from_secs(20);
-            while ticket.try_take().is_none() {
-                assert!(std::time::Instant::now() < deadline);
-                std::thread::sleep(Duration::from_millis(1));
+        // This is the fixture's observation request, after all raw input was
+        // delivered. A fast burst can fill the bounded realm queue; let its
+        // existing work finish before requesting a publication. No input is
+        // retried or dropped, and a stuck realm still fails the same deadline.
+        let publish_started = std::time::Instant::now();
+        let deadline = publish_started + Duration::from_secs(20);
+        let mut retries = 0;
+        let mut retry_wait = Duration::ZERO;
+        loop {
+            let mut busy = false;
+            for (_, ticket) in self.rig.runtime.publish() {
+                let ticket = match ticket {
+                    Err(pm_runtime_v8::Error::Busy) => {
+                        busy = true;
+                        continue;
+                    }
+                    ticket => ticket.unwrap(),
+                };
+                while ticket.try_take().is_none() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "fixture publication: retries={retries}, retry_wait={retry_wait:?}"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
             }
+            if !busy {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture publication: retries={retries}, retry_wait={retry_wait:?}"
+            );
+            retries += 1;
+            let waiting = std::time::Instant::now();
+            std::thread::sleep(Duration::from_millis(1));
+            retry_wait += waiting.elapsed();
         }
+        eprintln!(
+            "TIMELINE_FIXTURE_PUBLISH {}",
+            serde_json::json!({"retries":retries,"retry_wait_ms":retry_wait.as_secs_f64()*1000.,
+                "total_ms":publish_started.elapsed().as_secs_f64()*1000.,"ceiling_ms":20000})
+        );
         for p in self.rig.runtime.take_publications() {
             self.view.update(&mut self.vcx, |v, cx| v.publish(p, cx));
         }
@@ -4954,3 +4989,7 @@ fn overlap_timeline_time_starts_after_edit_tools(cx: &mut TestAppContext) {
         view.timeline_timecode_bounds(px(72.), px(slot.w)).is_none()
     }));
 }
+
+// Headless measurements through mounted app objects and their kernel workers.
+#[path = "drag_latency_timeline_tests.rs"]
+mod drag_latency_metrics;

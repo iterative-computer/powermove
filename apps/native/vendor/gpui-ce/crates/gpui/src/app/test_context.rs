@@ -955,6 +955,20 @@ impl VisualTestContext {
         self.background_executor.run_until_parked();
     }
 
+    /// Delivers a batch of platform events followed by one display frame.
+    /// This exercises high-rate input without an artificial frame per sample.
+    pub fn simulate_events_in_frame<E: InputEvent>(
+        &mut self,
+        events: impl IntoIterator<Item = E>,
+    ) {
+        let mut platform = self.test_window(self.window);
+        for event in events {
+            platform.simulate_input(event.to_platform_input());
+        }
+        platform.simulate_frame_request(crate::RequestFrameOptions::default());
+        self.background_executor.run_until_parked();
+    }
+
     /// Simulates the user blurring the window.
     pub fn deactivate_window(&mut self) {
         if Some(self.window) == self.test_platform.active_window() {
