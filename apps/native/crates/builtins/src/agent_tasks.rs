@@ -1033,7 +1033,7 @@ impl Tasks {
                     Ok(event) => event,
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        Event::Stopped("Agent runtime stopped.".into())
+                        Event::Stopped(pm_agents::RUNTIME_STOPPED.into())
                     }
                 };
                 changed = true;

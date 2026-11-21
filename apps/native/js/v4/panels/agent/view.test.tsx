@@ -1598,3 +1598,35 @@ test("a rendered result keeps the change card without placeholder prose", async 
     root.dispose();
   }
 });
+
+test("a real provider timeout keeps the failure card and its details", async () => {
+  const { root } = mount();
+  const failure = "The provider stopped responding and timed out.";
+  const publication = withRows([
+    turn()[0]!,
+    {
+      id: "history:provider-error",
+      commandId: "",
+      chosen: {},
+      open: false,
+      value: { role: "assistant", text: failure, error: true },
+    },
+  ]);
+  try {
+    await root.render(<AgentView publication={publication} send={() => {}} />);
+    expect(
+      root
+        .inspect()
+        .nodes.some(
+          (n) =>
+            n.props.role === "alert" &&
+            String(n.props.label).startsWith("The request timed out"),
+        ),
+    ).toBe(true);
+    expect(has(root, "Try Again")).toBe(true);
+    await root.drive(byLabel(root, "Details").id, "click");
+    expect(JSON.stringify(root.inspect().nodes)).toContain(failure);
+  } finally {
+    root.dispose();
+  }
+});

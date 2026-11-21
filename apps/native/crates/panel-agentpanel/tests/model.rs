@@ -1582,18 +1582,24 @@ fn steering_with_a_live_quote_sends_its_archived_source_id() {
     assert!(!text.contains(&format!("live:{source}")));
 }
 
-/// PM-507: a run whose edits were rolled back after it ended says so in its
-/// thread, after its own last words; another run's news changes nothing.
 #[test]
-fn a_rolled_back_run_says_so_in_its_thread() {
-    let mut p = panel();
-    start(&mut p);
-    event(&mut p, 1, json!({"kind":"answer","text":"Done: the rect is orange."}));
-    assert!(!p.note_rolled_back("some-other-run", "rolled back").unwrap());
-    assert!(p.note_rolled_back("run1", "This run's changes were rolled back.").unwrap());
-    let last = p.session("t").unwrap().conversation.values().last().unwrap().clone();
-    assert_eq!(last["text"], "This run's changes were rolled back.");
-    assert_eq!(last["rolledBack"], true);
+fn an_archived_rollback_notice_stays_out_of_the_conversation() {
+    let mut store = Memory::default();
+    let mut thread = pm_agents::persistence::new_thread("t", 0);
+    thread["conversation"] = json!([
+        {"role":"user","text":"Change the rectangle"},
+        {"role":"assistant","text":"The rectangle is orange."},
+        {"role":"assistant","text":"This run's changes were rolled back.","rolledBack":true}
+    ]);
+    store.values.insert(
+        "agentThreads.p".into(),
+        json!({"version":1,"activeId":"t","threads":[thread]}),
+    );
+    let p = Panel::load(&mut store, "p", "t", 1).unwrap();
+    let window = pm_panel_agentpanel::v4::Window::new(&p, "t").unwrap();
+    assert_eq!(window.count(&p).unwrap(), 2);
+    let snapshot = window.snapshot(&p, 0..2, 2).unwrap();
+    assert_eq!(snapshot["rows"]["items"][1]["value"]["text"], "The rectangle is orange.");
 }
 
 #[test]
@@ -1760,4 +1766,108 @@ fn subthreads_preserve_parent_drafts_target_live_children_and_start_new_turns_wh
     p.save(&mut store, 9).unwrap();
     let restored = Panel::load(&mut store, "p", "unused", 10).unwrap();
     assert_eq!(restored.raw_archive()["threads"][0]["parentId"], "t");
+}
+
+fn settle_turn(p: &mut Panel, result: pm_agents::RunResult) {
+    p.provider_event(
+        &mut Memory::default(),
+        "t",
+        &pm_agents::history::Receipt {
+            source: "run1".into(),
+            sequence: 2,
+            event: pm_agents::Event::Completed {
+                run: "run1".into(),
+                result,
+            },
+        },
+        12,
+    )
+    .unwrap();
+}
+
+#[test]
+fn stopped_turn_before_text_has_no_assistant_reply() {
+    let mut p = panel();
+    start(&mut p);
+    settle_turn(&mut p, pm_agents::RunResult::failure("The run was stopped.", true));
+    assert_eq!(p.session("t").unwrap().conversation.len(), 1);
+}
+
+#[test]
+fn stopped_turn_after_text_keeps_only_the_streamed_reply() {
+    let mut p = panel();
+    start(&mut p);
+    event(&mut p, 1, json!({"kind":"answer","text":"I found the opening shot."}));
+    settle_turn(&mut p, pm_agents::RunResult::failure("The run was stopped.", true));
+    let conversation = &p.session("t").unwrap().conversation;
+    assert_eq!(conversation.len(), 2);
+    let reply = &conversation.last().unwrap().value;
+    assert_eq!(reply["role"], "trace");
+    assert_eq!(reply["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(reply["steps"][0]["text"], "I found the opening shot.");
+}
+
+#[test]
+fn empty_finished_turn_has_no_assistant_reply() {
+    let mut p = panel();
+    start(&mut p);
+    settle_turn(&mut p, pm_agents::RunResult::success(String::new(), Access::Editor));
+    assert_eq!(p.session("t").unwrap().conversation.len(), 1);
+}
+
+#[test]
+fn failed_turn_keeps_the_actionable_error() {
+    let mut p = panel();
+    start(&mut p);
+    settle_turn(&mut p, pm_agents::RunResult::failure("Sign in to continue.", false));
+    let conversation = &p.session("t").unwrap().conversation;
+    assert_eq!(conversation.len(), 2);
+    let error = &conversation.last().unwrap().value;
+    assert_eq!(error["text"], "Sign in to continue.");
+    assert_eq!(error["error"], true);
+}
+
+#[test]
+fn unexpected_runtime_exit_keeps_an_error() {
+    let mut p = panel();
+    start(&mut p);
+    p.provider_event(
+        &mut Memory::default(),
+        "t",
+        &pm_agents::history::Receipt {
+            source: "run1".into(),
+            sequence: 1,
+            event: pm_agents::Event::Stopped("Agent runtime stopped.".into()),
+        },
+        11,
+    )
+    .unwrap();
+    let conversation = &p.session("t").unwrap().conversation;
+    assert_eq!(conversation.len(), 2);
+    let last = conversation.last().unwrap();
+    assert_eq!(last.value["text"], "Agent runtime exited without a result.");
+    assert_eq!(last.value["error"], true);
+    assert_eq!(p.toolbar_notice(), (false, true));
+}
+
+#[test]
+fn stopped_subthread_keeps_its_prompt_without_a_filler_reply() {
+    let mut p = panel();
+    let settings = p.session("t").unwrap().settings.clone();
+    p.start_subthread("child", "t", "Check the cut", "Check the cut", settings, "task-run", 10)
+        .unwrap();
+    p.observe_subthread(
+        "child",
+        "task-run",
+        Update::Complete {
+            text: "The task was stopped.".into(),
+            error: true,
+            cancelled: true,
+        },
+        11,
+    )
+    .unwrap();
+    let child = p.session("child").unwrap();
+    assert!(child.run.is_none());
+    assert_eq!(child.conversation.len(), 1);
 }

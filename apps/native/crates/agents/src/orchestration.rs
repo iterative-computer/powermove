@@ -104,14 +104,6 @@ fn terminal(record: &Value) -> bool {
         Some("completed" | "failed" | "cancelled" | "interrupted")
     )
 }
-fn summary(result: &RunResult) -> (&str, &'static str) {
-    match result {
-        RunResult::Success { text, .. } => (text, "completed"),
-        RunResult::Failure {
-            error, cancelled, ..
-        } => (error, if *cancelled { "cancelled" } else { "failed" }),
-    }
-}
 impl Scope {
     pub fn load(host: &mut impl Host, root: Value, now: u64) -> io::Result<Self> {
         let project = id(&root, "projectId")?;
@@ -468,16 +460,17 @@ impl Scope {
                 "Subagent children have not settled.",
             ));
         }
-        let stopped = RunResult::failure("The task was stopped.", true);
-        let (text, status) = summary(if self.stopped.contains(run) {
-            &stopped
-        } else {
-            result
-        });
+        let (text, status) = match result {
+            _ if self.stopped.contains(run) => ("", "cancelled"),
+            RunResult::Success { text, .. } => (text.as_str(), "completed"),
+            RunResult::Failure { cancelled: true, .. } => ("", "cancelled"),
+            RunResult::Failure { error, .. } => (crate::runtime_exit_error(error), "failed"),
+        };
+        let summary = (!text.trim().is_empty()).then(|| trace::truncate(text, 200_000));
         let mut archive = self.archive.clone();
         let task = &mut archive["records"][index]["task"];
         task["status"] = json!(status);
-        task["summary"] = json!(trace::truncate(text, 200_000));
+        task["summary"] = json!(summary);
         task["endedAt"] = json!(now);
         task["workState"] = json!("result_available");
         task["hasPendingChildRuns"] = json!(false);
