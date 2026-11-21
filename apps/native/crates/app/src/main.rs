@@ -156,6 +156,7 @@ mod v4_view;
 mod v4_view_tests;
 #[cfg(test)]
 mod ui_latency_bench;
+mod gesture_publish;
 mod studio_panes;
 mod studio_estimate_probe;
 mod viewer2;

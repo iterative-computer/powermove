@@ -1725,6 +1725,43 @@ impl Builtins {
     pub fn script_queue_stats(&self, panel: &str) -> Option<QueueStats> {
         self.realm_of(panel).ok().map(|realm| realm.queue_stats())
     }
+    /// `publish` while a pointer gesture (a drag, a scrub) holds an edit
+    /// open: a shipped built-in panel publishes only when `live(id)`; the
+    /// others keep their last tree until the next full `publish`, which the
+    /// gesture's end makes. Forks and extensions, whose content the host
+    /// cannot know, publish as always. Also says whether any panel waited.
+    pub fn publish_live(
+        &self,
+        live: impl Fn(&str) -> bool,
+    ) -> (Vec<(String, Result<Ticket<Evaluation>>)>, bool) {
+        let forked: std::collections::BTreeSet<String> =
+            self.forks.shared().keys().cloned().collect();
+        let mut waited = false;
+        let realms: Vec<_> = {
+            let extensions = self.extension_realms.shared();
+            let realms = self.realms.shared();
+            realms
+                .iter()
+                .filter(|(id, _)| {
+                    let now = forked.contains(*id) || live(id);
+                    waited |= !now;
+                    now
+                })
+                .chain(extensions.iter())
+                .map(|(id, realm)| (id.clone(), realm.clone()))
+                .collect()
+        };
+        let tickets = realms
+            .into_iter()
+            .map(|(id, realm)| {
+                (
+                    id,
+                    realm.eval_latest(StateChannel::Publication, "__pmBuiltin.publish()"),
+                )
+            })
+            .collect();
+        (tickets, waited)
+    }
     pub fn publish(&self) -> Vec<(String, Result<Ticket<Evaluation>>)> {
         let realms: Vec<_> = {
             let extensions = self.extension_realms.shared();

@@ -738,6 +738,7 @@ impl pm_shell::integration::Integration for Bridge {
                     effective.push(target);
                 }
             }
+            crate::gesture_publish::follow_shown(&mut v.builtins.shown, &effective);
             v.finish_extension_layout(&effective.iter().map(String::as_str).collect::<Vec<_>>());
             // The viewer's transport and timecode follow the timeline's
             // presence: one set of play controls on screen, never two.

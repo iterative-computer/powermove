@@ -1576,6 +1576,165 @@ fn shared_cases(out: &mut Vec<Case>) {
     }
 }
 
+// ------------------------------------------- gesture steps, many panels
+
+/// The built-in panels the gesture case mounts (Properties first), and the
+/// ones on screen: a default editor shows Properties, Project and the viewer
+/// with Effect Controls, Effects, Color and Easing behind tabs.
+const GESTURE_MOUNTED: [&str; 7] = [
+    "inspector",
+    "layer-effects",
+    "assets",
+    "fxbrowser",
+    "color",
+    "easing",
+    "viewer",
+];
+const GESTURE_SHOWN: [&str; 3] = ["inspector", "assets", "viewer"];
+
+/// G1: one step of a Properties scrub (a kernel gesture step) with seven
+/// built-in panels running, as `Controller::update_builtins` publishes it:
+/// the step is on screen once every realm asked has answered and Properties
+/// took its tree. The baseline publishes every realm; ui-latency N2 only the
+/// shown panels that show the edited layer, until the gesture ends.
+fn gesture_cases(cx: &mut TestAppContext, out: &mut Vec<Case>) {
+    let mut case = Case::new(
+        "G1",
+        "gesture",
+        "Scrub step with 7 built-in panels running (write → Properties shows it)",
+    )
+    .priority();
+    let project = project_json(layer_count());
+    let mut rig = rig_project("inspector", &project);
+    let Some(runtime) = std::sync::Arc::get_mut(&mut rig.runtime) else {
+        out.push(case.skip("the panel runtime is shared"));
+        return;
+    };
+    for panel in &GESTURE_MOUNTED[1..] {
+        let Ok(ticket) = runtime.mount(panel) else {
+            out.push(case.skip(format!("{panel} did not mount")));
+            return;
+        };
+        let deadline = Instant::now() + Duration::from_secs(180);
+        let mounted = loop {
+            if let Some(result) = ticket.try_take() {
+                break result.is_ok();
+            }
+            if Instant::now() > deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        if !mounted {
+            out.push(case.skip(format!("{panel} did not mount")));
+            return;
+        }
+    }
+    select_now(&rig.kernel, &["l0"]);
+    let Some(first) = rig
+        .runtime
+        .take_publications()
+        .into_iter()
+        .find(|p| p.panel == "inspector")
+    else {
+        out.push(case.skip("Properties did not publish"));
+        return;
+    };
+    let (view, mut vcx) = window(cx, &rig, first, crate::v4_view::Natives::default());
+    let mut warm = Probe::start();
+    republish(&rig, &view, &mut vcx, &mut warm);
+    draw(&mut vcx, &mut warm);
+    let begun = rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(
+                Caller::native(),
+                pm_kernel::GestureCall::Begin {
+                    label: "Position".into(),
+                },
+            ),
+        )
+        .wait();
+    let Some(Ok(pm_kernel::Ack {
+        reply: pm_kernel::Reply::Gesture(gesture),
+        ..
+    })) = begun
+    else {
+        out.push(case.skip("the kernel refused the gesture"));
+        return;
+    };
+    let (mut realms, mut others) = (vec![], vec![]);
+    for k in 0..iterations() {
+        let mut probe = Probe::start();
+        let before = revision(&rig.kernel);
+        let set =
+            pm_kernel::PropertyCommand::Set(pm_kernel::commands::properties::SetProperty::new(
+                "l0",
+                "position.x",
+                300. + k as f64,
+                0.,
+            ));
+        let ok = call(
+            &rig.kernel,
+            &vcx,
+            &mut probe,
+            pm_kernel::GestureCall::Step {
+                gesture,
+                body: WriteBody::Commands(vec![set.into()]),
+                replace: true,
+            },
+        );
+        let kernel = rig.kernel.clone();
+        let published_ = pump_until(&vcx, &mut probe, move |_| revision(&kernel) != before);
+        let tickets = probe.run(|| {
+            // N2-SHIM-BEGIN
+            let shown: std::collections::BTreeSet<String> =
+                GESTURE_SHOWN.iter().map(|s| (*s).to_owned()).collect();
+            match crate::gesture_publish::Deferral::default().scope(true, &shown) {
+                crate::gesture_publish::Scope::Live(live) => {
+                    rig.runtime.publish_live(|id| live.contains(id)).0
+                }
+                crate::gesture_publish::Scope::All => rig.runtime.publish(),
+            }
+            // N2-SHIM-END
+        });
+        realms.push(tickets.len() as f64);
+        for (_, ticket) in tickets {
+            let Ok(ticket) = ticket else { continue };
+            pump_until(&vcx, &mut probe, |_| ticket.try_take().is_some());
+        }
+        // `drain_builtins`: every panel's new tree is taken on the main
+        // thread; only Properties has a view here.
+        let mut shown = false;
+        let mut other = 0;
+        for p in probe.run(|| rig.runtime.take_publications()) {
+            if p.panel == "inspector" {
+                probe.run(|| view.update(&mut vcx, |v, cx| v.publish(p, cx)));
+                shown = true;
+            } else {
+                other += 1;
+            }
+        }
+        others.push(other as f64);
+        probe.run(|| vcx.run_until_parked());
+        let _ = rig.runtime.take_errors();
+        draw(&mut vcx, &mut probe);
+        case.samples
+            .push(probe.sample(!(ok && published_ && shown)));
+    }
+    let _ = rig
+        .kernel
+        .call(
+            PROJECT,
+            Request::new(Caller::native(), pm_kernel::GestureCall::Commit { gesture }),
+        )
+        .wait();
+    case.add_extra_ms("realms_published_per_step", &realms);
+    case.add_extra_ms("other_panel_trees_per_step", &others);
+    out.push(case);
+}
+
 /// Interactions the headless platform cannot drive (AppKit windows, the
 /// dock and menus live in pm-shell / the Controller, which needs a Metal
 /// layer). Measured on the real Mac in the batched hold instead.
@@ -1677,6 +1836,7 @@ fn ui_latency_catalogue(cx: &mut TestAppContext) {
     // Priority first: the tester's "moving and resizing shapes lags".
     guarded(&mut cases, "viewer", |out| viewer_cases(cx, out));
     guarded(&mut cases, "properties", |out| properties_cases(cx, out));
+    guarded(&mut cases, "gesture", |out| gesture_cases(cx, out));
     guarded(&mut cases, "timeline", |out| timeline_cases(cx, out));
     guarded(&mut cases, "panels", |out| panel_cases(cx, out));
     guarded(&mut cases, "shared", shared_cases);

@@ -252,6 +252,10 @@ pub struct Host {
     pub media_observed: u64,
     updating: bool,
     again: bool,
+    /// The panels on screen (`shown_panels`), and the built-ins that waited
+    /// while a pointer gesture was under way (`crate::gesture_publish`).
+    pub(crate) shown: BTreeSet<String>,
+    pub(crate) deferral: crate::gesture_publish::Deferral,
     /// The status line asked for the missing files; the next update hands it
     /// to the panels' workers (never their locks on the main thread).
     pub(crate) show_missing: bool,
@@ -1184,6 +1188,13 @@ impl Controller {
         let originals = self.media.originals.clone();
         let observed = self.rendition_runtime();
         let show_missing = std::mem::take(&mut self.builtins.show_missing);
+        // During a drag or scrub only the panels on screen that show the
+        // edited layers publish; the others wait for its end (N2).
+        let gesture = self.gesture_open();
+        let scope = self.builtins.deferral.scope(gesture, &self.builtins.shown);
+        if matches!(scope, crate::gesture_publish::Scope::Live(_)) {
+            self.watch_gesture_end(cx);
+        }
         self.builtins.updating = true;
         let check = runtime.clone();
         cx.spawn(async move |this, cx| {
@@ -1197,7 +1208,12 @@ impl Controller {
                     if show_missing {
                         runtime.show_missing_media();
                     }
-                    runtime.publish()
+                    match scope {
+                        crate::gesture_publish::Scope::All => runtime.publish(),
+                        crate::gesture_publish::Scope::Live(live) => {
+                            runtime.publish_live(|id| live.contains(id)).0
+                        }
+                    }
                 })
                 .await;
             for (id, ticket) in tickets {
@@ -1222,10 +1238,60 @@ impl Controller {
                 }
                 v.builtins.updating = false;
                 v.drain_builtins(cx);
-                if std::mem::take(&mut v.builtins.again) {
+                // A gesture that ended while this ran: the panels that waited
+                // publish now, whether or not its end brought a publication.
+                let owed = v.builtins.deferral.owed(v.gesture_open());
+                if std::mem::take(&mut v.builtins.again) || owed {
                     v.update_builtins(cx);
                 }
             });
+        })
+        .detach();
+    }
+    /// A drag or scrub holds an edit open (`crate::gesture_publish`).
+    fn gesture_open(&self) -> bool {
+        crate::gesture_publish::gesture_open(
+            self.published.as_ref().is_some_and(|p| p.entry.is_some()),
+            crate::gesture_publish::pointer_held,
+        )
+    }
+    /// Panels waited during a gesture. A release publishes its commit (or
+    /// cancel), and that publication settles them; this watch only covers a
+    /// release that brings none (an edit left open): two ticks after the
+    /// button came up, every realm publishes. Two, so it never races the
+    /// commit's own publication into a second full publish.
+    fn watch_gesture_end(&mut self, cx: &mut Context<Self>) {
+        if self.builtins.deferral.watching {
+            return;
+        }
+        self.builtins.deferral.watching = true;
+        cx.spawn(async move |this, cx| {
+            let mut released = 0;
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(8))
+                    .await;
+                let Ok(done) = this.update(cx, |v, cx| {
+                    if !v.builtins.deferral.deferred() {
+                        return true;
+                    }
+                    if v.gesture_open() {
+                        released = 0;
+                        return false;
+                    }
+                    released += 1;
+                    if released >= 2 && !v.builtins.updating {
+                        v.update_builtins(cx);
+                    }
+                    !v.builtins.deferral.deferred()
+                }) else {
+                    return;
+                };
+                if done {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |v, _| v.builtins.deferral.watching = false);
         })
         .detach();
     }
