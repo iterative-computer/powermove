@@ -386,11 +386,13 @@ function QuoteSource({
   text,
   style = reading,
   code = false,
+  userMessage = false,
 }: {
   id: string;
   text: string;
   style?: Style;
   code?: boolean;
+  userMessage?: boolean;
 }) {
   const context = useContext(CitationContext);
   const [selection, setSelection] = useState<Citation | null>(null);
@@ -414,6 +416,7 @@ function QuoteSource({
         tabIndex: 0,
         metadata: {
           quoteSource: `${context.threadId}:${id}`,
+          ...(userMessage ? { userMessage: true } : {}),
           ...(context.jump?.messageId === id
             ? {
                 revealQuote: [
@@ -1420,12 +1423,10 @@ interface Local {
 
 function UserMessageView({
   m,
-  answering,
   send,
 }: {
   key?: string | number;
   m: Message;
-  answering: boolean;
   send: Send;
 }) {
   const text = str(m.value.text);
@@ -1458,13 +1459,6 @@ function UserMessageView({
           paddingBottom: t("metrics.text_padding"),
           paddingLeft: t("metrics.inset"),
           paddingRight: t("metrics.inset"),
-          // The request being answered carries the accent, as the original's halo.
-          ...(answering
-            ? {
-                borderWidth: t("metrics.border"),
-                borderColor: t("colors.accent"),
-              }
-            : {}),
         }}
       >
         {Array.isArray(m.value.citations) &&
@@ -1498,15 +1492,14 @@ function UserMessageView({
             ))}
           </div>
         )}
-        {text && <QuoteSource id={m.rowId} text={text} />}
+        {text && <QuoteSource id={m.rowId} text={text} userMessage />}
       </div>
     </div>
   );
 }
 const UserMessage = memo(
   UserMessageView,
-  (a, b) =>
-    a.answering === b.answering && JSON.stringify(a.m) === JSON.stringify(b.m),
+  (a, b) => JSON.stringify(a.m) === JSON.stringify(b.m),
 );
 const MEDIA_KIND: Record<string, string> = {
   image: "Image",
@@ -2452,18 +2445,6 @@ function Conversation({
   local: Local;
 }) {
   const list = entries(s);
-  const running = s.runId !== null;
-  // The request being answered: the last prompt of a running turn.
-  const answering = running
-    ? [...list]
-        .reverse()
-        .find(
-          (e) =>
-            e.kind === "message" &&
-            e.message.role === "user" &&
-            !e.message.steering,
-        )?.key
-    : undefined;
   const render = (e: Entry): ComponentChildren => {
     if (e.kind === "working")
       return (
@@ -2516,12 +2497,7 @@ function Conversation({
   };
   const item = (m: Message) =>
     m.role === "user" ? (
-      <UserMessage
-        key={m.key}
-        m={m}
-        answering={m.key === answering}
-        send={send}
-      />
+      <UserMessage key={m.key} m={m} send={send} />
     ) : m.role === "assistant" ? (
       <AssistantMessage key={m.key} m={m} s={s} send={send} />
     ) : (

@@ -328,6 +328,7 @@ pub struct SurfaceView {
     leases: BTreeMap<Id, Option<SharedString>>,
     option_sets: BTreeMap<Id, Value>,
     focus: BTreeMap<Id, FocusHandle>,
+    keyboard_focused_user_message: Option<Id>,
     /// Hover washes (pm-design springs), stepped once per render.
     motion: pm_shell::motion::Motion<Id>,
     /// Floating surfaces marked `pmKit.presence` (the Light panel): how far
@@ -514,6 +515,7 @@ impl SurfaceView {
             leases: BTreeMap::new(),
             option_sets: BTreeMap::new(),
             focus: BTreeMap::new(),
+            keyboard_focused_user_message: None,
             motion: Default::default(),
             pressed: None,
             ready_text: None,
@@ -719,6 +721,9 @@ impl SurfaceView {
     /// there, and so does one that finished while no window was open.
     pub fn attach(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = window.window_handle();
+        if handle != self.window {
+            self.keyboard_focused_user_message = None;
+        }
         if handle != self.window && (!self.controls.is_empty() || !self.fields.is_empty()) {
             // AppKit controls and editors live in the window they were
             // mounted in. A reopened window (the Agent popover closes and
@@ -917,6 +922,7 @@ impl SurfaceView {
         self.leases.clear();
         self.option_sets.clear();
         self.focus.clear();
+        self.keyboard_focused_user_message = None;
         self.subscriptions.clear();
         self.focus_events.clear();
         self.anchors.borrow_mut().clear();
@@ -959,6 +965,8 @@ impl SurfaceView {
             live(id)
         });
         self.focus.retain(|id, _| live(id));
+        self.keyboard_focused_user_message =
+            self.keyboard_focused_user_message.filter(|id| live(id));
         self.focus_events.retain(|id| live(id));
         self.leases.retain(|id, _| live(id));
         self.option_sets.retain(|id, _| live(id));
@@ -1066,7 +1074,36 @@ impl SurfaceView {
         // Glyph actions deliver focus to their row as well as pointer hover.
         // Text fields and AppKit form controls keep their existing lifecycle.
         for (&id, handle) in &self.focus {
-            if self.focus_events.contains(&id) || !prepared.node(id).is_some_and(|node|node.component == Some(Component::ToolbarItem)) { continue; }
+            if self.focus_events.contains(&id) {
+                continue;
+            }
+            let user_message = self.publication.panel == "agent"
+                && surface.node(id)
+                    .and_then(|node| node.props.get("metadata"))
+                    .is_some_and(|metadata| {
+                        metadata.get("quoteSource").is_some()
+                            && metadata.get("userMessage").and_then(Value::as_bool) == Some(true)
+                    });
+            if user_message {
+                let focused = cx.on_focus(handle, window, move |v, window, cx| {
+                    v.keyboard_focused_user_message =
+                        window.last_input_was_keyboard().then_some(id);
+                    // GPUI delivers focus callbacks during drawing. Invalidate
+                    // the view after the current frame so the ring is painted.
+                    cx.defer_in(window, |_, _, cx| cx.notify());
+                });
+                let blurred = cx.on_blur(handle, window, move |v, _, _| {
+                    if v.keyboard_focused_user_message == Some(id) {
+                        v.keyboard_focused_user_message = None;
+                    }
+                });
+                self.subscriptions.entry(id).or_default().extend([focused, blurred]);
+                self.focus_events.insert(id);
+                continue;
+            }
+            if !prepared.node(id).is_some_and(|node| node.component == Some(Component::ToolbarItem)) {
+                continue;
+            }
             let mut at = Some(id);
             let mut interested = false;
             while let Some(target) = at {
@@ -4128,6 +4165,12 @@ impl SurfaceView {
             element = element.track_focus(focus).tab_index(tab.max(0));
         }
         if self.quote_owner(id) == Some(id) {
+            if self.keyboard_focused_user_message == Some(id) {
+                let (ink, width, _) = self.table.tokens.focus_ring();
+                element = element.focus_visible_style(move |style| {
+                    style.border(px(width)).border_color(rgb(ink)).rounded(px(width))
+                });
+            }
             let reveal = self
                 .publication
                 .surface
@@ -4192,6 +4235,11 @@ impl SurfaceView {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |v, event: &MouseDownEvent, window, cx| {
+                        // A click can change the focus origin without moving focus.
+                        if v.keyboard_focused_user_message == Some(id) {
+                            v.keyboard_focused_user_message = None;
+                            cx.notify();
+                        }
                         let at = v.quote_selection.borrow().hit(id, event.position);
                         if let Some(at) = at {
                             if let Some(focus) = v.focus.get(&id) {
