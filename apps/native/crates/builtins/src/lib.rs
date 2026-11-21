@@ -2335,6 +2335,56 @@ impl Builtins {
             )
         })
     }
+    /// Resolve a Properties gain lease without publishing a gesture step.
+    pub fn gain_scrub_request(
+        &self,
+        panel: &str,
+        handle: &str,
+        value: f64,
+    ) -> Option<pm_kernel::Request> {
+        if panel != "inspector" {
+            return None;
+        }
+        let backend = self.backend(panel).ok()?;
+        let mut backend = backend.shared();
+        if !backend.native.properties.is_gain_handle(handle) {
+            return None;
+        }
+        let models::NativeCommand::Kernel(request) = backend
+            .native_command("panel.binding", &json!({"handle":handle,"value":value}))
+            .ok()?
+        else {
+            return None;
+        };
+        let pm_kernel::Call::Transact {
+            body: pm_kernel::WriteBody::Commands(commands),
+            ..
+        } = &request.call
+        else {
+            return None;
+        };
+        let document = backend.model.as_ref()?.document_id();
+        (!commands.is_empty()
+            && commands.iter().all(|command| match command {
+                pm_kernel::Command::Property(pm_kernel::PropertyCommand::Set(set)) => {
+                    matches!(set.channel.as_str(), "c.gain" | "c.audioGain")
+                }
+                pm_kernel::Command::Content(pm_kernel::ContentCommand::Set { patch, .. }) => {
+                    patch.len() == 1
+                        && (patch.get("gain").is_some() || patch.get("audioGain").is_some())
+                }
+                _ => false,
+            }))
+        .then(|| request.with_document(document))
+    }
+
+    pub fn commit_gain_scrub(
+        &self,
+        request: pm_kernel::Request,
+    ) -> pm_kernel::Pending<std::result::Result<pm_kernel::Ack, pm_kernel::KernelFailure>> {
+        self.broker.kernel.call(&self.broker.project, request)
+    }
+
     /// One kernel gesture for a dragged number field, so a scrub is one undo step.
     /// Runs off the main thread; no sample passes through V8.
     pub fn scrub_begin(

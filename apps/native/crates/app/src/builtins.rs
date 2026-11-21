@@ -351,6 +351,7 @@ impl Controller {
                 .insert("viewer.gizmos".into(), gizmos.clone().into());
             self.builtins.gizmos = Some(gizmos);
             let controller = cx.entity().downgrade();
+            *self.builtins.natives.gain_preview.borrow_mut() = Some(controller.clone());
             *self.builtins.natives.sample_color.borrow_mut() = Some(Rc::new(move |at, cx| {
                 let owner = controller.upgrade().ok_or("Editor closed")?;
                 let v = owner.read(cx);
@@ -905,7 +906,8 @@ impl Controller {
         let timeline = self.builtins.timeline.clone();
         let gizmos = self.builtins.gizmos.clone();
         let views: Vec<_> = self.builtins.views.values().cloned().collect();
-        timeline.is_some_and(|t| t.update(cx, |t, cx| t.cancel(cx)))
+        self.mixer_cancel(cx)
+            || timeline.is_some_and(|t| t.update(cx, |t, cx| t.cancel(cx)))
             || gizmos.is_some_and(|g| {
                 // A text session ends here (it reads nothing of this
                 // controller, and its keys keep their order, PM-459); a
@@ -3056,6 +3058,19 @@ impl Controller {
             })
     }
 }
+impl Controller {
+    pub(crate) fn audio_gain_preview(&self, message: pm_engine_service::audio::GainPreview) {
+        if let Some(viewer) = &self.viewer {
+            viewer.audio_gain_preview(message.clone());
+        }
+        if let Some(popout) = &self.popout
+            && let Some(viewer) = &*popout.viewer.borrow()
+        {
+            viewer.audio_gain_preview(message);
+        }
+    }
+}
+
 struct ControllerDelegate(WeakEntity<Controller>);
 impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn timing_preview(&self, snapshot: Option<pm_kernel::Snapshot>, cx: &mut App) {
@@ -3069,6 +3084,12 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
                 }
             }
         });
+    }
+
+    fn audio_gain_preview(&self, message: pm_engine_service::audio::GainPreview, cx: &mut App) {
+        if let Some(controller) = self.0.upgrade() {
+            controller.read(cx).audio_gain_preview(message);
+        }
     }
 
     fn audio_peaks(&self, cx: &App) -> Option<([f64; 2], i64, bool)> {

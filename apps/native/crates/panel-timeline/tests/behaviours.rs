@@ -829,6 +829,67 @@ fn key_drag_collision_is_restored_when_pointer_returns() {
     assert_eq!(c.kernel.published("P").unwrap().history.entries, 0);
 }
 #[test]
+fn gain_key_drag_previews_the_final_curve_without_a_document_write() {
+    let (_actor, mut c) = client_with(
+        parse(
+            r#"{
+        "id":"P","compId":"C","w":200,"h":100,"fps":30,"dur":4,"comps":{},"assets":{},
+        "layers":[{"id":"a","from":0,"dur":4,"type":"audio","on":true,"d":{
+            "gain":{"v":1,"kf":[{"i":"first","t":0,"v":1},{"i":"second","t":2,"v":0.5}]}
+        }}]
+    }"#,
+        )
+        .unwrap(),
+    );
+    let published = c.kernel.published("P").unwrap();
+    let kind = DragKind::GraphKeys {
+        ids: strings(&["first"]),
+    };
+    assert!(c.is_gain_drag(&kind));
+    for commit in [false, true] {
+        c.begin_preview_drag(kind.clone()).unwrap();
+        block_on(c.drag(DragSample {
+            value_delta: -0.2,
+            ..sample(0.)
+        }))
+        .unwrap();
+        let current = c.kernel.published("P").unwrap();
+        assert_eq!(current.revision(), published.revision());
+        assert_eq!(current.history.entries, published.history.entries);
+        let preview = c.layer_preview().unwrap();
+        assert!(
+            preview
+                .gain_commands
+                .as_ref()
+                .is_some_and(|commands| !commands.is_empty())
+        );
+        let index = TimelineIndex::from_snapshot(&preview.snapshot);
+        let value = index.key("first").unwrap().2.value.as_f64().unwrap();
+        assert!((value - 0.8).abs() < 1e-8);
+        block_on(c.finish_drag(commit)).unwrap();
+        let value = c
+            .model
+            .index
+            .key("first")
+            .unwrap()
+            .2
+            .value
+            .as_f64()
+            .unwrap();
+        assert!((value - if commit { 0.8 } else { 1.0 }).abs() < 1e-8);
+    }
+    assert_eq!(
+        c.kernel.published("P").unwrap().history.entries,
+        published.history.entries + 1
+    );
+    undo(&mut c);
+    assert_eq!(
+        c.model.index.key("first").unwrap().2.value.as_f64(),
+        Some(1.)
+    );
+}
+
+#[test]
 fn graph_drag_stops_before_unselected_neighbour() {
     let (_a, mut c) = client();
     block_on(c.begin_drag(DragKind::GraphKeys {

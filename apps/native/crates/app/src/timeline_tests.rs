@@ -16,6 +16,7 @@ pub(crate) struct Recorder {
     pub audio: RefCell<Option<([f64; 2], i64, bool)>>,
     pub runtime: RefCell<Option<std::sync::Arc<pm_builtins::Builtins>>>,
     pub time: RefCell<f64>,
+    pub audio_gain_previews: RefCell<Vec<pm_engine_service::audio::GainPreview>>,
     pub timing_previews: RefCell<Vec<Option<pm_kernel::Snapshot>>>,
     pub seeks: RefCell<Vec<f64>>,
     pub effects: RefCell<Vec<HostEffect>>,
@@ -43,6 +44,9 @@ pub(crate) struct Recording(pub Rc<Recorder>);
 impl Delegate for Recording {
     fn timing_preview(&self, snapshot: Option<pm_kernel::Snapshot>, _: &mut App) {
         self.0.timing_previews.borrow_mut().push(snapshot);
+    }
+    fn audio_gain_preview(&self, message: pm_engine_service::audio::GainPreview, _: &mut App) {
+        self.0.audio_gain_previews.borrow_mut().push(message);
     }
     fn audio_peaks(&self, _: &App) -> Option<([f64; 2], i64, bool)> { *self.0.audio.borrow() }
     // G3_VIEW_SNAPSHOT_BEGIN

@@ -7,6 +7,7 @@ mod audio;
 use crate::v4_view::Outline;
 use gpui::{prelude::*, *};
 use pm_design::Tokens;
+use pm_engine_service::audio::GainPreview;
 use pm_kernel::{Caller, KernelHandle, Published, QueryMirror, SelectionCall};
 use pm_panel_timeline::{
     Context as MenuContext, DragKind, DragSample, EditTool, GraphDisplay, HostEffect,
@@ -78,6 +79,7 @@ pub struct EffectDrop {
 }
 pub trait Delegate: 'static {
     fn timing_preview(&self, _snapshot: Option<pm_kernel::Snapshot>, _cx: &mut App) {}
+    fn audio_gain_preview(&self, _message: GainPreview, _cx: &mut App) {}
     /// Latest output-mix peaks, media tick and playback flag. The timeline
     /// expires paused scrub taps from their media tick.
     fn audio_peaks(&self, _cx: &App) -> Option<([f64; 2], i64, bool)> { None }
@@ -279,6 +281,7 @@ enum Job {
     Sample(DragSample),
     Finish(bool),
     Apply(Plan),
+    CommitGain(Plan, u64),
     Command {
         id: String,
         time: f64,
@@ -449,6 +452,8 @@ pub struct TimelineSurface {
     busy: bool,
     sample_scheduled: bool,
     viewer_previewing: bool,
+    gain_previewing: Option<u64>,
+    gain_picture: Option<pm_kernel::Snapshot>,
     /// Assets this editor's viewer cannot read: their clips show Media
     /// Offline (docs/native/design/media-offline.md).
     offline: Arc<BTreeSet<String>>,
@@ -612,6 +617,8 @@ impl TimelineSurface {
             busy: true,
             sample_scheduled: false,
             viewer_previewing: false,
+            gain_previewing: None,
+            gain_picture: None,
             offline: Arc::new(offline),
             sources: Default::default(),
             reading: Default::default(),
@@ -667,6 +674,20 @@ impl TimelineSurface {
             late: None,
         };
         cx.on_release(|s, cx| {
+            s.release_gain_preview(cx);
+            if let Some(gesture) = s.audio.pending_gain.take() {
+                let delegate = s.delegate.clone();
+                cx.defer(move |cx| {
+                    delegate.audio_gain_preview(
+                        GainPreview::Finish {
+                            gesture,
+                            revision: None,
+                        },
+                        cx,
+                    )
+                });
+            }
+            s.finish_key_gain(None, cx);
             if s.viewer_previewing {
                 let delegate = s.delegate.clone();
                 cx.defer(move |cx| delegate.timing_preview(None, cx));
@@ -938,10 +959,24 @@ impl TimelineSurface {
         self.queue.push_back(Job::PasteKeys(tracks, time));
         self.pump(cx);
     }
+    fn finish_key_gain(&mut self, revision: Option<u64>, cx: &mut App) {
+        self.gain_picture = None;
+        if let Some(gesture) = self.gain_previewing.take() {
+            let delegate = self.delegate.clone();
+            cx.defer(move |cx| {
+                delegate.audio_gain_preview(GainPreview::Finish { gesture, revision }, cx)
+            });
+        }
+    }
     /// Escape: cancel the active gesture. Foreign edits survive in the kernel.
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
         self.row_scroll = None;
-        if self.audio_cancel(cx) { return true; }
+        if self.audio_cancel(cx) {
+            return true;
+        }
+        if !matches!(self.gesture, Gesture::Idle) {
+            self.finish_key_gain(None, cx);
+        }
         let split = self.model.edit_tool == EditTool::Split;
         match std::mem::replace(&mut self.gesture, Gesture::Idle) {
             Gesture::Idle if !split => return false,
@@ -1364,10 +1399,15 @@ impl TimelineSurface {
         while matches!(job, Job::Sample(_)) && matches!(self.queue.front(), Some(Job::Sample(_))) {
             job = self.queue.pop_front().unwrap();
         }
+        let gain_commit = match &job {
+            Job::CommitGain(_, gesture) => Some(*gesture),
+            _ => None,
+        };
         let work_update = client.active_drag().is_some_and(|drag| drag.is_work_area());
         self.busy = true;
         let previous_scene = self.scene.clone();
         let preview_update = matches!(&job, Job::Sample(_));
+        let finish_gain = matches!(&job, Job::Finish(true));
         let (tokens, offline, sources) = (
             self.tokens.clone(),
             self.offline.clone(),
@@ -1378,8 +1418,15 @@ impl TimelineSurface {
                 .background_executor()
                 .spawn(async move {
                     let effects = run(&mut client, job).await;
-                    let preview = client.layer_preview().cloned();
-                    let built = if preview_update && preview.is_some() && previous_scene.is_some() {
+                    let preview = effects
+                        .as_ref()
+                        .ok()
+                        .and_then(|_| client.layer_preview().cloned());
+                    let built = if let Some(gain) =
+                        preview.as_ref().filter(|p| p.gain_commands.is_some())
+                    {
+                        build_with(&client, &tokens, offline, sources, Some(&gain.snapshot))
+                    } else if preview_update && preview.is_some() && previous_scene.is_some() {
                         let mut scene = (*previous_scene.unwrap()).clone();
                         scene.preview_times(&client.model, &preview.as_ref().unwrap().starts);
                         Some(Built {
@@ -1404,16 +1451,52 @@ impl TimelineSurface {
                 s.snap_guide = client
                     .active_drag()
                     .and_then(|d| d.snap_target_in(&client.model.index));
+                let gain_revision = client.model.index.revision;
                 s.client = Some(client);
                 s.busy = false;
-                if let Some(preview) = preview {
-                    s.delegate.timing_preview(Some(preview.snapshot), cx);
-                    s.viewer_previewing = true;
-                } else if s.viewer_previewing {
-                    s.delegate.timing_preview(None, cx);
-                    s.viewer_previewing = false;
+                let gain_preview = preview.as_ref().is_some_and(|p| p.gain_commands.is_some());
+                match preview {
+                    Some(preview) if preview.gain_commands.is_some() => {
+                        if !matches!(s.gesture, Gesture::Idle)
+                            || s.queue.iter().any(|job| matches!(job, Job::Finish(true)))
+                        {
+                            let gesture =
+                                *s.gain_previewing.get_or_insert_with(GainPreview::gesture);
+                            s.delegate.audio_gain_preview(
+                                GainPreview::Sample {
+                                    gesture,
+                                    base_revision: Some(gain_revision),
+                                    commands: preview.gain_commands.unwrap().to_vec(),
+                                },
+                                cx,
+                            );
+                            s.gain_picture = Some(preview.snapshot);
+                        }
+                    }
+                    Some(preview) => {
+                        s.delegate.timing_preview(Some(preview.snapshot), cx);
+                        s.viewer_previewing = true;
+                    }
+                    None if s.viewer_previewing => {
+                        s.delegate.timing_preview(None, cx);
+                        s.viewer_previewing = false;
+                    }
+                    None => (),
                 }
                 s.install(built, work_update, cx);
+                if !gain_preview && s.gain_previewing.is_some() {
+                    let revision =
+                        (finish_gain && effects.is_ok()).then_some(s.model.index.revision);
+                    s.finish_key_gain(revision, cx);
+                }
+                if let Some(gesture) = gain_commit {
+                    if s.audio.pending_gain == Some(gesture) {
+                        s.audio.pending_gain = None;
+                    }
+                    let revision = effects.as_ref().ok().map(|_| s.model.index.revision);
+                    s.delegate
+                        .audio_gain_preview(GainPreview::Finish { gesture, revision }, cx);
+                }
                 match effects {
                     Ok(effects) => {
                         for effect in effects {
@@ -4553,9 +4636,10 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
         }
         Job::Begin(spec, time) => {
             let kind = drag_kind(&client.model, spec, time).map_err(|e| e.to_string())?;
-            if matches!(&kind, DragKind::Layers { .. })
-                && client.model.mode == TimelineMode::Layers
-                && client.model.graph_display == GraphDisplay::DopeSheet
+            if client.is_gain_drag(&kind)
+                || (matches!(&kind, DragKind::Layers { .. })
+                    && client.model.mode == TimelineMode::Layers
+                    && client.model.graph_display == GraphDisplay::DopeSheet)
             {
                 client.begin_preview_drag(kind).map_err(text)?;
             } else {
@@ -4586,7 +4670,7 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             }
             Ok(vec![])
         }
-        Job::Apply(plan) => client.dispatch(plan).await.map_err(text),
+        Job::Apply(plan) | Job::CommitGain(plan, _) => client.dispatch(plan).await.map_err(text),
         Job::PasteKeys(tracks, time) => {
             let mut effects = vec![];
             for track in tracks {
@@ -5176,20 +5260,34 @@ fn build(
     offline: Arc<BTreeSet<String>>,
     sources: Sources,
 ) -> Option<Built> {
-    let published: Arc<Published> = client.kernel.published(&client.project)?;
+    build_with(client, tokens, offline, sources, None)
+}
+fn build_with(
+    client: &TimelineClient,
+    tokens: &Tokens,
+    offline: Arc<BTreeSet<String>>,
+    sources: Sources,
+    preview: Option<&pm_kernel::Snapshot>,
+) -> Option<Built> {
+    let mut published = client.kernel.published(&client.project)?;
+    let mut model = client.model.clone();
+    if let Some(snapshot) = preview {
+        Arc::make_mut(&mut published).snapshot = snapshot.clone();
+        model.sync(&published);
+    }
     let presenter = Presenter {
         offline,
         sources,
         wanted: Default::default(),
         published: published.clone(),
     };
-    let mut scene = Scene::from_model(&client.model, &presenter, tokens, 0.).ok()?;
-    scene.bars = crate::render_frames::bars(client.model.index.comp_id.as_deref());
-    let graph = (client.model.graph_display != GraphDisplay::DopeSheet)
+    let mut scene = Scene::from_model(&model, &presenter, tokens, 0.).ok()?;
+    scene.bars = crate::render_frames::bars(model.index.comp_id.as_deref());
+    let graph = (model.graph_display != GraphDisplay::DopeSheet)
         .then(|| {
             let mut mirror = QueryMirror::new(&published);
-            let comp = client.model.index.comp_id.clone();
-            graph_render::sample(&client.model, tokens, |layer, path, time| {
+            let comp = model.index.comp_id.clone();
+            graph_render::sample(&model, tokens, |layer, path, time| {
                 mirror
                     .queries()
                     .evaluate(comp.as_deref(), layer, path, time)
@@ -5201,7 +5299,7 @@ fn build(
     Some(Built {
         scene: Arc::new(scene),
         graph: graph.map(Arc::new),
-        model: Arc::new(client.model.clone()),
+        model: Arc::new(model),
         wanted: presenter.wanted.into_inner(),
     })
 }

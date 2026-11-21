@@ -2555,6 +2555,12 @@ impl Properties {
         }
         Ok(Some(section))
     }
+    pub(crate) fn is_gain_handle(&self, handle: &str) -> bool {
+        ["content.gain", "content.audioGain"]
+            .into_iter()
+            .any(|field| self.handles.get(field).is_some_and(|h| h == handle))
+    }
+
     pub fn write(
         &self,
         model: &mut Inspector,

@@ -176,6 +176,7 @@ enum Control {
         Option<pm_time::Rate>,
         Option<i64>,
     ),
+    PreviewLevels(Arc<Document>, Arc<MixGraph>),
     Solo(Option<HashSet<String>>),
     /// Polled about once a second: the output device id and its latency.
     Watch(DeviceWatch),
@@ -252,6 +253,7 @@ fn control_label(control: &Control, nested: bool) -> &'static str {
             (_, TransportCommand::Grain { .. }) => "grain",
         },
         Control::Project(..) => "project",
+        Control::PreviewLevels(..) => "levels-preview",
         Control::Solo(..) => "solo",
         Control::Watch(..) => "watch",
         Control::Schedule(..) => "schedule",
@@ -1080,10 +1082,7 @@ impl Playback {
         comp_id: &str,
         resolver: &dyn AssetResolver,
     ) -> Result<Vec<(String, String, String)>> {
-        let graph = {
-            let mut ev = self.builder.lock().unwrap_or_else(|e| e.into_inner());
-            MixGraph::build(&doc, comp_id, &mut ev, &self.cache, resolver)?
-        };
+        let graph = self.build_graph(&doc, comp_id, resolver)?;
         let problems = graph.problems.clone();
         let comp = pm_eval::Comp::resolve(&doc, comp_id)?;
         let rate = comp.rate().map(|r| r.rate);
@@ -1093,9 +1092,32 @@ impl Playback {
             .then(|| (dur * TICKS_PER_SECOND as f64).round() as i64)
             .filter(|&e| e > 0);
         self.tx
-            .send(Control::Project(doc, Arc::new(graph), rate, end))
+            .send(Control::Project(doc, graph, rate, end))
             .map_err(|_| AudioError::Device("playback stopped".into()))?;
         Ok(problems)
+    }
+
+    /// Apply a temporary gain-only mix with the same clock and media cursor.
+    pub fn preview_levels(
+        &self,
+        doc: Arc<Document>,
+        comp_id: &str,
+        resolver: &dyn AssetResolver,
+    ) -> Result<()> {
+        let graph = self.build_graph(&doc, comp_id, resolver)?;
+        self.tx
+            .send(Control::PreviewLevels(doc, graph))
+            .map_err(|_| AudioError::Device("playback stopped".into()))
+    }
+
+    fn build_graph(
+        &self,
+        doc: &Document,
+        comp_id: &str,
+        resolver: &dyn AssetResolver,
+    ) -> Result<Arc<MixGraph>> {
+        let mut ev = self.builder.lock().unwrap_or_else(|e| e.into_inner());
+        MixGraph::build(doc, comp_id, &mut ev, &self.cache, resolver).map(Arc::new)
     }
 
     /// Applies a transport command (contract 6). Returns once the render
@@ -2279,13 +2301,15 @@ impl RenderThread {
     /// Applies a control; returns whether playback must pre-roll.
     fn control(&mut self, c: Control) -> bool {
         let _trace = crate::profile::control_timer(control_label(&c, self.batching));
-        self.boundary_due = true;
-        self.settled = None;
-        self.shared
-            .prepared
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+        if !matches!(&c, Control::PreviewLevels(..)) {
+            self.boundary_due = true;
+            self.settled = None;
+            self.shared
+                .prepared
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+        }
         match c {
             Control::Commands(commands, reply, requested_us, start) => {
                 let mut restart = false;
@@ -2416,6 +2440,15 @@ impl RenderThread {
                 }
                 self.transport.set_composition(rate, end);
                 self.pending_prepare = true;
+                false
+            }
+            Control::PreviewLevels(doc, graph) => {
+                if self.transport.is_running() {
+                    self.mixer.glide_levels_to(doc, graph, self.solo.clone());
+                    self.rebuild_today_index();
+                } else {
+                    self.mixer.set_graph(doc, graph);
+                }
                 false
             }
             Control::Solo(s) => {

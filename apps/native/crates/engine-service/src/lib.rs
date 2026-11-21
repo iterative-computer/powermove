@@ -624,6 +624,8 @@ struct View {
     refine_progress_stamp: Option<Stamp>,
     /// A Mixer monitor solo not yet handed to the transport.
     monitor: Option<Vec<String>>,
+    #[cfg(feature = "kernel")]
+    audio_preview: GainPreviewSender,
     desired_rate: pm_protocol::common::PlaybackRate,
     status: ViewerStatus,
     phase: Option<(f64, f64)>,
@@ -913,10 +915,15 @@ impl Shared {
         self.wake.try_send(()).ok();
     }
 }
+#[cfg(feature = "kernel")]
+type GainPreviewSender = Arc<Mutex<Option<std::sync::mpsc::Sender<audio::AudioCtl>>>>;
+
 #[derive(Clone)]
 pub struct Viewer {
     id: u64,
     shared: Arc<Shared>,
+    #[cfg(feature = "kernel")]
+    audio_preview: GainPreviewSender,
 }
 impl State {
     fn notify(&mut self) {
@@ -1413,6 +1420,15 @@ impl Viewer {
         self.shared.supersede();
         Ok(())
     }
+    /// Update the playback mix without touching the presenter's frame state.
+    #[cfg(feature = "kernel")]
+    pub fn audio_gain_preview(&self, message: audio::GainPreview) {
+        let sender = self.audio_preview.lock().unwrap().clone();
+        if let Some(sender) = sender {
+            let _ = sender.send(audio::AudioCtl::GainPreview(message));
+        }
+    }
+
     /// The Mixer's monitor solo: only these top-level layers are heard
     /// (empty: every strip). Meters still read every strip.
     pub fn monitor_solo(&self, solo: Vec<String>) -> Result<()> {
@@ -1860,6 +1876,8 @@ impl EngineService {
         state.content += 1;
         let id = state.next;
         let content = state.content;
+        #[cfg(feature = "kernel")]
+        let audio_preview = GainPreviewSender::default();
         let stamp = Stamp {
             generation: 1,
             doc_id: config.snapshot.doc_id,
@@ -1902,6 +1920,8 @@ impl EngineService {
                 export_estimate_cache: None,
                 refine_progress_stamp: None,
                 monitor: None,
+                #[cfg(feature = "kernel")]
+                audio_preview: audio_preview.clone(),
                 desired_rate: pm_protocol::common::PlaybackRate::STOPPED,
                 status: ViewerStatus {
                     proxied,
@@ -1942,6 +1962,8 @@ impl EngineService {
         Ok(Viewer {
             id,
             shared: self.shared.clone(),
+            #[cfg(feature = "kernel")]
+            audio_preview,
         })
     }
 }
@@ -3155,6 +3177,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     ) {
                         v.status.error = Some(e.to_string());
                     }
+                }
+                #[cfg(feature = "kernel")]
+                {
+                    *v.audio_preview.lock().unwrap() =
+                        transport.audio.as_ref().map(audio::AudioLink::preview_sender);
                 }
                 Runtime {
                     transport,
@@ -4564,6 +4591,36 @@ mod worker_tests {
             render::Engine::with_shader_cache(gpu, Some(shaders.path().to_owned())).unwrap();
         let service = EngineService::start_engine(device, engine).unwrap();
         (shaders, service)
+    }
+    #[test]
+    #[cfg(feature = "kernel")]
+    fn live_gain_does_not_request_picture_or_transport_work() {
+        let (_shaders, service) = rebuilding_service("gain-audio-only");
+        let viewer = shapes_viewer(&service, None);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        *viewer.audio_preview.lock().unwrap() = Some(sender);
+        let state = service.shared.state.lock().unwrap();
+        let view = &state.views[&viewer.id];
+        let (stamp, content, dirty) = (view.stamp, view.content, view.dirty);
+        let gesture = audio::GainPreview::gesture();
+        let send = std::thread::spawn(move || {
+            viewer.audio_gain_preview(audio::GainPreview::Sample {
+                gesture,
+                base_revision: None,
+                commands: vec![],
+            });
+        });
+        assert!(matches!(
+            receiver.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(audio::AudioCtl::GainPreview(audio::GainPreview::Sample { gesture: received, .. }))
+                if received == gesture
+        ));
+        send.join().unwrap();
+        assert_eq!(view.stamp, stamp);
+        assert_eq!(view.content, content);
+        assert_eq!(view.dirty, dirty);
+        assert!(view.transient_snapshot.is_none());
+        assert!(view.commands.is_empty());
     }
     #[test]
     fn transient_timing_preview_preserves_authoritative_snapshot_and_audio_identity() {
