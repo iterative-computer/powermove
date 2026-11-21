@@ -1,0 +1,469 @@
+app,scene,run,metric,value,unit,note
+electron,A,0,launch_s,1.949,s,
+electron,A,0,open_s,0.06089999999944121,s,PM.openProjectHere -> first preview:presented + rAF
+electron,A,0,idle_rss_mb,642.078125,MB,
+electron,A,0,playback_fps,29.13851772759315,fps,distinct rendered frames / elapsed; not physical present
+electron,A,0,playback_dropped,9,frames,of 301 expected
+electron,A,0,playback_peak_mb,696.421875,MB,
+electron,A,0,scrub_median_ms,33.40000000037253,ms,
+electron,A,0,scrub_p95_ms,36,ms,
+electron,A,0,export_mp4_s,9.629,s,
+electron,A,0,export_mp4_peak_mb,1006.875,MB,
+electron,A,0,export_prores4444_s,9.12,s,
+electron,A,0,export_prores4444_peak_mb,967.4375,MB,
+electron,B,0,launch_s,2.276,s,
+electron,B,0,open_s,0.0675,s,PM.openProjectHere -> first preview:presented + rAF
+electron,B,0,idle_rss_mb,1523.3125,MB,
+electron,B,0,playback_fps,28.43678091620589,fps,distinct rendered frames / elapsed; not physical present
+electron,B,0,playback_dropped,16,frames,of 299 expected
+electron,B,0,playback_peak_mb,1887.140625,MB,
+electron,B,0,scrub_median_ms,67.59999999962747,ms,
+electron,B,0,scrub_p95_ms,99.79999999981374,ms,
+electron,B,0,export_mp4_s,12.797,s,
+electron,B,0,export_mp4_peak_mb,2455.78125,MB,
+electron,B,0,export_prores4444_s,17.502,s,
+electron,B,0,export_prores4444_peak_mb,2529.78125,MB,
+electron,C,0,launch_s,2.043,s,
+electron,C,0,open_s,0.02959999999962747,s,PM.openProjectHere -> first preview:presented + rAF
+electron,C,0,idle_rss_mb,624.234375,MB,
+electron,C,0,playback_fps,29.027431421446384,fps,distinct rendered frames / elapsed; not physical present
+electron,C,0,playback_dropped,10,frames,of 301 expected
+electron,C,0,playback_peak_mb,672.765625,MB,
+electron,C,0,scrub_median_ms,34.30000000074506,ms,
+electron,C,0,scrub_p95_ms,51.299999999813735,ms,
+electron,C,0,export_mp4_s,18.45,s,
+electron,C,0,export_mp4_peak_mb,945.703125,MB,
+electron,C,0,export_prores4444_s,32.871,s,
+electron,C,0,export_prores4444_peak_mb,945.890625,MB,
+electron,A,1,launch_s,2.055,s,
+electron,A,1,open_s,0.06329999999981374,s,PM.openProjectHere -> first preview:presented + rAF
+electron,A,1,idle_rss_mb,653.65625,MB,
+electron,A,1,playback_fps,29.226641130762875,fps,distinct rendered frames / elapsed; not physical present
+electron,A,1,playback_dropped,8,frames,of 301 expected
+electron,A,1,playback_peak_mb,698.5625,MB,
+electron,A,1,scrub_median_ms,33.299999999813735,ms,
+electron,A,1,scrub_p95_ms,35.90000000037253,ms,
+electron,A,1,export_mp4_s,8.944,s,
+electron,A,1,export_mp4_peak_mb,951.921875,MB,
+electron,A,1,export_prores4444_s,8.575,s,
+electron,A,1,export_prores4444_peak_mb,1016.71875,MB,
+electron,B,1,launch_s,2.183,s,
+electron,B,1,open_s,0.044700000000186264,s,PM.openProjectHere -> first preview:presented + rAF
+electron,B,1,idle_rss_mb,1606.84375,MB,
+electron,B,1,playback_fps,29.139871382636656,fps,distinct rendered frames / elapsed; not physical present
+electron,B,1,playback_dropped,9,frames,of 299 expected
+electron,B,1,playback_peak_mb,1839.125,MB,
+electron,B,1,scrub_median_ms,67,ms,
+electron,B,1,scrub_p95_ms,87.70000000018626,ms,
+electron,B,1,export_mp4_s,11.052,s,
+electron,B,1,export_mp4_peak_mb,2409.046875,MB,
+electron,B,1,export_prores4444_s,15.253,s,
+electron,B,1,export_prores4444_peak_mb,2545.78125,MB,
+electron,C,1,launch_s,1.942,s,
+electron,C,1,open_s,0.029100000000558793,s,PM.openProjectHere -> first preview:presented + rAF
+electron,C,1,idle_rss_mb,630.5,MB,
+electron,C,1,playback_fps,29.365055583854122,fps,distinct rendered frames / elapsed; not physical present
+electron,C,1,playback_dropped,6,frames,of 300 expected
+electron,C,1,playback_peak_mb,675.25,MB,
+electron,C,1,scrub_median_ms,33.90000000037253,ms,
+electron,C,1,scrub_p95_ms,51.90000000037253,ms,
+electron,C,1,export_mp4_s,15.864,s,
+electron,C,1,export_mp4_peak_mb,920.203125,MB,
+electron,C,1,export_prores4444_s,15.346,s,
+electron,C,1,export_prores4444_peak_mb,936.640625,MB,
+electron,A,2,launch_s,2.963,s,
+electron,A,2,open_s,0.047400000000372526,s,PM.openProjectHere -> first preview:presented + rAF
+electron,A,2,idle_rss_mb,631.90625,MB,
+electron,A,2,playback_fps,29.393009445616862,fps,distinct rendered frames / elapsed; not physical present
+electron,A,2,playback_dropped,6,frames,of 301 expected
+electron,A,2,playback_peak_mb,680.40625,MB,
+electron,A,2,scrub_median_ms,33.40000000037253,ms,
+electron,A,2,scrub_p95_ms,36.299999999813735,ms,
+electron,A,2,export_mp4_s,7.916,s,
+electron,A,2,export_mp4_peak_mb,970.78125,MB,
+electron,A,2,export_prores4444_s,7.867,s,
+electron,A,2,export_prores4444_peak_mb,965.421875,MB,
+electron,B,2,launch_s,1.989,s,
+electron,B,2,open_s,0.104,s,PM.openProjectHere -> first preview:presented + rAF
+electron,B,2,idle_rss_mb,1276.53125,MB,
+electron,B,2,playback_fps,29.240059886859147,fps,distinct rendered frames / elapsed; not physical present
+electron,B,2,playback_dropped,8,frames,of 299 expected
+electron,B,2,playback_peak_mb,1705.296875,MB,
+electron,B,2,scrub_median_ms,67,ms,
+electron,B,2,scrub_p95_ms,87.1000000005588,ms,
+electron,B,2,export_mp4_s,10.191,s,
+electron,B,2,export_mp4_peak_mb,2401.171875,MB,
+electron,B,2,export_prores4444_s,13.415,s,
+electron,B,2,export_prores4444_peak_mb,2469.671875,MB,
+electron,C,2,launch_s,1.823,s,
+electron,C,2,open_s,0.023,s,PM.openProjectHere -> first preview:presented + rAF
+electron,C,2,idle_rss_mb,629.328125,MB,
+electron,C,2,playback_fps,28.865073261354837,fps,distinct rendered frames / elapsed; not physical present
+electron,C,2,playback_dropped,11,frames,of 300 expected
+electron,C,2,playback_peak_mb,680.015625,MB,
+electron,C,2,scrub_median_ms,33.90000000037253,ms,
+electron,C,2,scrub_p95_ms,51,ms,
+electron,C,2,export_mp4_s,15.643,s,
+electron,C,2,export_mp4_peak_mb,924.453125,MB,
+electron,C,2,export_prores4444_s,15.696,s,
+electron,C,2,export_prores4444_peak_mb,919.4375,MB,
+electron,A,3,launch_s,1.822,s,
+electron,A,3,open_s,0.077,s,PM.openProjectHere -> first preview:presented + rAF
+electron,A,3,idle_rss_mb,636.84375,MB,
+electron,A,3,playback_fps,29.44523186872253,fps,distinct rendered frames / elapsed; not physical present
+electron,A,3,playback_dropped,6,frames,of 301 expected
+electron,A,3,playback_peak_mb,689.4375,MB,
+electron,A,3,scrub_median_ms,33.30000000074506,ms,
+electron,A,3,scrub_p95_ms,35.69999999925494,ms,
+electron,A,3,export_mp4_s,7.841,s,
+electron,A,3,export_mp4_peak_mb,958.984375,MB,
+electron,A,3,export_prores4444_s,7.725,s,
+electron,A,3,export_prores4444_peak_mb,944.421875,MB,
+electron,B,3,launch_s,1.902,s,
+electron,B,3,open_s,0.1013999999994412,s,PM.openProjectHere -> first preview:presented + rAF
+electron,B,3,idle_rss_mb,1321.734375,MB,
+electron,B,3,playback_fps,28.417934427875682,fps,distinct rendered frames / elapsed; not physical present
+electron,B,3,playback_dropped,16,frames,of 299 expected
+electron,B,3,playback_peak_mb,1779.21875,MB,
+electron,B,3,scrub_median_ms,66.6000000005588,ms,
+electron,B,3,scrub_p95_ms,86.40000000037253,ms,
+electron,B,3,export_mp4_s,10.911,s,
+electron,B,3,export_mp4_peak_mb,2456.09375,MB,
+electron,B,3,export_prores4444_s,12.528,s,
+electron,B,3,export_prores4444_peak_mb,2526.203125,MB,
+electron,C,3,launch_s,8.373,s,
+electron,C,3,open_s,0.0325,s,PM.openProjectHere -> first preview:presented + rAF
+electron,C,3,idle_rss_mb,614.078125,MB,
+electron,C,3,playback_fps,19.76616625322472,fps,distinct rendered frames / elapsed; not physical present
+electron,C,3,playback_dropped,104,frames,of 304 expected
+electron,C,3,playback_peak_mb,676.171875,MB,
+electron,C,3,scrub_median_ms,77.40000000037253,ms,
+electron,C,3,scrub_p95_ms,248.20000000018626,ms,
+electron,C,3,export_mp4_s,34.138,s,
+electron,C,3,export_mp4_peak_mb,936.265625,MB,
+electron,C,3,export_prores4444_s,23.404,s,
+electron,C,3,export_prores4444_peak_mb,927.171875,MB,
+electron,A,4,launch_s,5.353,s,
+electron,A,4,open_s,0.1025,s,PM.openProjectHere -> first preview:presented + rAF
+electron,A,4,idle_rss_mb,631.046875,MB,
+electron,A,4,playback_fps,21.32596139606062,fps,distinct rendered frames / elapsed; not physical present
+electron,A,4,playback_dropped,88,frames,of 304 expected
+electron,A,4,playback_peak_mb,685.25,MB,
+electron,A,4,scrub_median_ms,71.5,ms,
+electron,A,4,scrub_p95_ms,275.29999999981374,ms,
+electron,A,4,export_mp4_s,41.679,s,
+electron,A,4,export_mp4_peak_mb,932.28125,MB,
+electron,A,4,export_prores4444_s,16.589,s,
+electron,A,4,export_prores4444_peak_mb,932,MB,
+electron,B,4,launch_s,2.368,s,
+electron,B,4,open_s,0.0795,s,PM.openProjectHere -> first preview:presented + rAF
+electron,B,4,idle_rss_mb,1266.109375,MB,
+electron,B,4,playback_fps,27.330640461407565,fps,distinct rendered frames / elapsed; not physical present
+electron,B,4,playback_dropped,27,frames,of 299 expected
+electron,B,4,playback_peak_mb,1667.8125,MB,
+electron,B,4,scrub_median_ms,99.30000000074506,ms,
+electron,B,4,scrub_p95_ms,391.2999999988824,ms,
+electron,B,4,export_mp4_s,17.441,s,
+electron,B,4,export_mp4_peak_mb,2404.8125,MB,
+electron,B,4,export_prores4444_s,28.049,s,
+electron,B,4,export_prores4444_peak_mb,2348.296875,MB,
+electron,C,4,launch_s,2.786,s,
+electron,C,4,open_s,0.029800000000745057,s,PM.openProjectHere -> first preview:presented + rAF
+electron,C,4,idle_rss_mb,622.640625,MB,
+electron,C,4,playback_fps,29.045104752023004,fps,distinct rendered frames / elapsed; not physical present
+electron,C,4,playback_dropped,10,frames,of 301 expected
+electron,C,4,playback_peak_mb,681.625,MB,
+electron,C,4,scrub_median_ms,33.59999999962747,ms,
+electron,C,4,scrub_p95_ms,51.40000000037253,ms,
+electron,C,4,export_mp4_s,18.728,s,
+electron,C,4,export_mp4_peak_mb,943.0625,MB,
+electron,C,4,export_prores4444_s,18.286,s,
+electron,C,4,export_prores4444_peak_mb,912.109375,MB,
+electron,A,5,launch_s,3.016,s,
+electron,A,5,open_s,0.0515,s,PM.openProjectHere -> first preview:presented + rAF
+electron,A,5,idle_rss_mb,636.34375,MB,
+electron,A,5,playback_fps,29.0230888146412,fps,distinct rendered frames / elapsed; not physical present
+electron,A,5,playback_dropped,10,frames,of 301 expected
+electron,A,5,playback_peak_mb,691.21875,MB,
+electron,A,5,scrub_median_ms,33.90000000037253,ms,
+electron,A,5,scrub_p95_ms,51.09999999962747,ms,
+electron,A,5,export_mp4_s,13.36,s,
+electron,A,5,export_mp4_peak_mb,976.140625,MB,
+electron,A,5,export_prores4444_s,17.952,s,
+electron,A,5,export_prores4444_peak_mb,943.59375,MB,
+electron,B,5,launch_s,2.783,s,
+electron,B,5,open_s,0.06780000000074506,s,PM.openProjectHere -> first preview:presented + rAF
+electron,B,5,idle_rss_mb,1421.09375,MB,
+electron,B,5,playback_fps,20.79482439925985,fps,distinct rendered frames / elapsed; not physical present
+electron,B,5,playback_dropped,92,frames,of 299 expected
+electron,B,5,playback_peak_mb,1642.265625,MB,
+electron,B,5,scrub_median_ms,135.10000000149012,ms,
+electron,B,5,scrub_p95_ms,435.09999999962747,ms,
+electron,B,5,export_mp4_s,43.052,s,
+electron,B,5,export_mp4_peak_mb,2320,MB,
+electron,B,5,export_prores4444_s,44.824,s,
+electron,B,5,export_prores4444_peak_mb,2369.125,MB,
+electron,C,5,launch_s,2.406,s,
+electron,C,5,open_s,0.02290000000037253,s,PM.openProjectHere -> first preview:presented + rAF
+electron,C,5,idle_rss_mb,622.53125,MB,
+electron,C,5,playback_fps,29.03293392263439,fps,distinct rendered frames / elapsed; not physical present
+electron,C,5,playback_dropped,10,frames,of 301 expected
+electron,C,5,playback_peak_mb,674.59375,MB,
+electron,C,5,scrub_median_ms,33.59999999962747,ms,
+electron,C,5,scrub_p95_ms,50.80000000074506,ms,
+electron,C,5,export_mp4_s,18.97,s,
+electron,C,5,export_mp4_peak_mb,934.640625,MB,
+electron,C,5,export_prores4444_s,19.464,s,
+electron,C,5,export_prores4444_peak_mb,906.4375,MB,
+native,A,0,launch_s,1.5386670829993818,s,
+native,A,0,open_s,0.9847822916663063,s,open accepted->first GPU-complete frame
+native,A,0,idle_rss_mb,571.21875,MB,
+native,A,0,playback_fps,10.688724375583861,fps,distinct rendered frames / elapsed; not physical present
+native,A,0,playback_dropped,193,frames,of 300 expected
+native,A,0,playback_peak_mb,702.203125,MB,
+native,A,0,scrub_median_ms,144.90641666725423,ms,
+native,A,0,scrub_p95_ms,154.05133333297272,ms,
+native,A,0,export_mp4_s,14.857053833000464,s,
+native,A,0,export_mp4_peak_mb,455.0,MB,
+native,A,0,export_prores422_s,20.01588124999944,s,
+native,A,0,export_prores422_peak_mb,539.109375,MB,
+native,A,0,export_prores4444_s,15.597547416999987,s,
+native,A,0,export_prores4444_peak_mb,650.3125,MB,
+native,B,0,launch_s,1.2831876660002308,s,
+native,B,0,open_s,1.46881250000024,s,open accepted->first GPU-complete frame
+native,B,0,idle_rss_mb,566.34375,MB,
+native,B,0,playback_fps,11.085810670442198,fps,distinct rendered frames / elapsed; not physical present
+native,B,0,playback_dropped,189,frames,of 300 expected
+native,B,0,playback_peak_mb,611.59375,MB,
+native,B,0,scrub_median_ms,202.96925000002375,ms,
+native,B,0,scrub_p95_ms,410.45200000007753,ms,
+native,B,0,export_mp4_s,4.181155500000386,s,
+native,B,0,export_mp4_peak_mb,293.734375,MB,
+native,B,0,export_prores422_s,4.5787907499998255,s,
+native,B,0,export_prores422_peak_mb,523.046875,MB,
+native,B,0,export_prores4444_s,4.707785583000259,s,
+native,B,0,export_prores4444_peak_mb,762.234375,MB,
+native,C,0,launch_s,1.330308917000366,s,
+native,C,0,open_s,1.3354902083328852,s,open accepted->first GPU-complete frame
+native,C,0,idle_rss_mb,601.109375,MB,
+native,C,0,playback_fps,11.086936862837222,fps,distinct rendered frames / elapsed; not physical present
+native,C,0,playback_dropped,189,frames,of 300 expected
+native,C,0,playback_peak_mb,628.953125,MB,
+native,C,0,scrub_median_ms,154.11516666699754,ms,
+native,C,0,scrub_p95_ms,190.7435416660519,ms,
+native,C,0,export_mp4_s,86.62353020899991,s,
+native,C,0,export_mp4_peak_mb,368.09375,MB,
+native,C,0,export_prores422_s,88.07185016699987,s,
+native,C,0,export_prores422_peak_mb,464.265625,MB,
+native,C,0,export_prores4444_s,68.18013820800024,s,
+native,C,0,export_prores4444_peak_mb,558.265625,MB,
+native,A,1,launch_s,1.6651941250001983,s,
+native,A,1,open_s,1.1498311249997641,s,open accepted->first GPU-complete frame
+native,A,1,idle_rss_mb,582.5625,MB,
+native,A,1,playback_fps,10.187042124863485,fps,distinct rendered frames / elapsed; not physical present
+native,A,1,playback_dropped,198,frames,of 300 expected
+native,A,1,playback_peak_mb,705.84375,MB,
+native,A,1,scrub_median_ms,184.31404166676657,ms,
+native,A,1,scrub_p95_ms,247.03150000004825,ms,
+native,A,1,export_mp4_s,17.161065999999664,s,
+native,A,1,export_mp4_peak_mb,398.015625,MB,
+native,A,1,export_prores422_s,14.425214749999213,s,
+native,A,1,export_prores422_peak_mb,390.25,MB,
+native,A,1,export_prores4444_s,14.392721666999932,s,
+native,A,1,export_prores4444_peak_mb,491.953125,MB,
+native,B,1,launch_s,1.277555000000575,s,
+native,B,1,open_s,1.074909583333465,s,open accepted->first GPU-complete frame
+native,B,1,idle_rss_mb,567.84375,MB,
+native,B,1,playback_fps,11.190781593662022,fps,distinct rendered frames / elapsed; not physical present
+native,B,1,playback_dropped,188,frames,of 300 expected
+native,B,1,playback_peak_mb,611.9375,MB,
+native,B,1,scrub_median_ms,181.24737500056654,ms,
+native,B,1,scrub_p95_ms,330.7252499998867,ms,
+native,B,1,export_mp4_s,3.5286183329999403,s,
+native,B,1,export_mp4_peak_mb,384.1875,MB,
+native,B,1,export_prores422_s,3.630696000000171,s,
+native,B,1,export_prores422_peak_mb,525.015625,MB,
+native,B,1,export_prores4444_s,4.2491247079997265,s,
+native,B,1,export_prores4444_peak_mb,774.9375,MB,
+native,C,1,launch_s,1.2128449589999946,s,
+native,C,1,open_s,1.2925652916665058,s,open accepted->first GPU-complete frame
+native,C,1,idle_rss_mb,592.515625,MB,
+native,C,1,playback_fps,11.086273115207334,fps,distinct rendered frames / elapsed; not physical present
+native,C,1,playback_dropped,189,frames,of 300 expected
+native,C,1,playback_peak_mb,643.171875,MB,
+native,C,1,scrub_median_ms,154.9150416667544,ms,
+native,C,1,scrub_p95_ms,160.05804166616144,ms,
+native,C,1,export_mp4_s,55.12458458299989,s,
+native,C,1,export_mp4_peak_mb,346.015625,MB,
+native,C,1,export_prores422_s,54.82591562499965,s,
+native,C,1,export_prores422_peak_mb,472.859375,MB,
+native,C,1,export_prores4444_s,54.48848399999952,s,
+native,C,1,export_prores4444_peak_mb,550.875,MB,
+native,A,2,launch_s,1.1085915840003508,s,
+native,A,2,open_s,1.0504781250001543,s,open accepted->first GPU-complete frame
+native,A,2,idle_rss_mb,578.0625,MB,
+native,A,2,playback_fps,10.48886585038251,fps,distinct rendered frames / elapsed; not physical present
+native,A,2,playback_dropped,195,frames,of 300 expected
+native,A,2,playback_peak_mb,700.96875,MB,
+native,A,2,scrub_median_ms,141.53420833372365,ms,
+native,A,2,scrub_p95_ms,150.90783333380386,ms,
+native,A,2,export_mp4_s,13.840943874999539,s,
+native,A,2,export_mp4_peak_mb,453.1875,MB,
+native,A,2,export_prores422_s,13.509669708000729,s,
+native,A,2,export_prores422_peak_mb,537.53125,MB,
+native,A,2,export_prores4444_s,13.722379457999523,s,
+native,A,2,export_prores4444_peak_mb,493.953125,MB,
+native,B,2,launch_s,1.1636340839995682,s,
+native,B,2,open_s,1.1817745833332083,s,open accepted->first GPU-complete frame
+native,B,2,idle_rss_mb,578.109375,MB,
+native,B,2,playback_fps,11.088295841726751,fps,distinct rendered frames / elapsed; not physical present
+native,B,2,playback_dropped,189,frames,of 300 expected
+native,B,2,playback_peak_mb,625.09375,MB,
+native,B,2,scrub_median_ms,189.04674999976123,ms,
+native,B,2,scrub_p95_ms,458.4827916660288,ms,
+native,B,2,export_mp4_s,3.872122750000017,s,
+native,B,2,export_mp4_peak_mb,297.984375,MB,
+native,B,2,export_prores422_s,3.8849470000004658,s,
+native,B,2,export_prores422_peak_mb,421.96875,MB,
+native,B,2,export_prores4444_s,4.187929417000305,s,
+native,B,2,export_prores4444_peak_mb,656.609375,MB,
+native,C,2,launch_s,1.2817472080005246,s,
+native,C,2,open_s,1.2901061250004204,s,open accepted->first GPU-complete frame
+native,C,2,idle_rss_mb,607.015625,MB,
+native,C,2,playback_fps,10.986092248070184,fps,distinct rendered frames / elapsed; not physical present
+native,C,2,playback_dropped,190,frames,of 300 expected
+native,C,2,playback_peak_mb,641.28125,MB,
+native,C,2,scrub_median_ms,153.56729166614969,ms,
+native,C,2,scrub_p95_ms,160.2792916673934,ms,
+native,C,2,export_mp4_s,54.02482316700025,s,
+native,C,2,export_mp4_peak_mb,317.53125,MB,
+native,C,2,export_prores422_s,53.82821091700043,s,
+native,C,2,export_prores422_peak_mb,433.84375,MB,
+native,C,2,export_prores4444_s,53.548991542000294,s,
+native,C,2,export_prores4444_peak_mb,506.921875,MB,
+native,A,3,launch_s,1.1444905830003336,s,
+native,A,3,open_s,0.7767921666663824,s,open accepted->first GPU-complete frame
+native,A,3,idle_rss_mb,583.0,MB,
+native,A,3,playback_fps,10.48902590035662,fps,distinct rendered frames / elapsed; not physical present
+native,A,3,playback_dropped,195,frames,of 300 expected
+native,A,3,playback_peak_mb,713.546875,MB,
+native,A,3,scrub_median_ms,142.44895833326154,ms,
+native,A,3,scrub_p95_ms,149.08399999967514,ms,
+native,A,3,export_mp4_s,14.55224066699975,s,
+native,A,3,export_mp4_peak_mb,454.8125,MB,
+native,A,3,export_prores422_s,14.49879320800028,s,
+native,A,3,export_prores422_peak_mb,536.328125,MB,
+native,A,3,export_prores4444_s,14.827236625000296,s,
+native,A,3,export_prores4444_peak_mb,616.921875,MB,
+native,B,3,launch_s,1.0389206250001735,s,
+native,B,3,open_s,1.1914208333337228,s,open accepted->first GPU-complete frame
+native,B,3,idle_rss_mb,584.828125,MB,
+native,B,3,playback_fps,11.184249035678809,fps,distinct rendered frames / elapsed; not physical present
+native,B,3,playback_dropped,188,frames,of 300 expected
+native,B,3,playback_peak_mb,642.5,MB,
+native,B,3,scrub_median_ms,185.7020833331262,ms,
+native,B,3,scrub_p95_ms,421.49774999961664,ms,
+native,B,3,export_mp4_s,3.369607208999696,s,
+native,B,3,export_mp4_peak_mb,341.59375,MB,
+native,B,3,export_prores422_s,4.282206708000558,s,
+native,B,3,export_prores422_peak_mb,530.515625,MB,
+native,B,3,export_prores4444_s,11.656422250000105,s,
+native,B,3,export_prores4444_peak_mb,717.515625,MB,
+native,C,3,launch_s,0.7885520419995373,s,
+native,C,3,open_s,1.3896383749997767,s,open accepted->first GPU-complete frame
+native,C,3,idle_rss_mb,602.015625,MB,
+native,C,3,playback_fps,10.89486878917194,fps,distinct rendered frames / elapsed; not physical present
+native,C,3,playback_dropped,191,frames,of 300 expected
+native,C,3,playback_peak_mb,629.546875,MB,
+native,C,3,scrub_median_ms,164.81362500053365,ms,
+native,C,3,scrub_p95_ms,184.87791666666453,ms,
+native,C,3,export_mp4_s,63.729894291000164,s,
+native,C,3,export_mp4_peak_mb,320.890625,MB,
+native,C,3,export_prores422_s,80.24761041700003,s,
+native,C,3,export_prores422_peak_mb,461.203125,MB,
+native,C,3,export_prores4444_s,77.10208583299936,s,
+native,C,3,export_prores4444_peak_mb,570.65625,MB,
+native,A,4,launch_s,1.4114344169993274,s,
+native,A,4,open_s,1.886426458333517,s,open accepted->first GPU-complete frame
+native,A,4,idle_rss_mb,574.34375,MB,
+native,A,4,playback_fps,9.190266932925441,fps,distinct rendered frames / elapsed; not physical present
+native,A,4,playback_dropped,208,frames,of 300 expected
+native,A,4,playback_peak_mb,709.234375,MB,
+native,A,4,scrub_median_ms,185.65683333326888,ms,
+native,A,4,scrub_p95_ms,252.61500000124215,ms,
+native,A,4,export_mp4_s,18.13451595799961,s,
+native,A,4,export_mp4_peak_mb,375.984375,MB,
+native,A,4,export_prores422_s,25.272087792000093,s,
+native,A,4,export_prores422_peak_mb,529.453125,MB,
+native,A,4,export_prores4444_s,24.853357042000425,s,
+native,A,4,export_prores4444_peak_mb,664.03125,MB,
+native,B,4,launch_s,1.5091003329998784,s,
+native,B,4,open_s,1.546971375000794,s,open accepted->first GPU-complete frame
+native,B,4,idle_rss_mb,581.90625,MB,
+native,B,4,playback_fps,11.18568577113139,fps,distinct rendered frames / elapsed; not physical present
+native,B,4,playback_dropped,188,frames,of 300 expected
+native,B,4,playback_peak_mb,626.703125,MB,
+native,B,4,scrub_median_ms,245.3665416669537,ms,
+native,B,4,scrub_p95_ms,460.2575416683976,ms,
+native,B,4,export_mp4_s,7.6899868750006135,s,
+native,B,4,export_mp4_peak_mb,349.015625,MB,
+native,B,4,export_prores422_s,7.103116666999995,s,
+native,B,4,export_prores422_peak_mb,506.328125,MB,
+native,B,4,export_prores4444_s,7.171256875000836,s,
+native,B,4,export_prores4444_peak_mb,747.859375,MB,
+native,C,4,launch_s,1.4729805420010962,s,
+native,C,4,open_s,1.7416349583327246,s,open accepted->first GPU-complete frame
+native,C,4,idle_rss_mb,594.6875,MB,
+native,C,4,playback_fps,10.890696259697096,fps,distinct rendered frames / elapsed; not physical present
+native,C,4,playback_dropped,191,frames,of 300 expected
+native,C,4,playback_peak_mb,645.953125,MB,
+native,C,4,scrub_median_ms,157.86479166672507,ms,
+native,C,4,scrub_p95_ms,185.63199999880453,ms,
+native,C,4,export_mp4_s,74.97919549999824,s,
+native,C,4,export_mp4_peak_mb,381.5625,MB,
+native,C,4,export_prores422_s,77.24188033300015,s,
+native,C,4,export_prores422_peak_mb,464.046875,MB,
+native,C,4,export_prores4444_s,69.35912729099982,s,
+native,C,4,export_prores4444_peak_mb,551.375,MB,
+native,A,5,launch_s,1.437261667000712,s,
+native,A,5,open_s,0.9564476249997824,s,open accepted->first GPU-complete frame
+native,A,5,idle_rss_mb,570.703125,MB,
+native,A,5,playback_fps,10.595963732515294,fps,distinct rendered frames / elapsed; not physical present
+native,A,5,playback_dropped,194,frames,of 300 expected
+native,A,5,playback_peak_mb,704.9375,MB,
+native,A,5,scrub_median_ms,174.38033333382918,ms,
+native,A,5,scrub_p95_ms,201.490333332913,ms,
+native,A,5,export_mp4_s,21.907681124999726,s,
+native,A,5,export_mp4_peak_mb,415.140625,MB,
+native,A,5,export_prores422_s,21.180212291001226,s,
+native,A,5,export_prores422_peak_mb,534.328125,MB,
+native,A,5,export_prores4444_s,26.972988833000272,s,
+native,A,5,export_prores4444_peak_mb,624.890625,MB,
+native,B,5,launch_s,1.6694502080008533,s,
+native,B,5,open_s,1.5283179166654008,s,open accepted->first GPU-complete frame
+native,B,5,idle_rss_mb,457.75,MB,
+native,B,5,playback_fps,10.89587518485173,fps,distinct rendered frames / elapsed; not physical present
+native,B,5,playback_dropped,191,frames,of 300 expected
+native,B,5,playback_peak_mb,500.359375,MB,
+native,B,5,scrub_median_ms,199.4272916654154,ms,
+native,B,5,scrub_p95_ms,452.69716666734894,ms,
+native,B,5,export_mp4_s,5.697629958000107,s,
+native,B,5,export_mp4_peak_mb,304.828125,MB,
+native,B,5,export_prores422_s,5.88239112500014,s,
+native,B,5,export_prores422_peak_mb,536.40625,MB,
+native,B,5,export_prores4444_s,6.633008167000298,s,
+native,B,5,export_prores4444_peak_mb,720.828125,MB,
+native,C,5,launch_s,1.39123195799948,s,
+native,C,5,open_s,1.497457375000522,s,open accepted->first GPU-complete frame
+native,C,5,idle_rss_mb,596.453125,MB,
+native,C,5,playback_fps,11.093774035339225,fps,distinct rendered frames / elapsed; not physical present
+native,C,5,playback_dropped,189,frames,of 300 expected
+native,C,5,playback_peak_mb,631.953125,MB,
+native,C,5,scrub_median_ms,155.14162499857775,ms,
+native,C,5,scrub_p95_ms,173.0338750003284,ms,
+native,C,5,export_mp4_s,66.5014628329991,s,
+native,C,5,export_mp4_peak_mb,320.953125,MB,
+native,C,5,export_prores422_s,77.08634316700045,s,
+native,C,5,export_prores422_peak_mb,460.484375,MB,
+native,C,5,export_prores4444_s,69.32443925000007,s,
+native,C,5,export_prores4444_peak_mb,541.640625,MB,
