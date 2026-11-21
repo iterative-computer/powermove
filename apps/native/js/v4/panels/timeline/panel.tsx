@@ -397,17 +397,6 @@ function Head({ frame: f, send }: { frame: TimelineFrame; send: Send }) {
             intent={{ type: "hideShy" }}
           />
         )}
-        {f.mode === "Tracks" && (
-          <Icon
-            id="timeline:snap"
-            label="Snapping"
-            symbol="arrow.right.and.line.vertical.and.arrow.left"
-            active={f.snapping}
-            title="Snap Clips to Edges, Markers and the Playhead"
-            send={send}
-            intent={{ type: "snap" }}
-          />
-        )}
       </div>
     </div>
   );

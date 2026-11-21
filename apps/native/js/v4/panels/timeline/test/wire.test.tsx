@@ -93,7 +93,7 @@ test("one track-area focus stop, non-focusable rows, conditional graph menu and 
   await root.dispose();
 });
 
-test("header actions preserve model enums, snap intent and composition identity", async () => {
+test("header actions preserve model enums and composition identity", async () => {
   const { root } = recorder();
   const actions: Intent[] = [];
   await root.render(
@@ -123,7 +123,7 @@ test("header actions preserve model enums, snap intent and composition identity"
   await root.dispose();
 });
 
-test("v1 head: one graph switch, its options while shown, snapping only in Tracks", async () => {
+test("header keeps the graph switch and only shows options when the graph is open", async () => {
   const { root } = recorder();
   const actions: Intent[] = [];
   const send = (a: Intent) => actions.push(a);
@@ -132,9 +132,8 @@ test("v1 head: one graph switch, its options while shown, snapping only in Track
     <TimelinePanel frame={{ ...frame(), view: "Graph" }} send={send} />,
   );
   await root.render(<TimelinePanel frame={frame()} send={send} />);
-  // Layers mode, dope sheet: no options, no snapping (v1 hides the magnet).
+  // Layers mode, dope sheet: no graph options.
   expect(byId(root, "timeline:graph-options")).toBeUndefined();
-  expect(byId(root, "timeline:snap")).toBeUndefined();
   expect(byId(root, "timeline:view")).toBeUndefined();
   await drive(root, "timeline:graph");
   // Shown: the switch is lit and turns it off; the options appear.
@@ -148,15 +147,27 @@ test("v1 head: one graph switch, its options while shown, snapping only in Track
     <TimelinePanel frame={{ ...frame(), view: "DopeSheet" }} send={send} />,
   );
   await drive(root, "timeline:graph");
-  await root.render(
-    <TimelinePanel frame={{ ...frame(), mode: "Tracks" }} send={send} />,
-  );
-  await drive(root, "timeline:snap");
   expect(actions).toEqual([
     { type: "view", view: "Graph" },
     { type: "view", view: "DopeSheet" },
     { type: "view", view: "Combined" },
-    { type: "snap" },
+  ]);
+  await root.dispose();
+});
+
+test("Tracks header has no Snapping button or reserved slot", async () => {
+  const { root } = recorder();
+  await root.render(
+    <TimelinePanel
+      frame={{ ...frame(), mode: "Tracks", shyLayers: true }}
+      send={() => {}}
+    />,
+  );
+  expect(byId(root, "timeline:snap")?.props.id).toBeUndefined();
+  const controls = byId(root, "timeline:graph").parent!;
+  expect(controls.children.map((node) => node.props.id)).toEqual([
+    "timeline:graph",
+    "timeline:hide-shy",
   ]);
   await root.dispose();
 });
