@@ -12,6 +12,7 @@ use tab_scroll::{TabLayout, TabScroll};
 use crate::{
     keyboard::{Class, Effect, Key, POINTER, Resolver},
     menu,
+    menu_input::{self, Press, Response},
     native_control::{SEGMENT_MENU_INDICATOR, SegmentedControl},
     transient::{
         Choice, ComposerPicker, Picker, PickerRow, composer_picker_frame, composer_picker_interior,
@@ -46,6 +47,7 @@ thread_local! {
     static ROUTES:RefCell<HashMap<isize,async_channel::Sender<Command>>>=RefCell::new(HashMap::new());
     static MENU_TARGET:RefCell<Option<Retained<Target>>>=const{RefCell::new(None)};
     static REPLAYING:Cell<bool>=const{Cell::new(false)};
+    static DISMISSED_MENU_BUTTONS:Cell<u32>=const{Cell::new(0)};
     /// A press replayed in its turn: the key monitor handles it as a press
     /// but does not queue it again.
     static ORDERED:Cell<bool>=const{Cell::new(false)};
@@ -296,6 +298,39 @@ fn is_pointer(e: &NSEvent) -> bool {
             | NSEventType::RightMouseDragged
     )
 }
+/// Keep the release and any drag paired with a press the menu consumed.
+fn consumes_dismissed_gesture(event: &NSEvent) -> bool {
+    if !is_pointer(event) {
+        return false;
+    }
+    DISMISSED_MENU_BUTTONS.with(|buttons| {
+        let button = 1 << event.buttonNumber();
+        let consumed = buttons.get() & button != 0;
+        match event.r#type() {
+            NSEventType::LeftMouseDown | NSEventType::RightMouseDown => {
+                // The previous release may have happened outside the app.
+                buttons.set(buttons.get() & !button);
+                false
+            }
+            NSEventType::LeftMouseUp | NSEventType::RightMouseUp => {
+                buttons.set(buttons.get() & !button);
+                consumed
+            }
+            _ => consumed,
+        }
+    })
+}
+
+fn native_menu_trigger(view: &NSView) -> bool {
+    if let Some(control) = view.downcast_ref::<NSControl>() {
+        control.isEnabled()
+            && (control.isKindOfClass(NSPopUpButton::class())
+                || control.action() == Some(sel!(projectMenu:)))
+    } else {
+        false
+    }
+}
+
 /// Sends an event the key queue held, in its turn. A key goes past the key
 /// monitor (it was handled there); a press goes through it, so its pointer
 /// handling runs, without being queued again; afterwards the keys queued
@@ -3940,6 +3975,9 @@ impl Host {
                     return event.as_ptr();
                 }
                 if let Some(host) = weak.upgrade() {
+                    if consumes_dismissed_gesture(e) {
+                        return std::ptr::null_mut();
+                    }
                     // PM-465: input is handled in the order it arrived. A
                     // press made while keys still wait their turn (⌘T whose
                     // command the editor has not answered yet, behind a slow
@@ -3994,6 +4032,23 @@ impl Host {
                         e.r#type(),
                         NSEventType::LeftMouseDown | NSEventType::RightMouseDown
                     ) {
+                        for popup in [&palette, &fields] {
+                            let mut popup = popup.borrow_mut();
+                            if !popup.model.open {
+                                continue;
+                            }
+                            match menu_input::press_response(popup.press(e)) {
+                                Response::Pass => {}
+                                Response::DismissAndPass => popup.dismiss(false),
+                                Response::DismissAndConsume => {
+                                    popup.hide();
+                                    DISMISSED_MENU_BUTTONS.with(|buttons| {
+                                        buttons.set(buttons.get() | (1 << e.buttonNumber()));
+                                    });
+                                    return std::ptr::null_mut();
+                                }
+                            }
+                        }
                         // Keys typed before this press reach the text first:
                         // the press may take the keyboard from it (a click
                         // elsewhere, a toolbar tool), and keys replayed after
@@ -4019,12 +4074,6 @@ impl Host {
                                 .and_then(|v| v.hitTest(e.locationInWindow()));
                             if editing && content.is_some_and(|hit| std::ptr::eq(&*hit, &*gpui)) {
                                 window.makeFirstResponder(Some(&gpui));
-                            }
-                        }
-                        for popup in [&palette, &fields] {
-                            let mut p = popup.borrow_mut();
-                            if p.model.open && e.windowNumber() != p.window.windowNumber() {
-                                p.hide();
                             }
                         }
                         // A press anywhere but on the text being edited (the
@@ -4089,6 +4138,14 @@ impl Host {
                     }
                     for popup in [&palette, &fields] {
                         let mut p = popup.borrow_mut();
+                        if p.model.open
+                            && e.windowNumber() == p.parent.windowNumber()
+                            && e.r#type() == NSEventType::KeyDown
+                            && chord(e) == "escape"
+                        {
+                            p.hide();
+                            return std::ptr::null_mut();
+                        }
                         if e.windowNumber() == p.window.windowNumber() && p.model.open {
                             if p.search
                                 .currentEditor()
@@ -6666,6 +6723,8 @@ impl Host {
             let mut p = self.fields.borrow_mut();
             p.model.choices = field_choices();
             (p.anchor, p.model.page, p.dismiss) = (None, None, None);
+            p.trigger = None;
+            p.other_triggers.clear();
             p.configure_field(None);
             p.search
                 .setPlaceholderString(Some(&NSString::from_str(FIELD_PLACEHOLDER)));
@@ -6685,6 +6744,7 @@ impl Host {
         owner: Option<Retained<NSWindow>>,
         choices: Vec<Choice>,
         anchor: Option<crate::layout::Rect>,
+        other_triggers: Vec<crate::layout::Rect>,
         page: Option<usize>,
         dismiss: Option<String>,
         placeholder: &str,
@@ -6693,21 +6753,28 @@ impl Host {
         if self.palette.borrow().model.open {
             self.palette.borrow_mut().hide();
         }
-        if self.fields.borrow().model.open {
-            let mut menu = self.fields.borrow_mut();
-            if dismiss.as_deref() == Some("agentPick:") && menu.dismiss == dismiss {
-                // The panel already settled its previous request. Its late
-                // dismiss command must not close the new picker's request.
-                menu.dismiss = None;
-            }
-            menu.hide();
-        }
         let owner = owner.unwrap_or_else(|| self.window.clone());
         let h = owner
             .contentView()
             .map_or(0., |content| content.bounds().size.height);
-        let anchor = anchor.map(|r| owner.convertRectToScreen(rect(r, h)));
+        let trigger = anchor.map(|r| rect(r, h));
+        if self.fields.borrow().model.open {
+            let mut menu = self.fields.borrow_mut();
+            let same_trigger = trigger.is_some()
+                && menu.trigger == trigger
+                && owner.windowNumber() == menu.parent.windowNumber();
+            if !menu_input::opens_after_activation(same_trigger) {
+                // The owner is waiting on the activation that closes this menu.
+                menu.dismiss = dismiss;
+                menu.hide();
+                return;
+            }
+            menu.dismiss(false);
+        }
+        let anchor = trigger.map(|r| owner.convertRectToScreen(r));
         let mut p = self.fields.borrow_mut();
+        p.trigger = trigger;
+        p.other_triggers = other_triggers.into_iter().map(|r| rect(r, h)).collect();
         p.parent = owner;
         p.model.choices = choices;
         (p.anchor, p.model.page, p.dismiss) = (anchor, page, dismiss);
@@ -6722,7 +6789,12 @@ impl Host {
     /// Replaces the open field menu's rows in place (after a row that
     /// stays was chosen): no closing and reopening, the query kept. `false`
     /// when no menu is open any more.
-    pub fn update_menu(&mut self, choices: Vec<Choice>, search: Option<bool>) -> bool {
+    pub fn update_menu(
+        &mut self,
+        choices: Vec<Choice>,
+        search: Option<bool>,
+        dismiss: Option<String>,
+    ) -> bool {
         let mut p = self.fields.borrow_mut();
         if !p.model.open {
             return false;
@@ -6734,6 +6806,9 @@ impl Host {
             p.set_searchable(searchable);
             p.search.setStringValue(&NSString::from_str(""));
             p.focus_search();
+        }
+        if dismiss.is_some() {
+            p.dismiss = dismiss;
         }
         p.model.replace_choices(choices);
         let query = p.search.stringValue().to_string();
@@ -7652,6 +7727,9 @@ pub struct Popup {
     /// Where a menu a control opened hangs from (screen points: the
     /// control's frame); `None` places it as the palette.
     anchor: Option<NSRect>,
+    /// Hit targets in the owner's window coordinates.
+    trigger: Option<NSRect>,
+    other_triggers: Vec<NSRect>,
     /// The command sent when the menu closes with nothing chosen.
     dismiss: Option<String>,
     picked: bool,
@@ -7744,6 +7822,8 @@ impl Popup {
             provider_state: None,
             stale: false,
             anchor: None,
+            trigger: None,
+            other_triggers: Vec::new(),
             dismiss: None,
             picked: false,
             built: None,
@@ -8685,6 +8765,47 @@ impl Popup {
         self.reveal();
     }
 
+    fn press(&self, event: &NSEvent) -> Press {
+        if event.windowNumber() == self.window.windowNumber() {
+            return Press::Menu;
+        }
+        let Some(window) = event.window(self.parent.mtm()) else {
+            return Press::WindowChrome;
+        };
+        let point = event.locationInWindow();
+        if let Some(view) = window.contentView().and_then(|view| view.hitTest(point)) {
+            for button in [
+                NSWindowButton::CloseButton,
+                NSWindowButton::MiniaturizeButton,
+                NSWindowButton::ZoomButton,
+            ] {
+                if window.standardWindowButton(button).is_some_and(|button| {
+                    let point = button.convertPoint_fromView(point, None);
+                    !button.isHiddenOrHasHiddenAncestor()
+                        && objc2_foundation::NSPointInRect(point, button.bounds())
+                }) {
+                    return Press::WindowChrome;
+                }
+            }
+            if event.r#type() == NSEventType::LeftMouseDown {
+                if window.windowNumber() == self.parent.windowNumber() {
+                    let hit = |trigger| objc2_foundation::NSPointInRect(point, trigger);
+                    if self.trigger.is_some_and(hit) {
+                        return Press::Trigger;
+                    }
+                    if self.other_triggers.iter().copied().any(hit) {
+                        return Press::OtherTrigger;
+                    }
+                }
+                if native_menu_trigger(&view) {
+                    return Press::OtherTrigger;
+                }
+            }
+            Press::Outside
+        } else {
+            Press::WindowChrome
+        }
+    }
     fn toggle(&mut self) {
         if self.model.open {
             self.hide();
@@ -8739,6 +8860,7 @@ impl Popup {
         unsafe {
             let _: () = msg_send![NSObject::class(),cancelPreviousPerformRequestsWithTarget:&*self.window,selector:sel!(orderOut:),object:std::ptr::null::<AnyObject>()];
         }
+        self.window.setIgnoresMouseEvents(false);
         gpui_macos::child_window::attach(&self.window, &self.parent);
         // Only while the app is active, never over other apps (P-CHILD).
         gpui_macos::child_window::show(&self.window, true);
@@ -8755,7 +8877,11 @@ impl Popup {
         }
     }
     fn hide(&mut self) {
+        self.dismiss(true);
+    }
+    fn dismiss(&mut self, restore_focus: bool) {
         self.model.open = false;
+        self.window.setIgnoresMouseEvents(true);
         // Closed with nothing chosen: the one who asked hears so.
         if !std::mem::take(&mut self.picked)
             && let Some(name) = self.dismiss.take()
@@ -8774,6 +8900,10 @@ impl Popup {
         unsafe {
             let _: () = msg_send![&*self.window,performSelector:sel!(orderOut:),withObject:std::ptr::null::<AnyObject>(),afterDelay:duration];
         }
+        if !restore_focus {
+            return;
+        }
+        let menu = self.me.clone();
         // Becoming key can synchronously render GPUI. Restore after the event
         // monitor releases its popup borrow; a command may already have opened
         // a sheet/settings/new window, whose focus must take precedence.
@@ -8786,6 +8916,11 @@ impl Popup {
         // inactive app marks it active for a moment, and the next menu then
         // ordered itself in as a real child that hid with its window.
         let restore = block2::RcBlock::new(move || {
+            if menu.upgrade().is_some_and(|menu| {
+                menu.try_borrow().map_or(true, |menu| menu.model.open)
+            }) {
+                return;
+            }
             let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
             let another_window = app.keyWindow().is_some_and(|key| {
                 key.windowNumber() != popup.windowNumber()

@@ -1,4 +1,4 @@
-// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
+// @ts-nocheck: frozen reference with native keyboard toggle
 // Replace a native <select> with a button trigger and our own listbox, while
 // the <select> stays in the DOM as the source of truth: its options, value,
 // disabled state and change events keep working for the code that owns it.
@@ -76,7 +76,11 @@ export function enhanceSelect(select: HTMLSelectElement): () => void {
   trigger.addEventListener('keydown', (event) => {
     const globalSpaceShortcut = event.key === ' ' && select.dataset.globalSpaceShortcut !== undefined;
     if (!globalSpaceShortcut && (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Enter' || event.key === ' ')) {
-      event.preventDefault(); event.stopPropagation(); open();
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.repeat) return;
+      if (menu && (event.key === 'Enter' || event.key === ' ')) menu.close();
+      else open();
     }
   });
 

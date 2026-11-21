@@ -1,4 +1,4 @@
-// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
+// @ts-nocheck: frozen reference with native menu dismissal
 // A menu opened from a button. Native menus are for right-click; a button's
 // menu is ours, drawn as the select listbox is (select/menu.ts): a raised
 // sheet, 30px rows on a 6px corner, one hover layer gliding between rows, and
@@ -9,6 +9,7 @@
 // may lead with an icon and carry a line of detail under its label; a
 // `warning` row tints both.
 
+import { bindMenuDismissal } from './menu-input';
 import { blink } from './menu-blink';
 
 export type PopoverMenuItem = '-' | {
@@ -47,7 +48,6 @@ let currentAnchor: HTMLElement | null = null;
 
 export function openPopoverMenu(req: PopoverMenuRequest): PopoverMenuHandle {
   // A second activation of the same trigger is a toggle, not a replacement.
-  // Pointerdown deliberately leaves trigger presses to this click handler.
   if (current && currentAnchor === req.anchor) {
     const previous = current;
     previous.close();
@@ -188,19 +188,12 @@ export function openPopoverMenu(req: PopoverMenuRequest): PopoverMenuHandle {
     }
   }
 
-  // A press on the trigger belongs to the trigger, which closes the menu itself.
-  function onPointerDown(event: PointerEvent): void {
-    const t = event.target as Node;
-    if (el.contains(t) || req.anchor.contains(t)) return;
-    close();
-  }
-
   function close(): void {
     if (closed) return;
     closed = true;
     if (current === handle) { current = null; currentAnchor = null; }
     req.anchor.setAttribute('aria-expanded', 'false');
-    document.removeEventListener('pointerdown', onPointerDown, true);
+    unbindDismissal();
     window.removeEventListener('resize', close);
     window.removeEventListener('blur', close);
     el.removeEventListener('keydown', onKey);
@@ -223,9 +216,9 @@ export function openPopoverMenu(req: PopoverMenuRequest): PopoverMenuHandle {
   place();
   el.dataset.state = 'open';
   el.addEventListener('pointerleave', () => { if (!picking) rest(); });
+  const unbindDismissal = bindMenuDismissal(req.anchor, el, close);
   el.focus({ preventScroll: true });
   el.addEventListener('keydown', onKey);
-  document.addEventListener('pointerdown', onPointerDown, true);
   window.addEventListener('resize', close);
   window.addEventListener('blur', close);
   return handle;

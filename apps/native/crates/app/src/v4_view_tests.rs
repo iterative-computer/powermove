@@ -374,6 +374,59 @@ fn double_click_right_click_hover_wheel_and_pinch_reach_their_listeners(cx: &mut
     );
 }
 #[gpui::test]
+fn the_kit_popover_consumes_dismissal_clicks_and_escape_refocuses_its_trigger(
+    cx: &mut TestAppContext,
+) {
+    let rig = rig("viewer", 1);
+    let _ = publication(&rig);
+    let mut ops = node_ops(
+        1, 0, "div",
+        json!({"style":{"width":560,"height":240,"flexDirection":"row","gap":20}}),
+        &["keydown"],
+    );
+    for (id, name, popup) in [(2, "trigger", true), (3, "other-menu", true), (4, "outside", false)] {
+        let mut props = json!({"id":name,"role":"button","tabIndex":0,"style":{"width":100,"height":24}});
+        if popup {
+            props["aria-haspopup"] = json!("menu");
+        }
+        ops.extend(node_ops(id, 1, "button", props, &["click"]));
+    }
+    ops.extend(node_ops(
+        5, 1, "anchored",
+        json!({"id":"popover","data-pm-component":"popover-anchor","anchor":2,
+               "data-pm-dismiss-outside":true,"style":{"width":160,"height":40}}),
+        &["keydown"],
+    ));
+    ops.extend(node_ops(
+        6, 5, "button",
+        json!({"id":"inside","role":"button","tabIndex":0,"style":{"width":100,"height":24}}),
+        &["click"],
+    ));
+    let (view, mut vcx) = window(cx, &rig, synthetic(&rig, ops), Default::default());
+    vcx.run_until_parked();
+    // The anchored popup reads the trigger geometry from the previous frame.
+    view.update(&mut vcx, |_, cx| cx.notify());
+    vcx.run_until_parked();
+    let click = |vcx: &mut VisualTestContext, name| {
+        let at = bounds(vcx, name).center();
+        vcx.simulate_click(at, Modifiers::none());
+    };
+    for name in ["trigger", "outside"] {
+        click(&mut vcx, name);
+        assert_eq!(events(&view, &mut vcx), [(5, "keydown".to_owned())]);
+    }
+    click(&mut vcx, "other-menu");
+    assert_eq!(
+        events(&view, &mut vcx),
+        [(5, "keydown".to_owned()), (3, "click".to_owned())],
+    );
+    vcx.update(|window, cx| view.update(cx, |v, cx| v.focus_semantic("inside", window, cx)));
+    vcx.simulate_keystrokes("escape");
+    vcx.update(|window, cx| {
+        assert_eq!(view.read(cx).focused_node(window), Some(2));
+    });
+}
+#[gpui::test]
 fn every_kit_component_renders_a_real_element(cx: &mut TestAppContext) {
     let rig = rig("viewer", 1);
     let _ = publication(&rig);

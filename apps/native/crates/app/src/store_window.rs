@@ -240,6 +240,7 @@ pub struct StoreWindow {
     /// A Library card's open "…" menu (v1.2.0's card menu), each card's
     /// button where it was drawn, and the row the pointer lights.
     card_menu: Option<CardMenu>,
+    card_menu_trigger_focus: Option<FocusHandle>,
     card_anchors: CardAnchors,
     card_lit: Option<usize>,
     /// Each installed card's real NSSwitch, by extension id.
@@ -319,6 +320,7 @@ impl StoreWindow {
             library_generation: 0,
             tx,
             card_menu: None,
+            card_menu_trigger_focus: None,
             card_anchors: Default::default(),
             card_lit: None,
             switches: Default::default(),
@@ -1085,7 +1087,7 @@ impl StoreWindow {
             .filter_map(Listing::from_value)
             .collect()
     }
-    fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if event.keystroke.key == "f" && event.keystroke.modifiers.platform {
             if let Some(field) = &self.search {
                 field.read(cx).focus();
@@ -1093,7 +1095,10 @@ impl StoreWindow {
             return;
         }
         if event.keystroke.key == "escape" && self.card_menu.take().is_some() {
-            // An open card menu closes first.
+            if let Some(trigger) = self.card_menu_trigger_focus.take() {
+                trigger.focus(window, cx);
+            }
+            cx.stop_propagation();
             cx.notify();
             return;
         }
@@ -2104,14 +2109,16 @@ impl StoreWindow {
                 .size_full(),
             )
             .debug_selector(move || selector.clone())
+            .tab_index(0)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |v, _, _, cx| {
+            .on_click(cx.listener(move |v, _, window, cx| {
                 cx.stop_propagation();
                 v.card_menu = if v.card_menu.as_ref() == Some(&menu) {
                     None
                 } else {
                     Some(menu.clone())
                 };
+                v.card_menu_trigger_focus = v.card_menu.as_ref().and_then(|_| window.focused(cx));
                 v.card_lit = None;
                 cx.notify();
             }));
@@ -2157,10 +2164,18 @@ impl StoreWindow {
         let t = &self.tokens;
         let rows = self.card_rows(&menu);
         let separator = rows.iter().position(|r| r.1 == CardAct::Uninstall).filter(|i| *i > 0);
-        let close = cx.listener(|v, _: &MouseDownEvent, _, cx| {
-            v.card_menu = None;
-            cx.notify();
-        });
+        let other_triggers = self.card_anchors.borrow().iter()
+            .filter(|(id, _)| **id != menu.id)
+            .map(|(_, bounds)| *bounds)
+            .collect();
+        let view = cx.entity().downgrade();
+        let close = move |_: &mut Window, cx: &mut App| {
+            let _ = view.update(cx, |v, cx| {
+                v.card_menu = None;
+                v.card_menu_trigger_focus = None;
+                cx.notify();
+            });
+        };
         let mut items: Vec<AnyElement> = Vec::new();
         for (row, (label, _)) in rows.iter().enumerate() {
             if Some(row) == separator {
@@ -2190,12 +2205,15 @@ impl StoreWindow {
                     .anchor(Anchor::TopRight)
                     .position(point(anchor.right(), anchor.bottom() + px(t.space.xs)))
                     .child(
-                        kit.menu()
-                            .id("store-card-menu")
+                        pm_shell::kit::dismiss_menu_on_press(
+                            kit.menu().id("store-card-menu"),
+                            Some(anchor),
+                            other_triggers,
+                            close,
+                        )
                             .min_w(px(t.metrics.sidebar - 2. * t.space.md))
                             .font_family(pm_design::TEXT_FONT)
                             .role(Role::Menu)
-                            .on_mouse_down_out(close)
                             .child(kit.menu_light("store-card-menu", lit))
                             .children(items),
                     ),

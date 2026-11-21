@@ -1,8 +1,9 @@
-// @ts-nocheck: verbatim reference source (scripts/freeze-reference.ts)
+// @ts-nocheck: frozen reference with native menu dismissal
 // A floating listbox for select controls. One instance at a time, anchored to
 // its trigger, drawn above everything else. Opens with a short fade, scale and
 // slide from the trigger's edge; closes the same way in reverse. Picks commit immediately.
 
+import { bindMenuDismissal } from '../menu-input';
 import { blink } from '../menu-blink';
 
 export interface MenuOption {
@@ -176,22 +177,17 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
       case 'Home': event.preventDefault(); setActive(0); break;
       case 'End': event.preventDefault(); setActive(items.length - 1); break;
       case 'Enter': case ' ': event.preventDefault(); if (!req.options[active]?.disabled) pick(active); break;
-      case 'Escape': case 'Tab': event.preventDefault(); close(); break;
+      case 'Escape': event.preventDefault(); close(); req.anchor.focus({ preventScroll: true }); break;
+      case 'Tab': event.preventDefault(); close(); break;
       default: if (event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) typeahead(event.key);
     }
-  }
-
-  function onPointerDown(event: PointerEvent): void {
-    const t = event.target as Node;
-    if (el.contains(t) || req.anchor.contains(t)) return;
-    close();
   }
 
   function close(): void {
     if (closed) return;
     closed = true;
     if (current === handle) current = null;
-    document.removeEventListener('pointerdown', onPointerDown, true);
+    unbindDismissal();
     window.removeEventListener('resize', close);
     window.removeEventListener('blur', close);
     document.removeEventListener('scroll', onScroll, true);
@@ -224,9 +220,9 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
   el.dataset.state = 'open';
   // Nothing is lit until the pointer or the arrow keys pick a row; the index still starts on the current value.
   el.addEventListener('pointerleave', () => { if (!picking) rest(); });
+  const unbindDismissal = bindMenuDismissal(req.anchor, el, close);
   el.focus({ preventScroll: true });
   el.addEventListener('keydown', onKey);
-  document.addEventListener('pointerdown', onPointerDown, true);
   window.addEventListener('resize', close);
   window.addEventListener('blur', close);
   document.addEventListener('scroll', onScroll, true);

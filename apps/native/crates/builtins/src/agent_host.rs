@@ -212,7 +212,7 @@ impl AgentLink {
                 .enumerate()
                 .map(|(at, id)| pm_agents::account::Model {
                     efforts: pm_agents::compatible::efforts(&id),
-                    label: id.clone(),
+                    label: pm_agents::account::codex_model_label(&id),
                     // The configured model (listed first) runs by default.
                     default: at == 0,
                     aliases: vec![],

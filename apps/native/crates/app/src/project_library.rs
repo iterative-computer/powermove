@@ -130,9 +130,11 @@ pub struct ProjectLibrary {
     gallery_native: Vec<Entity<NativeControl>>,
     /// The open button menu, and where its button was last painted.
     menu: Option<Menu>,
+    menu_trigger_focus: Option<FocusHandle>,
     /// The open menu's rows: which one the pointer or the keyboard has lit.
     pick: pm_shell::transient::Picker,
     anchors: Rc<RefCell<HashMap<Menu, Bounds<Pixels>>>>,
+    row_anchors: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
     /// The project whose "more" menu is open.
     menu_row: Option<String>,
     /// Columns and card width at the last layout: when they change (a resize)
@@ -250,8 +252,10 @@ impl ProjectLibrary {
             #[cfg(debug_assertions)]
             gallery_native: Vec::new(),
             menu: None,
+            menu_trigger_focus: None,
             pick: Default::default(),
             anchors: Rc::default(),
+            row_anchors: Rc::default(),
             menu_row: None,
             grid: (0, 0),
             editor,
@@ -575,7 +579,7 @@ impl ProjectLibrary {
                 }),
         );
     }
-    fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let columns = match self.layout {
             Layout::Grid => self.columns.max(1) as isize,
             Layout::List => 1,
@@ -585,13 +589,21 @@ impl ProjectLibrary {
         if self.menu.is_some() {
             let key = event.keystroke.key.as_str();
             match key {
-                "escape" => self.menu = None,
+                "escape" => {
+                    self.menu = None;
+                    if let Some(trigger) = self.menu_trigger_focus.take() {
+                        trigger.focus(window, cx);
+                    }
+                }
+                "enter" | "space" if self.menu_trigger_focus.as_ref()
+                    .is_some_and(|trigger| trigger.is_focused(window)) => return,
                 "enter" | "space" => {
                     if let Some(row) = self.pick.lit() {
                         self.choose(row, cx);
                     }
                 }
                 "up" | "down" | "home" | "end" => {
+                    self.focus.focus(window, cx);
                     self.pick.navigate(key);
                 }
                 _ => {
@@ -843,8 +855,9 @@ impl ProjectLibrary {
             .debug_selector(|| id.into())
     }
     /// Opens or closes a button menu; it enters on the `Enter` spring.
-    fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
+    fn toggle_menu(&mut self, menu: Menu, window: &Window, cx: &mut Context<Self>) {
         self.menu = (self.menu != Some(menu)).then_some(menu);
+        self.menu_trigger_focus = self.menu.and_then(|_| window.focused(cx));
         // Nothing is lit as it opens.
         self.pick = pm_shell::transient::Picker {
             choices: self.menu.map(|menu| self.rows_of(menu)).unwrap_or_default(),
@@ -938,15 +951,27 @@ impl ProjectLibrary {
     /// hanging from its button, closed by a click elsewhere or Escape.
     fn menu_overlay(&self, kit: &Kit, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.menu?;
-        let anchor = self.anchors.borrow().get(&menu).copied()?;
+        let anchors = self.anchors.borrow();
+        let rows = self.row_anchors.borrow();
+        let anchor = if menu == Menu::Row {
+            rows.get(self.menu_row.as_ref()?).copied()?
+        } else {
+            anchors.get(&menu).copied()?
+        };
+        let other_triggers = anchors.values().chain(rows.values()).copied()
+            .filter(|bounds| *bounds != anchor).collect();
         let t = &kit.t;
         let shown = kit
             .animate(kit::key("home-menu"), 1., Some(Preset::Enter))
             .clamp(0., 1.);
-        let close = cx.listener(|v, _: &MouseDownEvent, _, cx| {
-            v.menu = None;
-            cx.notify();
-        });
+        let view = cx.entity().downgrade();
+        let close = move |_: &mut Window, cx: &mut App| {
+            let _ = view.update(cx, |v, cx| {
+                v.menu = None;
+                v.menu_trigger_focus = None;
+                cx.notify();
+            });
+        };
         let rows: Vec<Stateful<Div>> = self
             .pick
             .choices
@@ -986,13 +1011,16 @@ impl ProjectLibrary {
         Some(
             deferred(
                 anchored().anchor(corner).position(at).child(
-                    kit.menu()
-                        .id("home-menu")
+                    kit::dismiss_menu_on_press(
+                        kit.menu().id("home-menu"),
+                        Some(anchor),
+                        other_triggers,
+                        close,
+                    )
                         .min_w(px(t.metrics.sidebar - 2. * t.space.md))
                         .opacity(shown)
                         .font_family(pm_design::TEXT_FONT)
                         .role(Role::Menu)
-                        .on_mouse_down_out(close)
                         .child(kit.menu_light("home-menu", lit))
                         .children(rows),
                 ),
@@ -1587,7 +1615,8 @@ impl ProjectLibrary {
         let reveal = if open { 1. } else { over.clamp(0., 1.) };
         let more = (reveal > 0.01).then(|| {
             let id = row.id.clone();
-            let anchors = self.anchors.clone();
+            let anchor_id = id.clone();
+            let anchors = self.row_anchors.clone();
             div()
                 .id(SharedString::from(format!("project-more-{}", row.id)))
                 .absolute()
@@ -1601,6 +1630,7 @@ impl ProjectLibrary {
                 .bg(rgba(if open { 0x000000a6 } else { 0x00000073 }))
                 .opacity(reveal)
                 .role(Role::Button)
+                .tab_index(0)
                 .aria_label(format!("More actions for {}", self.shown_title(row)))
                 .tooltip(kit::tooltip(t, "More"))
                 .child(kit.symbol(
@@ -1612,7 +1642,7 @@ impl ProjectLibrary {
                 .child(
                     canvas(
                         move |bounds, _, _| {
-                            anchors.borrow_mut().insert(Menu::Row, bounds);
+                            anchors.borrow_mut().insert(anchor_id.clone(), bounds);
                         },
                         |_, _, _, _| (),
                     )
@@ -1620,13 +1650,13 @@ impl ProjectLibrary {
                     .size_full(),
                 )
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |v, _, _, cx| {
+                .on_click(cx.listener(move |v, _, window, cx| {
                     cx.stop_propagation();
                     if v.menu == Some(Menu::Row) && v.menu_row.as_ref() != Some(&id) {
                         v.menu = None;
                     }
                     v.menu_row = Some(id.clone());
-                    v.toggle_menu(Menu::Row, cx);
+                    v.toggle_menu(Menu::Row, window, cx);
                 }))
         });
         let dark = t.scheme == pm_design::Scheme::Dark;
@@ -1857,7 +1887,8 @@ impl Render for ProjectLibrary {
                         false,
                     )
                     .child(anchor(Menu::Account))
-                    .on_click(cx.listener(|v, _, _, cx| v.toggle_menu(Menu::Account, cx))),
+                    .tab_index(0)
+                    .on_click(cx.listener(|v, _, window, cx| v.toggle_menu(Menu::Account, window, cx))),
                 None => self
                     .nav_row(
                         &kit,
@@ -2102,6 +2133,7 @@ impl Render for ProjectLibrary {
                         .px(px(t.space.md + t.space.hair))
                         .rounded(px(t.radius.md))
                         .role(Role::Button)
+                        .tab_index(0)
                         .aria_label(format!("Sort projects: {}", sort.label()))
                         .text_role(&t, Text::Body)
                         .text_color(rgb(c.muted))
@@ -2113,7 +2145,7 @@ impl Render for ProjectLibrary {
                         ))
                         .child(sort.label())
                         .child(anchor(Menu::Sort))
-                        .on_click(cx.listener(|v, _, _, cx| v.toggle_menu(Menu::Sort, cx))),
+                        .on_click(cx.listener(|v, _, window, cx| v.toggle_menu(Menu::Sort, window, cx))),
                     kit::key("home-sort"),
                     t.radius.md,
                 ),

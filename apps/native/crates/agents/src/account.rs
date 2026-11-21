@@ -470,7 +470,8 @@ fn chatgpt_models(peer: &mut Peer) -> Result<Vec<Model>, String> {
     Err("Codex returned too many model list pages.".into())
 }
 
-fn codex_model_label(label: &str) -> String {
+/// A display name for GPT model identifiers; preserves other model names.
+pub fn codex_model_label(label: &str) -> String {
     let Some((_, rest)) = label.split_once('-').filter(|(family, _)| family.eq_ignore_ascii_case("gpt")) else {
         return label.to_owned();
     };
