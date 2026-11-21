@@ -136,6 +136,73 @@ fn read_partition(f: &File, off: u64, len: u64) -> Result<Partition> {
     })
 }
 
+/// The Transfer Characteristic (ST 377-1 tag 0x3210) of the only picture
+/// descriptor in the header. FFmpeg discards vendor ULs it cannot map to
+/// CICP. Don't guess which descriptor to use if the header has several.
+pub(crate) fn picture_transfer(path: &Path) -> Option<[u8; 16]> {
+    let f = File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let header = read_partition(&f, 0, len).ok()?;
+    const MAX_HEADER: u64 = 16 * 1024 * 1024;
+    if header.header_bytes == 0 || header.header_bytes > MAX_HEADER {
+        return None;
+    }
+    let mut at = header.pack_end;
+    // HeaderByteCount excludes the alignment fill before the primer.
+    loop {
+        let k = read_klv(&f, at, len).ok()?;
+        if !k.is_fill() {
+            break;
+        }
+        at = k.end();
+        if at - header.pack_end > MAX_HEADER {
+            return None;
+        }
+    }
+    let end = at.checked_add(header.header_bytes)?;
+    if end > len {
+        return None;
+    }
+    let mut transfer = None;
+    let mut saw_picture = false;
+    while at < end {
+        let k = read_klv(&f, at, len).ok()?;
+        at = k.value.checked_add(k.len)?;
+        if at > end {
+            return None;
+        }
+        if !k.is(&[0x06, 0x0e, 0x2b, 0x34, 0x02, 0x53, 0x01])
+            || k.key[8..14] != [0x0d, 0x01, 0x01, 0x01, 0x01, 0x01]
+            || !matches!(k.key[14], 0x28 | 0x29 | 0x51)
+        {
+            continue;
+        }
+        if saw_picture || k.len > 65536 {
+            return None;
+        }
+        saw_picture = true;
+        transfer = transfer_from_descriptor(&super::read_declared(&f, k.value, k.len).ok()?);
+    }
+    transfer
+}
+
+fn transfer_from_descriptor(mut local_set: &[u8]) -> Option<[u8; 16]> {
+    let mut transfer = None;
+    while !local_set.is_empty() {
+        let (header, remaining) = local_set.split_at_checked(4)?;
+        let len = usize::from(u16::from_be_bytes([header[2], header[3]]));
+        let (value, remaining) = remaining.split_at_checked(len)?;
+        if header[..2] == [0x32, 0x10] {
+            if transfer.is_some() {
+                return None;
+            }
+            transfer = Some(value.try_into().ok()?);
+        }
+        local_set = remaining;
+    }
+    transfer
+}
+
 /// Every partition, from the Random Index Pack or the footer chain.
 pub fn partitions(f: &File) -> Result<Vec<Partition>> {
     let len = f.metadata()?.len();
