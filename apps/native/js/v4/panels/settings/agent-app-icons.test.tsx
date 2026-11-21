@@ -20,7 +20,7 @@ test("Other Agent Apps identifies every icon in its Settings row", async () => {
     label,
     detail: `Set up ${label}.`,
     control: "status",
-    value: "",
+    value: id === "claude-desktop" ? "Added" : "",
   }));
   rows.push({
     id: "account.chatgpt",
@@ -46,6 +46,16 @@ test("Other Agent Apps identifies every icon in its Settings row", async () => {
   }
   const subscription = nodes.find((node) => node.props.id === "settings.row.account.chatgpt");
   expect(subscription?.props.metadata).toEqual({ settingsLayout: "row" });
+  const styleForText = (text: string) => {
+    const content = nodes.find((node) => node.text === text);
+    expect(content).toBeDefined();
+    const label = nodes.find((node) => node.children.includes(content!.id));
+    expect(label).toBeDefined();
+    return label?.props.style;
+  };
+  expect(styleForText("Added")).toEqual({ whiteSpace: "nowrap" });
+  expect(styleForText("Set up Claude.")).toBeUndefined();
+  expect(styleForText("Signed in")).toBeUndefined();
   root.dispose();
   model.dispose();
 });

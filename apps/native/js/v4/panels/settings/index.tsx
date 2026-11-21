@@ -45,13 +45,18 @@ export interface SettingsPanelProps {
 function Copy({
   children,
   secondary = false,
+  nowrap,
 }: {
   children: ComponentChildren;
   secondary?: boolean;
+  nowrap?: boolean;
   key?: string | number;
 }) {
   return (
-    <text metadata={{ settingsLayout: secondary ? "secondary" : "label" }}>
+    <text
+      metadata={{ settingsLayout: secondary ? "secondary" : "label" }}
+      style={nowrap ? { whiteSpace: "nowrap" } : undefined}
+    >
       {children}
     </text>
   );
@@ -101,9 +106,11 @@ const SEGMENTED = new Set([
 function RowControl({
   row,
   model,
+  nowrapStatus,
 }: {
   row: Row;
   model: SettingsModel;
+  nowrapStatus?: boolean;
   key?: string;
 }) {
   // A choice stays open while the previous one saves (the model keeps the
@@ -169,7 +176,11 @@ function RowControl({
     );
   }
   if (row.control === "status")
-    return <Copy>{typeof row.value === "string" ? row.value : ""}</Copy>;
+    return (
+      <Copy nowrap={nowrapStatus}>
+        {typeof row.value === "string" ? row.value : ""}
+      </Copy>
+    );
   // An unknown authored value stays in the service; never coerce it into a default.
   if (!row.binding) return null;
   // The design's controls: AppKit's bordered fields (a stepper on Frame
@@ -311,7 +322,7 @@ function SettingRow({
         {row.id === "media.location" && row.detail && (
           <text metadata={{ settingsLayout: "path" }}>{row.detail}</text>
         )}
-        <RowControl row={row} model={model} />
+        <RowControl row={row} model={model} nowrapStatus={Boolean(agentApp)} />
       </div>
     </div>
   );
