@@ -2,7 +2,7 @@
   "tools": [
     {
       "name": "start_session",
-      "description": "Start a project or app tool session, pinned to the currently open project. Returns available workspace paths and harness instructions. Request includeExtensionStaging to get the extension staging and authoring paths. Planning access only exposes inspection tools. Filesystem paths refer to this host. Only one session per connection is active.",
+      "description": "Start a project or app tool session, pinned to the currently open project. Returns available workspace paths and harness instructions, including hand-editing guidance for composition edits. Request includeExtensionStaging to get the extension staging and authoring paths. Planning access only exposes inspection tools. Filesystem paths refer to this host. Only one session per connection is active.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

@@ -19,6 +19,7 @@ const PACK: &[(&str, &str)] = &[
         "EXTENSIONS.md",
         include_str!("../../../js/v4/api-pack/EXTENSIONS.md"),
     ),
+    ("HANDOFF.md", HANDOFF_GUIDE),
     (
         "builtin-effects.json",
         include_str!("../../../../../engine/crates/pm-fx-defs/src/main-effects.json"),
@@ -65,12 +66,13 @@ const PACK: &[(&str, &str)] = &[
         "samples/hello-panel/index.tsx",
         include_str!("../../../js/v4/api-pack/samples/hello-panel/index.tsx"),
     ),
-    // The shipped app's pack for apiVersion 1-3, unchanged: those extensions
+    // The shipped app's pack for apiVersion 1-3: those extensions
     // load here too, and it is the API for commands, keys, menus and effects.
     (
         "v3/EXTENSIONS.md",
         include_str!("../../../js/compat/api-pack/EXTENSIONS.md"),
     ),
+    ("v3/HANDOFF.md", HANDOFF_GUIDE),
     (
         "v3/api.ts",
         include_str!("../../../js/compat/api-pack/api.ts"),
@@ -120,6 +122,7 @@ const PACK: &[(&str, &str)] = &[
         include_str!("../../../js/compat/api-pack/samples/media-browser/README.md"),
     ),
 ];
+const HANDOFF_GUIDE: &str = include_str!("../../../js/compat/api-pack/HANDOFF.md");
 const ACTIVATION: Duration = Duration::from_secs(10);
 
 pub struct AppExtensions {

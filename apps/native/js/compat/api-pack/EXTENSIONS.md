@@ -4,6 +4,8 @@ Powermove is a kernel plus extensions. The built-in editor (timeline, effects,
 theme, keymap, panels) is itself a set of extensions. You extend or replace any
 of them by writing a new extension — never by editing the app bundle.
 
+For composition work, see [Leave the project ready for hand editing](HANDOFF.md).
+
 ## Start a new panel in its workspace slot
 
 Before writing a new panel, read `get_panel_layout`, choose a sensible location,

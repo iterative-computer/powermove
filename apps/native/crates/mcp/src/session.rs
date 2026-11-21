@@ -1630,13 +1630,19 @@ impl McpSession {
                     "Extension staging is inert: nothing here activates."
                 });
             }
-            result["instructions"] = if context == "app" {
-                json!("For effect work, iterate with render_effect_lab from the first draft. It works without a project. No project is open. Call create_project (or open_project), then you can add layers and use render_frames. Use finish_session commit:true to keep edits. api/mcp-tools.json lists the tool contract.")
+            let instructions = if context == "app" {
+                "For effect work, iterate with render_effect_lab from the first draft. It works without a project. No project is open. Call create_project (or open_project), then you can add layers and use render_frames. Use finish_session commit:true to keep edits. api/mcp-tools.json lists the tool contract."
             } else {
-                json!(
                 "Read get_project_state before edits. Its compositions list includes every composition; pass optional compositionId to composition tools to work inside a precomp without switching the editor. Omit it for the open composition. Use apply_commands for typed, editable commands. finish_session commit:true keeps edits; false or disconnect attempts guarded rollback. api/mcp-tools.json lists the public contract. A tool this build lacks returns an error naming what is missing, so report that instead of retrying. For effect work, iterate with render_effect_lab from the first draft."
-                )
             };
+            result["instructions"] = Value::String(if project.is_some() && access != "editor" {
+                format!(
+                    "{instructions}\n\n{}",
+                    include_str!("../../../js/compat/api-pack/HANDOFF.md").trim_end(),
+                )
+            } else {
+                instructions.into()
+            });
             Some(root)
         };
         let stage = match (&workspace, host.extensions.clone()) {

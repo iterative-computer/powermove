@@ -3,6 +3,8 @@
 You can add a panel or replace a built-in panel by writing and publishing an
 extension. Powermove loads the extension while it runs.
 
+For composition work, see [Leave the project ready for hand editing](HANDOFF.md).
+
 ## Start a new panel in its workspace slot
 
 Before writing a new panel, read `get_panel_layout`, choose a sensible location,
