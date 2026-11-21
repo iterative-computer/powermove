@@ -18,6 +18,7 @@ import { repoManagement, storeUtility } from './routes/repo-management';
 import { adminRoutes } from './routes/admin';
 import { storeRoutes } from './routes/store';
 import { installRoutes } from './routes/installs';
+import { nativeUpdateResponse } from './routes/native-updates';
 export const MIN_DESKTOP_VERSION = '0.0.0';
 export function createApp(deps: {
   data: (env: CloudflareBindings) => Data;
@@ -27,6 +28,11 @@ export function createApp(deps: {
   app.use('*', async (c, next) => {
     c.set('requestId', crypto.randomUUID());
     c.header('X-Request-Id', c.var.requestId);
+    await next();
+  });
+  app.use('/native/*', async (c, next) => {
+    const response = await nativeUpdateResponse(c.req.raw, c.env.TARS);
+    if (response) return response;
     await next();
   });
   app.use('*', async (c, next) => {
