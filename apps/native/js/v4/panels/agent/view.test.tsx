@@ -1492,7 +1492,7 @@ test("child thread menus nest under their parent and the path returns to each an
 
 test("saved stop and empty completion placeholders stay out of the transcript", async () => {
   const { root } = mount();
-  const messages = [
+  const messages: Array<Row["value"] & { text: string }> = [
     { role: "user", text: "Check the opening shot." },
     { role: "assistant", text: "I found the opening shot." },
     { role: "assistant", error: true, text: "The run was stopped." },
