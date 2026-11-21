@@ -10594,6 +10594,7 @@ exports[`spec §4 loading: op-tree snapshot and Rust wire/accessibility validato
         "label": "Transcript text",
         "metadata": {
           "quoteSource": "thread:history:message-0",
+          "userMessage": true,
         },
         "style": {
           "display": "flex",
@@ -19551,6 +19552,7 @@ exports[`spec §4 focus: op-tree snapshot and Rust wire/accessibility validator 
         "label": "Transcript text",
         "metadata": {
           "quoteSource": "thread:history:message-0",
+          "userMessage": true,
         },
         "style": {
           "display": "flex",
@@ -21394,6 +21396,7 @@ exports[`spec §4 selected: op-tree snapshot and Rust wire/accessibility validat
         "label": "Transcript text",
         "metadata": {
           "quoteSource": "thread:history:message-0",
+          "userMessage": true,
         },
         "style": {
           "display": "flex",
@@ -29370,6 +29373,7 @@ exports[`spec §4 multi-select-na: op-tree snapshot and Rust wire/accessibility 
         "label": "Transcript text",
         "metadata": {
           "quoteSource": "thread:history:message-0",
+          "userMessage": true,
         },
         "style": {
           "display": "flex",
@@ -31213,6 +31217,7 @@ exports[`spec §4 60k: op-tree snapshot and Rust wire/accessibility validator 1`
         "label": "Transcript text",
         "metadata": {
           "quoteSource": "thread:history:message-0",
+          "userMessage": true,
         },
         "style": {
           "display": "flex",
@@ -32991,6 +32996,7 @@ exports[`spec §4 narrow: op-tree snapshot and Rust wire/accessibility validator
         "label": "Transcript text",
         "metadata": {
           "quoteSource": "thread:history:message-0",
+          "userMessage": true,
         },
         "style": {
           "display": "flex",
@@ -34780,6 +34786,7 @@ exports[`spec §4 docked: op-tree snapshot and Rust wire/accessibility validator
         "label": "Transcript text",
         "metadata": {
           "quoteSource": "thread:history:message-0",
+          "userMessage": true,
         },
         "style": {
           "display": "flex",

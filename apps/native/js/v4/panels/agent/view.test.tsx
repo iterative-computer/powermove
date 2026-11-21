@@ -76,6 +76,28 @@ const byLabel = (root: ReturnType<typeof mount>["root"], label: string) =>
 const has = (root: ReturnType<typeof mount>["root"], label: string) =>
   root.inspect().nodes.some((n) => n.props.label === label);
 
+test("the user message keeps a fill and radius without a border while working and after finishing", async () => {
+  const { root } = mount();
+  const p = states.selected();
+  p.snapshot.rows.items = p.snapshot.rows.items.slice(0, 1);
+  p.snapshot.rows.count = 1;
+  p.snapshot.rows.range = [0, 1];
+  for (const runId of [null, "run", null]) {
+    p.snapshot.runId = runId;
+    p.snapshot.elapsedMs = runId ? 11_000 : null;
+    await root.render(<AgentView publication={p} send={() => {}} />);
+    const message = byLabel(root, "You said: Make the headline");
+    const bubble = node(root, (n) => n.id === message.children[0]);
+    expect(bubble.props.style).toMatchObject({
+      background: { token: "colors.field" },
+      borderRadius: { token: "metrics.panel_radius" },
+    });
+    expect(Object.keys(bubble.props.style)).not.toContain("borderWidth");
+    expect(Object.keys(bubble.props.style)).not.toContain("borderColor");
+  }
+  root.dispose();
+});
+
 test("focus order follows the thread bar, conversation and composer as the original panel's", async () => {
   const { root, commits } = mount();
   const p = states.selected();
