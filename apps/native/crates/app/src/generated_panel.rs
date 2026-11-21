@@ -88,6 +88,23 @@ impl WorkspaceJson {
 }
 
 #[cfg(test)]
+mod build_repaint_tests {
+    use super::build_repaint;
+
+    #[test]
+    fn building_panels_follow_the_display_unless_playing() {
+        // Paused: the next display frame (CADisplayLink, 120 Hz on
+        // ProMotion), not a 16 ms timer.
+        assert_eq!(build_repaint(false), None);
+        // Playing: unchanged, a 33 ms wait.
+        assert_eq!(
+            build_repaint(true),
+            Some(std::time::Duration::from_millis(33))
+        );
+    }
+}
+
+#[cfg(test)]
 mod workspace_json_tests {
     use super::{WorkspaceJson, panel_build, publication};
     use std::collections::HashMap;
@@ -197,26 +214,36 @@ fn build_surface(
     t: &pm_design::Tokens,
     playing: bool,
     fraction: f32,
-    _window: &Window,
+    window: &Window,
     cx: &mut Context<Controller>,
 ) -> AnyElement {
     let entity = cx.entity().downgrade();
     if state.animating(std::time::Instant::now(), t.accessibility.reduce_motion) {
-        cx.spawn(async move |_, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(if playing {
-                    33
-                } else {
-                    16
-                }))
-                .await;
-            let _ = entity.update(cx, |_, cx| cx.notify());
-        })
-        .detach();
+        match build_repaint(playing) {
+            // The display link paces it (120 Hz on ProMotion). Renders in
+            // one frame share one next frame, where a timer per render kept
+            // a chain of wake-ups going for each extra render.
+            None => window.on_next_frame(move |_, cx| {
+                let _ = entity.update(cx, |_, cx| cx.notify());
+            }),
+            Some(wait) => cx
+                .spawn(async move |_, cx| {
+                    cx.background_executor().timer(wait).await;
+                    let _ = entity.update(cx, |_, cx| cx.notify());
+                })
+                .detach(),
+        }
     }
     let age = state.started.elapsed().as_secs_f32();
     let elapsed = state.changed.elapsed().as_secs_f32();
     build_frame(state, rect, t, playing, age, elapsed, fraction, false)
+}
+
+/// When a building panel's animation draws again: at the display's next
+/// frame (`None`), or while playing after a fixed wait, at most 30 times a
+/// second, so the window does not draw at the display rate beside playback.
+fn build_repaint(playing: bool) -> Option<std::time::Duration> {
+    playing.then_some(std::time::Duration::from_millis(33))
 }
 
 /// Fixed event-relative times let headless captures exercise the live painter.
