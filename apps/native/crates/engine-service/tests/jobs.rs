@@ -645,6 +645,202 @@ fn loud_wav(path: &Path, seconds: u32) {
     std::fs::write(path, bytes).unwrap();
 }
 
+/// The same click must survive every movie preset and land within one frame.
+#[test]
+fn export_presets_keep_audio_and_sync_when_enabled() {
+    use pm_promedia::export_panel::{Codec, Format, Options, Profile};
+    use std::process::Command;
+
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("click.wav");
+    loud_wav(&wav, 1);
+    let mut bytes = std::fs::read(&wav).unwrap();
+    // Keep a short click at frame 12 of 30, with silence around it.
+    const RATE: usize = 48_000;
+    const CLICK: usize = RATE * 12 / 30;
+    bytes[44..44 + CLICK * 4].fill(0);
+    bytes[44 + (CLICK + RATE / 100) * 4..].fill(0);
+    std::fs::write(&wav, bytes).unwrap();
+
+    let defaults = Options::new(320, 180, 30.);
+    let mut presets = vec![
+        ("h264", defaults.clone(), Some("aac")),
+        (
+            "hevc",
+            Options {
+                codec: Codec::Hevc,
+                ..defaults.clone()
+            },
+            Some("aac"),
+        ),
+        (
+            "vp9",
+            Options {
+                format: Format::Webm,
+                ..defaults.clone()
+            },
+            Some("opus"),
+        ),
+    ];
+    presets.extend(
+        [
+            ("422proxy", Profile::Proxy),
+            ("422lt", Profile::Lt),
+            ("422", Profile::Standard),
+            ("422hq", Profile::Hq),
+            ("4444", Profile::P4444),
+            ("4444xq", Profile::P4444Xq),
+        ]
+        .map(|(label, profile)| {
+            let options = Options {
+                format: Format::Prores,
+                profile,
+                ..defaults.clone()
+            };
+            (label, options, Some("pcm_s24le"))
+        }),
+    );
+    presets.extend(
+        [
+            ("png-sequence-8", Format::Png, 8),
+            ("png-sequence-16", Format::Png, 16),
+            ("png-still-8", Format::Still, 8),
+            ("png-still-16", Format::Still, 16),
+        ]
+        .map(|(label, format, depth)| {
+            let options = Options {
+                format,
+                depth,
+                ..defaults.clone()
+            };
+            (label, options, None)
+        }),
+    );
+
+    let project = with_offline_audio();
+    for (label, mut options, audio_codec) in presets {
+        let format = options.format;
+        for audio in [true, false] {
+            options.audio = audio;
+            let name = format!("{label}-audio-{audio}");
+            let output = dir.path().join(format!("{name}.{}", format.extension()));
+            let mut request = request_for(&project, output.clone(), 1);
+            request.originals.insert("Avoice".into(), wav.clone());
+            let JobSpec::Export { settings, .. } = &mut request.spec else {
+                unreachable!()
+            };
+            settings.color = if format.video() {
+                OutputColor::Rec709QuickTime {
+                    candidate: pm_protocol::color::QuickTimeTag::Cicp1_13_1,
+                }
+            } else {
+                OutputColor::SrgbImage
+            };
+            if format == Format::Still {
+                settings.range.end =
+                    Ticks::new(pm_protocol::common::TICKS_PER_SECOND / 30).unwrap();
+            }
+            *settings = options
+                .intent(true, 0)
+                .unwrap()
+                .engine_settings(settings.clone())
+                .unwrap()
+                .unwrap();
+
+            let status = finish(request);
+            assert_eq!(status.state, JobState::Done, "{name}: {status:?}");
+            let probe_path = if format == Format::Png {
+                let frames: Vec<_> = std::fs::read_dir(&output)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .collect();
+                assert_eq!(frames.len(), 30, "{name}");
+                assert!(
+                    frames
+                        .iter()
+                        .all(|path| path.extension().is_some_and(|ext| ext == "png")),
+                    "{name}"
+                );
+                frames[0].clone()
+            } else {
+                output
+            };
+            let probe = Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a",
+                    "-show_streams",
+                    "-of",
+                    "json",
+                ])
+                .arg(&probe_path)
+                .output()
+                .unwrap();
+            assert!(
+                probe.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&probe.stderr)
+            );
+            let metadata: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
+            let streams = metadata["streams"].as_array().unwrap();
+            let expected_codec = audio_codec.filter(|_| audio);
+            assert_eq!(
+                streams.len(),
+                usize::from(expected_codec.is_some()),
+                "{name}: {metadata}"
+            );
+            let Some(audio_codec) = expected_codec else {
+                eprintln!("{name}: no audio stream");
+                continue;
+            };
+
+            let stream = &streams[0];
+            assert_eq!(stream["codec_name"], audio_codec, "{name}");
+            assert_eq!(stream["sample_rate"], "48000", "{name}");
+            let decoded = Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&probe_path)
+                .args(["-map", "0:a:0", "-ac", "1", "-f", "f32le", "pipe:1"])
+                .output()
+                .unwrap();
+            assert!(
+                decoded.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&decoded.stderr)
+            );
+            let samples: Vec<f32> = decoded
+                .stdout
+                .chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+                .collect();
+            assert!(
+                samples.len().abs_diff(RATE) <= RATE / 30,
+                "{name}: {} samples",
+                samples.len()
+            );
+            let rms = (samples.iter().map(|&s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+            assert!(rms > 0.02, "{name}: RMS {rms:.4}");
+            let click = samples.iter().position(|s| s.abs() > 0.2).unwrap();
+            let start = stream["start_time"]
+                .as_str()
+                .unwrap()
+                .parse::<f64>()
+                .unwrap();
+            let onset = click as f64 / RATE as f64 + start;
+            assert!(
+                (onset - CLICK as f64 / RATE as f64).abs() <= 1. / 30.,
+                "{name}: click at {onset:.6}s"
+            );
+            eprintln!(
+                "{name}: {audio_codec}, {} samples, RMS {rms:.4}, click at {onset:.6}s",
+                samples.len()
+            );
+        }
+    }
+}
+
 /// A finished export whose mixed sound went over full scale tells the
 /// person so with its file: clipped in 24-bit PCM, kept in a float track;
 /// and the check of the written file reports its progress on the way.
