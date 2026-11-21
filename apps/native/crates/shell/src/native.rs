@@ -199,17 +199,25 @@ const STATEFUL_MENUS: [&str; 4] = ["Edit", "Composition", "Playback", "View"];
 thread_local! {
     static PROJECT_HISTORY: RefCell<[Option<String>; 2]> = const { RefCell::new([None, None]) };
 }
-fn history_title(item: &NSMenuItem, index: usize, field: bool, workspace: bool) {
+/// The Edit menu's Undo (`index` 0) or Redo (1) title.
+fn history_item_title(index: usize, field: bool, workspace: bool, project: Option<&str>) -> String {
     let verb = ["Undo", "Redo"][index];
-    let title = if field {
+    if field {
         verb.to_owned()
     } else if workspace {
         format!("{verb} Move Panel")
     } else {
-        PROJECT_HISTORY.with(|h| h.borrow()[index].as_ref()
-            .map_or_else(|| verb.to_owned(), |label| format!("{verb} {label}")))
-    };
-    item.setTitle(&NSString::from_str(&title));
+        project.map_or_else(|| verb.to_owned(), |label| format!("{verb} {label}"))
+    }
+}
+fn history_title(item: &NSMenuItem, index: usize, field: bool, workspace: bool) {
+    let title = PROJECT_HISTORY
+        .with(|h| history_item_title(index, field, workspace, h.borrow()[index].as_deref()));
+    // Every publication names Undo and Redo again; a title set to itself
+    // still makes the menu bar lay out and redraw on the main thread.
+    if item.title().to_string() != title {
+        item.setTitle(&NSString::from_str(&title));
+    }
 }
 /// The Edit menu's Undo and Redo named by the front project's history
 /// ("Undo New Solid"; the plain verb, dimmed, when there is none). Under a
@@ -235,9 +243,35 @@ pub fn history_titles(undo: Option<&str>, redo: Option<&str>) {
             }
             if let Some(item) = menu.itemAtIndex(index as isize) {
                 history_title(&item, index, false, state.workspace_history[index]);
-                item.setEnabled(label.is_some() || state.workspace_history[index]);
+                let enabled = label.is_some() || state.workspace_history[index];
+                if item.isEnabled() != enabled {
+                    item.setEnabled(enabled);
+                }
             }
         }
+    }
+}
+#[cfg(test)]
+mod history_title_tests {
+    use super::history_item_title;
+    /// The titles the Edit menu showed before writes were skipped when
+    /// unchanged: the same text for the same history.
+    #[test]
+    fn undo_and_redo_titles_are_unchanged() {
+        assert_eq!(
+            history_item_title(0, false, false, Some("New Solid")),
+            "Undo New Solid"
+        );
+        assert_eq!(
+            history_item_title(1, false, false, Some("Move")),
+            "Redo Move"
+        );
+        assert_eq!(history_item_title(0, false, false, None), "Undo");
+        assert_eq!(
+            history_item_title(1, false, true, Some("Move")),
+            "Redo Move Panel"
+        );
+        assert_eq!(history_item_title(0, true, true, Some("Move")), "Undo");
     }
 }
 /// Under a sheet, its field's Undo or Redo only when the field has one to
@@ -4730,17 +4764,32 @@ impl Host {
                 }
             }
         }
-        self.window
-            .setTitle(&NSString::from_str(&agent_window_title(
-                title,
-                self.agent_status.working,
-            )));
-        self.window.setDocumentEdited(edited);
-        self.window.setSubtitle(&NSString::from_str(subtitle));
-        let url = path.map(|p| {
-            objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy()))
-        });
-        self.window.setRepresentedURL(url.as_deref());
+        // Every publication (each edit, each selection change) comes here.
+        // AppKit lays the title bar out again, and looks the represented
+        // file's icon up on disk, on every set even of the same value: only
+        // what changed is written.
+        let shown = agent_window_title(title, self.agent_status.working);
+        if self.window.title().to_string() != shown {
+            self.window.setTitle(&NSString::from_str(&shown));
+        }
+        if self.window.isDocumentEdited() != edited {
+            self.window.setDocumentEdited(edited);
+        }
+        if self.window.subtitle().to_string() != subtitle {
+            self.window.setSubtitle(&NSString::from_str(subtitle));
+        }
+        let path = path.map(|p| p.to_string_lossy().into_owned());
+        let represented = self
+            .window
+            .representedURL()
+            .and_then(|url| url.path())
+            .map(|p| p.to_string());
+        if represented != path {
+            let url = path
+                .as_deref()
+                .map(|p| objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(p)));
+            self.window.setRepresentedURL(url.as_deref());
+        }
         *self.document.borrow_mut() = (title.into(), subtitle.into());
         self.sync_tabs();
     }
