@@ -12,8 +12,18 @@
 //!   executor tasks on this thread too, so this over-counts work the app
 //!   does off the main thread (documented in PLAN-UI.md).
 //!
+//! Frame pacing (owner directive 2026-11-21, "stuttery, not buttery smooth"):
+//! averages hide stutter, so each case also records p99 and max, the
+//! **hitch** count (iterations over 1.5 display intervals at 120 Hz
+//! ProMotion, 12.5 ms), contiguous test-thread runs over **4 ms** (a run that
+//! long leaves too little of an 8.33 ms frame), and the **cadence** a
+//! continuous interaction would present on a synthetic 120 Hz clock
+//! (skipped vsyncs, superseded results; see `cadence_120`).
+//!
 //! `PM_UI_LATENCY_OUT=/path.json` writes the catalogue; `PM_UI_LATENCY_BUDGET=1`
-//! turns the budgets (p50 ≤ one 120 Hz frame, p95 ≤ 50 ms) into assertions.
+//! turns the budgets (p50 ≤ one 120 Hz frame, p95 ≤ 50 ms; and the pacing
+//! gates p99 ≤ two frames, hitches ≤ `PM_UI_LATENCY_MAX_HITCHES` (0), runs
+//! over 4 ms ≤ `PM_UI_LATENCY_MAX_MAIN_OVER_4MS` (0)) into assertions.
 //! Without it the run only records (the `.20` baseline). A case that cannot
 //! run headlessly is recorded as skipped with its reason, never a panic.
 use crate::gizmo::{GizmoSurface, Host, Navigate, Tool, ViewFrame};
@@ -37,6 +47,12 @@ use std::{
 const FRAME_MS: f64 = 1000. / 120.;
 /// Never more than this at p95.
 const P95_MS: f64 = 50.;
+/// A hitch: longer than 1.5 display intervals at 120 Hz (12.5 ms).
+const HITCH_MS: f64 = 1.5 * FRAME_MS;
+/// Never more than this at p99: a result lands at worst one vsync late.
+const P99_MS: f64 = 2. * FRAME_MS;
+/// One contiguous main-thread run longer than this is flagged.
+const MAIN_SLICE_MS: f64 = 4.;
 /// How long one iteration may wait for its result before it counts as a miss.
 const WAIT: Duration = Duration::from_secs(3);
 const POLL: Duration = Duration::from_micros(50);
@@ -49,6 +65,14 @@ fn iterations() -> usize {
         .unwrap_or(15)
 }
 
+/// Pacing gates: hitches and 4 ms runs allowed per case (default none).
+fn pacing_allowance(var: &str) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
 fn layer_count() -> usize {
     std::env::var("PM_UI_LATENCY_LAYERS")
         .ok()
@@ -59,12 +83,38 @@ fn layer_count() -> usize {
 
 // ---------------------------------------------------------------- samples
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct Sample {
     input_to_frame_ms: f64,
     main_ms: f64,
     /// The result never showed within `WAIT`.
     missed: bool,
+    /// The runs inside `main_ms` were timed one by one (`Probe`). A direct
+    /// timing (`false`) is one contiguous run of `main_ms`.
+    sliced: bool,
+    /// The longest contiguous test-thread run.
+    max_slice_ms: f64,
+    /// Contiguous test-thread runs over `MAIN_SLICE_MS`.
+    slices_over: u32,
+    /// The whole-window draw (`draw`: next-frame callbacks, layout, paint).
+    frame_ms: f64,
+}
+
+impl Sample {
+    fn max_slice(&self) -> f64 {
+        if self.sliced {
+            self.max_slice_ms
+        } else {
+            self.main_ms
+        }
+    }
+    fn slices_over(&self) -> u32 {
+        if self.sliced {
+            self.slices_over
+        } else {
+            u32::from(self.main_ms > MAIN_SLICE_MS)
+        }
+    }
 }
 
 /// Times one iteration: wall clock from the input, and the test thread's
@@ -72,6 +122,9 @@ struct Sample {
 struct Probe {
     start: Instant,
     main: Duration,
+    max_slice: Duration,
+    slices_over: u32,
+    frame: Duration,
 }
 
 impl Probe {
@@ -79,12 +132,18 @@ impl Probe {
         Self {
             start: Instant::now(),
             main: Duration::ZERO,
+            max_slice: Duration::ZERO,
+            slices_over: 0,
+            frame: Duration::ZERO,
         }
     }
     fn run<R>(&mut self, f: impl FnOnce() -> R) -> R {
         let at = Instant::now();
         let out = f();
-        self.main += at.elapsed();
+        let slice = at.elapsed();
+        self.main += slice;
+        self.max_slice = self.max_slice.max(slice);
+        self.slices_over += u32::from(slice.as_secs_f64() * 1e3 > MAIN_SLICE_MS);
         out
     }
     fn elapsed_ms(&self) -> f64 {
@@ -95,6 +154,10 @@ impl Probe {
             input_to_frame_ms: self.elapsed_ms(),
             main_ms: self.main.as_secs_f64() * 1e3,
             missed,
+            sliced: true,
+            max_slice_ms: self.max_slice.as_secs_f64() * 1e3,
+            slices_over: self.slices_over,
+            frame_ms: self.frame.as_secs_f64() * 1e3,
         }
     }
 }
@@ -119,6 +182,7 @@ fn pump_until(
 
 /// A whole-window frame, as the next display-link tick draws it.
 fn draw(vcx: &mut VisualTestContext, probe: &mut Probe) {
+    let at = Instant::now();
     probe.run(|| {
         vcx.update(|window, cx| {
             window.simulate_next_frame(cx);
@@ -126,6 +190,7 @@ fn draw(vcx: &mut VisualTestContext, probe: &mut Probe) {
         });
         vcx.run_until_parked();
     });
+    probe.frame += at.elapsed();
 }
 
 #[derive(Default)]
@@ -181,9 +246,16 @@ impl Case {
                 Value::Null
             } else {
                 let (p50, p95, max) = stats(v);
-                json!({"p50": p50, "p95": p95, "max": max})
+                json!({"p50": p50, "p95": p95, "p99": percentile(v, 0.99), "max": max})
             }
         };
+        let slices: Vec<f64> = self.samples.iter().map(Sample::max_slice).collect();
+        let frames: Vec<f64> = self
+            .samples
+            .iter()
+            .filter(|s| s.sliced)
+            .map(|s| s.frame_ms)
+            .collect();
         json!({
             "id": self.id,
             "name": self.name,
@@ -195,8 +267,39 @@ impl Case {
             "input_to_frame_ms": summary(&frame),
             "main_ms": summary(&main),
             "within_budget": self.within_budget(),
+            "hitches": self.hitches(),
+            "main_over_4ms": self.main_over(),
+            "main_max_slice_ms": summary(&slices),
+            "frame_ms": summary(&frames),
+            "frame_over_4ms": frames.iter().filter(|ms| **ms > MAIN_SLICE_MS).count(),
+            "cadence_120hz": cadence_120(&frame).to_json(),
+            "within_pacing": self.within_pacing(),
             "extra": Value::Object(self.extra.clone()),
         })
+    }
+    /// Iterations whose result took longer than 1.5 frames at 120 Hz.
+    fn hitches(&self) -> usize {
+        self.samples
+            .iter()
+            .filter(|s| s.missed || s.input_to_frame_ms > HITCH_MS)
+            .count()
+    }
+    /// Contiguous test-thread runs over 4 ms, across all iterations.
+    fn main_over(&self) -> usize {
+        self.samples.iter().map(|s| s.slices_over() as usize).sum()
+    }
+    /// The frame-pacing gates: p99, hitch count, 4 ms runs. `None` when the
+    /// case has no samples (skipped).
+    fn within_pacing(&self) -> Option<bool> {
+        let v = self.measured();
+        if v.is_empty() {
+            return None;
+        }
+        Some(
+            percentile(&v, 0.99) <= P99_MS
+                && self.hitches() <= pacing_allowance("PM_UI_LATENCY_MAX_HITCHES")
+                && self.main_over() <= pacing_allowance("PM_UI_LATENCY_MAX_MAIN_OVER_4MS"),
+        )
     }
     /// `None` when the case has no samples (skipped).
     fn within_budget(&self) -> Option<bool> {
@@ -217,6 +320,83 @@ fn stats(values: &[f64]) -> (f64, f64, f64) {
         v[i.min(v.len() - 1)]
     };
     (at(0.5), at(0.95), v[v.len() - 1])
+}
+
+/// The value at `pct` (0..=1), as `stats` picks its percentiles.
+fn percentile(values: &[f64], pct: f64) -> f64 {
+    let mut v = values.to_vec();
+    v.sort_by(f64::total_cmp);
+    let i = (((v.len() - 1) as f64) * pct).round() as usize;
+    v[i.min(v.len() - 1)]
+}
+
+/// What a continuous interaction (a drag, a scroll, hover) would present on
+/// a synthetic 120 Hz display: input `k` arrives at vsync `k`, the main
+/// thread handles the inputs in order, each for its measured input→frame
+/// time, and each result shows at the first vsync at or after it is ready.
+/// A model, not a capture: headless runs have no display link.
+#[derive(Debug, Default, PartialEq)]
+struct Cadence {
+    /// Inputs (one per vsync).
+    inputs: usize,
+    /// Distinct vsyncs that showed a new result.
+    presented: usize,
+    /// Results that landed on a vsync another result also reached: drawn,
+    /// never seen.
+    superseded: usize,
+    /// Vsyncs between two presented results that showed nothing new.
+    skipped_vsyncs: usize,
+    /// The longest wait between presented results, in vsyncs.
+    max_gap_vsyncs: u64,
+    /// Waits between presented results, ms.
+    gaps_ms: Vec<f64>,
+}
+
+impl Cadence {
+    fn to_json(&self) -> Value {
+        let gaps = if self.gaps_ms.is_empty() {
+            Value::Null
+        } else {
+            let (p50, p95, max) = stats(&self.gaps_ms);
+            json!({"p50": p50, "p95": p95, "p99": percentile(&self.gaps_ms, 0.99), "max": max})
+        };
+        json!({
+            "inputs": self.inputs,
+            "presented": self.presented,
+            "superseded": self.superseded,
+            "skipped_vsyncs": self.skipped_vsyncs,
+            "max_gap_vsyncs": self.max_gap_vsyncs,
+            "gap_ms": gaps,
+        })
+    }
+}
+
+fn cadence_120(latencies_ms: &[f64]) -> Cadence {
+    let mut out = Cadence {
+        inputs: latencies_ms.len(),
+        ..Default::default()
+    };
+    let mut ready = 0f64;
+    let mut last: Option<u64> = None;
+    for (k, ms) in latencies_ms.iter().enumerate() {
+        let start = ready.max(k as f64 * FRAME_MS);
+        ready = start + ms.max(0.);
+        // A hair under a vsync boundary counts as that vsync.
+        let vsync = ((ready / FRAME_MS) - 1e-9).ceil().max(k as f64 + 1.) as u64;
+        match last {
+            Some(prev) if vsync <= prev => out.superseded += 1,
+            Some(prev) => {
+                let gap = vsync - prev;
+                out.presented += 1;
+                out.skipped_vsyncs += (gap - 1) as usize;
+                out.max_gap_vsyncs = out.max_gap_vsyncs.max(gap);
+                out.gaps_ms.push(gap as f64 * FRAME_MS);
+            }
+            None => out.presented += 1,
+        }
+        last = Some(last.map_or(vsync, |prev| prev.max(vsync)));
+    }
+    out
 }
 
 // ---------------------------------------------------------------- project
@@ -1350,6 +1530,7 @@ fn shared_cases(out: &mut Vec<Case>) {
                 input_to_frame_ms: started.elapsed().as_secs_f64() * 1e3,
                 main_ms: (p.actor_work + p.publication_work).as_secs_f64() * 1e3,
                 missed: false,
+                ..Default::default()
             });
             let t = Instant::now();
             let list = crate::rows::list(&p.snapshot);
@@ -1358,6 +1539,7 @@ fn shared_cases(out: &mut Vec<Case>) {
                 input_to_frame_ms: ms,
                 main_ms: ms,
                 missed: false,
+                ..Default::default()
             });
             let t = Instant::now();
             let _ = crate::layer_commands::disabled(
@@ -1370,6 +1552,7 @@ fn shared_cases(out: &mut Vec<Case>) {
                 input_to_frame_ms: ms,
                 main_ms: ms,
                 missed: false,
+                ..Default::default()
             });
             let t = Instant::now();
             refresh_workspace_step(&mut builds, &mut cache, &previous, &p);
@@ -1378,6 +1561,7 @@ fn shared_cases(out: &mut Vec<Case>) {
                 input_to_frame_ms: ms,
                 main_ms: ms,
                 missed: false,
+                ..Default::default()
             });
         }
         workspace.note(
@@ -1431,9 +1615,17 @@ fn guarded(out: &mut Vec<Case>, group: &str, f: impl FnOnce(&mut Vec<Case>)) {
 
 fn report(cases: &[Case]) -> Value {
     json!({
-        "version": 1,
+        "version": 2,
         "frame_budget_ms": FRAME_MS,
         "p95_budget_ms": P95_MS,
+        "pacing": {
+            "display_hz": 120,
+            "hitch_threshold_ms": HITCH_MS,
+            "p99_budget_ms": P99_MS,
+            "main_slice_budget_ms": MAIN_SLICE_MS,
+            "max_hitches": pacing_allowance("PM_UI_LATENCY_MAX_HITCHES"),
+            "max_main_over_4ms": pacing_allowance("PM_UI_LATENCY_MAX_MAIN_OVER_4MS"),
+        },
         "iterations": iterations(),
         "layers": layer_count(),
         "commit": option_env!("PM_UI_LATENCY_COMMIT"),
@@ -1442,23 +1634,35 @@ fn report(cases: &[Case]) -> Value {
 }
 
 fn print(cases: &[Case]) {
-    eprintln!("\nUI latency (input→frame p50/p95 ms | main p50/p95 ms)");
+    eprintln!(
+        "\nUI latency (input→frame p50/p95/p99 ms | main p50/p95 ms | hitches >12.5 ms, runs >4 ms, skipped vsyncs)"
+    );
     for c in cases {
         match (&c.skipped, c.samples.is_empty()) {
             (Some(why), _) => eprintln!("{:<8} {:<58} skipped: {why}", c.id, c.name),
             (None, true) => eprintln!("{:<8} {:<58} no samples", c.id, c.name),
             (None, false) => {
                 let (f50, f95, _) = stats(&c.measured());
+                let f99 = percentile(&c.measured(), 0.99);
                 let main: Vec<f64> = c.samples.iter().map(|s| s.main_ms).collect();
                 let (m50, m95, _) = stats(&main);
+                let cadence = cadence_120(&c.measured());
                 eprintln!(
-                    "{:<8} {:<58} {f50:8.2} {f95:8.2} | {m50:8.2} {m95:8.2}{}",
+                    "{:<8} {:<58} {f50:8.2} {f95:8.2} {f99:8.2} | {m50:8.2} {m95:8.2} | {:3} {:3} {:3}{}{}",
                     c.id,
                     c.name,
+                    c.hitches(),
+                    c.main_over(),
+                    cadence.skipped_vsyncs,
                     if c.within_budget() == Some(true) {
                         ""
                     } else {
                         "  over"
+                    },
+                    if c.within_pacing() == Some(true) {
+                        ""
+                    } else {
+                        "  stutter"
                     }
                 );
             }
@@ -1491,10 +1695,25 @@ fn ui_latency_catalogue(cx: &mut TestAppContext) {
                 format!("{} {} (p50 {p50:.2} ms, p95 {p95:.2} ms)", c.id, c.name)
             })
             .collect();
+        let stutter: Vec<String> = cases
+            .iter()
+            .filter(|c| c.within_pacing() == Some(false))
+            .map(|c| {
+                format!(
+                    "{} {} (p99 {:.2} ms, {} hitches > {HITCH_MS:.1} ms, {} runs > {MAIN_SLICE_MS} ms)",
+                    c.id,
+                    c.name,
+                    percentile(&c.measured(), 0.99),
+                    c.hitches(),
+                    c.main_over()
+                )
+            })
+            .collect();
         assert!(
-            over.is_empty(),
-            "over the 8.33 ms p50 / 50 ms p95 budget:\n{}",
-            over.join("\n")
+            over.is_empty() && stutter.is_empty(),
+            "over the 8.33 ms p50 / 50 ms p95 budget:\n{}\nover the pacing gates (p99 ≤ {P99_MS:.2} ms, hitches, 4 ms runs):\n{}",
+            over.join("\n"),
+            stutter.join("\n")
         );
     }
 }
@@ -1512,11 +1731,47 @@ fn ui_latency_stats_and_budget() {
             input_to_frame_ms: if i == 19 { 40. } else { 4. },
             main_ms: 1.,
             missed: false,
+            ..Default::default()
         })
         .collect();
     assert_eq!(case.within_budget(), Some(true));
+    // The one 40 ms iteration passes p50/p95 but is a hitch and the p99.
+    assert_eq!(case.hitches(), 1);
+    assert_eq!(percentile(&case.measured(), 0.99), 40.);
+    assert_eq!(case.within_pacing(), Some(false));
+    case.samples[19].input_to_frame_ms = 4.;
+    assert_eq!(case.within_pacing(), Some(true));
+    // A direct timing is one run; a probed one counts its own runs.
+    case.samples[3].main_ms = 6.;
+    assert_eq!(case.main_over(), 1);
+    assert_eq!(case.within_pacing(), Some(false));
+    case.samples[3] = Sample {
+        input_to_frame_ms: 4.,
+        main_ms: 6.,
+        sliced: true,
+        max_slice_ms: 3.,
+        ..Default::default()
+    };
+    assert_eq!(case.main_over(), 0);
+    assert_eq!(case.within_pacing(), Some(true));
     case.samples[0].missed = true;
     assert_eq!(case.within_budget(), Some(false));
+    assert_eq!(case.hitches(), 1);
+    // Cadence on a synthetic 120 Hz clock: every result inside its frame
+    // shows on the next vsync, nothing skipped.
+    let smooth = cadence_120(&[4.; 6]);
+    assert_eq!(
+        (smooth.presented, smooth.superseded, smooth.skipped_vsyncs),
+        (6, 0, 0)
+    );
+    assert_eq!(smooth.max_gap_vsyncs, 1);
+    // One 20 ms result: two vsyncs show nothing new, and the queued result
+    // behind it lands on the same vsync (drawn, never seen).
+    let hitch = cadence_120(&[4., 20., 4., 4.]);
+    assert_eq!(hitch.presented, 3);
+    assert_eq!(hitch.superseded, 1);
+    assert_eq!(hitch.skipped_vsyncs, 2);
+    assert_eq!(hitch.max_gap_vsyncs, 3);
     let project: Value = serde_json::from_str(&project_json(6)).unwrap();
     assert_eq!(project["layers"].as_array().unwrap().len(), 6);
     assert_eq!(project["layers"][1]["type"], "image");
