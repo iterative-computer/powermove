@@ -152,6 +152,8 @@ pub struct Controller {
         std::collections::HashMap<String, crate::generated_panel::AgentBuild>,
     pub(crate) panel_builds:
         std::collections::HashMap<String, crate::generated_panel::panel_build::State>,
+    /// The workspace `panel_builds` last followed, as JSON (`refresh`).
+    pub(crate) workspace_json: crate::generated_panel::WorkspaceJson,
     /// Generated panels' Off/On toggles: the system's segmented control per
     /// `panel#index`, kept while the control is shown.
     pub(crate) generated_switches:
@@ -1318,6 +1320,7 @@ impl Controller {
             agent_panel_sweep: false,
             agent_panel_builds: Default::default(),
             panel_builds: Default::default(),
+            workspace_json: Default::default(),
             generated_switches: Default::default(),
             shell: None,
             cloud: Default::default(),
@@ -1877,15 +1880,8 @@ impl Controller {
         self.builtins.natives.published.replace(Some(p.clone()));
         let shape = (self.duration(), self.work_area());
         if let Some(previous) = &self.published {
-            let json = |v: &pm_model::Value| {
-                serde_json::from_str::<serde_json::Value>(&pm_model::json::to_canonical_string(v))
-                    .unwrap_or_default()
-            };
-            crate::generated_panel::publication(
-                &mut self.panel_builds,
-                &json(&previous.workspace),
-                &json(&p.workspace),
-            );
+            self.workspace_json
+                .follow(&mut self.panel_builds, &previous.workspace, &p.workspace);
         }
         self.published = Some(p);
         // A run in progress follows a changed duration or work area at once

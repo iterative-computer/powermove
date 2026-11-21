@@ -1288,14 +1288,11 @@ fn timeline_cases(cx: &mut TestAppContext, out: &mut Vec<Case>) {
 /// commit of this branch, so the catalogue measures the code the app runs.
 fn refresh_workspace_step(
     builds: &mut std::collections::HashMap<String, crate::generated_panel::panel_build::State>,
+    cache: &mut crate::generated_panel::WorkspaceJson,
     previous: &pm_kernel::Published,
     next: &pm_kernel::Published,
 ) {
-    let json = |v: &pm_model::Value| {
-        serde_json::from_str::<serde_json::Value>(&pm_model::json::to_canonical_string(v))
-            .unwrap_or_default()
-    };
-    crate::generated_panel::publication(builds, &json(&previous.workspace), &json(&next.workspace));
+    cache.follow(builds, &previous.workspace, &next.workspace);
 }
 
 fn shared_cases(out: &mut Vec<Case>) {
@@ -1336,6 +1333,7 @@ fn shared_cases(out: &mut Vec<Case>) {
             &format!("kernel: selection change publication ({tag})"),
         );
         let mut builds = std::collections::HashMap::new();
+        let mut cache = crate::generated_panel::WorkspaceJson::default();
         for k in 0..iterations() {
             let previous = kernel.published(PROJECT).unwrap();
             let id = format!("l{}", k % 2);
@@ -1374,7 +1372,7 @@ fn shared_cases(out: &mut Vec<Case>) {
                 missed: false,
             });
             let t = Instant::now();
-            refresh_workspace_step(&mut builds, &previous, &p);
+            refresh_workspace_step(&mut builds, &mut cache, &previous, &p);
             let ms = t.elapsed().as_secs_f64() * 1e3;
             workspace.samples.push(Sample {
                 input_to_frame_ms: ms,
