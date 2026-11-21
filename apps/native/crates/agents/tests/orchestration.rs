@@ -279,10 +279,9 @@ fn cancellation_is_owned_drains_descendants_and_never_stops_ordinary_threads() {
     scope
         .finish(&mut host, "run-1", &success("raced"), 4)
         .unwrap();
-    assert_eq!(
-        scope.status(&mut host, "root", "task-1").unwrap()["status"],
-        "cancelled"
-    );
+    let task = scope.status(&mut host, "root", "task-1").unwrap();
+    assert_eq!(task["status"], "cancelled");
+    assert!(task["summary"].is_null());
     assert_eq!(
         scope.after_turn(&mut host, "root").unwrap(),
         Barrier::Complete

@@ -182,11 +182,7 @@ impl Client {
                         .filter(|v| !v.is_null())
                         .map(Value::to_string)
                         .unwrap_or_else(|| text(&v, "result"));
-                    if output.is_empty() {
-                        RunResult::failure("Claude generation completed without a result.", false)
-                    } else {
-                        RunResult::success(output, self.authority.access)
-                    }
+                    RunResult::success(output, self.authority.access)
                 };
                 if self.steered {
                     e.close_stdin = self.last_result.is_none();
@@ -503,7 +499,7 @@ impl Client {
     }
     pub fn stopped(&mut self, reason: &str) -> Effects {
         let mut e = Effects::default();
-        let result = if reason == "Agent runtime stopped." {
+        let result = if reason == crate::RUNTIME_STOPPED {
             self.last_result
                 .take()
                 .unwrap_or_else(|| RunResult::failure(reason, false))

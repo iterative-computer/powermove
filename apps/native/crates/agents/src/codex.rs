@@ -600,12 +600,7 @@ impl Client {
         }
         if method_is(m, "turn/completed") {
             let result = match p["turn"]["status"].as_str() {
-                Some("completed") if !t.final_text.is_empty() => {
-                    RunResult::success(t.final_text.clone(), Access::Editor)
-                }
-                Some("completed") => {
-                    RunResult::failure("ChatGPT generation completed without a result.", false)
-                }
+                Some("completed") => RunResult::success(t.final_text.clone(), Access::Editor),
                 Some("interrupted") => RunResult::failure("The Codex run was cancelled.", true),
                 _ => RunResult::failure(app_error(&p["turn"], "ChatGPT generation failed."), false),
             };
