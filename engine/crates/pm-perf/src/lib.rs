@@ -212,6 +212,9 @@ counters! {
     /// Effect images and LUTs found unchanged on disk, and read again.
     EffectAssetHits = "cache.effect_asset.hits",
     EffectAssetMisses = "cache.effect_asset.misses",
+    /// Effect passes that shaded only the pixels their zero-preserving
+    /// program can change (a scissor inside a full-size target).
+    EffectScissorHits = "cache.effect_scissor.hits",
 }
 
 /// The number of counters.

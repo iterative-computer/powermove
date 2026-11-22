@@ -88,6 +88,27 @@ fn layer_rect(n: &LayerNode, rect: Region, full: (u32, u32)) -> Option<Region> {
     if n.effects.is_some() || n.transition.is_some() {
         return Some(rect);
     }
+    let Ok(bounds) = placed_bounds(n) else {
+        return Some(rect);
+    };
+    let b = bounds?;
+    let x0 = (b[0].max(f64::from(rect.x)).max(0.0) as u32).min(full.0);
+    let y0 = (b[1].max(f64::from(rect.y)).max(0.0) as u32).min(full.1);
+    let x1 = (b[2].min(f64::from(rect.x + rect.width)).max(0.0) as u32).min(full.0);
+    let y1 = (b[3].min(f64::from(rect.y + rect.height)).max(0.0) as u32).min(full.1);
+    (x1 > x0 && y1 > y0).then(|| Region {
+        x: x0,
+        y: y0,
+        width: x1 - x0,
+        height: y1 - y0,
+    })
+}
+
+/// The union of a layer's content placements in top-down device pixels
+/// (with the sampler's analytic edge support): `Ok(None)` when nothing is
+/// placed, `Err(())` when the layer holds a composite, whose bounds are
+/// not known here.
+fn placed_bounds(n: &LayerNode) -> Result<Option<[f64; 4]>, ()> {
     let mut bounds: Option<[f64; 4]> = None;
     for d in &n.content {
         let (plane, uv) = match &d.content {
@@ -98,7 +119,7 @@ fn layer_rect(n: &LayerNode, rect: Region, full: (u32, u32)) -> Option<Region> {
                 };
                 (p.plane, uv)
             }
-            Content::Composite(_) => return Some(rect),
+            Content::Composite(_) => return Err(()),
             Content::Texture { uv, .. } => (None, *uv),
             Content::Solid(_) => (None, [0.0, 0.0, 1.0, 1.0]),
         };
@@ -116,17 +137,34 @@ fn layer_rect(n: &LayerNode, rect: Region, full: (u32, u32)) -> Option<Region> {
             ],
         });
     }
-    let b = bounds?;
-    let x0 = (b[0].max(f64::from(rect.x)).max(0.0) as u32).min(full.0);
-    let y0 = (b[1].max(f64::from(rect.y)).max(0.0) as u32).min(full.1);
-    let x1 = (b[2].min(f64::from(rect.x + rect.width)).max(0.0) as u32).min(full.0);
-    let y1 = (b[3].min(f64::from(rect.y + rect.height)).max(0.0) as u32).min(full.1);
-    (x1 > x0 && y1 > y0).then(|| Region {
-        x: x0,
-        y: y0,
-        width: x1 - x0,
-        height: y1 - y0,
-    })
+    Ok(bounds)
+}
+
+/// Where a layer's effect input (its content, then its masks, which only
+/// multiply it) can be non-zero, in the texels of a target covering `rect`
+/// (x, GL row from the bottom of `rect`, width, height): the whole pixels
+/// its placements touch, one more on every side. Outside, the input is
+/// exactly transparent. `None` when that is not known (a composite).
+fn effect_input_bounds(n: &LayerNode, rect: Region) -> Option<(u32, u32, u32, u32)> {
+    let Some(b) = placed_bounds(n).ok()? else {
+        // Nothing placed: transparent everywhere.
+        return Some((0, 0, 0, 0));
+    };
+    if !b.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let clamp = |v: f64, lo: u32, hi: u32| v.clamp(f64::from(lo), f64::from(hi)) as u32;
+    let (left, right) = (rect.x, rect.x + rect.width);
+    let (top, bottom) = (rect.y, rect.y + rect.height);
+    let x0 = clamp(b[0].floor() - 1.0, left, right);
+    let x1 = clamp(b[2].ceil() + 1.0, left, right);
+    let y0 = clamp(b[1].floor() - 1.0, top, bottom);
+    let y1 = clamp(b[3].ceil() + 1.0, top, bottom);
+    if x1 <= x0 || y1 <= y0 {
+        return Some((0, 0, 0, 0));
+    }
+    // Targets are in GL row order: row 0 is the bottom of `rect`.
+    Some((x0 - left, bottom - y1, x1 - x0, y1 - y0))
 }
 
 impl Exec<'_> {
@@ -665,6 +703,7 @@ impl Exec<'_> {
         out
     }
 
+    /// `content`: where `input` can be non-zero ([`effect_input_bounds`]).
     #[allow(clippy::too_many_arguments)]
     fn run_effects(
         &mut self,
@@ -675,6 +714,7 @@ impl Exec<'_> {
         rect: Region,
         full: (u32, u32),
         view: Option<crate::plan::OutputView>,
+        content: Option<(u32, u32, u32, u32)>,
     ) -> Result<Option<Target>, String> {
         let mut ready = vec![];
         for producer in effects.passes.input_plans() {
@@ -748,6 +788,7 @@ impl Exec<'_> {
                     timer: self.timer.as_mut(),
                     linear: &self.pipelines.linear,
                     unsupported: &mut self.unsupported,
+                    content,
                 }),
             };
             effects.passes.record(
@@ -796,6 +837,7 @@ impl Exec<'_> {
                     timer: self.timer.as_mut(),
                     linear: &self.pipelines.linear,
                     unsupported: &mut self.unsupported,
+                    content: None,
                 }),
             };
             transition.passes.record(
@@ -872,7 +914,17 @@ impl Exec<'_> {
                 if n.masks.is_some() {
                     res = self.mask_and_matte(encoder, &res, n.masks.as_ref(), None, rect, full);
                 }
-                match self.run_effects(encoder, effects, &res, Some(acc), rect, full, plan.view) {
+                let content = effect_input_bounds(n, rect);
+                match self.run_effects(
+                    encoder,
+                    effects,
+                    &res,
+                    Some(acc),
+                    rect,
+                    full,
+                    plan.view,
+                    content,
+                ) {
                     Ok(Some(t)) => res = t,
                     Ok(None) => {}
                     Err(message) => {
@@ -900,7 +952,16 @@ impl Exec<'_> {
     ) -> Option<Target> {
         let full = (plan.width, plan.height);
         let adjusted =
-            match self.run_effects(encoder, &n.effects, acc, Some(acc), rect, full, plan.view) {
+            match self.run_effects(
+                encoder,
+                &n.effects,
+                acc,
+                Some(acc),
+                rect,
+                full,
+                plan.view,
+                None,
+            ) {
                 Ok(Some(t)) => t,
                 // A missing or failed effect program leaves the composition
                 // unchanged.

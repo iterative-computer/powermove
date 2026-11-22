@@ -986,6 +986,7 @@ impl Renderer {
                     timer: None,
                     linear: &self.pipelines.linear,
                     unsupported: &mut unsupported,
+                    content: None,
                 }),
             };
             let mut gpu = crate::effects::exec::Gpu::of(&mut cx).expect("native context");
@@ -1549,6 +1550,14 @@ impl Renderer {
     /// An effect whose provider isn't installed, or whose saved revision this
     /// build doesn't have, is bypassed on its layer too
     /// ([`Renderer::missing_effects`] names them).
+    /// Tests: whether zero-preserving effect passes keep to the pixels they
+    /// can change (on by default; off shades every pixel of each pass, the
+    /// reference the scissored passes are compared with bit for bit).
+    #[doc(hidden)]
+    pub fn set_effect_scissor(&mut self, on: bool) {
+        self.effects.scissor_passes = on;
+    }
+
     pub fn set_isolate_layers(&mut self, on: bool) {
         self.isolate_layers = on;
         self.effects.bypass_missing = on;

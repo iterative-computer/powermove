@@ -347,6 +347,11 @@ pub(crate) struct Native<'a> {
     pub linear: &'a wgpu::Sampler,
     /// A program WebGL draws that the engine cannot build routes the frame.
     pub unsupported: &'a mut Vec<Unsupported>,
+    /// Where the chain's input can be non-zero, in its target's texels (x,
+    /// GL row, width, height): outside it the input is exactly transparent.
+    /// Zero-preserving steps then shade only what they can change
+    /// ([`super::bounds`]). `None`: anywhere.
+    pub content: Option<(u32, u32, u32, u32)>,
 }
 
 /// Everything a chain records with.
@@ -363,6 +368,11 @@ pub(crate) struct Gpu<'c> {
     timer: Option<&'c mut FrameTimer>,
     linear: &'c wgpu::Sampler,
     unsupported: &'c mut Vec<Unsupported>,
+    /// [`Native::content`].
+    content: Option<(u32, u32, u32, u32)>,
+    /// A step of the running chain was drawn by the fallback runner: its
+    /// output is not known to keep the chain's bounds.
+    unbounded: bool,
 }
 
 impl<'c> Gpu<'c> {
@@ -380,6 +390,8 @@ impl<'c> Gpu<'c> {
             timer: native.timer.as_deref_mut(),
             linear: native.linear,
             unsupported: &mut *native.unsupported,
+            content: native.content,
+            unbounded: false,
         })
     }
 
@@ -463,13 +475,26 @@ impl<'c> Gpu<'c> {
         self.inputs = ready;
         let backdrop = backdrop.map(|b| self.encode_e(b, working));
         let mut current: Option<Target> = None;
+        // Where the running output can be non-zero: the input's content,
+        // grown by each zero-preserving step's reach; lost at the first
+        // step that is not one ([`super::bounds`]).
+        let size = (input.width(), input.height());
+        let mut bounds = self.content.filter(|_| self.effects.scissor_passes);
+        self.unbounded = false;
         for step in steps {
+            bounds = bounds.and_then(|b| {
+                let definition = self.effects.get(DefinitionKind::Effect, &step.definition)?;
+                Some(super::bounds::grow(b, super::bounds::reach(step, definition)?, size))
+            });
             let from = current.as_ref().unwrap_or(&input).clone();
             if let Some(next) =
-                self.run_effect(layer, step, &from, backdrop.as_ref(), time, coordinates)
+                self.run_effect(layer, step, &from, backdrop.as_ref(), time, coordinates, bounds)
                 && let Some(previous) = current.replace(next)
             {
                 self.taken.push(previous);
+            }
+            if std::mem::take(&mut self.unbounded) {
+                bounds = None;
             }
         }
         current.map(|r| self.decode_e(r, working))
@@ -484,7 +509,10 @@ impl<'c> Gpu<'c> {
     }
 
     /// `runEffects` for one effect: its passes from `input`; the output, or
-    /// `None` when the effect is skipped.
+    /// `None` when the effect is skipped. `bounds`: the scissor its passes
+    /// may keep to (target texels, GL rows), outside which every pass of
+    /// it writes exact zeros ([`super::bounds`]).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_effect(
         &mut self,
         layer: &str,
@@ -493,6 +521,7 @@ impl<'c> Gpu<'c> {
         backdrop: Option<&Target>,
         time: f64,
         (uv, origin, resolution): ([f64; 4], [f64; 2], [f64; 2]),
+        bounds: Option<(u32, u32, u32, u32)>,
     ) -> Option<Target> {
         let format = input.format();
         let (w, h) = (input.width(), input.height());
@@ -507,6 +536,8 @@ impl<'c> Gpu<'c> {
                 self.fallback(layer, &step.definition);
                 return None;
             }
+            // Another implementation draws it: the chain's bounds end here.
+            self.unbounded = true;
             let mut result = self.runner_effect(
                 layer,
                 step,
@@ -768,6 +799,16 @@ impl<'c> Gpu<'c> {
                     (d.height * sy).ceil().min((oh - y) as f64) as u32,
                 )
             });
+            // Kept to the pixels the step can change (same-size passes
+            // only; a scissor equal to the whole target is no scissor).
+            let bounds = bounds.filter(|b| (ow, oh) == (w, h) && *b != (0, 0, w, h));
+            if bounds.is_some() {
+                pm_perf::bump(pm_perf::Counter::EffectScissorHits);
+            }
+            let clip = match (clip, bounds) {
+                (Some(a), Some(b)) => Some(super::bounds::intersect(a, b)),
+                (a, b) => a.or(b),
+            };
             self.legacy_pass_clipped(
                 DefinitionKind::Effect,
                 &step.definition,
