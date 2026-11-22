@@ -790,6 +790,10 @@ fn rejected_steer_restarts_with_original_and_directions() {
         thread::sleep(Duration::from_millis(2));
     }
     assert!(restarted.load(Ordering::SeqCst));
+    // The fallback says so in the trail, once.
+    runs.poll(&mut panel, &mut store, 14, 256).unwrap();
+    let trail = format!("{:?}", panel.session("t").unwrap().trace.rows);
+    assert_eq!(trail.matches("Restarted with your new direction").count(), 1, "{trail}");
     let next = runs.continued_request("run", "Keep it short").unwrap();
     assert!(next.contains("Original brief"));
     assert!(next.contains("Make it blue\n\nKeep it short"));
@@ -889,6 +893,14 @@ fn exec_steer_restarts_and_preserves_attachment_metadata() {
     .unwrap();
     assert!(restarted.load(Ordering::SeqCst));
     assert!(runs.steerable("run"));
+    runs.poll(&mut panel, &mut store, 14, 256).unwrap();
+    assert!(
+        format!("{:?}", panel.session("t").unwrap().trace.rows)
+            .contains("Restarted with your new direction")
+    );
+    // Same turn: the run, its start time and the steering message are kept.
+    let session = panel.session("t").unwrap();
+    assert_eq!(session.run.as_ref().unwrap().started_at, 10);
 }
 
 #[test]

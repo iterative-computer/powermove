@@ -116,6 +116,47 @@ test("a finished turn folds its work; the running turn stays open under its time
     entries(live).map((e) => (e.kind === "working" ? e.label : e.kind)),
   ).toEqual(["message", "Working for 12s", "message"]);
 });
+test("a steer stays in the same turn and reads Steering until the agent answers it", () => {
+  const prompt = step("history:u", { role: "user", text: "Go" });
+  const steer = (id: string, text: string) =>
+    step(`history:${id}`, { role: "user", text, steering: true });
+  const run = (rows: ReturnType<typeof step>[], ms = 13_000) => {
+    const snap = withRows(rows).snapshot;
+    snap.runId = "run";
+    snap.elapsedMs = ms;
+    return entries(snap);
+  };
+  const flags = (list: ReturnType<typeof entries>) =>
+    list.map((e) =>
+      e.kind === "message" ? (e.pending ? "pending" : "message") : e.kind,
+    );
+  // One steer: no second prompt, the timer keeps the run's own elapsed time.
+  const one = run([prompt, steer("s1", "no, do it at 15:26")]);
+  expect(flags(one)).toEqual(["message", "working", "pending"]);
+  expect(one[1]!.kind === "working" && one[1]!.label).toBe("Working for 13s");
+  // Rapid double steer: both wait for the agent.
+  expect(flags(run([prompt, steer("s1", "a"), steer("s2", "b")]))).toEqual([
+    "message",
+    "working",
+    "pending",
+    "pending",
+  ]);
+  // Anything the agent shows after the steer acknowledges it.
+  expect(
+    flags(
+      run([
+        prompt,
+        steer("s1", "a"),
+        step("live:t", { id: "t", kind: "tool", status: "running" }),
+      ]),
+    ),
+  ).toEqual(["message", "working", "message", "message"]);
+  // A finished run never shows it.
+  const idle = withRows([prompt, steer("s1", "a")]).snapshot;
+  expect(entries(idle).some((e) => e.kind === "message" && e.pending)).toBe(
+    false,
+  );
+});
 test("Markdown becomes native blocks and styled runs, never markup", () => {
   expect(
     markdown("# Title\n\n- one\n- **two**\n\n```\ncode\n```\n> quote"),

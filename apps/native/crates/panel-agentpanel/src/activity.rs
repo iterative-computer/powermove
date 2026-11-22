@@ -103,6 +103,20 @@ impl Trace {
     pub fn receive(&mut self, event: &Value, now: u64) -> Result<()> {
         let kind = event["kind"].as_str().ok_or(Error::Invalid("trace kind"))?;
         match kind {
+            // A host-authored line in the trail (never provider text): a
+            // finished, non-live thought row so provider reasoning never
+            // appends to it.
+            "notice" => {
+                let text = event["text"].as_str().ok_or(Error::Invalid("trace text"))?;
+                if !text.is_empty() {
+                    self.finish_thought(now)?;
+                    let id = self.next_id("notice");
+                    self.rows.upsert(
+                        id.clone(),
+                        json!({"id":id,"kind":"thought","label":text,"live":false,"startedAt":now,"endedAt":now,"notice":true}),
+                    )?;
+                }
+            }
             "thought" | "answer" => {
                 let text = event["text"].as_str().ok_or(Error::Invalid("trace text"))?;
                 if text.is_empty() {

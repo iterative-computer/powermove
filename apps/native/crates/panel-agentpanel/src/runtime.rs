@@ -12,6 +12,18 @@ use pm_agents::{
     transport::{Action, Handle},
 };
 use std::collections::VecDeque;
+/// Shown in the trail when a direction could not be delivered live and the
+/// run was restarted from its original request plus the new direction.
+pub const RESTART_NOTICE_TEXT: &str = "Restarted with your new direction";
+fn restart_notice_value() -> serde_json::Value {
+    serde_json::json!({"kind":"notice","text":RESTART_NOTICE_TEXT})
+}
+fn restart_notice(effect: &Effect) -> Event {
+    Event::Trace {
+        run: effect.target.run.clone().unwrap_or_default(),
+        value: restart_notice_value(),
+    }
+}
 use std::sync::mpsc::{Receiver, TryRecvError, TrySendError};
 
 struct PendingAction {
@@ -348,6 +360,7 @@ impl ProviderRuns {
             running.pending = None;
             running.held = None;
             running.release = false;
+            running.injected.push_back(restart_notice(effect));
         } else {
             match running.handle.send_checked(Action::Steer {
                 run: effect.target.run.clone().ok_or(Error::Stale)?,
@@ -366,6 +379,7 @@ impl ProviderRuns {
                 Err(TrySendError::Disconnected(_)) => {
                     running.handle = restart()?;
                     running.pending = None;
+                    running.injected.push_back(restart_notice(effect));
                 }
             }
         }
@@ -526,7 +540,13 @@ impl ProviderRuns {
                     running.action = None;
                     if !accepted && let Some(restart) = restart {
                         match restart() {
-                            Ok(handle) => { running.handle = handle; running.pending = None; }
+                            Ok(handle) => {
+                                running.handle = handle;
+                                running.pending = None;
+                                if let Some(run) = running.target.run.clone() {
+                                    running.injected.push_back(Event::Trace { run, value: restart_notice_value() });
+                                }
+                            }
                             Err(error) => running.injected.push_back(Event::Trace {
                                 run: running.target.run.clone().ok_or(Error::Stale)?,
                                 value: serde_json::json!({"kind":"answer","text":format!("Your direction could not be delivered: {error}. Please send it again.")}),
