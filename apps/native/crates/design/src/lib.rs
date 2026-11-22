@@ -824,6 +824,14 @@ impl Tokens {
             self.translucency.panel,
         )
     }
+    /// Header, idle composer tray (field, actions and pickers) and bottom inset.
+    pub fn agent_panel_minimum_height(&self) -> f32 {
+        let m = &self.metrics;
+        let text = (self.typography.body * 1.5 + 6.).max(m.hit);
+        m.header + m.text_padding + 2. * m.composer_tray
+            + 4. * m.gap + 2. * m.border + 2. * m.control + text
+    }
+
     pub fn new(scheme: Scheme, accessibility: Accessibility) -> Self {
         let colors = Colors::of(scheme);
         let ground = colors.window;

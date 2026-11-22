@@ -1420,8 +1420,8 @@ impl Controller {
             let view =
                 cx.new(|cx| SurfaceView::new(runtime, publication, tokens, natives, window, cx));
             // Side panels' bodies scroll (`panel_body`): the panel grows
-            // with its content. The viewer and the timeline fit their slot.
-            if !matches!(id, "viewer" | "timeline") {
+            // with its content. These panels size to their slot and own their scroll.
+            if !matches!(id, "viewer" | "timeline" | "agent") {
                 view.update(cx, |v, _| v.grows = true);
             }
             if id == "timeline" {
@@ -1531,10 +1531,9 @@ impl Controller {
             .absolute()
             .size_0()
         };
-        // The viewer and the timeline lay out to their slot and scroll their
-        // own way; every other panel's body scrolls when its content is
-        // taller than its slot, where it was left across splitter drags.
-        if matches!(id, "viewer" | "timeline") {
+        // These panels lay out to their slot and own their scroll. In Threads,
+        // the conversation scrolls while the composer stays in the slot.
+        if matches!(id, "viewer" | "timeline" | "agent") {
             return Some(
                 div()
                     .w_full()
@@ -1874,12 +1873,18 @@ impl Controller {
         let owner = cx.entity();
         let panel = id.to_string();
         let m = self.host.borrow().tokens.metrics;
+        let agent_minimum = (id == "agent").then(|| {
+            self.builtins.views.get("agent").map_or_else(
+                || self.host.borrow().tokens.agent_panel_minimum_height(),
+                |view| view.read(cx).agent_panel_minimum_height(),
+            )
+        });
         let (width, height, kind) = match id {
             "agent" => (
                 m.agent_width,
-                m.agent_height.min(
-                    f32::from(window.viewport_size().height) - m.toolbar - m.status - 2. * m.gap,
-                ),
+                m.agent_height
+                    .min(f32::from(window.viewport_size().height) - m.toolbar - m.status - 2. * m.gap)
+                    .max(agent_minimum.unwrap()),
                 WindowKind::PopUp,
             ),
             "settings" => (
@@ -1991,6 +1996,7 @@ impl Controller {
                 // header (`popover_drag`), held in the editor, no event
                 // reaching what is under it.
                 options.is_movable = false;
+                options.window_min_size = agent_minimum.map(|height| size(px(m.min_panel), px(height)));
                 // Clear GPUI content over the native material (language §12).
                 options = options.macos_window_background(gpui::MacosWindowBackground::Transparent);
             }

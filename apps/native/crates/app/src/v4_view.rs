@@ -297,6 +297,8 @@ struct Capture {
 #[derive(Default)]
 struct Follow {
     token: Value,
+    anchor_start: bool,
+    compact: Option<bool>,
     away: bool,
 }
 /// How far from the end still counts as at the end (the original panel's
@@ -424,6 +426,7 @@ pub struct SurfaceView {
     fit: Cell<f32>,
     natural: Rc<Cell<f32>>,
     column_natural: Rc<Cell<f32>>,
+    agent_composer_height: Rc<Cell<f32>>,
     #[cfg(test)]
     pub renders: usize,
     #[cfg(test)]
@@ -595,6 +598,7 @@ impl SurfaceView {
             fit: Cell::new(0.),
             natural: Rc::new(Cell::new(0.)),
             column_natural: Rc::new(Cell::new(0.)),
+            agent_composer_height: Rc::new(Cell::new(0.)),
             #[cfg(test)]
             renders: 0,
             #[cfg(test)]
@@ -950,6 +954,8 @@ impl SurfaceView {
         self.controls.clear();
         self.fields.clear();
         self.scrolls.clear();
+        self.follow.get_mut().clear();
+        self.agent_composer_height.set(0.);
         self.leases.clear();
         self.option_sets.clear();
         self.focus.clear();
@@ -4208,14 +4214,10 @@ impl SurfaceView {
             // `metadata.scrollAnchor: "end"` (a conversation): a scroller that
             // was at its end stays there as content grows; once scrolled up,
             // it stays where the person left it.
-            let follows = self
-                .publication
-                .surface
-                .node(id)
-                .and_then(|n| n.props.get("metadata"))
-                .and_then(|m| m.get("scrollAnchor"))
-                .and_then(|a| a.as_str())
-                == Some("end");
+            let metadata = self.publication.surface.node(id).and_then(|n| n.props.get("metadata"));
+            let anchor = metadata.and_then(|m| m["scrollAnchor"].as_str());
+            let follows = anchor == Some("end");
+            let starts = anchor == Some("start");
             if follows && scroll.offset().y <= -scroll.max_offset().y + px(1.) {
                 scroll.scroll_to_bottom();
             }
@@ -4223,36 +4225,55 @@ impl SurfaceView {
                 element = element.overflow_y_scroll();
             }
             // Project replays wheel steps within a viewport of its layout.
-            let fits = self
-                .scrolls
-                .get(&id)
-                .is_some_and(|s| s.max_offset().y <= px(0.));
-            if self.layered()
-                && !self.holds_native(id)
-                && !(fits && self.culls_in(id))
-            {
+            let fits = scroll.max_offset().y <= px(0.);
+            if self.layered() && !self.holds_native(id) && !(fits && self.culls_in(id)) {
                 element = element.scroll_layer();
             }
-            if follows {
-                // `metadata.scrollToken`: a new value goes back to the end
-                // (the panel's Scroll to Latest).
-                let token = self
-                    .publication
-                    .surface
-                    .node(id)
-                    .and_then(|n| n.props.get("metadata"))
-                    .and_then(|m| m.get("scrollToken"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
+            if follows || starts {
+                // A new token or anchor changes where the scroll area starts.
+                let token = metadata.map_or(Value::Null, |m| m["scrollToken"].clone());
                 let mut follow = self.follow.borrow_mut();
                 let f = follow.entry(id).or_insert_with(|| Follow {
                     token: token.clone(),
-                    away: false,
+                    ..Follow::default()
                 });
-                if f.token != token {
+                if f.token != token || f.anchor_start != starts {
                     f.token = token;
-                    scroll.scroll_to_bottom();
+                    f.anchor_start = starts;
+                    f.away = false;
+                    if starts {
+                        scroll.set_offset(point(px(0.), px(0.)));
+                    } else {
+                        scroll.scroll_to_bottom();
+                    }
                 }
+            }
+            if let Some(threshold) = metadata.and_then(|m| m["scrollCompactBelow"].as_f64()) {
+                let view = cx.entity().downgrade();
+                let known = self.follow.borrow().get(&id).and_then(|f| f.compact);
+                element = element.child(canvas(
+                    move |bounds, _, cx| {
+                        let compact = f64::from(f32::from(bounds.size.height)) < threshold;
+                        if known != Some(compact) {
+                            let view = view.clone();
+                            cx.defer(move |cx| {
+                                let _ = view.update(cx, |v, cx| {
+                                    let previous = v.follow.borrow_mut().entry(id).or_default()
+                                        .compact.replace(compact);
+                                    if previous != Some(compact) {
+                                        v.send(id, "scroll", EventDetail {
+                                            value: Some(json!({ "compact": compact })),
+                                            ..Default::default()
+                                        }, cx);
+                                    }
+                                });
+                            });
+                        }
+                    },
+                    |_, _, _, _| {},
+                ).absolute().inset_0());
+            }
+            if follows {
                 element = element.on_scroll_wheel(cx.listener(move |_, _, window, cx| {
                     cx.defer_in(window, move |v, _, cx| {
                         let Some(scroll) = v.scrolls.get(&id) else {
@@ -4288,6 +4309,21 @@ impl SurfaceView {
             if node.scroll_x {
                 element = element.overflow_x_scroll();
             }
+        }
+        if self.publication.panel == "agent" && node.semantic.as_deref() == Some("agent-composer") {
+            let measured = self.agent_composer_height.clone();
+            element = element.child(canvas(
+                move |bounds, window, cx| {
+                    let height = f32::from(bounds.size.height);
+                    if (measured.replace(height) - height).abs() > 0.5 {
+                        let window = window.window_handle();
+                        cx.defer(move |cx| {
+                            let _ = cx.update_window(window, |_, window, _| window.refresh());
+                        });
+                    }
+                },
+                |_, _, _, _| {},
+            ).absolute().inset_0());
         }
         if let Some(geometry) = node.virtual_window {
             element = element.on_scroll_wheel(cx.listener(move |_, _, window, cx| {
@@ -6811,6 +6847,16 @@ impl SurfaceView {
     /// Natural content demand includes inner lists before they are clipped.
     pub(crate) fn natural_body_height(&self) -> f32 {
         self.natural.get().max(self.column_natural.get())
+    }
+
+    pub(crate) fn agent_panel_minimum_height(&self) -> f32 {
+        let tokens = &self.table.tokens;
+        let minimum = tokens.agent_panel_minimum_height();
+        if self.prepared.semantics.contains_key("agent-composer") {
+            minimum.max(self.agent_composer_height.get() + tokens.metrics.header + tokens.metrics.text_padding)
+        } else {
+            minimum
+        }
     }
 
     /// The panel fills its body and grows with longer content.
