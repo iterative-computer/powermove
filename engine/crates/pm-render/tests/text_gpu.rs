@@ -230,7 +230,7 @@ fn main() {
         r
     };
     level1_plans_are_reused_until_their_inputs_change(&mut gpu, &mut fresh(), &mut failures);
-    legacy_flat_plane_keeps_canvas(&mut gpu, &mut failures);
+    legacy_affine_planes_match_2d(&mut gpu, &mut failures);
     direct_fractional_coverage(&mut gpu, &mut failures);
     half_paint_stores_the_nearest_half(&mut gpu, &mut failures);
     unchanged_text_is_uploaded_once_across_viewer_frames(&mut fresh(), &mut failures);
@@ -931,11 +931,10 @@ fn linear_project_text_source(renderer: &mut pm_render::Renderer, failures: &mut
 #[cfg(not(target_os = "macos"))]
 fn main() {}
 
-/// The legacy compositor rasterizes text before projecting its quad,
-/// including a plane with no perspective. Check the actual default masks
-/// and sampling at fractional phases, both rotated and axis aligned.
+/// Equivalent affine placements use the same coverage; perspective keeps
+/// the local canvas and its projective sampler.
 #[cfg(target_os = "macos")]
-fn legacy_flat_plane_keeps_canvas(renderer: &mut pm_render::Renderer, failures: &mut Vec<String>) {
+fn legacy_affine_planes_match_2d(renderer: &mut pm_render::Renderer, failures: &mut Vec<String>) {
     use serde_json::json;
     use support::doc::*;
     renderer
@@ -945,7 +944,7 @@ fn legacy_flat_plane_keeps_canvas(renderer: &mut pm_render::Renderer, failures: 
         pm_protocol::common::Size::new(320, 180),
         pm_protocol::color::Precision::Float32,
     );
-    for rotation in [0.0, 17.0] {
+    for (rotation, scale) in [(0.0, 100), (0.0, 123), (17.0, 123)] {
         let mut l = layer(
             "text",
             "text",
@@ -954,8 +953,8 @@ fn legacy_flat_plane_keeps_canvas(renderer: &mut pm_render::Renderer, failures: 
             100.375,
             2.0,
         );
-        set(&mut l, "scale.x", json!(123));
-        set(&mut l, "scale.y", json!(123));
+        set(&mut l, "scale.x", json!(scale));
+        set(&mut l, "scale.y", json!(scale));
         set(&mut l, "rotation", json!(rotation));
         let mut pixels = vec![];
         for three_d in [false, true] {
@@ -983,6 +982,47 @@ fn legacy_flat_plane_keeps_canvas(renderer: &mut pm_render::Renderer, failures: 
                 "legacy text flat plane at {rotation} degrees changes canvas edge by {max}"
             ));
         }
+        l["threeD"] = json!(true);
+        set(&mut l, "rotation.y", json!(35));
+        let doc = load(&project(320, 180, 2.0, no_fill(), vec![l]));
+        let (plan, errors) = renderer
+            .plan(
+                &doc,
+                "Ptest-root",
+                support::ticks(0.0),
+                &request,
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            plan.draws.iter().any(|draw| {
+                matches!(&draw.content, pm_render::plan::Content::Placed(p)
+                if p.plane.is_some_and(|m| m[2] != 0.0 || m[5] != 0.0)
+                && matches!(&p.content, pm_render::plan::Content::Texture {
+                    source: pm_render::plan::Source::Text(_), ..
+                }))
+            }),
+            "perspective text must retain its local raster"
+        );
+        let frame = renderer
+            .render(
+                &doc,
+                "Ptest-root",
+                support::ticks(0.0),
+                &request,
+                &pm_render::MapResolver::default(),
+            )
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        let projected = renderer.read_rgba(&frame).unwrap();
+        assert!(projected.chunks_exact(4).any(|p| p[3] > 0.5));
+        assert!(
+            projected
+                .iter()
+                .zip(&pixels[1])
+                .any(|(a, b)| (a - b).abs() > 0.1)
+        );
     }
     renderer
         .text()
