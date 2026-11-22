@@ -471,6 +471,21 @@ fn recent_row(recent: &RecentWork) -> Value {
         "actionLabel":"Bring In Recent Work…","value":value,"detail":detail,
         "disabled":!recent.newer || recent.requested})
 }
+/// Settings › Storage's facts before the original app's lock is read
+/// (`older_electron_running` reads a link and probes a process).
+pub(crate) struct StorageIo {
+    pub(crate) generated: Option<u64>,
+    pub(crate) electron: Option<std::path::PathBuf>,
+}
+impl StorageIo {
+    pub(crate) fn resolve(self) -> Value {
+        let running = self
+            .electron
+            .as_deref()
+            .is_some_and(pm_kernel::locks::older_electron_running);
+        json!({"rows": rows(self.generated, running)})
+    }
+}
 impl crate::session::Controller {
     /// Measures both folders again off the main thread; Settings redraws.
     pub(crate) fn refresh_storage(&self, cx: &mut gpui::Context<Self>) {
@@ -489,17 +504,17 @@ impl crate::session::Controller {
         })
         .detach();
     }
-    /// Settings › Storage's fact: its rows, built from the last measurement.
-    pub(crate) fn storage_settings_fact(&self) -> Value {
-        let generated = self
-            .pro_media
-            .cached_usage()
-            .map(|u| u.proxies + u.optimized + u.renders);
-        let running = self
-            .electron
-            .as_deref()
-            .is_some_and(pm_kernel::locks::older_electron_running);
-        json!({"rows": rows(generated, running)})
+    /// Settings › Storage's fact, to be made by `StorageIo::resolve`: its
+    /// rows, built from the last measurement (reading the original app's
+    /// lock, so off the main thread).
+    pub(crate) fn storage_settings_io(&self) -> StorageIo {
+        StorageIo {
+            generated: self
+                .pro_media
+                .cached_usage()
+                .map(|u| u.proxies + u.optimized + u.renders),
+            electron: self.electron.clone(),
+        }
     }
     /// A Settings › Storage action (`storage.settings`).
     pub(crate) fn storage_settings(&mut self, input: &Value, cx: &mut gpui::Context<Self>) {

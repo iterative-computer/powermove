@@ -58,6 +58,110 @@ pub fn panel(
     Some(render(v, id, &def, rect, window, cx))
 }
 
+/// The last publication's workspace as the JSON [`publication`] compares.
+/// `Controller::refresh` runs on every publication (each edit, drag step and
+/// selection change) and converted both workspaces (canonical text, then
+/// parsed) every time; the workspace rarely changes, so each is converted
+/// at most once and an unchanged one not at all.
+#[derive(Default)]
+pub(crate) struct WorkspaceJson(Option<(pm_model::Value, Value)>);
+impl WorkspaceJson {
+    fn convert(workspace: &pm_model::Value) -> Value {
+        serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(workspace))
+            .unwrap_or_default()
+    }
+    /// Exactly `publication(builds, json(before), json(after))`.
+    pub(crate) fn follow(
+        &mut self,
+        builds: &mut std::collections::HashMap<String, panel_build::State>,
+        before: &pm_model::Value,
+        after: &pm_model::Value,
+    ) {
+        let old = match self.0.take() {
+            Some((source, json)) if source == *before => json,
+            _ => Self::convert(before),
+        };
+        let new = (after != before).then(|| Self::convert(after));
+        publication(builds, &old, new.as_ref().unwrap_or(&old));
+        self.0 = Some((after.clone(), new.unwrap_or(old)));
+    }
+}
+
+#[cfg(test)]
+mod build_repaint_tests {
+    use super::build_repaint;
+
+    #[test]
+    fn building_panels_follow_the_display_unless_playing() {
+        // Paused: the next display frame (CADisplayLink, 120 Hz on
+        // ProMotion), not a 16 ms timer.
+        assert_eq!(build_repaint(false), None);
+        // Playing: unchanged, a 33 ms wait.
+        assert_eq!(
+            build_repaint(true),
+            Some(std::time::Duration::from_millis(33))
+        );
+    }
+}
+
+#[cfg(test)]
+mod workspace_json_tests {
+    use super::{WorkspaceJson, panel_build, publication};
+    use std::collections::HashMap;
+    fn json(v: &pm_model::Value) -> serde_json::Value {
+        serde_json::from_str(&pm_model::json::to_canonical_string(v)).unwrap_or_default()
+    }
+    fn workspace(controls: &str) -> pm_model::Value {
+        pm_model::json::parse(&format!(
+            r#"{{"custom":[{{"id":"a","controls":[{controls}]}},{{"id":"b","building":true,"controls":[]}}]}}"#
+        ))
+        .unwrap()
+    }
+    type Seen = Vec<(String, bool, Vec<usize>, bool, usize)>;
+    fn seen(builds: &HashMap<String, panel_build::State>) -> Seen {
+        let mut v: Seen = builds
+            .iter()
+            .map(|(id, s)| {
+                (
+                    id.clone(),
+                    s.explicit,
+                    s.pending.iter().copied().collect(),
+                    s.complete,
+                    s.row,
+                )
+            })
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+    /// Following publications with the kept JSON leaves the builds exactly
+    /// as converting both workspaces on every publication did, including a
+    /// publication whose "before" is not the one last followed.
+    #[test]
+    fn follow_matches_converting_both_workspaces() {
+        let steps = [
+            ("", r#"{"k":1}"#),
+            (r#"{"k":1}"#, r#"{"k":1}"#),
+            (r#"{"k":1}"#, r#"{"k":2}"#),
+            (r#"{"k":2}"#, r#"{"k":2},{"k":3}"#),
+            (r#"{"k":2},{"k":3}"#, r#"{"k":2},{"k":3}"#),
+            (r#"{"k":9}"#, r#"{"k":9}"#),
+            (r#"{"k":9}"#, ""),
+        ];
+        let (mut converted, mut followed) = (HashMap::new(), HashMap::new());
+        let mut cache = WorkspaceJson::default();
+        for (before, after) in steps {
+            let (before, after) = (workspace(before), workspace(after));
+            publication(&mut converted, &json(&before), &json(&after));
+            cache.follow(&mut followed, &before, &after);
+            assert_eq!(seen(&converted), seen(&followed));
+            let kept = cache.0.as_ref().unwrap();
+            assert_eq!(kept.0, after);
+            assert_eq!(kept.1, json(&after));
+        }
+    }
+}
+
 /// Generated definitions arrive through the kernel workspace publication,
 /// including agent-authored workspace edits. Compare authored controls rather
 /// than local state values so editing a finished slider never restarts a build.
@@ -110,26 +214,36 @@ fn build_surface(
     t: &pm_design::Tokens,
     playing: bool,
     fraction: f32,
-    _window: &Window,
+    window: &Window,
     cx: &mut Context<Controller>,
 ) -> AnyElement {
     let entity = cx.entity().downgrade();
     if state.animating(std::time::Instant::now(), t.accessibility.reduce_motion) {
-        cx.spawn(async move |_, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(if playing {
-                    33
-                } else {
-                    16
-                }))
-                .await;
-            let _ = entity.update(cx, |_, cx| cx.notify());
-        })
-        .detach();
+        match build_repaint(playing) {
+            // The display link paces it (120 Hz on ProMotion). Renders in
+            // one frame share one next frame, where a timer per render kept
+            // a chain of wake-ups going for each extra render.
+            None => window.on_next_frame(move |_, cx| {
+                let _ = entity.update(cx, |_, cx| cx.notify());
+            }),
+            Some(wait) => cx
+                .spawn(async move |_, cx| {
+                    cx.background_executor().timer(wait).await;
+                    let _ = entity.update(cx, |_, cx| cx.notify());
+                })
+                .detach(),
+        }
     }
     let age = state.started.elapsed().as_secs_f32();
     let elapsed = state.changed.elapsed().as_secs_f32();
     build_frame(state, rect, t, playing, age, elapsed, fraction, false)
+}
+
+/// When a building panel's animation draws again: at the display's next
+/// frame (`None`), or while playing after a fixed wait, at most 30 times a
+/// second, so the window does not draw at the display rate beside playback.
+fn build_repaint(playing: bool) -> Option<std::time::Duration> {
+    playing.then_some(std::time::Duration::from_millis(33))
 }
 
 /// Fixed event-relative times let headless captures exercise the live painter.
