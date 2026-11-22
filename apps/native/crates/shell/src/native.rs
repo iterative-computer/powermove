@@ -3175,8 +3175,26 @@ impl Host {
     /// (`None`, or an empty title). The arc of an unknown share turns, still
     /// under Reduce Motion.
     pub fn set_task(&mut self, status: Option<TaskStatus>) {
-        let status = status.filter(|s| !s.title.is_empty());
-        if status == self.task_status {
+        self.task_status = status.filter(|s| !s.title.is_empty());
+        self.update_task_pill();
+    }
+
+    /// Use the same task pill for native file transfers while no import is active.
+    pub fn set_receiving_drops(&mut self, pending: usize) {
+        self.receiving_drops = pending;
+        self.update_task_pill();
+    }
+
+    fn update_task_pill(&mut self) {
+        let status = match (&self.task_status, self.receiving_drops) {
+            (Some(task), _) if !task.finished => Some(task.clone()),
+            (_, 0) => self.task_status.clone(),
+            _ => Some(TaskStatus {
+                title: "Receiving dropped media".into(),
+                ..Default::default()
+            }),
+        };
+        if status == self.shown_task_status {
             return;
         }
         let Some(item) = self
@@ -3196,7 +3214,7 @@ impl Host {
                 timer.invalidate();
             }
             item.setHidden(true);
-            self.task_status = None;
+            self.shown_task_status = None;
             return;
         };
         item.setHidden(false);
@@ -3257,7 +3275,7 @@ impl Host {
             }
             self.task_timer = Some(timer);
         }
-        self.task_status = status;
+        self.shown_task_status = status;
     }
 }
 /// Toolbar subtitle for a document: `Saving…` while a save runs, else
@@ -3371,6 +3389,8 @@ pub struct Host {
     /// What the toolbar's task pill shows, and the timer that turns its
     /// arc while the share is unknown.
     task_status: Option<TaskStatus>,
+    shown_task_status: Option<TaskStatus>,
+    receiving_drops: usize,
     task_timer: Option<Retained<objc2_foundation::NSTimer>>,
     _delegate: Retained<ToolbarDelegate>,
     _target: Retained<Target>,
@@ -3589,6 +3609,8 @@ impl Host {
             _toolbar: toolbar,
             agent_status: AgentStatus::default(),
             task_status: None,
+            shown_task_status: None,
+            receiving_drops: 0,
             task_timer: None,
             agent_timer: None,
             _delegate: delegate,

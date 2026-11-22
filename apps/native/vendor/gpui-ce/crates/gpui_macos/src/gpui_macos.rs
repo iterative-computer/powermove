@@ -8,6 +8,7 @@
 mod dispatcher;
 mod display;
 mod display_link;
+mod drop_sources;
 mod events;
 mod haptic_feedback;
 mod keyboard;

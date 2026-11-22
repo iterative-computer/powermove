@@ -198,6 +198,7 @@ pub(crate) struct MacPlatformState {
     #[cfg(not(feature = "wgpu"))]
     metal_device: Option<metal::Device>,
     headless: bool,
+    drop_storage: Option<crate::drop_sources::Storage>,
     activation_policy: Option<MacActivationPolicy>,
     general_pasteboard: Pasteboard,
     find_pasteboard: Pasteboard,
@@ -233,6 +234,14 @@ impl MacPlatform {
         platform
     }
 
+    /// Store materialized external drops under a host-owned, durable media directory.
+    pub fn with_drop_directory(self, directory: PathBuf) -> Self {
+        let background = self.0.lock().background_executor.clone();
+        let storage = crate::drop_sources::Storage::new(directory, background);
+        self.0.lock().drop_storage = Some(storage);
+        self
+    }
+
     pub fn new(headless: bool) -> Self {
         let marker = MainThreadMarker::new().expect("Mac platform not created on main thread");
         let dispatcher = Arc::new(MacDispatcher::new());
@@ -244,6 +253,7 @@ impl MacPlatform {
 
         let state = Mutex::new(MacPlatformState {
             headless,
+            drop_storage: None,
             text_system,
             background_executor: BackgroundExecutor::new(dispatcher.clone()),
             foreground_executor: ForegroundExecutor::new(dispatcher),
@@ -699,13 +709,20 @@ impl Platform for MacPlatform {
             return Err(PopupNotSupportedError.into());
         }
 
-        let (cursor_visible, foreground_executor, background_executor, renderer_context) = {
+        let (
+            cursor_visible,
+            foreground_executor,
+            background_executor,
+            renderer_context,
+            drop_storage,
+        ) = {
             let guard = self.0.lock();
             (
                 guard.cursor_visible.clone(),
                 guard.foreground_executor.clone(),
                 guard.background_executor.clone(),
                 guard.renderer_context.clone(),
+                guard.drop_storage.clone(),
             )
         };
 
@@ -729,6 +746,7 @@ impl Platform for MacPlatform {
             background_executor,
             renderer,
             self.1,
+            drop_storage,
         )))
     }
 
@@ -1524,7 +1542,7 @@ fn handle_dock_menu(this: &GPUIApplicationDelegate) -> Option<Retained<NSMenu>> 
     state.dock_menu.clone()
 }
 
-fn ns_url_to_path(url: &NSURL) -> Result<PathBuf> {
+pub(crate) fn ns_url_to_path(url: &NSURL) -> Result<PathBuf> {
     let path = url.fileSystemRepresentation();
     let description = url
         .absoluteString()
