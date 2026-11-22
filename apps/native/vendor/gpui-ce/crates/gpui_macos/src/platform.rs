@@ -546,6 +546,33 @@ impl Platform for MacPlatform {
             self.0.lock().app_delegate = Some(app_delegate);
 
             let pool = NSAutoreleasePool::new();
+            // Powermove P-LAUNCH (NativeGPUI 0003, 0007): finish launching
+            // now and run the app's callback directly. Left to `run`, AppKit
+            // sends `applicationDidFinishLaunching:` only once LaunchServices'
+            // open-application Apple Event has arrived, 15-25 ms of idle main
+            // thread at every launch. `run` skips `finishLaunching` when it
+            // has already happened; the delegate's `did_finish_launching`
+            // still installs its observers when the event lands, and finds no
+            // callback left to run. Documents
+            // and links arrive after the callback, through `open_urls`.
+            // Its own pool: the outer one drains only when `run` returns, and
+            // anything autoreleased here, a window the callback opens
+            // included, stayed retained until the app quit (never freed after
+            // closing; `tests/launch_release.rs`).
+            let launch_pool = NSAutoreleasePool::new();
+            app.as_super().finishLaunching();
+            // As `did_finish_launching` would have before the callback: a
+            // bare binary is no regular app until told (a bundle already is).
+            if self.0.lock().activation_policy.is_none() {
+                app.as_super()
+                    .setActivationPolicy(NSApplicationActivationPolicy::Regular);
+            }
+            let callback = self.0.lock().finish_launching.take();
+            if let Some(callback) = callback {
+                callback();
+                crate::launch::mark("callback_end");
+            }
+            drop(launch_pool);
             app.as_super().run();
             drop(pool);
 

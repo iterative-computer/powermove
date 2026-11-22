@@ -56,3 +56,6 @@ harness = false
 [[test]]
 name = "modal_sheets"
 harness = false
+[[test]]
+name = "launch_release"
+harness = false
