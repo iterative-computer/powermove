@@ -669,6 +669,30 @@ impl From<bool> for Readback {
     }
 }
 
+/// The idle upkeep deadlines that used to be found by polling every 250 ms:
+/// - the idle release, two seconds after the last frame;
+/// - a borrowed scrub allowance, returned by governing two seconds after the
+///   drag (polled at the old 250 ms while one is borrowed: its expiry is the
+///   media service's, and a drag is short);
+/// - kept paused decoders, which go when the app is no longer frontmost
+///   (checked each second while any are kept; pressure wakes at once).
+pub(crate) fn next_maintenance(
+    idle_released: bool,
+    since_last_frame: Duration,
+    budgeted_extra: u64,
+    kept_decoders: usize,
+) -> Option<Duration> {
+    const IDLE_RELEASE: Duration = Duration::from_secs(2);
+    let release = (!idle_released).then(|| {
+        IDLE_RELEASE
+            .saturating_sub(since_last_frame)
+            .max(Duration::from_millis(1))
+    });
+    let extra = (budgeted_extra > 0).then_some(Duration::from_millis(250));
+    let kept = (idle_released && kept_decoders > 0).then_some(Duration::from_secs(1));
+    [release, extra, kept].into_iter().flatten().min()
+}
+
 /// What [`Engine::maintain_memory`] let go.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Maintained {
@@ -798,6 +822,23 @@ impl Engine {
             maintained.idle = true;
         }
         maintained
+    }
+
+    /// How long an idle worker may sleep before [`Self::maintain_memory`]
+    /// has something to do; `None` when nothing is due (every request,
+    /// pressure change, edit and device loss wakes it).
+    pub fn next_maintenance(&self) -> Option<Duration> {
+        next_maintenance(
+            self.idle_released,
+            self.last_frame.elapsed(),
+            self.budgeted_extra,
+            self.renderer.kept_decoders(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_idle_released(&self) -> bool {
+        self.idle_released
     }
 
     pub fn release_project_memory(&mut self) {
@@ -1088,8 +1129,19 @@ impl Engine {
             .map_err(|s| anyhow!(s))?;
         let memory_request = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
         let pending = memory_request.clone();
+        // A lease request or a pressure change wakes an idle worker: it
+        // sleeps until its next deadline ([`Engine::next_maintenance`]),
+        // not polling for requests. The callback runs on the pressure
+        // source's queue or another engine's thread; `try_send` never
+        // blocks, and no lock of ours is held where it is called.
+        let woken = waker.clone();
         let memory_client = crate::memory::Registration::new(12, move |share, _| {
             pending.store(share, std::sync::atomic::Ordering::Release);
+            if let Ok(waker) = woken.lock()
+                && let Some(wake) = &*waker
+            {
+                wake.try_send(()).ok();
+            }
         });
         // Tests share one translated-shader folder per process, as the app
         // keeps one per profile: without one, every engine a test makes
@@ -3171,6 +3223,39 @@ mod lifetime_tests {
             .unwrap();
         assert!(engine.settled.is_none() && engine.showing.len() == 1);
         assert!(Arc::ptr_eq(&shown.surface, &engine.showing[0].1.surface));
+    }
+
+    #[test]
+    fn idle_upkeep_deadlines_replace_the_poll() {
+        let ms = Duration::from_millis;
+        // A frame was drawn: the idle release is due two seconds after it.
+        assert_eq!(next_maintenance(false, ms(0), 0, 0), Some(ms(2000)));
+        assert_eq!(next_maintenance(false, ms(1500), 0, 0), Some(ms(500)));
+        // Overdue: at once (never a zero wait that spins).
+        assert_eq!(next_maintenance(false, ms(2500), 0, 0), Some(ms(1)));
+        // Released, nothing kept or borrowed: nothing is due.
+        assert_eq!(next_maintenance(true, ms(9000), 0, 0), None);
+        // A borrowed scrub allowance is looked at as often as before.
+        assert_eq!(next_maintenance(true, ms(9000), 1 << 20, 0), Some(ms(250)));
+        assert_eq!(next_maintenance(false, ms(100), 1 << 20, 0), Some(ms(250)));
+        // Kept paused decoders: each second, only once released.
+        assert_eq!(next_maintenance(true, ms(9000), 0, 2), Some(ms(1000)));
+        assert_eq!(next_maintenance(false, ms(1900), 0, 2), Some(ms(100)));
+        assert_eq!(next_maintenance(true, ms(9000), 1, 2), Some(ms(250)));
+    }
+
+    /// An engine says when its idle upkeep is next due.
+    #[test]
+    fn an_engine_schedules_its_idle_release() {
+        let mut engine = Engine::new(Gpu::new("idle-deadline-test").unwrap()).unwrap();
+        let due = engine.next_maintenance().expect("the idle release is due");
+        assert!(due <= Duration::from_secs(2), "{due:?}");
+        engine.release_idle_memory();
+        assert!(engine.is_idle_released());
+        assert_eq!(engine.next_maintenance(), None);
+        engine.budgeted_extra = 1;
+        assert_eq!(engine.next_maintenance(), Some(Duration::from_millis(250)));
+        engine.budgeted_extra = 0;
     }
 
     /// The worker's loop takes one usage sample a pass: the one governing
