@@ -229,7 +229,7 @@ impl Exec<'_> {
     ) {
         self.pipelines.ops.run(
             self.device,
-            self.queue,
+            &mut self.effects.uniforms,
             encoder,
             op,
             uniform,
@@ -531,7 +531,7 @@ impl Exec<'_> {
         u.off = [-x, -y, -x, -y];
         self.pipelines.ops.run_with_coverage(
             self.device,
-            self.queue,
+            &mut self.effects.uniforms,
             encoder,
             Op::Composite,
             &u,
@@ -571,7 +571,7 @@ impl Exec<'_> {
         u.off = [0, 0, -x, -y];
         self.pipelines.ops.run_with_coverage(
             self.device,
-            self.queue,
+            &mut self.effects.uniforms,
             encoder,
             Op::SolidComposite,
             &u,
@@ -688,7 +688,7 @@ impl Exec<'_> {
         let out = self.take_rect(rect);
         self.pipelines.ops.run_with_coverage(
             self.device,
-            self.queue,
+            &mut self.effects.uniforms,
             encoder,
             Op::Layer,
             &u,

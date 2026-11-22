@@ -598,7 +598,9 @@ impl<'c> Gpu<'c> {
             } else {
                 (w, h)
             };
-            let mut calls: Vec<(String, Call)> = vec![("u_tex".into(), Call::I(0))];
+            // Room for every call a pass makes, so the list never regrows.
+            let mut calls: Vec<(String, Call)> = Vec::with_capacity(40 + step.params.len());
+            calls.push(("u_tex".into(), Call::I(0)));
             if step.keep_orig {
                 calls.push(("u_orig".into(), Call::I(1)));
             }
@@ -676,7 +678,9 @@ impl<'c> Gpu<'c> {
                 step.keep_orig.then_some(input),
                 backdrop.filter(|_| step.backdrop),
             ];
-            let ready = self.inputs.clone();
+            // Lent for the pass (the units borrow from it), given back after
+            // it: no copy of every prepared input per pass.
+            let ready = std::mem::take(&mut self.inputs);
             for (index, reference) in step.references.iter().enumerate() {
                 if step.temporal && index != pass as usize {
                     continue;
@@ -817,6 +821,8 @@ impl<'c> Gpu<'c> {
                 &out,
                 clip,
             );
+            drop(units);
+            self.inputs = ready;
             outputs.push(out);
         }
         if let (Some(timer), Some((_, e)), Some(last)) =
@@ -1285,14 +1291,25 @@ impl<'c> Gpu<'c> {
             .effects
             .program(device, kind, definition, format)
             .expect("checked by the caller");
-        let mut buffer = |block: &pm_glsl::reflect::Block| {
-            let bytes = GpuProgram::block_bytes(block, calls);
-            let size = bytes.len() as u64;
-            let (b, at) = uniforms.put(device, &bytes);
-            (b, at, size)
-        };
-        let fragment_buffer = program.fragment_block.as_ref().map(&mut buffer);
-        let vertex_buffer = program.vertex_block.as_ref().map(&mut buffer);
+        // Each block written straight into its range of the frame's
+        // uniforms, members found by name through the program's index:
+        // the bytes `GpuProgram::block_bytes` makes, without the copy.
+        let mut buffer =
+            |block: &pm_glsl::reflect::Block, index: &std::collections::HashMap<String, usize>| {
+                let size = u64::from(block.size.max(16));
+                let (b, at) = uniforms.put_with(device, size, |bytes| {
+                    GpuProgram::write_block(block, index, calls, bytes)
+                });
+                (b, at, size)
+            };
+        let fragment_buffer = program
+            .fragment_block
+            .as_ref()
+            .map(|block| buffer(block, &program.fragment_index));
+        let vertex_buffer = program
+            .vertex_block
+            .as_ref()
+            .map(|block| buffer(block, &program.vertex_index));
         fn range((buffer, offset, size): &(wgpu::Buffer, u64, u64)) -> wgpu::BindingResource<'_> {
             wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                 buffer,

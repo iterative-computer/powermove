@@ -252,12 +252,14 @@ impl OpPipelines {
             .collect()
     }
 
-    /// Records one full-screen pass of `op` into `target`.
+    /// Records one full-screen pass of `op` into `target`. The uniform goes
+    /// into the frame's uniform pool (sent before the submission that reads
+    /// it), not a buffer of its own written through a staging copy.
     #[allow(clippy::too_many_arguments)]
-    pub fn run(
+    pub(crate) fn run(
         &self,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        uniforms: &mut crate::exec::UniformPool,
         encoder: &mut wgpu::CommandEncoder,
         op: Op,
         uniform: &OpUniform,
@@ -268,16 +270,16 @@ impl OpPipelines {
         viewport: Option<[f32; 4]>,
     ) {
         self.run_with_coverage(
-            device, queue, encoder, op, uniform, a, b, None, target, format, viewport, None,
+            device, uniforms, encoder, op, uniform, a, b, None, target, format, viewport, None,
         );
     }
 
     /// [`Self::run`] with a path mask coverage canvas bound.
     #[allow(clippy::too_many_arguments)]
-    pub fn run_with_coverage(
+    pub(crate) fn run_with_coverage(
         &self,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        uniforms: &mut crate::exec::UniformPool,
         encoder: &mut wgpu::CommandEncoder,
         op: Op,
         uniform: &OpUniform,
@@ -289,20 +291,20 @@ impl OpPipelines {
         viewport: Option<[f32; 4]>,
         scissor: Option<[u32; 4]>,
     ) {
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pm composite op"),
-            size: size_of::<OpUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buffer, 0, bytes_of(uniform));
+        // A 256-byte-aligned range of a pooled chunk (`UniformPool::put`),
+        // the same bytes the op's own buffer held.
+        let (buffer, offset) = uniforms.put(device, bytes_of(uniform));
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("pm composite op"),
             layout: &self.layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: buffer.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &buffer,
+                        offset,
+                        size: wgpu::BufferSize::new(size_of::<OpUniform>() as u64),
+                    }),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
