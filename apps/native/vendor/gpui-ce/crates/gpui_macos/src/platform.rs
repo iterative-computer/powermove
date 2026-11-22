@@ -522,6 +522,7 @@ impl Platform for MacPlatform {
     }
 
     fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
+        trace_launch();
         let mut state = self.0.lock();
         if state.headless {
             drop(state);
@@ -1277,7 +1278,43 @@ fn get_mac_platform(object: &GPUIApplicationDelegate) -> &MacPlatform {
     unsafe { &*(platform_ptr as *const MacPlatform) }
 }
 
+/// Powermove P-LAUNCH-TRACE (`PM_LAUNCH_TRACE`): the process start, then
+/// the first wait for events after each traced present.
+fn trace_launch() {
+    use core_foundation_sys::runloop::*;
+    if !crate::launch::enabled() {
+        return;
+    }
+    // SAFETY: proc_pidinfo fills at most `size` bytes of this process's own record.
+    unsafe {
+        let mut info: libc::proc_bsdinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+        let pid = libc::getpid();
+        if libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut c_void, size) == size {
+            let exec = info.pbi_start_tvsec as f64 * 1000. + info.pbi_start_tvusec as f64 / 1000.;
+            crate::launch::write("exec", exec, "");
+        }
+    }
+    crate::launch::mark("run");
+    extern "C" fn before_waiting(_: CFRunLoopObserverRef, _: CFRunLoopActivity, _: *mut c_void) {
+        crate::launch::before_waiting();
+    }
+    // SAFETY: an observer on the main run loop for the process's lifetime.
+    unsafe {
+        let observer = CFRunLoopObserverCreate(
+            std::ptr::null(),
+            kCFRunLoopBeforeWaiting,
+            1,
+            0,
+            before_waiting,
+            std::ptr::null_mut(),
+        );
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, kCFRunLoopCommonModes);
+    }
+}
+
 fn will_finish_launching(this: &GPUIApplicationDelegate) {
+    crate::launch::mark("will_finish");
     {
         let user_defaults = NSUserDefaults::standardUserDefaults();
 
@@ -1308,6 +1345,7 @@ fn will_finish_launching(this: &GPUIApplicationDelegate) {
 }
 
 fn did_finish_launching(this: &GPUIApplicationDelegate) {
+    crate::launch::mark("did_finish");
     let platform = get_mac_platform(this);
     let state = platform.0.lock();
     if state.activation_policy.is_none() {
@@ -1350,6 +1388,7 @@ fn did_finish_launching(this: &GPUIApplicationDelegate) {
     };
     if let Some(callback) = callback {
         callback();
+        crate::launch::mark("callback_end");
     }
 }
 

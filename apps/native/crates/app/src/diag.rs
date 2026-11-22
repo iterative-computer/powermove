@@ -104,9 +104,24 @@ pub fn mark_start() {
 pub struct OpenTimer(Option<Instant>);
 impl OpenTimer {
     pub fn begin(&mut self) {
-        self.0 = enabled().then(Instant::now);
+        self.0 = (enabled() || gpui_macos::launch::enabled()).then(Instant::now);
     }
     pub fn mark(&self, stage: &str, extra: serde_json::Value) {
+        // P-LAUNCH-TRACE: the project on screen, and its first picture.
+        if gpui_macos::launch::enabled() {
+            let label = match stage {
+                "opened" => Some("opened"),
+                "first_frame" => Some("picture"),
+                _ => None,
+            };
+            if let Some(label) = label {
+                gpui_macos::launch::mark(label);
+                gpui_macos::launch::arm_present(label);
+            }
+        }
+        if !enabled() {
+            return;
+        }
         if let Some(t) = self.0 {
             let mut v = serde_json::json!({"open": stage, "ms": (t.elapsed().as_secs_f64() * 1000.).round()});
             if let (Some(m), serde_json::Value::Object(e)) = (v.as_object_mut(), extra) {

@@ -1815,6 +1815,7 @@ impl MacWindow {
 /// set_visible) goes through `child_window::present`: nothing an inactive app
 /// shows lands above other apps.
 unsafe fn present(native_window: ObjcId, key: bool) {
+    crate::launch::mark("order");
     crate::child_window::present(
         unsafe { &*(native_window as *const objc2_app_kit::NSWindow) },
         key,
