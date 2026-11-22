@@ -822,3 +822,20 @@ so specification tests can resolve their docs/theme files. No shared target,
 profile or secret-scanning exception is introduced. Thirty repetitions, mixed
 rate/display moves, a settled reference/corpus comparison and zero-miss display
 acceptance remain unverified; the diagnostic itself still fails.
+
+## Frames drawn inside input events (PM-610, 2026-11-21)
+
+NativeGPUI's patch 0002 (draw the frame an input dirtied inside the event, at most once per 3 ms, and let the
+display link's tick stand aside for 8 ms) is in the window code as `PM_GPUI_INPUT_FRAMES` (POWERMOVE.md
+P-INPUT-FRAMES), off by default. The earlier try that P-120 rejected ("drawing on input as well paced unevenly",
+timeline lane, 2026-11-15, never committed) drew on every input with no cap and no tick skip, so the input
+frames and the ticks were both drawing.
+Measured in the background only (soak, profile seeded from a copy of the co-founder's v1 setup, Paper, 120 Hz
+built-in display, interleaved rounds): the covered lane window presents nothing, so input-to-glass was not
+measured, and an inactive window takes no posted scroll or drag. On pointer moves, frames drawn in the event
+raise the draw rate by a third to a half and cut the frames that carry two or more moves from 93 % to 62-72 %,
+at the same frame CPU; with the transaction part on, playback with the pointer moving drops about one frame a
+second. Paper's frames cost 12-14 ms of GPUI CPU, over the 8.3 ms a 120 Hz refresh allows, so frame cost, not
+the 125/120 Hz beat, limits pacing there. Before adopting: a foreground A/B of trackpad scroll, scrub, clip
+drag, live resize and typing, input-to-glass from `PM_FEEL_TRACE` (`n`, `src`, `gpu_ms` per row).
+
