@@ -3457,6 +3457,12 @@ impl Controller {
                         .collect();
                     cx.notify();
                 });
+                // P-LAUNCH-TRACE: Home's list is its content.
+                static FIRST: std::sync::Once = std::sync::Once::new();
+                FIRST.call_once(|| {
+                    gpui_macos::launch::mark("recent");
+                    gpui_macos::launch::arm_present("recent");
+                });
             }
         })
         .detach();

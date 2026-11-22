@@ -7279,7 +7279,10 @@ impl Popup {
         }
         popup.borrow_mut().me = Rc::downgrade(&popup);
         popup.borrow_mut().target = Some(target);
-        popup.borrow_mut().refresh();
+        // Rows are built when it first opens (`toggle`): each editor window
+        // makes two pop-ups, and their rows (160 in the palette, each with
+        // its controls) were most of a window's opening, before its first
+        // frame (PM-609).
         popup
     }
     fn update_tokens(&mut self, t: &Tokens, surface: Surface) {

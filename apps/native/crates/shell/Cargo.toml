@@ -61,3 +61,7 @@ harness = false
 [[test]]
 name = "external_drops"
 harness = false
+
+[[test]]
+name = "launch_release"
+harness = false
