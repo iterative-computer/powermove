@@ -11,7 +11,7 @@ use pm_protocol::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{
         Mutex,
@@ -965,12 +965,15 @@ pub(crate) fn probe_media_hdr(path: &Path, kind: &str) -> Result<Option<String>,
     }
 }
 /// Native decoder probes; no metadata-only Ready state or proxy promotion.
+/// An asset in `unresolved` has no file because the resolver hasn't answered
+/// for it yet: it is loading, and offline only once that answer has none.
 #[cfg(target_os = "macos")]
 pub fn observe_media(
     project: &str,
     snapshot: &Snapshot,
     originals: &BTreeMap<String, PathBuf>,
     proxies: &BTreeMap<String, PathBuf>,
+    unresolved: &BTreeSet<String>,
     probes: &MediaProbes,
 ) -> Result<pm_panel_media::readiness::ObservedRuntime, String> {
     use pm_panel_media::{
@@ -982,6 +985,7 @@ pub fn observe_media(
     let mut hdrs = BTreeMap::new();
     for (id, asset) in &catalog.assets {
         let availability = match originals.get(id) {
+            None if unresolved.contains(id) => Availability::Loading,
             None => Availability::Offline,
             // A LUT is read when an effect draws it, and refused there in a
             // sentence; here it is there or it isn't.
@@ -1038,12 +1042,13 @@ mod probe_tests {
         let snapshot = pm_kernel::DocumentStore::new_untitled(project).snapshot();
         let originals = BTreeMap::from([("a".to_owned(), file.clone())]);
         let probes = MediaProbes::default();
+        let none = BTreeSet::new();
         for _ in 0..25 {
-            observe_media("p", &snapshot, &originals, &BTreeMap::new(), &probes).unwrap();
+            observe_media("p", &snapshot, &originals, &BTreeMap::new(), &none, &probes).unwrap();
         }
         assert_eq!(probes.runs(), 1);
         std::fs::write(&file, b"replaced bytes").unwrap();
-        observe_media("p", &snapshot, &originals, &BTreeMap::new(), &probes).unwrap();
+        observe_media("p", &snapshot, &originals, &BTreeMap::new(), &none, &probes).unwrap();
         assert_eq!(probes.runs(), 2, "a changed file is decoded again");
     }
 
@@ -1109,14 +1114,59 @@ mod probe_tests {
         let stamp = pm_panel_media::Catalog::new("p".into(), snapshot.clone())
             .unwrap()
             .stamp;
-        let observed =
-            observe_media("p", &snapshot, &originals, &BTreeMap::new(), &MediaProbes::default())
-                .unwrap();
+        let observed = observe_media(
+            "p",
+            &snapshot,
+            &originals,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            &MediaProbes::default(),
+        )
+        .unwrap();
         use pm_panel_media::MediaRuntime;
         let hdr = |id: &str| observed.state(&stamp, id).hdr;
         assert_eq!(hdr("dv").as_deref(), Some("Dolby Vision 8.4"));
         assert_eq!(hdr("hlg").as_deref(), Some("HLG"));
         assert_eq!(hdr("sdr"), None);
+    }
+
+    /// Opening a project cold listed every file as Missing until the resolver
+    /// landed. A file it hasn't answered for is loading; only one it answered
+    /// for and didn't find is offline (the status line's count).
+    #[test]
+    fn a_file_is_only_offline_once_the_resolver_has_answered_for_it() {
+        use pm_panel_media::{Availability, MediaRuntime};
+        let project = pm_model::json::parse(
+            r##"{"id":"p","name":"Synthetic","compId":"c","w":64,"h":36,"fps":30,"dur":1,"bg":"#000000","assets":{"a":{"name":"a.mov","kind":"video"},"b":{"name":"b.png","kind":"image"}},"comps":{},"layers":[]}"##,
+        )
+        .unwrap();
+        let snapshot = pm_kernel::DocumentStore::new_untitled(project).snapshot();
+        let stamp = pm_panel_media::Catalog::new("p".into(), snapshot.clone())
+            .unwrap()
+            .stamp;
+        let observe = |unresolved: &[&str]| {
+            observe_media(
+                "p",
+                &snapshot,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &unresolved.iter().map(|id| id.to_string()).collect(),
+                &MediaProbes::default(),
+            )
+            .unwrap()
+        };
+        let availability = |observed: &pm_panel_media::readiness::ObservedRuntime, id: &str| {
+            observed.state(&stamp, id).availability
+        };
+        let opening = observe(&["a", "b"]);
+        assert_eq!(availability(&opening, "a"), Availability::Loading);
+        assert_eq!(availability(&opening, "b"), Availability::Loading);
+        assert_eq!(opening.missing(["a", "b"]), 0);
+        let relinking = observe(&["b"]);
+        assert_eq!(availability(&relinking, "a"), Availability::Offline);
+        assert_eq!(availability(&relinking, "b"), Availability::Loading);
+        assert_eq!(relinking.missing(["a", "b"]), 1);
+        assert_eq!(observe(&[]).missing(["a", "b"]), 2);
     }
 
     /// A LUT asset (Apply LUT…, an agent's import) is ready when its file is
@@ -1143,6 +1193,7 @@ mod probe_tests {
                 &snapshot,
                 originals,
                 &BTreeMap::new(),
+                &BTreeSet::new(),
                 &MediaProbes::default(),
             )
             .unwrap()

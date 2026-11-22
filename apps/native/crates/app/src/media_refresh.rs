@@ -105,6 +105,9 @@ pub struct Refresh {
     visible: Option<Inputs>,
     settled: Option<Inputs>,
     pending: Option<(u64, Inputs)>,
+    /// Ids whose bytes changed since the resolver last answered; `None`:
+    /// every id, because it has not answered since the last reset.
+    unanswered: Option<BTreeSet<String>>,
 }
 pub struct Plan {
     /// Retire these ids' pixels and readiness before exposing a new selection.
@@ -118,6 +121,7 @@ impl Refresh {
         self.visible = None;
         self.settled = None;
         self.pending = None;
+        self.unanswered = None;
     }
     /// Settled at `inputs` (what a finished job leaves).
     #[cfg(test)]
@@ -125,6 +129,12 @@ impl Refresh {
         self.reset();
         self.visible = Some(inputs.clone());
         self.settled = Some(inputs);
+        self.unanswered = Some(BTreeSet::new());
+    }
+    /// The ids the resolver still owes an answer for (`None`: every id). A
+    /// file not found for one of them is loading, not missing.
+    pub fn unanswered(&self) -> Option<&BTreeSet<String>> {
+        self.unanswered.as_ref()
     }
     pub fn plan(&mut self, inputs: Inputs) -> Plan {
         let retire = match &self.visible {
@@ -132,6 +142,11 @@ impl Refresh {
             Some(old) if old.same(&inputs) => Some(BTreeSet::new()),
             Some(old) => inputs.changed_ids(old),
         };
+        match (&mut self.unanswered, &retire) {
+            (Some(unanswered), Some(ids)) => unanswered.extend(ids.iter().cloned()),
+            (unanswered, None) => *unanswered = None,
+            (None, Some(_)) => {}
+        }
         let changed = self.visible.as_ref().is_none_or(|old| !old.same(&inputs));
         self.visible = Some(inputs.clone());
         if changed {
@@ -162,6 +177,7 @@ impl Refresh {
             return false;
         }
         self.settled = Some(inputs);
+        self.unanswered = Some(BTreeSet::new());
         true
     }
 }
@@ -295,6 +311,14 @@ impl Controller {
         self.media = media;
         self.publish_offline_media(cx);
     }
+    /// The assets the resolver still owes an answer for, for the Project
+    /// panel's Loading (a file that isn't found yet is not Missing).
+    pub(crate) fn unresolved_media(&self) -> BTreeSet<String> {
+        match self.media_refresh.unanswered() {
+            Some(ids) => ids.clone(),
+            None => self.project_assets().into_iter().collect(),
+        }
+    }
     /// The assets the viewer cannot read in its media mode, for the timeline's
     /// Media Offline clips (the same catalog the engine draws the card from).
     pub(crate) fn offline_media(&self) -> BTreeSet<String> {
@@ -374,6 +398,38 @@ mod tests {
         refresh.adopt(reopened.clone());
         assert!(!refresh.finish(serial, Some(reopened.clone())));
         assert!(refresh.plan(reopened).job.is_none());
+    }
+    #[test]
+    fn every_id_is_unanswered_until_the_resolver_lands_then_only_changed_ones() {
+        let a = inputs(1, "a");
+        let mut refresh = Refresh::default();
+        assert_eq!(refresh.unanswered(), None);
+        let opened = refresh.plan(a.clone()).job.unwrap();
+        assert_eq!(refresh.unanswered(), None, "nothing is known while it runs");
+        assert!(refresh.finish(opened, Some(a.clone())));
+        assert_eq!(refresh.unanswered(), Some(&BTreeSet::new()));
+        // A selection or rename changes no bytes: what was missing stays so.
+        assert!(refresh.plan(a.clone()).job.is_none());
+        assert_eq!(refresh.unanswered(), Some(&BTreeSet::new()));
+        let b = inputs(1, "b");
+        let relinked = refresh.plan(b).job.unwrap();
+        let changed = BTreeSet::from(["a".to_owned()]);
+        assert_eq!(refresh.unanswered(), Some(&changed));
+        refresh.plan(a.clone());
+        assert!(
+            !refresh.finish(relinked, Some(a.clone())),
+            "undone meanwhile"
+        );
+        assert_eq!(
+            refresh.unanswered(),
+            Some(&changed),
+            "a stale answer settles nothing"
+        );
+        let again = refresh.plan(a.clone()).job.unwrap();
+        assert!(refresh.finish(again, Some(a)));
+        assert_eq!(refresh.unanswered(), Some(&BTreeSet::new()));
+        refresh.reset();
+        assert_eq!(refresh.unanswered(), None, "another project starts over");
     }
     #[test]
     fn same_assets_and_storage_do_not_recopy_on_selection_or_composition_edits() {

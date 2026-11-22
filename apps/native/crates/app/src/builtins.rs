@@ -13,6 +13,7 @@ type MediaProbeInputs = (
     crate::media_refresh::Inputs,
     BTreeMap<String, std::path::PathBuf>,
     BTreeMap<String, std::path::PathBuf>,
+    BTreeSet<String>,
 );
 /// The viewer overlays a native Metal layer and must join each shell repaint,
 /// including the loading reveal, even when its panel publication is unchanged.
@@ -498,18 +499,26 @@ impl Controller {
         let inputs = crate::media_refresh::Inputs::published(&published);
         let originals = self.media.originals.clone();
         let proxies = self.media.proxies.clone();
+        let unresolved = self.unresolved_media();
         let stamp = media_stamp(&published);
         if self
             .builtins
             .media_probed
             .as_ref()
-            .is_some_and(|(i, o, p)| i.same(&inputs) && *o == originals && *p == proxies)
+            .is_some_and(|(i, o, p, u)| {
+                i.same(&inputs) && *o == originals && *p == proxies && *u == unresolved
+            })
         {
             self.builtins.media_runtime = self.builtins.media_runtime.clone().rebound(stamp);
             self.builtins.media_observed += 1;
             return;
         }
-        self.builtins.media_probed = Some((inputs, originals.clone(), proxies.clone()));
+        self.builtins.media_probed = Some((
+            inputs,
+            originals.clone(),
+            proxies.clone(),
+            unresolved.clone(),
+        ));
         self.builtins.media_probe_serial += 1;
         let serial = self.builtins.media_probe_serial;
         let probes = self.builtins.media_probes.clone();
@@ -522,6 +531,7 @@ impl Controller {
                         &published.snapshot,
                         &originals,
                         &proxies,
+                        &unresolved,
                         &probes,
                     )
                 })
