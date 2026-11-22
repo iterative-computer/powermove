@@ -51,11 +51,11 @@ fn atomic_write_with(path: &Path, write: impl FnOnce(&mut File) -> io::Result<()
         path.file_name().unwrap().to_string_lossy(),
         crate::new_id("w")
     ));
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
     let result = (|| {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
         write(&mut f)?;
         f.sync_all()?;
         drop(f);
@@ -85,6 +85,7 @@ type FlushReply = mpsc::Sender<Result<(), String>>;
 enum WriteMsg {
     Set(String, Option<Value>),
     Batch(Vec<(String, Option<Value>)>, FlushReply),
+    Settings(Vec<(String, Option<Value>)>, FlushReply),
     Flush(FlushReply),
     Stop,
 }
@@ -144,7 +145,10 @@ impl LibraryWriter {
             })
         })?;
         replay_bundle(store.dir(), format)
+            .and_then(|()| replay_settings(store.dir()))
+            .and_then(|()| clear_settings_stage(store.dir()))
             .map_err(|_| OpenDecision::AsCopy(CopyReason::UncertainLock))?;
+        remove_settings_temps(profile, store.dir());
         let (tx, rx) = mpsc::channel();
         let dir = store.dir().to_path_buf();
         let worker = thread::Builder::new()
@@ -165,6 +169,14 @@ impl LibraryWriter {
                             let r =
                                 flush_pending(&dir, &mut pending, format, true).and_then(|()| {
                                     commit_bundle(&dir, &values, format).map_err(|e| e.to_string())
+                                });
+                            let _ = reply.send(r);
+                        }
+                        Ok(WriteMsg::Settings(values, reply)) => {
+                            let r =
+                                flush_pending(&dir, &mut pending, format, true).and_then(|()| {
+                                    commit_settings(&dir, &values, format)
+                                        .map_err(|e| e.to_string())
                                 });
                             let _ = reply.send(r);
                         }
@@ -227,6 +239,24 @@ impl LibraryWriter {
             .map_err(|_| io::Error::other("library writer stopped"))?;
         Ok(())
     }
+    /// Routes settings to the file store, including values larger than 64 KiB.
+    pub(crate) fn write_settings(
+        &self,
+        values: Vec<(String, Option<Value>)>,
+    ) -> Result<(), LibraryError> {
+        if values.is_empty() {
+            return Ok(());
+        }
+        validate_values(&values)?;
+        let (tx, rx) = mpsc::channel();
+        self.tx
+            .send(WriteMsg::Settings(values, tx))
+            .map_err(|_| io::Error::other("library writer stopped"))?;
+        rx.recv()
+            .map_err(|_| io::Error::other("library writer stopped"))?
+            .map_err(|e| io::Error::other(e).into())
+    }
+
     pub fn flush(&self) -> Result<(), LibraryError> {
         let (tx, rx) = mpsc::channel();
         self.tx
@@ -390,17 +420,7 @@ impl LibraryWriter {
         Ok((rows, trash))
     }
     fn batch(&self, values: Vec<(String, Option<Value>)>) -> Result<(), LibraryError> {
-        for (key, value) in &values {
-            if parse_key(key).is_none() {
-                return Err(LibraryError::InvalidKey(key.clone()));
-            }
-            if value
-                .as_ref()
-                .is_some_and(|v| to_canonical_string(v).len() > value_limit(key))
-            {
-                return Err(io::Error::other("store value exceeds its size limit").into());
-            }
-        }
+        validate_values(&values)?;
         let (tx, rx) = mpsc::channel();
         self.tx
             .send(WriteMsg::Batch(values, tx))
@@ -503,6 +523,125 @@ impl Drop for LibraryWriter {
 
 // A roll-forward intent makes a multi-slot checkpoint restartable; plain legacy
 // keys remain the published format. No native-only fields enter those slots.
+pub(crate) fn validate_values(values: &[(String, Option<Value>)]) -> Result<(), LibraryError> {
+    for (key, value) in values {
+        if parse_key(key).is_none() {
+            return Err(LibraryError::InvalidKey(key.clone()));
+        }
+        if value
+            .as_ref()
+            .is_some_and(|v| to_canonical_string(v).len() > value_limit(key))
+        {
+            return Err(io::Error::other("store value exceeds its size limit").into());
+        }
+    }
+    Ok(())
+}
+
+const SETTINGS_STAGE: &str = ".settings-stage";
+const SETTINGS_INTENT: &str = "settings.pending";
+
+fn clear_settings_stage(dir: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(dir.join(SETTINGS_STAGE)) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+/// A published directory is the commit record. Its children are independent
+/// file-store values or empty deletion markers. No preferences snapshot or
+/// aggregate payload goes through the kernel state file.
+fn commit_settings(
+    dir: &Path,
+    values: &[(String, Option<Value>)],
+    format: DiskFormat,
+) -> io::Result<()> {
+    replay_settings(dir)?;
+    if let [(key, value)] = values {
+        return persist(dir, key, value.as_ref(), format);
+    }
+    clear_settings_stage(dir)?;
+    let stage = dir.join(SETTINGS_STAGE);
+    fs::create_dir(&stage)?;
+    let prepared = (|| {
+        for (key, value) in values {
+            match value {
+                Some(value) => persist(&stage, key, Some(value), format)?,
+                None => atomic_write(&stage.join(format!("{key}.delete")), b"")?,
+            }
+        }
+        fs::rename(&stage, dir.join(SETTINGS_INTENT))?;
+        File::open(dir)?.sync_all()
+    })();
+    if prepared.is_err() {
+        let _ = clear_settings_stage(dir);
+        return prepared;
+    }
+    replay_settings(dir)
+}
+
+fn replay_settings(dir: &Path) -> io::Result<()> {
+    let intent = dir.join(SETTINGS_INTENT);
+    let entries = match fs::symlink_metadata(&intent) {
+        Ok(meta) if meta.is_dir() => fs::read_dir(&intent)?,
+        Ok(_) => return Err(io::Error::other("Invalid settings intent")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let mut files = BTreeMap::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let (key, suffix) = name
+            .to_str()
+            .and_then(|name| name.rsplit_once('.'))
+            .ok_or_else(|| io::Error::other("Invalid settings intent entry"))?;
+        if !entry.file_type()?.is_file()
+            || !matches!(suffix, "json" | "delete")
+            || !(crate::state::is_setting(key)
+                || key.starts_with("kernelExtension.") && parse_key(key).is_some())
+            || files
+                .insert(key.to_owned(), (entry.path(), suffix == "delete"))
+                .is_some()
+        {
+            return Err(io::Error::other("Invalid settings intent entry"));
+        }
+    }
+    for (key, (source, deleted)) in files {
+        if deleted {
+            persist(dir, &key, None, DiskFormat::V1_2)?;
+        } else {
+            let bytes = fs::read(source)?;
+            atomic_write(&dir.join(format!("{key}.json")), &bytes)?;
+        }
+    }
+    // Keep the intent intact until every replacement has been synced.
+    // Renaming it back to the scratch name is one atomic retirement step.
+    clear_settings_stage(dir)?;
+    fs::rename(&intent, dir.join(SETTINGS_STAGE))?;
+    File::open(dir)?.sync_all()?;
+    clear_settings_stage(dir)
+}
+
+fn remove_settings_temps(profile: &Path, store: &Path) {
+    let is_root = |name: &str| name.starts_with("kernel-state.json.tmp-");
+    let is_store = |name: &str| {
+        name.split_once(".json.tmp-").is_some_and(|(key, _)| {
+            crate::state::is_setting(key)
+                || key.starts_with("kernelExtension.") && parse_key(key).is_some()
+        })
+    };
+    for (directory, owned) in [(profile, is_root as fn(&str) -> bool), (store, is_store)] {
+        for entry in fs::read_dir(directory).into_iter().flatten().flatten() {
+            if owned(&entry.file_name().to_string_lossy())
+                && entry.file_type().is_ok_and(|kind| kind.is_file())
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
 fn commit_bundle(
     dir: &Path,
     values: &[(String, Option<Value>)],

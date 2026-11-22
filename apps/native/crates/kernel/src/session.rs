@@ -766,20 +766,28 @@ impl Kernel {
                         match std::fs::read_to_string(&record) {
                             Ok(text) => {
                                 let value = pm_model::json::parse(&text).map_err(failure)?;
-                                let old = self.state.settings.clone();
-                                self.state.restore_durable(&value).map_err(failure)?;
-                                for key in old
+                                let old = &self.state;
+                                let mut next = old.clone();
+                                next.restore_durable(&value).map_err(failure)?;
+                                let mut writes: Vec<_> = old
+                                    .settings
                                     .keys()
-                                    .chain(self.state.settings.keys())
+                                    .chain(next.settings.keys())
                                     .collect::<std::collections::BTreeSet<_>>()
-                                {
-                                    match self.state.settings.get(key) {
-                                        Some(v) => writer.set(key, v.clone()),
-                                        None => writer.delete(key),
-                                    }
+                                    .into_iter()
+                                    .filter_map(|key| {
+                                        let after = next.settings.get(key);
+                                        (after != old.settings.get(key))
+                                            .then(|| (key.clone(), after.cloned()))
+                                    })
+                                    .collect();
+                                writes.extend(next.durable_extensions_since(old));
+                                writer.write_settings(writes).map_err(failure)?;
+                                std::fs::remove_file(&record).map_err(failure)?;
+                                std::fs::File::open(&profile)
+                                    .and_then(|dir| dir.sync_all())
                                     .map_err(failure)?;
-                                }
-                                writer.flush().map_err(failure)?;
+                                self.state = next;
                             }
                             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                             Err(e) => return Err(failure(e)),

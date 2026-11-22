@@ -549,11 +549,25 @@ pub(super) fn reading_whole(path: &Path) {
 /// descriptor is hashed more than once, and its duplicates share the
 /// cursor), so it says nothing about where the file begins.
 pub(crate) fn hash_reader(file: &File, path: &Path) -> Result<Sha256, ProjectIoError> {
+    hash_reader_while(file, path, &|| true)
+}
+
+fn hash_reader_while(
+    file: &File,
+    path: &Path,
+    keep_reading: &impl Fn() -> bool,
+) -> Result<Sha256, ProjectIoError> {
     reading_whole(path);
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     let mut offset = 0u64;
     loop {
+        if !keep_reading() {
+            return Err(io_err(
+                path,
+                io::Error::new(io::ErrorKind::Interrupted, "Background work stopped"),
+            ));
+        }
         #[cfg(unix)]
         let n = {
             use std::os::unix::fs::FileExt;
@@ -2481,7 +2495,9 @@ fn publish_now(
     // The save stands. Versions earlier saves retained are read again and
     // go; one that changed since is kept beside the project instead.
     published.changed = transaction::prune_retained(destination, &tx, hooks);
-    if let Some(policy) = host.backups {
+    if let Some(policy) = host.backups
+        && policy.max_versions != usize::MAX
+    {
         let just_written = published.backup.as_deref().or(host.backup);
         for changed in retain(policy, just_written, hooks).unwrap_or_default() {
             match tx.keep_file(changed.clone(), "other version") {
@@ -2700,6 +2716,20 @@ pub(super) fn is_uuid_v4(uuid: &str) -> bool {
         })
         && uuid[14] == b'4'
         && matches!(uuid[19], b'8' | b'9' | b'a' | b'b')
+}
+
+/// Recognizes the recoverable-save writer's temporary sibling name. A
+/// caller must still establish that the file is empty and abandoned.
+pub fn is_recovery_stage(name: &OsStr) -> bool {
+    let Some((name, tag)) = name
+        .to_str()
+        .and_then(|value| value.strip_prefix('.'))
+        .and_then(|value| value.strip_suffix(".tmp"))
+        .and_then(|value| value.rsplit_once('.'))
+    else {
+        return false;
+    };
+    name.ends_with(".pmv") && is_uuid_v4(tag)
 }
 
 /// Removes the empty staging files ([`temporary_sibling`]) a save cut short
@@ -3113,6 +3143,144 @@ pub fn list_backups(policy: &BackupPolicy) -> Result<Vec<PathBuf>, ProjectIoErro
         .collect())
 }
 
+/// Retain the last ten versions and one per UTC day for seven days, then
+/// enforce the profile-wide budget oldest first. Every project's newest
+/// version is protected, even if those versions alone exceed the budget.
+pub fn tidy_backups(
+    root: &Path,
+    now: std::time::SystemTime,
+    limit: u64,
+    idle: impl Fn() -> bool,
+) -> Result<u64, ProjectIoError> {
+    let Some(directory) = Dir::open(root).map_err(|e| backup_dir_err(root, e))? else {
+        return Ok(0);
+    };
+    let now_ms = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    const DAY: i64 = 86_400_000;
+    let today = now_ms.div_euclid(DAY);
+    struct Candidate {
+        key: BackupKey,
+        directory: usize,
+        name: OsString,
+        bytes: u64,
+        retained: bool,
+    }
+    let mut directories = Vec::new();
+    let mut candidates = Vec::new();
+    let mut total: u64 = 0;
+    for (project, kind) in directory.entries().map_err(|e| io_err(root, e))? {
+        if !idle() {
+            return Ok(0);
+        }
+        if !matches!(kind, Kind::Dir) {
+            continue;
+        }
+        let Some(dir) = directory
+            .sub(&project, false)
+            .map_err(|e| io_err(root, e))?
+        else {
+            continue;
+        };
+        let path = root.join(&project);
+        for (name, kind) in dir.entries().map_err(|e| io_err(&path, e))? {
+            if matches!(kind, Kind::File { .. }) {
+                let captured = path.join(name);
+                if let Some(own) = backup_of_captured(&captured) {
+                    let _ = rename_back(&captured, &own);
+                }
+            }
+        }
+        let mut days = std::collections::BTreeSet::new();
+        let index = directories.len();
+        let mut versions: Vec<_> = generations(&dir)
+            .map_err(|e| io_err(&path, e))?
+            .into_iter()
+            .map(|(key, name, size)| (key, name, size, index))
+            .collect();
+        let archived = match dir.sub(OsStr::new("archived"), false) {
+            Ok(archived) => archived,
+            Err(e) if e.kind() == io::ErrorKind::NotADirectory => None,
+            Err(e) => return Err(io_err(&path, e)),
+        };
+        directories.push((dir, path.clone()));
+        if let Some(archived) = archived {
+            let archive_path = path.join("archived");
+            let index = directories.len();
+            for (name, kind) in archived.entries().map_err(|e| io_err(&archive_path, e))? {
+                if let (Some(key), Kind::File { size }) =
+                    (name.to_str().and_then(archived_key), kind)
+                {
+                    versions.push((key, name, size, index));
+                }
+            }
+            directories.push((archived, archive_path));
+        }
+        versions.sort_unstable_by(|a, b| (&b.0, &b.1).cmp(&(&a.0, &a.1)));
+        for (rank, (key, name, bytes, directory)) in versions.into_iter().enumerate() {
+            total = total.saturating_add(bytes);
+            let day = key.millis.div_euclid(DAY);
+            let daily = ((today - 6)..=today).contains(&day) && days.insert(day);
+            if rank > 0 {
+                candidates.push(Candidate {
+                    key,
+                    directory,
+                    name,
+                    bytes,
+                    retained: rank < 10 || daily,
+                });
+            }
+        }
+    }
+    candidates.sort_unstable_by_key(|entry| (entry.retained, entry.key));
+    let mut freed: u64 = 0;
+    for Candidate {
+        directory,
+        name,
+        bytes: size,
+        retained,
+        ..
+    } in &candidates
+    {
+        if !idle() || (*retained && total <= limit) {
+            break;
+        }
+        let (dir, path) = &directories[*directory];
+        let file = path.join(name);
+        // A displaced destination can change through another app's open
+        // descriptor. Use the save path's capture and verification before
+        // deleting any version that used to be the original inode.
+        if let Some(hash) = retained_hash(&file) {
+            let captured = captured_backup(&file);
+            let unchanged = |held: &File, _: &FileStat| {
+                hash_reader_while(held, &file, &idle)
+                    .is_ok_and(|actual| hex(&actual.finalize()) == hash)
+                    && idle()
+            };
+            let leftovers = dispose(&file, &captured, &unchanged, &PublishHooks::default());
+            if leftovers.is_empty() {
+                total = total.saturating_sub(*size);
+                freed = freed.saturating_add(*size);
+                dir.sync().map_err(|e| io_err(path, e))?;
+            } else if leftovers.contains(&captured) {
+                let _ = rename_back(&captured, &file);
+            }
+            continue;
+        }
+        match dir.unlink(name) {
+            Ok(()) => {
+                total = total.saturating_sub(*size);
+                freed = freed.saturating_add(*size);
+                dir.sync().map_err(|e| io_err(path, e))?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => total = total.saturating_sub(*size),
+            Err(e) => return Err(io_err(&file, e)),
+        }
+    }
+    Ok(freed)
+}
+
 /// Copies (clones) the current destination into the backup directory and
 /// syncs it. Returns the backup's path.
 ///
@@ -3333,6 +3501,39 @@ pub(crate) fn reclaim_archived(policy: &BackupPolicy, needed: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_hygiene_keeps_daily_backups_and_one_for_each_project() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let dir = tempfile::tempdir().unwrap();
+        let backups = dir.path().join("backups");
+        let now = UNIX_EPOCH + Duration::from_secs(32 * 86_400);
+        let recent = (32 * 86_400) * 1000;
+        let build = |project: &str, millis: i64| {
+            let root = backups.join(project);
+            std::fs::create_dir_all(&root).unwrap();
+            let path = root.join(format!("{}.pmv", backup_stamp(millis)));
+            std::fs::write(&path, [0; 16]).unwrap();
+            path
+        };
+        let current: Vec<_> = (0..12)
+            .map(|index| build("editing", recent + index))
+            .collect();
+        let daily = build("editing", recent - 86_400_000 + 1);
+        let redundant = build("editing", recent - 86_400_000);
+        let oldest = build("editing", recent - 10 * 86_400_000);
+        let only = build("closed", recent - 12 * 86_400_000);
+        tidy_backups(&backups, now, u64::MAX, || true).unwrap();
+        assert!(!oldest.exists() && !redundant.exists() && !current[1].exists());
+        assert!(daily.is_file() && only.is_file());
+        assert!(current[2..].iter().all(|path| path.is_file()));
+        tidy_backups(&backups, now, 32, || true).unwrap();
+        assert!(only.is_file() && current[11].is_file());
+        assert_eq!(
+            std::fs::read_dir(backups.join("editing")).unwrap().count(),
+            1
+        );
+    }
 
     #[test]
     fn backup_names_match_the_old_pattern() {

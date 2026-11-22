@@ -122,10 +122,12 @@ pub fn parse_key(key: &str) -> Option<StoreKey> {
         return Some(StoreKey::Static(key.to_owned()));
     }
     let (prefix, id) = key.split_once('.')?;
-    (DYNAMIC_PREFIXES.contains(&prefix) && valid_id(id)).then(|| StoreKey::Dynamic {
-        prefix: prefix.to_owned(),
-        id: id.to_owned(),
-    })
+    ((DYNAMIC_PREFIXES.contains(&prefix) || prefix == "kernelExtension") && valid_id(id)).then(
+        || StoreKey::Dynamic {
+            prefix: prefix.to_owned(),
+            id: id.to_owned(),
+        },
+    )
 }
 
 #[derive(Debug)]
