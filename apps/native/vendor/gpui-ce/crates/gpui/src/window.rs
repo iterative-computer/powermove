@@ -747,6 +747,8 @@ impl<M: Focusable + EventEmitter<DismissEvent> + Render> ManagedView for M {}
 pub struct DismissEvent;
 
 type FrameCallback = Box<dyn FnOnce(&mut Window, &mut App)>;
+type ExternalDropProgress = Box<dyn Fn(usize, &mut App)>;
+type ExternalDropTarget = Box<dyn Fn(&App) -> Option<u64>>;
 
 pub(crate) type AnyMouseListener =
     Box<dyn FnMut(&dyn Any, DispatchPhase, &mut Window, &mut App) + 'static>;
@@ -1388,6 +1390,9 @@ pub struct Window {
     #[cfg(feature = "profiler")]
     window_profiler: profiler::WindowProfiler,
     last_input_modality: InputModality,
+    external_drop_progress: Option<ExternalDropProgress>,
+    external_drop_target: Option<ExternalDropTarget>,
+    external_drops: HashMap<u64, Option<u64>>,
     touch_gestures: TouchGestureRecognizer,
     touch_prediction_enabled: bool,
     long_press_timer: Option<Task<()>>,
@@ -2183,6 +2188,9 @@ impl Window {
             #[cfg(feature = "profiler")]
             window_profiler: profiler::WindowProfiler::new(handle.window_id())?,
             last_input_modality: InputModality::Mouse,
+            external_drop_progress: None,
+            external_drop_target: None,
+            external_drops: HashMap::default(),
             touch_gestures: TouchGestureRecognizer::new(
                 cx.platform
                     .gestures()
@@ -3331,6 +3339,23 @@ impl Window {
     /// Returns whether the given entity has captured the current long press.
     pub fn has_long_press_capture<T: 'static>(&self, entity: &Entity<T>) -> bool {
         self.long_press_capture == Some(entity.entity_id())
+    }
+
+    /// Observe how many native file drops this window is waiting to receive.
+    pub fn on_external_drop_progress(&mut self, callback: impl Fn(usize, &mut App) + 'static) {
+        self.external_drop_progress = Some(Box::new(callback));
+    }
+
+    /// Provide the document identity for a deferred native drop. A drop
+    /// started in one document is discarded if this window now shows another.
+    pub fn set_external_drop_target(&mut self, target: impl Fn(&App) -> Option<u64> + 'static) {
+        self.external_drop_target = Some(Box::new(target));
+    }
+
+    fn notify_external_drop_progress(&self, cx: &mut App) {
+        if let Some(callback) = &self.external_drop_progress {
+            callback(self.external_drops.len(), cx);
+        }
     }
 
     /// The current state of the keyboard's modifiers
@@ -6476,6 +6501,33 @@ impl Window {
                         click_count: 1,
                     })
                 }
+                FileDropEvent::Receiving { id } => {
+                    let target = self
+                        .external_drop_target
+                        .as_ref()
+                        .and_then(|target| target(cx));
+                    self.external_drops.insert(id, target);
+                    self.notify_external_drop_progress(cx);
+                    PlatformInput::FileDrop(file_drop)
+                }
+                FileDropEvent::ReceiveFailed { id } => {
+                    self.external_drops.remove(&id);
+                    self.notify_external_drop_progress(cx);
+                    PlatformInput::FileDrop(file_drop)
+                }
+                FileDropEvent::Received { id, .. } => {
+                    let target = self
+                        .external_drop_target
+                        .as_ref()
+                        .and_then(|target| target(cx));
+                    let original = self.external_drops.remove(&id);
+                    self.notify_external_drop_progress(cx);
+                    if original == Some(target) {
+                        PlatformInput::FileDrop(file_drop)
+                    } else {
+                        PlatformInput::FileDrop(FileDropEvent::ReceiveFailed { id })
+                    }
+                }
                 FileDropEvent::Exited => {
                     if !cx.hand_restored_drag_to_platform(self.handle.window_id()) {
                         cx.active_drag.take();
@@ -6508,7 +6560,29 @@ impl Window {
             PlatformInput::KeyDown(_) | PlatformInput::KeyUp(_) => event,
         };
 
-        if let Some(any_mouse_event) = event.mouse_event() {
+        if let PlatformInput::FileDrop(
+            drop @ FileDropEvent::Received {
+                position,
+                modifiers,
+                ..
+            },
+        ) = &event
+        {
+            // The file can arrive during a newer gesture. Use the release
+            // point for hit testing without changing that gesture or focus.
+            let old_position = mem::replace(&mut self.mouse_position, *position);
+            let old_modifiers = mem::replace(&mut self.modifiers, *modifiers);
+            let hit_test = self.rendered_frame.hit_test(*position);
+            let old_hit_test = mem::replace(&mut self.mouse_hit_test, hit_test);
+            let capture = self.captured_hitbox.take();
+            let modality = mem::replace(&mut self.last_input_modality, InputModality::Mouse);
+            self.dispatch_mouse_listeners(drop, cx);
+            self.mouse_position = old_position;
+            self.modifiers = old_modifiers;
+            self.mouse_hit_test = old_hit_test;
+            self.captured_hitbox = capture;
+            self.last_input_modality = modality;
+        } else if let Some(any_mouse_event) = event.mouse_event() {
             self.dispatch_mouse_event(any_mouse_event, cx);
         } else if let Some(any_key_event) = event.keyboard_event() {
             self.dispatch_key_event(any_key_event, cx);
@@ -6740,30 +6814,7 @@ impl Window {
             return;
         }
 
-        let mut mouse_listeners = mem::take(&mut self.rendered_frame.mouse_listeners);
-
-        // Capture phase, events bubble from back to front. Handlers for this phase are used for
-        // special purposes, such as detecting events outside of a given Bounds.
-        for listener in &mut mouse_listeners {
-            let listener = listener.as_mut().unwrap();
-            listener(event, DispatchPhase::Capture, self, cx);
-            if !cx.propagate_event {
-                break;
-            }
-        }
-
-        // Bubble phase, where most normal handlers do their work.
-        if cx.propagate_event {
-            for listener in mouse_listeners.iter_mut().rev() {
-                let listener = listener.as_mut().unwrap();
-                listener(event, DispatchPhase::Bubble, self, cx);
-                if !cx.propagate_event {
-                    break;
-                }
-            }
-        }
-
-        self.rendered_frame.mouse_listeners = mouse_listeners;
+        self.dispatch_mouse_listeners(event, cx);
 
         if cx.has_active_drag() {
             if event.is::<MouseMoveEvent>() {
@@ -6788,6 +6839,33 @@ impl Window {
         {
             self.notify_pointer_observers(PointerChangeCause::Input, cx);
         }
+    }
+
+    fn dispatch_mouse_listeners(&mut self, event: &dyn Any, cx: &mut App) {
+        let mut mouse_listeners = mem::take(&mut self.rendered_frame.mouse_listeners);
+
+        // Capture phase, events bubble from back to front. Handlers for this phase are used for
+        // special purposes, such as detecting events outside of a given Bounds.
+        for listener in &mut mouse_listeners {
+            let listener = listener.as_mut().unwrap();
+            listener(event, DispatchPhase::Capture, self, cx);
+            if !cx.propagate_event {
+                break;
+            }
+        }
+
+        // Bubble phase, where most normal handlers do their work.
+        if cx.propagate_event {
+            for listener in mouse_listeners.iter_mut().rev() {
+                let listener = listener.as_mut().unwrap();
+                listener(event, DispatchPhase::Bubble, self, cx);
+                if !cx.propagate_event {
+                    break;
+                }
+            }
+        }
+
+        self.rendered_frame.mouse_listeners = mouse_listeners;
     }
 
     fn dispatch_key_event(&mut self, event: &dyn Any, cx: &mut App) {

@@ -30,13 +30,14 @@ use std::{cell::Cell, rc::Weak};
 use crate::{
     Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, AppContext, Bounds, ClickEvent,
     CursorStyle, DispatchPhase, Display, Element, ElementId, Entity, EntityId, ExternalDragPayload,
-    FocusHandle, Global, GlobalElementId, Hitbox, HitboxBehavior, HitboxId, InspectorElementId,
-    IntoElement, IsZero, KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent,
-    LayoutId, ModifiersChangedEvent, MouseButton, MouseClickEvent, MouseDownEvent, MouseExitEvent,
-    MouseMoveEvent, MousePressureEvent, MouseUpEvent, OngoingScroll, Overflow, ParentElement,
-    PinchEvent, Pixels, Point, PointerChangeCause, Render, ScrollWheelEvent, SharedString, Size,
-    Style, StyleRefinement, StyleTransitionContext, StyleTransitionState, StyleTransitions, Styled,
-    Task, TooltipId, Visibility, Window, WindowControlArea, point, px, size,
+    ExternalPaths, FileDropEvent, FocusHandle, Global, GlobalElementId, Hitbox, HitboxBehavior,
+    HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext, KeyDownEvent, KeyUpEvent,
+    KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent, MouseButton,
+    MouseClickEvent, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent,
+    MouseUpEvent, OngoingScroll, Overflow, ParentElement, PinchEvent, Pixels, Point,
+    PointerChangeCause, Render, ScrollWheelEvent, SharedString, Size, Style, StyleRefinement,
+    StyleTransitionContext, StyleTransitionState, StyleTransitions, Styled, Task, TooltipId,
+    Visibility, Window, WindowControlArea, point, px, size,
 };
 use collections::HashMap;
 use gpui_util::ResultExt;
@@ -3731,60 +3732,78 @@ impl Interactivity {
 
         if !drop_listeners.is_empty() {
             let hitbox = hitbox.clone();
-            window.on_mouse_event({
-                move |evt: &MouseUpEvent, phase, window, cx| {
+            let drop_at = Rc::new(
+                move |evt: &MouseUpEvent,
+                      received: Option<&ExternalPaths>,
+                      window: &mut Window,
+                      cx: &mut App| {
                     if disabled {
                         return;
                     }
-
-                    if !phase.bubble() {
-                        return;
-                    }
-
-                    let drag_value = match cx.active_drag() {
-                        None => return,
-                        Some(drag) => drag.value.clone(),
+                    let active_drag = received
+                        .is_none()
+                        .then(|| cx.active_drag())
+                        .flatten()
+                        .map(|drag| drag.value.clone());
+                    let drag_value: &dyn Any = match (received, active_drag.as_ref()) {
+                        (Some(paths), _) => paths,
+                        (None, Some(drag)) => drag.as_ref(),
+                        (None, None) => return,
                     };
 
-                    // Testing whether the element will be able to receive, regardless of if its hitbox is hovered.
-                    // Elements that override this can check if the hitbox is hovered, manually (or via interactivity api).
-                    if let Some(predicate) = &can_drop_predicate {
-                        if !predicate(drag_value.as_ref(), &hitbox, window, cx) {
-                            return;
-                        }
+                    if let Some(predicate) = &can_drop_predicate
+                        && !predicate(drag_value, &hitbox, window, cx)
+                    {
+                        return;
                     }
-
-                    let drag_state_type = drag_value.as_ref().type_id();
+                    let drag_state_type = drag_value.type_id();
                     for (recv_drop_type, listener) in &drop_listeners {
                         if *recv_drop_type != drag_state_type {
                             continue;
                         }
-
-                        // Test whether the DropListener api can receive the payload
-                        // (which may or may not test the hitbox being hovered).
                         if let Some(predicate) = &listener.can_drop {
-                            if !predicate(drag_value.as_ref(), &hitbox, window, cx) {
+                            if !predicate(drag_value, &hitbox, window, cx) {
                                 continue;
                             }
-                        }
-                        // Finally, if the element does override can_drop and the listener doesn't,
-                        // then we only still permit drop here if the hitbox is hovered.
-                        // This allows both previous predicates to override this check if they see fit
-                        // (or implement it manually or via interactivity).
-                        else if !hitbox.is_hovered(window) {
+                        } else if !hitbox.is_hovered(window) {
                             continue;
                         }
-
-                        let drag_value =
-                            cx.stop_drag(window).expect("already confirmed drag exists");
-
+                        if received.is_none() {
+                            cx.stop_drag(window);
+                        }
                         if let Some(predicate) = &listener.on_drop {
-                            predicate(drag_value.as_ref(), evt, window, cx);
+                            predicate(drag_value, evt, window, cx);
                         }
                         window.refresh();
                         cx.stop_propagation();
                         break;
                     }
+                },
+            );
+            window.on_mouse_event({
+                let drop_at = drop_at.clone();
+                move |evt: &MouseUpEvent, phase, window, cx| {
+                    if phase.bubble() {
+                        drop_at(evt, None, window, cx);
+                    }
+                }
+            });
+            window.on_mouse_event(move |evt: &FileDropEvent, phase, window, cx| {
+                if phase.bubble()
+                    && let FileDropEvent::Received {
+                        position,
+                        modifiers,
+                        paths,
+                        ..
+                    } = evt
+                {
+                    let drop = MouseUpEvent {
+                        button: MouseButton::Left,
+                        position: *position,
+                        modifiers: *modifiers,
+                        click_count: 1,
+                    };
+                    drop_at(&drop, Some(paths), window, cx);
                 }
             });
         }
