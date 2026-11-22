@@ -12,12 +12,20 @@ use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 /// Objects kept beyond those the open project needs, oldest evicted first.
-const CACHE_BUDGET: u64 = 8 << 30;
 const OBJECTS: &str = "objects";
+/// Desktop cleanup has a shared budget and observes pins from all editors.
+static IDLE_RETENTION: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn use_idle_retention() {
+    IDLE_RETENTION.store(true, Ordering::Release);
+}
 /// One writer at a time: a concurrent prune must not take another's objects.
 static CACHE: Mutex<()> = Mutex::new(());
 
@@ -201,12 +209,19 @@ pub fn for_session(
     path: Option<&Path>,
     cache: &Path,
 ) -> Result<Resolution> {
+    let budget = if IDLE_RETENTION.load(Ordering::Acquire) {
+        u64::MAX
+    } else {
+        cache
+            .parent()
+            .map_or(1_000_000_000, crate::pro_media::stored_cache_limit)
+    };
     for_session_within(
         snapshot,
         media,
         path,
         cache,
-        CACHE_BUDGET,
+        budget,
         &*crate::cloud_media::files(),
     )
 }
@@ -342,7 +357,9 @@ fn for_session_within(
         .chain(catalog.proxies.values())
         .map(PathBuf::as_path)
         .collect();
-    prune(&objects, &pinned, budget)?;
+    if budget != u64::MAX {
+        prune(&objects, &pinned, budget)?;
+    }
     Ok(Resolution {
         catalog,
         failed,
@@ -350,31 +367,61 @@ fn for_session_within(
     })
 }
 
+pub(crate) fn with_idle_cache<T>(task: impl FnOnce() -> T) -> T {
+    let _guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    task()
+}
+
 /// Remove what earlier builds left: one full copy of every project's media per
 /// open, plus partial objects from an interrupted run.
-pub fn sweep_cache(cache: &Path) -> Result<()> {
+pub fn sweep_cache(cache: &Path, idle: &impl Fn() -> bool) -> std::io::Result<u64> {
     let _writer = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let entries = match fs::read_dir(cache) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
     };
+    let mut reclaimed: u64 = 0;
     for entry in entries {
+        if !idle() {
+            return Ok(reclaimed);
+        }
         let entry = entry?;
-        if entry.file_name() != OBJECTS && entry.file_type()?.is_dir() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if (name.starts_with("app-") || name.starts_with("resolved-"))
+            && entry.file_type()?.is_dir()
+            && fs::read_dir(entry.path())?.all(|asset| {
+                asset.is_ok_and(|asset| {
+                    asset.file_name().to_string_lossy().starts_with("asset-")
+                        && asset.file_type().is_ok_and(|kind| kind.is_file())
+                })
+            })
+        {
+            let bytes = crate::storage::used(&entry.path());
+            if !idle() {
+                return Ok(reclaimed);
+            }
             fs::remove_dir_all(entry.path())?;
+            reclaimed = reclaimed.saturating_add(bytes);
         }
     }
     let objects = cache.join(OBJECTS);
-    if objects.is_dir() {
+    if fs::symlink_metadata(&objects).is_ok_and(|meta| meta.is_dir()) {
         for entry in fs::read_dir(objects)? {
+            if !idle() {
+                return Ok(reclaimed);
+            }
             let entry = entry?;
-            if entry.file_name().to_string_lossy().ends_with(".part") {
+            if entry.file_name().to_string_lossy().ends_with(".part")
+                && entry.file_type()?.is_file()
+            {
+                let bytes = crate::storage::used(&entry.path());
                 fs::remove_file(entry.path())?;
+                reclaimed = reclaimed.saturating_add(bytes);
             }
         }
     }
-    Ok(())
+    Ok(reclaimed)
 }
 
 #[cfg(test)]
@@ -577,10 +624,10 @@ mod tests {
             fs::write(cache.join(legacy).join("asset-0.png"), b"copy").unwrap();
         }
         fs::write(cache.join(OBJECTS).join(".x.png.part"), b"partial").unwrap();
-        sweep_cache(&cache).unwrap();
+        sweep_cache(&cache, &|| true).unwrap();
         assert_eq!(objects(&cache), [resolved.catalog.originals["a"].clone()]);
         assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
-        sweep_cache(&directory.path().join("absent")).unwrap();
+        sweep_cache(&directory.path().join("absent"), &|| true).unwrap();
     }
 }
 

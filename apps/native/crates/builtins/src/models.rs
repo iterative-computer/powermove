@@ -981,7 +981,12 @@ impl Backend {
         if let Some(rows) = publication["rows"].as_array_mut() {
             rows.extend(timeline_rows);
             rows.extend(shortcut_rows);
+            let cache_limit = rows
+                .iter()
+                .position(|row| row["id"] == "media.cacheLimit")
+                .map(|index| rows.remove(index));
             rows.extend(storage_rows);
+            rows.extend(cache_limit);
             if let Some(version) = self.native.facts["settingsVersion"].as_str() {
                 rows.push(
                     json!({"id":"about.version","section":"about","group":"Powermove",

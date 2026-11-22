@@ -518,6 +518,7 @@ fn main() -> Result<()> {
             journal_root: Some(worker_profile.join("journals")),
             text: Some(text_host::text_host(&text_fonts)),
             backup_root: Some(worker_profile.join("backups")),
+            defer_backup_retention: true,
             write_coordinator: Some(file_coordination::system()),
             trash: Some(file_coordination::trash()),
             idle_memory_relief: Some(pm_engine_service::memory::pressure_relief),
@@ -593,6 +594,7 @@ fn main() -> Result<()> {
                     diag::line(serde_json::json!({"startup":"window"}));
                     diag::install_probe(cx);
                     error_log::persist(&profile, cx);
+                    storage::install_cleanup(profile.clone(), cx);
                     notifications::install(cx);
                     // Background work (the background render) waits while the
                     // person works: every press in an editor and every key.

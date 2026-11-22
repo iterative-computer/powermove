@@ -1405,14 +1405,6 @@ impl Controller {
     }
     pub fn initialize(&mut self, opening: Option<crate::entry::Pending>, cx: &mut Context<Self>) {
         self.load_recent(cx);
-        let cache = crate::media::cache_root(&self.profile);
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(error) = crate::media::sweep_cache(&cache) {
-                    eprintln!("Media cache cleanup: {error}");
-                }
-            })
-            .detach();
         match opening {
             Some(pending) => self.apply_pending(pending, cx),
             None => self.reopen_restored(cx),

@@ -187,9 +187,10 @@ impl Backend {
                 let group = match r["id"].as_str() {
                     Some("media.importToTimeline" | "media.stillDuration") => "Import",
                     Some("media.renderLimit") => "Storage",
+                    Some("media.cacheLimit") => "Powermove",
                     _ => "Proxies",
                 };
-                json!({"id":r["id"],"section":or("section","media"),"group":or("group",group),
+                json!({"id":r["id"],"section":or("section", if r["id"] == "media.cacheLimit" { "storage" } else { "media" }),"group":or("group",group),
                     "label":r["label"],"control":or("control", if r["value"].is_boolean() { "switch" } else { "choice" }),"value":r["value"],
                     "options":r["options"],"detail":r["detail"],
                     "binding":leases[r["id"].as_str().unwrap_or_default()],"disabled":false})
