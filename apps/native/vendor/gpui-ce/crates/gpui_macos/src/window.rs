@@ -940,6 +940,9 @@ struct MacWindowState {
     sync_present_requested: bool,
     // Powermove P-120: when the previous GPUI frame was drawn.
     last_draw: Option<std::time::Instant>,
+    // Powermove P-INPUT-FRAMES: when an input event (or AppKit's synchronous
+    // display) last drew a frame, so the display link's tick stands aside.
+    last_input_frame: Option<std::time::Instant>,
     closed: Arc<AtomicBool>,
     accesskit_adapter: Option<crate::composition_accessibility::Adapter>,
     // The parent window if this window is a sheet (Dialog kind)
@@ -1543,6 +1546,7 @@ impl MacWindow {
                 activated_least_once: false,
                 sync_present_requested: false,
                 last_draw: None,
+                last_input_frame: None,
                 closed: Arc::new(AtomicBool::new(false)),
                 accesskit_adapter: None,
                 sheet_parent: None,
@@ -2598,6 +2602,7 @@ impl PlatformWindow for MacWindow {
         this.last_draw = Some(now);
         let direct = this.direct_moved.is_some();
         let sync = direct
+            || input_frames() == InputFrames::Transaction
             || crate::composition::presents_with_transaction(
                 forced,
                 transaction.as_ref(),
@@ -3728,8 +3733,76 @@ unsafe extern "C" fn handle_view_event(this: &Objc2Object, _: Sel, native_event:
             callback(event);
             window_state.lock().event_callback = Some(callback);
         }
-        wake_frame(this, &window_state, was_idle);
+        if input_frames() == InputFrames::Off {
+            wake_frame(this, &window_state, was_idle);
+        } else {
+            input_frame(this, &window_state);
+        }
     }
+}
+
+/// Powermove P-INPUT-FRAMES, after NativeGPUI's patch 0002 (Apache-2.0): a
+/// measurement switch, off by default. `PM_GPUI_INPUT_FRAMES=1` draws the
+/// frame an input event dirtied inside the event, at most once per
+/// [`INPUT_FRAME_GAP`]; a display-link tick within [`INPUT_FRAME_SKIP`] of
+/// such a frame, or during a live resize (where `displayLayer:` draws every
+/// step and stamps the time as an input frame does), does nothing; and every
+/// frame presents with the transaction, `CATransaction` flushed after it.
+/// `PM_GPUI_INPUT_FRAMES=draw` keeps P-120's present policy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputFrames {
+    Off,
+    Draw,
+    Transaction,
+}
+
+fn input_frames() -> InputFrames {
+    static MODE: std::sync::OnceLock<InputFrames> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("PM_GPUI_INPUT_FRAMES").as_deref() {
+        Ok("1") => InputFrames::Transaction,
+        Ok("draw") => InputFrames::Draw,
+        _ => InputFrames::Off,
+    })
+}
+
+/// The shortest time between two frames input events draw.
+const INPUT_FRAME_GAP: Duration = Duration::from_millis(3);
+/// How long after an input frame the display link's tick stands aside.
+const INPUT_FRAME_SKIP: Duration = Duration::from_millis(8);
+
+/// The frame this event asked for, drawn now (P-INPUT-FRAMES): the refresh
+/// it lands in follows the event's time, not whether it beat the tick. A
+/// trackpad reports at 125 Hz against a 120 Hz display; frames drawn only at
+/// the tick carry zero and two scroll steps by turns where the two cross.
+fn input_frame(view: &Objc2Object, window_state: &Arc<Mutex<MacWindowState>>) {
+    let mut lock = window_state.lock();
+    // A CAMetalDisplayLink hands out its drawable only in its own update.
+    #[cfg(not(feature = "wgpu"))]
+    if lock.renderer.display_link_bound() {
+        return;
+    }
+    if !lock.frame_requested
+        || lock
+            .last_input_frame
+            .is_some_and(|at| at.elapsed() < INPUT_FRAME_GAP)
+    {
+        return;
+    }
+    lock.last_input_frame = Some(std::time::Instant::now());
+    drop(lock);
+    gpui_apple::feel::set_source("input");
+    step(view as *const Objc2Object as *mut c_void);
+    gpui_apple::feel::set_source("tick");
+}
+
+/// Whether the display link's tick has nothing to add (P-INPUT-FRAMES).
+fn tick_stands_aside(view: &Objc2Object) -> bool {
+    let in_live_resize: Bool = unsafe { msg_send![view, inLiveResize] };
+    in_live_resize.as_bool()
+        || unsafe { get_window_state(view) }
+            .lock()
+            .last_input_frame
+            .is_some_and(|at| at.elapsed() < INPUT_FRAME_SKIP)
 }
 
 /// Powermove P-IDLE-WAKE: an input that wakes an idle window (its link
@@ -4074,7 +4147,9 @@ unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
         lock.release_display_link_for_sync_present();
         let request = lock.next_frame_request();
         drop(lock);
+        gpui_apple::feel::set_source("sync");
         callback(request);
+        gpui_apple::feel::set_source("tick");
 
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
@@ -4084,6 +4159,10 @@ unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
         let direct = false;
         lock.renderer.set_presents_with_transaction(direct);
         lock.sync_present_requested = false;
+        // This frame stands in for the one the next resize event would draw.
+        if input_frames() != InputFrames::Off {
+            lock.last_input_frame = Some(std::time::Instant::now());
+        }
         lock.start_display_link();
     }
 }
@@ -4134,6 +4213,9 @@ unsafe extern "C" fn ca_display_link_step(view: &Objc2Object, _: Sel, link: &Obj
         if std::env::var_os("PM_FRAME_PACING").is_some() {
             println!("PM_GPUI_TARGET {target:.9}");
         }
+        if input_frames() != InputFrames::Off && tick_stands_aside(view) {
+            return;
+        }
         step(view as *const _ as *mut c_void);
     }
 }
@@ -4154,6 +4236,11 @@ extern "C" fn step(view: *mut c_void) {
             drop(lock);
             gpui_apple::feel::set_frame_start();
             callback(request);
+            // The transaction carrying the drawable and every AppKit change
+            // made beside it commits now, not when the run loop next idles.
+            if input_frames() == InputFrames::Transaction {
+                let _: () = msg_send![class!(CATransaction), flush];
+            }
             let mut lock = window_state.lock();
             lock.request_frame_callback = Some(callback);
             // Device recovery can demand a forced retry during presentation.
