@@ -1055,12 +1055,13 @@ impl Layout {
     ) -> Option<DropPreview> {
         // The original app ignores panel zones for a floating drag: only the
         // side columns' inserts between panels, and their strips.
-        let side = |p: &Placement| matches!(self.docks[p.dock].id.as_str(), "left" | "right");
         let only_sides = Geometry {
             panels: geometry
                 .panels
                 .iter()
-                .filter(|p| side(p))
+                .filter(|p| self.docks.get(p.dock).is_some_and(|dock| {
+                    p.group < dock.groups.len() && matches!(dock.id.as_str(), "left" | "right")
+                }))
                 .cloned()
                 .collect(),
             ..Geometry::default()
@@ -1100,6 +1101,38 @@ impl Layout {
         };
         ok.then_some(preview)
     }
+
+    /// Applies a floating drop to a copy. Adding the source panel can insert
+    /// a dock before the destination, so resolve the displayed dock by ID.
+    pub(crate) fn plan_floating_drop(
+        &self,
+        id: &str,
+        target: DropTarget,
+        panels: &Panels,
+    ) -> anyhow::Result<Self> {
+        let mut next = self.clone();
+        next.show_panel(id, panels)?;
+        let target = match target {
+            DropTarget::Split { dock, group } => {
+                let destination = self
+                    .docks
+                    .get(dock)
+                    .filter(|dock| group <= dock.groups.len())
+                    .ok_or_else(|| anyhow::anyhow!("Unknown group"))?;
+                let dock = next
+                    .docks
+                    .iter()
+                    .position(|dock| dock.id == destination.id)
+                    .ok_or_else(|| anyhow::anyhow!("Unknown dock"))?;
+                DropTarget::Split { dock, group }
+            }
+            DropTarget::Edge(_) => target,
+            _ => anyhow::bail!("Invalid floating panel target"),
+        };
+        next.move_panel_to(id, target)?;
+        Ok(next)
+    }
+
     /// The zones over panel `p` (see [`Layout::drop_target`]). `groupable`
     /// false when the dragged panel cannot join a stack (the viewer).
     fn panel_zone(
