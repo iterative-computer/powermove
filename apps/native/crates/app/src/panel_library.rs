@@ -975,7 +975,7 @@ impl Render for PanelLibrary {
                                 Some("plus"),
                                 None,
                             )
-                            .when(!saves, |d| kit.disabled(d))
+                            .when(!saves, |d| kit.disabled(d).aria_disabled(true))
                             .when(saves, |d| {
                                 d.on_click(cx.listener(|v, _, _, cx| {
                                     v.send("layout:save".into(), cx)
@@ -1028,7 +1028,7 @@ impl Render for PanelLibrary {
                                 Some("plus"),
                                 None,
                             )
-                            .when(!saves, |d| kit.disabled(d))
+                            .when(!saves, |d| kit.disabled(d).aria_disabled(true))
                             .when(saves, |d| {
                                 d.on_click(cx.listener(|v, _, _, cx| {
                                     v.send("layout:save".into(), cx)
