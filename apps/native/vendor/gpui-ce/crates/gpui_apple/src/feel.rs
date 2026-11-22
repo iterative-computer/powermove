@@ -127,6 +127,6 @@ pub fn set_source(source: &'static str) {
         *SOURCE.lock() = source;
     }
 }
-pub(crate) fn source() -> &'static str {
+pub fn source() -> &'static str {
     *SOURCE.lock()
 }

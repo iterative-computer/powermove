@@ -2530,8 +2530,9 @@ impl PlatformWindow for MacWindow {
         let trace = |path: &str, moved: bool, acquire: f64| {
             if let Some(at) = traced {
                 eprintln!(
-                    r#"PM_GPUI_DRAW {{"at":{:.4},"path":"{path}","moved":{moved},"ms":{:.3},"acquire_ms":{acquire:.3}}}"#,
+                    r#"PM_GPUI_DRAW {{"at":{:.4},"path":"{path}","src":"{}","moved":{moved},"ms":{:.3},"acquire_ms":{acquire:.3}}}"#,
                     objc2_quartz_core::CACurrentMediaTime(),
+                    gpui_apple::feel::source(),
                     at.elapsed().as_secs_f64() * 1000.,
                 );
             }
