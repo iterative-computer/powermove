@@ -50,7 +50,19 @@ impl ExportReadback {
 
 fn half_table() -> &'static [f32; 1 << 16] {
     static TABLE: OnceLock<Box<[f32; 1 << 16]>> = OnceLock::new();
-    TABLE.get_or_init(|| Box::new(std::array::from_fn(|bits| half_to_f32(bits as u16))))
+    TABLE.get_or_init(build_half_table)
+}
+
+/// The table, built straight on the heap. `Box::new(array::from_fn(..))`
+/// builds the 256 KiB array on the caller's stack first (more than once in a
+/// debug build): the first colour-picker readback on the viewer's worker
+/// thread (2 MiB stack) overflowed it.
+fn build_half_table() -> Box<[f32; 1 << 16]> {
+    (0..=u16::MAX)
+        .map(half_to_f32)
+        .collect::<Box<[f32]>>()
+        .try_into()
+        .expect("one entry per binary16 code")
 }
 
 /// `data` is valid only while mapped. The caller owns the destination, so
@@ -135,6 +147,25 @@ fn decode_mapped_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The f16 table is built on the heap: a thread with a 64 KiB stack
+    /// builds it, and every entry is its code's value.
+    #[test]
+    fn the_half_table_builds_on_a_small_stack() {
+        let table = std::thread::Builder::new()
+            .stack_size(64 << 10)
+            .spawn(build_half_table)
+            .unwrap()
+            .join()
+            .unwrap();
+        for bits in 0..=u16::MAX {
+            assert_eq!(
+                table[usize::from(bits)].to_bits(),
+                half_to_f32(bits).to_bits(),
+                "{bits:#06x}"
+            );
+        }
+    }
 
     #[test]
     fn half_rows_preserve_every_bit_pattern_with_padding() {
