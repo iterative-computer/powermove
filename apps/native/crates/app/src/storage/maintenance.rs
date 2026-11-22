@@ -487,6 +487,7 @@ mod tests {
             fs::read_to_string(root.join(".synthetic-profile")).unwrap(),
             "profile-hygiene fixture v1\n"
         );
+        let allocated_before = super::super::used(&root);
         let selected = CATEGORIES.iter().map(|category| category.bucket).collect();
         let worker_root = root.clone();
         let freed = std::thread::spawn(move || {
@@ -510,20 +511,25 @@ mod tests {
                 1_000_000,
                 "legacy settings moved before deleting their snapshot"
             );
-            let freed = clean(
-                &worker_root,
-                &selected,
-                CACHE_DEFAULT,
-                &BTreeSet::new(),
-                &|| true,
-            )
+            let freed = super::super::worker::reclaim(&worker_root, true, || {
+                clean(
+                    &worker_root,
+                    &selected,
+                    CACHE_DEFAULT,
+                    &BTreeSet::new(),
+                    &|| true,
+                )
+            })
             .unwrap();
             super::super::worker::record_first(&worker_root, freed).unwrap();
             freed
         })
         .join()
         .unwrap();
-        assert!(freed > 0);
+        assert!(
+            freed <= allocated_before,
+            "the receipt cannot exceed allocated bytes in the entire sparse fixture"
+        );
         assert!(!root.join("kernel-state.json").exists());
         assert!(!root.join("kernel-state.json.tmp-w-synthetic").exists());
         for path in [

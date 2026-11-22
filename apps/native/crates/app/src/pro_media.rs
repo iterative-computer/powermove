@@ -2870,6 +2870,27 @@ mod erased {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn profile_hygiene_cache_limit_persists_with_the_media_preferences() {
+        let root = tempfile::tempdir().unwrap();
+        let mut preferences = super::Preferences::default();
+        assert_eq!(super::stored_cache_limit(root.path()), 1_000_000_000);
+        preferences
+            .set("media.cacheLimit", &serde_json::json!(2))
+            .unwrap();
+        assert!(
+            preferences
+                .set("media.cacheLimit", &serde_json::json!(0))
+                .is_err()
+        );
+        super::write_atomic(
+            &super::settings_path(root.path()),
+            &serde_json::to_vec(&preferences).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(super::stored_cache_limit(root.path()), 2_000_000_000);
+    }
+
     use super::*;
 
     fn service() -> (tempfile::TempDir, ProMedia) {

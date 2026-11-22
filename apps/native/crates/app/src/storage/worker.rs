@@ -59,6 +59,19 @@ pub(super) fn record_first(profile: &Path, bytes: u64) -> std::io::Result<()> {
     fs::File::open(profile)?.sync_all()
 }
 
+/// The receipt uses the same disk-block measurement as Settings › Storage.
+pub(super) fn reclaim(
+    profile: &Path,
+    measure: bool,
+    cleanup: impl FnOnce() -> anyhow::Result<u64>,
+) -> anyhow::Result<u64> {
+    let before = measure.then(|| super::used(profile));
+    let removed = cleanup()?;
+    Ok(before.map_or(removed, |before| {
+        before.saturating_sub(super::used(profile))
+    }))
+}
+
 pub(crate) fn start(profile: PathBuf, cx: &mut gpui::App) {
     crate::media::use_idle_retention();
     let mut last = None::<Instant>;
@@ -117,7 +130,9 @@ pub(crate) fn start(profile: PathBuf, cx: &mut gpui::App) {
                     async move {
                         let first = first_reclaimed(&profile).is_none();
                         let limit = crate::pro_media::stored_cache_limit(&profile);
-                        let freed = maintenance::clean(&profile, &buckets, limit, &pinned, &idle)?;
+                        let freed = reclaim(&profile, first, || {
+                            maintenance::clean(&profile, &buckets, limit, &pinned, &idle)
+                        })?;
                         let complete = idle();
                         let cumulative = initial_freed.saturating_add(freed);
                         if first && automatic && complete {
