@@ -52,7 +52,7 @@ fn open(
         view.clock = Some(1.);
         view
     });
-    cx.update(|window, cx| window.focus(&view.read(cx).focus_handle(), cx));
+    view.update_in(cx, |view, window, cx| view.hold_focus(window, cx));
     cx.run_until_parked();
     (view, cx, log)
 }
@@ -71,6 +71,66 @@ fn return_and_a_click_reach_the_default_action() {
     let (_, cx, log) = open(&mut cx, frame());
     cx.simulate_keystrokes("enter");
     click(cx, "welcome-continue");
+    assert_eq!(*log.borrow(), ["continue", "continue"]);
+}
+/// PM-630: the first run's driver answers an action by updating the window the
+/// action came from, a button that leaves with its step leaves the keys with
+/// the window, and a finished step closes it.
+#[test]
+fn an_action_can_update_and_close_its_own_window() {
+    let mut cx = TestAppContext::single();
+    let handle: Rc<RefCell<Option<gpui::WindowHandle<WelcomeView>>>> = Default::default();
+    let on_action = Rc::new({
+        let handle = handle.clone();
+        move |id: &str, cx: &mut gpui::App| {
+            let handle = handle.borrow().expect("the window is open");
+            handle
+                .update(cx, |view, window, cx| {
+                    if id == "quit" {
+                        window.remove_window();
+                    }
+                    let mut next = frame();
+                    next.title = id.into();
+                    if id == "back" {
+                        next.back = None;
+                    }
+                    view.set_frame(next, cx);
+                })
+                .expect("the action runs outside its window's update");
+        }
+    });
+    let (view, cx) = cx.add_window_view(|_, cx| WelcomeView::new(tokens(), frame(), on_action, cx));
+    *handle.borrow_mut() = cx.update(|window, _| window.window_handle().downcast());
+    view.update_in(cx, |view, window, cx| view.hold_focus(window, cx));
+    let title = |cx: &mut VisualTestContext| view.read_with(cx, |view, _| view.frame.title.clone());
+    click(cx, "welcome-continue");
+    assert_eq!(title(cx), "continue");
+    cx.simulate_keystrokes("right");
+    assert_eq!(title(cx), "choose:tracks");
+    click(cx, "welcome-back");
+    assert_eq!(title(cx), "back");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(title(cx), "continue");
+    click(cx, "welcome-quit");
+    assert!(cx.windows().is_empty());
+}
+
+/// A clicked button keeps the keys (GPUI focuses it), and the next step's
+/// button of the same name inherits them: Return released there must not act
+/// a second time as that button's own press.
+#[test]
+fn return_after_a_click_acts_once() {
+    let mut cx = TestAppContext::single();
+    let (_, cx, log) = open(&mut cx, frame());
+    click(cx, "welcome-continue");
+    let keystroke = gpui::Keystroke::parse("enter").unwrap();
+    cx.simulate_event(gpui::KeyDownEvent {
+        keystroke: keystroke.clone(),
+        is_held: false,
+        prefer_character_input: false,
+    });
+    cx.simulate_event(gpui::KeyUpEvent { keystroke });
+    cx.run_until_parked();
     assert_eq!(*log.borrow(), ["continue", "continue"]);
 }
 #[test]
