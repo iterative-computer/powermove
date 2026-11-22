@@ -91,6 +91,11 @@ pub mod grants {
         );
         Ok(Grant(token))
     }
+    /// Provider homes are in use while any launched run is live.
+    pub fn any_live() -> bool {
+        !table().lock().unwrap().is_empty()
+    }
+
     /// Build slots follow the owning process lifetime without retaining its token.
     pub fn run_live(run: &str) -> bool {
         table()

@@ -228,6 +228,7 @@ mod facts_io_tests {
         let storage = || StorageIo {
             generated: Some(42),
             electron: None,
+            cache_limit: 0,
         };
         let mut facts = json!({"storageSettings": null,
             "settingsHeader": {"path": null, "poster": null, "projects": []}});

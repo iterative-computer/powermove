@@ -66,6 +66,11 @@ fn cancellers() -> &'static Mutex<std::collections::HashMap<u64, Canceller>> {
         std::sync::OnceLock::new();
     CANCELS.get_or_init(Default::default)
 }
+/// A running job can own export inputs before its encoder starts.
+pub(crate) fn holding_export_inputs() -> bool {
+    !cancellers().lock().unwrap().is_empty()
+}
+
 /// Background Tasks ▸ Cancel. False if no running export has that task.
 pub fn cancel_export(id: pm_promedia::tasks::TaskId) -> bool {
     match cancellers().lock().unwrap().get(&id.0) {

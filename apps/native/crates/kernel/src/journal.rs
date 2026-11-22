@@ -616,6 +616,129 @@ pub fn sessions(project_dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Expires abandoned recovery points while preserving every active session
+/// and the predecessors of any discarded session still within retention.
+pub fn tidy_discarded(
+    root: &Path,
+    now: std::time::SystemTime,
+    limit: u64,
+    idle: impl Fn() -> bool,
+) -> io::Result<u64> {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::time::Duration;
+    const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+    let regular_directory =
+        |path: &Path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
+    let mut archived = Vec::new();
+    let mut active_bytes: u64 = 0;
+    if !regular_directory(root) {
+        return Ok(0);
+    }
+    for entry in fs::read_dir(root)? {
+        let project = entry?.path();
+        if !idle() {
+            return Ok(0);
+        }
+        if !regular_directory(&project) {
+            continue;
+        }
+        for active in sessions(&project)
+            .into_iter()
+            .filter(|dir| regular_directory(dir))
+        {
+            active_bytes = active_bytes.saturating_add(journal_bytes(&active, &idle).unwrap_or(0));
+        }
+        let discarded = project.join("discarded");
+        if regular_directory(&discarded) {
+            for dir in sessions(&discarded)
+                .into_iter()
+                .filter(|dir| regular_directory(dir))
+            {
+                let Some(bytes) = journal_bytes(&dir, &idle) else {
+                    if !idle() {
+                        return Ok(0);
+                    }
+                    continue;
+                };
+                let modified = fs::symlink_metadata(&dir)?.modified()?;
+                let old = now.duration_since(modified).is_ok_and(|age| age >= MAX_AGE);
+                archived.push((modified, dir, bytes, old));
+            }
+        }
+    }
+    // Newer recovery points have first claim on the budget. Older sessions
+    // are retained only if a newer recovery point depends on them.
+    archived.sort_unstable_by(|a, b| (&b.0, &b.1).cmp(&(&a.0, &a.1)));
+    let sizes: BTreeMap<_, _> = archived
+        .iter()
+        .map(|(_, path, size, _)| (path.clone(), *size))
+        .collect();
+    let mut kept = BTreeSet::new();
+    let mut remaining = limit.saturating_sub(active_bytes);
+    for (_, path, _, old) in &archived {
+        if *old || kept.contains(path) {
+            continue;
+        }
+        let predecessors = chain(path);
+        let bytes: u64 = predecessors
+            .iter()
+            .filter(|path| !kept.contains(*path))
+            .map(|path| sizes.get(path).copied().unwrap_or(0))
+            .sum();
+        if bytes <= remaining {
+            kept.extend(predecessors);
+            remaining -= bytes;
+        }
+    }
+    let mut freed: u64 = 0;
+    // Session names encode creation order, including continuation order.
+    // Retire descendants before predecessors.
+    archived.sort_unstable_by(|a, b| b.1.file_name().cmp(&a.1.file_name()));
+    for (_, path, size, _) in archived {
+        if !idle() {
+            break;
+        }
+        if kept.contains(&path) {
+            continue;
+        }
+        match fs::remove_dir_all(&path) {
+            Ok(()) => freed = freed.saturating_add(size),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(freed)
+}
+
+/// Only recognized regular checkpoint and log files belong to a session
+/// selected for cleanup. Unknown work and symlinks protect the directory.
+fn journal_bytes(dir: &Path, idle: &impl Fn() -> bool) -> Option<u64> {
+    let mut bytes: u64 = 0;
+    for entry in fs::read_dir(dir).ok()? {
+        if !idle() {
+            return None;
+        }
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        let name = name.to_str()?;
+        let part = name
+            .strip_prefix("checkpoint-")
+            .and_then(|n| n.strip_suffix(".json"))
+            .or_else(|| {
+                name.strip_prefix("journal-")
+                    .and_then(|n| n.strip_suffix(".log"))
+            })?;
+        if part.len() < 8
+            || !part.bytes().all(|b| b.is_ascii_digit())
+            || !entry.file_type().ok()?.is_file()
+        {
+            return None;
+        }
+        bytes = bytes.saturating_add(entry.metadata().ok()?.len());
+    }
+    (bytes > 0).then_some(bytes)
+}
+
 /// The prefix of a session folder still being created.
 const STAGING: &str = ".creating-";
 
@@ -2249,4 +2372,32 @@ fn an_archived_predecessor_is_durable_where_it_went_before_it_leaves() {
         "the source removal was made durable first: {synced:?}"
     );
     let _ = fs::remove_dir_all(&root);
+}
+
+#[cfg(test)]
+#[test]
+fn profile_hygiene_discards_expired_journals_but_keeps_the_active_one() {
+    use std::time::{Duration, SystemTime};
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    let old = project.join("discarded/s000000000000000000000001-0000000001");
+    let recent = project.join("discarded/s000000000000000000000002-0000000001");
+    let active = project.join("s000000000000000000000003-0000000001");
+    for path in [&old, &recent, &active] {
+        fs::create_dir_all(path).unwrap();
+        fs::write(path.join(checkpoint_name(0)), [0; 1024]).unwrap();
+    }
+    let now = SystemTime::now();
+    fs::File::open(&old)
+        .unwrap()
+        .set_modified(now - Duration::from_secs(8 * 86400))
+        .unwrap();
+    assert_eq!(
+        tidy_discarded(root.path(), now, 2048, || true).unwrap(),
+        1024
+    );
+    assert!(!old.exists());
+    assert!(recent.is_dir() && active.is_dir());
+    assert_eq!(tidy_discarded(root.path(), now, 1, || true).unwrap(), 1024);
+    assert!(!recent.exists() && active.is_dir());
 }

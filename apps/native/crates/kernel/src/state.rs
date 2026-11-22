@@ -179,7 +179,8 @@ impl StateSnapshot {
         }
         // Per-provider model preferences and opaque per-extension storage use
         // their existing dynamic library keys. Never flatten or discard them.
-        for k in store.keys()? {
+        let keys = store.keys()?;
+        for k in &keys {
             if let crate::library::StoreKey::Dynamic { prefix, id } = k
                 && matches!(
                     prefix.as_str(),
@@ -204,6 +205,22 @@ impl StateSnapshot {
                         source: Value::Null,
                     },
                 );
+            }
+        }
+        for key in keys {
+            if let crate::library::StoreKey::Dynamic { prefix, id } = key
+                && prefix == "kernelExtension"
+                && let Some(record) = store.read(&format!("{prefix}.{id}"))?
+            {
+                let entry = read_extension(&record).map_err(std::io::Error::other)?;
+                if extension_key(&entry.id) != format!("{prefix}.{id}") {
+                    return Err(std::io::Error::other("Extension record identity mismatch").into());
+                }
+                let mut entry = entry;
+                if let Some(enabled) = s.extensions.get(&entry.id) {
+                    entry.enabled = enabled.enabled;
+                }
+                Arc::make_mut(&mut s.extensions).insert(entry.id.clone(), entry);
             }
         }
         Ok(s)
@@ -618,31 +635,25 @@ pub struct StateAck {
 }
 
 impl StateSnapshot {
-    pub(crate) fn durable_value(&self) -> Value {
-        use pm_model::json::Map;
-        let settings: Map = self
-            .settings
-            .iter()
-            .map(|(k, v)| (k.clone().into(), v.clone()))
-            .collect();
-        let extensions = self
-            .extensions
-            .values()
-            .map(|e| {
-                let mut m = Map::new();
-                m.insert("id", Value::from(e.id.clone()));
-                m.insert("installed", Value::Bool(e.installed));
-                m.insert("enabled", Value::Bool(e.enabled));
-                m.insert("version", Value::from(e.version.clone()));
-                m.insert("source", e.source.clone());
-                Value::Object(m)
+    /// Native metadata is stored one record per extension, with the file name
+    /// independent of punctuation in the extension id.
+    pub(crate) fn durable_extensions_since(&self, old: &Self) -> Vec<(String, Option<Value>)> {
+        if Arc::ptr_eq(&self.extensions, &old.extensions) {
+            return Vec::new();
+        }
+        old.extensions
+            .keys()
+            .chain(self.extensions.keys())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|id| {
+                let new = self.extensions.get(id);
+                (new != old.extensions.get(id))
+                    .then(|| (extension_key(id), new.map(extension_value)))
             })
-            .collect();
-        let mut root = Map::new();
-        root.insert("settings", Value::Object(settings));
-        root.insert("extensions", Value::Array(extensions));
-        Value::Object(root)
+            .collect()
     }
+
     pub(crate) fn restore_durable(&mut self, v: &Value) -> Result<(), String> {
         let settings = v
             .get("settings")
@@ -665,34 +676,51 @@ impl StateSnapshot {
             .and_then(Value::as_array)
             .ok_or("Invalid extension registry record")?
         {
-            let id = e
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or("Invalid extension id")?
-                .to_owned();
-            Arc::make_mut(&mut self.extensions).insert(
-                id.clone(),
-                ExtensionEntry {
-                    id,
-                    installed: e
-                        .get("installed")
-                        .and_then(Value::as_bool)
-                        .ok_or("Invalid install state")?,
-                    enabled: e
-                        .get("enabled")
-                        .and_then(Value::as_bool)
-                        .ok_or("Invalid enable state")?,
-                    version: e
-                        .get("version")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .into(),
-                    source: e.get("source").cloned().unwrap_or(Value::Null),
-                },
-            );
+            let entry = read_extension(e)?;
+            Arc::make_mut(&mut self.extensions).insert(entry.id.clone(), entry);
         }
         Ok(())
     }
+}
+
+fn extension_key(id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("kernelExtension.{:x}", Sha256::digest(id.as_bytes()))
+}
+
+fn extension_value(entry: &ExtensionEntry) -> Value {
+    use pm_model::json::Map;
+    let mut record = Map::new();
+    record.insert("id", Value::from(entry.id.clone()));
+    record.insert("installed", Value::Bool(entry.installed));
+    record.insert("enabled", Value::Bool(entry.enabled));
+    record.insert("version", Value::from(entry.version.clone()));
+    record.insert("source", entry.source.clone());
+    Value::Object(record)
+}
+
+fn read_extension(record: &Value) -> Result<ExtensionEntry, String> {
+    Ok(ExtensionEntry {
+        id: record
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("Invalid extension id")?
+            .into(),
+        installed: record
+            .get("installed")
+            .and_then(Value::as_bool)
+            .ok_or("Invalid install state")?,
+        enabled: record
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .ok_or("Invalid enable state")?,
+        version: record
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .into(),
+        source: record.get("source").cloned().unwrap_or(Value::Null),
+    })
 }
 
 impl UiState {

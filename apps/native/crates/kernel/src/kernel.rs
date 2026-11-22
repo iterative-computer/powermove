@@ -37,6 +37,8 @@ pub struct KernelConfig {
     /// Previous versions (`<root>/<project id>/`). Every production host sets
     /// this: a save without it deletes the file it replaces.
     pub backup_root: Option<PathBuf>,
+    /// The host has an idle, profile-wide backup retention worker.
+    pub defer_backup_retention: bool,
     /// Where local project locks live (`locks::lock_project`). `None`: the
     /// user's lock folder ([`crate::locks::user_lock_root`]), which every
     /// build and profile of the app shares, so two of them never write one
@@ -507,11 +509,14 @@ impl Kernel {
     /// format that was, so upgrading PMV3 or JSON preserves the original.
     pub(crate) fn save_options(&self, project: &str) -> crate::SaveOptions {
         // Project ids are validated path components at open.
-        let backups = self
-            .config
-            .backup_root
-            .as_ref()
-            .map(|root| crate::project_io::BackupPolicy::new(root.join(project)));
+        let backups = self.config.backup_root.as_ref().map(|root| {
+            let mut policy = crate::project_io::BackupPolicy::new(root.join(project));
+            if self.config.defer_backup_retention {
+                policy.max_versions = usize::MAX;
+                policy.max_bytes = u64::MAX;
+            }
+            policy
+        });
         crate::SaveOptions {
             backups,
             hooks: self.publish_hooks.clone(),
@@ -962,52 +967,22 @@ impl Kernel {
             }
         }
         let (next, changes) = self.state.stage(tx).map_err(KernelFailure::Storage)?;
-        for change in &changes {
-            if let crate::state::StateChange::Setting {
-                key,
-                value: Some(value),
-            } = change
-                && pm_model::json::to_canonical_string(value).len()
-                    > crate::library::value_limit(key)
-            {
-                return Err(KernelFailure::Storage(
-                    "Settings value exceeds its size limit".into(),
-                ));
-            }
-        }
-        if let Some(writer) = &self.library
-            && changes.iter().any(|c| {
-                matches!(
-                    c,
-                    crate::state::StateChange::Setting { .. }
-                        | crate::state::StateChange::Extensions
-                )
-            })
-        {
-            // Durable state intent before updating legacy slots. On restart this
-            // rolls the settings transaction forward, including deletions.
-            let bytes = pm_model::json::to_canonical_string(&next.durable_value());
-            crate::persistence::atomic_write(
-                &writer
-                    .store()
-                    .dir()
-                    .parent()
-                    .unwrap()
-                    .join("kernel-state.json"),
-                bytes.as_bytes(),
-            )
-            .map_err(|e| KernelFailure::Storage(e.to_string()))?;
-            for change in &changes {
-                if let crate::state::StateChange::Setting { key, value } = change {
-                    match value {
-                        Some(v) => writer.set(key, v.clone()),
-                        None => writer.delete(key),
-                    }
-                    .map_err(|e| KernelFailure::Storage(e.to_string()))?;
+        let mut writes: Vec<_> = changes
+            .iter()
+            .filter_map(|change| match change {
+                crate::state::StateChange::Setting { key, value } => {
+                    Some((key.clone(), value.clone()))
                 }
-            }
+                _ => None,
+            })
+            .collect();
+        writes.extend(next.durable_extensions_since(&self.state));
+        if let Some(writer) = &self.library {
             writer
-                .flush()
+                .write_settings(writes)
+                .map_err(|e| KernelFailure::Storage(e.to_string()))?;
+        } else {
+            crate::persistence::validate_values(&writes)
                 .map_err(|e| KernelFailure::Storage(e.to_string()))?;
         }
         self.state = next;

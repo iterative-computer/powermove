@@ -7927,3 +7927,144 @@ fn two_projects_on_one_workspace_keep_each_others_changes() {
     .unwrap();
     assert_eq!(k.state().settings["workspaces"], before);
 }
+
+#[test]
+fn profile_hygiene_bounds_settings_writes_and_preserves_large_values() {
+    let dir = common::TempDir::new("profile-settings-budget");
+    let large = Value::from("a".repeat(80 * 1024));
+    let mut k = kernel(&dir.0);
+    for index in 0..1_000 {
+        k.state_transaction(state(vec![setting(
+            &format!("ext.fixture-{index}"),
+            Some(large.clone()),
+        )]))
+        .unwrap();
+        let bytes = fs::metadata(dir.path("kernel-state.json")).map_or(0, |meta| meta.len());
+        assert!(
+            bytes <= 256 * 1024,
+            "settings write {index} used {bytes} bytes"
+        );
+        assert!(bytes < 1024 * 1024, "kernel state used {bytes} bytes");
+    }
+    drop(k);
+    let k = kernel(&dir.0);
+    assert_eq!(k.state().settings.get("ext.fixture-0"), Some(&large));
+    assert_eq!(k.state().settings.get("ext.fixture-999"), Some(&large));
+}
+
+#[test]
+fn profile_hygiene_removes_interrupted_settings_writes_on_attach() {
+    let dir = common::TempDir::new("profile-stale-settings");
+    let stale = dir.path("kernel-state.json.tmp-w-old");
+    let unrelated = dir.path("project.tmp-w-old");
+    fs::write(&stale, b"partial").unwrap();
+    fs::write(&unrelated, b"keep").unwrap();
+    let _k = kernel(&dir.0);
+    assert!(!stale.exists());
+    assert!(unrelated.is_file());
+}
+
+#[test]
+fn profile_hygiene_upgrades_legacy_snapshot_without_losing_deletions_or_extension_metadata() {
+    let dir = common::TempDir::new("profile-settings-upgrade");
+    let store = writer(&dir.0);
+    store.set("theme", Value::from("obsolete")).unwrap();
+    store.flush().unwrap();
+    drop(store);
+    let value = "v".repeat(80 * 1024);
+    fs::write(
+        dir.path("kernel-state.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "settings": {"ext.fixture": value},
+            "extensions": [{
+                "id": "org.synthetic.extension",
+                "enabled": false,
+                "installed": true,
+                "version": "1.2.3",
+                "source": {"kind": "synthetic"}
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    // Agent-send's migration marker is the sign the record may be retired.
+    fs::write(dir.path("kernel-state.pre-agent-storage.json"), b"backup").unwrap();
+    for _ in 0..2 {
+        let k = kernel(&dir.0);
+        assert!(!k.state().settings.contains_key("theme"));
+        assert_eq!(
+            k.state().settings["ext.fixture"].as_str(),
+            Some(value.as_str())
+        );
+        assert_eq!(
+            k.state().extensions["org.synthetic.extension"].version,
+            "1.2.3"
+        );
+        assert!(!k.state().extensions["org.synthetic.extension"].enabled);
+        assert!(!dir.path("kernel-state.json").exists());
+    }
+}
+
+#[test]
+fn profile_hygiene_keeps_the_snapshot_until_agent_storage_migration() {
+    let dir = common::TempDir::new("profile-agent-gate");
+    fs::write(
+        dir.path("kernel-state.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "settings": {"theme": "dark"},
+            "extensions": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut k = kernel(&dir.0);
+    assert_eq!(k.state().settings["theme"].as_str(), Some("dark"));
+    assert!(
+        dir.path("kernel-state.json").is_file(),
+        "the Agent storage migration still needs the record"
+    );
+    assert!(dir.path("kernel-state.applied").is_file());
+    // A setting changed after the commit is never rolled back by the kept
+    // record, and the record itself stays intact for Agent-send.
+    k.state_transaction(state(vec![setting("theme", Some(Value::from("light")))]))
+        .unwrap();
+    drop(k);
+    let k = kernel(&dir.0);
+    assert_eq!(k.state().settings["theme"].as_str(), Some("light"));
+    let record = fs::read_to_string(dir.path("kernel-state.json")).unwrap();
+    assert!(record.contains("\"dark\""), "the record was left intact");
+    drop(k);
+    // Once Agent-send's migration has run (its backup is the marker), the
+    // record and the apply marker retire together.
+    fs::write(dir.path("kernel-state.pre-agent-storage.json"), b"backup").unwrap();
+    let _k = kernel(&dir.0);
+    assert!(!dir.path("kernel-state.json").exists());
+    assert!(!dir.path("kernel-state.applied").exists());
+}
+
+#[test]
+fn profile_hygiene_replays_only_a_published_settings_transaction() {
+    let dir = common::TempDir::new("profile-settings-intent");
+    let w = writer(&dir.0);
+    w.set("theme", Value::from("old")).unwrap();
+    w.flush().unwrap();
+    drop(w);
+    fs::create_dir_all(dir.path("store/settings.pending")).unwrap();
+    fs::create_dir_all(dir.path("store/.settings-stage")).unwrap();
+    fs::write(dir.path("store/settings.pending/theme.delete"), b"").unwrap();
+    fs::write(
+        dir.path("store/settings.pending/themeMode.json"),
+        br#""dark""#,
+    )
+    .unwrap();
+    fs::write(
+        dir.path("store/.settings-stage/themeMode.json"),
+        br#""ignored""#,
+    )
+    .unwrap();
+    let k = kernel(&dir.0);
+    assert!(!k.state().settings.contains_key("theme"));
+    assert_eq!(k.state().settings["themeMode"].as_str(), Some("dark"));
+    assert!(!dir.path("store/settings.pending").exists());
+    assert!(!dir.path("store/.settings-stage").exists());
+}

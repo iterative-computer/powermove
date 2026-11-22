@@ -97,6 +97,7 @@ fn code(source: &str) -> String {
 
 enum Persist {
     Log { code: String, text: String },
+    StorageCleanup(u64),
     Clear,
     Bundle(PathBuf, async_channel::Sender<Result<(), String>>),
     /// A clean quit; `true` when a quit signal (logout, shutdown, a script)
@@ -114,6 +115,10 @@ static LAST_QUIT_BY_SIGNAL: AtomicBool = AtomicBool::new(false);
 pub fn last_quit_by_signal() -> bool {
     LAST_QUIT_BY_SIGNAL.load(Ordering::Relaxed)
 }
+pub(crate) fn storage_cleanup(bytes: u64) {
+    send(Persist::StorageCleanup(bytes));
+}
+
 fn send(request: Persist) {
     if let Some(worker) = WORKER.get() {
         let _ = worker.send(request);
@@ -195,6 +200,16 @@ fn worker(profile: &Path, rx: mpsc::Receiver<Persist>, rows: async_channel::Send
         match request {
             Persist::Log { code, text } => {
                 let _ = Diagnostics::log(&mut storage, &mut redactor, Level::Error, &code, &text);
+            }
+            Persist::StorageCleanup(bytes) => {
+                let text = format!("Storage cleanup freed {}.", crate::pro_media::bytes(bytes));
+                let _ = Diagnostics::log(
+                    &mut storage,
+                    &mut redactor,
+                    Level::Info,
+                    "storage-cleanup",
+                    &text,
+                );
             }
             Persist::Clear => {
                 let _ = Diagnostics::clear(&mut storage);

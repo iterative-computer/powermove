@@ -176,11 +176,10 @@ function RowControl({
     );
   }
   if (row.control === "status")
-    return (
-      <Copy nowrap={nowrapStatus}>
-        {typeof row.value === "string" ? row.value : ""}
-      </Copy>
-    );
+    // An empty trailing text can stretch across the row and hide its title.
+    return typeof row.value === "string" && row.value !== "" ? (
+      <Copy nowrap={nowrapStatus}>{row.value}</Copy>
+    ) : null;
   // An unknown authored value stays in the service; never coerce it into a default.
   if (!row.binding) return null;
   // The design's controls: AppKit's bordered fields (a stepper on Frame

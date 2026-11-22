@@ -194,6 +194,84 @@ pub fn tidy(native: &Path) -> Result<usize> {
     Ok(removed)
 }
 
+/// Removes superseded migration captures after seven days. The bootstrap,
+/// selected comparison base and any unresolved conflicts are still used
+/// by Bring In Recent Work and the migration report.
+pub fn tidy_superseded(
+    native: &Path,
+    now: std::time::SystemTime,
+    idle: impl Fn() -> bool,
+) -> Result<u64> {
+    const GRACE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+    let deltas = native.join(DELTAS);
+    if !fs::symlink_metadata(&deltas).is_ok_and(|meta| meta.is_dir()) {
+        return Ok(0);
+    }
+    let Ok(_lock) = delta::lease(native) else {
+        return Ok(0);
+    };
+    let receipt = native.join("migration.json");
+    let finished = fs::symlink_metadata(&receipt).is_ok_and(|meta| {
+        meta.is_file()
+            && meta
+                .modified()
+                .is_ok_and(|at| now.duration_since(at).unwrap_or_default() >= GRACE)
+    });
+    if !idle()
+        || !finished
+        || requested(native)
+        || fs::symlink_metadata(native.join(PENDING)).is_ok()
+    {
+        return Ok(0);
+    }
+    let Some(state) = state(native) else {
+        return Ok(0);
+    };
+    if state.version != 1
+        || state.bundle_id != crate::BETA_BUNDLE_ID
+        || !state.completed.contains(&Step::Secrets)
+        || !state.conflicts.is_empty()
+    {
+        return Ok(0);
+    }
+    let mut removed: u64 = 0;
+    for entry in fs::read_dir(&deltas)? {
+        if !idle() {
+            break;
+        }
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if state.delta_base.as_deref() == Some(name)
+            || name.split('-').count() != 3
+            || name
+                .split('-')
+                .any(|part| part.len() != 16 || !part.bytes().all(|c| c.is_ascii_hexdigit()))
+            || !entry.file_type()?.is_dir()
+        {
+            continue;
+        }
+        let path = entry.path();
+        if now
+            .duration_since(entry.metadata()?.modified()?)
+            .unwrap_or_default()
+            < GRACE
+            || !fs::symlink_metadata(path.join("checkpoint.json")).is_ok_and(|meta| meta.is_file())
+        {
+            continue;
+        }
+        let bytes = disk::tree_bytes(&path)?;
+        if !idle() {
+            break;
+        }
+        fs::remove_dir_all(path)?;
+        removed = removed.saturating_add(bytes);
+    }
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

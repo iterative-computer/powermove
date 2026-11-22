@@ -60,6 +60,8 @@ pub struct Preferences {
     /// Settings › Media › Render Files Limit, in GB: rendered frames past it
     /// go least recently used first (kept frames never).
     pub render_limit_gb: u32,
+    /// Settings › Storage › Media Cache Limit.
+    pub cache_limit_gb: u32,
     /// Settings › General › Playback › Background Rendering.
     pub background_render: bool,
     /// Its delay after the last interaction, in seconds.
@@ -82,6 +84,7 @@ impl Default for Preferences {
             format: ProxyFormat::ProResProxy,
             location: None,
             render_limit_gb: 25,
+            cache_limit_gb: 1,
             background_render: true,
             background_delay_s: 5,
             still_duration_s: 0,
@@ -102,6 +105,8 @@ pub type Row = (
 /// Settings › Media › Render Files Limit's choices, in GB.
 const RENDER_LIMITS: [(u32, &str); 4] =
     [(10, "10 GB"), (25, "25 GB"), (50, "50 GB"), (100, "100 GB")];
+const CACHE_LIMITS: [(u32, &str); 4] = [(1, "1 GB"), (2, "2 GB"), (5, "5 GB"), (10, "10 GB")];
+
 /// Settings › Media › Still Duration's choices, in seconds (0: until the
 /// composition ends).
 const STILL_DURATIONS: [(u32, &str); 5] = [
@@ -182,6 +187,16 @@ impl Preferences {
                     .collect(),
             ),
             (
+                "media.cacheLimit",
+                "Media Cache Limit",
+                "Old copies and previews go first when the cache reaches this size.",
+                serde_json::json!(self.cache_limit_gb),
+                CACHE_LIMITS
+                    .iter()
+                    .map(|(gb, label)| (serde_json::json!(gb), *label))
+                    .collect(),
+            ),
+            (
                 "media.renderLimit",
                 "Render Files Limit",
                 "Rendered frames past this go oldest first; kept frames stay.",
@@ -223,6 +238,14 @@ impl Preferences {
         rows
     }
 
+    pub(crate) fn cache_limit(&self) -> u64 {
+        let gb = CACHE_LIMITS
+            .iter()
+            .find(|(value, _)| self.cache_limit_gb == *value)
+            .map_or(1, |(gb, _)| *gb);
+        u64::from(gb) * 1_000_000_000
+    }
+
     /// How long a placed still lasts (`None`: until the composition ends).
     pub fn still(&self) -> Option<f64> {
         (self.still_duration_s > 0).then(|| f64::from(self.still_duration_s))
@@ -251,6 +274,13 @@ impl Preferences {
                     return Err("Invalid setting value".into());
                 }
                 self.format = format;
+            }
+            "media.cacheLimit" => {
+                let gb: u32 = serde_json::from_value(value.clone()).map_err(bad)?;
+                if !CACHE_LIMITS.iter().any(|(choice, _)| *choice == gb) {
+                    return Err("Invalid setting value".into());
+                }
+                self.cache_limit_gb = gb;
             }
             "media.renderLimit" => {
                 let gb: u32 = serde_json::from_value(value.clone()).map_err(bad)?;
@@ -596,6 +626,56 @@ fn index_path(profile: &Path) -> PathBuf {
 
 fn settings_path(profile: &Path) -> PathBuf {
     profile.join("Pro Media").join("settings.json")
+}
+
+pub(crate) fn stored_cache_limit(profile: &Path) -> u64 {
+    std::fs::read(settings_path(profile))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Preferences>(&bytes).ok())
+        .unwrap_or_default()
+        .cache_limit()
+}
+
+/// Generated rendition files whose linked original still matches the
+/// existing fingerprint. The index also records attached user files, which
+/// are protected even if they happen to live inside a generated store.
+pub(crate) fn regenerable_proxies(profile: &Path, idle: &impl Fn() -> bool) -> Vec<PathBuf> {
+    let index = index_path(profile);
+    if !std::fs::symlink_metadata(&index).is_ok_and(|meta| meta.is_file()) {
+        return Vec::new();
+    }
+    let Some(index) = std::fs::read(index)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Index>(&bytes).ok())
+    else {
+        return Vec::new();
+    };
+    let attached: HashSet<&Path> = index
+        .contents
+        .values()
+        .flat_map(|entry| [entry.proxy.as_ref(), entry.optimized.as_ref()])
+        .flatten()
+        .filter(|entry| entry.attached)
+        .map(|entry| entry.path.as_path())
+        .collect();
+    let mut sources = BTreeSet::new();
+    for (source, content) in &index.stamps {
+        if !idle() {
+            return Vec::new();
+        }
+        if content.starts_with("b3:") && Source::of(&source.path).as_ref() == Some(source) {
+            sources.insert(content.as_str());
+        }
+    }
+    index
+        .contents
+        .iter()
+        .filter(|(content, _)| sources.contains(content.as_str()))
+        .flat_map(|(_, entry)| [entry.proxy.as_ref(), entry.optimized.as_ref()])
+        .flatten()
+        .filter(|entry| !entry.attached && !attached.contains(entry.path.as_path()))
+        .map(|entry| entry.path.clone())
+        .collect()
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -1935,6 +2015,16 @@ impl ProMedia {
         self.inner.usage.lock().unwrap().clone()
     }
 
+    /// Rechecks the file index after the background cache pass.
+    pub(crate) fn refresh_after_cleanup(&self) {
+        self.inner.io(|inner| {
+            if inner.refresh_present() {
+                let _ = inner.events.try_send(Event::Renditions);
+            }
+            inner.measure_usage();
+        });
+    }
+
     /// Measures usage again on the file thread; `Changed` follows.
     pub fn refresh_usage(&self) {
         self.inner.io(|inner| inner.measure_usage());
@@ -2780,6 +2870,27 @@ mod erased {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn profile_hygiene_cache_limit_persists_with_the_media_preferences() {
+        let root = tempfile::tempdir().unwrap();
+        let mut preferences = super::Preferences::default();
+        assert_eq!(super::stored_cache_limit(root.path()), 1_000_000_000);
+        preferences
+            .set("media.cacheLimit", &serde_json::json!(2))
+            .unwrap();
+        assert!(
+            preferences
+                .set("media.cacheLimit", &serde_json::json!(0))
+                .is_err()
+        );
+        super::write_atomic(
+            &super::settings_path(root.path()),
+            &serde_json::to_vec(&preferences).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(super::stored_cache_limit(root.path()), 2_000_000_000);
+    }
+
     use super::*;
 
     fn service() -> (tempfile::TempDir, ProMedia) {

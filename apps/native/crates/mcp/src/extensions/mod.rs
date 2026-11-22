@@ -681,6 +681,122 @@ pub fn recover_all(host: &dyn ExtensionHost) -> Result<()> {
     })
 }
 
+/// Rotation for committed change sets. Pending promotions and rollback
+/// snapshots belong to the extension transaction's recovery path.
+pub fn tidy_history(
+    history: &Path,
+    now: std::time::SystemTime,
+    limit: u64,
+    idle: impl Fn() -> bool,
+) -> Result<u64> {
+    let is_dir = |path: &Path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
+    if !is_dir(history) {
+        return Ok(0);
+    }
+    let mut runs = Vec::new();
+    for project in fs::read_dir(history)? {
+        let project = project?.path();
+        if !is_dir(&project) {
+            continue;
+        }
+        for entry in fs::read_dir(project)? {
+            if !idle() {
+                return Ok(0);
+            }
+            let entry = entry?;
+            let path = entry.path();
+            let id = entry.file_name();
+            let Some(id) = id.to_str() else { continue };
+            let retired = id.strip_prefix(".expired-");
+            let expected = retired.unwrap_or(id);
+            if expected.is_empty() || expected.starts_with('.') || !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let marker = path.join(RECORD);
+            if !fs::symlink_metadata(&marker).is_ok_and(|meta| meta.is_file()) {
+                continue;
+            }
+            let Ok(record) = serde_json::from_slice::<Value>(&fs::read(marker)?) else {
+                continue;
+            };
+            if record["version"] != 1 || record["id"].as_str() != Some(expected) {
+                continue;
+            }
+            let bytes = history_bytes(&path, &idle)?;
+            if !idle() {
+                return Ok(0);
+            }
+            runs.push((
+                entry.metadata()?.modified()?,
+                path,
+                bytes,
+                retired.is_some(),
+            ));
+        }
+    }
+    runs.sort_unstable_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    let cutoff = runs.len().saturating_sub(200);
+    let mut total = runs.iter().map(|run| run.2).sum::<u64>();
+    let mut freed: u64 = 0;
+    for (rank, (modified, path, bytes, retired)) in runs.into_iter().enumerate() {
+        if !idle() {
+            break;
+        }
+        if !retired
+            && total <= limit
+            && (rank >= cutoff
+                || now.duration_since(modified).unwrap_or_default()
+                    < std::time::Duration::from_secs(30 * 24 * 60 * 60))
+        {
+            continue;
+        }
+        let captured = if retired {
+            path
+        } else {
+            let name = path.file_name().expect("history entry has a name");
+            let captured = path.with_file_name(format!(".expired-{}", name.to_string_lossy()));
+            let moved = locked(|| {
+                if !idle() || !is_dir(&path) || fs::symlink_metadata(&captured).is_ok() {
+                    return Ok(false);
+                }
+                fs::rename(&path, &captured)?;
+                Ok(true)
+            })?;
+            if !moved {
+                continue;
+            }
+            captured
+        };
+        if !idle() {
+            break;
+        }
+        fs::remove_dir_all(&captured)?;
+        total = total.saturating_sub(bytes);
+        freed = freed.saturating_add(bytes);
+    }
+    Ok(freed)
+}
+
+fn history_bytes(root: &Path, idle: &impl Fn() -> bool) -> Result<u64> {
+    let mut bytes: u64 = 0;
+    let mut pending = vec![root.to_owned()];
+    while let Some(path) = pending.pop() {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            if !idle() {
+                return Ok(0);
+            }
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
+                bytes = bytes.saturating_add(metadata.len());
+            }
+        }
+    }
+    Ok(bytes)
+}
+
 /// Change sets of a project, newest first.
 pub fn change_sets(history: &Path) -> Vec<Value> {
     let mut out: Vec<Value> = fs::read_dir(history)

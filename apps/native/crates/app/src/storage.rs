@@ -1,7 +1,14 @@
 //! Settings › Storage: what Powermove and the original app keep on this Mac,
 //! measured off the main thread, and the parts of the original app's folder
 //! that can go. Nothing here touches the original app's library or media.
+mod maintenance;
+mod retention;
+mod worker;
+
+pub(crate) use worker::start as install_cleanup;
+
 use crate::pro_media::bytes;
+use maintenance::CATEGORIES;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -195,6 +202,8 @@ pub(crate) struct Report {
     pub tools: u64,
     pub native_total: u64,
     pub original: Option<Original>,
+    native_categories: Vec<(&'static str, u64)>,
+    first_reclaimed: Option<u64>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Original {
@@ -224,10 +233,9 @@ pub(crate) fn measure(native: &Path, original: Option<&Path>) -> Report {
         native,
         &[
             "store",
-            "journals",
-            "recovery-files",
-            "backups",
             "kernel-state.json",
+            "kernel-state.applied",
+            "kernel-state.pre-agent-storage.json",
             "session.json",
         ],
     ));
@@ -287,6 +295,21 @@ pub(crate) fn measure(native: &Path, original: Option<&Path>) -> Report {
         tools,
         native_total: used(native),
         original,
+        native_categories: CATEGORIES
+            .iter()
+            .map(|category| {
+                (
+                    category.id,
+                    category
+                        .paths
+                        .iter()
+                        .filter_map(|path| retention::owned_dir(native, path))
+                        .map(|path| used(&path))
+                        .sum(),
+                )
+            })
+            .collect(),
+        first_reclaimed: worker::first_reclaimed(native),
     }
 }
 /// Removes one part of the original app's folder. Refused while the original
@@ -321,12 +344,22 @@ pub(crate) fn remove(original: &Path, id: &str) -> Result<u64, String> {
 
 static LATEST: Mutex<Option<Report>> = Mutex::new(None);
 static MEASURING: AtomicBool = AtomicBool::new(false);
+static MEASUREMENT_DIRTY: AtomicBool = AtomicBool::new(false);
 /// Bytes moved and to move while Move Into Library runs.
 static ADOPTING: Mutex<Option<(u64, u64)>> = Mutex::new(None);
 
 /// Settings › Storage's rows, ready for the panel.
-pub(crate) fn rows(generated: Option<u64>, original_running: bool) -> Vec<Value> {
+pub(crate) fn rows(generated: Option<u64>, original_running: bool, cache_limit: u64) -> Vec<Value> {
     let report = LATEST.lock().unwrap().clone();
+    build_rows(report.as_ref(), generated, original_running, cache_limit)
+}
+
+fn build_rows(
+    report: Option<&Report>,
+    generated: Option<u64>,
+    original_running: bool,
+    cache_limit: u64,
+) -> Vec<Value> {
     let Some(report) = report else {
         return vec![
             json!({"id":"storage.measuring","section":"storage","group":"Powermove",
@@ -335,14 +368,40 @@ pub(crate) fn rows(generated: Option<u64>, original_running: bool) -> Vec<Value>
     };
     let mut rows = vec![
         json!({"id":"storage.native.total","section":"storage","group":"Powermove",
-            "label":"Space Used","control":"status","value":bytes(report.native_total)}),
+        "label":format!("Space Used · {}", bytes(report.native_total)),"control":"status",
+        "detail":report.first_reclaimed.filter(|freed| *freed > 0).map(|freed| {
+            format!("Freed {} of old caches and backups.", bytes(freed))
+        })}),
         json!({"id":"storage.native.library","section":"storage","group":"Powermove",
-            "label":"Projects and Settings","control":"status","value":bytes(report.library),
-            "detail":"Your library, its undo history and recovery copies."}),
+            "label":format!("Projects and Settings · {}", bytes(report.library)),"control":"status",
+            "detail":"Library projects, undo history, and settings."}),
         json!({"id":"storage.native.media","section":"storage","group":"Powermove",
-            "label":"Media","control":"status","value":bytes(report.media),
+            "label":format!("Media Library · {}", bytes(report.media)),"control":"status",
             "detail":"Media kept inside Powermove’s own folder."}),
     ];
+    for category in CATEGORIES {
+        let used = report
+            .native_categories
+            .iter()
+            .find(|(id, _)| *id == category.id)
+            .map_or(0, |(_, size)| *size);
+        let value = category.limit(cache_limit).map_or_else(
+            || bytes(used),
+            |limit| format!("{} / {}", bytes(used), bytes(limit)),
+        );
+        let status = worker::status(category.bucket);
+        rows.push(json!({
+            "id":format!("storage.native.{}", category.id),
+            "section":"storage",
+            "group":"Powermove",
+            "label":format!("{} · {value}", category.title),
+            "detail":category.detail,
+            "control":"action",
+            "action":format!("storage.clean.{}", category.id),
+            "actionLabel":status.unwrap_or("Clean Up Now"),
+            "disabled":status.is_some(),
+        }));
+    }
     if let Some(generated) = generated {
         rows.push(
             json!({"id":"storage.native.generated","section":"storage","group":"Powermove",
@@ -352,7 +411,7 @@ pub(crate) fn rows(generated: Option<u64>, original_running: bool) -> Vec<Value>
     }
     rows.push(
         json!({"id":"storage.native.tools","section":"storage","group":"Powermove",
-        "label":"Downloaded Tools","control":"status","value":bytes(report.tools),
+        "label":format!("Downloaded Tools · {}", bytes(report.tools)),"control":"status",
         "detail":"Agent and speech tools. Powermove downloads them again when it needs them."}),
     );
     rows.push(
@@ -476,6 +535,7 @@ fn recent_row(recent: &RecentWork) -> Value {
 pub(crate) struct StorageIo {
     pub(crate) generated: Option<u64>,
     pub(crate) electron: Option<std::path::PathBuf>,
+    pub(crate) cache_limit: u64,
 }
 impl StorageIo {
     pub(crate) fn resolve(self) -> Value {
@@ -483,13 +543,14 @@ impl StorageIo {
             .electron
             .as_deref()
             .is_some_and(pm_kernel::locks::older_electron_running);
-        json!({"rows": rows(self.generated, running)})
+        json!({"rows": rows(self.generated, running, self.cache_limit)})
     }
 }
 impl crate::session::Controller {
     /// Measures both folders again off the main thread; Settings redraws.
     pub(crate) fn refresh_storage(&self, cx: &mut gpui::Context<Self>) {
         if MEASURING.swap(true, Ordering::AcqRel) {
+            MEASUREMENT_DIRTY.store(true, Ordering::Release);
             return;
         }
         let (native, original) = (self.profile.clone(), self.electron.clone());
@@ -500,7 +561,12 @@ impl crate::session::Controller {
                 .await;
             *LATEST.lock().unwrap() = Some(report);
             MEASURING.store(false, Ordering::Release);
-            let _ = this.update(cx, |v, cx| v.update_builtins(cx));
+            let _ = this.update(cx, |v, cx| {
+                v.update_builtins(cx);
+                if MEASUREMENT_DIRTY.swap(false, Ordering::AcqRel) {
+                    v.refresh_storage(cx);
+                }
+            });
         })
         .detach();
     }
@@ -514,6 +580,7 @@ impl crate::session::Controller {
                 .cached_usage()
                 .map(|u| u.proxies + u.optimized + u.renders),
             electron: self.electron.clone(),
+            cache_limit: self.pro_media.preferences().cache_limit(),
         }
     }
     /// A Settings › Storage action (`storage.settings`).
@@ -535,6 +602,11 @@ impl crate::session::Controller {
             _ => {
                 if let Some(id) = action.strip_prefix("storage.delete.") {
                     self.confirm_storage_delete(id, cx);
+                } else if let Some(id) = action.strip_prefix("storage.clean.")
+                    && let Some(category) = CATEGORIES.iter().find(|category| category.id == id)
+                {
+                    worker::request(category.bucket);
+                    self.update_builtins(cx);
                 }
             }
         }
@@ -716,7 +788,7 @@ mod tests {
             }),
             ..Report::default()
         });
-        let rows = rows(None, false);
+        let rows = rows(None, false, retention::CACHE_DEFAULT);
         // After Not Now at startup, Storage offers the extensions again,
         // with a button, even while the original app runs.
         let offer = |rows: &[Value]| {
@@ -729,7 +801,10 @@ mod tests {
         assert_eq!(extensions["actionLabel"], "Bring In Extensions…");
         assert_eq!(extensions["value"], "45 not in Powermove");
         assert_eq!(extensions["group"], "Original App");
-        assert!(offer(&super::rows(None, true)).unwrap()["disabled"].is_null());
+        assert!(
+            offer(&super::rows(None, true, retention::CACHE_DEFAULT)).unwrap()["disabled"]
+                .is_null()
+        );
         let linked = rows
             .iter()
             .find(|r| r["id"] == "storage.original.linked")
@@ -743,7 +818,7 @@ mod tests {
                 .contains("1161 media files")
         );
         *ADOPTING.lock().unwrap() = Some((5_000_000_000, 20_000_000_000));
-        let rows = super::rows(None, false);
+        let rows = super::rows(None, false, retention::CACHE_DEFAULT);
         let moving = rows
             .iter()
             .find(|r| r["id"] == "storage.original.linked")
@@ -760,7 +835,7 @@ mod tests {
             {
                 original.extensions = extensions;
             }
-            let row = offer(&super::rows(None, false));
+            let row = offer(&super::rows(None, false, retention::CACHE_DEFAULT));
             assert_eq!(row.as_ref().and_then(|r| r["value"].as_str()), expected);
             assert!(row.is_none_or(|r| r["control"] == "status"));
         }
@@ -863,4 +938,27 @@ mod tests {
         );
         assert!(remove(&root, "store").is_err());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn profile_hygiene_storage_lists_native_retention() {
+    let fixture = tempfile::tempdir().unwrap();
+    let capture_profile = std::env::var_os("PM_HYGIENE_PROFILE").map(PathBuf::from);
+    let capture_profile = capture_profile.as_deref().filter(|path| {
+        fs::read_to_string(path.join(".synthetic-profile"))
+            .ok()
+            .as_deref()
+            == Some("profile-hygiene fixture v1\n")
+    });
+    let report = measure(capture_profile.unwrap_or(fixture.path()), None);
+    let rows = build_rows(Some(&report), None, false, retention::CACHE_DEFAULT);
+    if let Some(output) = std::env::var_os("PM_HYGIENE_CAPTURE_ROWS") {
+        fs::write(output, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
+    }
+    let backups = rows
+        .iter()
+        .find(|row| row["id"] == "storage.native.backups");
+    assert!(backups.is_some(), "Storage must show native backup usage");
+    assert_eq!(backups.unwrap()["actionLabel"], "Clean Up Now");
 }

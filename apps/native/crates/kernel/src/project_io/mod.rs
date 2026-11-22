@@ -53,8 +53,8 @@ use sha2::{Digest, Sha256};
 pub use crate::error::kept_beside;
 pub(crate) use durable::stat_of as durable_stat_of;
 pub use durable::{
-    BackupPolicy, FileStat, FileVersion, Publish, check_version, hash_file, list_backups,
-    local_time, temporary_sibling,
+    BackupPolicy, FileStat, FileVersion, Publish, check_version, hash_file, is_recovery_stage,
+    list_backups, local_time, temporary_sibling, tidy_backups,
 };
 pub(crate) use durable::{Host, folder_sync_now, lstat_file, remove_abandoned_temps};
 pub use durable::{
