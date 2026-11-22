@@ -108,6 +108,14 @@ fn hash_with(path: &Path, mut read: impl FnMut(u64)) -> Result<(String, u64)> {
 pub fn json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     // Buffered: serde_json reads a bare `File` a byte per `read` call, and
     // these run on every launch (the 460 KB media report took 150 ms).
+    let base = std::env::var_os("PM_LAUNCH_TRACE").is_some_and(|t| {
+        let mut p = t;
+        p.push(".variant");
+        std::fs::read_to_string(p).is_ok_and(|v| v == "base")
+    });
+    if base {
+        return Ok(serde_json::from_reader(regular(path)?)?);
+    }
     let file = std::io::BufReader::new(regular(path)?);
     Ok(serde_json::from_reader(file)?)
 }

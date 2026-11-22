@@ -7261,6 +7261,9 @@ impl Popup {
         // makes two pop-ups, and their rows (160 in the palette, each with
         // its controls) were most of a window's opening, before its first
         // frame (PM-609).
+        if gpui_macos::launch_variant() == 0 {
+            popup.borrow_mut().refresh();
+        }
         popup
     }
     fn update_tokens(&mut self, t: &Tokens, surface: Surface) {

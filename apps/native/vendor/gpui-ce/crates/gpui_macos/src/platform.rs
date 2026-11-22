@@ -559,6 +559,7 @@ impl Platform for MacPlatform {
             // anything autoreleased here, a window the callback opens
             // included, stayed retained until the app quit (never freed after
             // closing; `tests/launch_release.rs`).
+            if launch_variant() != 0 {
             let launch_pool = NSAutoreleasePool::new();
             app.as_super().finishLaunching();
             // As `did_finish_launching` would have before the callback: a
@@ -573,6 +574,7 @@ impl Platform for MacPlatform {
                 crate::launch::mark("callback_end");
             }
             drop(launch_pool);
+            }
             app.as_super().run();
             drop(pool);
 
@@ -1305,6 +1307,19 @@ fn get_mac_platform(object: &GPUIApplicationDelegate) -> &MacPlatform {
     unsafe { &*(platform_ptr as *const MacPlatform) }
 }
 
+/// MEASUREMENT BUILD ONLY (wip): `<PM_LAUNCH_TRACE>.variant` = base | full.
+pub fn launch_variant() -> u8 {
+    static V: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        let mut path = std::env::var_os("PM_LAUNCH_TRACE").unwrap_or_default();
+        path.push(".variant");
+        match std::fs::read_to_string(path).as_deref() {
+            Ok("base") => 0,
+            _ => 1,
+        }
+    })
+}
+
 /// Powermove P-LAUNCH-TRACE (`PM_LAUNCH_TRACE`): the process start, then
 /// the first wait for events after each traced present.
 fn trace_launch() {
@@ -1323,6 +1338,7 @@ fn trace_launch() {
         }
     }
     crate::launch::mark("run");
+    crate::launch::write("variant", crate::launch::wall_ms(), &format!(r#","v":{}"#, launch_variant()));
     extern "C" fn before_waiting(_: CFRunLoopObserverRef, _: CFRunLoopActivity, _: *mut c_void) {
         crate::launch::before_waiting();
     }
