@@ -2041,6 +2041,12 @@ fn side_group_heights(
             }
         }
     }
+    // A group never stands taller than the column's viewport: its bottom
+    // edge, inset and corners stay inside the dock and its own content
+    // scrolls. Only a stack of several groups outgrows the column.
+    for (g, h) in groups.iter().zip(&mut heights) {
+        *h = (*h).min(space).max(group_least(g, t));
+    }
     heights
 }
 

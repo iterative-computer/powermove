@@ -104,6 +104,11 @@ pub struct Editor {
     /// Where each extension body was placed this frame (its panel's
     /// animated rect, less the header and the dividers' grab).
     native_body_rects: Vec<(String, Rect)>,
+    /// The aperture clip each native body was published with (the dock
+    /// viewport and the travelling sticky header). Test mirror of
+    /// `Host::native_panel_clips` for hosts that cannot exist headless.
+    #[cfg(test)]
+    native_clip_rects: Vec<(String, Rect)>,
     maximized_panel: Option<String>,
     /// Tabs of panels whose owner went away for a moment (an extension
     /// reloading), and where they were: the panel returns there.
@@ -289,6 +294,8 @@ impl Editor {
             slides: PanelSlides::default(),
             tab_slides: Default::default(),
             native_body_rects: Vec::new(),
+            #[cfg(test)]
+            native_clip_rects: Vec::new(),
             maximized_panel: None,
             parked: HashMap::new(),
             awaiting_panels: true,
@@ -4376,6 +4383,10 @@ impl Editor {
             integration.shown_panels(&shown, cx);
         }
         self.native_body_rects = native_bodies.clone();
+        #[cfg(test)]
+        {
+            self.native_clip_rects = native_clips.clone();
+        }
         if let Some(host) = self.host.clone() {
             // Publish the layout that actually painted its headers. A
             // compositor retry of the preceding scene keeps its own slots.
@@ -7736,6 +7747,89 @@ mod tests {
                 assert!(!v.dragging_panel());
             });
             crate::drag::set_frame_time(None);
+        }
+    }
+
+    /// The aperture a native body shows through stays inside its side dock's
+    /// viewport: an extension's page can never reach the window's status bar,
+    /// even when the column's groups stand taller than it and the panel's own
+    /// bottom is below the fold.
+    #[gpui::test]
+    fn native_body_clip_stays_above_the_status_bar(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            let mut e = Editor::new(
+                Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                None,
+                cx,
+            );
+            e.integration = Some(Rc::new(NativeBody { aliases: false }));
+            e
+        });
+        // The column outgrows its viewport: a saved group height taller than
+        // the dock makes it scroll, like the list that painted under the
+        // status bar.
+        view.update(cx, |v, cx| {
+            let right = v
+                .layout
+                .docks
+                .iter_mut()
+                .find(|dock| dock.id == "right")
+                .unwrap();
+            right.groups = vec![layout::Group {
+                tabs: vec!["inspector".to_owned()],
+                active: 0,
+                size: Some(2400.),
+                collapsed: false,
+            }];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for scroll in [0., 220., 900.] {
+            view.update(cx, |v, cx| {
+                v.dock_scroll.insert("right".into(), scroll);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            view.read_with(cx, |v, _| {
+                let m = v.tokens.metrics;
+                let status_top = v.dock_bounds.y + v.dock_bounds.h + m.dock_gap;
+                let (dock, _, _) = v.layout.find("inspector").unwrap();
+                let viewport = v.geometry.side_docks[&dock];
+                let panel = v
+                    .geometry
+                    .panels
+                    .iter()
+                    .find(|p| p.dock == dock)
+                    .expect("the panel is placed");
+                assert!(
+                    panel.rect.y + panel.rect.h <= viewport.y + viewport.h + 0.01,
+                    "scroll {scroll}: panel bottom {} is below the column viewport {}",
+                    panel.rect.y + panel.rect.h,
+                    viewport.y + viewport.h,
+                );
+                let (_, body) = v
+                    .native_body_rects
+                    .iter()
+                    .find(|(id, _)| id == "inspector")
+                    .expect("the native body is placed");
+                assert!(
+                    body.y + body.h <= status_top - m.inset + 0.01,
+                    "scroll {scroll}: content bottom {} reached the status bar inset {}",
+                    body.y + body.h,
+                    status_top - m.inset,
+                );
+                let (_, clip) = v
+                    .native_clip_rects
+                    .iter()
+                    .find(|(id, _)| id == "inspector")
+                    .expect("the native body publishes a clip");
+                assert!(
+                    clip.y + clip.h <= viewport.y + viewport.h + 0.01,
+                    "scroll {scroll}: clip bottom {} passed the column viewport {}",
+                    clip.y + clip.h,
+                    viewport.y + viewport.h,
+                );
+            });
         }
     }
 }
