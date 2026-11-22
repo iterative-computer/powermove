@@ -717,3 +717,37 @@ fn a_one_frame_window_keeps_reorder_frames_in_the_cache() {
         "spilling saved no seek ({backend:?}): {one:?} vs no cache {uncached:?}"
     );
 }
+
+/// VideoToolbox decodes from the index's samples: opening its sessions
+/// (a cut into a clip, a session after the last one closed) never opens and
+/// probes the file in FFmpeg as well. A software session still opens one.
+#[test]
+fn a_videotoolbox_session_opens_no_ffmpeg_demuxer() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mp4")).unwrap();
+    let svc = DecodeService::new(ServiceConfig {
+        cache_bytes: 0,
+        ..Default::default()
+    });
+    for instance in 1..=3 {
+        let mut s = svc
+            .session_with(&src, instance, DecodePurpose::Display, Some(Backend::VideoToolbox))
+            .unwrap();
+        assert_eq!(s.info().backend, Backend::VideoToolbox);
+        s.frame(3).unwrap();
+    }
+    svc.release(None, None);
+    {
+        let mut s = svc
+            .session_with(&src, 1, DecodePurpose::Display, Some(Backend::VideoToolbox))
+            .unwrap();
+        s.frame(40).unwrap();
+    }
+    assert_eq!(svc.input_opens(), 0, "VideoToolbox sessions need no demuxer");
+    let mut s = svc
+        .session_with(&src, 9, DecodePurpose::Display, Some(Backend::Ffmpeg))
+        .unwrap();
+    assert_eq!(s.info().backend, Backend::Ffmpeg);
+    let soft = s.frame(3).unwrap();
+    assert_eq!(svc.input_opens(), 1, "a software session opens its demuxer");
+    drop(soft);
+}

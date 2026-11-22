@@ -270,6 +270,38 @@ pub fn open(
     threads: i32,
     prefer: Option<Backend>,
 ) -> Result<(Decoder, Vec<String>)> {
+    let input = spec.input;
+    let stream = Stream {
+        stream: spec.stream,
+        info: spec.info,
+        index: spec.index,
+        extradata: spec.extradata,
+    };
+    open_lazily(&stream, &|| Ok(input), purpose, pool, arbiter, threads, prefer)
+}
+
+/// A stream to open decoders for, without its demuxer.
+pub(crate) struct Stream<'a> {
+    pub stream: usize,
+    pub info: &'a CodecInfo,
+    pub index: &'a FrameIndex,
+    pub extradata: &'a [u8],
+}
+
+/// As [`open`], asking `input` for the FFmpeg demuxer only when a backend
+/// that reads through it (FFmpeg, its alpha pair) is tried. VideoToolbox
+/// and dav1d decode from the index's samples and never need it, so a
+/// session that opens one of those does not open (and probe) the file in
+/// FFmpeg as well. A failed `input` is that backend's skip reason.
+pub(crate) fn open_lazily<'i>(
+    spec: &Stream<'_>,
+    input: &impl Fn() -> Result<&'i Input>,
+    purpose: DecodePurpose,
+    pool: &FramePool,
+    arbiter: &dyn HardwareArbiter,
+    threads: i32,
+    prefer: Option<Backend>,
+) -> Result<(Decoder, Vec<String>)> {
     let mut order = backends(spec.info, spec.index);
     if let Some(p) = prefer {
         if !order.contains(&p) {
@@ -285,20 +317,15 @@ pub fn open(
     for b in order {
         let r = match b {
             Backend::VideoToolbox => open_vt(spec, purpose, arbiter, pool),
-            Backend::Ffmpeg => FfDecoder::new_for_purpose(
-                spec.input,
-                spec.stream,
-                None,
-                pool.clone(),
-                threads,
-                purpose,
-            )
-            .map(Decoder::Ff),
+            Backend::Ffmpeg => input().and_then(|input| {
+                FfDecoder::new_for_purpose(input, spec.stream, None, pool.clone(), threads, purpose)
+                    .map(Decoder::Ff)
+            }),
             Backend::Dav1d => Dav1dDecoder::new(pool.clone(), threads).map(Decoder::Dav1d),
-            Backend::FfmpegAlphaPair => {
-                AlphaPairDecoder::new(spec.input, spec.stream, pool.clone(), threads, purpose)
+            Backend::FfmpegAlphaPair => input().and_then(|input| {
+                AlphaPairDecoder::new(input, spec.stream, pool.clone(), threads, purpose)
                     .map(Decoder::Alpha)
-            }
+            }),
         };
         match r {
             Ok(d) => return Ok((d, skipped)),
@@ -313,7 +340,7 @@ pub fn open(
 }
 
 fn open_vt(
-    spec: &StreamSpec<'_>,
+    spec: &Stream<'_>,
     purpose: DecodePurpose,
     arbiter: &dyn HardwareArbiter,
     pool: &FramePool,
