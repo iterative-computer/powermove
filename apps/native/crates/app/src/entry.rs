@@ -15,6 +15,8 @@ use std::{collections::VecDeque, path::PathBuf};
 /// What a new editor window opens instead of restoring its last project.
 pub enum Pending {
     File(PathBuf),
+    /// A received project keeps its underlying file through the window change.
+    ReceivedFile(PathBuf, gpui_macos::ReceivedDrop),
     /// A project in the library, by id (a copy offered from its file's window).
     Library(String),
     /// A project an agent opened while its window showed another: already

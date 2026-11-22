@@ -165,6 +165,8 @@ pub struct Publication {
 }
 #[derive(Clone, Debug)]
 pub struct PlatformRequest {
+    /// Holds files through the handoff from the panel realm to the app.
+    pub received: Option<Arc<dyn media_import::ReceivedMedia>>,
     pub id: u64,
     pub panel: String,
     pub generation: u64,
@@ -262,6 +264,8 @@ pub struct Builtins {
     /// and module graph by panel, so a parked fork starts again as itself.
     forks: Mutex<BTreeMap<String, (String, Value)>>,
 }
+type DropLookup = fn(&[std::path::PathBuf]) -> Option<Arc<dyn media_import::ReceivedMedia>>;
+
 struct Broker {
     /// Third-party v4 surface extensions mounted in this window.
     extensions: Mutex<std::collections::BTreeSet<String>>,
@@ -273,6 +277,7 @@ struct Broker {
     entries: Mutex<BTreeMap<String, Arc<Mutex<Entry>>>>,
     publications: Mutex<BTreeMap<String, Publication>>,
     platform: Mutex<Vec<PlatformRequest>>,
+    drop_lookup: Mutex<Option<DropLookup>>,
     errors: Mutex<Vec<String>>,
     facts: Mutex<Value>,
     platform_replies: Mutex<BTreeMap<u64, Value>>,
@@ -1192,6 +1197,7 @@ impl Builtins {
             entries: Default::default(),
             publications: Default::default(),
             platform: Default::default(),
+            drop_lookup: Default::default(),
             errors: Default::default(),
             facts: Mutex::new(json!({})),
             platform_replies: Default::default(),
@@ -1798,6 +1804,11 @@ impl Builtins {
         let backend = entry.backend.try_lock().ok()?;
         backend.native.properties.layers_of(handle)
     }
+    /// The host supplies ownership for paths it materialized from a native drag.
+    pub fn set_drop_lookup(&self, lookup: DropLookup) {
+        *self.broker.drop_lookup.shared() = Some(lookup);
+    }
+
     pub fn take_platform_requests(&self) -> Vec<PlatformRequest> {
         std::mem::take(&mut *self.broker.platform.shared())
     }
@@ -2058,7 +2069,23 @@ impl Broker {
             } else {
                 0
             };
+            let received = if operation == "project.effect"
+                && let Some(lookup) = *self.drop_lookup.shared()
+                && let Some(files) = input
+                    .pointer("/effect/Import/files")
+                    .and_then(Value::as_array)
+            {
+                let paths: Vec<_> = files
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(Into::into)
+                    .collect();
+                lookup(&paths)
+            } else {
+                None
+            };
             queue.push(PlatformRequest {
+                received,
                 id,
                 panel: panel.into(),
                 generation,
@@ -2405,6 +2432,7 @@ impl EngineProxy for Broker {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let (operation, platform_input) = inspector_platform(panel, input)?;
                 requests.push(PlatformRequest {
+                    received: None,
                     id,
                     panel: panel.into(),
                     generation: generation.number,
@@ -2435,6 +2463,7 @@ impl EngineProxy for Broker {
                     return Err(Error::Quota("platform queue"));
                 }
                 requests.push(PlatformRequest {
+                    received: None,
                     id: 0,
                     panel: panel.into(),
                     generation: generation.number,

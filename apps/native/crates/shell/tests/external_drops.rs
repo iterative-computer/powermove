@@ -29,6 +29,7 @@ fn resolved_drop_routes_to_release_hitbox_without_synthesizing_mouse_up() {
     struct Recorded {
         drops: Vec<(&'static str, bool, Vec<PathBuf>)>,
         mouse_ups: usize,
+        pending: Vec<usize>,
     }
 
     struct Targets(Rc<RefCell<Recorded>>);
@@ -75,7 +76,11 @@ fn resolved_drop_routes_to_release_hitbox_without_synthesizing_mouse_up() {
             let project = project.clone();
             move |_| Some(project.get())
         });
-        for id in 1..=3 {
+        window.on_external_drop_progress({
+            let observed = observed.clone();
+            move |pending, _| observed.borrow_mut().pending.push(pending)
+        });
+        for id in 1..=4 {
             window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Receiving { id }), cx);
         }
         let newer_drag =
@@ -125,9 +130,14 @@ fn resolved_drop_routes_to_release_hitbox_without_synthesizing_mouse_up() {
             cx,
         );
         assert!(result.propagate);
+        window.dispatch_event(
+            PlatformInput::FileDrop(FileDropEvent::ReceiveFailed { id: 4 }),
+            cx,
+        );
     })
     .unwrap();
     let observed = observed.borrow();
     assert_eq!(observed.drops.as_slice(), &[("right", true, vec![path])]);
     assert_eq!(observed.mouse_ups, 0);
+    assert_eq!(observed.pending, [1, 2, 3, 4, 3, 2, 1, 0]);
 }

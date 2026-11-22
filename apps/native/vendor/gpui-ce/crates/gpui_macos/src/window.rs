@@ -922,6 +922,7 @@ struct MacWindowState {
     classified_drop: bool,
     drop_storage: Option<drop_sources::Storage>,
     drop_sequence: u64,
+    drop_transfers: std::collections::BTreeMap<u64, oneshot::Sender<()>>,
     // Whether the next left-mouse click is also the focusing click.
     first_mouse: bool,
     // When true, the whole content view is reported as app-owned titlebar content via
@@ -1535,6 +1536,7 @@ impl MacWindow {
                 classified_drop: false,
                 drop_storage,
                 drop_sequence: 0,
+                drop_transfers: Default::default(),
                 first_mouse: false,
                 app_owns_titlebar_drag,
                 fullscreen_restore_bounds: Bounds::default(),
@@ -1829,6 +1831,7 @@ impl Drop for MacWindow {
     fn drop(&mut self) {
         let mut this = self.0.lock();
         this.incoming_drop.take();
+        this.drop_transfers.clear();
         // The accessibility adapter retains the window's content view (and
         // its action handler the GPUI view), while the view holds this
         // state: a cycle that kept every closed window's view, layer and
@@ -3978,6 +3981,7 @@ unsafe extern "C" fn close_window(this: &Objc2Object, _: Sel) {
             let window_state = get_window_state(this);
             let mut lock = window_state.as_ref().lock();
             lock.closed.store(true, Ordering::Release);
+            lock.drop_transfers.clear();
             (
                 lock.close_callback.take(),
                 lock.simple_fullscreen_state.take(),
@@ -4484,16 +4488,20 @@ unsafe extern "C" fn dragging_entered(
         return NSDragOperationNone;
     }
     let window_state = unsafe { get_window_state(this) };
-    let receive_media = {
+    let storage = {
         let mut state = window_state.lock();
         state.classified_drop = true;
-        state.drop_storage.is_some()
+        state.drop_storage.clone()
     };
     let pasteboard: Option<Retained<NSPasteboard>> =
         unsafe { msg_send![dragging_info, draggingPasteboard] };
-    let Some(source) = pasteboard.and_then(|board| DropSource::read(&board, receive_media)) else {
+    let Some(source) = pasteboard.and_then(|board| DropSource::read(&board, storage.is_some()))
+    else {
         return NSDragOperationNone;
     };
+    if let Some(storage) = &storage {
+        storage.prepare(&source);
+    }
     let background = window_state.lock().background_executor.clone();
     if let Some(probe) = source.probe_urls(&background) {
         probe.detach();
@@ -4586,7 +4594,11 @@ unsafe extern "C" fn perform_drag_operation(
             Bool::new(submitted)
         }
         Err(source) => {
-            send_file_drop_event(window_state.clone(), FileDropEvent::Exited);
+            // The start event records the document at release. If AppKit
+            // nested a new drag inside an input callback, it cannot start here.
+            if !send_file_drop_event(window_state.clone(), FileDropEvent::Exited) {
+                return Bool::NO;
+            }
             let pasteboard: Option<Retained<NSPasteboard>> =
                 unsafe { msg_send![dragging_info, draggingPasteboard] };
             let Some(pending) = storage
@@ -4595,49 +4607,85 @@ unsafe extern "C" fn perform_drag_operation(
             else {
                 return Bool::NO;
             };
+            let (cancel, closed) = oneshot::channel();
             let id = {
                 let mut state = window_state.lock();
                 state.drop_sequence += 1;
-                state.drop_sequence
+                let id = state.drop_sequence;
+                state.drop_transfers.insert(id, cancel);
+                id
             };
             send_file_drop_event(window_state.clone(), FileDropEvent::Receiving { id });
             let window_state = Arc::downgrade(&window_state);
             let modifiers = current_modifiers();
             foreground
                 .spawn(async move {
-                    let received = pending.finish(&background).await;
-                    let accepted = window_state.upgrade().is_some_and(|state| {
-                        let window = {
-                            let lock = state.lock();
-                            if lock.closed.load(Ordering::Acquire) {
-                                return false;
-                            }
-                            lock.native_window
-                        };
-                        let event = match &received {
-                            Some(files) if !covered_by_sheet(unsafe { &*window }) => {
-                                FileDropEvent::Received {
-                                    id,
-                                    position,
-                                    modifiers,
-                                    paths: files.paths.clone(),
-                                }
-                            }
-                            _ => FileDropEvent::ReceiveFailed { id },
-                        };
-                        send_file_drop_event(state, event)
-                    });
-                    if let Some(received) = received {
-                        if accepted {
-                            received.keep();
-                        } else {
-                            background.spawn(async move { drop(received) }).await;
-                        }
+                    let receive = pending.finish(&background);
+                    let received = match futures::future::select(Box::pin(receive), closed).await {
+                        futures::future::Either::Left((received, _)) => received,
+                        futures::future::Either::Right(_) => None,
+                    };
+                    deliver_file_drop(&window_state, &background, || match &received {
+                        Some(files) => FileDropEvent::Received {
+                            id,
+                            position,
+                            modifiers,
+                            paths: files.paths().clone(),
+                        },
+                        None => FileDropEvent::ReceiveFailed { id },
+                    })
+                    .await;
+                    if let Some(state) = window_state.upgrade() {
+                        state.lock().drop_transfers.remove(&id);
                     }
+                    // The host can retain its own lease during dispatch. A
+                    // listener consuming the event does not own the files.
+                    drop(received);
                 })
                 .detach();
             Bool::YES
         }
+    }
+}
+
+async fn deliver_file_drop(
+    window: &Weak<Mutex<MacWindowState>>,
+    background: &BackgroundExecutor,
+    event: impl Fn() -> FileDropEvent,
+) {
+    retry_file_drop(background, || {
+        let Some(state) = window.upgrade() else {
+            return true;
+        };
+        let native = {
+            let lock = state.lock();
+            if lock.closed.load(Ordering::Acquire) {
+                return true;
+            }
+            if lock.event_callback.is_none() {
+                return false;
+            }
+            lock.native_window
+        };
+        let event = match event() {
+            FileDropEvent::Received { id, .. } if covered_by_sheet(unsafe { &*native }) => {
+                FileDropEvent::ReceiveFailed { id }
+            }
+            event => event,
+        };
+        send_file_drop_event(state, event)
+    })
+    .await;
+}
+
+/// A nested AppKit loop can retire a transfer while its input callback is
+/// borrowed. Wait for it to be restored instead of losing the completion.
+pub(crate) async fn retry_file_drop(
+    background: &BackgroundExecutor,
+    mut deliver: impl FnMut() -> bool,
+) {
+    while !deliver() {
+        background.timer(Duration::from_millis(16)).await;
     }
 }
 
@@ -4712,10 +4760,6 @@ fn send_file_drop_event(
     window_state: Arc<Mutex<MacWindowState>>,
     file_drop_event: FileDropEvent,
 ) -> bool {
-    let completing = matches!(
-        file_drop_event,
-        FileDropEvent::Received { .. } | FileDropEvent::ReceiveFailed { .. }
-    );
     let external_files_dragged = match file_drop_event {
         FileDropEvent::Entered { .. } => Some(true),
         FileDropEvent::Exited | FileDropEvent::Ended => Some(false),
@@ -4725,13 +4769,13 @@ fn send_file_drop_event(
     let mut lock = window_state.lock();
     if let Some(mut callback) = lock.event_callback.take() {
         drop(lock);
-        let result = callback(PlatformInput::FileDrop(file_drop_event));
+        callback(PlatformInput::FileDrop(file_drop_event));
         let mut lock = window_state.lock();
         lock.event_callback = Some(callback);
         if let Some(external_files_dragged) = external_files_dragged {
             lock.external_files_dragged = external_files_dragged;
         }
-        !completing || !result.propagate
+        true
     } else {
         false
     }

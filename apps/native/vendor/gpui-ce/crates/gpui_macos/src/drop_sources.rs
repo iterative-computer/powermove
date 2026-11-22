@@ -1,21 +1,25 @@
 //! Powermove P-DROP-SOURCES, adapted from NativeGPUI patch 0001 (Apache-2.0).
 use block2::RcBlock;
+use futures::{FutureExt, StreamExt, channel::mpsc, future::Either};
 use gpui::{BackgroundExecutor, ExternalPaths, Task};
-use objc2::{ClassType, rc::Retained};
-use objc2_app_kit::{NSFilePromiseReceiver, NSPasteboard};
-use objc2_foundation::{
-    NSArray, NSCopying, NSData, NSDictionary, NSError, NSOperationQueue, NSString, NSURL,
+use objc2::{
+    ClassType, msg_send,
+    rc::{Retained, autoreleasepool},
 };
+use objc2_app_kit::{NSFilePromiseReceiver, NSPasteboard};
+use objc2_foundation::{NSArray, NSDictionary, NSError, NSOperationQueue, NSString, NSURL};
 use std::{
+    collections::HashMap,
     ffi::CString,
     fs,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     ptr::NonNull,
     sync::{
-        Arc, Mutex,
+        Arc, LazyLock, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 const FINDER_LIST: &str = "NSFilenamesPboardType";
@@ -42,38 +46,19 @@ pub(crate) enum Source {
     Promises {
         urls: ExternalPaths,
         usable_urls: Arc<AtomicBool>,
+        directory: Arc<Mutex<Option<ReceiveDirectory>>>,
     },
-    Image(Image),
+    Image(ImageKind),
 }
 
-pub(crate) struct Image {
-    data: Retained<NSData>,
+#[derive(Clone, Copy)]
+pub(crate) struct ImageKind {
+    utype: &'static str,
     extension: &'static str,
-}
-
-// SAFETY: The pasteboard result is copied as immutable NSData. Immutable
-// Foundation data can be read and released on a worker.
-unsafe impl Send for Image {}
-
-impl Image {
-    fn write(self, directory: &Path) -> std::io::Result<PathBuf> {
-        let path = directory.join(format!("image.{}", self.extension));
-        // SAFETY: This is an immutable snapshot.
-        fs::write(&path, unsafe { self.data.as_bytes_unchecked() })?;
-        Ok(path)
-    }
 }
 
 impl Source {
     pub(crate) fn read(board: &NSPasteboard, receive_media: bool) -> Option<Self> {
-        Self::read_with_image_limit(board, receive_media, IMAGE_LIMIT)
-    }
-
-    fn read_with_image_limit(
-        board: &NSPasteboard,
-        receive_media: bool,
-        image_limit: usize,
-    ) -> Option<Self> {
         let items = board
             .pasteboardItems()
             .map(|items| items.to_vec())
@@ -120,22 +105,19 @@ impl Source {
             return Some(Self::Promises {
                 urls,
                 usable_urls: Arc::new(AtomicBool::new(false)),
+                directory: Arc::default(),
             });
         }
         if !urls.paths().is_empty() {
             return Some(Self::Paths(urls));
         }
         if receive_media {
-            for (utype, extension) in IMAGES {
-                if let Some(data) = board.dataForType(&NSString::from_str(utype))
-                    && (1..=image_limit).contains(&data.len())
-                {
-                    return Some(Self::Image(Image {
-                        data: data.copy(),
-                        extension,
-                    }));
-                }
-            }
+            let types = board.types()?;
+            return IMAGES.into_iter().find_map(|(utype, extension)| {
+                types
+                    .containsObject(&NSString::from_str(utype))
+                    .then_some(Self::Image(ImageKind { utype, extension }))
+            });
         }
         None
     }
@@ -153,14 +135,16 @@ impl Source {
     /// Some promise sources also advertise a placeholder file URL. Resolve that
     /// distinction while hovering so the actual AppKit drop callback can choose.
     pub(crate) fn probe_urls(&self, background: &BackgroundExecutor) -> Option<Task<()>> {
-        if let Self::Promises { urls, usable_urls } = self
+        if let Self::Promises {
+            urls, usable_urls, ..
+        } = self
             && !urls.paths().is_empty()
         {
             let urls = urls.clone();
             let usable_urls = usable_urls.clone();
             return Some(background.spawn(async move {
                 usable_urls.store(
-                    urls.paths().iter().all(|path| path.exists()),
+                    urls.paths().iter().all(|path| usable_file_url(path)),
                     Ordering::Release,
                 );
             }));
@@ -172,102 +156,125 @@ impl Source {
     pub(crate) fn into_paths(self) -> Result<ExternalPaths, Self> {
         match self {
             Self::Paths(paths) => Ok(paths),
-            Self::Promises { urls, usable_urls } if usable_urls.load(Ordering::Acquire) => Ok(urls),
+            Self::Promises {
+                urls, usable_urls, ..
+            } if usable_urls.load(Ordering::Acquire) => Ok(urls),
             source => Err(source),
         }
     }
 }
 
-/// AppKit only allows starting a promise inside its drag-destination callback.
-/// Keep empty, unique directories ready so that callback need not touch disk.
-#[derive(Clone)]
-pub(crate) struct Storage(Arc<StorageState>);
+fn usable_file_url(path: &Path) -> bool {
+    let temp = std::env::temp_dir();
+    if temporary_path(path, &temp) {
+        return false;
+    }
+    let Ok(path) = fs::canonicalize(path) else {
+        return false;
+    };
+    let temp = fs::canonicalize(&temp).unwrap_or(temp);
+    !temporary_path(&path, &temp)
+}
 
-struct StorageState {
+fn temporary_path(path: &Path, temp: &Path) -> bool {
+    path.starts_with(temp)
+        || path
+            .components()
+            .any(|part| part.as_os_str() == "TemporaryItems")
+}
+
+/// Set by the host before the editor opens. Promise directories are prepared
+/// only for a hovering promise, since AppKit needs one inside the drop callback.
+#[derive(Clone)]
+pub(crate) struct Storage {
     root: PathBuf,
-    reserved: Mutex<Vec<ReceiveDirectory>>,
     background: BackgroundExecutor,
 }
 
 impl Storage {
     pub(crate) fn new(root: PathBuf, background: BackgroundExecutor) -> Self {
-        let storage = Self(Arc::new(StorageState {
-            root,
-            reserved: Mutex::new(Vec::new()),
-            background,
-        }));
-        storage.replenish(2);
-        storage
+        Self { root, background }
     }
 
-    fn replenish(&self, count: usize) {
-        let storage = self.clone();
-        self.0
-            .background
-            .spawn(async move {
-                for _ in 0..count {
-                    let Ok(directory) = ReceiveDirectory::new(&storage.0.root) else {
-                        break;
-                    };
-                    let mut reserved = storage.0.reserved.lock().unwrap();
-                    if reserved.len() < 2 {
-                        reserved.push(directory);
-                    }
-                }
-            })
-            .detach();
+    pub(crate) fn prepare(&self, source: &Source) {
+        if let Source::Promises { directory, .. } = source {
+            let directory = directory.clone();
+            let storage = self.clone();
+            self.background
+                .spawn(async move {
+                    let prepared = ReceiveDirectory::new(&storage).ok();
+                    *directory.lock().unwrap() = prepared;
+                })
+                .detach();
+        }
     }
 
     /// Called from AppKit's performDragOperation for this pasteboard.
     pub(crate) fn begin(&self, source: Source, board: &NSPasteboard) -> Option<Pending> {
+        self.begin_inner(source, board, PromiseBatch::start_receiver)
+    }
+
+    fn begin_inner(
+        &self,
+        source: Source,
+        board: &NSPasteboard,
+        start: impl FnMut(&NSFilePromiseReceiver, &NSURL, &NSOperationQueue, &PromiseReader) -> usize,
+    ) -> Option<Pending> {
         match source {
-            Source::Promises { .. } => {
+            Source::Promises { directory, .. } => {
                 let receivers = promise_receivers(board);
-                if receivers.is_empty() {
-                    return None;
-                }
-                let directory = self.0.reserved.lock().unwrap().pop();
-                self.replenish(1);
+                let directory = directory.lock().unwrap().take()?;
                 Some(Pending::Promises(PromiseBatch::begin(
-                    receivers, directory?,
+                    receivers, directory, start,
                 )?))
             }
-            Source::Image(image) => Some(Pending::Image(self.0.root.clone(), image)),
+            Source::Image(kind) => {
+                let board_name = board.name().to_string();
+                let change = board.changeCount();
+                let storage = self.clone();
+                Some(Pending::Image(self.background.spawn(async move {
+                    storage.read_image(&board_name, change, kind, IMAGE_LIMIT)
+                })))
+            }
             Source::Paths(_) => None,
         }
     }
-}
 
-impl Drop for StorageState {
-    fn drop(&mut self) {
-        let reserved = std::mem::take(self.reserved.get_mut().unwrap());
-        self.background
-            .spawn(async move { drop(reserved) })
-            .detach();
+    fn read_image(
+        &self,
+        board_name: &str,
+        change: isize,
+        kind: ImageKind,
+        limit: usize,
+    ) -> Option<ReceivedDrop> {
+        autoreleasepool(|_| {
+            let board = NSPasteboard::pasteboardWithName(&NSString::from_str(board_name));
+            if board.changeCount() != change {
+                return None;
+            }
+            let data = board.dataForType(&NSString::from_str(kind.utype))?;
+            if board.changeCount() != change || !(1..=limit).contains(&data.len()) {
+                return None;
+            }
+            let directory = ReceiveDirectory::new(self).ok()?;
+            let path = directory.path.join(format!("image.{}", kind.extension));
+            // SAFETY: Keep the pasteboard data and its byte slice on this worker.
+            fs::write(&path, unsafe { data.as_bytes_unchecked() }).ok()?;
+            directory.publish(smallvec::smallvec![path]).ok()
+        })
     }
 }
 
 pub(crate) enum Pending {
     Promises(PromiseBatch),
-    Image(PathBuf, Image),
+    Image(Task<Option<ReceivedDrop>>),
 }
 
 impl Pending {
-    pub(crate) async fn finish(self, background: &BackgroundExecutor) -> Option<Received> {
+    pub(crate) async fn finish(self, background: &BackgroundExecutor) -> Option<ReceivedDrop> {
         match self {
-            Self::Promises(promises) => promises.finish(background).await,
-            Self::Image(root, image) => {
-                background
-                    .spawn(async move {
-                        let directory = ReceiveDirectory::new(&root).ok()?;
-                        let path = image.write(&directory.path).ok()?;
-                        Some(Received {
-                            paths: ExternalPaths(smallvec::smallvec![path]),
-                            directory,
-                        })
-                    })
-                    .await
-            }
+            Self::Promises(promises) => promises.finish(background, Duration::from_secs(600)).await,
+            Self::Image(task) => task.await,
         }
     }
 }
@@ -281,6 +288,13 @@ fn local_path(url: &NSURL) -> Option<PathBuf> {
     {
         return None;
     }
+    let resolved;
+    let url = if url.isFileReferenceURL() {
+        resolved = url.filePathURL()?;
+        &*resolved
+    } else {
+        url
+    };
     crate::platform::ns_url_to_path(url)
         .ok()
         .filter(|p| p.is_absolute())
@@ -300,23 +314,55 @@ fn promise_receivers(board: &NSPasteboard) -> Vec<Retained<NSFilePromiseReceiver
         .collect()
 }
 
-type PromiseFiles = Arc<Mutex<Vec<Option<PathBuf>>>>;
+type PromiseReader = block2::DynBlock<dyn Fn(*mut NSURL, *mut NSError)>;
+type Callback = (usize, Option<PathBuf>);
 
 pub(crate) struct PromiseBatch {
-    directory: ReceiveDirectory,
+    directory: Option<ReceiveDirectory>,
     queue: Retained<NSOperationQueue>,
-    receivers: Vec<Retained<NSFilePromiseReceiver>>,
-    batches: Vec<(usize, PromiseFiles)>,
+    // AppKit may keep scheduling operations after begin returns.
+    _receivers: Vec<Retained<NSFilePromiseReceiver>>,
+    expected: Vec<usize>,
+    callbacks: mpsc::UnboundedReceiver<Callback>,
 }
 
 impl PromiseBatch {
+    fn start_receiver(
+        receiver: &NSFilePromiseReceiver,
+        destination: &NSURL,
+        queue: &NSOperationQueue,
+        reader: &PromiseReader,
+    ) -> usize {
+        let options: Retained<NSDictionary> = NSDictionary::new();
+        // SAFETY: This runs in performDragOperation. The reader takes a raw URL
+        // pointer since AppKit may omit the URL when it supplies an error.
+        unsafe {
+            let _: () = msg_send![
+                receiver,
+                receivePromisedFilesAtDestination: destination,
+                options: &*options,
+                operationQueue: queue,
+                reader: reader,
+            ];
+        }
+        receiver.fileNames().count()
+    }
+
     fn begin(
         receivers: Vec<Retained<NSFilePromiseReceiver>>,
         directory: ReceiveDirectory,
+        mut start: impl FnMut(
+            &NSFilePromiseReceiver,
+            &NSURL,
+            &NSOperationQueue,
+            &PromiseReader,
+        ) -> usize,
     ) -> Option<Self> {
-        let options = NSDictionary::new();
+        if receivers.is_empty() {
+            return None;
+        }
         let path = CString::new(directory.path.as_os_str().as_bytes()).ok()?;
-        // SAFETY: The null-terminated path remains live during this initializer.
+        // SAFETY: This filesystem representation lives through the initializer.
         let destination = unsafe {
             NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
                 NonNull::new(path.as_ptr().cast_mut())?,
@@ -325,111 +371,266 @@ impl PromiseBatch {
             )
         };
         let queue = NSOperationQueue::new();
-        let mut batches = Vec::new();
-        for receiver in &receivers {
-            let results = PromiseFiles::default();
-            let reader = RcBlock::new({
-                let results = results.clone();
-                move |url: NonNull<NSURL>, error: *mut NSError| {
-                    // SAFETY: AppKit supplies a valid URL for the successful callback.
-                    let path = if error.is_null() {
-                        local_path(unsafe { url.as_ref() })
+        // Move each file out of AppKit's shared input directory in its
+        // coordinated read, before running the next reader.
+        queue.setMaxConcurrentOperationCount(1);
+        let (tx, callbacks) = mpsc::unbounded();
+        let expected = receivers
+            .iter()
+            .enumerate()
+            .map(|(index, receiver)| {
+                let parent = directory.path.clone();
+                let tx = tx.clone();
+                let reader = RcBlock::new(move |url: *mut NSURL, error: *mut NSError| {
+                    let path = if error.is_null() && !tx.is_closed() {
+                        // SAFETY: AppKit's successful result stays live for the reader.
+                        unsafe { url.as_ref() }
+                            .and_then(local_path)
+                            .and_then(|path| isolate(&parent, index, path).ok())
                     } else {
                         None
                     };
-                    results.lock().unwrap().push(path);
-                }
-            });
-            // SAFETY: Called in performDragOperation with receivers read from
-            // its own pasteboard. The existing directory and worker queue live
-            // through all of the AppKit callbacks.
-            unsafe {
-                receiver.receivePromisedFilesAtDestination_options_operationQueue_reader(
-                    &destination,
-                    &options,
-                    &queue,
-                    &reader,
-                );
-            }
-            // Legacy promises can produce several files despite listing just
-            // one file type. AppKit populates fileNames when receiving starts.
-            batches.push((receiver.fileNames().count(), results));
-        }
+                    let _ = tx.unbounded_send((index, path));
+                });
+                // AppKit requires the same destination URL for every receiver.
+                // The reader isolates completed files into per-receiver subfolders.
+                start(receiver, &destination, &queue, &reader)
+            })
+            .collect();
         Some(Self {
-            directory,
+            directory: Some(directory),
             queue,
-            receivers,
-            batches,
+            _receivers: receivers,
+            expected,
+            callbacks,
         })
     }
 
-    async fn finish(self, background: &BackgroundExecutor) -> Option<Received> {
-        let Self {
-            directory,
-            queue,
-            receivers,
-            batches,
-        } = self;
-        let received = background
-            .spawn_dedicated(move |_| async move {
-                queue.waitUntilAllOperationsAreFinished();
-                let mut paths = ExternalPaths::default();
-                for (count, results) in batches {
-                    let mut results = results.lock().unwrap();
-                    if count == 0 || results.len() != count {
-                        return None;
-                    }
-                    for result in results.drain(..) {
-                        let path = result?;
-                        if path.parent() != Some(&directory.path)
-                            || !fs::symlink_metadata(&path).is_ok_and(|m| m.is_file())
-                            || paths.0.contains(&path)
-                        {
-                            return None;
-                        }
-                        paths.0.push(path);
-                    }
-                }
-                Some(Received { paths, directory })
-            })
-            .await;
-        drop(receivers);
-        received
+    async fn finish(
+        mut self,
+        background: &BackgroundExecutor,
+        timeout: Duration,
+    ) -> Option<ReceivedDrop> {
+        let collect = collect_callbacks(&self.expected, &mut self.callbacks).fuse();
+        let timer = background.timer(timeout).fuse();
+        let paths = match futures::future::select(Box::pin(collect), Box::pin(timer)).await {
+            Either::Left((paths, _)) => paths?,
+            Either::Right(_) => return None,
+        };
+        let directory = self.directory.take()?;
+        background
+            .spawn(async move { directory.publish(paths).ok() })
+            .await
     }
 }
 
-pub(crate) struct Received {
-    pub(crate) paths: ExternalPaths,
+impl Drop for PromiseBatch {
+    fn drop(&mut self) {
+        if self.directory.is_some() {
+            self.callbacks.close();
+            self.queue.cancelAllOperations();
+        }
+    }
+}
+
+async fn collect_callbacks(
+    expected: &[usize],
+    callbacks: &mut mpsc::UnboundedReceiver<Callback>,
+) -> Option<smallvec::SmallVec<[PathBuf; 2]>> {
+    if expected.contains(&0) {
+        return None;
+    }
+    let mut batches = vec![Vec::new(); expected.len()];
+    let mut remaining = expected
+        .iter()
+        .try_fold(0usize, |total, count| total.checked_add(*count))?;
+    while remaining != 0 {
+        let (index, path) = callbacks.next().await?;
+        let batch = batches.get_mut(index)?;
+        if batch.len() == expected[index] {
+            return None;
+        }
+        batch.push(path?);
+        remaining -= 1;
+    }
+    Some(batches.into_iter().flatten().collect())
+}
+
+fn isolate(parent: &Path, index: usize, path: PathBuf) -> std::io::Result<PathBuf> {
+    if path.parent() != Some(parent) || !fs::symlink_metadata(&path)?.is_file() {
+        return Err(std::io::Error::other("Invalid promised file"));
+    }
+    let folder = parent.join(index.to_string());
+    match fs::create_dir(&folder) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let destination = folder.join(
+        path.file_name()
+            .ok_or_else(|| std::io::Error::other("Missing file name"))?,
+    );
+    // A hard link refuses an occupied destination. Both names are in staging
+    // on the same volume. The promised bytes never need a second copy.
+    fs::hard_link(&path, &destination)?;
+    fs::remove_file(path)?;
+    Ok(destination)
+}
+
+static RECEIVED: LazyLock<Mutex<HashMap<PathBuf, Weak<ReceivedFiles>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Ownership of materialized drop files while a host handler or import needs them.
+#[derive(Clone)]
+pub struct ReceivedDrop(Arc<ReceivedFiles>);
+
+struct ReceivedFiles {
+    paths: ExternalPaths,
     directory: ReceiveDirectory,
+    retained: Mutex<std::collections::HashSet<PathBuf>>,
 }
 
-impl Received {
-    pub(crate) fn keep(mut self) {
-        // An accepted drop may become a project source, a relink or a sequence.
-        self.directory.keep = true;
+impl std::fmt::Debug for ReceivedDrop {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("ReceivedDrop")
+            .field(&self.0.paths)
+            .finish()
     }
 }
 
-struct ReceiveDirectory {
+impl ReceivedDrop {
+    /// Obtain ownership from the exact paths handed to a native drop handler.
+    pub fn for_paths(paths: &[PathBuf]) -> Option<Self> {
+        let files = RECEIVED.lock().unwrap();
+        paths
+            .iter()
+            .find_map(|path| files.get(path)?.upgrade().map(Self))
+    }
+
+    pub(crate) fn paths(&self) -> &ExternalPaths {
+        &self.0.paths
+    }
+
+    /// Whether this lease owns a particular file.
+    pub fn owns(&self, path: &Path) -> bool {
+        self.0.paths.paths().iter().any(|owned| owned == path)
+    }
+
+    /// Keep files only when the host has registered a path as a durable source.
+    pub fn keep(&self, paths: &[PathBuf]) {
+        self.0
+            .retained
+            .lock()
+            .unwrap()
+            .extend(paths.iter().filter(|path| self.owns(path)).cloned());
+    }
+}
+
+impl Drop for ReceivedFiles {
+    fn drop(&mut self) {
+        let mut files = RECEIVED.lock().unwrap();
+        for path in self.paths.paths() {
+            files.remove(path);
+        }
+        self.directory.retained = std::mem::take(self.retained.get_mut().unwrap());
+    }
+}
+
+/// Remove unfinished transfers once the app has acquired its profile lock.
+pub fn clear_incoming_drops(root: &Path) -> std::io::Result<()> {
+    match fs::remove_dir_all(root.join(".incoming")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+pub(crate) struct ReceiveDirectory {
     path: PathBuf,
-    keep: bool,
+    background: BackgroundExecutor,
+    retained: std::collections::HashSet<PathBuf>,
 }
 
 impl ReceiveDirectory {
-    fn new(root: &Path) -> std::io::Result<Self> {
-        fs::create_dir_all(root)?;
-        let path = fs::canonicalize(root)?.join(uuid::Uuid::new_v4().to_string());
+    fn new(storage: &Storage) -> std::io::Result<Self> {
+        let root = storage.root.join(".incoming");
+        fs::create_dir_all(&root)?;
+        let path = fs::canonicalize(&root)?.join(uuid::Uuid::new_v4().to_string());
         let mut builder = fs::DirBuilder::new();
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700).create(&path)?;
-        Ok(Self { path, keep: false })
+        Ok(Self {
+            path,
+            background: storage.background.clone(),
+            retained: Default::default(),
+        })
+    }
+
+    fn publish(mut self, paths: smallvec::SmallVec<[PathBuf; 2]>) -> std::io::Result<ReceivedDrop> {
+        let final_path = self
+            .path
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join(self.path.file_name().unwrap());
+        let paths = ExternalPaths(
+            paths
+                .into_iter()
+                .map(|path| {
+                    final_path.join(
+                        path.strip_prefix(&self.path)
+                            .expect("drop file under staging root"),
+                    )
+                })
+                .collect(),
+        );
+        fs::rename(&self.path, &final_path)?;
+        self.path = final_path;
+        let files = Arc::new(ReceivedFiles {
+            paths,
+            directory: self,
+            retained: Default::default(),
+        });
+        {
+            let mut registered = RECEIVED.lock().unwrap();
+            for path in files.paths.paths() {
+                registered.insert(path.clone(), Arc::downgrade(&files));
+            }
+        }
+        Ok(ReceivedDrop(files))
     }
 }
 
 impl Drop for ReceiveDirectory {
     fn drop(&mut self) {
-        if !self.keep {
-            let _ = fs::remove_dir_all(&self.path);
+        let path = std::mem::take(&mut self.path);
+        let retained = std::mem::take(&mut self.retained);
+        self.background
+            .spawn(async move {
+                if retained.is_empty() {
+                    let _ = fs::remove_dir_all(&path);
+                } else {
+                    remove_unregistered(&path, &retained);
+                }
+            })
+            .detach();
+    }
+}
+
+fn remove_unregistered(dir: &Path, retained: &std::collections::HashSet<PathBuf>) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                if retained.iter().any(|file| file.starts_with(&path)) {
+                    remove_unregistered(&path, retained);
+                } else {
+                    let _ = fs::remove_dir_all(path);
+                }
+            } else if !retained.contains(&path) {
+                let _ = fs::remove_file(path);
+            }
         }
     }
 }

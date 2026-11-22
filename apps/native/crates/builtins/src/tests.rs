@@ -279,6 +279,20 @@ fn properties_native_binding_writes_kernel_and_retired_selection_rejects_lease()
 fn a_finder_drop_on_the_project_panel_imports_into_that_target_without_a_layer() {
     let actor = actor();
     let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    #[derive(Debug)]
+    struct CopyLease;
+    impl crate::media_import::ReceivedMedia for CopyLease {
+        fn owns(&self, path: &std::path::Path) -> bool {
+            path == std::path::Path::new("/synthetic/clip.mov")
+        }
+        fn keep(&self, _: &[std::path::PathBuf]) {
+            panic!("the platform request has not registered a source");
+        }
+    }
+    panels.set_drop_lookup(|paths| {
+        let lease: Arc<dyn crate::media_import::ReceivedMedia> = Arc::new(CopyLease);
+        paths.iter().any(|path| lease.owns(path)).then_some(lease)
+    });
     finish(panels.mount("assets").unwrap());
     let mut publication = None;
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -330,6 +344,10 @@ fn a_finder_drop_on_the_project_panel_imports_into_that_target_without_a_layer()
         assert!(Instant::now() < deadline, "{:?}", panels.take_errors());
         thread::sleep(Duration::from_millis(1));
     };
+    assert!(
+        request.received.is_some(),
+        "the queued effect carries the drop lease"
+    );
     let effect: pm_panel_media::HostRequest = serde_json::from_value(request.input).unwrap();
     assert_eq!(
         effect.effect,
