@@ -160,7 +160,7 @@ fn sample(p: &[(f64, f64)], v: f64) -> f64 {
 /// neutral grey, and the hues rise in strength and in light as they reach the
 /// edge.
 fn disc_colour(x: f64, y: f64, radius: f64, dark: bool) -> [f64; 3] {
-    let strength = if dark { 0.50 } else { 0.32 };
+    let strength = if dark { 0.50 } else { 0.26 };
     let reach = radius.min(1.);
     let rise = reach.powf(0.7) / radius.max(1e-6);
     let push = offset(x * rise * strength, y * rise * strength);
