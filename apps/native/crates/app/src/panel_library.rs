@@ -242,6 +242,19 @@ impl PanelLibrary {
         }
         cx.notify();
     }
+    /// Whether there is a layout to save: the editor holds a project. After
+    /// its project closes (the window shows Home) the library stays open,
+    /// and Save Current as New has nothing to save.
+    fn saves_current(&self, cx: &App) -> bool {
+        #[cfg(test)]
+        if self.fixture.is_some() {
+            return true;
+        }
+        self.editor
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .is_some_and(|e| e.read(cx).session.is_some())
+    }
     fn send(&self, command: String, cx: &mut Context<Self>) {
         if let Some(editor) = self.editor.as_ref().and_then(WeakEntity::upgrade) {
             if let Some(id) = command.strip_prefix("library-delete:") {
@@ -693,6 +706,7 @@ impl Render for PanelLibrary {
         let kit = Kit::new(&t, &self.motion, Self::motion, window, cx);
         let (c, m, ty) = (&t.colors, &t.metrics, &t.typography);
         let (ground, ground_alpha) = t.ground();
+        let saves = self.saves_current(cx);
         let (panels, workspaces) = self
             .editor
             .as_ref()
@@ -961,7 +975,12 @@ impl Render for PanelLibrary {
                                 Some("plus"),
                                 None,
                             )
-                            .on_click(cx.listener(|v, _, _, cx| v.send("layout:save".into(), cx))),
+                            .when(!saves, |d| kit.disabled(d))
+                            .when(saves, |d| {
+                                d.on_click(cx.listener(|v, _, _, cx| {
+                                    v.send("layout:save".into(), cx)
+                                }))
+                            }),
                         )
                     },
                 )
@@ -1009,7 +1028,12 @@ impl Render for PanelLibrary {
                                 Some("plus"),
                                 None,
                             )
-                            .on_click(cx.listener(|v, _, _, cx| v.send("layout:save".into(), cx))),
+                            .when(!saves, |d| kit.disabled(d))
+                            .when(saves, |d| {
+                                d.on_click(cx.listener(|v, _, _, cx| {
+                                    v.send("layout:save".into(), cx)
+                                }))
+                            }),
                         )
                     }),
             )
