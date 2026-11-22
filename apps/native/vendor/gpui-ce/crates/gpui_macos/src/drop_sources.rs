@@ -470,10 +470,15 @@ fn isolate(parent: &Path, index: usize, path: PathBuf) -> std::io::Result<PathBu
         path.file_name()
             .ok_or_else(|| std::io::Error::other("Missing file name"))?,
     );
-    // A hard link refuses an occupied destination. Both names are in staging
-    // on the same volume. The promised bytes never need a second copy.
-    fs::hard_link(&path, &destination)?;
-    fs::remove_file(path)?;
+    // This batch's reader queue is serial, and the source writes into the
+    // shared parent. Only this reader writes into its receiver's folder.
+    match fs::symlink_metadata(&destination) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::rename(&path, &destination)?;
+        }
+        Err(error) => return Err(error),
+        Ok(_) => return Err(std::io::Error::other("Duplicate promised file")),
+    }
     Ok(destination)
 }
 
