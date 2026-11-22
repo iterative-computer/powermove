@@ -321,3 +321,105 @@ fn corpus_layouts() {
         }
     }
 }
+
+/// The source pass's normalization (`normalize_luma_as`) writes luma
+/// without alpha to R32Float: a quarter of the bytes, and every texel a
+/// reader loads has the bits of the RGBA32Float one, whose other channels
+/// are (0, 0, 1) for those frames (an R32Float load returns (r, 0, 0, 1)).
+/// Frames with alpha keep RGBA32Float. Idle release empties the free list.
+#[test]
+fn luma_only_normalization_loads_the_same_bits() {
+    let g = gpu();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(fixtures())
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("mp4" | "mov" | "mkv" | "webm")
+            )
+        })
+        .collect();
+    files.sort();
+    let mut compact = 0;
+    for path in files {
+        let src = MediaSource::open(&path).unwrap();
+        let svc = DecodeService::new(ServiceConfig {
+            cache_bytes: 0,
+            ..Default::default()
+        });
+        let n = src.index.frames.len();
+        for b in backends(&src.info, &src.index) {
+            let Ok(mut s) = svc.session_with(&src, 1, DecodePurpose::Display, Some(b)) else {
+                continue;
+            };
+            for k in [0, n / 2] {
+                let f = s.frame(k).unwrap();
+                let what = format!("{} [{b:?}] frame {k}", path.display());
+                let imp = g.importer.import(&f).unwrap();
+                let range = f.format.range;
+                let mut enc = g.device.create_command_encoder(&Default::default());
+                let full = g.importer.normalize_as(&g.queue, &mut enc, &imp, range).unwrap();
+                let small = g
+                    .importer
+                    .normalize_luma_as(&g.queue, &mut enc, &imp, range)
+                    .unwrap();
+                g.queue.submit([enc.finish()]);
+                match (full, small) {
+                    (
+                        Normalized::YCbCr { luma: fl, chroma: fc },
+                        Normalized::YCbCr { luma: sl, chroma: sc },
+                    ) => {
+                        let (fv, sv) = (read_texture(&g, &fl), read_texture(&g, &sl));
+                        assert_eq!(fv.len(), sv.len(), "{what}");
+                        if sl.format() == wgpu::TextureFormat::R32Float {
+                            assert!(!f.format.has_alpha(), "{what}: alpha frame went to R32Float");
+                            compact += 1;
+                            for (i, (a, c)) in fv.iter().zip(&sv).enumerate() {
+                                assert_eq!(a[0].to_bits(), c[0].to_bits(), "{what}: luma texel {i}");
+                                assert_eq!(
+                                    [a[1].to_bits(), a[2].to_bits(), a[3].to_bits()],
+                                    [0.0f32.to_bits(), 0.0f32.to_bits(), 1.0f32.to_bits()],
+                                    "{what}: texel {i} is not (Y', 0, 0, 1)"
+                                );
+                            }
+                        } else {
+                            assert_eq!(sl.format(), wgpu::TextureFormat::Rgba32Float, "{what}");
+                            let bits = |v: &[[f32; 4]]| -> Vec<[u32; 4]> {
+                                v.iter().map(|p| p.map(f32::to_bits)).collect()
+                            };
+                            assert_eq!(bits(&fv), bits(&sv), "{what}: luma");
+                        }
+                        let bits = |v: &[[f32; 4]]| -> Vec<[u32; 4]> {
+                            v.iter().map(|p| p.map(f32::to_bits)).collect()
+                        };
+                        assert_eq!(
+                            bits(&read_texture(&g, &fc)),
+                            bits(&read_texture(&g, &sc)),
+                            "{what}: chroma"
+                        );
+                        g.importer.recycle(Normalized::YCbCr { luma: fl, chroma: fc });
+                        g.importer.recycle(Normalized::YCbCr { luma: sl, chroma: sc });
+                    }
+                    (Normalized::Rgb { rgba: a }, Normalized::Rgb { rgba: c }) => {
+                        assert_eq!(c.format(), wgpu::TextureFormat::Rgba32Float, "{what}");
+                        let bits = |v: &[[f32; 4]]| -> Vec<[u32; 4]> {
+                            v.iter().map(|p| p.map(f32::to_bits)).collect()
+                        };
+                        assert_eq!(
+                            bits(&read_texture(&g, &a)),
+                            bits(&read_texture(&g, &c)),
+                            "{what}: rgba"
+                        );
+                    }
+                    _ => panic!("{what}: the two normalizations differ in kind"),
+                }
+                g.importer.flush_cache();
+            }
+        }
+    }
+    assert!(compact > 0, "no fixture frame took the R32Float luma");
+    assert!(g.importer.free_bytes() > 0, "recycled textures are kept for reuse");
+    g.importer.release_free();
+    assert_eq!(g.importer.free_bytes(), 0, "idle release empties the free list");
+}

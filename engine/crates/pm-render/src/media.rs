@@ -2306,8 +2306,11 @@ impl MediaCache {
                 recycled.extend([np, nc, nn]);
                 out
             }
+            // Only the source pass reads it, by texel: luma without alpha
+            // goes to R32Float (the same loaded values; bwdif above keeps
+            // RGBA32Float).
             None => importer
-                .normalize_as(queue, encoder, &imported, range)
+                .normalize_luma_as(queue, encoder, &imported, range)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?,
         };
         let converted = convert_format_scaled(
@@ -2775,6 +2778,11 @@ impl MediaCache {
         });
         self.idle_media = true;
         self.service.pool().trim(0);
+        // The importer's reusable normalization textures go too (about
+        // 150 MB for UHD); playing again allocates them on its first frame.
+        if let Some(importer) = &self.importer {
+            importer.release_free();
+        }
         self.recount();
     }
 
