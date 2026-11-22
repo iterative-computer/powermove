@@ -3596,7 +3596,7 @@ pub fn probe(path: &Path) -> Result<serde_json::Value, String> {
     Ok(crate::data::wire(&record))
 }
 
-pub(crate) fn mark_new_video(asset: &mut serde_json::Value) {
+pub fn mark_new_video(asset: &mut serde_json::Value) {
     if asset["kind"] == "video" {
         asset["videoColor"] = json!(pm_media::interpret::CAMERA_LOG_VIDEO_COLOR);
     }

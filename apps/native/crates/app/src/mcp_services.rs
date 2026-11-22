@@ -1145,6 +1145,7 @@ impl MediaImporter for EngineJobs {
         // presentation; a replaced asset keeps the reading it was edited with.
         if request.replace.is_none() && matches!(kind, "video" | "audio") {
             metadata["timing"] = json!(pm_media::clip::ClipTiming::imported());
+            pm_builtins::media_import::mark_new_video(&mut metadata);
         }
         let revision = self.admit(request, &published, &id, &metadata, original, previous)?;
         let status = if request.replace.is_some() {
@@ -2401,8 +2402,8 @@ mod relink_tests {
         assert_eq!(root_of(&kernel).0.revision(), revision);
     }
 
-    /// An agent's relink keeps which audio streams are heard, exactly as a
-    /// person's does (`pm_builtins` tests the full table).
+    /// Agent imports and relinks follow the same asset reading rules as a
+    /// person's (`pm_builtins` tests the full audio routing table).
     #[test]
     fn an_agent_relink_keeps_which_audio_streams_are_heard() {
         let dir = tempfile::tempdir().unwrap();
@@ -2450,27 +2451,39 @@ mod relink_tests {
         let ffmpeg = ffmpeg_path();
         let recorder = clip(&root, "recorder.mov", &CLICKS[..2]);
         let mono = clip(&root, "mono.mov", &CLICKS[2..]);
-        let relink = |asset: &str, path: &Path| {
+        let import = |replace: Option<&str>, path: &Path| {
             let (published, project) = root_of(&kernel);
-            let replaced = jobs
-                .import(&MediaImport {
-                    frozen: FrozenProject {
-                        project_id: "p".into(),
-                        document_id: published.snapshot.doc_id,
-                        revision: published.revision(),
-                        project,
-                    },
-                    path: path.to_owned(),
-                    folder: None,
-                    replace: Some(asset.into()),
-                    expected_fingerprint: None,
-                    writer: 1,
-                    sequence: None,
-                })
-                .unwrap();
-            assert_eq!(replaced.status, "replaced");
+            jobs.import(&MediaImport {
+                frozen: FrozenProject {
+                    project_id: "p".into(),
+                    document_id: published.snapshot.doc_id,
+                    revision: published.revision(),
+                    project,
+                },
+                path: path.to_owned(),
+                folder: None,
+                replace: replace.map(str::to_owned),
+                expected_fingerprint: None,
+                writer: 1,
+                sequence: None,
+            })
+            .unwrap()
         };
+        let relink = |asset: &str, path: &Path| {
+            assert_eq!(import(Some(asset), path).status, "replaced");
+        };
+        let fresh = import(None, &recorder);
+        assert_eq!(fresh.status, "imported");
+        assert_eq!(
+            root_of(&kernel).1["assets"][&fresh.asset]["videoColor"],
+            pm_media::interpret::CAMERA_LOG_VIDEO_COLOR
+        );
         relink("older", &recorder);
+        assert!(
+            root_of(&kernel).1["assets"]["older"]
+                .get("videoColor")
+                .is_none()
+        );
         assert_eq!(heard(&kernel, "older"), [0]);
         relink("muted", &recorder);
         assert_eq!(heard(&kernel, "muted"), [0]);
