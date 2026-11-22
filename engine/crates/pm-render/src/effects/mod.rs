@@ -18,6 +18,7 @@
 //! shader; [`builtin_definitions`] embeds their snapshots as the kernel
 //! produces them (`tools/effects/builtins.ts`).
 
+pub(crate) mod bounds;
 mod brush;
 pub(crate) mod exec;
 pub mod fallback;
@@ -195,6 +196,9 @@ pub struct Effects {
     /// Time frames spent building programs or waiting for builds in
     /// flight (µs; renderer telemetry).
     pub(crate) frame_build_us: u64,
+    /// Zero-preserving effect passes keep to the pixels they can change
+    /// ([`bounds`]; on unless a test compares against shading everything).
+    pub(crate) scissor_passes: bool,
     /// Tests: every program build fails with this, and builds are counted.
     #[cfg(test)]
     fail_builds: Option<Failure>,
@@ -384,6 +388,7 @@ impl Effects {
             simple: Default::default(),
             prewarm: Default::default(),
             frame_build_us: 0,
+            scissor_passes: true,
             #[cfg(test)]
             fail_builds: None,
             #[cfg(test)]

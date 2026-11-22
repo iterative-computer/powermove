@@ -141,7 +141,17 @@ impl UniformPool {
     /// Places `data` in this frame's uniforms: a chunk and the range's
     /// start. It reaches the GPU at the next [`UniformPool::flush`].
     pub(crate) fn put(&mut self, device: &wgpu::Device, data: &[u8]) -> (wgpu::Buffer, u64) {
-        let size = data.len() as u64;
+        self.put_with(device, data.len() as u64, |bytes| bytes.copy_from_slice(data))
+    }
+
+    /// [`Self::put`] of `size` bytes that `write` fills in place (every
+    /// byte: the range holds an earlier frame's bytes), without a copy.
+    pub(crate) fn put_with(
+        &mut self,
+        device: &wgpu::Device,
+        size: u64,
+        write: impl FnOnce(&mut [u8]),
+    ) -> (wgpu::Buffer, u64) {
         let span = size.next_multiple_of(UNIFORM_STRIDE);
         let at = self
             .chunks
@@ -165,7 +175,7 @@ impl UniformPool {
         });
         let chunk = &mut self.chunks[index];
         let base = chunk.used;
-        chunk.bytes[base as usize..(base + size) as usize].copy_from_slice(data);
+        write(&mut chunk.bytes[base as usize..(base + size) as usize]);
         chunk.used = (base + span).min(chunk.buffer.size());
         chunk.written = base + size;
         (chunk.buffer.clone(), base)

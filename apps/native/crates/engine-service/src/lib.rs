@@ -898,6 +898,15 @@ struct Shared {
     /// Every frame costs more than its refresh (Auto resolution tests).
     #[cfg(test)]
     slow_frames: std::sync::atomic::AtomicBool,
+    /// Test record: worker loop passes, and idle waits that ended by their
+    /// own timeout (not a wake).
+    #[cfg(test)]
+    passes: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    idle_timeouts: std::sync::atomic::AtomicU64,
+    /// Test record: the engine's idle release is in effect.
+    #[cfg(test)]
+    idle_released: std::sync::atomic::AtomicBool,
 }
 impl Shared {
     fn supersede(&self) {
@@ -1708,6 +1717,12 @@ impl EngineService {
             invalid_call: Default::default(),
             #[cfg(test)]
             slow_frames: Default::default(),
+            #[cfg(test)]
+            passes: Default::default(),
+            #[cfg(test)]
+            idle_timeouts: Default::default(),
+            #[cfg(test)]
+            idle_released: Default::default(),
         });
         // A font installed or removed while a project is open: every viewer
         // draws again with fonts of the new generation, and the frame its
@@ -2591,6 +2606,10 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         let _pool = LoopPool::push();
         let mut pass = trace::Pass::start(recorder.as_ref());
         #[cfg(test)]
+        shared
+            .passes
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        #[cfg(test)]
         if shared
             .lose_device
             .swap(false, std::sync::atomic::Ordering::AcqRel)
@@ -2611,10 +2630,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         {
             panic!("injected viewer failure");
         }
-        // Delivers a pending device-lost callback even while idle.
-        engine.govern_memory();
+        // Delivers a pending device-lost callback even while idle. One usage
+        // sample a pass: governing returns the usage it reported; `poll`
+        // runs wgpu callbacks only and changes none of the counted caches,
+        // but the device's allocation is read after it, as before.
+        let mut usage = engine.govern_memory();
         engine.poll();
-        *shared.memory.lock().unwrap() = engine.memory_usage();
+        usage.gpu_allocated_bytes = engine.metal().current_allocated_size();
+        *shared.memory.lock().unwrap() = usage;
         pass.mark("memory");
         if engine.lost() {
             // Work on the lost device never completes: forget it, rebuild,
@@ -4248,7 +4271,8 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 timeout
             };
             pass.mark("scopes");
-            if engine.maintain_memory() {
+            let maintained = engine.maintain_memory();
+            if maintained.idle {
                 shared.disk.release_idle_reads();
                 for r in runtime.values() {
                     if let Some(audio) = &r.transport.audio {
@@ -4256,10 +4280,40 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     }
                 }
             }
+            if maintained.released {
+                // What was let go is reported now, not at the next pass.
+                *shared.memory.lock().unwrap() = engine.govern_memory();
+            }
+            #[cfg(test)]
+            shared.idle_released.store(
+                engine.is_idle_released(),
+                std::sync::atomic::Ordering::Release,
+            );
             pass.mark("idle release");
+            // While anything is busy (playing, frames in flight, a wait) the
+            // loop looks again within 250 ms, as before. Idle, it sleeps
+            // until its next upkeep deadline: lease requests and pressure,
+            // edits, decodes, disk reads, settled pictures and a device loss
+            // all wake it, so it no longer polls for them four times a
+            // second. A device loss nothing wakes for is noticed within
+            // IDLE_CAP.
+            const IDLE_CAP: Duration = Duration::from_secs(10);
+            let cap = if busy {
+                Duration::from_millis(250)
+            } else {
+                engine.next_maintenance().unwrap_or(IDLE_CAP).min(IDLE_CAP)
+            };
             // The wait is not the pass's time.
             drop(pass);
-            let _ = wakes.recv_timeout(timeout.min(Duration::from_millis(250)));
+            let waited = wakes.recv_timeout(timeout.min(cap));
+            #[cfg(test)]
+            if !busy && waited == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                shared
+                    .idle_timeouts
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            }
+            #[cfg(not(test))]
+            let _ = waited;
         }
     }
     drop(flights); // Command completion handlers hold their source leases.
@@ -5382,6 +5436,82 @@ mod worker_tests {
     }
     fn seconds(t: f64) -> Ticks {
         Ticks::new((t * pm_protocol::common::TICKS_PER_SECOND as f64) as i64).unwrap()
+    }
+
+    /// Waits for the worker's idle release, then for passes to stop.
+    fn idle_released(service: &EngineService, v: &Viewer) {
+        wait_for(v, "a first frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !service
+            .shared
+            .idle_released
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            assert!(std::time::Instant::now() < deadline, "{:?}", v.status());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Released after two seconds at rest, the worker sleeps: no idle wait
+    /// ends by its own timeout for seconds (it used to end four times a
+    /// second). Other tests' engines may wake it (their leases rebalance
+    /// the grant), so only its own timeouts are counted.
+    #[test]
+    fn an_idle_released_viewer_sleeps() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("idle-sleep-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        idle_released(&service, &v);
+        let timeouts = || {
+            service
+                .shared
+                .idle_timeouts
+                .load(std::sync::atomic::Ordering::Acquire)
+        };
+        let before = timeouts();
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(
+            timeouts() - before <= 1,
+            "an idle worker timed out {} times in 3 s",
+            timeouts() - before
+        );
+        // Still a working viewer: a seek wakes it and draws.
+        v.command(TransportCommand::Seek {
+            time: seconds(0.5),
+            mode: pm_protocol::clock::SeekMode::Exact,
+        })
+        .unwrap();
+        wait_for(&v, "a frame after the sleep", |s| {
+            s.frame
+                .as_ref()
+                .is_some_and(|f| f.gpu_ok && f.time == seconds(0.5))
+        });
+    }
+
+    /// A lease request (another client's registration rebalances the
+    /// grant) wakes an idle-released worker at once instead of waiting for
+    /// a poll.
+    #[test]
+    fn a_lease_request_wakes_an_idle_engine() {
+        let service =
+            EngineService::start(pm_gpu::Gpu::new("lease-wake-test").unwrap()).unwrap();
+        let v = shapes_viewer(&service, None);
+        idle_released(&service, &v);
+        std::thread::sleep(Duration::from_millis(100));
+        let passes = || service.shared.passes.load(std::sync::atomic::Ordering::Acquire);
+        let before = passes();
+        let started = std::time::Instant::now();
+        let other = memory::Registration::new(1, |_, _| {});
+        while passes() == before {
+            assert!(
+                started.elapsed() < Duration::from_millis(500),
+                "a lease request did not wake the idle worker"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(other);
     }
 
     /// A restart keeps each viewer's transport: a paused viewer stays where

@@ -5,7 +5,7 @@
 
 use super::arbiter::{HardwareArbiter, LocalArbiter};
 use super::session::Session;
-use super::{Backend, DecoderInfo, StreamSpec, open};
+use super::{Backend, DecoderInfo, Stream, open_lazily};
 use crate::cache::{CacheStats, FrameCache, FrameKey};
 use crate::clip::{ClipTiming, LegacyMap, Span};
 use crate::error::{MediaError, Result};
@@ -334,6 +334,8 @@ pub struct DecodeService {
     open_sessions: AtomicU64,
     /// Decoders a failed session's recovery tried to open, in all.
     recovery_opens: AtomicU64,
+    /// FFmpeg demuxers sessions opened (besides a source's startup one).
+    input_opens: AtomicU64,
     /// The two media shares are one bounded pool: warm decoder references
     /// can borrow only the frame-cache capacity that is not being kept.
     lease: Mutex<MediaLease>,
@@ -674,6 +676,7 @@ impl DecodeService {
             scrubbed_ms: AtomicU64::new(0),
             open_sessions: AtomicU64::new(0),
             recovery_opens: AtomicU64::new(0),
+            input_opens: AtomicU64::new(0),
             lease: Mutex::new(MediaLease::UNLIMITED),
             displayed: Mutex::new(VecDeque::new()),
             kept: Mutex::new(HashSet::new()),
@@ -704,6 +707,13 @@ impl DecodeService {
     #[doc(hidden)]
     pub fn recovery_opens(&self) -> u64 {
         self.recovery_opens.load(Ordering::Relaxed)
+    }
+
+    /// How many FFmpeg demuxers sessions opened besides the probe's. For
+    /// tests.
+    #[doc(hidden)]
+    pub fn input_opens(&self) -> u64 {
+        self.input_opens.load(Ordering::Relaxed)
     }
 
     pub fn pool(&self) -> &FramePool {
@@ -845,20 +855,31 @@ impl DecodeService {
         purpose: DecodePurpose,
         prefer: Option<Backend>,
     ) -> Result<Session> {
-        // The probe's demuxer serves the first session.
-        let input = match source.startup_input.lock().unwrap().take() {
-            Some(input) => input,
-            None => Input::open(source.path())?,
-        };
-        let spec = StreamSpec {
-            input: &input,
+        // The probe's demuxer serves the first session. Later sessions open
+        // one only for a backend that reads through it: VideoToolbox decodes
+        // from the index and needs none (a cut into a clip opened again
+        // used to probe the file in FFmpeg first, inside the frame's
+        // deadline). Unused, the startup demuxer goes as before.
+        let input = std::cell::OnceCell::new();
+        if let Some(startup) = source.startup_input.lock().unwrap().take() {
+            let _ = input.set(startup);
+        }
+        let spec = Stream {
             stream: source.stream,
             info: &source.info,
             index: &source.index,
             extradata: &source.extradata,
         };
-        let (decoder, _skipped) = open(
+        let (decoder, _skipped) = open_lazily(
             &spec,
+            &|| {
+                if input.get().is_none() {
+                    let fresh = Input::open(source.path())?;
+                    self.input_opens.fetch_add(1, Ordering::Relaxed);
+                    let _ = input.set(fresh);
+                }
+                Ok(input.get().expect("set above"))
+            },
             purpose,
             &self.pool,
             self.arbiter.as_ref(),
@@ -871,6 +892,7 @@ impl DecodeService {
         s.set_window_bytes(
             super::diag::knob("PM_ABL_WINDOW_MIB").map_or(32 << 20, |m| (m << 20) as usize),
         );
+        s.spill_to(self.cache.clone(), source.id, purpose);
         self.open_sessions.fetch_add(1, Ordering::Relaxed);
         super::diag::bump(&super::diag::SESSIONS_OPENED, 1);
         Ok(s)

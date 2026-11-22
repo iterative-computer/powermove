@@ -70,6 +70,11 @@ pub fn apply(block: &Block, bytes: &mut [u8], name: &str, call: &Call) -> bool {
     let Some(member) = block.members.iter().find(|m| m.name == name) else {
         return false;
     };
+    apply_member(member, bytes, call)
+}
+
+/// [`apply`] to a member found already.
+fn apply_member(member: &pm_glsl::reflect::Member, bytes: &mut [u8], call: &Call) -> bool {
     let at = member.offset as usize;
     let mut put = |index: usize, word: [u8; 4]| {
         if let Some(slot) = bytes.get_mut(at + index * 4..at + index * 4 + 4) {
@@ -131,6 +136,11 @@ pub struct GpuProgram {
     pub vertex_layout: wgpu::BindGroupLayout,
     pub fragment_block: Option<Block>,
     pub vertex_block: Option<Block>,
+    /// Each block member's index by name (the first of a name, as
+    /// [`apply`] finds it): a pass's calls are written without a search of
+    /// the members per call.
+    pub fragment_index: HashMap<String, usize>,
+    pub vertex_index: HashMap<String, usize>,
     /// Sampler name and image binding, in binding order.
     pub samplers: Vec<(String, u32)>,
     pipelines: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
@@ -157,6 +167,15 @@ fn pop_error(scopes: Scopes) -> Option<String> {
         }
     }
     (!errors.is_empty()).then(|| errors.join("; "))
+}
+
+/// Each member's index by name, the first of a name kept.
+fn member_index(block: Option<&Block>) -> HashMap<String, usize> {
+    let mut index = HashMap::new();
+    for (i, member) in block.iter().flat_map(|b| b.members.iter()).enumerate() {
+        index.entry(member.name.clone()).or_insert(i);
+    }
+    index
 }
 
 fn layout_entries(
@@ -334,6 +353,8 @@ impl GpuProgram {
             layout,
             fragment_layout,
             vertex_layout,
+            fragment_index: member_index(fragment_block.as_ref()),
+            vertex_index: member_index(vertex_block.as_ref()),
             fragment_block,
             vertex_block,
             samplers,
@@ -430,6 +451,23 @@ impl GpuProgram {
         bytes
     }
 
+    /// [`Self::block_bytes`] written into `out` (`block.size.max(16)`
+    /// bytes, any previous contents), finding members through `index`
+    /// ([`Self::fragment_index`], [`Self::vertex_index`]): the same bytes.
+    pub fn write_block(
+        block: &Block,
+        index: &HashMap<String, usize>,
+        calls: &[(String, Call)],
+        out: &mut [u8],
+    ) {
+        out.fill(0);
+        for (name, call) in calls {
+            if let Some(member) = index.get(name.as_str()).and_then(|&i| block.members.get(i)) {
+                apply_member(member, out, call);
+            }
+        }
+    }
+
     /// Which unit each sampler reads: unit 0 unless a `uniform1i` call
     /// names it (or, for element 0 of an array, the array).
     pub fn sampler_units(&self, calls: &[(String, Call)]) -> Vec<u32> {
@@ -484,6 +522,47 @@ mod tests {
                     },
                 ),
             ],
+        }
+    }
+
+    /// Indexed writes into a reused (dirty) range give exactly the bytes of
+    /// a fresh block: calls in order, later ones overwriting, unknown names
+    /// and wrong types ignored, duplicate member names resolved as `apply`.
+    #[test]
+    fn indexed_writes_equal_block_bytes() {
+        let mut block = block();
+        block.members.push(pm_glsl::reflect::Member {
+            name: "f".into(),
+            offset: 88,
+            ty: UniformType::Scalar(Scalar::Float),
+            active: true,
+        });
+        let index = member_index(Some(&block));
+        let names = ["f", "i", "b", "v2", "v3", "m", "nope", "u_tex"];
+        let mut seed = 0x2545_f491_u32;
+        let mut next = |n: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed % n
+        };
+        for _ in 0..200 {
+            let calls: Vec<(String, Call)> = (0..next(12))
+                .map(|_| {
+                    let name = names[next(names.len() as u32) as usize].to_owned();
+                    let v = next(1000) as f32 / 7.0 - 50.0;
+                    let call = match next(5) {
+                        0 => Call::I(next(4) as i32 - 1),
+                        1 => Call::M3([v; 9]),
+                        n => Call::F(vec![v; n as usize - 1]),
+                    };
+                    (name, call)
+                })
+                .collect();
+            let fresh = GpuProgram::block_bytes(&block, &calls);
+            let mut reused = vec![0xA5u8; fresh.len()];
+            GpuProgram::write_block(&block, &index, &calls, &mut reused);
+            assert_eq!(fresh, reused, "{calls:?}");
         }
     }
 

@@ -154,7 +154,7 @@ pub(crate) struct Settled {
 }
 
 /// The bytes the settling renderer holds between frames.
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub(crate) struct Held {
     pub target_pool: u64,
     pub images: u64,
@@ -405,6 +405,11 @@ fn run(
                     });
                     let now = held(&renderer, budget, &shared);
                     *shared.held.lock().unwrap() = now;
+                    // The worker reports what was let go: it sleeps while
+                    // idle rather than looking every 250 ms.
+                    if let Some(wake) = &*waker.lock().unwrap() {
+                        wake.try_send(()).ok();
+                    }
                 }
                 continue;
             }
@@ -467,7 +472,12 @@ fn run(
             }
         }
         let now = held(&renderer, budget, &shared);
-        *shared.held.lock().unwrap() = now;
+        let changed = std::mem::replace(&mut *shared.held.lock().unwrap(), now) != now;
+        // A release or budget asked of it changed what it holds: the idle
+        // worker reports that now (it no longer polls every 250 ms).
+        if changed && let Some(wake) = &*waker.lock().unwrap() {
+            wake.try_send(()).ok();
+        }
     }
 }
 

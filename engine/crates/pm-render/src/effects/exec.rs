@@ -347,6 +347,11 @@ pub(crate) struct Native<'a> {
     pub linear: &'a wgpu::Sampler,
     /// A program WebGL draws that the engine cannot build routes the frame.
     pub unsupported: &'a mut Vec<Unsupported>,
+    /// Where the chain's input can be non-zero, in its target's texels (x,
+    /// GL row, width, height): outside it the input is exactly transparent.
+    /// Zero-preserving steps then shade only what they can change
+    /// ([`super::bounds`]). `None`: anywhere.
+    pub content: Option<(u32, u32, u32, u32)>,
 }
 
 /// Everything a chain records with.
@@ -363,6 +368,11 @@ pub(crate) struct Gpu<'c> {
     timer: Option<&'c mut FrameTimer>,
     linear: &'c wgpu::Sampler,
     unsupported: &'c mut Vec<Unsupported>,
+    /// [`Native::content`].
+    content: Option<(u32, u32, u32, u32)>,
+    /// A step of the running chain was drawn by the fallback runner: its
+    /// output is not known to keep the chain's bounds.
+    unbounded: bool,
 }
 
 impl<'c> Gpu<'c> {
@@ -380,6 +390,8 @@ impl<'c> Gpu<'c> {
             timer: native.timer.as_deref_mut(),
             linear: native.linear,
             unsupported: &mut *native.unsupported,
+            content: native.content,
+            unbounded: false,
         })
     }
 
@@ -463,13 +475,26 @@ impl<'c> Gpu<'c> {
         self.inputs = ready;
         let backdrop = backdrop.map(|b| self.encode_e(b, working));
         let mut current: Option<Target> = None;
+        // Where the running output can be non-zero: the input's content,
+        // grown by each zero-preserving step's reach; lost at the first
+        // step that is not one ([`super::bounds`]).
+        let size = (input.width(), input.height());
+        let mut bounds = self.content.filter(|_| self.effects.scissor_passes);
+        self.unbounded = false;
         for step in steps {
+            bounds = bounds.and_then(|b| {
+                let definition = self.effects.get(DefinitionKind::Effect, &step.definition)?;
+                Some(super::bounds::grow(b, super::bounds::reach(step, definition)?, size))
+            });
             let from = current.as_ref().unwrap_or(&input).clone();
             if let Some(next) =
-                self.run_effect(layer, step, &from, backdrop.as_ref(), time, coordinates)
+                self.run_effect(layer, step, &from, backdrop.as_ref(), time, coordinates, bounds)
                 && let Some(previous) = current.replace(next)
             {
                 self.taken.push(previous);
+            }
+            if std::mem::take(&mut self.unbounded) {
+                bounds = None;
             }
         }
         current.map(|r| self.decode_e(r, working))
@@ -484,7 +509,10 @@ impl<'c> Gpu<'c> {
     }
 
     /// `runEffects` for one effect: its passes from `input`; the output, or
-    /// `None` when the effect is skipped.
+    /// `None` when the effect is skipped. `bounds`: the scissor its passes
+    /// may keep to (target texels, GL rows), outside which every pass of
+    /// it writes exact zeros ([`super::bounds`]).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_effect(
         &mut self,
         layer: &str,
@@ -493,6 +521,7 @@ impl<'c> Gpu<'c> {
         backdrop: Option<&Target>,
         time: f64,
         (uv, origin, resolution): ([f64; 4], [f64; 2], [f64; 2]),
+        bounds: Option<(u32, u32, u32, u32)>,
     ) -> Option<Target> {
         let format = input.format();
         let (w, h) = (input.width(), input.height());
@@ -507,6 +536,8 @@ impl<'c> Gpu<'c> {
                 self.fallback(layer, &step.definition);
                 return None;
             }
+            // Another implementation draws it: the chain's bounds end here.
+            self.unbounded = true;
             let mut result = self.runner_effect(
                 layer,
                 step,
@@ -567,7 +598,9 @@ impl<'c> Gpu<'c> {
             } else {
                 (w, h)
             };
-            let mut calls: Vec<(String, Call)> = vec![("u_tex".into(), Call::I(0))];
+            // Room for every call a pass makes, so the list never regrows.
+            let mut calls: Vec<(String, Call)> = Vec::with_capacity(40 + step.params.len());
+            calls.push(("u_tex".into(), Call::I(0)));
             if step.keep_orig {
                 calls.push(("u_orig".into(), Call::I(1)));
             }
@@ -645,7 +678,9 @@ impl<'c> Gpu<'c> {
                 step.keep_orig.then_some(input),
                 backdrop.filter(|_| step.backdrop),
             ];
-            let ready = self.inputs.clone();
+            // Lent for the pass (the units borrow from it), given back after
+            // it: no copy of every prepared input per pass.
+            let ready = std::mem::take(&mut self.inputs);
             for (index, reference) in step.references.iter().enumerate() {
                 if step.temporal && index != pass as usize {
                     continue;
@@ -768,6 +803,16 @@ impl<'c> Gpu<'c> {
                     (d.height * sy).ceil().min((oh - y) as f64) as u32,
                 )
             });
+            // Kept to the pixels the step can change (same-size passes
+            // only; a scissor equal to the whole target is no scissor).
+            let bounds = bounds.filter(|b| (ow, oh) == (w, h) && *b != (0, 0, w, h));
+            if bounds.is_some() {
+                pm_perf::bump(pm_perf::Counter::EffectScissorHits);
+            }
+            let clip = match (clip, bounds) {
+                (Some(a), Some(b)) => Some(super::bounds::intersect(a, b)),
+                (a, b) => a.or(b),
+            };
             self.legacy_pass_clipped(
                 DefinitionKind::Effect,
                 &step.definition,
@@ -776,6 +821,8 @@ impl<'c> Gpu<'c> {
                 &out,
                 clip,
             );
+            drop(units);
+            self.inputs = ready;
             outputs.push(out);
         }
         if let (Some(timer), Some((_, e)), Some(last)) =
@@ -1244,14 +1291,25 @@ impl<'c> Gpu<'c> {
             .effects
             .program(device, kind, definition, format)
             .expect("checked by the caller");
-        let mut buffer = |block: &pm_glsl::reflect::Block| {
-            let bytes = GpuProgram::block_bytes(block, calls);
-            let size = bytes.len() as u64;
-            let (b, at) = uniforms.put(device, &bytes);
-            (b, at, size)
-        };
-        let fragment_buffer = program.fragment_block.as_ref().map(&mut buffer);
-        let vertex_buffer = program.vertex_block.as_ref().map(&mut buffer);
+        // Each block written straight into its range of the frame's
+        // uniforms, members found by name through the program's index:
+        // the bytes `GpuProgram::block_bytes` makes, without the copy.
+        let mut buffer =
+            |block: &pm_glsl::reflect::Block, index: &std::collections::HashMap<String, usize>| {
+                let size = u64::from(block.size.max(16));
+                let (b, at) = uniforms.put_with(device, size, |bytes| {
+                    GpuProgram::write_block(block, index, calls, bytes)
+                });
+                (b, at, size)
+            };
+        let fragment_buffer = program
+            .fragment_block
+            .as_ref()
+            .map(|block| buffer(block, &program.fragment_index));
+        let vertex_buffer = program
+            .vertex_block
+            .as_ref()
+            .map(|block| buffer(block, &program.vertex_index));
         fn range((buffer, offset, size): &(wgpu::Buffer, u64, u64)) -> wgpu::BindingResource<'_> {
             wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                 buffer,

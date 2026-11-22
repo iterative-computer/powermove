@@ -135,6 +135,10 @@ pub struct DecodeImporter {
     cache: Cf,
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    /// The same pass writing luma to `R32Float` (frames without alpha, for
+    /// readers that only load texels: [`DecodeImporter::normalize_luma_as`]).
+    luma_pipeline: wgpu::ComputePipeline,
+    luma_layout: wgpu::BindGroupLayout,
     dummy: wgpu::TextureView,
     dummy_out: wgpu::TextureView,
     /// Output textures handed back with [`DecodeImporter::recycle`], reused
@@ -186,10 +190,6 @@ impl DecodeImporter {
             });
         }
         let cache = unsafe { Cf::from_create(cache as CFTypeRef) }.unwrap();
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("pm-gpu normalize"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
         let tex = |b| wgpu::BindGroupLayoutEntry {
             binding: b,
             visibility: wgpu::ShaderStages::COMPUTE,
@@ -210,40 +210,52 @@ impl DecodeImporter {
             },
             count: None,
         };
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("pm-gpu normalize"),
-            entries: &[
-                tex(0),
-                tex(1),
-                tex(2),
-                tex(3),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+        // One program, two luma outputs: the WGSL differs only in out0's
+        // storage format, so every value written is computed alike.
+        let variant = |luma: wgpu::TextureFormat, source: &str| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("pm-gpu normalize"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("pm-gpu normalize"),
+                entries: &[
+                    tex(0),
+                    tex(1),
+                    tex(2),
+                    tex(3),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                out(5, wgpu::TextureFormat::Rgba32Float),
-                out(6, wgpu::TextureFormat::Rg32Float),
-            ],
-        });
-        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("pm-gpu normalize"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("pm-gpu normalize"),
-            layout: Some(&pl),
-            module: &module,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+                    out(5, luma),
+                    out(6, wgpu::TextureFormat::Rg32Float),
+                ],
+            });
+            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("pm-gpu normalize"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("pm-gpu normalize"),
+                layout: Some(&pl),
+                module: &module,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            (pipeline, layout)
+        };
+        let (pipeline, layout) = variant(wgpu::TextureFormat::Rgba32Float, SHADER);
+        let (luma_pipeline, luma_layout) =
+            variant(wgpu::TextureFormat::R32Float, luma_only_shader().as_str());
         let small = |format, usage| {
             device
                 .create_texture(&wgpu::TextureDescriptor {
@@ -269,6 +281,8 @@ impl DecodeImporter {
             cache,
             pipeline,
             layout,
+            luma_pipeline,
+            luma_layout,
             dummy: small(
                 wgpu::TextureFormat::R8Unorm,
                 wgpu::TextureUsages::TEXTURE_BINDING,
@@ -467,6 +481,35 @@ impl DecodeImporter {
         imp: &ImportedFrame,
         range: pm_protocol::color::Range,
     ) -> Result<Normalized> {
+        self.normalize_into(queue, encoder, imp, range, false)
+    }
+
+    /// [`Self::normalize_as`] for a reader that only loads texels (the
+    /// source pass): a Y′CbCr frame without alpha writes its luma to
+    /// `R32Float`, 4 bytes a pixel instead of 16. The pass writes
+    /// (Y′, 0, 0, 1) for such frames, and loading an `R32Float` texel
+    /// returns (r, 0, 0, 1), so every loaded value has the same bits.
+    /// Frames with alpha and RGB frames are as [`Self::normalize_as`].
+    /// bwdif filters every channel of its planes: deinterlaced frames take
+    /// [`Self::normalize_as`].
+    pub fn normalize_luma_as(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        imp: &ImportedFrame,
+        range: pm_protocol::color::Range,
+    ) -> Result<Normalized> {
+        self.normalize_into(queue, encoder, imp, range, true)
+    }
+
+    fn normalize_into(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        imp: &ImportedFrame,
+        range: pm_protocol::color::Range,
+        luma_only: bool,
+    ) -> Result<Normalized> {
         let f = &imp.format;
         let n = f.norm_as(range);
         let unorm_max = |pf: PlaneFormat| match pf {
@@ -536,12 +579,21 @@ impl DecodeImporter {
             })
         };
         let rgb = kind >= 4;
-        let out0 = mk(
-            w,
-            h,
-            wgpu::TextureFormat::Rgba32Float,
-            "normalized luma/rgba",
-        );
+        let luma_only = luma_only && !rgb && alpha == 0;
+        let (pipeline, layout, out0_format) = if luma_only {
+            (
+                &self.luma_pipeline,
+                &self.luma_layout,
+                wgpu::TextureFormat::R32Float,
+            )
+        } else {
+            (
+                &self.pipeline,
+                &self.layout,
+                wgpu::TextureFormat::Rgba32Float,
+            )
+        };
+        let out0 = mk(w, h, out0_format, "normalized luma/rgba");
         let out1 = (!rgb).then(|| mk(cw, ch, wgpu::TextureFormat::Rg32Float, "normalized chroma"));
         let ubuf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("normalize params"),
@@ -565,7 +617,7 @@ impl DecodeImporter {
         let o1 = out1.as_ref().map(|t| t.create_view(&Default::default()));
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("normalize"),
-            layout: &self.layout,
+            layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -604,7 +656,7 @@ impl DecodeImporter {
                 label: Some("normalize"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bg, &[]);
             pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
         }
@@ -634,6 +686,36 @@ impl DecodeImporter {
     pub fn flush_cache(&self) {
         unsafe { CVMetalTextureCacheFlush(self.cache.as_mut_ptr(), 0) }
     }
+
+    /// Drops the normalization textures kept for reuse (nothing is being
+    /// drawn: a UHD frame's are about 150 MB) and CoreVideo's unused
+    /// texture cache entries. The next normalization allocates again.
+    pub fn release_free(&self) {
+        self.free.lock().unwrap().clear();
+        self.flush_cache();
+    }
+
+    /// Bytes of the normalization textures kept for reuse. For tests and
+    /// diagnostics.
+    pub fn free_bytes(&self) -> u64 {
+        self.free
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                let bpp = t.format().block_copy_size(None).unwrap_or(0) as u64;
+                t.width() as u64 * t.height() as u64 * bpp
+            })
+            .sum()
+    }
+}
+
+/// The normalization program with its luma/RGBA output declared `r32float`
+/// (Y′CbCr frames without alpha; [`DecodeImporter::normalize_luma_as`]).
+fn luma_only_shader() -> String {
+    const RGBA: &str = "var out0: texture_storage_2d<rgba32float, write>;";
+    assert_eq!(SHADER.matches(RGBA).count(), 1, "normalize.wgsl out0");
+    SHADER.replace(RGBA, "var out0: texture_storage_2d<r32float, write>;")
 }
 
 /// The contract 3 descriptor for a frame.

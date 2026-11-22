@@ -669,6 +669,39 @@ impl From<bool> for Readback {
     }
 }
 
+/// The idle upkeep deadlines that used to be found by polling every 250 ms:
+/// - the idle release, two seconds after the last frame;
+/// - a borrowed scrub allowance, returned by governing two seconds after the
+///   drag (polled at the old 250 ms while one is borrowed: its expiry is the
+///   media service's, and a drag is short);
+/// - kept paused decoders, which go when the app is no longer frontmost
+///   (checked each second while any are kept; pressure wakes at once).
+pub(crate) fn next_maintenance(
+    idle_released: bool,
+    since_last_frame: Duration,
+    budgeted_extra: u64,
+    kept_decoders: usize,
+) -> Option<Duration> {
+    const IDLE_RELEASE: Duration = Duration::from_secs(2);
+    let release = (!idle_released).then(|| {
+        IDLE_RELEASE
+            .saturating_sub(since_last_frame)
+            .max(Duration::from_millis(1))
+    });
+    let extra = (budgeted_extra > 0).then_some(Duration::from_millis(250));
+    let kept = (idle_released && kept_decoders > 0).then_some(Duration::from_secs(1));
+    [release, extra, kept].into_iter().flatten().min()
+}
+
+/// What [`Engine::maintain_memory`] let go.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Maintained {
+    /// Something was released: the usage last sampled is out of date.
+    pub released: bool,
+    /// The idle release ran (two seconds after the last frame).
+    pub idle: bool,
+}
+
 pub struct Submission {
     pub drawable: Option<metal::MetalDrawable>,
     pub trace: Arc<std::sync::Mutex<Trace>>,
@@ -709,11 +742,7 @@ impl Engine {
             decoder_sessions: media.sessions,
             decoder_pool_free_bytes: media.pool.free_bytes as u64,
             disk_read_ahead_bytes: self.disk.as_ref().map_or(0, |disk| disk.ready_bytes()),
-            surface_bytes: self
-                .pool
-                .iter()
-                .map(|s| u64::from(s.size.width) * u64::from(s.size.height) * 8)
-                .sum(),
+            surface_bytes: self.surface_bytes(),
             text_bytes: self.renderer.text_cache_bytes() + settling.text,
             // (The settler's decode service and 3D residency are counted
             // with the engine's below.)
@@ -728,6 +757,15 @@ impl Engine {
             // Counted by the service across engine rebuilds.
             project_releases: 0,
         }
+    }
+
+    /// Bytes of the presentation surfaces held ([`Self::memory_usage`]'s
+    /// `surface_bytes`), without sampling every other cache.
+    fn surface_bytes(&self) -> u64 {
+        self.pool
+            .iter()
+            .map(|s| u64::from(s.size.width) * u64::from(s.size.height) * 8)
+            .sum()
     }
 
     /// What the settling renderer holds, and its peak and budget.
@@ -765,20 +803,42 @@ impl Engine {
         let _ = self.gpu.device.poll(wgpu::PollType::Poll);
     }
 
-    pub fn maintain_memory(&mut self) -> bool {
-        self.govern_memory();
+    /// Idle upkeep. The worker governed memory at the top of this loop pass
+    /// ([`Self::govern_memory`]) and drew nothing since, so this does not
+    /// govern again; a lease request that lands later wakes the next pass.
+    pub fn maintain_memory(&mut self) -> Maintained {
+        let mut maintained = Maintained::default();
         // Kept paused decoders go when the app is hidden or in the
         // background, or under memory pressure; drawing again (playhead
         // moved, Play) and a project's release end them as well.
         if self.idle_released && self.renderer.kept_decoders() > 0 && !keep_paused_decoders() {
             self.renderer.release_kept_decoders();
             crate::memory::pressure_relief();
+            maintained.released = true;
         }
         if !self.idle_released && self.last_frame.elapsed() >= Duration::from_secs(2) {
             self.release_idle_memory();
-            return true;
+            maintained.released = true;
+            maintained.idle = true;
         }
-        false
+        maintained
+    }
+
+    /// How long an idle worker may sleep before [`Self::maintain_memory`]
+    /// has something to do; `None` when nothing is due (every request,
+    /// pressure change, edit and device loss wakes it).
+    pub fn next_maintenance(&self) -> Option<Duration> {
+        next_maintenance(
+            self.idle_released,
+            self.last_frame.elapsed(),
+            self.budgeted_extra,
+            self.renderer.kept_decoders(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_idle_released(&self) -> bool {
+        self.idle_released
     }
 
     pub fn release_project_memory(&mut self) {
@@ -832,11 +892,14 @@ impl Engine {
         (mib << 20) * crate::memory::budget() / (160 << 20)
     }
 
-    pub fn govern_memory(&mut self) {
-        objc2::rc::autoreleasepool(|_| self.govern_memory_inner());
+    /// Applies the grant (and any lease request or pressure) to every
+    /// cache, reports the usage to the broker, and returns that usage: the
+    /// one sample of [`Self::memory_usage`] a loop pass takes.
+    pub fn govern_memory(&mut self) -> crate::memory::CacheUsage {
+        objc2::rc::autoreleasepool(|_| self.govern_memory_inner())
     }
 
-    fn govern_memory_inner(&mut self) {
+    fn govern_memory_inner(&mut self) -> crate::memory::CacheUsage {
         use std::sync::atomic::Ordering;
         if let Some(disk) = &self.disk {
             disk.memory_pressure(crate::memory::pressure());
@@ -844,7 +907,7 @@ impl Engine {
         self.renderer
             .set_memory_pressure(crate::memory::pressure() == crate::memory::Pressure::Critical);
         let request = self.memory_request.swap(u64::MAX, Ordering::AcqRel);
-        let surfaces = self.memory_usage().surface_bytes;
+        let surfaces = self.surface_bytes();
         let share = self.memory_client.grant();
         let extra = self.scrub_extra();
         if request != u64::MAX || surfaces != self.budgeted_surfaces || extra != self.budgeted_extra
@@ -939,6 +1002,7 @@ impl Engine {
                 geometry_3d: crate::memory::bytes(u.geometry_bytes),
                 ..Default::default()
             });
+        u
     }
     /// A fresh engine on a new device after `lost` reported a loss. Fonts
     /// carry over; every surface, cache and program is made again.
@@ -1065,8 +1129,19 @@ impl Engine {
             .map_err(|s| anyhow!(s))?;
         let memory_request = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
         let pending = memory_request.clone();
+        // A lease request or a pressure change wakes an idle worker: it
+        // sleeps until its next deadline ([`Engine::next_maintenance`]),
+        // not polling for requests. The callback runs on the pressure
+        // source's queue or another engine's thread; `try_send` never
+        // blocks, and no lock of ours is held where it is called.
+        let woken = waker.clone();
         let memory_client = crate::memory::Registration::new(12, move |share, _| {
             pending.store(share, std::sync::atomic::Ordering::Release);
+            if let Ok(waker) = woken.lock()
+                && let Some(wake) = &*waker
+            {
+                wake.try_send(()).ok();
+            }
         });
         // Tests share one translated-shader folder per process, as the app
         // keeps one per profile: without one, every engine a test makes
@@ -3148,6 +3223,108 @@ mod lifetime_tests {
             .unwrap();
         assert!(engine.settled.is_none() && engine.showing.len() == 1);
         assert!(Arc::ptr_eq(&shown.surface, &engine.showing[0].1.surface));
+    }
+
+    #[test]
+    fn idle_upkeep_deadlines_replace_the_poll() {
+        let ms = Duration::from_millis;
+        // A frame was drawn: the idle release is due two seconds after it.
+        assert_eq!(next_maintenance(false, ms(0), 0, 0), Some(ms(2000)));
+        assert_eq!(next_maintenance(false, ms(1500), 0, 0), Some(ms(500)));
+        // Overdue: at once (never a zero wait that spins).
+        assert_eq!(next_maintenance(false, ms(2500), 0, 0), Some(ms(1)));
+        // Released, nothing kept or borrowed: nothing is due.
+        assert_eq!(next_maintenance(true, ms(9000), 0, 0), None);
+        // A borrowed scrub allowance is looked at as often as before.
+        assert_eq!(next_maintenance(true, ms(9000), 1 << 20, 0), Some(ms(250)));
+        assert_eq!(next_maintenance(false, ms(100), 1 << 20, 0), Some(ms(250)));
+        // Kept paused decoders: each second, only once released.
+        assert_eq!(next_maintenance(true, ms(9000), 0, 2), Some(ms(1000)));
+        assert_eq!(next_maintenance(false, ms(1900), 0, 2), Some(ms(100)));
+        assert_eq!(next_maintenance(true, ms(9000), 1, 2), Some(ms(250)));
+    }
+
+    /// An engine says when its idle upkeep is next due.
+    #[test]
+    fn an_engine_schedules_its_idle_release() {
+        let mut engine = Engine::new(Gpu::new("idle-deadline-test").unwrap()).unwrap();
+        let due = engine.next_maintenance().expect("the idle release is due");
+        assert!(due <= Duration::from_secs(2), "{due:?}");
+        engine.release_idle_memory();
+        assert!(engine.is_idle_released());
+        assert_eq!(engine.next_maintenance(), None);
+        engine.budgeted_extra = 1;
+        assert_eq!(engine.next_maintenance(), Some(Duration::from_millis(250)));
+        engine.budgeted_extra = 0;
+    }
+
+    /// The worker's loop takes one usage sample a pass: the one governing
+    /// returns. It is the usage `memory_usage` measures after governing
+    /// (the device's own allocation aside, which moves with Metal's
+    /// deferred frees and is read again by the loop).
+    #[test]
+    fn govern_returns_the_usage_it_reports() {
+        let mut engine = Engine::new(Gpu::new("govern-usage-test").unwrap()).unwrap();
+        let scene = Scene {
+            doc: Arc::new(pm_model::Document::new(
+                Some(pm_model::canonical::canonical_project(
+                    pm_model::json::parse(include_str!("../tests/fixtures/shapes.json")).unwrap(),
+                )),
+                1,
+            )),
+            comp: "Pshapes-primitives-root".into(),
+            media: Default::default(),
+            content: 1,
+        };
+        let spec = FrameSpec::exact(
+            Ticks::from_whole_seconds(1),
+            Output {
+                width: 160,
+                height: 90,
+                display: 0,
+                headroom: 1.,
+                crop: None,
+            },
+        );
+        let trace = Arc::new(std::sync::Mutex::new(Trace::default()));
+        let submission = loop {
+            if let Some(submission) = engine
+                .frame(&scene, spec, None, &Default::default(), false, trace.clone())
+                .unwrap()
+            {
+                break submission;
+            }
+        };
+        submission.commit();
+        submission.complete().unwrap();
+        drop(submission);
+        let without_device = |mut usage: crate::memory::CacheUsage| {
+            usage.gpu_allocated_bytes = 0;
+            usage
+        };
+        let governed = engine.govern_memory();
+        // A frame drawn without a layer holds no presentation surface, and
+        // other tests' engines can shrink the shared grant so governing
+        // trims the vector cache: the target it made is what is always
+        // counted.
+        assert!(governed.targets_created > 0, "{governed:?}");
+        assert_eq!(
+            without_device(governed),
+            without_device(engine.memory_usage())
+        );
+        // A lease request trims; the usage returned is the trimmed one.
+        engine
+            .memory_request
+            .store(0, std::sync::atomic::Ordering::Release);
+        let governed = engine.govern_memory();
+        assert_eq!(
+            without_device(governed),
+            without_device(engine.memory_usage())
+        );
+        // Idle upkeep within two seconds of a frame lets nothing go.
+        if engine.last_frame.elapsed() < Duration::from_secs(1) {
+            assert_eq!(engine.maintain_memory(), Maintained::default());
+        }
     }
 
     /// The frame cache holds viewer pictures only. A paused viewer frame at

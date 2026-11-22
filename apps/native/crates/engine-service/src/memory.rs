@@ -1,6 +1,6 @@
 //! Cache accounting uses nominal bytes; the OS footprint includes driver and
 //! allocator storage as well. Never substitute RSS for Activity Monitor Memory.
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct CacheUsage {
     pub target_pool_bytes: u64,
