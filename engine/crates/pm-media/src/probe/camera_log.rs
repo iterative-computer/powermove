@@ -4,7 +4,7 @@
 use crate::index::CodecConfig;
 use pm_protocol::color::{Primaries, Transfer};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 pub(crate) struct CameraLog {
     pub primaries: Primaries,
     pub transfer: Transfer,

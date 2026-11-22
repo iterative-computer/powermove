@@ -974,11 +974,7 @@ fn video_color(
     // The file's reading is the source monitor's (`frame_reading`, with its
     // image-sequence rule); Interpret Footage members replace their fields,
     // and the host's per-file override replaces it all.
-    let mut file = if interp.electron_color {
-        pm_media::probe::color::electron_frame_reading(&v.color, &v.codec.codec, sequence)
-    } else {
-        pm_media::probe::color::frame_reading(&v.color, sequence)
-    };
+    let mut file = interp.file_color(&v.color, &v.codec.codec, sequence);
     // A proxy or optimized copy reads as its original does.
     if let Some(original) = interp.original {
         file.primaries = original.primaries;

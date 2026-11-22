@@ -94,12 +94,7 @@ fn sequence_reading(
 /// values and relabels them Rec.709 before grading. Keep the input YUV matrix
 /// (decode those values first); suppress only the gamut/transfer conversion.
 pub fn electron_frame_reading(color: &ColorInfo, codec: &str, sequence: bool) -> ColorDescription {
-    let mut desc = color.interpreted;
-    if let Some((primaries, transfer)) = color.before_camera_log {
-        desc.primaries = primaries;
-        desc.transfer = transfer;
-    }
-    desc = sequence_reading(desc, &color.tagged, sequence);
+    let mut desc = frame_reading(color, sequence);
     let opaque_vp9 = cfg!(target_os = "macos")
         && codec == "vp9"
         && !sequence
@@ -193,9 +188,9 @@ pub struct ColorInfo {
     pub tagged: TaggedColor,
     /// Section 9's reading (Interpret Footage can override it).
     pub interpreted: ColorDescription,
-    /// V1 projects keep the legacy reading, including for known camera logs.
-    #[serde(skip)]
-    before_camera_log: Option<(Primaries, Transfer)>,
+    /// Camera metadata does not change the reading for already-saved assets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) camera_log: Option<CameraLog>,
     /// One line per rule that filled in an untagged value.
     pub defaults_applied: Vec<String>,
     /// Where each value of `interpreted` came from (Interpret Footage shows
@@ -381,15 +376,6 @@ pub(crate) fn interpret_with_camera_log(
     // declared HDR signal. Matrix and range describe the stored codes.
     let camera_log = camera_log
         .filter(|_| side.dovi.is_none() && !matches!(transfer, Transfer::Pq | Transfer::Hlg));
-    let before_camera_log = camera_log.map(|_| (primaries, transfer));
-    let (primaries, transfer) = if let Some(log) = camera_log {
-        defaults.clear();
-        from[0] = Some(file(log.source));
-        from[1] = Some(file(log.source));
-        (log.primaries, log.transfer)
-    } else {
-        (primaries, transfer)
-    };
     let matrix = if rgb_format {
         from[2] = Some(file("RGB pixel format"));
         MatrixCoefficients::Identity
@@ -511,7 +497,7 @@ pub(crate) fn interpret_with_camera_log(
     };
     ColorInfo {
         tagged,
-        before_camera_log,
+        camera_log,
         interpreted: ColorDescription {
             primaries,
             transfer,

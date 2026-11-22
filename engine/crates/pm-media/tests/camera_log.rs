@@ -6,6 +6,13 @@ use pm_media::probe::color::electron_frame_reading;
 use pm_protocol::color::{Primaries, Transfer};
 use std::{fs, path::Path, process::Command};
 
+fn new_import() -> Interpretation {
+    Interpretation {
+        auto_camera_log: true,
+        ..Default::default()
+    }
+}
+
 fn video(path: &Path) -> VideoProbe {
     pm_media::probe::probe(path).unwrap().probe.video.unwrap()
 }
@@ -159,8 +166,13 @@ fn camera_log_import_changes_only_native_transfer_and_primaries() {
         assert_eq!(after.color.tagged, baseline.color.tagged, "{name}");
         let mut expected = before;
         (expected.primaries, expected.transfer) = (primaries, transfer);
-        assert_eq!(after.color.interpreted, expected, "{name}");
-        let automatic = resolve_video(&after, &Interpretation::default());
+        assert_eq!(after.color.interpreted, before, "{name}");
+        assert_eq!(
+            resolve_video(&after, &Interpretation::default()),
+            resolve_video(&baseline, &Interpretation::default()),
+            "{name}"
+        );
+        let automatic = resolve_video(&after, &new_import());
         assert_eq!(automatic.color, expected, "{name}");
         if let Some(source) = origin {
             assert_eq!(
@@ -174,7 +186,7 @@ fn camera_log_import_changes_only_native_transfer_and_primaries() {
             &after,
             &Interpretation {
                 transfer: Some(Transfer::Gamma22),
-                ..Default::default()
+                ..new_import()
             },
         );
         assert_eq!(manual.color.transfer, Transfer::Gamma22);
@@ -218,7 +230,11 @@ fn panasonic_quicktime_distinguishes_v_log_from_other_profiles() {
         if is_log {
             (expected.primaries, expected.transfer) = (Primaries::VGamut, Transfer::VLog);
         }
-        assert_eq!(video(&path).color.interpreted, expected, "{gamma}/{gamut}");
+        assert_eq!(
+            resolve_video(&video(&path), &new_import()).color,
+            expected,
+            "{gamma}/{gamut}"
+        );
     }
 }
 
@@ -242,7 +258,7 @@ fn arri_quicktime_distinguishes_log_c_from_a_baked_rec709_look() {
                 &format!("com.arri.camera.ColorGammaSxS={gamma}"),
             ],
         );
-        let color = video(&path).color.interpreted;
+        let color = resolve_video(&video(&path), &new_import()).color;
         assert_eq!((color.primaries, color.transfer), (primaries, transfer));
     }
 }
@@ -316,7 +332,7 @@ fn mxf_camera_log_uses_the_picture_descriptor() {
         }
         let path = dir.path().join(format!("{name}.mxf"));
         fs::write(&path, modified).unwrap();
-        let after = video(&path).color.interpreted;
+        let after = resolve_video(&video(&path), &new_import()).color;
         let mut expected = before;
         (expected.primaries, expected.transfer) = (primaries, transfer);
         assert_eq!(after, expected, "{name}");

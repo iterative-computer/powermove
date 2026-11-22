@@ -476,6 +476,7 @@ pub fn plan(project: &Value, root: &str, tree: &Tree, next_id: &mut dyn FnMut() 
 /// path it is read from in place, and its identity for following renames.
 pub fn asset_record(path: &Path, folder: &str, s: Stat) -> Result<Value, String> {
     let mut asset = crate::media_import::probe(path)?;
+    crate::media_import::mark_new_video(&mut asset);
     asset["folder"] = json!(folder);
     asset["sourceFile"] = json!({"dev": s.dev, "ino": s.ino});
     Ok(asset)
