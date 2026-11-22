@@ -7987,6 +7987,8 @@ fn profile_hygiene_upgrades_legacy_snapshot_without_losing_deletions_or_extensio
         .unwrap(),
     )
     .unwrap();
+    // Agent-send's migration marker is the sign the record may be retired.
+    fs::write(dir.path("kernel-state.pre-agent-storage.json"), b"backup").unwrap();
     for _ in 0..2 {
         let k = kernel(&dir.0);
         assert!(!k.state().settings.contains_key("theme"));
@@ -8001,6 +8003,43 @@ fn profile_hygiene_upgrades_legacy_snapshot_without_losing_deletions_or_extensio
         assert!(!k.state().extensions["org.synthetic.extension"].enabled);
         assert!(!dir.path("kernel-state.json").exists());
     }
+}
+
+#[test]
+fn profile_hygiene_keeps_the_snapshot_until_agent_storage_migration() {
+    let dir = common::TempDir::new("profile-agent-gate");
+    fs::write(
+        dir.path("kernel-state.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "settings": {"theme": "dark"},
+            "extensions": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut k = kernel(&dir.0);
+    assert_eq!(k.state().settings["theme"].as_str(), Some("dark"));
+    assert!(
+        dir.path("kernel-state.json").is_file(),
+        "the Agent storage migration still needs the record"
+    );
+    assert!(dir.path("kernel-state.applied").is_file());
+    // A setting changed after the commit is never rolled back by the kept
+    // record, and the record itself stays intact for Agent-send.
+    k.state_transaction(state(vec![setting("theme", Some(Value::from("light")))]))
+        .unwrap();
+    drop(k);
+    let k = kernel(&dir.0);
+    assert_eq!(k.state().settings["theme"].as_str(), Some("light"));
+    let record = fs::read_to_string(dir.path("kernel-state.json")).unwrap();
+    assert!(record.contains("\"dark\""), "the record was left intact");
+    drop(k);
+    // Once Agent-send's migration has run (its backup is the marker), the
+    // record and the apply marker retire together.
+    fs::write(dir.path("kernel-state.pre-agent-storage.json"), b"backup").unwrap();
+    let _k = kernel(&dir.0);
+    assert!(!dir.path("kernel-state.json").exists());
+    assert!(!dir.path("kernel-state.applied").exists());
 }
 
 #[test]

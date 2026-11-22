@@ -509,7 +509,7 @@ mod tests {
                     .unwrap()
                     .len(),
                 1_000_000,
-                "legacy settings moved before deleting their snapshot"
+                "legacy settings committed to the store on attach"
             );
             let freed = super::super::worker::reclaim(&worker_root, true, || {
                 clean(
@@ -530,7 +530,11 @@ mod tests {
             freed <= allocated_before,
             "the receipt cannot exceed allocated bytes in the entire sparse fixture"
         );
-        assert!(!root.join("kernel-state.json").exists());
+        assert!(
+            root.join("kernel-state.json").is_file(),
+            "held for the Agent storage migration until its marker exists"
+        );
+        assert!(root.join("kernel-state.applied").is_file());
         assert!(!root.join("kernel-state.json.tmp-w-synthetic").exists());
         for path in [
             "exports/keep.mov",

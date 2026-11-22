@@ -234,6 +234,8 @@ pub(crate) fn measure(native: &Path, original: Option<&Path>) -> Report {
         &[
             "store",
             "kernel-state.json",
+            "kernel-state.applied",
+            "kernel-state.pre-agent-storage.json",
             "session.json",
         ],
     ));
