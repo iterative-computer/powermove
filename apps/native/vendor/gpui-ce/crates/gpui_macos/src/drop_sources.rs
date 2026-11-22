@@ -433,3 +433,7 @@ impl Drop for ReceiveDirectory {
         }
     }
 }
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod tests;

@@ -46,3 +46,6 @@ pub(crate) use window::*;
 
 pub use gpui_apple::feel;
 pub use platform::MacPlatform;
+
+#[cfg(feature = "test-support")]
+pub use drop_sources::tests as drop_source_tests;

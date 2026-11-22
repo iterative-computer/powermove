@@ -20,6 +20,7 @@ bench-support = ["gpui/bench-support", "gpui_apple/bench-support"]
 test-support = [
   "gpui/test-support",
   "gpui_apple/test-support",
+  "objc2-app-kit/NSFilePromiseProvider",
 ]
 font-kit = []
 screen-capture = ["gpui/screen-capture", "dep:core-video"]
