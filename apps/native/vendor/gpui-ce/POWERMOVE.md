@@ -221,7 +221,10 @@ has been made. No measurements from a locked or occluded session certify pacing.
   `Selection`, editing chords (`Key`) and `Blurred` instead of committing, keeps
   its last placement when a frame skips its host's paint (so it stays first
   responder), and shows the system insertion point (`NSTextInsertionIndicator`)
-  at a caret rectangle the host stages.
+  at a caret rectangle the host stages. Its context menu (`context_menu`)
+  opens on the run-loop turn after the click, never inside GPUI's event
+  dispatch: menu tracking runs GPUI's tasks, which need the app the
+  dispatch still holds (PM-631).
 - **Development review frames:** debug builds with `PM_NATIVE_DRAW_OCCLUDED`
   set keep an occluded window's display link running, so background lane checks
   see live frames without raising a window. Release builds always pause it.
