@@ -12,6 +12,8 @@ use pm_design::Tokens;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap},
+    io::Write as _,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     rc::Rc,
     time::Duration,
@@ -585,9 +587,17 @@ impl Editor {
 
     /// Save the layout in its workspace record and session.
     pub fn save(&mut self) {
+        let after = self.workspace_with_layout(&self.layout);
+        if after != self.record {
+            self.commit(after);
+        }
+        self.persist_session();
+    }
+
+    fn workspace_with_layout(&self, layout: &Layout) -> serde_json::Value {
         // A parked panel keeps its place in the workspace (v1 kept a retired
         // panel's spec); only this window's view leaves it out.
-        let mut written = self.layout.clone();
+        let mut written = layout.clone();
         for id in self.agent_build_slots.keys() {
             layout::remove_build(&mut written, id);
         }
@@ -603,11 +613,7 @@ impl Editor {
                 written.docks[dock].groups[group].active = tab;
             }
         }
-        let after = workspace::write(&written, &self.record);
-        if after != self.record {
-            self.commit(after);
-        }
-        self.persist_session();
+        workspace::write(&written, &self.record)
     }
     /// The window now shows `after`: the store learns it on the next frame.
     fn commit(&mut self, after: serde_json::Value) {
@@ -1875,7 +1881,9 @@ impl Editor {
             drag.lifted = true;
             self.slides.snap();
             self.tab_slides.snap();
-            drag.geometry = self.geometry.clone();
+            if drag.original == self.layout {
+                drag.geometry = self.geometry.clone();
+            }
             self.reveal_motion = None;
             self.reveal_panel = None;
         }
@@ -1987,19 +1995,62 @@ impl Editor {
     pub fn dragging_panel(&self) -> bool {
         matches!(&self.gesture, Some(Gesture::Panel(d)) if d.moved)
     }
+
+    /// Keep unwinding inside the editor's GPUI update. A panic escaping the
+    /// AppKit mouse callback aborts the process.
+    fn guard_panel_drag<T>(
+        &mut self,
+        cx: &mut Context<Self>,
+        operation: impl FnOnce(&mut Self, &mut Context<Self>) -> T,
+    ) -> Option<T> {
+        match catch_unwind(AssertUnwindSafe(|| operation(self, cx))) {
+            Ok(result) => Some(result),
+            Err(panic) => {
+                let message = panic
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("unknown panic");
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "Dock panel move cancelled: {message}"
+                );
+                self.gesture = None;
+                self.slides.snap();
+                self.tab_slides.snap();
+                self.notice = None;
+                self.status = "Panel move cancelled".into();
+                cx.notify();
+                None
+            }
+        }
+    }
+
     /// A panel that is not in the workspace (the Agent popover, a window of
     /// its own) dragged over it to `at` (this window's points): the same drop
     /// preview a tab drag shows, for the panel as Pin would first place it.
     /// True when a drop there would dock it.
     pub fn drag_from_outside(&mut self, id: &str, at: (f32, f32), cx: &mut Context<Self>) -> bool {
+        self.guard_panel_drag(cx, |editor, cx| editor.preview_outside_drag(id, at, cx))
+            .unwrap_or(false)
+    }
+
+    fn preview_outside_drag(&mut self, id: &str, at: (f32, f32), cx: &mut Context<Self>) -> bool {
+        if let Some(Gesture::Panel(drag)) = &mut self.gesture
+            && !drag.live
+            && drag.original != self.layout
+        {
+            drag.preview = None;
+            cx.notify();
+            return false;
+        }
         let preview = self.outside_target(id, at, cx);
         let pointer = point(px(at.0), px(at.1));
         let mut drag = match self.gesture.take() {
             Some(Gesture::Panel(d)) if !d.live => d,
-            other => {
-                if let Some(g) = other {
-                    self.layout = g.original();
-                }
+            Some(Gesture::Panel(_)) | None => self.new_drag(id, pointer, false, false),
+            Some(g) => {
+                self.layout = g.original();
                 self.new_drag(id, pointer, false, false)
             }
         };
@@ -2021,50 +2072,59 @@ impl Editor {
     /// showed (the workspace changes as a Pin there would). False, with the
     /// workspace untouched, when no target was lit.
     pub fn drop_from_outside(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        if !matches!(&self.gesture, Some(Gesture::Panel(d)) if !d.live && d.id == id) {
+            return false;
+        }
+        self.guard_panel_drag(cx, |editor, cx| editor.finish_outside_drop(id, cx))
+            .unwrap_or(false)
+    }
+
+    fn finish_outside_drop(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
         let Some(Gesture::Panel(drag)) = self.gesture.take() else {
             return false;
         };
-        let Some(preview) = drag.preview.filter(|_| drag.id == id) else {
-            cx.notify();
+        cx.notify();
+        let Some(preview) = drag.preview.filter(|_| drag.original == self.layout) else {
             return false;
         };
-        let panels = self.panels(cx);
-        let mut next = self.layout.clone();
-        let docked = next
-            .show_panel(id, &panels)
-            .and_then(|_| next.move_panel_to(id, preview.target));
-        if let Err(error) = docked {
-            self.status = error.to_string();
-            cx.notify();
-            return false;
+        match self
+            .layout
+            .plan_floating_drop(id, preview.target, &self.panels(cx))
+        {
+            Ok(next) => {
+                self.commit_panel_drop(next);
+                true
+            }
+            Err(error) => {
+                self.status = error.to_string();
+                false
+            }
         }
-        let before = std::mem::replace(&mut self.layout, next);
-        self.record_panel_drop(before);
-        cx.notify();
-        true
     }
     /// An outside drag let go off any target, or cancelled: no preview, the
     /// workspace as it was.
     pub fn cancel_from_outside(&mut self, cx: &mut Context<Self>) {
-        if let Some(Gesture::Panel(drag)) = self.gesture.take() {
-            self.layout = drag.original;
+        if matches!(&self.gesture, Some(Gesture::Panel(d)) if !d.live) {
+            self.gesture = None;
             cx.notify();
         }
     }
-    /// Where a panel from outside would dock at `at`: the layout with it
-    /// shown (as Pin shows it) asked as for a tab drag; over the group Pin
-    /// puts it in, that group itself.
+    /// Hit-test the workspace as drawn, then check that the floating panel
+    /// can be inserted at the displayed target.
     fn outside_target(&self, id: &str, at: (f32, f32), cx: &App) -> Option<DropPreview> {
-        let panels = self.panels(cx);
-        let mut with = self.layout.clone();
-        with.show_panel(id, &panels).ok()?;
         // A floating panel's own drag docks as the original app's did: near
         // a side column's edge or between its panels; over the middle of
         // the workspace it stays floating (`Layout::floating_drop_target`).
-        let preview =
-            with.floating_drop_target(&self.geometry, self.dock_bounds, at.0, at.1, &self.tokens)?;
-        let mut next = with.clone();
-        next.move_panel_to(id, preview.target).ok()?;
+        let preview = self.layout.floating_drop_target(
+            &self.geometry,
+            self.dock_bounds,
+            at.0,
+            at.1,
+            &self.tokens,
+        )?;
+        self.layout
+            .plan_floating_drop(id, preview.target, &self.panels(cx))
+            .ok()?;
         Some(preview)
     }
     /// Completes a simulated drag like a mouse-up; returns the applied target.
@@ -2073,19 +2133,30 @@ impl Editor {
         let Some(Gesture::Panel(drag)) = self.gesture.take() else {
             return None;
         };
-        let preview = drag.preview?;
-        self.layout
-            .apply_drop(&drag.id, &preview, drag.stack)
-            .ok()?;
-        self.record_panel_drop(drag.original);
+        let preview = drag.preview.filter(|_| drag.original == self.layout)?;
+        let mut next = drag.original;
+        next.apply_drop(&drag.id, &preview, drag.stack).ok()?;
+        self.commit_panel_drop(next);
         Some(preview.target)
     }
-    fn record_panel_drop(&mut self, before: Layout) {
-        if before == self.layout {
+    fn commit_panel_drop(&mut self, next: Layout) {
+        if next == self.layout {
             return;
         }
+        let after = self.workspace_with_layout(&next);
+        // Docking keeps the workspace ID. Read the native session state
+        // before changing the layout, history or queued workspace writes.
+        self.persist_session();
+        if after != self.record {
+            self.commit(after);
+        }
+        let before = std::mem::replace(&mut self.layout, next);
         // Do not undo through a workspace edit made outside this history.
-        if self.panel_undo.last().is_some_and(|(_, after)| *after != before) {
+        if self
+            .panel_undo
+            .last()
+            .is_some_and(|(_, after)| *after != before)
+        {
             self.panel_undo.clear();
         }
         self.panel_redo.clear();
@@ -2095,8 +2166,8 @@ impl Editor {
         self.panel_undo.push((before, self.layout.clone()));
         self.slides.snap();
         self.tab_slides.snap();
-        self.save();
     }
+
     fn shell_history_focus(&self, window: &Window, cx: &App) -> bool {
         window.focused(cx).is_none_or(|f| f == self.focus || f == self.workspace_focus)
             && self.host.as_ref().is_none_or(|h| h.borrow().shell_owns_history())
@@ -2132,7 +2203,17 @@ impl Editor {
     }
     /// Ends the drag in progress as a release does: a panel moved lands
     /// where its preview showed, a resize keeps the sizes it reached.
-    fn end_gesture(&mut self, cx: &mut Context<Self>) {
+    fn end_gesture(&mut self, at: Option<Point<Pixels>>, cx: &mut Context<Self>) {
+        if let Some(Gesture::Panel(drag)) = &self.gesture {
+            // The floating window owns release of its own drag.
+            if !drag.live {
+                return;
+            }
+            if drag.moved {
+                self.guard_panel_drag(cx, |editor, cx| editor.finish_panel_drop(at, cx));
+                return;
+            }
+        }
         let Some(g) = self.gesture.take() else {
             return;
         };
@@ -2199,48 +2280,11 @@ impl Editor {
             }
         }
         if let Gesture::Panel(drag) = g {
-            if !drag.moved {
-                if !drag.stack && let Some((d, g, i)) = self.layout.find(&drag.id) {
-                    self.layout.docks[d].groups[g].active = i;
-                    self.save();
-                }
-                cx.notify();
-                return;
+            if !drag.stack && let Some((d, g, i)) = self.layout.find(&drag.id) {
+                self.layout.docks[d].groups[g].active = i;
+                self.save();
             }
-            // The original app says what happened: where it went, that it
-            // was already there, or that it was no drop zone.
-            let panels = self.panels(cx);
-            let name = self.moving_name(&drag.original, &drag.id, drag.stack, &panels);
-            let message = match drag.preview {
-                Some(p) => {
-                    let (near, kind) = self.near_name(p.near, &drag, &panels);
-                    let moved = self.layout.apply_drop(&drag.id, &p, drag.stack);
-                    if moved.is_ok() {
-                        self.record_panel_drop(drag.original);
-                    }
-                    match moved {
-                        Ok(()) => match kind {
-                            "tab" => format!("{name} tabbed with {near}"),
-                            "above" => format!("Moved {name} above {near}"),
-                            "below" => format!("Moved {name} below {near}"),
-                            _ => format!("Moved {name} → {near}"),
-                        },
-                        Err(err) => err.to_string(),
-                    }
-                }
-                None => match self.layout.drop_outcome(
-                    &Self::drag_zones(&drag),
-                    self.dock_bounds,
-                    (f32::from(drag.at.x), f32::from(drag.at.y)),
-                    &self.tokens,
-                    &drag.id,
-                    drag.stack,
-                ) {
-                    layout::DropOutcome::Here => format!("{name} is already here"),
-                    _ => format!("Drop on a panel or dock to move {name}"),
-                },
-            };
-            self.notify_status(message, cx);
+            cx.notify();
             return;
         }
         self.slides.armed = true;
@@ -2248,6 +2292,57 @@ impl Editor {
         self.save();
         cx.notify();
     }
+
+    fn finish_panel_drop(&mut self, at: Option<Point<Pixels>>, cx: &mut Context<Self>) {
+        let Some(Gesture::Panel(drag)) = &mut self.gesture else {
+            return;
+        };
+        // The preview and its indices belong to the layout at pickup. Any
+        // intervening workspace edit invalidates the drop, including no target.
+        if drag.original != self.layout {
+            self.cancel_gesture(cx);
+            return;
+        }
+        if let Some(at) = at {
+            drag.at = at;
+            self.retarget(false);
+        }
+        let Some(Gesture::Panel(drag)) = self.gesture.take() else {
+            return;
+        };
+        let panels = self.panels(cx);
+        let name = self.moving_name(&drag.original, &drag.id, drag.stack, &panels);
+        let Some(preview) = drag.preview else {
+            let message = match drag.original.drop_outcome(
+                &Self::drag_zones(&drag),
+                self.dock_bounds,
+                (f32::from(drag.at.x), f32::from(drag.at.y)),
+                &self.tokens,
+                &drag.id,
+                drag.stack,
+            ) {
+                layout::DropOutcome::Here => format!("{name} is already here"),
+                _ => format!("Drop on a panel or dock to move {name}"),
+            };
+            self.notify_status(message, cx);
+            return;
+        };
+        let (near, kind) = self.near_name(preview.near, &drag, &panels);
+        let mut next = drag.original;
+        if let Err(error) = next.apply_drop(&drag.id, &preview, drag.stack) {
+            self.notify_status(error.to_string(), cx);
+            return;
+        }
+        let message = match kind {
+            "tab" => format!("{name} tabbed with {near}"),
+            "above" => format!("Moved {name} above {near}"),
+            "below" => format!("Moved {name} below {near}"),
+            _ => format!("Moved {name} → {near}"),
+        };
+        self.notify_status(message, cx);
+        self.commit_panel_drop(next);
+    }
+
     /// While a drag is in progress, the button's real state: a release that
     /// AppKit delivered elsewhere (or not at all) still ends the drag at
     /// once, so a dragged panel never stays in flight (owner feedback W4).
@@ -2266,7 +2361,7 @@ impl Editor {
                         return false;
                     }
                     if !held {
-                        v.end_gesture(cx);
+                        v.end_gesture(None, cx);
                         return false;
                     }
                     true
@@ -2280,17 +2375,27 @@ impl Editor {
         })
         .detach();
     }
-    fn begin_panel_drag(&mut self, id: &str, at: Point<Pixels>, stack: bool, w: &Window, cx: &App) {
-        self.maximized_panel = None;
-        let mut drag = self.new_drag(id, at, stack, true);
-        let label = self.moving_name(&drag.original, id, stack, &self.panels(cx));
-        drag.chip = Some(still_drag::Chip::new(label, &self.tokens, w));
-        self.gesture = Some(Gesture::Panel(drag));
-        self.split_focus = None;
-        if let Some(h) = &self.host {
-            h.borrow_mut().splitter_focus = false;
-        }
+    fn begin_panel_drag(
+        &mut self,
+        id: &str,
+        at: Point<Pixels>,
+        stack: bool,
+        w: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.guard_panel_drag(cx, |editor, cx| {
+            let mut drag = editor.new_drag(id, at, stack, true);
+            let label = editor.moving_name(&drag.original, id, stack, &editor.panels(cx));
+            drag.chip = Some(still_drag::Chip::new(label, &editor.tokens, w));
+            if let Some(host) = &editor.host {
+                host.borrow_mut().splitter_focus = false;
+            }
+            editor.maximized_panel = None;
+            editor.gesture = Some(Gesture::Panel(drag));
+            editor.split_focus = None;
+        });
     }
+
     /// Test-driver commands (`PM_PERF_GATE=1` runs only): drag a tab to a point,
     /// drop it, open a tab's context menu, close transients.
     fn test_command(&mut self, cmd: &Command, cx: &mut Context<Self>) {
@@ -2944,9 +3049,13 @@ mod control_focus_tests {
 }
 impl Render for Editor {
     fn render(&mut self, w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let scrolling = if matches!(&self.gesture, Some(Gesture::Panel(d)) if d.live && d.moved) {
+            self.guard_panel_drag(cx, |editor, _| editor.drag_edge_scroll(w)).unwrap_or(false)
+        } else {
+            false
+        };
         let dragging = self.dragging_panel();
         w.set_pointer_hover_suppressed(dragging);
-        let scrolling = self.drag_edge_scroll(w);
         let scene = self.scene.clone();
         // Cache the workspace as a sibling of the chip. Pointer and preview
         // frames replace only the overlay; edge scrolling can refresh the scene.
@@ -3340,7 +3449,7 @@ impl Editor {
                         // The button is up: a release that never reached
                         // this window ends the drag here, where it showed.
                         if this.gesture.is_some() {
-                            this.end_gesture(cx);
+                            this.end_gesture(None, cx);
                         }
                         return;
                     }
@@ -3401,7 +3510,7 @@ impl Editor {
                                 (f32::from(e.position.x), f32::from(e.position.y)),
                                 this.tokens.metrics.panel_drag_threshold,
                             );
-                            this.retarget(false);
+                            this.guard_panel_drag(cx, |editor, _| editor.retarget(false));
                             cx.notify();
                         }
                         None => {}
@@ -3426,11 +3535,7 @@ impl Editor {
                             );
                         }
                     }
-                    if let Some(Gesture::Panel(drag)) = &mut this.gesture && drag.moved && drag.live {
-                        drag.at = e.position;
-                        this.retarget(false);
-                    }
-                    this.end_gesture(cx);
+                    this.end_gesture(Some(e.position), cx);
                 });
                 move |e: &MouseUpEvent, phase, _, w, cx| {
                     if phase == DispatchPhase::Capture && e.button == MouseButton::Left {
@@ -3443,7 +3548,7 @@ impl Editor {
                 // A drag still in flight (its release never came) ends where
                 // it showed before this press is handled, never on it.
                 if this.gesture.is_some() {
-                    this.end_gesture(cx);
+                    this.end_gesture(None, cx);
                 }
                 if this.ringed_panel.take().is_some() {
                     cx.notify();
@@ -5517,6 +5622,7 @@ mod tests {
         contributed: RefCell<Vec<(String, String)>>,
         consume_viewer_pointer: std::cell::Cell<bool>,
         native_pexels: std::cell::Cell<bool>,
+        panic_on_panel_catalog: std::cell::Cell<bool>,
     }
     struct Stub(Rc<Kernel>);
     impl crate::integration::Integration for Stub {
@@ -5548,6 +5654,7 @@ mod tests {
             self.0.writes.borrow_mut().push(write);
         }
         fn contributed_panels(&self, _: &App) -> Vec<(String, String)> {
+            assert!(!self.0.panic_on_panel_catalog.replace(false), "test panel catalog panic");
             self.0.contributed.borrow().clone()
         }
         fn native_panel(&self, id: &str, _: &App) -> bool {
@@ -5953,6 +6060,372 @@ mod tests {
         view.read_with(cx, |v, _| {
             assert!(v.gesture.is_none());
             assert_eq!(v.layout, before, "a cancelled drag leaves the workspace");
+        });
+    }
+
+    #[gpui::test]
+    fn agent_dock_release_after_a_column_loses_a_group(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            let mut v = away_fixture(cx, Rc::new(Kernel::default()));
+            v.layout.show_panel("agent", &v.panels(cx)).unwrap();
+            v.layout
+                .place_relative("agent", "inspector", "group")
+                .unwrap();
+            v
+        });
+        cx.run_until_parked();
+        let from = view.read_with(cx, |v, _| tab_middle(v, "agent"));
+        let outside = (-100., -100.);
+        press(cx, from);
+        cx.simulate_mouse_move(at(outside), gpui::MouseButton::Left, drag_none());
+        let after_close = view.update(cx, |v, cx| {
+            assert!(v.dragging_panel());
+            assert!(target(v).is_none());
+            assert!(v.run_shell_command("panel:close:fxbrowser", cx));
+            assert!(v.layout.find("fxbrowser").is_none());
+            v.layout.clone()
+        });
+        cx.run_until_parked();
+
+        cx.simulate_mouse_up(at(outside), gpui::MouseButton::Left, drag_none());
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            assert_eq!(v.layout, after_close);
+            assert!(v.panel_undo.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn agent_dock_floating_release_preserves_a_changed_workspace(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| away_fixture(cx, Rc::new(Kernel::default())));
+        cx.run_until_parked();
+        let edge = view.read_with(cx, |v, _| {
+            let r = stack_rect(v, "assets");
+            (r.x + 1., r.y + r.h / 4.)
+        });
+        let after_close = view.update(cx, |v, cx| {
+            assert!(v.drag_from_outside("agent", edge, cx));
+            assert!(v.run_shell_command("panel:close:assets", cx));
+            assert!(v.layout.find("assets").is_none());
+            v.layout.clone()
+        });
+        cx.run_until_parked();
+
+        view.update(cx, |v, cx| assert!(!v.drop_from_outside("agent", cx)));
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            assert_eq!(v.layout, after_close);
+            assert!(v.panel_undo.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn agent_dock_floating_project_can_land_on_the_right_without_a_left_dock(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            let mut v = away_fixture(cx, Rc::new(Kernel::default()));
+            v.layout.docks.retain(|d| d.id != "left");
+            v
+        });
+        cx.run_until_parked();
+        view.update(cx, |v, cx| {
+            let r = stack_rect(v, "inspector");
+            let at = (r.x + r.w / 2., r.y + 1.);
+            assert!(v.drag_from_outside("assets", at, cx));
+            assert!(v.drop_from_outside("assets", cx));
+            let (dock, group, _) = v.layout.find("assets").unwrap();
+            assert_eq!(v.layout.docks[dock].id, "right");
+            assert_eq!(group, 0);
+            v.layout.validate().unwrap();
+        });
+    }
+
+    #[gpui::test]
+    fn agent_dock_release_contains_a_panel_catalog_panic(cx: &mut TestAppContext) {
+        let kernel = Rc::new(Kernel::default());
+        let (view, cx) = cx.add_window_view(|_, cx| away_fixture(cx, kernel.clone()));
+        cx.run_until_parked();
+        let (before, from, to, edge) = view.read_with(cx, |v, _| {
+            let r = stack_rect(v, "assets");
+            (
+                v.layout.clone(),
+                tab_middle(v, "inspector"),
+                (r.x + r.w / 2., r.y + r.h / 2.),
+                (r.x + 1., r.y + r.h / 4.),
+            )
+        });
+        press(cx, from);
+        pull(cx, from, to);
+        view.read_with(cx, |v, _| assert!(target(v).is_some()));
+        kernel.panic_on_panel_catalog.set(true);
+        cx.simulate_mouse_up(at(to), gpui::MouseButton::Left, drag_none());
+        assert!(!kernel.panic_on_panel_catalog.get());
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            assert_eq!(v.layout, before);
+            assert!(v.panel_undo.is_empty());
+        });
+        assert!(kernel.writes.borrow().is_empty());
+
+        view.update(cx, |v, cx| {
+            assert!(v.drag_from_outside("agent", edge, cx));
+            kernel.panic_on_panel_catalog.set(true);
+            assert!(!v.drop_from_outside("agent", cx));
+        });
+        assert!(!kernel.panic_on_panel_catalog.get());
+        view.read_with(cx, |v, _| {
+            assert!(v.gesture.is_none());
+            assert_eq!(v.layout, before);
+            assert!(v.panel_undo.is_empty());
+        });
+        assert!(kernel.writes.borrow().is_empty());
+
+        view.update(cx, |v, cx| {
+            assert!(v.drag_from_outside("agent", edge, cx));
+            assert!(v.drop_from_outside("agent", cx));
+        });
+        view.read_with(cx, |v, _| assert!(v.layout.find("agent").is_some()));
+    }
+
+    #[test]
+    fn agent_dock_panel_sweep_in_a_short_workspace() {
+        use crate::layout::{DropTarget, Edge};
+        use gpui::{
+            AppContext, HeadlessAppContext, MouseButton, MouseDownEvent, MouseMoveEvent,
+            MouseUpEvent, px, size,
+        };
+        use std::sync::Arc;
+
+        let mut cx = HeadlessAppContext::new(Arc::new(gpui_parley::ParleyTextSystem::new(
+            gpui_parley::SystemFonts::Load,
+        )));
+        for id in [
+            "agent",
+            "inspector",
+            "assets",
+            "timeline",
+            "fxbrowser",
+            "fixture.notes",
+        ] {
+            let kernel = Rc::new(Kernel::default());
+            kernel
+                .contributed
+                .borrow_mut()
+                .push(("fixture.notes".into(), "Fixture Notes".into()));
+            let window = cx
+                .open_window(size(px(1000.), px(330.)), |_, cx| {
+                    cx.new(|cx| {
+                        let mut v = away_fixture(cx, kernel.clone());
+                        let record = serde_json::json!({"id": "short-docks", "layout": {"docks": [
+                            {"id": "left", "size": 240, "panels": [{"id": "notes", "flex": true}]},
+                            {"id": "center", "panels": [{"id": "viewer", "flex": true}]},
+                            {"id": "right", "size": 330, "panels": [
+                                {"id": id, "flex": true}, {"id": "shader", "size": 500}
+                            ]}
+                        ]}});
+                        *kernel.store.borrow_mut() = Rc::new(workspace::Store {
+                            project: Some(record.clone()),
+                            project_id: Some("p".into()),
+                            ..Default::default()
+                        });
+                        v.seen = Some(record.clone());
+                        v.show_record(record);
+                        v
+                    })
+                })
+                .unwrap();
+            cx.run_until_parked();
+            let original = window.update(&mut cx, |v, _, _| v.layout.clone()).unwrap();
+
+            for zone in ["top", "centre", "bottom", "edge"] {
+                window
+                    .update(&mut cx, |v, _, cx| {
+                        v.layout = original.clone();
+                        cx.notify();
+                    })
+                    .unwrap();
+                cx.run_until_parked();
+                let (from, to, left) = window
+                    .update(&mut cx, |v, _, _| {
+                        let r = stack_rect(v, "notes");
+                        let body_top = r.y + v.tokens.metrics.header;
+                        let fraction = match zone {
+                            "top" => 0.1,
+                            "centre" => 0.5,
+                            _ => 0.85,
+                        };
+                        let viewer = stack_rect(v, "viewer");
+                        let to = if zone == "edge" {
+                            (
+                                viewer.x + viewer.w / 2.,
+                                v.dock_bounds.y + v.dock_bounds.h + 1.,
+                            )
+                        } else {
+                            (r.x + r.w / 2., body_top + (r.y + r.h - body_top) * fraction)
+                        };
+                        (tab_middle(v, id), to, v.layout.find("notes").unwrap().0)
+                    })
+                    .unwrap();
+                cx.simulate_event(
+                    window.into(),
+                    MouseDownEvent {
+                        position: at(from),
+                        button: MouseButton::Left,
+                        click_count: 1,
+                        ..Default::default()
+                    },
+                );
+                cx.simulate_event(
+                    window.into(),
+                    MouseMoveEvent {
+                        position: at(to),
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: drag_none(),
+                    },
+                );
+                let expected = window.update(&mut cx, |v, _, _| {
+                    let preview = target(v).expect("the drop has a preview");
+                    match zone {
+                        "top" => assert_eq!(preview, DropTarget::Split { dock: left, group: 0 }),
+                        "centre" => assert!(matches!(preview, DropTarget::Tab { dock, group: 0, .. } if dock == left)),
+                        "bottom" => assert_eq!(preview, DropTarget::Split { dock: left, group: 1 }),
+                        _ => assert_eq!(preview, DropTarget::Edge(Edge::Bottom)),
+                    }
+                    assert_eq!(v.layout, original, "{id} {zone}: still dragging");
+                    preview
+                }).unwrap();
+                cx.simulate_event(
+                    window.into(),
+                    MouseUpEvent {
+                        position: at(to),
+                        button: MouseButton::Left,
+                        ..Default::default()
+                    },
+                );
+                window
+                    .update(&mut cx, |v, _, _| {
+                        assert!(v.gesture.is_none(), "{id} {zone}: drag ended");
+                        assert!(v.slides.moving.is_empty() && !v.tab_slides.travelling());
+                        v.layout.validate().unwrap();
+                        let (dock, group, _) = v.layout.find(id).unwrap();
+                        match expected {
+                            DropTarget::Tab { .. } => {
+                                assert_eq!(Some(group), v.layout.find("notes").map(|p| p.1))
+                            }
+                            DropTarget::Split {
+                                group: expected, ..
+                            } => assert_eq!(group, expected),
+                            _ => {}
+                        }
+                        assert_eq!(
+                            v.layout.docks[dock].id,
+                            if zone == "edge" { "bottom" } else { "left" }
+                        );
+                    })
+                    .unwrap();
+            }
+
+            window
+                .update(&mut cx, |v, _, cx| {
+                    v.layout = original.clone();
+                    v.layout.close_panel(id).unwrap();
+                    cx.notify();
+                })
+                .unwrap();
+            cx.run_until_parked();
+            window
+                .update(&mut cx, |v, _, cx| {
+                    let before = v.layout.clone();
+                    let viewer = stack_rect(v, "viewer");
+                    let centre = (viewer.x + viewer.w / 2., viewer.y + viewer.h / 2.);
+                    assert!(
+                        !v.drag_from_outside(id, centre, cx),
+                        "{id}: centre keeps it floating"
+                    );
+                    assert!(!v.drop_from_outside(id, cx));
+                    assert_eq!(v.layout, before);
+                    let left = stack_rect(v, "notes");
+                    let edge = (left.x + 1., left.y + left.h / 4.);
+                    assert!(
+                        v.drag_from_outside(id, edge, cx),
+                        "{id}: left edge previews"
+                    );
+                    assert!(v.drop_from_outside(id, cx));
+                    let (dock, _, _) = v.layout.find(id).unwrap();
+                    assert_eq!(v.layout.docks[dock].id, "left");
+                    v.layout.validate().unwrap();
+                })
+                .unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn agent_dock_release_panic_preserves_the_workspace_record(cx: &mut TestAppContext) {
+        let kernel = Rc::new(Kernel::default());
+        let (view, cx) = cx.add_window_view(|_, cx| away_fixture(cx, kernel.clone()));
+        let (before, record, from, to) = view.read_with(cx, |v, _| {
+            let r = stack_rect(v, "assets");
+            (
+                v.layout.clone(),
+                v.workspace_record().clone(),
+                tab_middle(v, "inspector"),
+                (r.x + r.w / 2., r.y + r.h / 2.),
+            )
+        });
+        press(cx, from);
+        pull(cx, from, to);
+        let hold = view.update(cx, |v, _| {
+            assert!(target(v).is_some());
+            // Fail after the move has been planned, while creating its status notice.
+            std::mem::replace(&mut v.tokens.motion.note_hold, f64::NAN)
+        });
+        cx.simulate_mouse_up(at(to), gpui::MouseButton::Left, drag_none());
+        view.update(cx, |v, _| {
+            v.tokens.motion.note_hold = hold;
+            assert!(v.gesture.is_none());
+            assert_eq!(v.layout, before);
+            assert_eq!(v.workspace_record(), &record);
+            assert!(v.outbox.is_empty() && v.pending.is_empty());
+            assert!(v.panel_undo.is_empty());
+        });
+        assert!(kernel.writes.borrow().is_empty());
+    }
+
+    #[gpui::test]
+    fn agent_dock_releasing_a_stack_keeps_its_tabs_and_active_panel(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            let mut v = away_fixture(cx, Rc::new(Kernel::default()));
+            v.layout.show_panel("agent", &v.panels(cx)).unwrap();
+            v.layout
+                .place_relative("agent", "inspector", "group")
+                .unwrap();
+            v
+        });
+        cx.run_until_parked();
+        let (from, to) = view.read_with(cx, |v, _| {
+            let header = v.panel_header_rect("agent").unwrap();
+            let last = v.tab_rect("agent").unwrap();
+            let viewer = stack_rect(v, "viewer");
+            (
+                (last.x + last.w + 8., header.y + header.h / 2.),
+                (viewer.x + viewer.w / 2., viewer.y + viewer.h * 0.8),
+            )
+        });
+        press(cx, from);
+        pull(cx, from, to);
+        view.read_with(cx, |v, _| {
+            assert!(matches!(&v.gesture, Some(super::Gesture::Panel(d)) if d.stack && d.moved));
+            assert!(target(v).is_some());
+        });
+        cx.simulate_mouse_up(at(to), gpui::MouseButton::Left, drag_none());
+        view.read_with(cx, |v, _| {
+            let (d, g, _) = v.layout.find("agent").unwrap();
+            assert_eq!(v.layout.docks[d].id, "center");
+            let stack = &v.layout.docks[d].groups[g];
+            assert_eq!(stack.tabs, ["inspector", "agent"]);
+            assert_eq!(stack.active(), "agent");
+            assert!(v.gesture.is_none());
         });
     }
 
