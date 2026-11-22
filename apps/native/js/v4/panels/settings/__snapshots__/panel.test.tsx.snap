@@ -156,15 +156,11 @@ exports[`selected: six-op tree snapshot passes the real Rust wire and kit valida
                   text
                     text "ChatGPT"
                 div
-                  text
-                    text
               div group settings.row.account.claude label="Claude"
                 div
                   text
                     text "Claude"
                 div
-                  text
-                    text
         div group label="API or Local Model"
           div
             text heading
