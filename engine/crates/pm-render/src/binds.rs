@@ -25,6 +25,11 @@ pub(crate) struct BindCache {
     pub compat: crate::compat::Uploads,
     frame: u64,
     budget: u64,
+    /// [`Self::retained_bytes`] as last measured, while no binding changed
+    /// since (`None` once one did). Measuring builds two sets over every
+    /// group; the engine reads it once a loop pass and every frame's end
+    /// trims by it.
+    retained: Option<u64>,
 }
 
 impl Default for BindCache {
@@ -36,6 +41,7 @@ impl Default for BindCache {
             compat: Default::default(),
             frame: 0,
             budget: 32 << 20,
+            retained: Some(0),
         }
     }
 }
@@ -50,9 +56,13 @@ impl BindCache {
     /// resources only they kept alive).
     pub fn end_frame(&mut self) {
         let frame = self.frame;
+        let before = self.len();
         self.textures.retain(|_, (_, used)| *used == frame);
         self.quads.retain(|_, (_, used)| *used == frame);
         self.resamples.retain(|_, (_, used)| *used == frame);
+        if self.len() != before {
+            self.retained = None;
+        }
         self.compat.end_frame(frame);
         self.trim();
     }
@@ -78,6 +88,12 @@ impl BindCache {
         self.textures.clear();
         self.quads.clear();
         self.resamples.clear();
+        self.retained = Some(0);
+    }
+
+    /// Groups held, in every map.
+    fn len(&self) -> usize {
+        self.textures.len() + self.quads.len() + self.resamples.len()
     }
 
     pub fn set_budget(&mut self, bytes: u64) {
@@ -89,14 +105,22 @@ impl BindCache {
         // The last frame can contain hundreds of transient textures. Keeping
         // its bindings used to bypass every source cache's eviction budget.
         // Submitted commands retain their own references until completion.
-        if self.retained_bytes() > self.budget {
+        let retained = self.retained_bytes();
+        self.retained = Some(retained);
+        if retained > self.budget {
             self.clear_bindings();
         }
     }
 
     /// Unique texture and buffer backings referenced by these bindings.
     /// Some are also owned by other caches; this is not additive accounting.
+    /// Measured again only after a binding was added or dropped.
     pub fn retained_bytes(&self) -> u64 {
+        self.retained.unwrap_or_else(|| self.measure_retained())
+    }
+
+    /// [`Self::retained_bytes`], measured now.
+    fn measure_retained(&self) -> u64 {
         let textures: HashSet<_> = self
             .textures
             .keys()
@@ -142,7 +166,9 @@ impl BindCache {
             self.textures.contains_key(view),
         );
         let frame = self.frame;
+        let retained = &mut self.retained;
         let entry = self.textures.entry(view.clone()).or_insert_with(|| {
+            *retained = None;
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("pm texture"),
                 layout,
@@ -179,7 +205,9 @@ impl BindCache {
             self.quads.contains_key(&key),
         );
         let frame = self.frame;
+        let retained = &mut self.retained;
         let entry = self.quads.entry(key).or_insert_with(|| {
+            *retained = None;
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("pm quads"),
                 layout,
@@ -209,13 +237,19 @@ impl BindCache {
         // hold the former source view; the pyramid pool only reassigns a
         // tail after the previous encoder has been submitted.
         if tail != view {
+            let before = self.resamples.len();
             self.resamples.retain(|(old_source, old_tail), _| {
                 old_tail.texture() != tail.texture() || old_source == view
             });
+            if self.resamples.len() != before {
+                self.retained = None;
+            }
         }
         let key = (view.clone(), tail.clone());
         let frame = self.frame;
+        let retained = &mut self.retained;
         let entry = self.resamples.entry(key).or_insert_with(|| {
+            *retained = None;
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("pm sampled source"),
                 layout,
@@ -298,5 +332,142 @@ mod tests {
             "the evicted texture must be releasable"
         );
         assert!(cache.textures.is_empty());
+    }
+
+    #[test]
+    fn cached_retained_bytes_equal_a_fresh_measure() {
+        let gpu = pm_gpu::Gpu::new("binding-retained-cache").unwrap();
+        let device = &gpu.device;
+        let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let sampler_entry = wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
+        let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[texture_entry(0), sampler_entry],
+        });
+        let resample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[texture_entry(0), sampler_entry, texture_entry(2)],
+        });
+        let quads_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let sampler = device.create_sampler(&Default::default());
+        let targets: Vec<_> = [(64, 64), (128, 32), (256, 256), (17, 9)]
+            .into_iter()
+            .map(|(w, h)| {
+                pm_gpu::Target::new(
+                    device,
+                    "retained bytes",
+                    w,
+                    h,
+                    wgpu::TextureFormat::Rgba16Float,
+                    wgpu::TextureUsages::TEXTURE_BINDING,
+                )
+            })
+            .collect();
+        let buffers: Vec<_> = [256u64, 4096]
+            .into_iter()
+            .map(|size| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size,
+                    usage: wgpu::BufferUsages::UNIFORM,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect();
+        let mut cache = BindCache::default();
+        let check = |cache: &BindCache, step: &str| {
+            assert_eq!(
+                cache.retained_bytes(),
+                cache.measure_retained(),
+                "after {step}"
+            );
+        };
+        check(&cache, "nothing");
+        // A deterministic mix of inserts, repeats and drops across frames.
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as usize % n
+        };
+        for frame in 0..5 {
+            cache.begin_frame();
+            for step in 0..6 {
+                match next(3) {
+                    0 => {
+                        cache.texture(device, &texture_layout, &sampler, &targets[next(4)].view);
+                    }
+                    1 => {
+                        let buffer = &buffers[next(2)];
+                        cache.quads(device, &quads_layout, buffer, 256);
+                    }
+                    _ => {
+                        let (a, b) = (next(4), next(4));
+                        cache.resample(
+                            device,
+                            &resample_layout,
+                            &sampler,
+                            &targets[a].view,
+                            &targets[b].view,
+                        );
+                    }
+                }
+                check(&cache, &format!("frame {frame} step {step}"));
+            }
+            cache.end_frame();
+            check(&cache, &format!("the end of frame {frame}"));
+        }
+        // A frame that uses nothing drops every group.
+        cache.begin_frame();
+        cache.end_frame();
+        check(&cache, "an empty frame");
+        assert_eq!(cache.retained_bytes(), 0);
+        cache.begin_frame();
+        cache.texture(device, &texture_layout, &sampler, &targets[2].view);
+        cache.quads(device, &quads_layout, &buffers[1], 256);
+        cache.end_frame();
+        check(&cache, "a refill");
+        assert!(cache.retained_bytes() > 0);
+        // A budget below what is held drops it all; one above keeps it.
+        cache.set_budget(u64::MAX);
+        check(&cache, "a larger budget");
+        assert!(cache.retained_bytes() > 0);
+        cache.set_budget(1);
+        check(&cache, "a smaller budget");
+        assert_eq!(cache.retained_bytes(), 0);
+        cache.set_budget(32 << 20);
+        cache.begin_frame();
+        cache.texture(device, &texture_layout, &sampler, &targets[0].view);
+        check(&cache, "an insert in a frame");
+        cache.clear();
+        check(&cache, "a clear");
+        assert_eq!(cache.retained_bytes(), 0);
     }
 }

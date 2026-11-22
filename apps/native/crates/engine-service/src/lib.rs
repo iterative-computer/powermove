@@ -2611,10 +2611,14 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         {
             panic!("injected viewer failure");
         }
-        // Delivers a pending device-lost callback even while idle.
-        engine.govern_memory();
+        // Delivers a pending device-lost callback even while idle. One usage
+        // sample a pass: governing returns the usage it reported; `poll`
+        // runs wgpu callbacks only and changes none of the counted caches,
+        // but the device's allocation is read after it, as before.
+        let mut usage = engine.govern_memory();
         engine.poll();
-        *shared.memory.lock().unwrap() = engine.memory_usage();
+        usage.gpu_allocated_bytes = engine.metal().current_allocated_size();
+        *shared.memory.lock().unwrap() = usage;
         pass.mark("memory");
         if engine.lost() {
             // Work on the lost device never completes: forget it, rebuild,
@@ -4248,13 +4252,18 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                 timeout
             };
             pass.mark("scopes");
-            if engine.maintain_memory() {
+            let maintained = engine.maintain_memory();
+            if maintained.idle {
                 shared.disk.release_idle_reads();
                 for r in runtime.values() {
                     if let Some(audio) = &r.transport.audio {
                         audio.send(audio::AudioCtl::MemoryPressure);
                     }
                 }
+            }
+            if maintained.released {
+                // What was let go is reported now, not at the next pass.
+                *shared.memory.lock().unwrap() = engine.govern_memory();
             }
             pass.mark("idle release");
             // The wait is not the pass's time.
