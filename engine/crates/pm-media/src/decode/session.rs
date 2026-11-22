@@ -11,10 +11,12 @@
 
 use super::skip::Disposable;
 use super::{Decoder, DecoderInfo};
+use crate::cache::{FrameCache, FrameKey};
 use crate::error::{MediaError, Result};
 use crate::ff::PacketReader;
 use crate::frame::DecodedFrame;
 use crate::index::FrameIndex;
+use crate::vt::DecodePurpose;
 use pm_protocol::color::ColorDescription;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -36,6 +38,9 @@ pub struct SessionStats {
     pub disposable_skipped: usize,
     /// Requests given up because a newer one superseded them.
     pub stopped: usize,
+    /// Frames decoded ahead of their turn (a reorder frame the run passed)
+    /// that the window let go of and the frame cache took instead.
+    pub spilled: usize,
     /// Time spent reading samples from the file, in µs.
     pub read_us: u64,
     /// Time spent submitting samples to the decoder, in µs.
@@ -66,6 +71,9 @@ pub struct Session {
     /// Keep reorder frames while a drag scrubs (PM_FIX_VIDEO2).
     reorder: bool,
     color: Option<ColorDescription>,
+    /// Where a frame the window lets go of goes when the run has passed its
+    /// sample and it shows after the newest request ([`Session::spill_to`]).
+    spill: Option<Spill>,
     /// Classifies unreferenced pictures a seek may leave out.
     skip: Option<Disposable>,
     /// Presented frames just before a target that are decoded and kept even
@@ -79,6 +87,13 @@ pub struct Session {
     /// not replaced again ([`super::service::SessionGuard`]).
     pub(super) replacement: bool,
     pub stats: SessionStats,
+}
+
+/// The frame cache entry a session's frames are cached under.
+struct Spill {
+    cache: Arc<FrameCache>,
+    source: u64,
+    purpose: DecodePurpose,
 }
 
 /// Where a request stands, for a caller deciding whether to stop it
@@ -136,6 +151,7 @@ impl Session {
             last_target: None,
             reorder: false,
             color,
+            spill: None,
             stats: SessionStats::default(),
         }
     }
@@ -149,6 +165,20 @@ impl Session {
     pub fn set_window_bytes(&mut self, bytes: usize) {
         self.window_bytes = bytes;
         self.trim(None);
+    }
+
+    /// Frames the window lets go of that the run has decoded ahead of their
+    /// turn (B-frame reordering decodes a later picture first) go into
+    /// `cache` under (`source`, sample, `purpose`) instead of being dropped:
+    /// dropping one sends its request back to the sync sample. The cache
+    /// keeps them within its own budget (it refuses or evicts as for any
+    /// insert); the window's own limits are unchanged.
+    pub fn spill_to(&mut self, cache: Arc<FrameCache>, source: u64, purpose: DecodePurpose) {
+        self.spill = Some(Spill {
+            cache,
+            source,
+            purpose,
+        });
     }
 
     /// Whether seeks leave out unreferenced pictures before their target
@@ -426,7 +456,29 @@ impl Session {
             } else {
                 last
             };
-            self.window.remove(&drop);
+            let pending = self.pending(drop);
+            if let Some(frame) = self.window.remove(&drop)
+                && pending
+            {
+                self.spill_frame(drop, frame);
+            }
+        }
+    }
+
+    /// Hands a frame decoded ahead of its turn to the frame cache
+    /// ([`Session::spill_to`]); without one it is dropped, as before.
+    fn spill_frame(&mut self, sample: usize, frame: DecodedFrame) {
+        let Some(spill) = &self.spill else {
+            return;
+        };
+        let key = FrameKey {
+            source: spill.source,
+            sample,
+            purpose: spill.purpose,
+        };
+        if !spill.cache.contains(&key) && spill.cache.insert(key, frame) {
+            self.stats.spilled += 1;
+            super::diag::bump(&super::diag::WINDOW_SPILLED, 1);
         }
     }
 

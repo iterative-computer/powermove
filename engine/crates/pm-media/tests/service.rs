@@ -666,3 +666,54 @@ fn hot_display_return_defers_eviction_but_the_next_fit_enforces_the_lease() {
         "zero shares close even the current display decoder"
     );
 }
+
+/// A window that holds one frame (a 4K frame fills the 32 MiB display
+/// window) still plays a B-pyramid clip forward on the runs a roomy window
+/// plays it on: the pictures the decoder outputs ahead of their turn go
+/// into the frame cache when the window lets them go, instead of sending
+/// their request back to the sync sample (as they still do when the cache
+/// can keep nothing). The frames are the ones a roomy window returns.
+#[test]
+fn a_one_frame_window_keeps_reorder_frames_in_the_cache() {
+    let src = MediaSource::open(&fixtures_dir().join("h264-aac.mov")).unwrap();
+    assert!(
+        src.index.samples.windows(2).any(|s| s[0].cts > s[1].cts),
+        "fixture must contain presentation reordering"
+    );
+    let frames = 48.min(src.index.frames.len().saturating_sub(8));
+    // Plays `frames` forward; returns each frame's pts and the session's stats.
+    let play = |config: ServiceConfig, window: Option<usize>| {
+        let svc = DecodeService::new(config);
+        let mut s = svc.session(&src, 1, DecodePurpose::Display).unwrap();
+        if let Some(window) = window {
+            s.set_window(window);
+        }
+        let pts: Vec<i64> = (0..frames).map(|n| s.frame(n).unwrap().pts).collect();
+        let cache = svc.cache().stats();
+        assert!(cache.bytes <= cache.budget, "{cache:?}");
+        (pts, s.stats(), s.info().backend)
+    };
+    let (reference, roomy, _) = play(ServiceConfig::default(), None);
+    let (pts, one, backend) = play(ServiceConfig::default(), Some(1));
+    let (_, uncached, _) = play(
+        ServiceConfig {
+            cache_bytes: 0,
+            ..Default::default()
+        },
+        Some(1),
+    );
+    for n in 0..frames {
+        let want = src.index.samples[src.index.frames[n].sample].cts;
+        assert_eq!(pts[n], want, "frame {n}");
+        assert_eq!(pts[n], reference[n], "frame {n}");
+    }
+    assert!(one.spilled > 0, "nothing spilled ({backend:?}, {one:?})");
+    assert!(
+        one.seeks <= roomy.seeks,
+        "a one-frame window seeks more than a roomy one ({backend:?}): {one:?} vs {roomy:?}"
+    );
+    assert!(
+        one.seeks < uncached.seeks,
+        "spilling saved no seek ({backend:?}): {one:?} vs no cache {uncached:?}"
+    );
+}

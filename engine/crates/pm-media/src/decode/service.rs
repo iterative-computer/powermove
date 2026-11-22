@@ -871,6 +871,7 @@ impl DecodeService {
         s.set_window_bytes(
             super::diag::knob("PM_ABL_WINDOW_MIB").map_or(32 << 20, |m| (m << 20) as usize),
         );
+        s.spill_to(self.cache.clone(), source.id, purpose);
         self.open_sessions.fetch_add(1, Ordering::Relaxed);
         super::diag::bump(&super::diag::SESSIONS_OPENED, 1);
         Ok(s)

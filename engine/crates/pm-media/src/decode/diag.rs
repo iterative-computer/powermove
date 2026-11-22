@@ -20,6 +20,7 @@ counters! {
     SEEKS = "seeks",
     CONTINUED = "continued",
     WINDOW_HITS = "window_hits",
+    WINDOW_SPILLED = "window_spilled",
     SAMPLES_FED = "samples_fed",
     DECODE_WAIT_US = "decode_wait_us",
     FETCH_CACHED = "fetch_cached",
