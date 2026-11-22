@@ -106,7 +106,10 @@ fn hash_with(path: &Path, mut read: impl FnMut(u64)) -> Result<(String, u64)> {
     Ok((hasher.finalize().to_hex().to_string(), size))
 }
 pub fn json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    Ok(serde_json::from_reader(regular(path)?)?)
+    // Buffered: serde_json reads a bare `File` a byte per `read` call, and
+    // these run on every launch (the 460 KB media report took 150 ms).
+    let file = std::io::BufReader::new(regular(path)?);
+    Ok(serde_json::from_reader(file)?)
 }
 pub fn atomic(path: &Path, value: &impl Serialize) -> Result<()> {
     bytes(path, &serde_json::to_vec(value)?)

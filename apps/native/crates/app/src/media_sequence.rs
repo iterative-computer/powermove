@@ -253,6 +253,7 @@ impl Controller {
         folder: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let received = gpui_macos::ReceivedDrop::for_paths(&paths);
         let mut choice = Choice::new(paths, required);
         if let Some(picked) = picked {
             choice = choice.picked(picked);
@@ -266,6 +267,7 @@ impl Controller {
         let open = Rc::new(open);
         let actions = open.actions.clone();
         cx.spawn(async move |this, cx| {
+            let _received = received;
             while let Ok(action) = actions.recv().await {
                 let rate = open.text("fps");
                 if action == "changed:fps" {

@@ -1262,6 +1262,7 @@ impl Controller {
     pub(crate) fn apply_pending(&mut self, pending: crate::entry::Pending, cx: &mut Context<Self>) {
         match pending {
             crate::entry::Pending::File(path) => self.open_file(path, cx),
+            crate::entry::Pending::ReceivedFile(path, _received) => self.open_file(path, cx),
             crate::entry::Pending::Library(project) => self.open_named(
                 SessionSource::Library {
                     profile: self.profile.clone(),
@@ -2329,12 +2330,22 @@ impl Controller {
             self.message = "Finish the active edit or recovery decision first".into();
             return;
         }
+        let received = match &source {
+            SessionSource::File(path) => {
+                gpui_macos::ReceivedDrop::for_paths(std::slice::from_ref(path))
+            }
+            _ => None,
+        };
         // One project per window: an open replaces the project shown, which
         // closes first as any close does (asking about unsaved work).
         if self.session.is_some() {
             match source {
                 SessionSource::File(path) => {
-                    self.replace_project(crate::entry::Pending::File(path), cx)
+                    let pending = match received {
+                        Some(received) => crate::entry::Pending::ReceivedFile(path, received),
+                        None => crate::entry::Pending::File(path),
+                    };
+                    self.replace_project(pending, cx);
                 }
                 SessionSource::Library { project, .. } => {
                     self.replace_project(crate::entry::Pending::Library(project), cx)
@@ -2410,7 +2421,7 @@ impl Controller {
             kernel.shell(call).await
         };
         let saved = path.as_ref().is_none_or(|p| p.exists());
-        self.settle_open(operation, name, path, saved, pending, cx);
+        self.settle_open(operation, name, path, saved, pending, received, cx);
     }
     /// The ghost's picture goes (its own frame is retired at the next draw).
     pub(crate) fn ghost_retire(&mut self) {
@@ -2521,9 +2532,11 @@ impl Controller {
             file,
             true,
             async move { Some(Ok(reply)) },
+            None,
             cx,
         );
     }
+    #[allow(clippy::too_many_arguments)]
     fn settle_open(
         &mut self,
         operation: crate::mcp::Operation,
@@ -2531,6 +2544,7 @@ impl Controller {
         path: Option<PathBuf>,
         saved: bool,
         pending: impl std::future::Future<Output = Option<Result<ShellReply, KernelFailure>>> + 'static,
+        received: Option<gpui_macos::ReceivedDrop>,
         cx: &mut Context<Self>,
     ) {
         // Only a window without a project opens one (`open_named`,
@@ -2647,6 +2661,9 @@ impl Controller {
                         // Media resolves on a worker after the project shows.
                         let in_place = decision == pm_kernel::locks::OpenDecision::Writable;
                         v.adopt(session, decision, info.history_rejected, cx);
+                        if let (Some(received), Some(path)) = (&received, &path) {
+                            received.keep(std::slice::from_ref(path));
+                        }
                         v.report_first_frame(cx);
                         v.load_recent(cx);
                         v.offer_stranded_copies(cx);
@@ -3439,6 +3456,12 @@ impl Controller {
                         })
                         .collect();
                     cx.notify();
+                });
+                // P-LAUNCH-TRACE: Home's list is its content.
+                static FIRST: std::sync::Once = std::sync::Once::new();
+                FIRST.call_once(|| {
+                    gpui_macos::launch::mark("recent");
+                    gpui_macos::launch::arm_present("recent");
                 });
             }
         })

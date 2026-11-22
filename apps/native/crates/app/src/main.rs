@@ -357,6 +357,7 @@ fn main() -> Result<()> {
         }
     }
     diag::mark_start();
+    gpui_macos::launch::mark("main");
     let headless = args
         .first()
         .is_some_and(|a| a == "--engine-job" || a == "--smoke" || a == "--gate-p1-smoke")
@@ -533,6 +534,7 @@ fn main() -> Result<()> {
     .join()
     .map_err(|_| anyhow::anyhow!("Engine initialization panicked"))??;
     diag::line(serde_json::json!({"startup":"engine"}));
+    gpui_macos::launch::mark("engine");
     // Filled once the library is attached; the MCP server waits for that too.
     let server = Arc::new(std::sync::Mutex::new(None));
     let handle = actor.handle();
@@ -548,6 +550,7 @@ fn main() -> Result<()> {
     pm_shell::set_tabs_mode(tabs::setting(&handle));
     // The command-line project opens in the first window only.
     let launch = Cell::new(launch);
+    let drop_directory = profile.join("media/received");
     let result = pm_shell::run_gated(
         device,
         Rc::new({
@@ -585,6 +588,25 @@ fn main() -> Result<()> {
                         host,
                         cx,
                     )
+                });
+                window.set_external_drop_target({
+                    let controller = entity.downgrade();
+                    move |cx| {
+                        let controller = controller.upgrade()?;
+                        controller
+                            .read(cx)
+                            .published
+                            .as_ref()
+                            .map(|p| p.snapshot.doc_id)
+                    }
+                });
+                window.on_external_drop_progress({
+                    let controller = entity.downgrade();
+                    move |pending, cx| {
+                        let _ = controller.update(cx, |v, _| {
+                            v.host.borrow_mut().set_receiving_drops(pending);
+                        });
+                    }
                 });
                 let font_broker = broker.clone();
                 entity.update(cx, |v, _| {
@@ -637,6 +659,7 @@ fn main() -> Result<()> {
         }),
         gate,
         Rc::new(entry::receive),
+        drop_directory,
     );
     broker.close();
     std::thread::spawn(move || {

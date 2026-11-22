@@ -233,10 +233,10 @@ test("selected rows take the accent only while the timeline holds the keyboard (
   expect(style()).toMatchObject({
     background: { token: "colors.selected_fill" },
   });
-  expect(style().color?.token).not.toBe("colors.accent_text");
-  expect(
-    byId(root, "timeline:name:layer:headline").props.style.color,
-  ).toMatchObject({ token: "colors.text" });
+  expect(style()).not.toMatchObject({ color: { token: "colors.accent_text" } });
+  expect(byId(root, "timeline:name:layer:headline").props.style).toMatchObject({
+    color: { token: "colors.text" },
+  });
   await root.dispose();
 });
 

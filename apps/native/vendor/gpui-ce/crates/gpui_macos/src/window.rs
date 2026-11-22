@@ -1,8 +1,10 @@
 // Powermove modified: composition presentation and hit-test hooks; see POWERMOVE.md.
 use crate::{
     MacDisplay, TISCopyCurrentKeyboardInputSource, TISGetInputSourceProperty, WindowFrameSource,
-    events::platform_input_from_native, kTISPropertyInputSourceIsASCIICapable,
-    kTISPropertyInputSourceType, kTISTypeKeyboardInputMode, renderer,
+    drop_sources::{self, Source as DropSource},
+    events::platform_input_from_native,
+    kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
+    renderer,
 };
 #[cfg(any(test, feature = "test-support", feature = "frame-capture"))]
 use anyhow::Result;
@@ -10,12 +12,12 @@ use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use gpui::{
     AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, ExternalDragPayload,
-    ExternalPaths, FileDropEvent, ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PromptButton, PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind,
-    WindowParams, point, px, size,
+    FileDropEvent, ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas,
+    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
+    PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind, WindowParams, point,
+    px, size,
 };
 #[cfg(any(test, feature = "test-support", feature = "frame-capture"))]
 use image::RgbaImage;
@@ -37,10 +39,10 @@ use objc2::{
 use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSBackingStoreType, NSBeep, NSButton as Objc2NSButton,
     NSCursorFrameResizeDirections, NSCursorFrameResizePosition, NSEventModifierFlags, NSEventType,
-    NSRequestUserAttentionType, NSScreen, NSView as Objc2NSView, NSViewLayerContentsRedrawPolicy,
-    NSVisualEffectMaterial, NSVisualEffectState, NSWindow as Objc2NSWindow,
-    NSWindowButton as Objc2NSWindowButton, NSWindowOcclusionState, NSWindowOrderingMode,
-    NSWindowStyleMask, NSWindowTitleVisibility,
+    NSPasteboard, NSRequestUserAttentionType, NSScreen, NSView as Objc2NSView,
+    NSViewLayerContentsRedrawPolicy, NSVisualEffectMaterial, NSVisualEffectState,
+    NSWindow as Objc2NSWindow, NSWindowButton as Objc2NSWindowButton, NSWindowOcclusionState,
+    NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     NSInteger, NSNotFound, NSOperatingSystemVersion, NSPoint as Objc2NSPoint, NSRange,
@@ -48,14 +50,12 @@ use objc2_foundation::{
 };
 use parking_lot::Mutex;
 use raw_window_handle as rwh;
-use smallvec::SmallVec;
 use std::{
     cell::Cell,
     ffi::{CStr, CString, c_void},
     mem,
     ops::Range,
     os::unix::ffi::OsStrExt,
-    path::PathBuf,
     ptr::{self, NonNull},
     rc::Rc,
     sync::{
@@ -84,10 +84,6 @@ const NIL: ObjcId = ptr::null_mut();
 
 fn ns_string(value: &str) -> Retained<NSString> {
     NSString::from_str(value)
-}
-
-fn filenames_pboard_type() -> Retained<NSString> {
-    ns_string("NSFilenamesPboardType")
 }
 
 fn invalid_ns_range() -> NSRange {
@@ -921,6 +917,12 @@ struct MacWindowState {
     keystroke_for_do_command: Option<Keystroke>,
     do_command_handled: Option<bool>,
     external_files_dragged: bool,
+    // Owned and accessed by AppKit's main-thread drag callbacks.
+    incoming_drop: Option<DropSource>,
+    classified_drop: bool,
+    drop_storage: Option<drop_sources::Storage>,
+    drop_sequence: u64,
+    drop_transfers: std::collections::BTreeMap<u64, oneshot::Sender<()>>,
     // Whether the next left-mouse click is also the focusing click.
     first_mouse: bool,
     // When true, the whole content view is reported as app-owned titlebar content via
@@ -1374,6 +1376,7 @@ impl MacWindow {
         background_executor: BackgroundExecutor,
         renderer: renderer::Renderer,
         marker: MainThreadMarker,
+        drop_storage: Option<drop_sources::Storage>,
     ) -> Self {
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
@@ -1469,10 +1472,8 @@ impl MacWindow {
                 target_screen,
             );
             assert!(!native_window.is_null());
-            let filenames_type = filenames_pboard_type();
-            let dragged_types: ObjcId =
-                msg_send![class!(NSArray), arrayWithObject: &*filenames_type];
-            let () = msg_send![native_window, registerForDraggedTypes: dragged_types];
+            let dragged_types = drop_sources::registered_types(drop_storage.is_some());
+            let () = msg_send![native_window, registerForDraggedTypes: &*dragged_types];
             let () = msg_send![
                 native_window,
                 setReleasedWhenClosed: Bool::new(false)
@@ -1483,7 +1484,7 @@ impl MacWindow {
             let content_bounds: Objc2NSRect = msg_send![content_view, bounds];
             let native_view: ObjcId = msg_send![native_view, initWithFrame: content_bounds];
             assert!(!native_view.is_null());
-            let () = msg_send![native_view, registerForDraggedTypes: dragged_types];
+            let () = msg_send![native_view, registerForDraggedTypes: &*dragged_types];
 
             let state = Arc::new(Mutex::new(MacWindowState {
                 handle,
@@ -1531,6 +1532,11 @@ impl MacWindow {
                 keystroke_for_do_command: None,
                 do_command_handled: None,
                 external_files_dragged: false,
+                incoming_drop: None,
+                classified_drop: false,
+                drop_storage,
+                drop_sequence: 0,
+                drop_transfers: Default::default(),
                 first_mouse: false,
                 app_owns_titlebar_drag,
                 fullscreen_restore_bounds: Bounds::default(),
@@ -1815,6 +1821,7 @@ impl MacWindow {
 /// set_visible) goes through `child_window::present`: nothing an inactive app
 /// shows lands above other apps.
 unsafe fn present(native_window: ObjcId, key: bool) {
+    crate::launch::mark("order");
     crate::child_window::present(
         unsafe { &*(native_window as *const objc2_app_kit::NSWindow) },
         key,
@@ -1824,6 +1831,8 @@ unsafe fn present(native_window: ObjcId, key: bool) {
 impl Drop for MacWindow {
     fn drop(&mut self) {
         let mut this = self.0.lock();
+        this.incoming_drop.take();
+        this.drop_transfers.clear();
         // The accessibility adapter retains the window's content view (and
         // its action handler the GPUI view), while the view holds this
         // state: a cycle that kept every closed window's view, layer and
@@ -2010,23 +2019,7 @@ impl PlatformWindow for MacWindow {
     }
 
     fn modifiers(&self) -> Modifiers {
-        unsafe {
-            let modifiers: NSEventModifierFlags = msg_send![class!(NSEvent), modifierFlags];
-
-            let control = modifiers.contains(NSEventModifierFlags::Control);
-            let alt = modifiers.contains(NSEventModifierFlags::Option);
-            let shift = modifiers.contains(NSEventModifierFlags::Shift);
-            let command = modifiers.contains(NSEventModifierFlags::Command);
-            let function = modifiers.contains(NSEventModifierFlags::Function);
-
-            Modifiers {
-                control,
-                alt,
-                shift,
-                platform: command,
-                function,
-            }
-        }
+        current_modifiers()
     }
 
     fn capslock(&self) -> Capslock {
@@ -3989,6 +3982,7 @@ unsafe extern "C" fn close_window(this: &Objc2Object, _: Sel) {
             let window_state = get_window_state(this);
             let mut lock = window_state.as_ref().lock();
             lock.closed.store(true, Ordering::Release);
+            lock.drop_transfers.clear();
             (
                 lock.close_callback.take(),
                 lock.simple_fullscreen_state.take(),
@@ -4467,6 +4461,25 @@ fn covered_by_sheet(this: &Objc2Object) -> bool {
     !sheet.is_null()
 }
 
+fn current_modifiers() -> Modifiers {
+    let flags: NSEventModifierFlags = unsafe { msg_send![class!(NSEvent), modifierFlags] };
+    Modifiers {
+        control: flags.contains(NSEventModifierFlags::Control),
+        alt: flags.contains(NSEventModifierFlags::Option),
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        platform: flags.contains(NSEventModifierFlags::Command),
+        function: flags.contains(NSEventModifierFlags::Function),
+    }
+}
+
+fn drag_operation(this: &Objc2Object, dragging_info: ObjcId) -> NSDragOperation {
+    if is_drag_from_this_window(this, dragging_info) {
+        NSDragOperationMove
+    } else {
+        NSDragOperationCopy
+    }
+}
+
 unsafe extern "C" fn dragging_entered(
     this: &Objc2Object,
     _: Sel,
@@ -4475,48 +4488,80 @@ unsafe extern "C" fn dragging_entered(
     if covered_by_sheet(this) {
         return NSDragOperationNone;
     }
-    let is_source_window = is_drag_from_this_window(this, dragging_info);
     let window_state = unsafe { get_window_state(this) };
-    let position = drag_event_position(&window_state, dragging_info);
-    let paths = external_paths_from_event(dragging_info);
-    if let Some(event) = paths.map(|paths| FileDropEvent::Entered { position, paths })
-        && send_file_drop_event(window_state, event)
-    {
-        if is_source_window {
-            return NSDragOperationMove;
-        }
-        return NSDragOperationCopy;
-    }
-    NSDragOperationNone
-}
-
-unsafe extern "C" fn dragging_updated(
-    this: &Objc2Object,
-    _: Sel,
-    dragging_info: ObjcId,
-) -> NSDragOperation {
-    let is_source_window = is_drag_from_this_window(this, dragging_info);
-    let window_state = unsafe { get_window_state(this) };
-    if covered_by_sheet(this) {
-        // A sheet that came up mid-drag: the window lets go of it.
-        send_file_drop_event(window_state, FileDropEvent::Exited);
+    let storage = {
+        let mut state = window_state.lock();
+        state.classified_drop = true;
+        state.drop_storage.clone()
+    };
+    let pasteboard: Option<Retained<NSPasteboard>> =
+        unsafe { msg_send![dragging_info, draggingPasteboard] };
+    let Some(source) = pasteboard.and_then(|board| DropSource::read(&board, storage.is_some()))
+    else {
         return NSDragOperationNone;
+    };
+    if let Some(storage) = &storage {
+        storage.prepare(&source);
+    }
+    let background = window_state.lock().background_executor.clone();
+    if let Some(probe) = source.probe_urls(&background) {
+        probe.detach();
     }
     let position = drag_event_position(&window_state, dragging_info);
-    if send_file_drop_event(window_state, FileDropEvent::Pending { position }) {
-        if is_source_window {
-            NSDragOperationMove
-        } else {
-            NSDragOperationCopy
-        }
+    let paths = source.hover_paths();
+    if send_file_drop_event(
+        window_state.clone(),
+        FileDropEvent::Entered { position, paths },
+    ) {
+        window_state.lock().incoming_drop = Some(source);
+        drag_operation(this, dragging_info)
     } else {
         NSDragOperationNone
     }
 }
 
-unsafe extern "C" fn dragging_exited(this: &Objc2Object, _: Sel, _: ObjcId) {
+unsafe extern "C" fn dragging_updated(
+    this: &Objc2Object,
+    selector: Sel,
+    dragging_info: ObjcId,
+) -> NSDragOperation {
     let window_state = unsafe { get_window_state(this) };
-    send_file_drop_event(window_state, FileDropEvent::Exited);
+    if covered_by_sheet(this) {
+        exit_file_drop(window_state);
+        return NSDragOperationNone;
+    }
+    {
+        let state = window_state.lock();
+        if state.classified_drop && state.incoming_drop.is_none() {
+            return NSDragOperationNone;
+        }
+        if !state.classified_drop {
+            // A sheet can dismiss while the drag is still over this window.
+            drop(state);
+            return unsafe { dragging_entered(this, selector, dragging_info) };
+        }
+    }
+    let position = drag_event_position(&window_state, dragging_info);
+    if send_file_drop_event(window_state, FileDropEvent::Pending { position }) {
+        drag_operation(this, dragging_info)
+    } else {
+        NSDragOperationNone
+    }
+}
+
+fn exit_file_drop(window_state: Arc<Mutex<MacWindowState>>) {
+    let was_dragging = {
+        let mut state = window_state.lock();
+        state.classified_drop = false;
+        state.incoming_drop.take().is_some()
+    };
+    if was_dragging {
+        send_file_drop_event(window_state, FileDropEvent::Exited);
+    }
+}
+
+unsafe extern "C" fn dragging_exited(this: &Objc2Object, _: Sel, _: ObjcId) {
+    exit_file_drop(unsafe { get_window_state(this) });
 }
 
 unsafe extern "C" fn perform_drag_operation(
@@ -4526,39 +4571,127 @@ unsafe extern "C" fn perform_drag_operation(
 ) -> Bool {
     let window_state = unsafe { get_window_state(this) };
     if covered_by_sheet(this) {
-        send_file_drop_event(window_state, FileDropEvent::Exited);
+        exit_file_drop(window_state);
         return Bool::NO;
     }
     let position = drag_event_position(&window_state, dragging_info);
-    Bool::new(send_file_drop_event(
-        window_state,
-        FileDropEvent::Submit { position },
-    ))
+    let (source, storage, foreground, background) = {
+        let mut state = window_state.lock();
+        (
+            state.incoming_drop.take(),
+            state.drop_storage.clone(),
+            state.foreground_executor.clone(),
+            state.background_executor.clone(),
+        )
+    };
+    let Some(source) = source else {
+        return Bool::NO;
+    };
+    match source.into_paths() {
+        Ok(_) => {
+            let submitted =
+                send_file_drop_event(window_state.clone(), FileDropEvent::Submit { position });
+            send_file_drop_event(window_state, FileDropEvent::Exited);
+            Bool::new(submitted)
+        }
+        Err(source) => {
+            // The start event records the document at release. If AppKit
+            // nested a new drag inside an input callback, it cannot start here.
+            if !send_file_drop_event(window_state.clone(), FileDropEvent::Exited) {
+                return Bool::NO;
+            }
+            let pasteboard: Option<Retained<NSPasteboard>> =
+                unsafe { msg_send![dragging_info, draggingPasteboard] };
+            let Some(pending) = storage
+                .zip(pasteboard)
+                .and_then(|(storage, board)| storage.begin(source, &board))
+            else {
+                return Bool::NO;
+            };
+            let (cancel, closed) = oneshot::channel();
+            let id = {
+                let mut state = window_state.lock();
+                state.drop_sequence += 1;
+                let id = state.drop_sequence;
+                state.drop_transfers.insert(id, cancel);
+                id
+            };
+            send_file_drop_event(window_state.clone(), FileDropEvent::Receiving { id });
+            let window_state = Arc::downgrade(&window_state);
+            let modifiers = current_modifiers();
+            foreground
+                .spawn(async move {
+                    let receive = pending.finish(&background);
+                    let received = match futures::future::select(Box::pin(receive), closed).await {
+                        futures::future::Either::Left((received, _)) => received,
+                        futures::future::Either::Right(_) => None,
+                    };
+                    deliver_file_drop(&window_state, &background, || match &received {
+                        Some(files) => FileDropEvent::Received {
+                            id,
+                            position,
+                            modifiers,
+                            paths: files.paths().clone(),
+                        },
+                        None => FileDropEvent::ReceiveFailed { id },
+                    })
+                    .await;
+                    if let Some(state) = window_state.upgrade() {
+                        state.lock().drop_transfers.remove(&id);
+                    }
+                    // The host can retain its own lease during dispatch. A
+                    // listener consuming the event does not own the files.
+                    drop(received);
+                })
+                .detach();
+            Bool::YES
+        }
+    }
 }
 
-fn external_paths_from_event(dragging_info: *mut Objc2Object) -> Option<ExternalPaths> {
-    let mut paths = SmallVec::new();
-    let pasteboard: ObjcId = unsafe { msg_send![dragging_info, draggingPasteboard] };
-    let filenames_type = filenames_pboard_type();
-    let filenames: ObjcId = unsafe { msg_send![pasteboard, propertyListForType: &*filenames_type] };
-    if filenames == NIL {
-        return None;
-    }
-    let count: NSUInteger = unsafe { msg_send![filenames, count] };
-    for index in 0..count {
-        let file: ObjcId = unsafe { msg_send![filenames, objectAtIndex: index] };
-        let path = unsafe {
-            let f = msg_send![file, UTF8String];
-            CStr::from_ptr(f).to_string_lossy().into_owned()
+async fn deliver_file_drop(
+    window: &Weak<Mutex<MacWindowState>>,
+    background: &BackgroundExecutor,
+    event: impl Fn() -> FileDropEvent,
+) {
+    retry_file_drop(background, || {
+        let Some(state) = window.upgrade() else {
+            return true;
         };
-        paths.push(PathBuf::from(path))
+        let native = {
+            let lock = state.lock();
+            if lock.closed.load(Ordering::Acquire) {
+                return true;
+            }
+            if lock.event_callback.is_none() {
+                return false;
+            }
+            lock.native_window
+        };
+        let event = match event() {
+            FileDropEvent::Received { id, .. } if covered_by_sheet(unsafe { &*native }) => {
+                FileDropEvent::ReceiveFailed { id }
+            }
+            event => event,
+        };
+        send_file_drop_event(state, event)
+    })
+    .await;
+}
+
+/// A nested AppKit loop can retire a transfer while its input callback is
+/// borrowed. Wait for it to be restored instead of losing the completion.
+pub(crate) async fn retry_file_drop(
+    background: &BackgroundExecutor,
+    mut deliver: impl FnMut() -> bool,
+) {
+    while !deliver() {
+        background.timer(Duration::from_millis(16)).await;
     }
-    Some(ExternalPaths(paths))
 }
 
 unsafe extern "C" fn conclude_drag_operation(this: &Objc2Object, _: Sel, _: ObjcId) {
-    let window_state = unsafe { get_window_state(this) };
-    send_file_drop_event(window_state, FileDropEvent::Exited);
+    exit_file_drop(unsafe { get_window_state(this) });
 }
 
 unsafe extern "C" fn dragging_session_source_operation_mask(

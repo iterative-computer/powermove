@@ -25,6 +25,7 @@ async-channel = "2"
 core-graphics = "0.24"
 image = { version = "0.25", default-features = false }
 [target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui_macos = { package = "gpui_ce_macos", path = "../../vendor/gpui-ce/crates/gpui_macos", features = ["test-support"] }
 gpui = { package = "gpui-ce", path = "../../vendor/gpui-ce/crates/gpui", default-features = false, features = ["test-support"] }
 gpui_apple = { package = "gpui_ce_apple", path = "../../vendor/gpui-ce/crates/gpui_apple", features = ["test-support"] }
 gpui_parley = { package = "gpui_ce_parley", path = "../../vendor/gpui-ce/crates/gpui_ce_parley" }
@@ -55,4 +56,12 @@ name = "window_tabs"
 harness = false
 [[test]]
 name = "modal_sheets"
+harness = false
+
+[[test]]
+name = "external_drops"
+harness = false
+
+[[test]]
+name = "launch_release"
 harness = false

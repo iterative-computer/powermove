@@ -8,6 +8,7 @@
 mod dispatcher;
 mod display;
 mod display_link;
+mod drop_sources;
 mod events;
 mod haptic_feedback;
 mod keyboard;
@@ -43,5 +44,9 @@ pub(crate) use platform::*;
 pub(crate) use text_system::*;
 pub(crate) use window::*;
 
-pub use gpui_apple::feel;
+pub use drop_sources::{ReceivedDrop, clear_incoming_drops};
+pub use gpui_apple::{feel, launch};
 pub use platform::MacPlatform;
+
+#[cfg(feature = "test-support")]
+pub use drop_sources::tests as drop_source_tests;

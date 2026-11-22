@@ -1442,6 +1442,11 @@ impl Library {
         }
         if !self.attached.load(Ordering::Acquire) {
             crate::mcp::attach(&self.kernel, &self.plan.profile)?;
+            if let Err(error) =
+                gpui_macos::clear_incoming_drops(&self.plan.profile.join("media/received"))
+            {
+                eprintln!("Could not clear unfinished media drops: {error}");
+            }
             self.attached.store(true, Ordering::Release);
         }
         if self.server.lock().unwrap().is_none() {
