@@ -978,18 +978,24 @@ impl MetalRenderer {
             .copy();
             drawable.add_presented_handler(&handler);
         }
-        if let Some((input, kind)) = crate::feel::take() {
+        // The frame's GPU time, from its command buffer, for the feel row.
+        let mut feel_gpu = None;
+        if let Some((input, kind, inputs)) = crate::feel::take() {
             let draw = crate::feel::now();
             let target = crate::feel::target();
             let frame = crate::feel::frame_start();
+            let source = crate::feel::source();
+            let gpu = Arc::new(Mutex::new(0f64));
+            feel_gpu = Some(gpu.clone());
             let path = match (self.presents_with_transaction, supplied.is_some()) {
                 (true, _) => "transaction",
                 (false, true) => "link",
                 (false, false) => "queued",
             };
             let handler = ConcreteBlock::new(move |d: &metal::DrawableRef| {
+                let gpu = *gpu.lock();
                 crate::feel::write(&format!(
-                    r#"{{"ui":"{kind}","path":"{path}","input":{input:.6},"frame":{frame:.6},"draw":{draw:.6},"target":{target:.6},"presented":{:.6}}}"#,
+                    r#"{{"ui":"{kind}","path":"{path}","src":"{source}","n":{inputs},"input":{input:.6},"frame":{frame:.6},"draw":{draw:.6},"target":{target:.6},"gpu_ms":{gpu:.3},"presented":{:.6}}}"#,
                     d.presented_time()
                 ));
             })
@@ -1006,6 +1012,21 @@ impl MetalRenderer {
                 return false;
             }
         };
+        if let Some(gpu) = feel_gpu {
+            let timed = ConcreteBlock::new(move |buffer: &metal::CommandBufferRef| {
+                // SAFETY: MTLCommandBuffer's GPU start and end times, read in its completion.
+                let (start, end): (f64, f64) = unsafe {
+                    let buffer = buffer.as_ptr() as *mut objc2::runtime::AnyObject;
+                    (
+                        objc2::msg_send![buffer, GPUStartTime],
+                        objc2::msg_send![buffer, GPUEndTime],
+                    )
+                };
+                *gpu.lock() = (end - start).max(0.) * 1000.;
+            })
+            .copy();
+            command_buffer.add_completed_handler(&timed);
+        }
         self.release_instance_buffer_when_complete(&command_buffer, instance_buffer);
 
         if self.presents_with_transaction {

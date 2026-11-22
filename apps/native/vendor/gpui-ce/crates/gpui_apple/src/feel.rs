@@ -71,14 +71,15 @@ pub fn write(line: &str) {
     }
 }
 
-/// The oldest input not yet painted, and what it was. One per process: the
-/// window an input changes is the one that paints next.
-static PENDING: Mutex<Option<(f64, &'static str)>> = Mutex::new(None);
+/// The oldest input not yet painted, what it was, and how many inputs the
+/// next frame carries. One per process: the window an input changes is the
+/// one that paints next.
+static PENDING: Mutex<Option<(f64, &'static str, u32)>> = Mutex::new(None);
 
 /// Notes an input event (`input`: its host-seconds timestamp).
 pub fn note(input: f64, kind: &'static str) {
     if enabled() && input > 0. {
-        PENDING.lock().get_or_insert((input, kind));
+        PENDING.lock().get_or_insert((input, kind, 0)).2 += 1;
     }
 }
 
@@ -89,7 +90,7 @@ pub fn note_now(kind: &'static str) {
     }
 }
 
-pub(crate) fn take() -> Option<(f64, &'static str)> {
+pub(crate) fn take() -> Option<(f64, &'static str, u32)> {
     if !enabled() {
         return None;
     }
@@ -116,4 +117,16 @@ pub fn set_frame_start() {
 }
 pub(crate) fn frame_start() -> f64 {
     *FRAME_START.lock()
+}
+
+/// What started the frame being drawn: the display link's tick, an input
+/// event, or AppKit's synchronous display.
+static SOURCE: Mutex<&'static str> = Mutex::new("tick");
+pub fn set_source(source: &'static str) {
+    if enabled() {
+        *SOURCE.lock() = source;
+    }
+}
+pub(crate) fn source() -> &'static str {
+    *SOURCE.lock()
 }
