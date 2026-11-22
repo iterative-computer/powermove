@@ -63,6 +63,11 @@ fn selected_clips_keep_their_hue_with_a_white_rim_and_exact_authored_times() {
         assert_eq!(clip.shape, "clip");
         assert_eq!(clip.detail["top"], material.top);
         assert_eq!(clip.detail["ring"], material.ring.0);
+        // The light pooled at its foot travels with the body it belongs to.
+        assert_eq!(
+            (clip.detail["glow"].as_u64(), clip.detail["glowAlpha"].as_f64()),
+            (Some(u64::from(material.glow.0)), Some(f64::from(material.glow.1)))
+        );
         assert!(material.ring.1 > rest.ring.1 * 2., "selection is the rim");
         // Accessibility reads selection from the strip, with no ring to find.
         let node = f.clip_nodes().into_iter().find(|n| n.id == "selected");

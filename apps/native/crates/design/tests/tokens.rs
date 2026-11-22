@@ -229,6 +229,59 @@ fn a_strip_keeps_its_layer_hue_and_its_states_differ_by_the_rim() {
         assert_eq!((t.playhead().head, t.playhead().head_foot), (11., 1.));
     }
 }
+/// The dark canvas's slab glows at its foot where its name is dark: its own
+/// hue a step more luminous than the body, only in the band under a name,
+/// fainter on a disabled strip, and absent under a pale name and from the
+/// light canvas's pale tint.
+#[test]
+fn a_dark_strip_glows_at_its_foot_under_the_name() {
+    let oklch = pm_design::color::to_oklch;
+    let dark = Tokens::new(Scheme::Dark, Accessibility::default());
+    let light = Tokens::new(Scheme::Light, Accessibility::default());
+    let l = &dark.colors.labels;
+    for hue in [l.red, l.orange, l.yellow, l.green, l.teal, l.blue, l.violet] {
+        let m = dark.strip(hue, StripState::Rest);
+        let (body, glow) = (oklch(m.bottom), oklch(m.glow.0));
+        let step = glow.0 - body.0;
+        assert!((0.05..0.16).contains(&step), "{hue:06x}: {step}");
+        let turn = (glow.2 - body.2).abs();
+        assert!(turn.min(360. - turn) < 12., "{hue:06x}: its own hue");
+        // A collapsed layer's summary marks stand in the band in the name's
+        // ink: the glow never costs them contrast, so it is a dark name's.
+        let dark_name = oklch(m.foreground).0 < 0.5;
+        if dark_name {
+            assert!(m.glow.1 > 0.4 && m.glow.1 < 0.8, "{hue:06x}");
+        } else {
+            assert_eq!(m.glow.1, 0., "{hue:06x}");
+        }
+        let lit = pm_design::mix(m.bottom, m.glow.0, m.glow.1);
+        let (was, is) = (
+            contrast(m.foreground, m.bottom),
+            contrast(m.foreground, lit),
+        );
+        assert!(is >= was, "{hue:06x}: marks {was:.2} -> {is:.2}");
+        let off = dark.strip(hue, StripState::Disabled);
+        assert!(
+            off.glow.1 <= m.glow.1 / 3.,
+            "{hue:06x}: a disabled strip is dim"
+        );
+        let chosen = dark.strip(hue, StripState::Selected);
+        assert!(oklch(chosen.glow.0).0 >= glow.0, "{hue:06x}");
+    }
+    for hue in [light.colors.labels.green, light.colors.labels.violet] {
+        assert_eq!(light.strip(hue, StripState::Rest).glow.1, 0., "{hue:06x}");
+    }
+    // The band ends where a name's foot is measured: no name stands on it.
+    assert!(pm_design::GLOW_REACH > 0.15 && pm_design::GLOW_REACH < 0.3);
+    // Green is the brightest of the slabs, never muted.
+    let (green, blue) = (
+        dark.strip(l.green, StripState::Rest),
+        dark.strip(l.blue, StripState::Rest),
+    );
+    assert!(oklch(green.bottom).0 > oklch(blue.bottom).0);
+    assert!(oklch(green.bottom).1 > 0.16, "vivid: {:06x}", green.bottom);
+}
+
 /// A waveform is light caught inside the glass (the owner's reference: pale
 /// peach on amber, about 0.09 lighter than the slab once laid on it): on
 /// the dark canvas a pale tint lighter than the slab's foot for every hue;

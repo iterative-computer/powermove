@@ -1705,6 +1705,7 @@ fn paint_clip(
         "gridFrom":grid_from,"gridStep":grid * v.pps,
         "ring":material.ring.0,"ringAlpha":material.ring.1,"ringWidth":material.ring_width,
         "light":material.light.0,"lightAlpha":material.light.1,
+        "glow":material.glow.0,"glowAlpha":material.glow.1,
         "shadow":material.shadow.0,"shadowAlpha":material.shadow.1,
         "shadowY":material.shadow.2,"shadowBlur":material.shadow.3,
     });

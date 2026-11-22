@@ -65,6 +65,12 @@ pub struct Strip {
     /// straight sides, so the rim is brightest along the top and corners
     /// with nothing cut off.
     pub light: (u32, f32),
+    /// Light pooled at the foot of the glass, as (colour, alpha at the
+    /// bottom edge): the slab's own hue a step more luminous, rising
+    /// `GLOW_REACH` of the way up and gone by the foot of a name's
+    /// descenders, so the ground a name stands on is the body's alone.
+    /// Only under a dark name: none (alpha 0) where the name is pale.
+    pub glow: (u32, f32),
     /// The ruler's grid where it passes through the body, as (colour, alpha
     /// at the strip's top edge): a top-lit line that fades to nothing
     /// `GRID_FADE` of the way down.
@@ -121,6 +127,9 @@ const NAME_CONTRAST: f32 = 3.2;
 /// How far down a strip the ruler's grid line reaches before it has faded
 /// out: about half its height (the owner's reference).
 pub const GRID_FADE: f32 = 0.5;
+/// How far up a strip the light pooled at its foot reaches (a share of its
+/// height): the band under a name's descenders.
+pub const GLOW_REACH: f32 = 1. - LABEL_FOOT;
 
 /// The light canvas's strip, in OKLCH lightness unless said otherwise.
 struct LightStrip {
@@ -201,6 +210,7 @@ impl Tokens {
                 ring: (ink, edge),
                 ring_width: if selected { 2. } else { 1. },
                 light: (ink, 0.),
+                glow: (ink, 0.),
                 grid: (ink, 0.),
                 shadow: (0, 0., 0., 0.),
                 foreground: ink,
@@ -240,7 +250,15 @@ impl Tokens {
         };
         // As the reference's slab: deep and saturated at the top, more
         // luminous toward the foot (the light hues the reference's amber).
-        let (top, foot) = if light_hue { (0.64, 0.74) } else { (0.52, 0.64) };
+        // Yellow, green and cyan hold a dark name with room to spare, so
+        // their slabs go a step brighter again, where sRGB gives those hues
+        // their fullest colour: green reads vivid, never muted.
+        let bright_hue = coloured && (60. ..230.).contains(&hue);
+        let (top, foot) = match (bright_hue, light_hue) {
+            (true, _) => (0.67, 0.78),
+            (_, true) => (0.64, 0.74),
+            _ => (0.52, 0.64),
+        };
         let lit = oklch_fit(top + lift, vivid, hue);
         let body = oklch_fit(foot + lift, vivid * 0.9, hue);
         let under = |bottom: u32| mix(lit, bottom, LABEL_FOOT);
@@ -297,6 +315,23 @@ impl Tokens {
             ring,
             ring_width: if selected { 2. } else { 1. },
             light,
+            // The foot a step more luminous and as vivid as the hue allows:
+            // the glass glows where the light pools, under the name.
+            glow: (
+                oklch_fit(
+                    foot + lift + if bright_hue { 0.1 } else { 0.14 },
+                    vivid,
+                    hue,
+                ),
+                // A collapsed layer's summary marks stand in that band in the
+                // name's ink: a dark ink gains from the glow, a pale one would
+                // lose to it, so the slabs with a pale name keep a plain foot.
+                match (to_oklch(foreground).0 < 0.5, disabled) {
+                    (false, _) => 0.,
+                    (_, true) => 0.12,
+                    _ => 0.6,
+                },
+            ),
             grid: (tint, if disabled { 0.12 } else { 0.6 }),
             shadow: if state == StripState::Dragging {
                 (0x000000, 0.45, 6., 16.)
@@ -308,7 +343,15 @@ impl Tokens {
             // hues further, so they still read lighter), at half strength:
             // the reference's pale peach on amber.
             wave: (
-                mix(body, 0xffffff, if light_hue { 0.74 } else { 0.78 }),
+                mix(
+                    body,
+                    0xffffff,
+                    match (bright_hue, light_hue) {
+                        (true, _) => 0.82,
+                        (_, true) => 0.74,
+                        _ => 0.78,
+                    },
+                ),
                 if disabled { 0.24 } else { 0.5 },
             ),
             level: (mix(body, 0xffffff, 0.8), if disabled { 0.4 } else { 0.85 }),
@@ -391,6 +434,7 @@ impl Tokens {
             ring,
             ring_width: if selected { 2. } else { 1. },
             light,
+            glow: (edge, 0.),
             grid: (edge, if disabled { 0.1 } else { 0.3 }),
             shadow: if state == StripState::Dragging {
                 (0x000000, 0.22, 6., 16.)
