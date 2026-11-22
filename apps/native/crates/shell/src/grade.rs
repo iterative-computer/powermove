@@ -154,6 +154,31 @@ fn sample(p: &[(f64, f64)], v: f64) -> f64 {
         + (t3 - t2) * h * tangent(i + 1)
 }
 
+/// The colour of a wheel's disc at (`x`, `y`) of its unit disc, `radius` from
+/// the centre, before the channels are held to what a display shows. Luminous
+/// toward the rim, as a colourist expects of a wheel: the centre falls to a
+/// neutral grey, and the hues rise in strength and in light as they reach the
+/// edge.
+fn disc_colour(x: f64, y: f64, radius: f64, dark: bool) -> [f64; 3] {
+    let strength = if dark { 0.50 } else { 0.32 };
+    let reach = radius.min(1.);
+    let rise = reach.powf(0.7) / radius.max(1e-6);
+    let push = offset(x * rise * strength, y * rise * strength);
+    if dark {
+        let light = 0.13 + 0.30 * reach.powf(1.6);
+        return push.map(|c| light + c);
+    }
+    // A light ground has no room above it for a hue to add into: the push
+    // comes out of the ground instead, by its largest channel (a soft
+    // largest, so no line shows where it passes from one channel to the
+    // next; nothing at the centre). The hue is the same, and no channel
+    // meets its limit.
+    let larger = |a: f64, b: f64| (a + b + ((a - b) * (a - b) + 0.01).sqrt()) / 2.;
+    let over = larger(larger(push[0], push[1]), push[2]) - larger(larger(0., 0.), 0.);
+    let light = 0.92 - 0.06 * reach * reach;
+    push.map(|c| light + c - over)
+}
+
 /// The disc a wheel's puck sits on: at each point the colour a push there
 /// adds, over a neutral ground, fading to the ground at the centre. Made
 /// once per size and appearance.
@@ -165,37 +190,39 @@ fn disc(side: u32, dark: bool) -> Arc<RenderImage> {
         d.borrow_mut()
             .entry((side, dark))
             .or_insert_with(|| {
-                // Luminous toward the rim, as a colourist expects of a wheel:
-                // the centre falls to a neutral grey, and the hues rise in
-                // strength and in light as they reach the edge.
-                let (ground, lift, strength) = if dark {
-                    (0.13, 0.30, 0.50)
-                } else {
-                    (0.92, -0.06, 0.40)
-                };
-                let r = side as f64 / 2.;
-                let mut bgra = Vec::with_capacity((side * side * 4) as usize);
-                for row in 0..side {
-                    for col in 0..side {
-                        let (x, y) = ((col as f64 + 0.5 - r) / r, (r - row as f64 - 0.5) / r);
-                        let radius = x.hypot(y);
-                        let edge = ((1. - radius) * r + 0.5).clamp(0., 1.);
-                        let reach = radius.min(1.);
-                        let rise = reach.powf(0.7) / radius.max(1e-6);
-                        let (u, v) = (x * rise * strength, y * rise * strength);
-                        let light = ground + lift * reach.powf(1.6);
-                        let rgb = offset(u, v).map(|c| {
-                            let s = (light + c).clamp(0., 1.);
-                            (s * 255.).round() as u8
-                        });
-                        bgra.extend([rgb[2], rgb[1], rgb[0], (edge * 255.).round() as u8]);
-                    }
-                }
-                let image = image::RgbaImage::from_raw(side, side, bgra).expect("a disc");
+                let image = image::RgbaImage::from_raw(side, side, disc_pixels(side, dark))
+                    .expect("a disc");
                 Arc::new(RenderImage::new([image::Frame::new(image)]))
             })
             .clone()
     })
+}
+
+/// A disc's pixels, blue first, its edge softened over a pixel.
+fn disc_pixels(side: u32, dark: bool) -> Vec<u8> {
+    #[inline(always)]
+    fn pixels(side: u32, dark: bool) -> Vec<u8> {
+        let r = side as f64 / 2.;
+        let mut bgra = Vec::with_capacity((side * side * 4) as usize);
+        for row in 0..side {
+            for col in 0..side {
+                let (x, y) = ((col as f64 + 0.5 - r) / r, (r - row as f64 - 0.5) / r);
+                let radius = x.hypot(y);
+                let edge = ((1. - radius) * r + 0.5).clamp(0., 1.);
+                let rgb = disc_colour(x, y, radius, dark)
+                    .map(|c| (c.clamp(0., 1.) * 255.).round() as u8);
+                bgra.extend([rgb[2], rgb[1], rgb[0], (edge * 255.).round() as u8]);
+            }
+        }
+        bgra
+    }
+    // A loop of its own for each appearance, so neither asks which it is at
+    // every pixel.
+    if dark {
+        pixels(side, true)
+    } else {
+        pixels(side, false)
+    }
 }
 
 /// How a control is drawn this frame.
@@ -1251,6 +1278,49 @@ mod tests {
         assert!(right[2] > 0. && right[0] == 0.);
         // A puck past the rim stays on it.
         assert!((puck([1., -1., 1.], 0.).0.hypot(puck([1., -1., 1.], 0.).1) - 1.).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_light_disc_turns_through_its_hues_without_a_channel_at_its_limit() {
+        // Nothing is held at 0 or 1 anywhere on the disc, so no patch of it
+        // is flat.
+        for row in 0..=80 {
+            for col in 0..=80 {
+                let (x, y) = (col as f64 / 40. - 1., row as f64 / 40. - 1.);
+                if x.hypot(y) > 1. {
+                    continue;
+                }
+                let rgb = disc_colour(x, y, x.hypot(y), false);
+                assert!(rgb.iter().all(|c| *c > 0. && *c < 1.), "({x}, {y}): {rgb:?}");
+            }
+        }
+        // Round the rim the colour keeps turning, in steps too small to
+        // show as a seam.
+        let at = |degrees: f64| {
+            let a = degrees.to_radians();
+            disc_colour(0.95 * a.cos(), 0.95 * a.sin(), 0.95, false)
+        };
+        for step in 0..72 {
+            let (a, b) = (at(step as f64 * 5.), at(step as f64 * 5. + 5.));
+            let turn = (0..3).map(|i| (a[i] - b[i]).abs()).fold(0., f64::max);
+            assert!(turn > 0.02 && turn < 0.12, "{}°: {turn}", step * 5);
+        }
+        // The hue is the push's own: only the brightness moved.
+        let (pushed, plain) = (disc_colour(0.6, 0.3, 0.6f64.hypot(0.3), false), offset(0.6, 0.3));
+        let chroma = |c: [f64; 3]| ((c[2] - luma(c)) / 1.8556, (c[0] - luma(c)) / 1.5748);
+        let ((u, v), (pu, pv)) = (chroma(pushed), chroma(plain));
+        assert!((u * pv - v * pu).abs() < 1e-9 && u * pu > 0.);
+    }
+
+    #[test]
+    fn a_dark_disc_is_the_one_it_was() {
+        let pixel = |x: f64, y: f64| {
+            disc_colour(x, y, x.hypot(y), true).map(|c| (c.clamp(0., 1.) * 255.).round() as u8)
+        };
+        assert_eq!(pixel(0., 0.), [33, 33, 33]);
+        assert_eq!(pixel(1., 0.), [110, 86, 255]);
+        assert_eq!(pixel(0., 1.), [255, 50, 110]);
+        assert_eq!(pixel(-0.5, -0.5), [0, 123, 0]);
     }
 
     #[test]
