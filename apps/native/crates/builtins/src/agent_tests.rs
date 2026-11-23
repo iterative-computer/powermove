@@ -1220,9 +1220,9 @@ fn full_access_runs_once_the_person_consents_and_asks_again_otherwise() {
 fn an_auto_run_reaches_the_provider_and_shows_what_it_did() {
     let root = tempfile::tempdir().unwrap();
     let actor = actor();
-    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply_with_work"));
     panel.connected(Provider::Chatgpt);
-    // Auto runs the autonomous CLI (`codex exec`), not the App Server.
+    // Project Auto uses the App Server and still shows the work it performed.
     panel.choose("agent-access", "auto");
     {
         let agent = panel.agent();
