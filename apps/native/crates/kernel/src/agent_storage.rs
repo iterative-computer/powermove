@@ -587,7 +587,7 @@ impl crate::Kernel {
             } else {
                 atomic_write(
                     &backup,
-                    to_canonical_string(&self.state.durable_value()).as_bytes(),
+                    to_canonical_string(&self.state.legacy_rollback_snapshot()).as_bytes(),
                 )?;
             }
         }
