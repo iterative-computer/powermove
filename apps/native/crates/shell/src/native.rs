@@ -1524,11 +1524,8 @@ fn workspace_menu(state: &MenuState) -> Vec<Retained<NSMenuItem>> {
     items.push(named_item(mtm, "Reset Workspace", "layout:reset"));
     items
 }
-const TOOLS: [(&str, &str, &str); 8] = [
+const TOOLS: [(&str, &str, &str); 5] = [
     ("toolSelect", "cursorarrow", "Select (V)"),
-    ("toolHand", "hand.raised.fill", "Hand (H)"),
-    ("toolZoom", "magnifyingglass", "Zoom (Z)"),
-    ("toolRotate", "crop.rotate", "Rotate (W)"),
     ("toolAnchor", "scope", "Anchor (Y)"),
     ("toolShape", "square.on.circle", "Shape (Q)"),
     ("toolPen", "pencil.tip", "Pen (G)"),
@@ -1542,7 +1539,7 @@ pub const SHAPES: [(&str, &str, &str); 5] = [
     ("polygon", "Polygon", "hexagon"),
     ("star", "Star", "star"),
 ];
-const SHAPE_SEGMENT: isize = 5;
+const SHAPE_SEGMENT: isize = 2;
 /// A toolbar tool segment's width, before its optional menu indicator.
 const TOOL_SEGMENT: f64 = 34.;
 /// The toolbar's symbol buttons: name (a `TOOLBAR` slot, whose index is the
@@ -1573,6 +1570,16 @@ mod strip_page_tests {
 }
 #[cfg(test)]
 mod toolbar_tag_tests {
+    #[test]
+    fn toolbar_tool_group_keeps_only_select_anchor_shape_pen_and_text() {
+        assert_eq!(
+            &super::TOOLS.map(|(command, _, _)| command)[..],
+            &["toolSelect", "toolAnchor", "toolShape", "toolPen", "toolText"],
+        );
+        assert_eq!(super::TOOLS[super::SHAPE_SEGMENT as usize].0, "toolShape");
+        assert!(super::TOOLBAR.contains(&"add"));
+    }
+
     /// Each button the toolbar builds has a tag (its `TOOLBAR` slot);
     /// one without would stop the window from opening.
     #[test]
@@ -2715,7 +2722,7 @@ const TAB_FADE: f64 = 14.;
 /// window buttons), the tools' width before they exist, and the clear space
 /// kept between the strip and the tools.
 const TAB_LEADING: f64 = 92.;
-const TAB_TOOLS: f64 = 300.;
+const TAB_TOOLS: f64 = TOOL_SEGMENT * TOOLS.len() as f64 + SEGMENT_MENU_INDICATOR;
 const TAB_CLEAR: f64 = 16.;
 /// How far the pointer travels on a tab before it is a drag, not a click.
 const TAB_DRAG_SLOP: f64 = 4.;
@@ -2848,11 +2855,8 @@ fn menu_symbol(s: &str, label: &str) -> Retained<NSImage> {
 /// vendored glyph reads as large at about 16 pt, so its square is this much
 /// larger. A glyph matched to its SF Symbol on its own (Home) keeps its size.
 const TOOLBAR_GLYPH: f64 = 1.4;
-/// Apple's own drawings stand in the toolbar where the vendored family has no
-/// good one: the filled hand for the Hand tool, and Export's box and arrow at
-/// semibold (its filled twin closes into a block on the accent button at 1x).
-/// At the toolbar's 14 pt an SF Symbol draws about 18 pt of ink; among the
-/// vendored glyphs (about 16 pt) these are drawn at this size instead.
+/// Export uses a smaller semibold SF Symbol to match the vendored glyphs.
+/// The filled version closes into a block on the accent button at 1x.
 const SF_AMONG_GLYPHS: f64 = 12.5;
 fn toolbar_symbol(s: &str, label: &str, t: &Tokens) -> Retained<NSImage> {
     if let Some(glyph) = crate::icons::glyph(s) {
@@ -2864,7 +2868,6 @@ fn toolbar_symbol(s: &str, label: &str, t: &Tokens) -> Retained<NSImage> {
     }
     let image = symbol(s, label);
     let (points, weight) = match s {
-        "hand.raised.fill" => (SF_AMONG_GLYPHS, unsafe { objc2_app_kit::NSFontWeightRegular }),
         "square.and.arrow.up" => (SF_AMONG_GLYPHS, unsafe { objc2_app_kit::NSFontWeightSemibold }),
         _ => (t.metrics.symbol_toolbar as f64, unsafe { objc2_app_kit::NSFontWeightRegular }),
     };
@@ -6585,16 +6588,19 @@ impl Host {
         }
     }
     pub fn select_tool(&self, command: &str) {
-        let Some(index) = TOOLS.iter().position(|(c, _, _)| *c == command) else {
-            return;
-        };
+        // Hand, Zoom and Rotate remain available from the menu and keys.
+        // Clear the highlight when the active tool has no visible segment.
+        let index = TOOLS
+            .iter()
+            .position(|(c, _, _)| *c == command)
+            .map_or(-1, |index| index as isize);
         for item in self._toolbar.items().to_vec() {
             if item.itemIdentifier().to_string() == "tools"
-                && let Some(v) = item.view()
+                && let Some(control) = item
+                    .view()
+                    .and_then(|view| view.downcast::<SegmentedControl>().ok())
             {
-                unsafe {
-                    let _: () = msg_send![&*v,setSelectedSegment:index as isize];
-                }
+                control.setSelectedSegment(index);
             }
         }
     }

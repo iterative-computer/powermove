@@ -4312,9 +4312,7 @@ impl SurfaceView {
             && self.natives.views.borrow().contains_key("timeline")
         {
             let m = &self.table.tokens.metrics;
-            // Native edit tools stand over this band, before Play and Time.
             element = element
-                .pl(px(crate::timeline_surface::edit_tools_width(m) + m.gap))
                 .pr(px(m.gap))
                 .min_w(px(0.))
                 .overflow_hidden();

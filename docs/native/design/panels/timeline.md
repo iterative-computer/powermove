@@ -66,6 +66,8 @@ Left to right; leading inset `m.inset`, items separated by `m.gap`.
 | Graph options | borderless icon button `ellipsis.circle`, shown only when view ≠ Dope Sheet. Opens an `NSMenu`: `Value Graph` ✓ / `Speed Graph` ✓ (radio), separator, `Merge Selected Curves` ✓ (disabled with < 2 curves), `Fit Selected Curves` (disabled with no graph). Tooltip `Graph Options`. |
 | Trailing inset | README §2 trailing rule |
 
+Play and current time start at the header's content inset in Layers and Tracks.
+Selection, Roll, and Split are in **Timeline → Tools**. The menu marks the active tool.
 In Tracks mode, use **View → Snapping** to toggle clip snapping. Hold Shift to temporarily invert it.
 
 ### Layer column (`m.layer_column` default, `c.panel_secondary`)

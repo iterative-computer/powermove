@@ -204,6 +204,14 @@ fn capture_builtin_panels() {
                         }
                     }
                 }
+                let capture_timeline = panel == "timeline"
+                    && std::env::var_os("PM_TIMELINE_HEADER_CAPTURE").is_some();
+                if capture_timeline && let Ok(mode) = std::env::var("PM_TIMELINE_CAPTURE_MODE") {
+                    assert!(matches!(mode.as_str(), "Layers" | "Tracks"));
+                    wait_export_publication(r.runtime.timeline_action(
+                        serde_json::json!({"type": "mode", "mode": mode}),
+                    ).unwrap());
+                }
                 let mut first = publication(&r);
                 let hovered_job = match export_view.as_deref() {
                     Some("rendering") => Some("queue.job.3"),
@@ -273,8 +281,6 @@ fn capture_builtin_panels() {
                     },
                 );
                 let panel_fill = tokens.colors.panel;
-                let capture_timeline = panel == "timeline"
-                    && std::env::var_os("PM_TIMELINE_HEADER_CAPTURE").is_some();
                 let timeline_tokens = tokens.clone();
                 let window = cx
                     .open_window(size(px(w), px(h)), |window, cx| {

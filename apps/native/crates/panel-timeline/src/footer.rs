@@ -1,9 +1,8 @@
 //! The timeline's bottom bar and its scroll thumbs: zoom under the layer
 //! column (a slider between its two ends, on a logarithmic scale), the
-//! composition's length beside it, and under the tracks the navigator, a
-//! thumb as long as the stretch of time on screen. The row thumb rides the
-//! tracks' trailing edge. Geometry and its inverse live here; the host owns
-//! the pointer.
+//! navigator under the tracks (a thumb as long as the stretch of time
+//! on screen). The row thumb rides the tracks' trailing edge. Geometry
+//! and its inverse live here. The host owns the pointer.
 use crate::render::{Op, Rect};
 use pm_design::Tokens;
 use serde_json::json;
@@ -186,9 +185,8 @@ impl Layout {
         }
     }
     /// The bar, its thumbs and the row thumb, for the timeline painter.
-    /// `lit` is the part under the pointer or held; `length` the
-    /// composition's length as it reads in the bar.
-    pub fn ops(self, lit: Option<Part>, length: &str, t: &Tokens) -> Vec<Op> {
+    /// `lit` is the part under the pointer or held.
+    pub fn ops(self, lit: Option<Part>, t: &Tokens) -> Vec<Op> {
         let (m, c) = (t.metrics, &t.colors);
         let mut ops = vec![];
         let bar = Rect::new(0., self.top, self.width, self.height);
@@ -298,22 +296,6 @@ impl Layout {
             // The knob covers the track: it sits on the bar's own ground.
             knob.detail = json!({"keyline":c.panel_secondary,"keylineWidth":2.});
             ops.push(knob);
-            // The composition's length, at the column's trailing edge.
-            let size = t.typography.minimum as f64;
-            let width = size * 0.62 * length.len() as f64;
-            let x = self.layer_column - self.inset(t) - width;
-            if x >= to + m.gap as f64 + ZOOM_GLYPH + m.inset as f64 {
-                let mut o = Op::new(
-                    "length",
-                    "text",
-                    Rect::new(x, self.top, width, self.height),
-                    c.muted,
-                );
-                o.text = Some(length.into());
-                o.font_size = size;
-                o.detail = json!({"tabular":true,"align":"right"});
-                ops.push(o);
-            }
         }
         if let Some((from, length)) = self.time_thumb(t) {
             let mut o = Op::new(
@@ -360,6 +342,25 @@ mod tests {
         }
     }
     #[test]
+    fn the_footer_retains_its_zoom_slider_without_a_duration_readout() {
+        let l = layout();
+        for scheme in [pm_design::Scheme::Dark, pm_design::Scheme::Light] {
+            let t = Tokens::new(scheme, pm_design::Accessibility::default());
+            let ops = l.ops(None, &t);
+            assert!(ops.iter().all(|op| op.text.is_none()));
+            let zoom = |id| ops.iter().find(|op| op.id == id).unwrap().bounds;
+            assert_eq!(zoom("zoom-out:h").x, t.metrics.inset as f64);
+            let track = zoom("zoom-track");
+            assert_eq!(track.width, ZOOM_TRACK);
+            assert_eq!(
+                zoom("zoom-knob").x + ZOOM_KNOB / 2.,
+                track.x + track.width * l.zoom_fraction(),
+            );
+            assert_eq!(zoom("zoom-in:h").x, track.x + track.width + t.metrics.gap as f64);
+        }
+    }
+
+    #[test]
     fn the_zoom_slider_is_logarithmic_and_reads_back_where_it_was_set() {
         let (l, t) = (
             layout(),
@@ -404,7 +405,7 @@ mod tests {
         assert_eq!(l.hit(700., l.top + 12., &t), None);
         assert_eq!(l.hit(l.width - 4., 100., &t), None);
         assert!(
-            l.ops(None, "0:01:00:00", &t)
+            l.ops(None, &t)
                 .iter()
                 .all(|o| !o.id.ends_with("thumb"))
         );
@@ -426,23 +427,18 @@ mod tests {
         assert_eq!(l.hit(l.width - 40., from + 2., &t), None);
     }
     #[test]
-    fn a_narrow_layer_column_gives_up_the_length_then_the_slider() {
+    fn a_narrow_layer_column_gives_up_the_zoom_slider() {
         let (mut l, t) = (
             layout(),
             Tokens::new(pm_design::Scheme::Dark, pm_design::Accessibility::default()),
         );
-        assert!(
-            l.ops(None, "0:01:00:00", &t)
-                .iter()
-                .any(|o| o.id == "length")
-        );
+        assert!(l.ops(None, &t).iter().any(|o| o.id == "zoom-knob"));
         l.layer_column = 190.;
-        let ops = l.ops(None, "0:01:00:00", &t);
+        let ops = l.ops(None, &t);
         assert!(ops.iter().any(|o| o.id == "zoom-knob"));
-        assert!(!ops.iter().any(|o| o.id == "length"));
         l.layer_column = 120.;
         assert!(
-            !l.ops(None, "0:01:00:00", &t)
+            !l.ops(None, &t)
                 .iter()
                 .any(|o| o.id == "zoom-knob")
         );

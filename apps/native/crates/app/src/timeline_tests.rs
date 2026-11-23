@@ -4754,22 +4754,45 @@ fn g6_pointer_split_in_both_modes_is_one_undo_and_stays_selected(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn g6_visible_tool_buttons_select_split_and_selection(cx: &mut TestAppContext) {
-    let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
-    let at = bounds(&mut s.vcx, "timeline.tool:split").center();
-    s.vcx.simulate_click(at, Modifiers::none());
-    s.idle(cx);
-    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Split);
-    let cancelled = s.surface.update(&mut s.vcx, |t, cx| t.cancel(cx));
-    assert!(cancelled, "Escape exits Split with no clip selected");
-    s.idle(cx);
-    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Selection);
-    s.vcx.simulate_click(at, Modifiers::none());
-    s.idle(cx);
-    let at = bounds(&mut s.vcx, "timeline.tool:selection").center();
-    s.vcx.simulate_click(at, Modifiers::none());
-    s.idle(cx);
-    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Selection);
+fn timeline_header_starts_with_play_in_both_modes(cx: &mut TestAppContext) {
+    let mut stage = stage(cx, 2);
+    for mode in ["layers", "tracks"] {
+        stage.surface.update(&mut stage.vcx, |timeline, cx| {
+            timeline.command(&format!("timeline.mode:{mode}"), 0., None, false, cx);
+        });
+        stage.idle(cx);
+        assert_eq!(
+            stage.surface.read_with(&stage.vcx, |t, _| t.toggles().0),
+            mode == "tracks",
+        );
+        let origin = stage.origin();
+        let (inset, gap) = stage.view.read_with(&stage.vcx, |view, _| {
+            let m = &view.tokens().metrics;
+            (m.inset, m.gap)
+        });
+        let play = bounds(&mut stage.vcx, "timeline:play");
+        let time = bounds(&mut stage.vcx, "timeline:time");
+        assert_eq!(play.left(), origin.x + px(inset), "{mode}");
+        assert_eq!(time.left(), play.right() + px(gap), "{mode}");
+    }
+}
+
+#[gpui::test]
+fn timeline_header_has_no_edit_tool_buttons(cx: &mut TestAppContext) {
+    let mut stage = stage(cx, 2);
+    for mode in ["layers", "tracks"] {
+        stage.surface.update(&mut stage.vcx, |timeline, cx| {
+            timeline.command(&format!("timeline.mode:{mode}"), 0., None, false, cx);
+        });
+        stage.idle(cx);
+        assert_eq!(
+            stage.surface.read_with(&stage.vcx, |t, _| t.toggles().0),
+            mode == "tracks",
+        );
+        for id in ["timeline.tool:selection", "timeline.tool:roll", "timeline.tool:split"] {
+            assert!(stage.vcx.debug_bounds(id).is_none(), "{mode}: {id} is still visible");
+        }
+    }
 }
 
 #[gpui::test]
@@ -5040,19 +5063,16 @@ fn g2_g6_split_tool_keeps_the_pair_on_the_pieces_adjacent_to_the_cut(cx: &mut Te
     }
 }
 
-/// The native edit tools and the time editor share the same header band.
+/// The live timecode follows the time editor and clips with its transport.
 #[gpui::test]
-fn overlap_timeline_time_starts_after_edit_tools(cx: &mut TestAppContext) {
+fn overlap_timeline_time_follows_the_transport(cx: &mut TestAppContext) {
     let mut stage = stage(cx, 1);
     for width in [1000., 480., 320.] {
         stage.vcx.simulate_resize(gpui::size(px(width), px(420.)));
         stage.idle(cx);
-        let split = bounds(&mut stage.vcx, "timeline.tool:split");
+        let play = bounds(&mut stage.vcx, "timeline:play");
         let time = bounds(&mut stage.vcx, "timeline:time");
-        assert!(
-            split.right() <= time.left(),
-            "{width}: {split:?} and {time:?}"
-        );
+        assert!(play.right() <= time.left(), "{width}: {play:?} and {time:?}");
         let clock = stage.view.read_with(&stage.vcx, |view, _| {
             let slot = crate::playback::timecode_slot(view.tokens());
             view.timeline_timecode_bounds(px(width), px(slot.w))

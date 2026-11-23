@@ -1199,11 +1199,9 @@ impl TimelineSurface {
         })
     }
     fn bar_ops(&self) -> Vec<Op> {
-        let (Some(bar), Some(scene)) = (self.bar(), self.scene.as_ref()) else {
-            return vec![];
-        };
-        let length = crate::captions_panel::timecode(scene.duration, scene.fps);
-        bar.ops(self.lit, &length, &self.tokens)
+        self.bar()
+            .map(|bar| bar.ops(self.lit, &self.tokens))
+            .unwrap_or_default()
     }
     /// The bar's part at `(x, y)`. A strip's trim zone beside the row
     /// scroller's track wins over the track: a strip that runs to the view's
@@ -5687,25 +5685,6 @@ fn build_with(
 }
 /// The frame the canvas prepared, and where, for the clips' accessible elements.
 type Shown = Rc<RefCell<Option<(Point<Pixels>, Arc<Frame>)>>>;
-const EDIT_TOOLS: [(EditTool, &str, &str); 3] = [
-    (EditTool::Selection, "cursorarrow", "Selection (V)"),
-    (
-        EditTool::Roll,
-        "arrow.left.and.right.righttriangle.left.righttriangle.right",
-        "Roll — or ⌥-drag a cut",
-    ),
-    (
-        EditTool::Split,
-        "scissors",
-        "Split (C) — click a clip to cut it. ⇧-click cuts every layer.",
-    ),
-];
-
-/// The native edit-tool strip sits over the outline header.
-pub(crate) fn edit_tools_width(metrics: &pm_design::Metrics) -> f32 {
-    EDIT_TOOLS.len() as f32 * metrics.control
-}
-
 impl Render for TimelineSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.activation.is_none() {
@@ -5780,16 +5759,6 @@ impl Render for TimelineSurface {
             } else if self.cursor == CursorStyle::Split { self.cursor = CursorStyle::Arrow; }
         } else if self.cursor == CursorStyle::Split { self.cursor = CursorStyle::Arrow; }
         let t = &self.tokens;
-        let tools = div().id("timeline-ruler-tools").occlude().absolute().left(px(t.metrics.inset)).top(px(0.)).h(px(t.metrics.ruler))
-            .flex().items_center().children(EDIT_TOOLS.into_iter().map(|(tool, symbol, label)| {
-                let image = pm_shell::symbol::rasterize(symbol, t.metrics.symbol_panel, pm_shell::symbol::Weight::Regular, t.colors.text, window.scale_factor());
-                div().id(SharedString::from(tool.command())).debug_selector(move || tool.command()).size(px(t.metrics.control)).flex().items_center().justify_center()
-                    .rounded(px(t.metrics.control_radius)).when(self.model.edit_tool == tool, |d| d.bg(rgb(t.colors.floating)))
-                    .role(Role::Button).aria_label(label).aria_selected(self.model.edit_tool == tool)
-                    .tooltip(pm_shell::kit::tooltip(t, label))
-                    .children(image.map(|im| img(ImageSource::Render(im)).size(px(t.metrics.symbol_panel))))
-                    .on_click(cx.listener(move |s, _, _, cx| { s.command(&tool.command(), 0., None, false, cx); }))
-            }));
         // Media dragged over the timeline: where it would land, an
         // insertion line between layers and the frame under the pointer.
         if !cx.has_active_drag() {
@@ -6521,9 +6490,6 @@ impl Render for TimelineSurface {
             .children(effect_row)
             .children(tip)
             .children(self.fallback_outline(cx))
-            // The DOM outline's scroll hitbox covers the column, including
-            // its transparent ruler band. Keep these native controls above it.
-            .child(gpui::deferred(tools))
             .children(self.graph_readout_element())
             .child(self.audio_overlay(cx))
     }
