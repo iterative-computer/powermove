@@ -2436,8 +2436,23 @@ impl SurfaceView {
     }
 
     pub fn send(&mut self, id: Id, event: &str, detail: EventDetail, cx: &mut Context<Self>) {
+        self.send_with_drop(id, event, detail, None, cx);
+    }
+
+    fn send_with_drop(
+        &mut self,
+        id: Id,
+        event: &str,
+        detail: EventDetail,
+        received: Option<gpui_macos::ReceivedDrop>,
+        cx: &mut Context<Self>,
+    ) {
         #[cfg(test)]
         self.log.push((id, event.into(), detail.clone()));
+        if received.is_some() {
+            self.runtime
+                .set_drop_lookup(crate::media_import::lookup_received_drop);
+        }
         let p = &self.publication;
         let semantic = self.prepared.node(id).and_then(|n| n.semantic.as_deref());
         let sent = crate::diag::enabled().then(|| {
@@ -2463,6 +2478,9 @@ impl SurfaceView {
                 Ok(ticket) => ticket.await.err().map(|e| e.to_string()),
                 Err(error) => Some(error.to_string()),
             };
+            // A native project effect takes its own lease before reaching
+            // the app queue. A rejected or unhandled event releases this one.
+            drop(received);
             let _ = this.update(cx, |v, cx| {
                 if let Some(sent) = sent {
                     crate::diag::line(
@@ -5104,7 +5122,8 @@ impl SurfaceView {
                 .on_drop(cx.listener(move |v, paths: &ExternalPaths, window, cx| {
                     cx.stop_propagation();
                     let detail = file_drop(paths.paths(), window.modifiers().alt);
-                    v.send(id, "drop", detail, cx);
+                    let received = gpui_macos::ReceivedDrop::for_paths(paths.paths());
+                    v.send_with_drop(id, "drop", detail, received, cx);
                 }))
                 .on_drag_move(
                     cx.listener(move |v, event: &DragMoveEvent<PanelDrag>, _, cx| {

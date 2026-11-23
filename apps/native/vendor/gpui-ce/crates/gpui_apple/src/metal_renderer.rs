@@ -293,6 +293,8 @@ pub struct MetalRenderer {
     last_draw: Option<std::time::Instant>,
     /// `PM_GPUI_PRESENT_TRACE`: how long the last draw waited for its drawable.
     pub acquire_seconds: f64,
+    /// P-LAUNCH-TRACE: whether this window presented a drawable yet.
+    presented_once: bool,
 }
 
 /// A link holds at most this many drawables of a previous size after a
@@ -683,6 +685,7 @@ impl MetalRenderer {
             headless_render_target: None,
             last_draw: None,
             acquire_seconds: 0.,
+            presented_once: false,
         }
     }
 
@@ -977,6 +980,16 @@ impl MetalRenderer {
             })
             .copy();
             drawable.add_presented_handler(&handler);
+        }
+        if crate::launch::enabled() {
+            let labels = crate::launch::take_armed(!std::mem::replace(&mut self.presented_once, true));
+            if !labels.is_empty() {
+                let handler = ConcreteBlock::new(move |d: &metal::DrawableRef| {
+                    crate::launch::presented(&labels, d.presented_time());
+                })
+                .copy();
+                drawable.add_presented_handler(&handler);
+            }
         }
         if let Some((input, kind)) = crate::feel::take() {
             let draw = crate::feel::now();

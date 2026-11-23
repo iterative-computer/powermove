@@ -292,6 +292,13 @@ fn decodes(path: &Path, kind: &str) -> Result<(), String> {
     crate::delivery::probe_media(path, kind)
 }
 
+/// A native drop remains readable through an asynchronous import. Only
+/// imports that read the files in place register them as durable sources.
+pub trait ReceivedMedia: std::fmt::Debug + Send + Sync {
+    fn owns(&self, path: &Path) -> bool;
+    fn keep(&self, paths: &[PathBuf]);
+}
+
 #[derive(Debug, Default)]
 pub struct ImportRequest {
     pub paths: Vec<PathBuf>,
@@ -314,6 +321,7 @@ pub struct ImportRequest {
     pub placed_as: Option<PlacedAs>,
     /// Scratch holding generated `paths`, removed once the import is done.
     pub staged: Option<tempfile::TempDir>,
+    pub received: Option<std::sync::Arc<dyn ReceivedMedia>>,
     /// What the status bar says once it lands, instead of the summary.
     pub note: Option<String>,
     /// Layer ▸ Add 3D Layer ▸ Import 3D Model…: each imported model becomes
@@ -908,6 +916,7 @@ impl Builtins {
         if request.sequence.is_some() || request.staged.is_some() {
             return self.import_once(document, profile, request, cancel);
         }
+        let received = request.received.clone();
         let known_now = assets()?;
         let (mut relink, mut reuse) = (vec![], vec![]);
         let mut fresh = vec![];
@@ -937,6 +946,7 @@ impl Builtins {
             let request = ImportRequest {
                 paths: vec![path],
                 replace: Some(id.clone()),
+                received: received.clone(),
                 ..Default::default()
             };
             match self.import_once(document, profile, request, cancel) {
@@ -1050,7 +1060,7 @@ impl Builtins {
         &self,
         document: u64,
         profile: &Path,
-        request: ImportRequest,
+        mut request: ImportRequest,
         cancel: &AtomicBool,
     ) -> Result<Outcome, String> {
         let project = self.broker.project.clone();
@@ -1104,7 +1114,7 @@ impl Builtins {
         let paths = match &sequence {
             Some(sequence) => vec![sequence.path.clone()],
             None if request.keep_folders && request.replace.is_none() => {
-                let (made, files) = folder_tree(request.paths);
+                let (made, files) = folder_tree(std::mem::take(&mut request.paths));
                 folders = made;
                 files
                     .into_iter()
@@ -1116,7 +1126,7 @@ impl Builtins {
                     })
                     .collect()
             }
-            None => expand(request.paths),
+            None => expand(std::mem::take(&mut request.paths)),
         };
         let total = paths.len();
         for (done, path) in paths.into_iter().enumerate() {
@@ -1218,8 +1228,14 @@ impl Builtins {
                 if let Some(folder) = folder_of.get(&path) {
                     asset["folder"] = json!(folder);
                 }
-                // Generated in scratch: no source file to relink to.
-                if request.staged.is_some()
+                // Generated and received copies go into the archive. The
+                // received path is only a source for a read-in-place sequence.
+                if (request.staged.is_some()
+                    || (sequence.is_none()
+                        && request
+                            .received
+                            .as_ref()
+                            .is_some_and(|received| received.owns(&path))))
                     && let Some(asset) = asset.as_object_mut()
                 {
                     asset.remove("sourcePath");
@@ -1354,6 +1370,14 @@ impl Builtins {
                 Err(error) => return Err(error.to_string()),
             }
         };
+        if sequence.is_some()
+            && let Some(received) = &request.received
+        {
+            let paths = relinked
+                .as_ref()
+                .map_or(&request.paths, |relinked| &relinked.frames);
+            received.keep(paths);
+        }
         if !layers.is_empty() {
             // The import landed; a refused selection does not undo that.
             let selection = SelectionCall::Layers {
@@ -2431,6 +2455,101 @@ mod tests {
             published.selection.primary(),
             layer.get("id").and_then(Value::as_str)
         );
+    }
+
+    #[derive(Debug)]
+    struct ReceivedFixture {
+        paths: Vec<PathBuf>,
+        kept: std::sync::Mutex<Vec<PathBuf>>,
+    }
+
+    impl ReceivedMedia for ReceivedFixture {
+        fn owns(&self, path: &Path) -> bool {
+            self.paths.iter().any(|owned| owned == path)
+        }
+
+        fn keep(&self, paths: &[PathBuf]) {
+            self.kept.lock().unwrap().extend_from_slice(paths);
+        }
+    }
+
+    impl Drop for ReceivedFixture {
+        fn drop(&mut self) {
+            let kept = self.kept.get_mut().unwrap();
+            for path in self.paths.iter().filter(|path| !kept.contains(path)) {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn received_copies_release_the_source_but_sequences_register_their_frames() {
+        let f = fixture();
+        let received = |paths: Vec<PathBuf>| -> std::sync::Arc<dyn ReceivedMedia> {
+            std::sync::Arc::new(ReceivedFixture {
+                paths,
+                kept: Default::default(),
+            })
+        };
+        let original = write(&f.root, "Drop.png", PNG);
+        let outcome = f
+            .runtime
+            .import_media(
+                document(&f),
+                &f.root,
+                ImportRequest {
+                    paths: vec![original.clone()],
+                    received: Some(received(vec![original.clone()])),
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(outcome.imported, ["Drop.png"]);
+        assert!(!original.exists());
+        assert!(!has_source_path(&f, &outcome.assets[0]));
+        let restored = f.root.join("restored.png");
+        f.actor
+            .handle()
+            .published("p")
+            .unwrap()
+            .media
+            .get(&outcome.assets[0])
+            .unwrap()
+            .copy_to(&restored)
+            .unwrap();
+        assert_eq!(std::fs::read(restored).unwrap(), PNG);
+
+        let frames = [
+            write(&f.root, "shot.0001.png", PNG),
+            write(&f.root, "shot.0002.png", PNG),
+        ];
+        let outcome = f
+            .runtime
+            .import_media(
+                document(&f),
+                &f.root,
+                ImportRequest {
+                    paths: frames.to_vec(),
+                    received: Some(received(frames.to_vec())),
+                    sequence: Some(SequenceImport {
+                        fps: 24.,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(outcome.assets.len(), 1, "{outcome:?}");
+        assert!(frames.iter().all(|path| path.is_file()));
+    }
+
+    fn has_source_path(f: &Fixture, id: &str) -> bool {
+        assets_now(f)
+            .get(id)
+            .and_then(|asset| asset.get("sourcePath"))
+            .is_some()
     }
 
     /// A 16-bit RGBA PNG of `w`×`h` samples `pixel(x, y)`.

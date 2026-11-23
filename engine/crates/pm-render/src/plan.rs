@@ -2760,11 +2760,22 @@ fn text_quad<'d>(
             }
         }));
     }
-    // Preserve the resting Canvas mask weight. Transformed 2D text uses
-    // device coverage to avoid magnifying/filtering a bounded source bitmap.
-    // The existing 3D plane behavior is deliberately unchanged in this fix.
-    if !scope.is_3d_layer(layer)? && !crate::raster_roi::at_rest(&world) {
-        let m = kurbo::Affine::new(world);
+    let device_world = if scope.is_3d_layer(layer)? {
+        crate::space25d::local::content_plane(scope, layer, time, scale)?
+            .map(|p| plane_at_origin(p, b.origin))
+            .filter(|p| {
+                p.iter().all(|v| v.is_finite()) && p[2] == 0.0 && p[5] == 0.0 && p[8] > 0.0
+            })
+            .map(|p| {
+                let w = p[8];
+                [p[0] / w, p[1] / w, p[3] / w, p[4] / w, p[6] / w, p[7] / w]
+            })
+            .filter(|m| m.iter().all(|v| v.is_finite()))
+    } else {
+        Some(world)
+    };
+    if let Some(m) = device_world.filter(|m| !crate::raster_roi::at_rest(m)) {
+        let m = kurbo::Affine::new(m);
         let plan = if ty == "text" {
             text.text_layer_level1_device(scope, layer, time, m, target)?
         } else {

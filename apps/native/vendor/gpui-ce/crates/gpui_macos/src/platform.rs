@@ -198,6 +198,7 @@ pub(crate) struct MacPlatformState {
     #[cfg(not(feature = "wgpu"))]
     metal_device: Option<metal::Device>,
     headless: bool,
+    drop_storage: Option<crate::drop_sources::Storage>,
     activation_policy: Option<MacActivationPolicy>,
     general_pasteboard: Pasteboard,
     find_pasteboard: Pasteboard,
@@ -233,6 +234,14 @@ impl MacPlatform {
         platform
     }
 
+    /// Store materialized external drops under a host-owned, durable media directory.
+    pub fn with_drop_directory(self, directory: PathBuf) -> Self {
+        let background = self.0.lock().background_executor.clone();
+        let storage = crate::drop_sources::Storage::new(directory, background);
+        self.0.lock().drop_storage = Some(storage);
+        self
+    }
+
     pub fn new(headless: bool) -> Self {
         let marker = MainThreadMarker::new().expect("Mac platform not created on main thread");
         let dispatcher = Arc::new(MacDispatcher::new());
@@ -244,6 +253,7 @@ impl MacPlatform {
 
         let state = Mutex::new(MacPlatformState {
             headless,
+            drop_storage: None,
             text_system,
             background_executor: BackgroundExecutor::new(dispatcher.clone()),
             foreground_executor: ForegroundExecutor::new(dispatcher),
@@ -522,6 +532,7 @@ impl Platform for MacPlatform {
     }
 
     fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
+        trace_launch();
         let mut state = self.0.lock();
         if state.headless {
             drop(state);
@@ -545,6 +556,33 @@ impl Platform for MacPlatform {
             self.0.lock().app_delegate = Some(app_delegate);
 
             let pool = NSAutoreleasePool::new();
+            // Powermove P-LAUNCH (NativeGPUI 0003, 0007): finish launching
+            // now and run the app's callback directly. Left to `run`, AppKit
+            // sends `applicationDidFinishLaunching:` only once LaunchServices'
+            // open-application Apple Event has arrived, 15-25 ms of idle main
+            // thread at every launch. `run` skips `finishLaunching` when it
+            // has already happened; the delegate's `did_finish_launching`
+            // still installs its observers when the event lands, and finds no
+            // callback left to run. Documents
+            // and links arrive after the callback, through `open_urls`.
+            // Its own pool: the outer one drains only when `run` returns, and
+            // anything autoreleased here, a window the callback opens
+            // included, stayed retained until the app quit (never freed after
+            // closing; `tests/launch_release.rs`).
+            let launch_pool = NSAutoreleasePool::new();
+            app.as_super().finishLaunching();
+            // As `did_finish_launching` would have before the callback: a
+            // bare binary is no regular app until told (a bundle already is).
+            if self.0.lock().activation_policy.is_none() {
+                app.as_super()
+                    .setActivationPolicy(NSApplicationActivationPolicy::Regular);
+            }
+            let callback = self.0.lock().finish_launching.take();
+            if let Some(callback) = callback {
+                callback();
+                crate::launch::mark("callback_end");
+            }
+            drop(launch_pool);
             app.as_super().run();
             drop(pool);
 
@@ -699,13 +737,20 @@ impl Platform for MacPlatform {
             return Err(PopupNotSupportedError.into());
         }
 
-        let (cursor_visible, foreground_executor, background_executor, renderer_context) = {
+        let (
+            cursor_visible,
+            foreground_executor,
+            background_executor,
+            renderer_context,
+            drop_storage,
+        ) = {
             let guard = self.0.lock();
             (
                 guard.cursor_visible.clone(),
                 guard.foreground_executor.clone(),
                 guard.background_executor.clone(),
                 guard.renderer_context.clone(),
+                guard.drop_storage.clone(),
             )
         };
 
@@ -729,6 +774,7 @@ impl Platform for MacPlatform {
             background_executor,
             renderer,
             self.1,
+            drop_storage,
         )))
     }
 
@@ -1277,7 +1323,43 @@ fn get_mac_platform(object: &GPUIApplicationDelegate) -> &MacPlatform {
     unsafe { &*(platform_ptr as *const MacPlatform) }
 }
 
+/// Powermove P-LAUNCH-TRACE (`PM_LAUNCH_TRACE`): the process start, then
+/// the first wait for events after each traced present.
+fn trace_launch() {
+    use core_foundation_sys::runloop::*;
+    if !crate::launch::enabled() {
+        return;
+    }
+    // SAFETY: proc_pidinfo fills at most `size` bytes of this process's own record.
+    unsafe {
+        let mut info: libc::proc_bsdinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+        let pid = libc::getpid();
+        if libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut c_void, size) == size {
+            let exec = info.pbi_start_tvsec as f64 * 1000. + info.pbi_start_tvusec as f64 / 1000.;
+            crate::launch::write("exec", exec, "");
+        }
+    }
+    crate::launch::mark("run");
+    extern "C" fn before_waiting(_: CFRunLoopObserverRef, _: CFRunLoopActivity, _: *mut c_void) {
+        crate::launch::before_waiting();
+    }
+    // SAFETY: an observer on the main run loop for the process's lifetime.
+    unsafe {
+        let observer = CFRunLoopObserverCreate(
+            std::ptr::null(),
+            kCFRunLoopBeforeWaiting,
+            1,
+            0,
+            before_waiting,
+            std::ptr::null_mut(),
+        );
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, kCFRunLoopCommonModes);
+    }
+}
+
 fn will_finish_launching(this: &GPUIApplicationDelegate) {
+    crate::launch::mark("will_finish");
     {
         let user_defaults = NSUserDefaults::standardUserDefaults();
 
@@ -1308,6 +1390,7 @@ fn will_finish_launching(this: &GPUIApplicationDelegate) {
 }
 
 fn did_finish_launching(this: &GPUIApplicationDelegate) {
+    crate::launch::mark("did_finish");
     let platform = get_mac_platform(this);
     let state = platform.0.lock();
     if state.activation_policy.is_none() {
@@ -1350,6 +1433,7 @@ fn did_finish_launching(this: &GPUIApplicationDelegate) {
     };
     if let Some(callback) = callback {
         callback();
+        crate::launch::mark("callback_end");
     }
 }
 
@@ -1524,7 +1608,7 @@ fn handle_dock_menu(this: &GPUIApplicationDelegate) -> Option<Retained<NSMenu>> 
     state.dock_menu.clone()
 }
 
-fn ns_url_to_path(url: &NSURL) -> Result<PathBuf> {
+pub(crate) fn ns_url_to_path(url: &NSURL) -> Result<PathBuf> {
     let path = url.fileSystemRepresentation();
     let description = url
         .absoluteString()

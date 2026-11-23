@@ -2,7 +2,7 @@
 use crate::{integration, native, session, theme, view};
 use gpui::{prelude::*, *};
 use pm_design::{Scheme, Tokens};
-use std::rc::Rc;
+use std::{path::PathBuf, rc::Rc};
 pub fn run() -> anyhow::Result<()> {
     let device = metal::Device::system_default()
         .ok_or_else(|| anyhow::anyhow!("Metal device unavailable"))?;
@@ -11,7 +11,7 @@ pub fn run() -> anyhow::Result<()> {
 struct SharedMetalDevice(metal::Device);
 impl Global for SharedMetalDevice {}
 pub fn run_with_device(device: metal::Device) -> anyhow::Result<()> {
-    launch(device, false, None, None, None)
+    launch(device, false, None, None, None, None)
 }
 /// Initializes native chrome with activation prohibited and every window hidden.
 pub fn smoke() -> anyhow::Result<()> {
@@ -21,11 +21,12 @@ pub fn smoke() -> anyhow::Result<()> {
         None,
         None,
         None,
+        None,
     )
 }
 /// Launch using the engine device and app-owned panel/command implementation.
 pub fn run_integrated(device: metal::Device, factory: integration::Factory) -> anyhow::Result<()> {
-    launch(device, false, Some(factory), None, None)
+    launch(device, false, Some(factory), None, None, None)
 }
 /// Opens the editor windows. Whoever holds the gate calls it exactly once.
 pub type Finish = Rc<dyn Fn(&mut App)>;
@@ -39,8 +40,16 @@ pub fn run_gated(
     factory: integration::Factory,
     gate: Gate,
     open_urls: OpenUrls,
+    drop_directory: PathBuf,
 ) -> anyhow::Result<()> {
-    launch(device, false, Some(factory), Some(gate), Some(open_urls))
+    launch(
+        device,
+        false,
+        Some(factory),
+        Some(gate),
+        Some(open_urls),
+        Some(drop_directory),
+    )
 }
 fn launch(
     device: metal::Device,
@@ -48,17 +57,19 @@ fn launch(
     factory: Option<integration::Factory>,
     gate: Option<Gate>,
     open_urls: Option<OpenUrls>,
+    drop_directory: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     native::install_identity();
     let theme_error = theme::load_from_env();
     if let Some(e) = &theme_error {
         eprintln!("{e}");
     }
-    let platform = Rc::new(gpui_macos::MacPlatform::new_with_metal_device(
-        false,
-        device.clone(),
-    ));
-    let app = Application::with_platform(platform);
+    let platform = gpui_macos::MacPlatform::new_with_metal_device(false, device.clone());
+    let platform = match drop_directory {
+        Some(path) => platform.with_drop_directory(path),
+        None => platform,
+    };
+    let app = Application::with_platform(Rc::new(platform));
     let app = if smoke {
         app.with_activation_policy(MacActivationPolicy::Prohibited)
     } else {
