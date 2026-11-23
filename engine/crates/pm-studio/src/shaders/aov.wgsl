@@ -6,20 +6,25 @@ fn denoising_guide(origin:vec3f, direction:vec3f) -> Guide {
   var ro=origin;var rd=direction;var tint=vec3f(1.);
   var result=Guide(vec3f(0.),vec3f(0.),0.,0.,0.);
   var primary=true;let band=floor(rnd()*3.);
+  var minimum = ray_epsilon();
   for(var bounce=0u;bounce<24u;bounce++) {
     var h:Hit;
-    if(primary){h=primary_intersect(ro,rd,camera_limit(ro,rd));}
-    else{h=secondary_intersect(ro,rd,BIG);}
+    if(primary){h=primary_intersect_from(ro,rd,minimum,camera_limit(ro,rd));}
+    else{h=secondary_intersect_from(ro,rd,minimum,BIG);}
+    minimum = ray_epsilon();
     let tf=floor_t(ro,rd);
     if(tf<h.t){result.albedo=tint*P.env_horizon.w;result.normal=vec3f(0.,1.,0.);return result;}
     if(h.tri<0){result.albedo=select(tint,vec3f(0.),primary);return result;}
     let sf=surface(ro,rd,h);let m=sf.m;
-    if(m.extra.z<.999 && rnd()>=m.extra.z){ro=sf.p+rd*ray_epsilon();continue;}
     let front=dot(rd,sf.ng)<0.;
-    if(!front && (u32(m.policy.y)&4u)==0u){ro=sf.p+rd*ray_epsilon();continue;}
+    if ((m.extra.z < .999 && rnd() >= m.extra.z) || (!front && (u32(m.policy.y) & 4u) == 0u)) {
+      minimum = coverage_minimum(sf.p, h.t);
+      ro = sf.p;
+      continue;
+    }
     let n=select(-sf.n,sf.n,front);let ng=select(-sf.ng,sf.ng,front);
     if(primary){
-      result.coverage=1.;result.depth=h.t;primary=false;
+      result.coverage=1.;result.depth=distance(sf.p,origin);primary=false;
       result.specular=select(0.,1.,m.spec.x<.075 && (m.spec.w*(1.-m.base.w)>.5 || m.base.w>.5));
     }
     if(any(m.emit.xyz>vec3f(0.))){result.albedo=tint;result.normal=n;return result;}

@@ -61,6 +61,67 @@ fn center(renderer: &Renderer) -> [f32; 3] {
 }
 
 #[test]
+fn alpha_blended_cover_preserves_nearby_display() {
+    let mut scene = scene();
+    scene.materials = vec![
+        Material {
+            emission: v3(0., 0.8, 0.),
+            ..Material::dielectric(Vec3::ZERO, 1.)
+        },
+        Material {
+            emission: v3(0., 0., 0.8),
+            ..Material::dielectric(Vec3::ZERO, 1.)
+        },
+    ];
+    scene.objects = vec![
+        Object {
+            mesh: plane(0.),
+            material: 0,
+        },
+        Object {
+            mesh: plane(0.0006),
+            material: 1,
+        },
+    ];
+    let mut prepared = scene.prepare();
+    for material in &mut prepared.materials {
+        material.policy[1] = 15.;
+    }
+    let cover = &mut prepared.materials[1];
+    imported(cover);
+    cover.physical_maps[0].info[0] = 0.;
+
+    let mut renderer = Renderer::new(16, 16).expect("GPU");
+    for hardware in [false, true] {
+        renderer.hardware_rt = hardware;
+        renderer.set_scene(&scene, &prepared);
+        renderer.set_screen(&[255, 255, 255, 0], 1, 1);
+        renderer.trace(4, 2, true, 64);
+        let pixel = center(&renderer);
+        assert!(
+            pixel[1] > 0.75 && pixel[2] < 0.02,
+            "display behind clear cover: {pixel:?}, hardware={hardware}"
+        );
+        let visible = renderer.pick_surface(0.52, 0.53).expect("visible display");
+        assert!(visible.point[2].abs() < 1e-5);
+        renderer.finish_with(&|_, albedo, normal| {
+            let index = (8 * 16 + 8) * 4;
+            assert!(albedo[index] > 0.95 && normal[index + 2] > 0.95);
+            Ok(())
+        });
+
+        renderer.set_scene(&scene, &prepared);
+        renderer.set_screen(&[255; 4], 1, 1);
+        renderer.trace(4, 2, true, 64);
+        let pixel = center(&renderer);
+        assert!(
+            pixel[2] > 0.75 && pixel[1] < 0.02,
+            "opaque cover: {pixel:?}, hardware={hardware}"
+        );
+    }
+}
+
+#[test]
 fn lit_materials_keep_layer_ids_coverage_and_denoising_guides() {
     let mut s = scene();
     s.materials.push(Material {
