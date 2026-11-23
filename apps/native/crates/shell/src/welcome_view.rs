@@ -49,8 +49,13 @@ impl WelcomeView {
             clock: None,
         }
     }
-    pub fn focus_handle(&self) -> FocusHandle {
-        self.focus.clone()
+    /// Gives the view the keys, and takes them back when the control that had
+    /// them leaves with its step (Begin, Back): GPUI then leaves the window
+    /// with no focus, and Return and the arrows reach nothing.
+    pub fn hold_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        cx.on_focus_lost(window, |view, window, cx| window.focus(&view.focus, cx))
+            .detach();
     }
     pub fn set_frame(&mut self, frame: Frame, cx: &mut Context<Self>) {
         if frame.surface != self.frame.surface {
@@ -73,13 +78,20 @@ impl WelcomeView {
     pub fn time(&self) -> f64 {
         self.now() - self.started
     }
+    /// Runs the action after this window's own update: the action may update
+    /// or close the window, which GPUI refuses from inside its listeners.
     fn act(&self, id: &str, cx: &mut App) {
-        (self.on_action)(id, cx);
+        let (on_action, id) = (self.on_action.clone(), id.to_owned());
+        cx.defer(move |cx| on_action(&id, cx));
     }
-    fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event.keystroke.key.as_str() {
             "enter" if !event.is_held => {
                 if let Some(id) = self.frame.default_action().map(str::to_owned) {
+                    // Return is the default button's alone: a button that has
+                    // the keys (the one last clicked) would press itself too
+                    // when the key comes up.
+                    window.focus(&self.focus, cx);
                     self.act(&id, cx);
                 }
             }
@@ -950,14 +962,14 @@ pub fn open_welcome_window(
             .is_minimizable(false),
         |window, cx| {
             let view = cx.new(|cx| WelcomeView::new(tokens, frame, on_action, cx));
-            window.focus(&view.read(cx).focus_handle(), cx);
             window.on_window_should_close(cx, move |_, cx| {
                 if quits {
                     cx.quit();
                 }
                 true
             });
-            view.update(cx, |_, cx| {
+            view.update(cx, |view, cx| {
+                view.hold_focus(window, cx);
                 cx.observe_window_appearance(window, |v, _, cx| {
                     v.tokens = crate::macos::tokens();
                     cx.notify();
