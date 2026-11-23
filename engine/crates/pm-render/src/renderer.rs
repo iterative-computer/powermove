@@ -494,6 +494,8 @@ pub struct Renderer {
     reuse_enabled: bool,
     /// See [`Renderer::set_isolate_layers`].
     isolate_layers: bool,
+    /// See [`Renderer::set_early_target_release`].
+    early_target_release: bool,
     /// [`Renderer::missing_effects`].
     missing_effects: Vec<crate::effects::versions::MissingEffect>,
     /// [`Renderer::set_channel_memo`].
@@ -559,6 +561,7 @@ impl Renderer {
             reuse: crate::reuse::DrawReuse::new(),
             reuse_enabled: false,
             isolate_layers: false,
+            early_target_release: true,
             missing_effects: Vec::new(),
             svg_warned: Default::default(),
             channel_memo: true,
@@ -980,6 +983,7 @@ impl Renderer {
                 full,
                 view: None,
                 taken: &mut taken,
+                recycle: true,
                 native: Some(crate::effects::exec::Native {
                     inputs: &[],
                     effects: &mut self.effects,
@@ -997,6 +1001,7 @@ impl Renderer {
         for t in taken {
             self.pool.give(t);
         }
+        self.pool.end_frame();
         (out, unsupported)
     }
 
@@ -1556,6 +1561,16 @@ impl Renderer {
     #[doc(hidden)]
     pub fn set_effect_scissor(&mut self, on: bool) {
         self.effects.scissor_passes = on;
+    }
+
+    /// Tests and benches: whether a frame's node, group, and effect targets
+    /// go back to the pool as soon as the last pass reading them is
+    /// recorded, for the frame's later passes (on by default). Off, every
+    /// such target is held until the frame is submitted: the reference the
+    /// reusing frames are compared with bit for bit.
+    #[doc(hidden)]
+    pub fn set_early_target_release(&mut self, on: bool) {
+        self.early_target_release = on;
     }
 
     pub fn set_isolate_layers(&mut self, on: bool) {
@@ -2349,7 +2364,11 @@ impl Renderer {
                 final_frame: request.export
                     || matches!(request.output_kind, crate::request::OutputKind::Final),
                 depth_id: depth_id.is_some(),
+                // The depth and id surface reads the frame's images after
+                // the frame: nothing it may read goes back early.
+                recycle: self.early_target_release && depth_id.is_none(),
                 taken: Vec::new(),
+                drawn: Vec::new(),
                 pyramids: &mut self.pyramids,
                 failures: Vec::new(),
                 unsupported: Vec::new(),
@@ -2453,6 +2472,10 @@ impl Renderer {
                 exec.flip(&mut encoder, &id_rows, ids);
                 exec.taken.push(id_rows);
             }
+            // Every resolve hands its group passes to the pass drawing them
+            // (`Exec::resolve_draws_owned`); none is left, but one would be
+            // given back after the frame like any other.
+            exec.taken.append(&mut exec.drawn);
             let legend: Vec<String> = kept_legend
                 .into_iter()
                 .chain(resolved.iter().map(|r| r.layer.clone()))
@@ -2502,6 +2525,9 @@ impl Renderer {
         for t in taken {
             self.pool.give(t);
         }
+        // Targets the frame gave back while it was recorded were kept for
+        // its later passes past the free budget; idle, they go down to it.
+        self.pool.end_frame();
         let mut scene3d_meta = crate::scene3d::metadata::collect(&plan, &self.scene3d);
         if prefix {
             if unsupported.is_empty()

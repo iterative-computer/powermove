@@ -225,8 +225,19 @@ pub(crate) struct Exec<'a> {
     /// The frame also renders the depth and id surface (3D layers then
     /// produce their linear view depth).
     pub depth_id: bool,
+    /// Targets go back to the pool as soon as the last pass reading them is
+    /// recorded, for this frame's later passes (`TargetPool::recycle`):
+    /// node content, masks and mattes, effect intermediates and results,
+    /// accumulators, and group passes. Off with the depth and id surface,
+    /// which reads the frame's images after the frame (they stay in
+    /// `taken`), and for the reference renders
+    /// (`Renderer::set_early_target_release`).
+    pub recycle: bool,
     /// Pool targets to give back after the frame is submitted.
     pub taken: Vec<Target>,
+    /// Group passes resolved but not yet drawn: the pass drawing them gives
+    /// them back ([`Exec::resolve_draws_owned`]).
+    pub drawn: Vec<Target>,
     /// Mip pyramids of level 2 stills, kept across frames.
     pub pyramids: &'a mut crate::sampling::gpu::PyramidCache,
     pub failures: Vec<LayerFailure>,
@@ -380,8 +391,38 @@ impl Exec<'_> {
     }
 
     /// Resolves the sources of `draws` (of `plan`), recording any passes
-    /// they need.
+    /// they need. Their targets are given back after the frame.
     pub(crate) fn resolve_draws(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &CompPlan,
+        draws: &[Draw],
+        region: Option<Region>,
+    ) -> Vec<Resolved> {
+        let (resolved, owned) = self.resolve_draws_owned(encoder, plan, draws, region);
+        self.taken.extend(owned);
+        resolved
+    }
+
+    /// [`Self::resolve_draws`], and the group passes it rendered that only
+    /// the pass drawing `resolved` reads: the caller gives them back
+    /// (`release`) once that pass is recorded. Empty without
+    /// [`Exec::recycle`].
+    pub(crate) fn resolve_draws_owned(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &CompPlan,
+        draws: &[Draw],
+        region: Option<Region>,
+    ) -> (Vec<Resolved>, Vec<Target>) {
+        // Nested resolves hand theirs to their own passes first, so what is
+        // above the mark is this call's.
+        let mark = self.drawn.len();
+        let resolved = self.resolve_draws_inner(encoder, plan, draws, region);
+        (resolved, self.drawn.split_off(mark))
+    }
+
+    fn resolve_draws_inner(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         plan: &CompPlan,
@@ -571,7 +612,16 @@ impl Exec<'_> {
                                 f64::from(g.y),
                             ];
                         }
-                        self.taken.push(target);
+                        // A group pass is read only by the pass drawing this
+                        // draw (never shared as a twin, `comp_twins`): that
+                        // pass gives it back (`resolve_draws_owned`). A
+                        // nested composition may be a later twin's source,
+                        // and an accumulation keeps today's lifetime.
+                        if self.recycle && group && !accumulate {
+                            self.drawn.push(target);
+                        } else {
+                            self.taken.push(target);
+                        }
                     }
                     Source::Image {
                         path,
@@ -986,7 +1036,13 @@ impl Exec<'_> {
             );
             let done: Vec<Target> = self.taken.drain(mark..).collect();
             for t in done {
-                self.pool.give(t);
+                // Kept for the next sample past the free budget, which
+                // would destroy a full-frame target as soon as it is given.
+                if self.recycle {
+                    self.pool.recycle(t);
+                } else {
+                    self.pool.give(t);
+                }
             }
             // Compositions rendered for this sample lived in those targets,
             // which the pool hands out again: they are no longer there to
@@ -1022,8 +1078,12 @@ impl Exec<'_> {
         blend: PassBlend,
         clear: bool,
     ) -> Vec<Resolved> {
-        let resolved = self.resolve_draws(encoder, plan, draws, region);
+        let (resolved, owned) = self.resolve_draws_owned(encoder, plan, draws, region);
         self.draw_pass_with(encoder, plan, &resolved, region, target, clear, blend);
+        // The pass that reads the group passes is recorded.
+        for t in owned {
+            self.release(t);
+        }
         resolved
     }
 

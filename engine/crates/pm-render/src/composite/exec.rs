@@ -200,14 +200,48 @@ impl Exec<'_> {
 
     /// Gives back a [`Self::take_scoped`] target whose last read is
     /// recorded: later work in this frame may draw into it (commands run in
-    /// the order they are recorded). With the depth and id surface, which
-    /// reads the frame's images afterwards, it stays until the frame is
-    /// submitted.
-    fn release(&mut self, target: Target) {
-        if self.depth_id {
-            self.taken.push(target);
+    /// the order they are recorded). Without [`Exec::recycle`] (the depth
+    /// and id surface, which reads the frame's images afterwards, or a
+    /// reference render), it stays until the frame is
+    /// submitted. The pool keeps it for this frame's later takes whatever
+    /// its free budget (`TargetPool::recycle`): every working target a
+    /// later pass draws into is cleared first or wholly overwritten.
+    pub(crate) fn release(&mut self, target: Target) {
+        if self.recycle {
+            self.pool.recycle(target);
         } else {
-            self.pool.give(target);
+            self.taken.push(target);
+        }
+    }
+
+    /// A scoped target when nothing reads this frame's images after it
+    /// ([`Exec::recycle`]), else one given back after the frame is
+    /// submitted; and whether it is scoped ([`Self::release`] it).
+    fn take_node(&mut self, rect: Region) -> (Target, bool) {
+        if self.recycle {
+            (self.take_scoped(rect), true)
+        } else {
+            (self.take_rect(rect), false)
+        }
+    }
+
+    /// Takes a chain's result back out of `taken`, where
+    /// `EffectPasses::record` leaves it, so that the node gives it back
+    /// itself once its last read is recorded: `true` when it was there
+    /// (and is now the caller's to [`Self::release`]). Never without
+    /// [`Exec::recycle`].
+    fn adopt(&mut self, target: &Target) -> bool {
+        if !self.recycle {
+            return false;
+        }
+        match self.taken.iter().rposition(|t| t.texture == target.texture) {
+            Some(i) => {
+                // `remove`, not `swap_remove`: motion-blur samples give back
+                // `taken[mark..]` by position.
+                self.taken.remove(i);
+                true
+            }
+            None => false,
         }
     }
 
@@ -323,8 +357,9 @@ impl Exec<'_> {
         // The accumulator: the caller's target until a node writes a new one.
         // `owned`: the loop took it (`take_scoped`) and gives it back once a
         // node replaced it, as today's compositor frees an accumulator after
-        // its last use; layer images stay (later draws and the depth and id
-        // surface read them).
+        // its last use. Layer images go back after the flush that draws them
+        // (`pending_targets`), except with the depth and id surface, which
+        // reads them after the frame (`Exec::recycle`).
         let mut in_target = rect == want;
         let mut owned = !in_target;
         let mut acc = if in_target {
@@ -338,8 +373,16 @@ impl Exec<'_> {
         let mut ids: Vec<Resolved> = Vec::new();
         for draw in &plan.draws {
             let Content::Composite(node) = &draw.content else {
-                let r = self.resolve_draws(encoder, plan, std::slice::from_ref(draw), pass_region);
+                // Group passes among them go back after the flush that
+                // draws them.
+                let (r, groups) = self.resolve_draws_owned(
+                    encoder,
+                    plan,
+                    std::slice::from_ref(draw),
+                    pass_region,
+                );
                 pending.extend(r);
+                pending_targets.extend(groups);
                 continue;
             };
             // A frame drawn in slices that is giving way records no further
@@ -380,7 +423,10 @@ impl Exec<'_> {
                         );
                         continue;
                     }
-                    let Some((res, depth)) = self.layer_node(encoder, plan, n, covered, &acc)
+                    // `res_owned`: the image is ours to give back once the
+                    // pass reading it is recorded (else it is in `taken`).
+                    let Some((res, depth, res_owned)) =
+                        self.layer_node(encoder, plan, n, covered, &acc)
                     else {
                         continue;
                     };
@@ -437,6 +483,11 @@ impl Exec<'_> {
                             );
                             out
                         };
+                        // The pass reading the layer image is recorded; the
+                        // transition reads the two stacks only.
+                        if res_owned {
+                            self.release(res);
+                        }
                         // A transition's result is its own target (in
                         // `taken`), never one of its inputs.
                         let (next, next_owned) = match self.run_transition(
@@ -467,9 +518,10 @@ impl Exec<'_> {
                         in_target = false;
                         ids.push(image);
                     } else if n.blend == BlendMode::Normal {
-                        // `drawFbo(res, W, H, compositeAlpha)`.
+                        // `drawFbo(res, W, H, compositeAlpha)`: given back
+                        // after the flush that draws it, masked or not.
                         pending.push(image);
-                        if unmasked(n) {
+                        if res_owned {
                             pending_targets.push(res);
                         }
                     } else {
@@ -477,15 +529,19 @@ impl Exec<'_> {
                             encoder, &res, covered, &acc, rect, full, n.blend, n.alpha,
                         );
                         ids.push(image);
-                        if unmasked(n) {
+                        if res_owned {
                             self.release(res);
                         }
                     }
                 }
                 Node::Adjustment(n) => {
-                    if let Some(out) = self.adjustment_node(encoder, plan, n, rect, &acc) {
+                    if let Some((out, out_owned)) =
+                        self.adjustment_node(encoder, plan, n, rect, &acc)
+                    {
+                        // The old accumulator's last reads (the chain and
+                        // the composite) are recorded.
                         let old = std::mem::replace(&mut acc, out);
-                        if std::mem::replace(&mut owned, false) {
+                        if std::mem::replace(&mut owned, out_owned) {
                             self.release(old);
                         }
                         in_target = false;
@@ -636,7 +692,9 @@ impl Exec<'_> {
         });
     }
 
-    /// Masks and the matte in f32, with one working-format store.
+    /// Masks and the matte in f32, with one working-format store. `scoped`:
+    /// the output is the caller's to [`Self::release`] (else in `taken`).
+    #[allow(clippy::too_many_arguments)]
     fn mask_and_matte(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -645,6 +703,7 @@ impl Exec<'_> {
         matte: Option<(&Matte, &Target)>,
         rect: Region,
         full: (u32, u32),
+        scoped: bool,
     ) -> Target {
         let mut u = self.op_uniform(full);
         let mut coverage = None;
@@ -685,7 +744,11 @@ impl Exec<'_> {
                 u.i[1] |= FLAG_MATTE_INVERTED;
             }
         }
-        let out = self.take_rect(rect);
+        let out = if scoped {
+            self.take_scoped(rect)
+        } else {
+            self.take_rect(rect)
+        };
         self.pipelines.ops.run_with_coverage(
             self.device,
             &mut self.effects.uniforms,
@@ -782,6 +845,7 @@ impl Exec<'_> {
                 full,
                 view,
                 taken: &mut taken,
+                recycle: self.recycle,
                 native: Some(crate::effects::exec::Native {
                     inputs: &ready,
                     effects: self.effects,
@@ -831,6 +895,7 @@ impl Exec<'_> {
                 full,
                 view,
                 taken: &mut taken,
+                recycle: self.recycle,
                 native: Some(crate::effects::exec::Native {
                     inputs: &[],
                     effects: self.effects,
@@ -857,7 +922,11 @@ impl Exec<'_> {
     }
 
     /// A layer node: content, masks, effects, matte. `None` when the layer
-    /// failed (reported) and draws nothing.
+    /// failed (reported) and draws nothing. The finished layer image, its
+    /// depth, and whether the image is the caller's to [`Self::release`]
+    /// once its last read is recorded (else it is in `taken`). Every target
+    /// before it goes back as soon as the pass reading it is recorded
+    /// ([`Exec::recycle`]).
     fn layer_node(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -865,15 +934,18 @@ impl Exec<'_> {
         n: &LayerNode,
         rect: Region,
         acc: &Target,
-    ) -> Option<(Target, Option<wgpu::TextureView>)> {
+    ) -> Option<(Target, Option<wgpu::TextureView>, bool)> {
         let full = (plan.width, plan.height);
         let pass_region = (rect != Region::full(full.0, full.1)).then_some(rect);
-        let content = if unmasked(n) {
-            self.take_scoped(rect)
+        // `owned`: `res` (here the content) is ours to release.
+        let (content, mut owned) = if unmasked(n) {
+            (self.take_scoped(rect), true)
         } else {
-            self.take_rect(rect)
+            self.take_node(rect)
         };
-        let resolved = self.resolve_draws(encoder, plan, &n.content, pass_region);
+        // Scoped masks, mattes, and effect results (else in `taken`).
+        let scoped = self.recycle;
+        let (resolved, groups) = self.resolve_draws_owned(encoder, plan, &n.content, pass_region);
         // A 3D layer keeps its linear view depth in the depth and id
         // surface. Its depth covers the full output, as the finished layer
         // image does when the pass is not a region.
@@ -891,8 +963,12 @@ impl Exec<'_> {
             view: plan.view,
         };
         self.draw_pass(encoder, &layer_plan, &resolved, pass_region, &content, true);
+        // The pass drawing the layer's group passes is recorded.
+        for t in groups {
+            self.release(t);
+        }
         let matte = n.matte.as_ref().map(|m| {
-            let t = self.take_rect(rect);
+            let (t, _) = self.take_node(rect);
             self.render_comp(encoder, &m.source, pass_region, &t);
             (m, t)
         });
@@ -900,19 +976,30 @@ impl Exec<'_> {
         match &n.effects {
             None => {
                 if n.masks.is_some() || matte.is_some() {
-                    res = self.mask_and_matte(
+                    let masked = self.mask_and_matte(
                         encoder,
                         &res,
                         n.masks.as_ref(),
                         matte.as_ref().map(|(m, t)| (*m, t)),
                         rect,
                         full,
+                        scoped,
                     );
+                    self.replace_res(&mut res, &mut owned, masked, scoped);
                 }
             }
             Some(effects) => {
                 if n.masks.is_some() {
-                    res = self.mask_and_matte(encoder, &res, n.masks.as_ref(), None, rect, full);
+                    let masked = self.mask_and_matte(
+                        encoder,
+                        &res,
+                        n.masks.as_ref(),
+                        None,
+                        rect,
+                        full,
+                        scoped,
+                    );
+                    self.replace_res(&mut res, &mut owned, masked, scoped);
                 }
                 let content = effect_input_bounds(n, rect);
                 match self.run_effects(
@@ -925,23 +1012,62 @@ impl Exec<'_> {
                     plan.view,
                     content,
                 ) {
-                    Ok(Some(t)) => res = t,
+                    Ok(Some(t)) => {
+                        // The chain read its input (and `u_orig`, the same
+                        // target) in passes recorded by now.
+                        let adopted = self.adopt(&t);
+                        self.replace_res(&mut res, &mut owned, t, adopted);
+                    }
                     Ok(None) => {}
                     Err(message) => {
                         self.fail_layer(plan, &n.layer, message);
+                        if owned {
+                            self.release(res);
+                        }
+                        if let Some((_, t)) = matte
+                            && scoped
+                        {
+                            self.release(t);
+                        }
                         return None;
                     }
                 }
                 if let Some((m, t)) = &matte {
-                    res = self.mask_and_matte(encoder, &res, None, Some((m, t)), rect, full);
+                    let matted =
+                        self.mask_and_matte(encoder, &res, None, Some((m, t)), rect, full, scoped);
+                    self.replace_res(&mut res, &mut owned, matted, scoped);
                 }
             }
         }
-        Some((res, depth))
+        // The matte's last read (`mask_and_matte`) is recorded.
+        if let Some((_, t)) = matte
+            && scoped
+        {
+            self.release(t);
+        }
+        Some((res, depth, owned))
+    }
+
+    /// `res` becomes `next` (whose ownership is `next_owned`); the old one,
+    /// whose last read is recorded, goes back when it was the node's.
+    fn replace_res(&mut self, res: &mut Target, owned: &mut bool, next: Target, next_owned: bool) {
+        let old = std::mem::replace(res, next);
+        let old_owned = std::mem::replace(owned, next_owned);
+        // A result is a new target, never its input; were it the same
+        // texture, it would stay, still the node's.
+        if old.texture == res.texture {
+            *owned = old_owned || next_owned;
+        } else if old_owned {
+            self.release(old);
+        }
     }
 
     /// An adjustment node: the accumulator through the effects, masked, and
-    /// composited over the accumulator. `None` leaves it unchanged.
+    /// composited over the accumulator. `None` leaves it unchanged. The new
+    /// accumulator, and whether it is the caller's to [`Self::release`]
+    /// once replaced (else in `taken`). The effect result and its masked
+    /// copy go back once the composite reading them is recorded; the old
+    /// accumulator is the caller's.
     fn adjustment_node(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -949,7 +1075,7 @@ impl Exec<'_> {
         n: &AdjustmentNode,
         rect: Region,
         acc: &Target,
-    ) -> Option<Target> {
+    ) -> Option<(Target, bool)> {
         let full = (plan.width, plan.height);
         let adjusted =
             match self.run_effects(
@@ -971,11 +1097,17 @@ impl Exec<'_> {
                     return None;
                 }
             };
-        let contribution = match &n.masks {
-            Some(m) => self.mask_and_matte(encoder, &adjusted, Some(m), None, rect, full),
-            None => adjusted,
-        };
-        let out = self.take_rect(rect);
+        let scoped = self.recycle;
+        // The chain read the accumulator (input, `u_orig`, and backdrop) in
+        // passes recorded by now; the accumulator stays the caller's.
+        let mut owned = self.adopt(&adjusted);
+        let mut contribution = adjusted;
+        if let Some(m) = &n.masks {
+            let masked =
+                self.mask_and_matte(encoder, &contribution, Some(m), None, rect, full, scoped);
+            self.replace_res(&mut contribution, &mut owned, masked, scoped);
+        }
+        let (out, out_owned) = self.take_node(rect);
         let u = self.composite_uniform(full, n.blend, n.alpha);
         self.run_op(
             encoder,
@@ -987,7 +1119,10 @@ impl Exec<'_> {
             rect,
             full,
         );
-        Some(out)
+        if owned {
+            self.release(contribution);
+        }
+        Some((out, out_owned))
     }
 }
 

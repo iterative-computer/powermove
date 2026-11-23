@@ -363,6 +363,9 @@ pub(crate) struct Gpu<'c> {
     precision: Precision,
     /// Intermediates, given back after the frame is submitted.
     taken: &'c mut Vec<Target>,
+    /// [`EffectContext::recycle`]: intermediates go back to `pool` once the
+    /// last pass reading them is recorded ([`Gpu::retire`]).
+    recycle: bool,
     inputs: Vec<super::resources::Ready>,
     effects: &'c mut Effects,
     timer: Option<&'c mut FrameTimer>,
@@ -385,6 +388,7 @@ impl<'c> Gpu<'c> {
             pool: &mut *cx.pool,
             precision: cx.precision,
             taken: &mut *cx.taken,
+            recycle: cx.recycle,
             inputs: native.inputs.to_vec(),
             effects: &mut *native.effects,
             timer: native.timer.as_deref_mut(),
@@ -415,6 +419,18 @@ impl<'c> Gpu<'c> {
 
     fn take(&mut self, w: u32, h: u32) -> Target {
         self.pool.take_working(self.device, w, h, self.precision)
+    }
+
+    /// An intermediate this chain took whose last read is recorded: back
+    /// to the pool for the frame's later passes ([`Self::recycle`]; each
+    /// pass clears its target first, `LoadOp::Clear`), else given back
+    /// after the frame is submitted.
+    fn retire(&mut self, target: Target) {
+        if self.recycle {
+            self.pool.recycle(target);
+        } else {
+            self.taken.push(target);
+        }
     }
 
     /// An exact copy of `source` in a new working target.
@@ -450,7 +466,8 @@ impl<'c> Gpu<'c> {
         }
         let out = self.take(result.width(), result.height());
         self.simple_pass(SimpleOp::DecodeE, &result, &out);
-        self.taken.push(result);
+        // Read only by the decode.
+        self.retire(result);
         out
     }
 
@@ -491,7 +508,20 @@ impl<'c> Gpu<'c> {
                 self.run_effect(layer, step, &from, backdrop.as_ref(), time, coordinates, bounds)
                 && let Some(previous) = current.replace(next)
             {
-                self.taken.push(previous);
+                // The previous step's output was this step's input (and
+                // `u_orig`): its passes are recorded, and no later step
+                // reads it. The chain's own input, prepared inputs, and
+                // backdrop are never `current`; they stay to the end.
+                let same = |t: &Target| t.texture == previous.texture;
+                let kept = same(&input)
+                    || backdrop.as_ref().is_some_and(same)
+                    || current.as_ref().is_some_and(same)
+                    || self.inputs.iter().any(|r| same(&r.target));
+                // (A step handing back a target it did not take would be
+                // kept.)
+                if !kept {
+                    self.retire(previous);
+                }
             }
             if std::mem::take(&mut self.unbounded) {
                 bounds = None;
@@ -550,7 +580,9 @@ impl<'c> Gpu<'c> {
             if step.clamp {
                 let clamped = self.take(w, h);
                 self.simple_pass(SimpleOp::Clamp, &result, &clamped);
-                self.taken.push(std::mem::replace(&mut result, clamped));
+                // Read only by the clamp.
+                let unclamped = std::mem::replace(&mut result, clamped);
+                self.retire(unclamped);
             }
             return Some(result);
         }
@@ -824,6 +856,14 @@ impl<'c> Gpu<'c> {
             drop(units);
             self.inputs = ready;
             outputs.push(out);
+            // A pass reads only the one before it (`u_tex`, or the mips
+            // copied from it) besides the step's input, backdrop, prepared
+            // inputs, and assets: the pass before this one has had its last
+            // read. The next pass takes a target other than this one's.
+            if self.recycle && outputs.len() >= 2 {
+                let read = outputs.remove(outputs.len() - 2);
+                self.retire(read);
+            }
         }
         if let (Some(timer), Some((_, e)), Some(last)) =
             (self.timer.as_deref(), span, outputs.last())
@@ -831,11 +871,15 @@ impl<'c> Gpu<'c> {
             timer.mark(device, self.encoder, &last.view, e);
         }
         let mut result = outputs.pop().expect("at least one pass");
-        self.taken.extend(outputs);
+        for read in outputs {
+            self.retire(read);
+        }
         if step.clamp {
             let clamped = self.take(w, h);
             self.simple_pass(SimpleOp::Clamp, &result, &clamped);
-            self.taken.push(std::mem::replace(&mut result, clamped));
+            // Read only by the clamp.
+            let unclamped = std::mem::replace(&mut result, clamped);
+            self.retire(unclamped);
         }
         Some(result)
     }

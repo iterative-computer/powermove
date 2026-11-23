@@ -176,8 +176,13 @@ pub struct EffectContext<'a> {
     /// origin.
     pub view: Option<crate::plan::OutputView>,
     /// Targets to return to the pool after the frame is submitted: every
-    /// target a chain takes from `pool`, the one it returns included.
+    /// target a chain takes from `pool`, the one it returns included
+    /// (with `recycle`, only the ones read after the chain returns).
     pub taken: &'a mut Vec<Target>,
+    /// Nothing reads the chain's intermediates once it returns (no depth
+    /// and id surface): each goes back to `pool` as soon as the last pass
+    /// reading it is recorded (`TargetPool::recycle`), not after the frame.
+    pub recycle: bool,
     /// The renderer's own effect state (`crate::effects`: programs, the
     /// watchdog's timestamps), for the chains it prepares itself.
     pub(crate) native: Option<crate::effects::exec::Native<'a>>,
