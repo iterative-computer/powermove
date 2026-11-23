@@ -138,6 +138,9 @@ struct State {
     input_rect: Cell<Option<NSRect>>,
     /// A form number field's stepper, at the field's trailing edge.
     stepper: RefCell<Option<Retained<NSStepper>>>,
+    /// Canvas: the context menu to show on the next run-loop turn, with the
+    /// click that asked for it.
+    menu: RefCell<Option<(Retained<NSMenu>, Retained<NSEvent>)>>,
 }
 impl State {
     fn emit(&self, event: TextEvent) {
@@ -427,6 +430,19 @@ define_class!(
                 let title = item.title();
                 unsafe {
                     let _: () = msg_send![&**v, insertText: &*title, replacementRange: range];
+                }
+            }
+        }
+        /// The canvas context menu, a run-loop turn after its click: menu
+        /// tracking runs GPUI's tasks, so it never nests inside GPUI's
+        /// event dispatch.
+        #[unsafe(method(pmShowMenu:))]
+        fn show_menu(&self, _: Option<&AnyObject>) {
+            let s = self.ivars();
+            let pending = s.menu.borrow_mut().take();
+            if let (Some((menu, event)), Editor::Multiline(v)) = (pending, &s.editor) {
+                if v.window().is_some() {
+                    NSMenu::popUpContextMenu_withEvent_forView(&menu, &event, v);
                 }
             }
         }
@@ -830,6 +846,7 @@ impl NativeTextSlot {
             caret_staged: Cell::new(None),
             input_rect: Cell::new(None),
             stepper: RefCell::new(None),
+            menu: RefCell::new(None),
         });
         if let Some(canvas) = &canvas {
             *canvas.ivars().borrow_mut() = Rc::downgrade(&state);
@@ -1142,7 +1159,8 @@ impl NativeTextSlot {
         ranges
     }
     /// Canvas: the editor's own context menu on `word` (selected first), with
-    /// spelling guesses on top when it is misspelled.
+    /// spelling guesses on top when it is misspelled and AppKit lists none.
+    /// Shown on the next run-loop turn (`pmShowMenu:`).
     pub fn context_menu(&self, word: (usize, usize)) {
         let Editor::Multiline(v) = &self.state.editor else {
             return;
@@ -1170,7 +1188,17 @@ impl NativeTextSlot {
                     language: Option::<&NSString>::None,
                     inSpellDocumentWithTag: tag
                 ];
-                let guesses = guesses.map(|g| g.to_vec()).unwrap_or_default();
+                let mut guesses = guesses.map(|g| g.to_vec()).unwrap_or_default();
+                // AppKit lists its own guesses, in the menu's first section,
+                // once it has checked the word.
+                let listed = menu
+                    .itemArray()
+                    .iter()
+                    .take_while(|item| !item.isSeparatorItem())
+                    .any(|item| guesses.iter().any(|guess| **guess == *item.title()));
+                if listed {
+                    guesses.clear();
+                }
                 if !guesses.is_empty() {
                     menu.insertItem_atIndex(&NSMenuItem::separatorItem(mtm), 0);
                 }
@@ -1186,11 +1214,20 @@ impl NativeTextSlot {
                 }
             }
         }
-        NSMenu::popUpContextMenu_withEvent_forView(&menu, &event, v);
+        *self.state.menu.borrow_mut() = Some((menu, event));
+        unsafe {
+            let _: () = msg_send![
+                &*self._delegate,
+                performSelector: objc2::sel!(pmShowMenu:),
+                withObject: std::ptr::null::<AnyObject>(),
+                afterDelay: 0.0f64
+            ];
+        }
     }
 }
 impl Drop for NativeTextSlot {
     fn drop(&mut self) {
+        self.state.menu.borrow_mut().take();
         if self.state.editing.get() {
             if let Some(w) = self.state.gpui.window() {
                 w.makeFirstResponder(Some(&self.state.gpui));
