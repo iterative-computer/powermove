@@ -24,6 +24,8 @@ impl ModelPresenter for Presenter {
         match row {
             RowId::Layer(id) => id.clone(),
             RowId::Property { channel, .. } => channel.clone(),
+            RowId::Effect { effect, .. } => effect.clone(),
+            RowId::Path { path, .. } => path.clone(),
         }
     }
     fn layer_label(&self, layer: &Layer) -> Label {
