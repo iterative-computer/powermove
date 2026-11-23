@@ -142,6 +142,21 @@ impl Default for Limits {
         }
     }
 }
+/// Heap ceiling of the built-in Timeline realm: a project with hundreds of
+/// layers and thousands of transform fields outgrows the 64 MiB extension
+/// ceiling. Not reserved up front.
+const TIMELINE_HEAP_BYTES: usize = 512 * 1024 * 1024;
+/// Heap ceiling of every other built-in panel realm.
+const BUILTIN_HEAP_BYTES: usize = 256 * 1024 * 1024;
+/// The ceiling for a shipped built-in panel's realm. Extension realms keep
+/// `Limits::default().heap_bytes`.
+pub(crate) fn builtin_heap_bytes(panel: &str) -> usize {
+    if panel == "timeline" {
+        TIMELINE_HEAP_BYTES
+    } else {
+        BUILTIN_HEAP_BYTES
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RealmKind {
     BuiltinEditor,

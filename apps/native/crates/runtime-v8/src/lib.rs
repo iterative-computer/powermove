@@ -27,6 +27,12 @@ pub enum Error {
     Invalid(&'static str),
     StaleGeneration,
 }
+impl Error {
+    /// The realm ran out of heap or external memory: a fresh realm may succeed.
+    pub fn is_memory(&self) -> bool {
+        matches!(self, Error::Quota(q) if *q == "heap" || *q == HEAP_FULL || *q == "external memory")
+    }
+}
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self:?}")

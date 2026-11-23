@@ -926,6 +926,9 @@ impl SurfaceView {
         self.try_focus_text(cx);
         self.follow_focus_request(cx);
         self.take_ready(cx);
+        if self.publication.panel == "timeline" {
+            self.sync_outline_window(cx);
+        }
         self.try_reveal(cx);
         if let Some(installed) = &self.installed {
             let _ = installed.try_send(());
@@ -1852,6 +1855,11 @@ impl SurfaceView {
     }
     #[cfg(test)]
     pub fn outline_scroll_for_test(&self) -> f32 { self.natives.outline.scroll_for_test() }
+    /// A new tree can have a different window even though the scroll hasn't
+    /// moved (e.g. expanding properties switches from a retained outline).
+    pub(crate) fn sync_outline_window(&mut self, cx: &mut Context<Self>) {
+        self.outline_rows(self.natives.outline.rows.get(), cx);
+    }
     /// Ask JS for the row window that covers native scroll, when it left the
     /// published one. Rows already overscan a viewport on each side.
     pub fn outline_rows(&mut self, rows: (usize, usize), cx: &mut Context<Self>) {

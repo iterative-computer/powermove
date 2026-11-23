@@ -1,4 +1,5 @@
 use super::*;
+use crate::host::builtin_heap_bytes;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -1110,6 +1111,100 @@ fn a_trim_that_frees_nothing_never_keeps_a_stuck_wait_going() {
     assert!(took < Duration::from_millis(1000), "refused after its patience, not {took:?}");
     drop(held);
 }
+#[test]
+fn builtin_panels_get_a_higher_heap_ceiling() {
+    assert_eq!(builtin_heap_bytes("timeline"), 512 * 1024 * 1024);
+    for panel in ["inspector", "fxbrowser", "assets", "agent"] {
+        assert_eq!(builtin_heap_bytes(panel), 256 * 1024 * 1024);
+    }
+    let f = fixture_with(|config| config.watchdog.prompt = Duration::from_secs(2));
+    let timeline = f
+        .pool
+        .builtin_panel_realm("timeline", Arc::new(|| {}))
+        .unwrap();
+    eval(&timeline, "1");
+    assert_eq!(f.admission.used(), 16 * 1024 * 1024);
+
+    // The same load on both paths: it killed the old 64 MiB Timeline and
+    // still hits the ordinary extension quota, but fits a shipped Timeline.
+    const LOAD: &str =
+        "globalThis.rows=[];for(let i=0;i<160;i++)rows.push(new Array(131072).fill(i));rows.length";
+    let legacy = f
+        .pool
+        .realm(RealmKind::V4Extension("legacy".into()))
+        .unwrap();
+    assert!(matches!(
+        wait(legacy.eval(LOAD).unwrap()),
+        Err(Error::Quota("heap"))
+    ));
+    assert_eq!(eval(&timeline, LOAD), "160");
+    let memory = &wait(timeline.measure().unwrap()).unwrap()[0].memory;
+    eprintln!(
+        "Timeline test allocation: {} bytes used, {} bytes reserved, {} bytes ceiling",
+        memory.used_heap_bytes,
+        memory.reserved_heap_bytes,
+        builtin_heap_bytes("timeline"),
+    );
+    assert!(memory.used_heap_bytes > Limits::default().heap_bytes);
+    assert!(f.admission.used() <= CAGE_ADMISSION);
+    assert_eq!(legacy.take_panel_memory_failure(), None);
+    close(&legacy);
+    close(&timeline);
+    assert_eq!(f.admission.used(), 0);
+}
+
+#[test]
+fn builtin_panel_memory_failure_wakes_the_host_without_a_ticket() {
+    let f = fixture_with(|config| config.watchdog.prompt = Duration::from_secs(2));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let limits = Limits {
+        heap_bytes: 16 * 1024 * 1024,
+        ..Limits::default()
+    };
+    let kind = RealmKind::V4Extension("tiny-panel".into());
+    let create = || {
+        f.pool
+            .start_realm_with(
+                kind.clone(),
+                limits.clone(),
+                Some(Arc::new({
+                    let tx = tx.clone();
+                    move || {
+                        let _ = tx.send(());
+                    }
+                })),
+            )
+            .unwrap()
+    };
+    let original = create();
+    let first = wait(original.eval("globalThis.marker = 1").unwrap())
+        .unwrap()
+        .generation;
+    let fail = |realm: &Realm| {
+        drop(
+            realm
+                .eval("globalThis.kept=[];for(;;)kept.push(new Array(65536).fill(123))")
+                .unwrap(),
+        );
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("memory failure wakes the host");
+        assert_eq!(
+            realm.take_panel_memory_failure(),
+            Some(Error::Quota("heap"))
+        );
+        assert_eq!(realm.take_panel_memory_failure(), None);
+        close(realm);
+        assert_eq!(f.admission.used(), 0);
+    };
+    fail(&original);
+
+    let restarted = create();
+    let fresh = wait(restarted.eval("typeof marker").unwrap()).unwrap();
+    assert_eq!(fresh.value, "undefined");
+    assert_ne!(fresh.generation, first);
+    fail(&restarted);
+}
+
 #[test]
 fn heap_quota_child() {
     if std::env::var_os("PM_RUNTIME_SYNTHETIC_HEAP_CHILD").is_none() {
