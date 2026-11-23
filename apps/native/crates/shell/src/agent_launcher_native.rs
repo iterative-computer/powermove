@@ -71,7 +71,11 @@ define_class!(
         #[unsafe(method(launch:))]
         fn launch(&self, _: &NSButton) {
             self.dismiss();
-            self.ivars().target.send(Command { name:"agent".into(), args:vec![], token:None });
+            self.ivars().target.send(Command {
+                name: "agent.launcher.open".into(),
+                args: vec![],
+                token: None,
+            });
         }
     }
 );

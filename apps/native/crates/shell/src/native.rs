@@ -3047,6 +3047,7 @@ impl ToolbarDelegate {
             item.setView(Some(&button));
             item.setBordered(false);
             item.setLabel(&NSString::from_str("Agent"));
+            item.setHidden(true);
             return Some(item);
         }
         // Every other item is a plain bordered toolbar item (an image, or an
@@ -3075,19 +3076,39 @@ impl ToolbarDelegate {
 #[path = "agent_launcher_native.rs"]
 mod launcher_native;
 use launcher_native::AgentButton;
-fn agent_launcher_button(toolbar: &NSToolbar) -> Option<Retained<AgentButton>> {
+fn agent_launcher_item(toolbar: &NSToolbar) -> Option<Retained<NSToolbarItem>> {
     toolbar
         .items()
         .iter()
-        .find(|item| item.itemIdentifier().to_string() == "agent")?
-        .view()?
-        .downcast()
-        .ok()
+        .find(|item| item.itemIdentifier().to_string() == "agent")
 }
+
+fn agent_launcher_button(toolbar: &NSToolbar) -> Option<Retained<AgentButton>> {
+    agent_launcher_item(toolbar)?.view()?.downcast().ok()
+}
+
 impl Host {
     pub fn set_agent_launcher(&mut self, snapshot: crate::agent_launcher::Snapshot) {
         if let Some(button) = agent_launcher_button(&self._toolbar) {
             button.publish(snapshot, self.tokens.clone());
+        }
+    }
+
+    pub fn set_agent_button_context(&self, has_project: bool, panel_visible: bool) {
+        let context = (has_project, panel_visible);
+        if self.agent_button_context.replace(context) != context {
+            self.sync_agent_button();
+        }
+    }
+
+    fn sync_agent_button(&self) {
+        let (has_project, panel_visible) = self.agent_button_context.get();
+        let show = crate::agent_launcher::show_agent_button(
+            has_project && !self.aside(),
+            panel_visible,
+        );
+        if let Some(item) = agent_launcher_item(&self._toolbar) {
+            item.setHidden(!show);
         }
     }
 }
@@ -3774,6 +3795,8 @@ pub struct Host {
     window_observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
     /// Home shows over the docks (`set_home`).
     home: Cell<bool>,
+    /// Whether a project is open and whether its Agent panel is in view.
+    agent_button_context: Cell<(bool, bool)>,
     /// The pages open in the strip (Settings, the Store: id and title) and
     /// the one showing over the project, if any (`set_pages`).
     pages: RefCell<(Vec<(String, String)>, Option<usize>)>,
@@ -3968,6 +3991,7 @@ impl Host {
             tabs_shown: RefCell::default(),
             window_observers: Vec::new(),
             home: Cell::new(false),
+            agent_button_context: Cell::default(),
             pages: RefCell::default(),
             sidebar: RefCell::new(None),
         }));
@@ -5596,6 +5620,7 @@ impl Host {
                 item.setHidden(aside);
             }
         }
+        self.sync_agent_button();
     }
     /// The width of the sidebar column under Home or the page showing.
     pub fn sidebar_width(&self) -> f32 {
