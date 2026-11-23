@@ -345,7 +345,14 @@ fn app_stdio_conformance_on_a_corpus_copy_commit_and_rollback() {
 }
 
 /// Effects compile in the helper the app bundle carries beside its executable.
+/// Built once per test binary: every `cargo build` links the executable into
+/// place again (remove, then link), so a build per test left a moment in which
+/// another test's app could not start the compiler.
 fn glsl_compiler() -> std::path::PathBuf {
+    static COMPILER: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    COMPILER.get_or_init(build_glsl_compiler).clone()
+}
+fn build_glsl_compiler() -> std::path::PathBuf {
     if let Some(path) = std::env::var_os("POWERMOVE_GLSL_COMPILER") {
         return path.into();
     }
