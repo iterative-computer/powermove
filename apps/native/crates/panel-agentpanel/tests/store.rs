@@ -170,10 +170,26 @@ fn migrated_profiles_append_messages_without_rewriting_settings_or_payloads() {
         let legacy_len = bytes.len();
         drop((bytes, legacy));
 
+        let settings_path = temp.0.join("store/ext.builtin-application-agent.json");
+        let expected_current = if legacy_attachment_mib > 0 {
+            // .23 already applied the snapshot. Its current store setting must
+            // win, while the retained Agent data is still available to import.
+            fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+            fs::write(&settings_path, br#"{"future":"changed on .23"}"#).unwrap();
+            fs::write(temp.0.join("kernel-state.applied"), b"").unwrap();
+            "changed on .23"
+        } else {
+            "preserve"
+        };
         let actor = temp.actor();
         let kernel = actor.handle();
-        let settings = fs::read(&record).unwrap();
+        assert!(!record.exists(), "the applied legacy record was retired");
+        let settings = fs::read(&settings_path).unwrap();
         assert!(settings.len() < 1024);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&settings).unwrap(),
+            json!({"future":expected_current})
+        );
         assert_eq!(
             fs::metadata(temp.0.join("kernel-state.pre-agent-storage.json"))
                 .unwrap()
@@ -302,7 +318,8 @@ fn migrated_profiles_append_messages_without_rewriting_settings_or_payloads() {
                 "100 sends on the migrated profile: journal {journal_size} bytes, up {growth} bytes from {first_len}"
             );
         }
-        assert_eq!(fs::read(&record).unwrap(), settings);
+        assert!(!record.exists());
+        assert_eq!(fs::read(&settings_path).unwrap(), settings);
         if let Some(modified) = modified {
             assert_eq!(
                 fs::metadata(&payload).unwrap().modified().unwrap(),

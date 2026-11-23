@@ -100,19 +100,11 @@ fn thread_tools_page_the_durable_archive() {
         "updatedAt":5,"provider":"claude","access":"project","lastRunStatus":"completed",
         "lastRunId":"r1","conversation":[{"role":"user","text":long},
         {"role":"assistant","text":"Done."}]}]});
-    fixture
-        .host
-        .kernel
-        .state_transaction(state::StateTransaction {
-            expected_revision: None,
-            ops: vec![state::StateOp::Setting {
-                key: "agentThreads.test".into(),
-                value: Some(model(&archive)),
-            }],
-        })
-        .wait()
-        .unwrap()
+    use pm_agents::persistence::Store;
+    let mut store = pm_panel_agentpanel::store::KernelStore::bind(fixture.host.kernel.clone())
         .unwrap();
+    assert!(store.get("agentThreads.test").unwrap().is_none());
+    store.set("agentThreads.test", &archive).unwrap();
     let mut c = fixture.connection();
     c.dispatch("start_session", &json!({"prompt":"read"}))
         .unwrap();

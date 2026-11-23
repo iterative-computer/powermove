@@ -435,6 +435,7 @@ mod tests {
         let settings = json!({
             "extensions": [],
             "settings": {
+                "theme": "dark",
                 "agentThreads.pick":{"version":1,"activeId":"t","threads":[{
                     "id":"t","composerDraft":"Keep both pictures","conversation":[],
                     "attachments":[{"id":"legacy-0","name":"Existing.png","payloadStored":true}]
@@ -450,7 +451,7 @@ mod tests {
         let actor = KernelActor::spawn(KernelConfig::default());
         let kernel = actor.handle();
         // Kernel replies are blocking and must never be awaited on AppKit.
-        let (settings, mut store, mut panel) = std::thread::spawn(move || {
+        let (settings_path, settings, mut store, mut panel) = std::thread::spawn(move || {
             kernel
                 .shell(ShellCall::AttachLibrary {
                     profile: root.clone(),
@@ -462,11 +463,11 @@ mod tests {
                 .unwrap();
             let mut store = KernelStore::bind(kernel.clone()).unwrap();
             let panel = Panel::load(&mut store, "pick", "fallback", 0).unwrap();
-            (
-                fs::read(root.join("kernel-state.json")).unwrap(),
-                store,
-                panel,
-            )
+            assert!(!root.join("kernel-state.json").exists());
+            let settings_path = root.join("store/theme.json");
+            let settings = fs::read(&settings_path).unwrap();
+            assert_eq!(serde_json::from_slice::<String>(&settings).unwrap(), "dark");
+            (settings_path, settings, store, panel)
         })
         .join()
         .unwrap();
@@ -542,7 +543,8 @@ mod tests {
         );
         println!("viewer selection at 289%: queued in {main:?}");
         cx.foreground_executor().block_test(task).unwrap();
-        assert_eq!(fs::read(legacy).unwrap(), settings);
+        assert!(!legacy.exists());
+        assert_eq!(fs::read(settings_path).unwrap(), settings);
         actor.shutdown();
     }
 
