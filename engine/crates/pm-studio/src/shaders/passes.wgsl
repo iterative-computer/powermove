@@ -8,11 +8,16 @@ fn data_pass(@builtin(global_invocation_id) gid:vec3u){
   let ray=camera_ray(vec2f(gid.xy)+vec2f(0.5));
   var ro=ray[0];let rd=ray[1];
   var value=vec4f(0.);
+  var minimum = ray_epsilon();
   for(var cut=0;cut<64;cut++){
-    let hit=primary_intersect(ro,rd,camera_limit(ro,rd));
+    let hit=primary_intersect_from(ro,rd,minimum,camera_limit(ro,rd));
     if(hit.tri<0){break;}
     let sf=surface(ro,rd,hit);
-    if(sf.m.extra.z<0.5){let step=hit.t+ray_epsilon();ro+=rd*step;continue;}
+    if (sf.m.extra.z < 0.5) {
+      minimum = coverage_minimum(sf.p, hit.t);
+      ro = sf.p;
+      continue;
+    }
     let kind=P.counts.w;
     if(kind==0u){let distance=select(length(sf.p-P.cam_pos.xyz),dot(sf.p-P.cam_pos.xyz,P.cam_fwd.xyz),(P.opts.w&1u)!=0u);let depth=clamp((distance-camera_near())/max(abs(P.backdrop.w)-camera_near(),1e-5),0.,1.);value=vec4f(vec3f(depth),1.);}
     if(kind==1u){value=vec4f(sf.n*0.5+vec3f(0.5),1.);}

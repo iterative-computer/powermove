@@ -44,13 +44,13 @@ const PHOTONS_PER_PASS: u32 = 1 << 18;
 const RT_WGSL: &str = r#"
 @group(1) @binding(0) var tlas: acceleration_structure;
 
-fn intersect(ro: vec3f, rd: vec3f, tmax: f32, any: bool) -> Hit {
+fn intersect_from(ro: vec3f, rd: vec3f, minimum: f32, tmax: f32, any: bool) -> Hit {
   var h = Hit(tmax, -1, vec2f(0.0), 0u);
   if (arrayLength(&pos) < 3u || P.opts.z == 0u) { return h; }
   var rq: ray_query;
   var flags = RAY_FLAG_FORCE_OPAQUE;
   if (any) { flags |= RAY_FLAG_TERMINATE_ON_FIRST_HIT; }
-  rayQueryInitialize(&rq, tlas, RayDesc(flags, 0xffu, ray_epsilon(), tmax, ro, rd));
+  rayQueryInitialize(&rq, tlas, RayDesc(flags, 0xffu, minimum, tmax, ro, rd));
   rayQueryProceed(&rq);
   let x = rayQueryGetCommittedIntersection(&rq);
   if (x.kind != RAY_QUERY_INTERSECTION_TRIANGLE) { return h; }
@@ -64,9 +64,12 @@ fn trace_source() -> String {
     include_str!("shaders/trace.wgsl").replacen("    var jitter = rnd2();", "    var jitter = rnd2();\n    if (P.opts.x == 1u) {jitter=vec2f(f32(pcg(P.dims.z ^ 0x68bc21ebu)),f32(pcg(P.dims.z ^ 0x02e5be93u)))*(1.0/4294967296.0);}",1)
 }
 fn rt_source() -> String {
-    let base = trace_source().replacen("fn intersect(ro: vec3f", "fn intersect_bvh(ro: vec3f", 1);
+    let base = trace_source().replacen("fn intersect_from(ro: vec3f", "fn intersect_bvh_from(ro: vec3f", 1);
     format!("enable wgpu_ray_query;\n{base}\n{RT_WGSL}")
 }
+
+/// SDR tone mapping and display transfer shared by the GPU output paths.
+pub const DISPLAY_TONE_WGSL: &str = include_str!("shaders/display-tone.wgsl");
 
 /// Where [`Renderer::present_to`] draws one layer: premultiplied display
 /// color into `view` (a render attachment of `format`), only `layer`'s
@@ -357,7 +360,7 @@ impl Renderer {
             })
         };
         let trace_src = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("trace.wgsl"), source: wgpu::ShaderSource::Wgsl(trace_source().into()) });
-        let post_src = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("post.wgsl"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders/post.wgsl").into()) });
+        let post_src = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("post.wgsl"), source: wgpu::ShaderSource::Wgsl(format!("{DISPLAY_TONE_WGSL}\n{}", include_str!("shaders/post.wgsl")).into()) });
         let trace = pipeline(&trace_src, &trace_layout, "main");
         let resolve = pipeline(&post_src, &post_layout, "resolve");
         let compose = pipeline(&post_src, &post_layout, "compose");
@@ -1437,13 +1440,13 @@ impl Renderer {
 @compute @workgroup_size(1)
 fn probe_main() {{
  seed=1u;let r=camera_ray(vec2f({x},{y}));let a=intersect(r[0],r[1],BIG,false);
- let b={portable}(r[0],r[1],BIG,false);
+ let b={portable}(r[0],r[1],ray_epsilon(),BIG,false);
  probe_out[0]=vec4f(a.t,f32(a.tri),f32(a.inst),0.);
  probe_out[1]=vec4f(b.t,f32(b.tri),f32(b.inst),0.);
  if(a.tri>=0){{let sf=surface(r[0],r[1],a);probe_out[2]=vec4f(sf.m.base.xyz,sf.m.spec.w);}}
  if(b.tri>=0){{let sf=surface(r[0],r[1],b);probe_out[3]=vec4f(sf.m.base.xyz,sf.m.spec.w);}}
 }}
-"#,portable=if rt {"intersect_bvh"}else{"intersect"});
+"#,portable=if rt {"intersect_bvh_from"}else{"intersect_from"});
         let module=self.device.create_shader_module(wgpu::ShaderModuleDescriptor{label:Some("probe"),source:wgpu::ShaderSource::Wgsl(format!("{base}\n{kernel}").into())});
         let empty=self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{label:None,entries:&[]});
         let ray_layout=if rt {&self.rt.as_ref().unwrap().layout}else{&empty};
