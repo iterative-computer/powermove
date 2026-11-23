@@ -310,6 +310,7 @@ fn build_options(
         origin: request.origin,
         final_output: request.output_kind == crate::OutputKind::Final,
         read_ahead: request.read_ahead && !request.export,
+        keep_empty_groups: request.depth_id,
     }
 }
 
@@ -2252,12 +2253,18 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             options3d,
             Some(&mut self.text),
-            plan::BuildOptions { material:self.material.plan, ..build_options(
-                &comp,
-                request,
-                self.shaders.fallback_runner,
-                self.isolate_layers,
-            ) },
+            // The depth and id surface's legend lists every top-level draw:
+            // its frames keep boundary groups that draw nothing.
+            plan::BuildOptions {
+                material: self.material.plan,
+                keep_empty_groups: depth_id.is_some() || request.depth_id,
+                ..build_options(
+                    &comp,
+                    request,
+                    self.shaders.fallback_runner,
+                    self.isolate_layers,
+                )
+            },
             self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );

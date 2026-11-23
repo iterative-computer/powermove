@@ -322,6 +322,8 @@ pub struct Build<'r> {
     pub(crate) sampling: crate::sampling::Sampling,
     /// A playing viewer frame ([`BuildOptions::read_ahead`]).
     read_ahead: bool,
+    /// [`BuildOptions::keep_empty_groups`].
+    keep_empty_groups: bool,
     /// The output origin of the level being built (the request's at the
     /// top level, in its groups, mattes, and motion-blur samples; `(0, 0)`
     /// inside a precomp, which renders its own target).
@@ -447,6 +449,11 @@ pub struct BuildOptions {
     /// A playing viewer frame ([`RenderRequest::read_ahead`](crate::RenderRequest::read_ahead)):
     /// image sequences name the files their next frames show.
     pub read_ahead: bool,
+    /// Keep boundary groups whose members draw nothing at this time
+    /// (frames with the depth and id surface: its legend lists every
+    /// top-level draw). Otherwise such a group is left out of the plan when
+    /// leaving it out cannot change a pixel ([`draw_layer`]).
+    pub keep_empty_groups: bool,
 }
 
 /// A bounded source-local material canvas, without its receiving model.
@@ -618,6 +625,7 @@ pub(crate) fn build_reusing<'r>(
         windowed: options.origin.is_some(),
         final_output: options.final_output,
         read_ahead: options.read_ahead,
+        keep_empty_groups: options.keep_empty_groups,
         passes: Vec::new(),
         compat,
         compat_missing: Vec::new(),
@@ -1216,6 +1224,40 @@ fn draw_layer<'d>(
         // A boundary group: its members composite into their own target,
         // drawn with the group's opacity.
         let inner = comp_pass(scope, b, time, width, height, scale, true, Some(layer));
+        // Members that draw nothing at this time (a group is active at any
+        // time, `Evaluator::active_base`; only its members' spans gate
+        // drawing): the group's target stays its clear, all `+0`. When the
+        // group's own stages keep it so and its composite cannot change the
+        // stack beneath, the group is left out, and with it two working
+        // targets and their passes. Bit-identical:
+        // - no masks or track matte (their passes, and what planning them
+        //   reports, stay as they were); every effect a reviewed program
+        //   that maps all `+0` to all `+0` reading nothing else
+        //   (`EffectPasses::preserves_zero`; generators such as `gradient`,
+        //   unreviewed or changed extension sources, and backdrop or
+        //   reference reads keep the group); no transition;
+        // - a normal blend: `src + dst·(1 − src.a)` with `src = +0` is `dst`
+        //   (`dst·1 = dst`, `dst + (+0) = dst`; only a `−0` texel of the
+        //   stack would become `+0`, and an encoded export cannot tell
+        //   them apart);
+        // - everything the group's planning reports (its effects, inputs,
+        //   transition, and its members' failures) is recorded above, as
+        //   before.
+        // Not with the depth and id surface (its legend indexes every
+        // top-level draw) or a material capture.
+        if inner.draws.is_empty()
+            && !b.keep_empty_groups
+            && b.material.is_none()
+            && !has_masks
+            && !matted
+            && transition.is_none()
+            && blend == BlendMode::Normal
+            && effects
+                .as_ref()
+                .is_none_or(|e| !e.backdrop && e.passes.preserves_zero())
+        {
+            return Ok(None);
+        }
         let draw = |alpha: f64| Draw {
             layer: id.clone(),
             matrix: full,
@@ -3570,6 +3612,223 @@ mod tests {
 
     fn parse(s: &str) -> Node {
         Node::from_value(pm_model::json::parse(s).unwrap(), 0)
+    }
+
+    /// Empty boundary groups (`draw_layer`): a group with effects whose
+    /// one member is outside its span at the frame's time.
+    mod empty_groups {
+        use super::*;
+        use crate::effects::bounds::tests::{DOT_MATRIX, dot_matrix_definition};
+        use pm_protocol::definitions::DefinitionKind;
+        use serde_json::{Value, json};
+
+        fn ch(v: Value) -> Value {
+            json!({"v": v, "kf": [], "expr": null})
+        }
+
+        fn transform() -> Value {
+            let mut p = serde_json::Map::new();
+            for (key, value) in [
+                ("position.x", 160.),
+                ("position.y", 90.),
+                ("position.z", 0.),
+                ("anchor.x", 0.),
+                ("anchor.y", 0.),
+                ("anchor.z", 0.),
+                ("scale.x", 100.),
+                ("scale.y", 100.),
+                ("scale.z", 100.),
+                ("rotation", 0.),
+                ("rotation.x", 0.),
+                ("rotation.y", 0.),
+                ("orientation.x", 0.),
+                ("orientation.y", 0.),
+                ("orientation.z", 0.),
+                ("opacity", 100.),
+                ("skew", 0.),
+                ("perspective", 50.),
+            ] {
+                p.insert(key.into(), ch(json!(value)));
+            }
+            Value::Object(p)
+        }
+
+        fn layer(id: &str, ty: &str, d: Value, from: f64, group: Option<&str>, fx: Value) -> Value {
+            json!({
+                "id": id, "type": ty, "name": id, "from": from, "dur": 1, "on": true,
+                "lock": false, "shy": false, "threeD": false, "solo": false, "blend": "normal",
+                "mblur": false, "parent": null, "group": group, "matteSource": null,
+                "p": transform(), "fx": fx, "transitionIn": null, "transitionOut": null,
+                "masks": [], "d": d
+            })
+        }
+
+        /// A group `g` with `fx` (and `edit` applied to it) holding one solid
+        /// that starts at `member_from` (seconds; the frame is at 0.5 s).
+        fn document(fx: Value, member_from: f64, edit: impl Fn(&mut Value)) -> pm_model::Document {
+            let mut group = layer("g", "group", json!({}), 0., None, fx);
+            group["dur"] = json!(10);
+            edit(&mut group);
+            let member = layer(
+                "s",
+                "solid",
+                json!({"w": 100, "h": 50, "color": "#F0C040"}),
+                member_from,
+                Some("g"),
+                json!([]),
+            );
+            let root = pm_model::json::parse(
+                &json!({
+                    "id": "p", "compId": "c", "w": 320, "h": 180, "fps": 30, "dur": 10,
+                    "comps": {}, "layers": [group, member]
+                })
+                .to_string(),
+            )
+            .unwrap();
+            pm_model::Document::new(Some(pm_model::canonical::canonical_project(root)), 1)
+        }
+
+        /// The built-ins and `dot-matrix-resolve` with `source`, translated.
+        fn host(source: &str) -> crate::effects::Effects {
+            let mut effects = crate::effects::Effects::new("test");
+            let mut set = crate::effects::builtin_definitions();
+            set.definitions.push(dot_matrix_definition(source));
+            effects.set_snapshot(&set).unwrap();
+            for id in ["blur", "gradient", "dot-matrix-resolve"] {
+                assert!(
+                    matches!(
+                        effects.status(DefinitionKind::Effect, id),
+                        Some(crate::effects::Status::Ready)
+                    ),
+                    "{id} translates"
+                );
+            }
+            effects
+        }
+
+        /// The top level's draws at 0.5 s (every build reports nothing).
+        fn draws(
+            effects: &crate::effects::Effects,
+            doc: &pm_model::Document,
+            options: BuildOptions,
+        ) -> usize {
+            let comp = Comp::resolve(doc, "c").unwrap();
+            let mut ev = Evaluator::new();
+            let assets = crate::MapResolver::default();
+            let (plan, b) = build_with(
+                &mut ev,
+                &comp,
+                &comp,
+                0.5,
+                320,
+                180,
+                (1., 1.),
+                &assets,
+                Some(effects),
+                crate::scene3d::Options3d::default(),
+                None,
+                options,
+                None,
+            );
+            assert!(b.failures.is_empty(), "{:?}", b.failures);
+            assert!(b.unsupported.is_empty(), "{:?}", b.unsupported);
+            plan.draws.len()
+        }
+
+        fn dots() -> Value {
+            json!({"id": "dm", "type": "dot-matrix-resolve", "on": true,
+                "p": {"resolve": ch(json!(40)), "detail": ch(json!(2.5)), "pitch": ch(json!(10))}})
+        }
+        fn blur() -> Value {
+            json!({"id": "b", "type": "blur", "on": true, "p": {"amount": ch(json!(6))}})
+        }
+        fn gradient() -> Value {
+            json!({"id": "gr", "type": "gradient", "on": true, "p": {}})
+        }
+
+        #[test]
+        fn a_group_that_draws_nothing_through_zero_preserving_effects_is_left_out() {
+            let effects = host(DOT_MATRIX);
+            let none = |_: &mut Value| {};
+            let half = |g: &mut Value| g["p"]["opacity"] = ch(json!(50));
+            let o = BuildOptions::default();
+            for fx in [
+                json!([]),
+                json!([dots()]),
+                json!([blur()]),
+                json!([blur(), dots()]),
+            ] {
+                // A member that draws: the group draws.
+                assert_eq!(
+                    draws(&effects, &document(fx.clone(), 0., none), o),
+                    1,
+                    "{fx}"
+                );
+                // None does: left out.
+                assert_eq!(
+                    draws(&effects, &document(fx.clone(), 5., none), o),
+                    0,
+                    "{fx}"
+                );
+                // Kept for the depth and id surface.
+                let keep = BuildOptions {
+                    keep_empty_groups: true,
+                    ..o
+                };
+                assert_eq!(
+                    draws(&effects, &document(fx.clone(), 5., half), keep),
+                    1,
+                    "{fx}"
+                );
+                // At half opacity (a boundary for that alone without
+                // effects): left out the same way.
+                assert_eq!(draws(&effects, &document(fx, 5., half), o), 0);
+            }
+            // An effect switched off is not a stage.
+            let mut off = gradient();
+            off["on"] = json!(false);
+            assert_eq!(draws(&effects, &document(json!([off]), 5., half), o), 0);
+        }
+
+        #[test]
+        fn a_group_whose_stages_can_draw_from_nothing_is_kept() {
+            let effects = host(DOT_MATRIX);
+            let none = |_: &mut Value| {};
+            let o = BuildOptions::default();
+            // A generator draws from a transparent input.
+            assert_eq!(
+                draws(&effects, &document(json!([gradient()]), 5., none), o),
+                1
+            );
+            assert_eq!(
+                draws(
+                    &effects,
+                    &document(json!([dots(), gradient()]), 5., none),
+                    o
+                ),
+                1
+            );
+            // A non-normal blend.
+            let multiply = |g: &mut Value| g["blend"] = json!("multiply");
+            assert_eq!(
+                draws(&effects, &document(json!([dots()]), 5., multiply), o),
+                1
+            );
+            // `dot-matrix-resolve` from another source (one byte changed):
+            // not the reviewed program.
+            let at = DOT_MATRIX.find("* 0.5").unwrap() + "* 0.".len();
+            let mut changed = DOT_MATRIX.to_owned();
+            changed.replace_range(at..at + 1, "6");
+            let unreviewed = host(&changed);
+            assert_eq!(
+                draws(&unreviewed, &document(json!([dots()]), 5., none), o),
+                1
+            );
+            assert_eq!(
+                draws(&unreviewed, &document(json!([dots()]), 0., none), o),
+                1
+            );
+        }
     }
 
     #[test]

@@ -1475,9 +1475,17 @@ pub(crate) struct Chain {
     pub time: f64,
     /// The steps' program sources (a hot reload changes the key).
     pub sources: Vec<Option<pm_glsl::Key>>,
+    /// Every step is a translated (`Status::Ready`), reviewed,
+    /// zero-preserving program when the chain was prepared
+    /// ([`super::bounds::chain_preserves_zero`]). Removing steps keeps it
+    /// true; a chain with input plans never has it (references refuse it).
+    pub zero_preserving: bool,
 }
 
 impl EffectPasses for Chain {
+    fn preserves_zero(&self) -> bool {
+        self.zero_preserving && self.inputs.is_empty()
+    }
     fn source_allocation_bytes(&self, (w, h): (u32, u32)) -> Option<u64> {
         self.steps.first()?.source_domain?;
         let bytes = |w: u32, h: u32| u64::from(w).checked_mul(u64::from(h))?.checked_mul(16);

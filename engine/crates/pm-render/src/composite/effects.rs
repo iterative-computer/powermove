@@ -223,6 +223,16 @@ pub trait EffectPasses: Send + Sync {
         None
     }
 
+    /// Whether the chain provably maps an input whose every texel is `+0`
+    /// to an output whose every texel is `+0` (or to no output), reading
+    /// nothing else: no backdrop, other layers, assets, or frames
+    /// (`crate::effects::bounds::chain_preserves_zero`). The plan then
+    /// leaves out a boundary group whose members draw nothing. `false`
+    /// unless the host proves it.
+    fn preserves_zero(&self) -> bool {
+        false
+    }
+
     /// Identifies the chain and every input that changes its pixels (for
     /// plan equality and render cache keys).
     fn key(&self) -> Vec<u8>;

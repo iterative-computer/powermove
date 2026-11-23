@@ -1091,6 +1091,9 @@ impl crate::composite::EffectHost for Effects {
                     steps,
                     time: frame.time,
                     sources,
+                    // Source rasters (`effectSpace: source`) are never a
+                    // boundary group's chain: not reviewed here.
+                    zero_preserving: false,
                 }),
             })
         };
@@ -1153,6 +1156,12 @@ impl crate::composite::EffectHost for Effects {
             .iter()
             .map(|s| self.source_key(DefinitionKind::Effect, &s.definition))
             .collect();
+        // Only programs this engine draws itself (not the fallback
+        // runner's) are known to keep an all-`+0` input `+0`.
+        let zero_preserving = bounds::chain_preserves_zero(&steps, |id| {
+            self.get(DefinitionKind::Effect, id)
+                .filter(|_| matches!(self.status(DefinitionKind::Effect, id), Some(Status::Ready)))
+        });
         Ok(Ok(Some(crate::composite::PreparedEffects {
             padding: plan::region_padding(&steps),
             backdrop: steps.iter().any(|s| s.backdrop),
@@ -1162,6 +1171,7 @@ impl crate::composite::EffectHost for Effects {
                 steps,
                 time: frame.time,
                 sources,
+                zero_preserving,
             }),
         })))
     }
