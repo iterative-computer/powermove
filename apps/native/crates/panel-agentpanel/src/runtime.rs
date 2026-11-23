@@ -3,7 +3,7 @@
 //! Shell registration, workspace staging and consent remain host-owned.
 use crate::{
     Error, Result,
-    model::{Effect, EffectKind, Panel, Target},
+    model::{ComposerSubmission, Effect, EffectKind, Panel, Target},
 };
 use pm_agents::{
     Event, RunResult,
@@ -30,6 +30,8 @@ struct Running {
     sequence: u64,
     pending: Option<Event>,
     action: Option<PendingAction>,
+    /// Keep the submitted draft until the provider replies or refuses it.
+    start_submission: Option<(Option<String>, ComposerSubmission)>,
     /// The run settled. Its process only has late cleanup left to report.
     finished: bool,
     /// The run delegated or watched: its turn's completion waits for the
@@ -104,6 +106,7 @@ impl ProviderRuns {
                 return Err(error);
             }
         };
+        panel.provider_started(effect, now)?;
         self.register_start(effect, handle);
         Ok(())
     }
@@ -118,7 +121,9 @@ impl ProviderRuns {
         launch: impl FnOnce() -> Result<Handle>,
     ) -> Result<()> {
         self.validate_start(panel, effect)?;
-        self.register_start(effect, launch()?);
+        let handle = launch()?;
+        panel.provider_started(effect, now)?;
+        self.register_start(effect, handle);
         panel.defer_save(now);
         Ok(())
     }
@@ -156,6 +161,9 @@ impl ProviderRuns {
             sequence: 0,
             pending: None,
             action: None,
+            start_submission: effect.composer_submission().map(|submission| {
+                (effect.message_id().map(str::to_owned), submission.clone())
+            }),
             finished: false,
             orchestrated: self.completion_gate,
             held: None,
@@ -741,7 +749,40 @@ impl ProviderRuns {
                     sequence: running.sequence,
                     event: event.clone(),
                 };
-                panel.provider_event(store, &running.target.thread, &receipt, now)?;
+                let failed_before_reply = matches!(
+                    event,
+                    Event::Stopped(_)
+                        | Event::Completed {
+                            result: RunResult::Failure { cancelled: false, .. },
+                            ..
+                        }
+                ) && !running.finished
+                    && panel.session(&running.target.thread).is_ok_and(|session| {
+                        session.run.as_ref().is_some_and(|run| !run.stopping)
+                    });
+                if let Some((message, draft)) = running
+                    .start_submission
+                    .as_ref()
+                    .filter(|_| failed_before_reply)
+                {
+                    let mut next = panel.clone();
+                    next.restore_failed_send(
+                        &running.target.thread, message.as_deref(), Some(draft),
+                    )?;
+                    next.provider_event(store, &running.target.thread, &receipt, now)?;
+                    *panel = next;
+                } else {
+                    panel.provider_event(store, &running.target.thread, &receipt, now)?;
+                }
+                if matches!(
+                    event,
+                    Event::Trace { .. }
+                        | Event::Progress { .. }
+                        | Event::Completed { .. }
+                        | Event::Stopped(_)
+                ) {
+                    running.start_submission = None;
+                }
                 running.pending = None;
                 running.sequence += 1;
                 delivered += 1;

@@ -8,7 +8,7 @@ import { Component, createContext, type ComponentChildren } from "preact";
 import { useContext, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { citationLabel, quoteSelection, type Citation } from "./citations";
 import * as UI from "../../src/components";
-import type { Json, SurfaceEvent } from "../../src/protocol";
+import { json, type Json, type SurfaceEvent } from "../../src/protocol";
 import type {
   Access,
   Action,
@@ -1398,10 +1398,12 @@ interface Local {
 function UserMessageView({
   m,
   send,
+  retry,
 }: {
   key?: string | number;
   m: Message;
   send: Send;
+  retry?: () => void;
 }) {
   const text = str(m.value.text);
   const files = Array.isArray(m.value.attachments) ? m.value.attachments : [];
@@ -1475,14 +1477,21 @@ function UserMessageView({
           </div>
         )}
         {text && <QuoteSource id={m.rowId} text={text} userMessage />}
-        {delivery && <text style={quiet}>{delivery}</text>}
+        {delivery && (retry ? (
+          <div style={{ ...row, gap: t("metrics.gap") }}>
+            <text style={quiet}>{delivery} ·</text>
+            <button role="button" label="Retry" tabIndex={0} style={quiet} onClick={retry}>
+              Retry
+            </button>
+          </div>
+        ) : <text style={quiet}>{delivery}</text>)}
       </div>
     </div>
   );
 }
 const UserMessage = memo(
   UserMessageView,
-  (a, b) => JSON.stringify(a.m) === JSON.stringify(b.m),
+  (a, b) => a.retry === b.retry && JSON.stringify(a.m) === JSON.stringify(b.m),
 );
 const MEDIA_KIND: Record<string, string> = {
   image: "Image",
@@ -2422,26 +2431,33 @@ function Conversation({
   s,
   send,
   local,
+  starting,
+  retryLocal,
 }: {
   s: Snapshot;
   send: Send;
   local: Local;
+  starting: "waiting" | "delayed" | null;
+  retryLocal?: { id: string; run: () => void };
 }) {
   const list = entries(s);
   const render = (e: Entry): ComponentChildren => {
-    if (e.kind === "working")
+    if (e.kind === "working") {
+      if (starting === "waiting") return null;
+      const label = starting === "delayed" ? "Starting…" : e.label;
       return (
         <div
           key={e.key}
           role="status"
-          label={e.label}
+          label={label}
           style={{ ...hairline, paddingBottom: t("metrics.inset") }}
         >
           <text style={{ ...faint, fontVariantNumeric: "tabular-nums" }}>
-            {e.label}
+            {label}
           </text>
         </div>
       );
+    }
     if (e.kind === "work") {
       const open = local.open[e.key] ?? false;
       return (
@@ -2480,7 +2496,13 @@ function Conversation({
   };
   const item = (m: Message) =>
     m.role === "user" ? (
-      <UserMessage key={m.key} m={m} send={send} />
+      <UserMessage key={m.key} m={m} send={send}
+        retry={m.value.delivery !== "failed" || s.runId !== null
+          ? undefined
+          : retryLocal?.id === m.rowId
+            ? retryLocal.run
+            : () => send({ type: "retry", id: m.rowId })}
+      />
     ) : m.role === "assistant" ? (
       <AssistantMessage key={m.key} m={m} s={s} send={send} />
     ) : (
@@ -2510,6 +2532,10 @@ function Composer({
   s,
   n,
   send,
+  submit,
+  stop,
+  submitting,
+  optimistic,
   menu,
   shown,
 }: {
@@ -2517,28 +2543,15 @@ function Composer({
   s: Snapshot;
   n: NativeFacts;
   send: Send;
+  submit: (action: Action) => void;
+  stop: () => void;
+  submitting: boolean;
+  optimistic?: string;
   menu?: Menu;
   /** Counts the panel's showings (each change of presentation). */
   shown: number;
 }) {
   const [dragging, setDragging] = useState(false);
-  const [sending, setSending] = useState(false);
-  const pending = useRef(false);
-  const submit = (action: Action) => {
-    if (pending.current) return;
-    pending.current = true;
-    setSending(true);
-    const settle = () => {
-      pending.current = false;
-      setSending(false);
-    };
-    try {
-      void Promise.resolve(send(action)).then(settle, settle);
-    } catch (error) {
-      settle();
-      throw error;
-    }
-  };
   const working = s.runId !== null;
   const available = n.connection === "connected" || working;
   const disabled = !available || s.composerDisabled;
@@ -2704,24 +2717,22 @@ function Composer({
     n.modelGroups,
     n.connectedModelName,
   ]);
-  const sendLabel = sending ? "Sending…" : working ? "Send direction" : "Send";
+  const sendLabel = working ? "Send direction" : "Send";
   // The shortcuts menu hangs from the composer, once per draft that asks
   // for it (the window's searchable menu); closing it unchosen leaves the
   // draft as typed.
   const composerNode = useRef<number | null>(null);
   const edit = (event: SurfaceEvent) => {
-    const input = composerText(event.value);
-    if (event.composing || input.text === undefined) return;
-    const { text } = input;
+    const text = event.value;
+    if (optimistic !== undefined || event.composing || typeof text !== "string") return;
     if (event.type === "change" && text === s.draft.text) return;
+    const composerEpoch = event.composerEpoch ?? s.draft.sent;
     send({
       type: "draft",
       text,
       selection: event.selection ?? [text.length, text.length],
       base: s.draft.text,
-      ...((input.epoch ?? s.draft.sent) === undefined
-        ? {}
-        : { composerEpoch: input.epoch ?? s.draft.sent }),
+      ...(composerEpoch === undefined ? {} : { composerEpoch }),
     });
   };
   const focused = useRef(false);
@@ -2847,6 +2858,7 @@ function Composer({
             placeholder,
             submitOnReturn: true,
             ...(s.draft.sent === undefined ? {} : { composerEpoch: s.draft.sent }),
+            ...(optimistic === undefined ? {} : { composerSending: optimistic }),
             attachmentProject: s.projectId,
             attachmentThread: s.threadId,
           }}
@@ -2921,9 +2933,7 @@ function Composer({
               tabIndex={0}
               disabled={s.stopping}
               metadata={{ symbol: "stop.fill" }}
-              onClick={() => {
-                if (!s.stopping) send({ type: "stop" });
-              }}
+              onClick={stop}
               style={{
                 ...target,
                 ...row,
@@ -2945,17 +2955,16 @@ function Composer({
               label={sendLabel}
               title={sendLabel}
               tabIndex={0}
-              disabled={disabled || sending || !s.sendable}
-              metadata={{ symbol: sending ? "ellipsis" : "return" }}
+              disabled={disabled || submitting || !s.sendable}
+              metadata={{ symbol: "return" }}
               onClick={(event) => {
-                const { text, epoch } = composerText(event.value);
+                const text = event.value;
+                const composerEpoch = event.composerEpoch ?? s.draft.sent;
                 if (!event.composing && !disabled && s.sendable)
                   submit({
                     type: "submit",
-                    ...(text === undefined ? {} : { text }),
-                    ...((epoch ?? s.draft.sent) === undefined
-                      ? {}
-                      : { composerEpoch: epoch ?? s.draft.sent }),
+                    ...(typeof text === "string" ? { text } : {}),
+                    ...(composerEpoch === undefined ? {} : { composerEpoch }),
                   });
               }}
               style={{
@@ -2969,10 +2978,10 @@ function Composer({
                 symbolSize: t("metrics.symbol_panel"),
                 // A quiet square until there is something to send (v1's).
                 background: t(
-                  !disabled && !sending && s.sendable ? "colors.accent" : "colors.raised",
+                  !disabled && !submitting && s.sendable ? "colors.accent" : "colors.raised",
                 ),
                 color: t(
-                  !disabled && !sending && s.sendable
+                  !disabled && !submitting && s.sendable
                     ? "colors.selected_text"
                     : "colors.muted",
                 ),
@@ -3074,8 +3083,10 @@ function Composer({
 
 // ── The panel ────────────────────────────────────────────────────────────
 
+type LocalSend = { thread: string; row: Row; baseDraft: string; failed: boolean };
+
 export function AgentView({
-  publication: { snapshot: s, native: n },
+  publication: { snapshot: published, native: n },
   send,
   menu,
 }: {
@@ -3084,6 +3095,104 @@ export function AgentView({
   /** The window's field menu (threads, run choices, access, shortcuts). */
   menu?: Menu;
 }) {
+  const pending = useRef(false);
+  const requestedStop = useRef<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submission, setSubmission] = useState<LocalSend>();
+  const [stopPending, setStopPending] = useState(false);
+  const localSend =
+    submission?.thread === published.threadId &&
+    published.runId === null &&
+    !published.rows.items.some((row) => row.id === submission.row.id)
+      ? submission
+      : undefined;
+  const optimistic = localSend !== undefined && !localSend.failed;
+  let s = published;
+  if (localSend) {
+    s = {
+      ...published,
+      rows: {
+        count: published.rows.count + 1,
+        range: [published.rows.range[0], published.rows.range[1] + 1],
+        items: [...published.rows.items, localSend.row],
+      },
+    };
+    if (optimistic) {
+      s.runId = localSend.row.id;
+      s.draft = { ...published.draft, text: "", selection: [0, 0], armed: null, citations: [] };
+      s.attachments = [];
+      s.sendable = false;
+      s.stopping = stopPending;
+    } else if (localSend.baseDraft === published.draft.text) {
+      const text = str(localSend.row.value.text);
+      s.draft = { ...published.draft, text, selection: [text.length, text.length] };
+    }
+  }
+  const waiting = optimistic || published.starting === true;
+  const [delayed, setDelayed] = useState(false);
+  useLayoutEffect(() => {
+    setDelayed(false);
+    if (waiting) {
+      const timer = setTimeout(() => setDelayed(true), 300);
+      return () => clearTimeout(timer);
+    }
+  }, [waiting, published.threadId]);
+  useLayoutEffect(() => {
+    if (requestedStop.current === published.threadId && published.runId !== null) {
+      requestedStop.current = null;
+      setStopPending(false);
+      send({ type: "stop" });
+    }
+  }, [published.runId, published.threadId, send]);
+  const stop = () => {
+    if (s.stopping) return;
+    if (optimistic) {
+      requestedStop.current = published.threadId;
+      setStopPending(true);
+    } else {
+      send({ type: "stop" });
+    }
+  };
+  const submit = (action: Action) => {
+    if (pending.current) return;
+    const authored = action.type === "submit" ? action.text
+      : action.type === "key" ? action.key.value : undefined;
+    const text = typeof authored === "string" ? authored : published.draft.text;
+    if (!text.trim() && published.attachments.length === 0) return;
+    pending.current = true;
+    requestedStop.current = null;
+    setStopPending(false);
+    setSubmitting(true);
+    const id = published.nextMessageId ?? `history:message-${published.rows.count}`;
+    const start = published.runId === null && !n.needsAnswer ? {
+      thread: published.threadId,
+      baseDraft: published.draft.text,
+      row: { id, commandId: id, value: obj(json({
+        role: "user", text, attachments: published.attachments,
+        citations: published.draft.citations ?? [],
+      })), chosen: {}, open: false },
+      failed: false,
+    } : undefined;
+    setSubmission(start);
+    const settle = (failed: boolean) => {
+      pending.current = false;
+      setSubmitting(false);
+      if (failed) {
+        requestedStop.current = null;
+        setStopPending(false);
+      }
+      setSubmission(failed && start ? {
+        ...start,
+        failed: true,
+        row: { ...start.row, value: { ...start.row.value, delivery: "failed" } },
+      } : undefined);
+    };
+    try {
+      void Promise.resolve(send(action)).then(() => settle(false), () => settle(true));
+    } catch {
+      settle(true);
+    }
+  };
   const [jump, setJump] = useState<
     (Citation & { nonce: number }) | undefined
   >();
@@ -3239,7 +3348,7 @@ export function AgentView({
           // Bottom anchored: new content keeps the latest in view unless
           // the person scrolled up; a new token goes back to the end.
           scrollAnchor: "end",
-          scrollToken: `${s.threadId}:${jumps + (s.draft.sent ?? followed.current.sends)}`,
+          scrollToken: `${s.threadId}:${jumps + (s.draft.sent === undefined ? followed.current.sends : s.draft.sent + Number(optimistic))}`,
         }}
         style={{
           ...column,
@@ -3262,7 +3371,17 @@ export function AgentView({
           (empty ? (
             <Welcome s={s} n={n} send={send} />
           ) : (
-            <Conversation s={s} send={send} local={local} />
+            <Conversation s={s} send={send} local={local}
+              starting={waiting ? delayed ? "delayed" : "waiting" : null}
+              retryLocal={localSend?.failed ? {
+                id: localSend.row.id,
+                run: () => submit({
+                  type: "submit",
+                  text: published.draft.text || str(localSend.row.value.text),
+                  ...(published.draft.sent === undefined ? {} : { composerEpoch: published.draft.sent }),
+                }),
+              } : undefined}
+            />
           ))}
       </div>
       {s.stopError && (
@@ -3322,6 +3441,10 @@ export function AgentView({
           s={s}
           n={n}
           send={send}
+          submit={submit}
+          stop={stop}
+          submitting={submitting}
+          optimistic={optimistic && localSend ? str(localSend.row.value.text) : undefined}
           menu={menu}
           shown={presentation.current.count}
         />
@@ -3361,7 +3484,11 @@ export function AgentPanel({
     <AgentView
       publication={publication}
       menu={menu}
-      send={(action) => model.dispatch(action).catch(onError)}
+      send={(action) => {
+        const dispatch = model.dispatch(action);
+        void dispatch.catch(onError);
+        return dispatch;
+      }}
     />
   );
 }
@@ -3370,23 +3497,14 @@ const namedKeys: Record<string, string> = {
   delete: "Delete",
   tab: "Tab",
 };
-function composerText(value: Json | undefined) {
-  if (typeof value === "string") return { text: value, epoch: undefined };
-  const input = obj(value);
-  return {
-    text: typeof input.text === "string" ? input.text : undefined,
-    epoch: typeof input.epoch === "number" ? input.epoch : undefined,
-  };
-}
 export function composerKey(event: SurfaceEvent, currentEpoch?: number): Action {
-  const { key, metaKey, ctrlKey, shiftKey, altKey, repeat, composing } = event;
-  const { text, epoch } = composerText(event.value);
-  const composerEpoch = epoch ?? currentEpoch;
+  const { key, metaKey, ctrlKey, shiftKey, altKey, repeat, composing, value } = event;
+  const composerEpoch = event.composerEpoch ?? currentEpoch;
   return {
     type: "key",
     ...(composerEpoch === undefined ? {} : { composerEpoch }),
     key: {
-      ...(text === undefined ? {} : { value: text }),
+      ...(typeof value === "string" ? { value } : {}),
       key: namedKeys[key ?? ""] ?? key,
       metaKey,
       ctrlKey,

@@ -85,6 +85,7 @@ pub struct Session {
     pub conversation: Rows,
     pub trace: Trace,
     pub run: Option<Run>,
+    pub(crate) starting: bool,
     last_run: Option<String>,
     /// An unacknowledged completion: true for failure; session-local only.
     toolbar_notice: Option<bool>,
@@ -112,7 +113,7 @@ pub struct Session {
     pub stop_error: Option<String>,
     pub disclosures: HashMap<String, bool>,
     pub(crate) questions: HashMap<String, QuestionDraft>,
-    next_message: u64,
+    pub(crate) next_message: u64,
 }
 impl Session {
     /// The thread's latest run, live or finished.
@@ -177,6 +178,7 @@ impl Session {
             conversation,
             trace,
             run: None,
+            starting: false,
             toolbar_notice: None,
             last_run: v["lastRunId"].as_str().map(str::to_owned),
             settings_dirty: false,
@@ -425,12 +427,18 @@ pub enum ShellAction {
     RepairExtension(String),
 }
 #[derive(Clone, Debug)]
+pub(crate) struct ComposerSubmission {
+    epoch: u64,
+    draft: Draft,
+}
+
+#[derive(Clone, Debug)]
 pub struct Effect {
     pub id: u64,
     pub target: Target,
     pub kind: EffectKind,
     message: Option<String>,
-    composer: Option<(u64, Draft)>,
+    composer: Option<ComposerSubmission>,
     live_or_queue: bool,
 }
 impl Effect {
@@ -442,6 +450,9 @@ impl Effect {
     }
     pub fn has_composer_submission(&self) -> bool {
         self.composer.is_some()
+    }
+    pub(crate) fn composer_submission(&self) -> Option<&ComposerSubmission> {
+        self.composer.as_ref()
     }
 }
 #[derive(Clone, Debug)]
@@ -1405,8 +1416,24 @@ impl Panel {
         }
         let session = self.session_mut(&effect.target.thread)?;
         session.composer_epoch += 1;
-        effect.composer = Some((session.composer_epoch, draft));
+        if matches!(effect.kind, EffectKind::Send { steer: false, .. }) {
+            session.starting = true;
+        }
+        effect.composer = Some(ComposerSubmission {
+            epoch: session.composer_epoch,
+            draft,
+        });
         self.track_live_direction(effect)
+    }
+
+    pub(crate) fn provider_started(&mut self, effect: &Effect, now: u64) -> Result<()> {
+        let session = self.session_mut(&effect.target.thread)?;
+        if session.starting {
+            let run = session.run.as_mut().ok_or(Error::Stale)?;
+            run.started_at = now;
+            session.starting = false;
+        }
+        Ok(())
     }
 
     pub fn track_live_direction(&mut self, effect: &mut Effect) -> Result<()> {
@@ -1485,22 +1512,36 @@ impl Panel {
         if !effect.live_or_queue && effect.composer.is_none() {
             return Ok(false);
         }
-        let session = self.session_mut(&effect.target.thread)?;
-        if let Some(message) = &effect.message {
+        self.restore_failed_send(
+            &effect.target.thread,
+            effect.message.as_deref(),
+            effect.composer_submission(),
+        )?;
+        Ok(true)
+    }
+
+    pub(crate) fn restore_failed_send(
+        &mut self,
+        thread: &str,
+        message: Option<&str>,
+        submission: Option<&ComposerSubmission>,
+    ) -> Result<()> {
+        let session = self.session_mut(thread)?;
+        if let Some(message) = message {
             session.conversation.update(message, |row| {
                 row["delivery"] = json!("failed");
             })?;
         }
-        if let Some((epoch, draft)) = &effect.composer
-            && session.composer_epoch == *epoch
+        if let Some(submission) = submission
+            && session.composer_epoch == submission.epoch
             && session.draft.text().is_empty()
             && !session.draft.sendable()
             && session.draft.citations().is_empty()
         {
-            session.draft = draft.clone();
+            session.draft = submission.draft.clone();
             session.composer_epoch += 1;
         }
-        Ok(true)
+        Ok(())
     }
 
     pub fn receive(
@@ -1632,6 +1673,7 @@ impl Panel {
                 self.retired_runs.insert(run_id.into());
                 s.toolbar_notice = (!cancelled).then_some(error);
                 s.run = None;
+                s.starting = false;
                 s.activity.clear();
                 s.phase = if s.plan.is_some() {
                     Phase::Preview

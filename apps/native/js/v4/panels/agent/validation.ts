@@ -38,6 +38,8 @@ export function publication(
     typeof s.threadId !== "string" ||
     !s.threadId ||
     !nullableString(s.runId) ||
+    (s.starting !== undefined && typeof s.starting !== "boolean") ||
+    (s.nextMessageId !== undefined && typeof s.nextMessageId !== "string") ||
     typeof s.phase !== "string" ||
     !["sendable", "composerDisabled", "stopping", "showJump"].every(
       (k) => typeof s[k] === "boolean",

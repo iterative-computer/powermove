@@ -140,6 +140,8 @@ impl Window {
         let text = session.draft.text();
         let selection = session.draft.text_selection();
         value["draft"] = json!({"sent":session.composer_epoch,"citations":session.draft.citations(),"text":text,"selection":[selection.start,selection.end],"armed":session.draft.armed()});
+        value["nextMessageId"] = json!(format!("history:message-{}", session.next_message));
+        value["starting"] = json!(session.starting);
         value["rows"] = json!({"count":count,"range":[range.start,range.end],"items":items});
         let mut threads = panel.summaries();
         value["threadTitle"] = json!(
@@ -337,10 +339,10 @@ fn retry_turn(
             .ok_or_else(|| Error::UnknownId(id.into()))?,
         None => rows.len(),
     };
-    let user = rows[..end]
-        .iter()
-        .rev()
-        .find(|r| r.value["role"] == "user")
+    let user = rows
+        .get(end)
+        .filter(|row| row.value["role"] == "user" && row.value["delivery"] == "failed")
+        .or_else(|| rows[..end].iter().rev().find(|r| r.value["role"] == "user"))
         .ok_or(Error::Invalid("retry has no user turn"))?;
     let text = user.value["text"].as_str().unwrap_or_default().to_owned();
     let files = user.value["attachments"]
@@ -1424,6 +1426,10 @@ mod admission_tests {
         let effect = dispatch_at(&mut panel, 1, &submit, context())
             .unwrap()
             .unwrap();
+        let starting = Window::new(&panel, "t").unwrap()
+            .snapshot(&panel, 0..1, 1).unwrap();
+        assert_eq!(starting["starting"], true);
+        assert_eq!(starting["rows"]["items"][0]["id"], "history:message-0");
         crate::runtime::ProviderRuns::default()
             .refuse(
                 &mut panel,
@@ -1436,6 +1442,66 @@ mod admission_tests {
         let session = panel.session("t").unwrap();
         assert_eq!(session.draft.text(), "Keep this");
         assert!(session.run.is_none());
+        assert!(!session.starting);
+        assert_eq!(session.conversation.at(0).unwrap().value["delivery"], "failed");
+        let retried = retry_turn(&mut panel, "t", Some("message-0"), "retry", "request", 2)
+            .unwrap();
+        assert!(matches!(retried.kind, EffectKind::Send { text, .. } if text == "Keep this"));
+    }
+    #[test]
+    fn composer_timer_starts_when_the_provider_worker_accepts_the_run() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let submit = json!({"sequence":1,"target":{"project":"p","thread":"t","run":null},
+            "action":{"type":"submit","text":"Start a run","composerEpoch":0}});
+        let effect = dispatch_at(&mut panel, 1, &submit, context())
+            .unwrap()
+            .unwrap();
+        let window = Window::new(&panel, "t").unwrap();
+        assert_eq!(window.snapshot(&panel, 0..1, 301).unwrap()["starting"], true);
+        panel.provider_started(&effect, 301).unwrap();
+        let active = window.snapshot(&panel, 0..1, 301).unwrap();
+        assert_eq!(active["starting"], false);
+        assert_eq!(active["elapsedMs"], 0);
+    }
+    #[test]
+    fn a_provider_worker_that_cannot_start_restores_the_composer_draft() {
+        use pm_agents::{approvals::Authority, claude, transport};
+        use std::time::{Duration, Instant};
+
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let submit = json!({"sequence":1,"target":{"project":"p","thread":"t","run":null},
+            "action":{"type":"submit","text":"Keep the original draft","composerEpoch":0}});
+        let effect = dispatch_at(&mut panel, 1, &submit, context())
+            .unwrap()
+            .unwrap();
+        let mut runs = crate::runtime::ProviderRuns::default();
+        runs.start_admitted(&mut panel, &effect, 0, || {
+            Ok(transport::spawn(
+                transport::ProcessSpec {
+                    executable: "/dev/null".into(),
+                    args: vec![],
+                    cwd: std::env::temp_dir(),
+                    env: Default::default(),
+                },
+                transport::Machine::Claude(claude::Client::new(
+                    "run".into(),
+                    Authority::new(Access::Editor, ApprovalMode::Auto, false).unwrap(),
+                    0,
+                )),
+                vec![],
+            ))
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !runs.is_empty() {
+            runs.poll(&mut panel, &mut Empty, 1, 64).unwrap();
+            assert!(Instant::now() < deadline, "startup error was not delivered");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let session = panel.session("t").unwrap();
+        assert!(session.run.is_none());
+        assert_eq!(session.draft.text(), "Keep the original draft");
+        assert_eq!(session.conversation.at(0).unwrap().value["delivery"], "failed");
     }
     #[test]
     fn the_sent_attachment_is_previewable_without_republishing_its_full_payload() {

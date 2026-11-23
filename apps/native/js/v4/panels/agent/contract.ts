@@ -49,6 +49,8 @@ export interface Snapshot {
   /** Every thread of this project, the latest first (the thread picker). */
   threads?: ThreadSummary[];
   runId: string | null;
+  starting?: boolean;
+  nextMessageId?: string;
   phase: string;
   sendable: boolean;
   composerDisabled: boolean;

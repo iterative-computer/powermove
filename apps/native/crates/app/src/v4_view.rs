@@ -1557,6 +1557,11 @@ impl SurfaceView {
             .get("metadata")
             .and_then(|m| m.get("composerEpoch"))
             .and_then(Value::as_u64);
+        let composer_sending = node
+            .props
+            .get("metadata")
+            .and_then(|m| m.get("composerSending"))
+            .and_then(Value::as_str);
         if let Some(field) = self.fields.get(&id) {
             let tokens = self.table.tokens.clone();
             // A value the panel's host set (`metadata.hostValue`) replaces
@@ -1573,7 +1578,7 @@ impl SurfaceView {
                 f.set_placeholder(&placeholder);
                 f.set_unit(unit);
                 match (composer_epoch, host) {
-                    (Some(epoch), _) => f.set_composer_value(&value, epoch, cx),
+                    (Some(epoch), _) => f.set_composer_value(&value, epoch, composer_sending, cx),
                     (None, Some(revision)) => f.set_value_from_host(&value, revision, cx),
                     (None, None) => f.set_value(&value, cx),
                 }
@@ -1623,7 +1628,7 @@ impl SurfaceView {
             field.set_unit(unit);
             field.set_stepper(stepper);
             if let Some(epoch) = composer_epoch {
-                field.set_composer_value(&value, epoch, cx);
+                field.set_composer_value(&value, epoch, composer_sending, cx);
             }
             field
         });
@@ -2450,8 +2455,7 @@ impl SurfaceView {
     }
 
     pub fn send(&mut self, id: Id, event: &str, mut detail: EventDetail, cx: &mut Context<Self>) {
-        if let Some(value) = detail.value.as_mut()
-            && value.is_string()
+        if detail.value.as_ref().is_some_and(Value::is_string)
             && self.publication.panel == "agent"
             && let Some(epoch) = self
                 .publication
@@ -2461,7 +2465,7 @@ impl SurfaceView {
                 .and_then(|meta| meta.get("composerEpoch"))
                 .and_then(Value::as_u64)
         {
-            *value = json!({"text": value, "epoch": epoch});
+            detail.composer_epoch = Some(epoch);
         }
         #[cfg(test)]
         self.log.push((id, event.into(), detail.clone()));
@@ -2801,7 +2805,8 @@ impl SurfaceView {
                 id,
                 "click",
                 EventDetail {
-                    value: Some(json!({"text": text, "epoch": epoch})),
+                    value: Some(json!(text)),
+                    composer_epoch: epoch,
                     ..detail
                 },
                 cx,

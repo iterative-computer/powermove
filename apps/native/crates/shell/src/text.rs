@@ -23,6 +23,7 @@ pub struct TextField {
     /// A composer's last submitted text, cleared once the model empties it.
     submitted: Option<String>,
     composer_epoch: Option<u64>,
+    composer_optimistic: bool,
     /// The newest host replacement this field took (see
     /// [`Self::set_value_from_host`]).
     host_value: u64,
@@ -121,6 +122,7 @@ impl TextField {
             tokens,
             submitted: None,
             composer_epoch: None,
+            composer_optimistic: false,
             host_value: 0,
             fill: false,
             bare: false,
@@ -492,8 +494,38 @@ impl TextField {
         Some(text)
     }
 
-    pub fn set_composer_value(&mut self, value: &str, epoch: u64, cx: &mut Context<Self>) {
+    pub fn set_composer_value(
+        &mut self,
+        value: &str,
+        epoch: u64,
+        sending: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
         let previous = self.composer_epoch.replace(epoch);
+        if let Some(sending) = sending {
+            if !self.composer_optimistic
+                && !self.slot.has_marked_text()
+                && self.slot.value() == sending
+            {
+                self.composer_optimistic = true;
+                self.replace_text(value, cx);
+            }
+            return;
+        }
+        if std::mem::take(&mut self.composer_optimistic) {
+            self.submitted = None;
+            if !self.slot.has_marked_text() {
+                let editing = self.slot.value();
+                if editing.is_empty() {
+                    self.replace_text(value, cx);
+                } else {
+                    // New input during submission belongs to the next draft.
+                    // Report it against the current epoch.
+                    cx.emit(TextEvent::Changed(editing));
+                }
+            }
+            return;
+        }
         if !self.slot.is_editing() {
             if self.value != value {
                 self.slot.set_value(value);
