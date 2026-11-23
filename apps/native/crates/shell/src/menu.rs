@@ -102,6 +102,16 @@ pub const BESIDE_SHEET: [&str; 9] = [
 pub fn runs_beside_sheet(command: &str, field_editing: bool) -> bool {
     BESIDE_SHEET.contains(&command) || (field_editing && command.starts_with("context"))
 }
+/// The commands that close what is in front (⌘W, ⇧⌘W).
+pub const CLOSES: [&str; 3] = ["closeTab", "closeWindow", "closeProject"];
+/// Whether a close command closes the key window itself instead of going to
+/// the editor: a closable window of its own (Settings, Error Log, the
+/// library, a popped-out viewer). An editor window takes the command, and
+/// so does the editor behind an attached window (a sheet, a palette, a
+/// field menu).
+pub fn closes_in_front(editor: bool, attached: bool, closable: bool) -> bool {
+    !editor && !attached && closable
+}
 /// Commands whose items get a dynamic submenu (rebuilt when opened).
 pub const SUBMENUS: [&str; 9] = [
     "openRecent",
@@ -874,6 +884,23 @@ mod sheet_tests {
             assert!(!runs_beside_sheet(edit, false), "{edit}");
         }
         assert!(runs_beside_sheet("settings", false));
+    }
+    #[test]
+    fn a_close_command_closes_the_window_in_front_not_the_project_behind_it() {
+        // Error Log, the library, Settings, a popped-out viewer: closable
+        // windows of their own.
+        assert!(closes_in_front(false, false, true));
+        // The editor's own window, and the editor behind a sheet, a palette
+        // or a field menu, take the command as before.
+        assert!(!closes_in_front(true, false, true));
+        assert!(!closes_in_front(false, true, true));
+        assert!(!closes_in_front(false, true, false));
+        // A window with no close button stays.
+        assert!(!closes_in_front(false, false, false));
+        for close in ["closeTab", "closeWindow", "closeProject"] {
+            assert!(CLOSES.contains(&close), "{close}");
+        }
+        assert!(!CLOSES.contains(&"settings"));
     }
 }
 

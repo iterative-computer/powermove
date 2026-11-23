@@ -754,6 +754,27 @@ pub enum FileDropEvent {
         /// The position of the mouse relative to the window.
         position: Point<Pixels>,
     },
+    /// A native file transfer started when the drag was released.
+    Receiving {
+        /// Transfer ID, unique in this window.
+        id: u64,
+    },
+    /// A native file transfer failed or was cancelled.
+    ReceiveFailed {
+        /// The transfer ID from `Receiving`.
+        id: u64,
+    },
+    /// A drop's files have arrived after the native drag session ended.
+    Received {
+        /// The transfer ID from `Receiving`.
+        id: u64,
+        /// Where the user released the drag, in window coordinates.
+        position: Point<Pixels>,
+        /// Keyboard modifiers at the release.
+        modifiers: Modifiers,
+        /// The paths of the completed files.
+        paths: ExternalPaths,
+    },
     /// The user has stopped dragging the files over the window.
     Exited,
     /// The platform-owned drag session has ended.

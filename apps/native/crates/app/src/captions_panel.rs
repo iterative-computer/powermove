@@ -648,7 +648,9 @@ impl Controller {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let received = gpui_macos::ReceivedDrop::for_paths(std::slice::from_ref(&path));
         let task = cx.background_executor().spawn(async move {
+            let _received = received;
             let text = decode_text(std::fs::read(&path).ok()?);
             Some(backing::Import::parse(stamp, text, name))
         });

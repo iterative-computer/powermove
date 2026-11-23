@@ -5,5 +5,6 @@
 //! by GPUI's Apple platform backends.
 
 pub mod feel;
+pub mod launch;
 mod metal_atlas;
 pub mod metal_renderer;

@@ -9,6 +9,27 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
+#[derive(Debug)]
+struct ReceivedMedia(gpui_macos::ReceivedDrop);
+
+impl pm_builtins::media_import::ReceivedMedia for ReceivedMedia {
+    fn owns(&self, path: &std::path::Path) -> bool {
+        self.0.owns(path)
+    }
+
+    fn keep(&self, paths: &[PathBuf]) {
+        self.0.keep(paths);
+    }
+}
+
+pub(crate) fn lookup_received_drop(
+    paths: &[PathBuf],
+) -> Option<Arc<dyn pm_builtins::media_import::ReceivedMedia>> {
+    Some(Arc::new(ReceivedMedia(
+        gpui_macos::ReceivedDrop::for_paths(paths)?,
+    )))
+}
+
 /// An extension's `assets.import`: the realm promise to answer and the held file.
 pub(crate) struct ExtensionImport {
     pub answer: u64,
@@ -675,7 +696,10 @@ impl Controller {
         }
     }
     /// Batches run in order: user order and project identity both depend on it.
-    pub(crate) fn import(&mut self, request: ImportRequest, cx: &mut Context<Self>) {
+    pub(crate) fn import(&mut self, mut request: ImportRequest, cx: &mut Context<Self>) {
+        if request.received.is_none() {
+            request.received = lookup_received_drop(&request.paths);
+        }
         self.imports.push_back((request, None));
         self.next_import(cx);
     }

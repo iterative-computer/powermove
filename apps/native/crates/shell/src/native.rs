@@ -179,6 +179,17 @@ fn editor_window_number() -> Option<isize> {
             .find(|n| r.contains_key(n))
     })
 }
+/// The key window when it is a window of its own rather than an editor's
+/// (`menu::closes_in_front`).
+fn front_window_of_its_own(app: &NSApplication) -> Option<Retained<NSWindow>> {
+    app.keyWindow().filter(|w| {
+        menu::closes_in_front(
+            ROUTES.with(|r| r.borrow().contains_key(&w.windowNumber())),
+            w.parentWindow().is_some() || w.sheetParent().is_some(),
+            w.styleMask().contains(NSWindowStyleMask::Closable),
+        )
+    })
+}
 /// Whether a sheet is up where the menu's commands would act: the key
 /// window is a sheet or has one (New Project over Home), the main window
 /// has one, or the window commands go to has one.
@@ -788,20 +799,21 @@ define_class!(
         fn act(&self, sender: &AnyObject) {
             let tag: isize = unsafe { msg_send![sender, tag] };
             if let Some((name, args)) = self.ivars().commands.get(tag as usize) {
-                // ⌘, or ⌘W with Settings in front closes Settings, never
-                // the project behind it (it is known by its identifier: its
-                // title is the section's name).
-                if matches!(
-                    name.as_str(),
-                    "settings" | "closeTab" | "closeWindow" | "closeProject"
-                ) {
-                    let app = NSApplication::sharedApplication(self.mtm());
-                    if let Some(w) = app.keyWindow()
-                        && crate::settings_window::is_settings(&w)
-                    {
-                        w.performClose(None);
-                        return;
-                    }
+                // ⌘, with Settings in front closes Settings (it is known by
+                // its identifier: its title is the section's name), and ⌘W
+                // closes the window in front (Settings, Error Log, the
+                // library, a popped-out viewer), never the project behind it.
+                let app = NSApplication::sharedApplication(self.mtm());
+                let front = match name.as_str() {
+                    "settings" => app
+                        .keyWindow()
+                        .filter(|w| crate::settings_window::is_settings(w)),
+                    n if menu::CLOSES.contains(&n) => front_window_of_its_own(&app),
+                    _ => None,
+                };
+                if let Some(w) = front {
+                    w.performClose(None);
+                    return;
                 }
                 self.send(Command { name: name.clone(), args: args.clone(), token: None });
             }
@@ -3515,8 +3527,26 @@ impl Host {
     /// (`None`, or an empty title). The arc of an unknown share turns, still
     /// under Reduce Motion.
     pub fn set_task(&mut self, status: Option<TaskStatus>) {
-        let status = status.filter(|s| !s.title.is_empty());
-        if status == self.task_status {
+        self.task_status = status.filter(|s| !s.title.is_empty());
+        self.update_task_pill();
+    }
+
+    /// Use the same task pill for native file transfers while no import is active.
+    pub fn set_receiving_drops(&mut self, pending: usize) {
+        self.receiving_drops = pending;
+        self.update_task_pill();
+    }
+
+    fn update_task_pill(&mut self) {
+        let status = match (&self.task_status, self.receiving_drops) {
+            (Some(task), _) if !task.finished => Some(task.clone()),
+            (_, 0) => self.task_status.clone(),
+            _ => Some(TaskStatus {
+                title: "Receiving dropped media".into(),
+                ..Default::default()
+            }),
+        };
+        if status == self.shown_task_status {
             return;
         }
         let Some(item) = self
@@ -3536,7 +3566,7 @@ impl Host {
                 timer.invalidate();
             }
             item.setHidden(true);
-            self.task_status = None;
+            self.shown_task_status = None;
             return;
         };
         item.setHidden(false);
@@ -3600,7 +3630,7 @@ impl Host {
             }
             self.task_timer = Some(timer);
         }
-        self.task_status = status;
+        self.shown_task_status = status;
     }
 }
 /// Toolbar subtitle for a document: `Saving…` while a save runs, else
@@ -3748,6 +3778,8 @@ pub struct Host {
     /// What the toolbar's task pill shows, and the timer that turns its
     /// arc while the share is unknown.
     task_status: Option<TaskStatus>,
+    shown_task_status: Option<TaskStatus>,
+    receiving_drops: usize,
     task_timer: Option<Retained<objc2_foundation::NSTimer>>,
     _delegate: Retained<ToolbarDelegate>,
     _target: Retained<Target>,
@@ -3974,6 +4006,8 @@ impl Host {
             _toolbar: toolbar,
             agent_status: AgentStatus::default(),
             task_status: None,
+            shown_task_status: None,
+            receiving_drops: 0,
             task_timer: None,
             agent_timer: None,
             agent_presence_generation: Rc::new(Cell::new(0)),
@@ -7972,7 +8006,10 @@ impl Popup {
         }
         popup.borrow_mut().me = Rc::downgrade(&popup);
         popup.borrow_mut().target = Some(target);
-        popup.borrow_mut().refresh();
+        // Rows are built when it first opens (`toggle`): each editor window
+        // makes two pop-ups, and their rows (160 in the palette, each with
+        // its controls) were most of a window's opening, before its first
+        // frame (PM-609).
         popup
     }
     fn update_tokens(&mut self, t: &Tokens, surface: Surface) {
