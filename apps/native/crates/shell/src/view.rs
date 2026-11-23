@@ -1024,6 +1024,17 @@ impl Editor {
             return false;
         };
         let rest = parts.next().unwrap_or("");
+        // No project (Home after the last project closed): there is no layout
+        // to save. The same session state disables the library's button; Home
+        // over an open project still saves that project's layout.
+        if (kind, verb) == ("layout", "save")
+            && self
+                .integration
+                .as_ref()
+                .is_some_and(|i| i.project_id(cx).is_none())
+        {
+            return true;
+        }
         if (self.dragging_panel() || matches!(self.gesture, Some(Gesture::Resize(..))))
             && matches!((kind, verb),
                 ("panel", "registered" | "show" | "restore" | "park")
@@ -5726,6 +5737,33 @@ mod tests {
                 assert_eq!(v.layout, layout);
                 let (dock, group, _) = v.layout.find(ID).expect("back");
                 assert!(v.layout.docks[dock].groups[group].tabs.iter().any(|t| t == "inspector"));
+            })
+            .unwrap();
+    }
+
+    /// PM-613: with no project (Home after the last one closed) Save Workspace
+    /// is consumed and saves nothing; Home over an open project, or the
+    /// project itself, still saves its layout.
+    #[gpui::test]
+    fn save_workspace_needs_a_project(cx: &mut TestAppContext) {
+        let kernel = Rc::new(Kernel::default());
+        kernel.home.set(true);
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let stub = kernel.clone();
+        let window = cx.add_window(|_, cx| {
+            let mut e = Editor::new(tokens, None, cx);
+            e.integration = Some(Rc::new(Stub(stub)));
+            e
+        });
+        window
+            .update(cx, |v, _, cx| {
+                let before = v.record.clone();
+                assert!(v.shell_command("layout:save", cx));
+                assert!(v.shell_command("layout:save:No project", cx));
+                assert_eq!(v.record, before, "nothing saved without a project");
+                kernel.home.set(false);
+                assert!(v.shell_command("layout:save:With project", cx));
+                assert_eq!(workspace::record_name(&v.record), "With project");
             })
             .unwrap();
     }

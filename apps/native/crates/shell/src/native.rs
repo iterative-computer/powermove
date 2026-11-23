@@ -6690,10 +6690,6 @@ impl Host {
     /// Return = Save (the accent default button), Esc = Cancel. Save sends
     /// `layout:save:<name>`.
     pub fn prompt_workspace_name(&self, workspace: &str) {
-        // No project (Home alone): there is no layout to save.
-        if HOME_WINDOWS.with(|h| h.borrow().contains(&self.window.windowNumber())) {
-            return;
-        }
         if self.window.attachedSheet().is_some()
             || gpui_macos::child_window::sheet_pending(&self.window)
         {
