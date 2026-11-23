@@ -581,6 +581,9 @@ pub struct Engine {
         Option<u64>,
         u64,
     )>,
+    /// Whether the scene last looked ahead in draws stills or videos
+    /// ([`Self::has_visual_media`]).
+    visual_media: crate::frame_inputs::VisualMediaCache,
     /// The document, composition and contributed definitions the effects
     /// were last registered for (`set_document_effects`): a drag frame of
     /// the same keeps them (`drag_frame`).
@@ -1200,6 +1203,7 @@ impl Engine {
             capture_target: None,
             cache_enabled: true,
             studio_content: None,
+            visual_media: Default::default(),
             effects_for: None,
             drag_frame: false,
             #[cfg(test)]
@@ -1490,6 +1494,15 @@ impl Engine {
     /// uploaded ahead is of the state before.
     pub(crate) fn drop_upload_ahead(&mut self) {
         self.disk_next = None;
+    }
+
+    /// Whether `scene` draws a still, a video or an image sequence anywhere
+    /// (nested compositions too, whatever their time): without one,
+    /// [`Self::prepare`] would plan a whole frame ahead to warm nothing.
+    /// Pixel-neutral to skip: it only warms media caches. Kept per document,
+    /// revision, content and composition.
+    pub fn has_visual_media(&mut self, scene: &Scene) -> bool {
+        self.visual_media.get(&scene.doc, scene.content, &scene.comp)
     }
 
     /// Opens and warms the videos of a coming frame on background workers, so

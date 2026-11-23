@@ -4185,8 +4185,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // A frame rendered on disk is read, not drawn: planning it and
             // opening its media ahead would only hold this thread (a quarter
             // of a second on a heavy project) while frames are due.
+            // A composition without stills or videos has none to open ahead.
             let mut prepared = None;
-            if let Some(at) = prepare_at.filter(|at| !shared.disk.rendered(&scene, *at)) {
+            if let Some(at) = prepare_at
+                .filter(|at| engine.has_visual_media(&scene) && !shared.disk.rendered(&scene, *at))
+            {
                 let videos = engine.prepare(&scene, at, spec);
                 if let Some(r) = runtime.get_mut(&id) {
                     r.lookahead.planned(at, videos, frame_ticks);
