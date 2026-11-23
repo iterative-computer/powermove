@@ -1430,6 +1430,9 @@ fn the_watchdog_judges_every_timed_frame_not_only_the_first() {
         eprintln!("no TIMESTAMP_QUERY on this device; the watchdog times nothing");
         return;
     }
+    // A recording viewer times one frame in 30 (`watchdog::SAMPLE_EVERY`):
+    // this test is about the timestamps of every timed frame.
+    r.effects_mut().watchdog.set_sample_every(1);
     let (doc, res) = document(
         vec![fx("f1", "blur", json!({ "amount": ch(json!(40)) }))],
         None,
@@ -1551,6 +1554,8 @@ fn builtin_costs_at_uhd() {
         "again (translation cache): {:.2} ms",
         t.elapsed().as_secs_f64() * 1000.0
     );
+    // Every frame timed (a recording viewer samples one in 30).
+    r.effects_mut().watchdog.set_sample_every(1);
     let (w, h) = (3840u32, 2160u32);
     for d in set
         .definitions
