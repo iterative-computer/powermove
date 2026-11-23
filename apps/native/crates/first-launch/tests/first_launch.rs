@@ -79,13 +79,35 @@ fn generated_profile_migrates_copies_history_agents_gzip_local_storage_and_media
         serde_json::from_str::<Value>(&pm_model::json::to_canonical_string(&imported)).unwrap(),
         huge
     );
-    assert!(
-        store
-            .read(&format!("agentThreads.{}", cp.projects["p"]))
-            .unwrap()
-            .is_some()
-    );
-    assert!(store.read("agentAttachment.a").unwrap().is_some());
+    {
+        use pm_kernel::{
+            persistence::DiskFormat,
+            profile::{ProfileCall, ProfileReply},
+            session::ShellCall,
+        };
+        let mut native = Kernel::new(KernelConfig::default());
+        native
+            .shell(ShellCall::AttachLibrary {
+                profile: config.native_profile.clone(),
+                format: DiskFormat::V1_2,
+                electron_profile: None,
+            })
+            .unwrap();
+        for key in [
+            format!("agentThreads.{}", cp.projects["p"]),
+            "agentAttachment.a".into(),
+        ] {
+            assert!(matches!(
+                native
+                    .profile(ProfileCall::AgentGet {
+                        application: false,
+                        key
+                    })
+                    .unwrap(),
+                ProfileReply::AgentValue(Some(_))
+            ));
+        }
+    }
     let history = History::import(copied.history.as_ref().unwrap(), None).unwrap();
     assert_eq!(history.len(), 1);
     let mut kernel = Kernel::new(KernelConfig::default());

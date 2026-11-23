@@ -1681,3 +1681,83 @@ test("a real provider timeout keeps the failure card and its details", async () 
     root.dispose();
   }
 });
+
+test("dragging an attachment keeps the same focused composer editor", async () => {
+  const root = createRoot(async (commit) => ({
+    accepted: true,
+    revision: commit.baseRevision + 1,
+  }));
+  const p = fixture();
+  await root.render(<AgentView publication={p} send={() => {}} />);
+  const editor = byId(root, "agent-composer-text").id;
+  await root.drive(byId(root, "agent-composer").id, "dragover", {});
+  expect(byId(root, "agent-composer-text").id).toBe(editor);
+  await root.drive(byId(root, "agent-composer").id, "dragleave", {});
+  expect(byId(root, "agent-composer-text").id).toBe(editor);
+  await root.dispose();
+});
+
+test("Return and Send share one pending submission across publications", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.draft.text = "First message";
+  p.snapshot.sendable = true;
+  const actions: Action[] = [];
+  let finish!: () => void;
+  const pending = new Promise<void>((resolve) => { finish = resolve; });
+  const send = (action: Action) => {
+    actions.push(action);
+    return pending;
+  };
+  const render = () => root.render(<AgentView publication={p} send={send} />);
+  await render();
+  await root.drive(byId(root, "agent-composer-text").id, "keydown", { key: "Enter" });
+  p.sequence++;
+  await render();
+  expect(byId(root, "agent-send").props.disabled).toBe(true);
+  await root.drive(byId(root, "agent-send").id, "click");
+  await root.drive(byId(root, "agent-composer-text").id, "keydown", { key: "Enter" });
+  expect(actions).toEqual([{ type: "key", key: { key: "Enter" } }]);
+  finish();
+  await pending;
+  await render();
+  expect(byId(root, "agent-send").props.disabled).toBe(false);
+  await root.dispose();
+});
+
+test("a new user message jumps to the end but streaming updates retain position", async () => {
+  const { root } = mount();
+  const p = fixture();
+  const render = () => root.render(<AgentView publication={p} send={() => {}} />);
+  const getToken = () =>
+    (byId(root, "agent-conversation").props.metadata as { scrollToken: string }).scrollToken;
+  await render();
+  const start = getToken();
+  p.snapshot.runId = "run";
+  p.snapshot.rows = { count: 1, range: [0, 1], items: [
+    { id: "user-1", commandId: "", chosen: {}, open: false, value: { role: "user", text: "Direction" } },
+  ] };
+  await render();
+  const sent = getToken();
+  expect(sent).not.toBe(start);
+  p.snapshot.rows = { count: 2, range: [0, 2], items: [
+    ...p.snapshot.rows.items,
+    { id: "live-1", commandId: "", chosen: {}, open: false, value: { kind: "text", text: "Working…" } },
+  ] };
+  await render();
+  expect(getToken()).toBe(sent);
+  await root.dispose();
+});
+
+test("queued directions are marked on the user bubble", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.runId = "run";
+  p.snapshot.rows = { count: 1, range: [0, 1], items: [
+    { id: "user-1", commandId: "", chosen: {}, open: false, value: { role: "user", text: "Keep the logo.", delivery: "queued" } },
+  ] };
+  await root.render(<AgentView publication={p} send={() => {}} />);
+  expect(root.inspect().nodes.filter((node) => node.text === "Queued for next step")).toHaveLength(1);
+  expect(has(root, "You said: Keep the logo. (Queued for next step)")).toBe(true);
+  await root.dispose();
+});

@@ -60,6 +60,38 @@ impl Rows {
         }
         Ok(true)
     }
+    pub(crate) fn position(&self, id: &str) -> Option<usize> {
+        self.index.get(id).copied()
+    }
+    pub(crate) fn move_to_end(&mut self, id: &str) -> Result<()> {
+        let at = *self.index.get(id).ok_or(Error::Stale)?;
+        let row = self.order.remove(at);
+        self.order.push(row);
+        for (index, row) in self.order.iter().enumerate().skip(at) {
+            self.index.insert(row.id.clone(), index);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn replace_stored_attachments(&mut self, index: usize, stored: &Value) {
+        let row = &mut self.order[index];
+        if row.value["attachments"] == *stored {
+            return;
+        }
+        // Avoid cloning the very payloads we're dropping.
+        let mut record: serde_json::Map<_, _> = row
+            .value
+            .as_object()
+            .expect("stored row")
+            .iter()
+            .filter(|(key, _)| *key != "attachments")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        record.insert("attachments".into(), stored.clone());
+        row.value = Arc::new(Value::Object(record));
+        row.revision += 1;
+    }
+
     pub fn update(&mut self, id: &str, f: impl FnOnce(&mut Value)) -> Result<bool> {
         let row = self.get(id).ok_or_else(|| Error::UnknownId(id.into()))?;
         let mut next = (*row.value).clone();

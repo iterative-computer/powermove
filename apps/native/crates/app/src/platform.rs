@@ -1,7 +1,7 @@
 //! AppKit sheets are asynchronous. No modal run loop or UI-thread file IO.
 use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained};
 use objc2_app_kit::*;
-use objc2_foundation::NSString;
+use objc2_foundation::{NSData, NSString};
 use std::path::PathBuf;
 
 // `UTType` is looked up by name for open panels; load its framework.
@@ -327,37 +327,88 @@ pub enum PastedMedia {
 pub fn pasteboard_media() -> Option<PastedMedia> {
     read_media(&paste_board())
 }
-/// Agent paste accepts copied pictures/files and existing textual file paths.
-pub fn agent_pasteboard() -> Option<PastedMedia> {
-    let board = paste_board();
-    read_media(&board).or_else(|| {
-        let text = board.stringForType(unsafe { NSPasteboardTypeString })?;
-        crate::media::agent_pasted_path(&text.to_string()).map(|p| PastedMedia::Files(vec![p]))
-    })
+pub(crate) enum AgentPaste {
+    Files(Vec<PathBuf>),
+    Image { board: String, change_count: isize },
 }
-fn read_media(board: &NSPasteboard) -> Option<PastedMedia> {
-    let files: Vec<PathBuf> = board
+impl AgentPaste {
+    pub(crate) fn into_media(self) -> Result<PastedMedia, String> {
+        match self {
+            Self::Files(paths) => Ok(PastedMedia::Files(paths)),
+            Self::Image {
+                board,
+                change_count,
+            } => objc2::rc::autoreleasepool(|_| {
+                let board = NSPasteboard::pasteboardWithName(&NSString::from_str(&board));
+                let changed =
+                    || "The clipboard changed before the image could be attached.".to_owned();
+                if board.changeCount() != change_count {
+                    return Err(changed());
+                }
+                let (data, png) =
+                    pasteboard_picture(&board).ok_or("The pasted image could not be read.")?;
+                let data = data.to_vec();
+                if board.changeCount() != change_count {
+                    return Err(changed());
+                }
+                Ok(PastedMedia::Image { data, png })
+            }),
+        }
+    }
+}
+
+/// Agent paste accepts copied pictures/files and existing textual file paths.
+pub(crate) fn agent_pasteboard() -> Option<AgentPaste> {
+    let board = paste_board();
+    let files = pasteboard_files(&board);
+    if !files.is_empty() {
+        return Some(AgentPaste::Files(files));
+    }
+    // Read only type metadata here. A clipboard owner can provide its image
+    // lazily, so loading the actual PNG/TIFF must stay on the worker.
+    let change_count = board.changeCount();
+    let image = board.types().is_some_and(|types| {
+        let (png, tiff) = unsafe { (NSPasteboardTypePNG, NSPasteboardTypeTIFF) };
+        types.iter().any(|kind| &*kind == png || &*kind == tiff)
+    });
+    if image {
+        return Some(AgentPaste::Image {
+            board: board.name().to_string(),
+            change_count,
+        });
+    }
+    let text = board.stringForType(unsafe { NSPasteboardTypeString })?;
+    crate::media::agent_pasted_path(&text.to_string()).map(|p| AgentPaste::Files(vec![p]))
+}
+fn pasteboard_files(board: &NSPasteboard) -> Vec<PathBuf> {
+    board
         .pasteboardItems()
         .iter()
         .flat_map(|items| items.iter())
         .filter_map(|item| item.stringForType(unsafe { NSPasteboardTypeFileURL }))
         .filter_map(|url| objc2_foundation::NSURL::URLWithString(&url)?.path())
         .map(|path| PathBuf::from(path.to_string()))
-        .collect();
-    if !files.is_empty() {
-        return Some(PastedMedia::Files(files));
-    }
+        .collect()
+}
+fn pasteboard_picture(board: &NSPasteboard) -> Option<(Retained<NSData>, bool)> {
     let picture = |kind, png| {
         board
             .dataForType(kind)
             .filter(|data| !data.is_empty())
-            .map(|data| PastedMedia::Image {
-                data: data.to_vec(),
-                png,
-            })
+            .map(|data| (data, png))
     };
     picture(unsafe { NSPasteboardTypePNG }, true)
         .or_else(|| picture(unsafe { NSPasteboardTypeTIFF }, false))
+}
+fn read_media(board: &NSPasteboard) -> Option<PastedMedia> {
+    let files = pasteboard_files(board);
+    if !files.is_empty() {
+        return Some(PastedMedia::Files(files));
+    }
+    pasteboard_picture(board).map(|(data, png)| PastedMedia::Image {
+        data: data.to_vec(),
+        png,
+    })
 }
 /// A copied TIFF as the PNG the importer keeps. Any thread: the image is
 /// decoded and encoded by its own bitmap object.
@@ -880,7 +931,7 @@ mod signal_tests {
 
 #[cfg(test)]
 mod paste_tests {
-    use super::{PastedMedia, read_media, text_clipboard_on, tiff_to_png};
+    use super::{AgentPaste, PastedMedia, read_media, text_clipboard_on, tiff_to_png};
     /// An extension's `navigator.clipboard` text reaches the pasteboard and
     /// comes back, from a thread of its own as the realm calls it.
     #[test]
@@ -931,6 +982,17 @@ mod paste_tests {
         shot.setData_forType(Some(&NSData::with_bytes(&png)), unsafe {
             NSPasteboardTypePNG
         });
+        let image = AgentPaste::Image {
+            board: shot.name().to_string(),
+            change_count: shot.changeCount(),
+        };
+        assert_eq!(
+            std::thread::spawn(move || image.into_media()).join().unwrap(),
+            Ok(PastedMedia::Image {
+                data: png.clone(),
+                png: true
+            })
+        );
         assert_eq!(
             read_media(&shot),
             Some(PastedMedia::Image {

@@ -140,6 +140,41 @@ fn no_process_launch_before_durable_submission_and_retry_launches_once() {
     );
 }
 #[test]
+fn composer_dispatches_before_storage_and_retries_only_the_write() {
+    let temp = Temp::new();
+    let (mut store, mut panel, effect) = setup();
+    let mut runs = ProviderRuns::default();
+    store.fail = true;
+    let mut launches = 0;
+    runs.start_admitted(&mut panel, &effect, 10, || {
+        launches += 1;
+        Ok(peer(&temp, "claude"))
+    })
+    .unwrap();
+    assert_eq!(launches, 1);
+    assert!(panel.unsaved());
+    assert!(!store.data.contains_key("agentThreads.p"));
+    assert!(panel.checkpoint(&mut store, 10 + CHECKPOINT_MS).is_err());
+    assert_eq!(
+        runs.start_admitted(&mut panel, &effect, 11, || panic!("duplicate launch")),
+        Err(Error::Busy)
+    );
+    store.fail = false;
+    assert!(panel.checkpoint(&mut store, 11 + CHECKPOINT_MS).unwrap());
+    assert_eq!(
+        store.data["agentThreads.p"]["threads"][0]["lastRunStatus"],
+        "running"
+    );
+    assert_eq!(
+        store.data["agentThreads.p"]["threads"][0]["conversation"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn real_pipe_question_answer_background_stream_and_reopen_preserve_receipts() {
     let temp = Temp::new();
     let (mut store, mut panel, effect) = setup();
@@ -1007,4 +1042,135 @@ fn rejected_steer_with_failed_restart_reports_a_quiet_notice() {
     assert!(rows.contains("synthetic restart refused"));
     assert!(rows.contains("Please send it again"));
     assert!(panel.session("t").unwrap().run.is_some());
+}
+
+#[test]
+fn composer_direction_on_nonlive_codex_queues_until_a_new_turn_without_a_second_bubble() {
+    let temp = Temp::new();
+    let (mut store, mut panel, first) = setup();
+    let mut runs = ProviderRuns::default();
+    let handle = transport::spawn(
+        spec(&temp, "idle"),
+        Machine::CodexExec {
+            client: pm_agents::codex_exec::Client::new(
+                "run".into(),
+                Authority::new(Access::Project, ApprovalMode::Auto, false).unwrap(),
+                0,
+            ),
+            output: temp.0.join("result"),
+        },
+        vec![],
+    );
+    runs.start(&mut panel, &mut store, &first, 10, || Ok(handle))
+        .unwrap();
+    assert!(!runs.live_steerable("run"));
+    let direction = panel
+        .send_message("t", "Follow up", &[], "run", "direction", 11)
+        .unwrap();
+    runs.steer_live(&mut panel, &direction, 12, "Follow up".into(), vec![])
+        .unwrap();
+    let message = direction.message_id().unwrap();
+    let session = panel.session("t").unwrap();
+    assert_eq!(session.run.as_ref().unwrap().id, "run");
+    assert_eq!(
+        session.conversation.get(message).unwrap().value["delivery"],
+        "queued"
+    );
+    assert!(panel.queued_thread(|_| true).is_none());
+    panel
+        .receive(
+            "t",
+            "run",
+            1,
+            pm_panel_agentpanel::model::Update::Complete {
+                text: "Original reply".into(),
+                error: false,
+                cancelled: false,
+            },
+            13,
+        )
+        .unwrap();
+    panel
+        .draft_mut("t")
+        .unwrap()
+        .insert_text("Unsent", 14, false);
+    let next = panel
+        .submit_queued("t", "next", "next-request", 15)
+        .unwrap();
+    assert_eq!(next.message_id(), Some(message));
+    assert!(
+        matches!(next.kind, pm_panel_agentpanel::model::EffectKind::Send {
+        steer: false, ref text, ..
+    } if text == "Follow up")
+    );
+    let session = panel.session("t").unwrap();
+    assert_eq!(session.draft.text(), "Unsent");
+    assert_eq!(session.conversation.last().unwrap().id, message);
+    assert_eq!(
+        session
+            .conversation
+            .values()
+            .filter(|row| row["text"] == "Follow up")
+            .count(),
+        1
+    );
+    assert!(!session.has_queued_messages());
+}
+
+#[test]
+fn rejected_live_direction_stays_queued_in_original_order() {
+    let temp = Temp::new();
+    let (mut store, mut panel, first) = setup();
+    let mut runs = ProviderRuns::default();
+    let peer_with_wrong_run = transport::spawn(
+        spec(&temp, "idle"),
+        Machine::Claude(claude::Client::new(
+            "other-run".into(),
+            Authority::new(Access::Editor, ApprovalMode::Auto, false).unwrap(),
+            0,
+        )),
+        vec![],
+    );
+    runs.start(&mut panel, &mut store, &first, 10, || {
+        Ok(peer_with_wrong_run)
+    })
+    .unwrap();
+    assert!(runs.live_steerable("run"));
+    let mut direction = panel
+        .send_message("t", "First direction", &[], "run", "direction", 11)
+        .unwrap();
+    panel.track_live_direction(&mut direction).unwrap();
+    runs.steer_live(&mut panel, &direction, 12, "First direction".into(), vec![])
+        .unwrap();
+    let second = panel.queue_text("t", "Second direction", 13).unwrap();
+    panel.save(&mut store, 13).unwrap();
+    let first_message = direction.message_id().unwrap();
+    drain(&mut runs, &mut panel, &mut store, |panel| {
+        panel
+            .session("t")
+            .unwrap()
+            .conversation
+            .get(first_message)
+            .unwrap()
+            .value["delivery"]
+            == "queued"
+    });
+    panel
+        .receive(
+            "t",
+            "run",
+            1,
+            pm_panel_agentpanel::model::Update::Complete {
+                text: String::new(),
+                error: false,
+                cancelled: false,
+            },
+            14,
+        )
+        .unwrap();
+    let next = panel
+        .submit_queued("t", "next", "next-request", 15)
+        .unwrap();
+    assert_eq!(next.message_id(), Some(first_message));
+    assert_ne!(next.message_id(), second.message_id());
 }

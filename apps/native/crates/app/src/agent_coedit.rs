@@ -54,6 +54,7 @@ use pm_shell::text::{TextEvent, TextField, TextKind};
 struct Steer {
     field: Entity<TextField>,
     _events: Subscription,
+    sending: bool,
     tokens: pm_design::Tokens,
 }
 impl Render for Steer {
@@ -88,38 +89,90 @@ impl Controller {
             );
         let owner = cx.entity().downgrade();
         cx.defer(move |cx| {
-            let mut options=WindowOptions::new().kind(WindowKind::PopUp)
-                .window_bounds(Some(WindowBounds::Windowed(Bounds::new(origin,size(px(320.),px(44.))))))
+            let mut options = WindowOptions::new()
+                .kind(WindowKind::PopUp)
+                .window_bounds(Some(WindowBounds::Windowed(Bounds::new(
+                    origin,
+                    size(px(320.), px(44.)),
+                ))))
                 .titlebar(None)
                 .macos_window_background(gpui::MacosWindowBackground::Transparent);
-            options.parent=Some(parent);
-            let _=cx.open_window(options,move |window,cx| {
-                pm_shell::popover_frame(window,&tokens);
+            options.parent = Some(parent);
+            let _ = cx.open_window(options, move |window, cx| {
+                pm_shell::popover_frame(window, &tokens);
                 cx.new(|cx| {
-                    let field=cx.new(|cx| {
-                        let mut field=TextField::new(TextKind::Composer,"Tell the agent","",tokens.clone(),window,cx);
-                        field.set_bare(true);field.set_placeholder("Tell the agent…");
-                        field.begin_editing(cx);field
+                    let field = cx.new(|cx| {
+                        let mut field = TextField::new(
+                            TextKind::Composer,
+                            "Tell the agent",
+                            "",
+                            tokens.clone(),
+                            window,
+                            cx,
+                        );
+                        field.set_bare(true);
+                        field.set_placeholder("Tell the agent…");
+                        field.begin_editing(cx);
+                        field
                     });
-                    let events=cx.subscribe_in(&field,window,move |_:&mut Steer,_,event,window,cx| {
-                        match event {
-                            TextEvent::Submitted(text) if !text.trim().is_empty()=>{
-                                pm_mcp::coedit::record_steer(runtime.project_id());
-                                let (runtime,thread,message,owner)=(runtime.clone(),thread.clone(),text.trim().to_owned(),owner.clone());
-                                cx.spawn(async move |_,cx| {
-                                    let result=cx.background_executor().spawn(async move {
-                                        runtime.agent_thread_control("thread_send",&serde_json::json!({"threadId":thread,"message":message,"callerAccess":"project"}))
-                                    }).await;
-                                    let _=owner.update(cx,|s,cx| {s.message=match result {Ok(_)=>"Sent steering".into(),Err(error)=>error};cx.notify();});
-                                }).detach();
-                                window.remove_window();
+                    let events = cx.subscribe_in(
+                        &field,
+                        window,
+                        move |steer: &mut Steer, _, event, window, cx| match event {
+                            TextEvent::Submitted(text)
+                                if !text.trim().is_empty() && !steer.sending =>
+                            {
+                                steer.sending = true;
+                                let (runtime, thread, message, owner) = (
+                                    runtime.clone(),
+                                    thread.clone(),
+                                    text.trim().to_owned(),
+                                    owner.clone(),
+                                );
+                                cx.spawn_in(window, async move |this, cx| {
+                                    let result = cx
+                                        .background_executor()
+                                        .spawn(async move {
+                                            let result =
+                                                runtime.agent_quick_prompt(&thread, &message);
+                                            if result.is_ok() {
+                                                pm_mcp::coedit::record_steer(runtime.project_id());
+                                            }
+                                            result
+                                        })
+                                        .await;
+                                    let succeeded = result.is_ok();
+                                    let _ = owner.update(cx, |s, cx| {
+                                        s.message = match result {
+                                            Ok(true) => "Queued for next step".into(),
+                                            Ok(false) => "Direction submitted".into(),
+                                            Err(error) => error,
+                                        };
+                                        cx.notify();
+                                    });
+                                    let _ = this.update_in(cx, |steer, window, _| {
+                                        steer.sending = false;
+                                        if succeeded {
+                                            window.remove_window();
+                                        }
+                                    });
+                                })
+                                .detach();
                             }
-                            TextEvent::Key("escape")=>window.remove_window(),
-                            _=>{}
-                        }
-                    });
-                    cx.on_release(move |_,_| {native.makeFirstResponder(responder.as_deref());}).detach();
-                    Steer{field,_events:events,tokens:tokens.clone()}
+                            TextEvent::Key("escape") => window.remove_window(),
+                            _ => {}
+                        },
+                    );
+                    cx.on_release(move |_, _| {
+                        native.makeFirstResponder(responder.as_deref());
+                    })
+                    .detach();
+                    Steer {
+                        field,
+                        _events: events,
+                        sending: false,
+                        tokens: tokens.clone(),
+                    }
                 })
             });
         });

@@ -65,6 +65,8 @@ export interface Snapshot {
     text: string;
     selection: [number, number];
     armed: string | null;
+    /** Advances when the host consumes this thread’s composer draft. */
+    sent?: number;
   };
   attachments: {
     id: string;
@@ -136,14 +138,15 @@ export type Action =
       selection: [number, number];
       /** The draft the person saw when they typed (from the publication). */
       base?: string;
+      composerEpoch?: number;
     }
   | { type: "focus"; focused: boolean }
-  | { type: "key"; key: EventDetail }
+  | { type: "key"; key: EventDetail; composerEpoch?: number }
+  | { type: "submit"; text?: string; composerEpoch?: number }
   | {
       type:
         | "attach"
         | "pickRegion"
-        | "submit"
         | "stop"
         | "newThread"
         | "openSettings"

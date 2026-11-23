@@ -172,10 +172,7 @@ impl Models {
         })
     }
 }
-// A disjoint actor setting namespace avoids treating any real project ID as
-// reserved. Unknown application fields are retained; concurrent writes refuse.
-/// Where the application Agent panel (no project) keeps its archives.
-pub const APPLICATION_AGENT_STORE: &str = "ext.builtin-application-agent";
+pub use pm_kernel::agent_storage::APPLICATION_STORE as APPLICATION_AGENT_STORE;
 pub(crate) struct KernelStore {
     kernel: KernelHandle,
     application: bool,
@@ -189,49 +186,42 @@ impl KernelStore {
     }
 }
 impl pm_agents::persistence::Store for KernelStore {
-    fn get(&mut self, key: &str) -> std::io::Result<Option<Value>> {
-        let state = self.kernel.state();
-        if !self.application {
-            return Ok(state.settings.get(key).map(wire));
-        }
-        match state.settings.get(APPLICATION_AGENT_STORE).map(wire) {
-            None => Ok(None),
-            Some(Value::Object(fields)) => Ok(fields.get(key).cloned()),
-            Some(_) => Err(std::io::Error::other(
-                "Unknown application Agent archive shape",
-            )),
-        }
+    fn lazy_history_attachments(&self) -> bool {
+        true
     }
-    fn set(&mut self, key: &str, value: &Value) -> std::io::Result<()> {
-        let state = self.kernel.state();
-        let (key, value) = if self.application {
-            let mut fields = match state.settings.get(APPLICATION_AGENT_STORE).map(wire) {
-                None => serde_json::Map::new(),
-                Some(Value::Object(fields)) => fields,
-                Some(_) => {
-                    return Err(std::io::Error::other(
-                        "Unknown application Agent archive shape",
-                    ));
-                }
-            };
-            fields.insert(key.into(), value.clone());
-            (APPLICATION_AGENT_STORE, Value::Object(fields))
-        } else {
-            (key, value.clone())
-        };
-        let value = model(&value).map_err(std::io::Error::other)?;
-        self.kernel
-            .state_transaction(state::StateTransaction {
-                expected_revision: Some(state.revision),
-                ops: vec![state::StateOp::Setting {
-                    key: key.into(),
-                    value: Some(value),
-                }],
+
+    fn get(&mut self, key: &str) -> std::io::Result<Option<Value>> {
+        use pm_kernel::profile::{ProfileCall, ProfileReply};
+        match self
+            .kernel
+            .profile(ProfileCall::AgentGet {
+                application: self.application,
+                key: key.into(),
             })
             .wait()
-            .ok_or_else(|| std::io::Error::other("kernel closed"))?
-            .map_err(std::io::Error::other)?;
-        Ok(())
+        {
+            Some(Ok(ProfileReply::AgentValue(value))) => Ok(value),
+            Some(Err(error)) => Err(std::io::Error::other(error)),
+            _ => Err(std::io::Error::other("Agent storage is unavailable")),
+        }
+    }
+
+    fn set(&mut self, key: &str, value: &Value) -> std::io::Result<()> {
+        use pm_kernel::profile::{ProfileCall, ProfileReply};
+        match self
+            .kernel
+            .profile(ProfileCall::AgentSet {
+                application: self.application,
+                key: key.into(),
+                expected: None,
+                value: value.clone(),
+            })
+            .wait()
+        {
+            Some(Ok(ProfileReply::Changed)) => Ok(()),
+            Some(Err(error)) => Err(std::io::Error::other(error)),
+            _ => Err(std::io::Error::other("Agent storage is unavailable")),
+        }
     }
 }
 
@@ -2084,11 +2074,17 @@ impl Backend {
                     }
                     if action["type"] == "pickRegion" {
                         // The window shows a crosshair over the editor; what
-                        // is selected comes back through `agent_attach`.
+                        // is selected belongs to the thread that opened it.
+                        if args["target"]["project"].as_str() != Some(state.panel.project())
+                            || args["target"]["thread"].as_str() != Some(&thread)
+                        {
+                            return Err("The attachment's thread changed.".into());
+                        }
+                        let input = json!({"project":state.panel.project(), "thread":thread});
                         drop(state);
                         self.native
                             .platform
-                            .push(("agent.pickRegion".into(), Value::Null));
+                            .push(("agent.pickRegion".into(), input));
                         link.touch();
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
@@ -2225,13 +2221,24 @@ impl Backend {
                     } else {
                         provider
                     };
-                    crate::agent_host::admit(action, link.available(admission_provider), live)?;
-                    if crate::agent_host::sends(action) {
-                        crate::agent_host::admit_send(&state, &thread)?;
+                    if let Some(epoch) = action["composerEpoch"].as_u64()
+                        && epoch != session.composer_epoch()
+                        && args["target"]["project"].as_str() == Some(state.panel.project())
+                        && args["target"]["thread"].as_str() == Some(&thread)
+                    {
+                        drop(state);
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
-                    // A fresh run, or, while the thread runs, the current
-                    // one: a message sent then steers it (PM-506: a fresh id
-                    // there was refused as stale, and the steer was lost).
+                    crate::agent_host::admit(action, link.available(admission_provider), live)?;
+                    let sending = crate::agent_host::sends(action);
+                    let queue = sending && crate::agent_host::queue_composer_send(&state, &thread)?;
+                    if sending && !queue && !live && state.panel.active_runs() >= 8 {
+                        return Err(
+                            "Eight agents are already running. Wait for one to finish.".into()
+                        );
+                    }
+                    // A new turn gets a fresh run id. A live direction
+                    // reaches the running turn; queued messages reserve no run.
                     let run = state
                         .panel
                         .session(&thread)
@@ -2243,9 +2250,9 @@ impl Backend {
                     let request = new_id("request");
                     let new_thread = new_id("thread");
                     let catalogs = |provider| link.catalog(provider);
-                    let recovery_before =
+                    let admission_before =
                         (action["type"] == "resumeInterrupted").then(|| state.panel.clone());
-                    let effect = pm_panel_agentpanel::v4::dispatch_at(
+                    let effect = pm_panel_agentpanel::v4::dispatch_at_with_queue(
                         &mut state.panel,
                         sequence,
                         args,
@@ -2259,6 +2266,7 @@ impl Backend {
                             popover_open: self.native.facts["agentPopover"] == true,
                             catalogs: &catalogs,
                         },
+                        queue,
                     )
                     .map_err(|e| format!("{e:?}"))?;
                     if action["type"] == "draft"
@@ -2267,11 +2275,14 @@ impl Backend {
                         link.typed(&thread, text);
                     }
                     let now = crate::agent_host::now_ms();
-                    // Typing reaches the archive at the next checkpoint, not per key.
-                    if effect.is_none() && matches!(action["type"].as_str(), Some("draft" | "key"))
+                    // A composer send publishes its row before the provider worker
+                    // sets up the request or writes the archive.
+                    if sending
+                        || effect.is_none()
+                            && matches!(action["type"].as_str(), Some("draft" | "key"))
                     {
                         state.panel.defer_save(now);
-                    } else if let Some(before) = recovery_before {
+                    } else if let Some(before) = admission_before {
                         state
                             .panel
                             .save_recovery_admission(
@@ -2279,7 +2290,7 @@ impl Backend {
                                 before,
                                 now,
                             )
-                            .map_err(|e| format!("{e:?}"))?;
+                            .map_err(|error| error.to_string())?;
                     } else {
                         state
                             .panel
@@ -2287,14 +2298,28 @@ impl Backend {
                                 &mut KernelStore::new(self.kernel.clone(), self.application),
                                 now,
                             )
-                            .map_err(|e| format!("{e:?}"))?;
+                            .map_err(|error| format!("{error:?}"))?;
                     }
                     if let Some(run) = kept_run {
                         crate::agent_completion::keep(&link, state.panel.project(), &run);
                     }
-                    effect
+                    use pm_panel_agentpanel::model::EffectKind;
+                    match effect {
+                        Some(effect)
+                            if matches!(
+                                effect.kind,
+                                EffectKind::Send { .. }
+                                    | EffectKind::Stop
+                                    | EffectKind::Answer { .. }
+                            ) =>
+                        {
+                            state.sends.push_back(effect);
+                            None
+                        }
+                        Some(effect) if matches!(effect.kind, EffectKind::Queued) => None,
+                        effect => effect,
+                    }
                 };
-                crate::agent_host::ensure_worker(&agent, &link, &self.kernel, self.application);
                 if let Some(effect) = effect {
                     use pm_panel_agentpanel::model::{EffectKind, ShellAction};
                     let now = crate::agent_host::now_ms();
@@ -2310,12 +2335,21 @@ impl Backend {
                         EffectKind::Shell(ShellAction::Pin) => Some(("agent.pin", Value::Null)),
                         EffectKind::ChooseFiles => Some(("agent.attach", Value::Null)),
                         EffectKind::OpenAttachment { attachment, .. } => {
-                            Some(("agent.previewAttachment", attachment.clone()))
+                            let mut attachment = attachment.clone();
+                            if attachment["payloadStored"] == true
+                                && !["dataUrl", "dataBase64", "content"]
+                                    .iter()
+                                    .any(|key| attachment[*key].is_string())
+                            {
+                                pm_agents::persistence::hydrate_attachment(
+                                    &mut store,
+                                    &mut attachment,
+                                )
+                                .map_err(|error| error.to_string())?;
+                            }
+                            Some(("agent.previewAttachment", attachment))
                         }
-                        EffectKind::Send { .. }
-                        | EffectKind::Stop
-                        | EffectKind::Answer { .. }
-                        | EffectKind::StopTask { .. } => {
+                        EffectKind::StopTask { .. } => {
                             crate::agent_host::run_effect(
                                 &agent,
                                 &link,
@@ -2421,7 +2455,9 @@ impl Backend {
                 if !matches!(args["action"]["type"].as_str(), Some("draft" | "focus")) {
                     link.publish_now();
                 }
-                self.agent_snapshot()?
+                let snapshot = self.agent_snapshot()?;
+                crate::agent_host::ensure_worker(&agent, &link, &self.kernel, self.application);
+                snapshot
             }
             "profile.get" => {
                 let key = args["key"].as_str().ok_or("profile key")?;

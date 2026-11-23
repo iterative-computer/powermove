@@ -73,7 +73,7 @@ const Field = UI.TextField as (
     binding?: string;
   },
 ) => ReturnType<typeof UI.TextField>;
-type Send = (action: Action) => void;
+type Send = (action: Action) => unknown;
 type Style = Record<string, string | number | null | { token: string }>;
 type Obj = Record<string, Json>;
 const obj = (v: unknown): Obj =>
@@ -1405,6 +1405,14 @@ function UserMessageView({
 }) {
   const text = str(m.value.text);
   const files = Array.isArray(m.value.attachments) ? m.value.attachments : [];
+  const delivery =
+    m.value.delivery === "queued"
+      ? "Queued for next step"
+      : m.value.delivery === "steering"
+        ? "Steering"
+        : m.value.delivery === "failed"
+          ? "Couldn’t send"
+          : null;
   const shown =
     text ||
     (files.length
@@ -1413,7 +1421,7 @@ function UserMessageView({
   return (
     <div
       role="listitem"
-      label={`You said: ${shown}`}
+      label={delivery ? `You said: ${shown} (${delivery})` : `You said: ${shown}`}
       metadata={{ rowId: m.rowId }}
       // The bubble keeps a reply's width of room on its leading side.
       style={{
@@ -1467,6 +1475,7 @@ function UserMessageView({
           </div>
         )}
         {text && <QuoteSource id={m.rowId} text={text} userMessage />}
+        {delivery && <text style={quiet}>{delivery}</text>}
       </div>
     </div>
   );
@@ -2504,6 +2513,7 @@ function Composer({
   menu,
   shown,
 }: {
+  key?: string;
   s: Snapshot;
   n: NativeFacts;
   send: Send;
@@ -2512,8 +2522,25 @@ function Composer({
   shown: number;
 }) {
   const [dragging, setDragging] = useState(false);
+  const [sending, setSending] = useState(false);
+  const pending = useRef(false);
+  const submit = (action: Action) => {
+    if (pending.current) return;
+    pending.current = true;
+    setSending(true);
+    const settle = () => {
+      pending.current = false;
+      setSending(false);
+    };
+    try {
+      void Promise.resolve(send(action)).then(settle, settle);
+    } catch (error) {
+      settle();
+      throw error;
+    }
+  };
   const working = s.runId !== null;
-  const available = n.connection === "connected";
+  const available = n.connection === "connected" || working;
   const disabled = !available || s.composerDisabled;
   const acceptsFiles = !disabled && s.attachments.length < 6;
   const dropTarget = acceptsFiles && (dragging || n.dropTarget);
@@ -2677,11 +2704,26 @@ function Composer({
     n.modelGroups,
     n.connectedModelName,
   ]);
-  const sendLabel = working ? "Send direction" : "Send";
+  const sendLabel = sending ? "Sending…" : working ? "Send direction" : "Send";
   // The shortcuts menu hangs from the composer, once per draft that asks
   // for it (the window's searchable menu); closing it unchosen leaves the
   // draft as typed.
   const composerNode = useRef<number | null>(null);
+  const edit = (event: SurfaceEvent) => {
+    const input = composerText(event.value);
+    if (event.composing || input.text === undefined) return;
+    const { text } = input;
+    if (event.type === "change" && text === s.draft.text) return;
+    send({
+      type: "draft",
+      text,
+      selection: event.selection ?? [text.length, text.length],
+      base: s.draft.text,
+      ...((input.epoch ?? s.draft.sent) === undefined
+        ? {}
+        : { composerEpoch: input.epoch ?? s.draft.sent }),
+    });
+  };
   const focused = useRef(false);
   const opened = useRef<string | null>(null);
   const slashDraft =
@@ -2780,7 +2822,7 @@ function Composer({
           </div>
         )}
         <CitationChips key={s.threadId} s={s} send={send} />
-        {dropTarget ? (
+        {dropTarget && (
           <text
             style={{
               ...quiet,
@@ -2790,66 +2832,50 @@ function Composer({
           >
             Drop to attach
           </text>
-        ) : (
-          <Field
-            // A fresh editor each time the panel is shown somewhere new, so
-            // it starts from the draft as it is now (typed text lives in the
-            // editor, not in the value the host last saw).
-            key={`${s.threadId}:composer-${shown}`}
-            multiline
-            id="agent-composer-text"
-            label="Message Powermove agent"
-            title="Return to send · Shift-Return for a new line · / for shortcuts"
-            value={s.draft.text}
-            disabled={disabled}
-            metadata={{
-              placeholder,
-              submitOnReturn: true,
-              attachmentProject: s.projectId,
-              attachmentThread: s.threadId,
-            }}
-            state={{ keyboardFocus: n.keyboardFocus === "composer" }}
-            tabIndex={0}
-            onInput={(event) => {
-              const text = String(event.value ?? "");
-              send({
-                type: "draft",
-                text,
-                selection: [text.length, text.length],
-                base: s.draft.text,
-              });
-              // Typing says the composer is focused (the host reports no
-              // focus of its own for a hosted editor), so shortcuts can show;
-              // the menu hangs from this node.
-              composerNode.current = Number(event.currentTarget);
-              if (!focused.current) {
-                focused.current = true;
-                send({ type: "focus", focused: true });
-              }
-            }}
-            onChange={(event) => {
-              // The native editor reports the text as it is typed, so Send
-              // follows the draft.
-              const text = String(event.value ?? "");
-              if (text !== s.draft.text)
-                send({
-                  type: "draft",
-                  text,
-                  selection: [text.length, text.length],
-                  base: s.draft.text,
-                });
-            }}
-            onKeyDown={(event) => {
-              event.stopPropagation();
-              send(composerKey(event));
-            }}
-            style={{
-              ...reading,
-              background: t("colors.floating"),
-              minWidth: t("metrics.hit"),
-            }}
-          />
         )}
+        <Field
+          // Keep the same editor throughout a send. A thread change or a
+          // new showing starts with that thread’s own draft.
+          key={`${s.threadId}:composer-${shown}`}
+          multiline
+          id="agent-composer-text"
+          label="Message Powermove agent"
+          title="Return to send · Shift-Return for a new line · / for shortcuts"
+          value={s.draft.text}
+          disabled={disabled}
+          metadata={{
+            placeholder,
+            submitOnReturn: true,
+            ...(s.draft.sent === undefined ? {} : { composerEpoch: s.draft.sent }),
+            attachmentProject: s.projectId,
+            attachmentThread: s.threadId,
+          }}
+          state={{ keyboardFocus: n.keyboardFocus === "composer" }}
+          tabIndex={0}
+          onInput={(event) => {
+            edit(event);
+            composerNode.current = Number(event.currentTarget);
+            if (!focused.current) {
+              focused.current = true;
+              send({ type: "focus", focused: true });
+            }
+          }}
+          onChange={edit}
+          onKeyDown={(event) => {
+            event.stopPropagation();
+            const action = composerKey(event, s.draft.sent);
+            if (event.key === "Enter" && !event.shiftKey && !event.composing) {
+              if (!event.repeat && !disabled) submit(action);
+            } else {
+              send(action);
+            }
+          }}
+          style={{
+            ...reading,
+            background: t("colors.floating"),
+            minWidth: t("metrics.hit"),
+          }}
+        />
         <div
           style={{
             ...row,
@@ -2919,10 +2945,18 @@ function Composer({
               label={sendLabel}
               title={sendLabel}
               tabIndex={0}
-              disabled={disabled || !s.sendable}
-              metadata={{ symbol: "return" }}
-              onClick={() => {
-                if (!disabled && s.sendable) send({ type: "submit" });
+              disabled={disabled || sending || !s.sendable}
+              metadata={{ symbol: sending ? "ellipsis" : "return" }}
+              onClick={(event) => {
+                const { text, epoch } = composerText(event.value);
+                if (!event.composing && !disabled && s.sendable)
+                  submit({
+                    type: "submit",
+                    ...(text === undefined ? {} : { text }),
+                    ...((epoch ?? s.draft.sent) === undefined
+                      ? {}
+                      : { composerEpoch: epoch ?? s.draft.sent }),
+                  });
               }}
               style={{
                 ...target,
@@ -2935,10 +2969,10 @@ function Composer({
                 symbolSize: t("metrics.symbol_panel"),
                 // A quiet square until there is something to send (v1's).
                 background: t(
-                  !disabled && s.sendable ? "colors.accent" : "colors.raised",
+                  !disabled && !sending && s.sendable ? "colors.accent" : "colors.raised",
                 ),
                 color: t(
-                  !disabled && s.sendable
+                  !disabled && !sending && s.sendable
                     ? "colors.selected_text"
                     : "colors.muted",
                 ),
@@ -3067,6 +3101,22 @@ export function AgentView({
   const [typed, setTyped] = useState<Record<string, string>>({});
   const [away, setAway] = useState(false);
   const [jumps, setJumps] = useState(0);
+  const newestUser = s.rows.items.reduce<string | undefined>(
+    (last, item) => (item.value.role === "user" ? item.id : last),
+    undefined,
+  );
+  const followed = useRef({ thread: s.threadId, user: newestUser, sends: 0 });
+  if (followed.current.thread !== s.threadId) {
+    followed.current = { thread: s.threadId, user: newestUser, sends: 0 };
+  } else if (
+    s.draft.sent === undefined &&
+    s.rows.range[1] === s.rows.count &&
+    newestUser &&
+    followed.current.user !== newestUser
+  ) {
+    followed.current.user = newestUser;
+    followed.current.sends++;
+  }
   // Each change of where the panel is shown (the popover opening, a dock)
   // counts as a new showing.
   const presentation = useRef({ at: n.presentation, count: 0 });
@@ -3189,7 +3239,7 @@ export function AgentView({
           // Bottom anchored: new content keeps the latest in view unless
           // the person scrolled up; a new token goes back to the end.
           scrollAnchor: "end",
-          scrollToken: `${s.threadId}:${jumps}`,
+          scrollToken: `${s.threadId}:${jumps + (s.draft.sent ?? followed.current.sends)}`,
         }}
         style={{
           ...column,
@@ -3268,6 +3318,7 @@ export function AgentView({
       {!setup && <PlanPreview s={s} send={send} />}
       {!setup && (
         <Composer
+          key={s.threadId}
           s={s}
           n={n}
           send={send}
@@ -3310,9 +3361,7 @@ export function AgentPanel({
     <AgentView
       publication={publication}
       menu={menu}
-      send={(action) => {
-        void model.dispatch(action).catch(onError);
-      }}
+      send={(action) => model.dispatch(action).catch(onError)}
     />
   );
 }
@@ -3321,11 +3370,23 @@ const namedKeys: Record<string, string> = {
   delete: "Delete",
   tab: "Tab",
 };
-export function composerKey(event: SurfaceEvent): Action {
+function composerText(value: Json | undefined) {
+  if (typeof value === "string") return { text: value, epoch: undefined };
+  const input = obj(value);
+  return {
+    text: typeof input.text === "string" ? input.text : undefined,
+    epoch: typeof input.epoch === "number" ? input.epoch : undefined,
+  };
+}
+export function composerKey(event: SurfaceEvent, currentEpoch?: number): Action {
   const { key, metaKey, ctrlKey, shiftKey, altKey, repeat, composing } = event;
+  const { text, epoch } = composerText(event.value);
+  const composerEpoch = epoch ?? currentEpoch;
   return {
     type: "key",
+    ...(composerEpoch === undefined ? {} : { composerEpoch }),
     key: {
+      ...(text === undefined ? {} : { value: text }),
       key: namedKeys[key ?? ""] ?? key,
       metaKey,
       ctrlKey,

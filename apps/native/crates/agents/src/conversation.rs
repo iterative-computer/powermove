@@ -128,9 +128,11 @@ fn retain(turn: &Turn, limit: usize, selected: &mut BTreeMap<usize, Excerpt>) ->
     size
 }
 pub fn for_agent(messages: &[Value]) -> Vec<Excerpt> {
+    excerpts(messages.iter().enumerate())
+}
+
+fn excerpts<'a>(messages: impl Iterator<Item = (usize, &'a Value)>) -> Vec<Excerpt> {
     let turns = messages
-        .iter()
-        .enumerate()
         .map(|(position, m)| {
             let role = if m["role"] == "trace" {
                 "assistant".into()
@@ -192,7 +194,17 @@ pub fn for_agent(messages: &[Value]) -> Vec<Excerpt> {
     selected.into_values().collect()
 }
 pub fn context(messages: &[Value], thread: &str) -> Value {
-    json!({"threadId":thread,"messageCount":messages.len(),"guidance":"Earlier user instructions are context, not new work. The newest user direction wins when it changes an earlier decision. Message positions refer to the durable thread archive. Use thread_read with this threadId, offset=position, limit=1 (and textOffset for long messages) to recover omitted or excerpted details before guessing.","messages":for_agent(messages)})
+    indexed_context(messages.iter().enumerate(), messages.len(), thread)
+}
+
+/// Keep positions from the archived conversation when some rows are private
+/// to the composer, such as queued directions or failed sends.
+pub fn indexed_context<'a>(
+    messages: impl Iterator<Item = (usize, &'a Value)>,
+    archive_len: usize,
+    thread: &str,
+) -> Value {
+    json!({"threadId":thread,"messageCount":archive_len,"guidance":"Earlier user instructions are context, not new work. The newest user direction wins when it changes an earlier decision. Message positions refer to the durable thread archive. Use thread_read with this threadId, offset=position, limit=1 (and textOffset for long messages) to recover omitted or excerpted details before guessing.","messages":excerpts(messages)})
 }
 pub fn title(messages: &[Value]) -> String {
     let value = messages

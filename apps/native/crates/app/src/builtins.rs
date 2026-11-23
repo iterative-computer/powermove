@@ -2510,7 +2510,14 @@ impl Controller {
                 // Select part of the screen (v1's): the popover gives way to a
                 // crosshair over the editor; what is selected is attached, and
                 // the popover comes back either way.
-                "agent.pickRegion" => {
+                "agent.pickRegion" => 'pick: {
+                    let (Some(project), Some(thread)) = (
+                        request.input["project"].as_str(),
+                        request.input["thread"].as_str(),
+                    ) else {
+                        break 'pick Err("The attachment's thread is unavailable.".into());
+                    };
+                    let (project, thread) = (project.to_owned(), thread.to_owned());
                     let editor = self.host.borrow().window.clone();
                     // The answer goes to the editor's window: the popover that
                     // asked closes now, and its handle with it.
@@ -2554,7 +2561,9 @@ impl Controller {
                         let picked = picked.recv().await.ok().flatten();
                         let _ = handle.update(cx, |_, window, cx| {
                             if let Some(rect) = picked {
-                                let _ = this.update(cx, |v, cx| v.attach_region(rect, window, cx));
+                                let _ = this.update(cx, |v, cx| {
+                                    v.attach_region(rect, project, thread, window, cx)
+                                });
                             }
                             // Put the popover back after the deferred capture has drawn.
                             window.defer(cx, move |window, cx| {

@@ -19,6 +19,7 @@ use pm_panel_agentpanel::{
 use pm_runtime_v8::{Realm, StateChannel};
 use serde_json::Value;
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -321,19 +322,21 @@ impl Drop for AgentCarry {
 pub(crate) struct AgentState {
     pub panel: Panel,
     pub runs: ProviderRuns,
+    pub sends: VecDeque<Effect>,
     /// Subagent tasks and run watches (`agent_tasks`).
     pub tasks: crate::agent_tasks::Tasks,
     pub completion: crate::agent_completion::Coordinator,
-    worker: bool,
+    worker: Option<std::thread::Thread>,
 }
 impl AgentState {
     pub fn new(panel: Panel) -> Self {
         Self {
             panel,
             runs: ProviderRuns::default(),
+            sends: VecDeque::new(),
             tasks: Default::default(),
             completion: Default::default(),
-            worker: false,
+            worker: None,
         }
     }
 }
@@ -359,7 +362,8 @@ pub fn admit(action: &Value, connected: bool, live: bool) -> Result<(), String> 
         ) => true,
         Some("stop" | "stopTask") => true,
         Some("answer") => connected || live,
-        Some("submit" | "resumeInterrupted") => connected,
+        Some("submit") => connected || live,
+        Some("resumeInterrupted") => connected,
         // Full access needs a connected provider and asks the window first
         // (`agent.consent`), as v1's consent.
         Some("setAccess") => match action["access"].as_str() {
@@ -370,6 +374,7 @@ pub fn admit(action: &Value, connected: bool, live: bool) -> Result<(), String> 
         Some("shell") => matches!(action["action"].as_str(), Some("open" | "close" | "pin")),
         Some("key") => {
             connected
+                || live
                 || action["key"]["key"] != "Enter"
                 || action["key"]["composing"] == true
                 || action["key"]["shiftKey"] == true
@@ -392,6 +397,20 @@ pub fn sends(action: &Value) -> bool {
             && action["key"]["key"] == "Enter"
             && action["key"]["shiftKey"] != true
             && action["key"]["composing"] != true
+            && action["key"]["repeat"] != true
+}
+pub fn queue_composer_send(state: &AgentState, thread: &str) -> Result<bool, String> {
+    let session = state.panel.session(thread).map_err(|e| e.to_string())?;
+    if session.needs_answer() {
+        return Ok(false);
+    }
+    Ok(session.has_queued_messages()
+        || session.run.as_ref().is_some_and(|run| {
+            run.stopping
+                || !(state.runs.live_steerable(&run.id)
+                    || state.runs.held(&run.id)
+                    || state.tasks.owns_live_run(&run.id))
+        }))
 }
 /// Refuse a send the panel could not hand to a provider, before it is consumed.
 pub fn admit_send(state: &AgentState, thread: &str) -> Result<(), String> {
@@ -452,17 +471,25 @@ fn expand_attached_request<'a>(text: &'a str, attached: &[Value]) -> std::borrow
     }
 }
 /// A run carries bounded thread history, so it needs no provider session.
-fn prompt(panel: &Panel, thread: &str, text: &str) -> Result<String, Error> {
+fn prompt(panel: &Panel, thread: &str, text: &str, message: Option<&str>) -> Result<String, Error> {
     let text = &*expand_request(text);
-    let session = panel.session(thread)?;
-    let mut messages = session.conversation.values().cloned().collect::<Vec<_>>();
-    messages.pop();
-    Ok(if messages.is_empty() {
+    let conversation = &panel.session(thread)?.conversation;
+    let mut messages = conversation
+        .page(0..conversation.len())
+        .iter()
+        .enumerate()
+        .filter_map(|(position, row)| {
+            (Some(row.id.as_str()) != message
+                && !matches!(row.value["delivery"].as_str(), Some("queued" | "failed")))
+            .then_some((position, row.value.as_ref()))
+        })
+        .peekable();
+    Ok(if messages.peek().is_none() {
         text.to_owned()
     } else {
         format!(
             "THREAD CONTEXT\n{}\n\nUSER REQUEST\n{text}",
-            pm_agents::conversation::context(&messages, thread)
+            pm_agents::conversation::indexed_context(messages, conversation.len(), thread)
         )
     })
 }
@@ -477,6 +504,38 @@ pub fn run_effect(
     effect: &Effect,
 ) -> Result<(), String> {
     let mut store = KernelStore::new(kernel.clone(), application);
+    let mut hydrated_effect;
+    let effect = if let EffectKind::Send { attachments, .. } = &effect.kind
+        && attachments.iter().any(needs_payload)
+    {
+        hydrated_effect = effect.clone();
+        let EffectKind::Send { attachments, .. } = &mut hydrated_effect.kind else {
+            unreachable!()
+        };
+        for attachment in attachments.iter_mut().filter(|item| needs_payload(item)) {
+            let error = pm_agents::persistence::hydrate_attachment(&mut store, attachment)
+                .err()
+                .map(|error| Error::Host(error.to_string()))
+                .or_else(|| {
+                    needs_payload(attachment).then(|| {
+                        Error::MissingPayload(
+                            attachment["id"].as_str().unwrap_or_default().to_owned(),
+                        )
+                    })
+                });
+            if let Some(error) = error {
+                let mut state = shared.shared();
+                let AgentState { runs, panel, .. } = &mut *state;
+                let refused = runs.refuse(panel, &mut store, effect, now(), &error);
+                drop(state);
+                ensure_worker(shared, link, kernel, application);
+                return refused.map_err(|error| format!("{error:?}"));
+            }
+        }
+        &hydrated_effect
+    } else {
+        effect
+    };
     // Rendering can wait on the engine. Never hold the conversation or focus
     // mutex while collecting its read-only launch observation.
     let mut observation = (String::new(), Vec::new());
@@ -487,7 +546,7 @@ pub fn run_effect(
         steer: false,
         ..
     } = &effect.kind
-        && let Some(environment) = observation_environment
+        && let Some(environment) = &observation_environment
         && let Some(run) = &effect.target.run
         && let Ok(directory) = workspace(
             &environment.profile,
@@ -511,12 +570,41 @@ pub fn run_effect(
             &focus,
         );
     }
+    let staged = match (&effect.kind, &observation_environment) {
+        (
+            EffectKind::Send {
+                attachments,
+                steer: false,
+                ..
+            },
+            Some(environment),
+        ) if !attachments.is_empty() => stage_request_files(environment, effect).map(Some),
+        _ => Ok(None),
+    };
     let mut guard = shared.shared();
     let state = &mut *guard;
     let child_result = state
         .tasks
         .panel_effect(&mut state.runs, &mut state.panel, link, effect);
     if let Some(result) = child_result {
+        let result = if matches!(effect.kind, EffectKind::Send { .. }) {
+            if effect.live_or_queue() {
+                match result {
+                    Ok(()) => state.panel.settle_direction(effect, now()),
+                    Err(error) => state.runs.refuse(
+                        &mut state.panel,
+                        &mut store,
+                        effect,
+                        now(),
+                        &Error::Host(error),
+                    ),
+                }
+                .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        } else {
+            result
+        };
         state
             .panel
             .save(&mut store, now())
@@ -535,8 +623,11 @@ pub fn run_effect(
             ..
         } => {
             let environment = link.environment.shared().clone();
-            launch_request(state, environment, effect, text, settings).and_then(
-                |(environment, mut request)| {
+            staged
+                .and_then(|staged| {
+                    launch_request(state, environment, effect, text, settings, staged)
+                })
+                .and_then(|(environment, mut request)| {
                     request.prompt =
                         pm_agents::context::with_observation(&request.prompt, &observation.0, text);
                     request.images.extend(observation.1.clone());
@@ -563,16 +654,63 @@ pub fn run_effect(
                         &effect.target.thread,
                         &kept,
                     );
-                    state
-                        .runs
-                        .start(&mut state.panel, &mut store, &original, now(), || {
-                            launch::launch(&environment, request).map_err(Error::Host)
-                        })?;
+                    let recovery = state
+                        .panel
+                        .recovery_launch(&effect.target.thread, &request.run)?
+                        .is_some();
+                    let start = || launch::launch(&environment, request).map_err(Error::Host);
+                    if recovery {
+                        state
+                            .runs
+                            .start(&mut state.panel, &mut store, &original, now(), start)?;
+                    } else {
+                        state
+                            .runs
+                            .start_admitted(&mut state.panel, &original, now(), start)?;
+                    }
+
                     let target = &effect.target;
                     state.tasks.launched(&target.project, &target.thread, &kept);
                     Ok(())
-                },
-            )
+                })
+        }
+        EffectKind::Send {
+            text,
+            attachments,
+            steer: true,
+            ..
+        } if effect.live_or_queue()
+            && !effect
+                .target
+                .run
+                .as_deref()
+                .is_some_and(|run| state.runs.held(run)) =>
+        {
+            (|| {
+                let environment = link
+                    .environment()
+                    .ok_or_else(|| Error::Host(UNAVAILABLE.into()))?;
+                let target = &effect.target;
+                let directory = workspace(&environment.profile, &target.project, &target.thread)
+                    .map_err(|e| {
+                        Error::Host(format!("The agent's workspace could not be created: {e}"))
+                    })?;
+                let (images, files) = lay_out_direction(
+                    &directory
+                        .join("attachments")
+                        .join(safe(target.run.as_deref().ok_or(Error::Stale)?))
+                        .join(effect.id.to_string()),
+                    attachments,
+                )
+                .map_err(|e| Error::Host(format!("An attachment could not be prepared: {e}")))?;
+                let document = kernel
+                    .published(&target.project)
+                    .map_or(0, |p| p.snapshot.doc_id);
+                let prompt = steering_prompt(text, &files, attachments, &target.project, document);
+                state
+                    .runs
+                    .steer_live(&mut state.panel, effect, now(), prompt, images)
+            })()
         }
         EffectKind::Send {
             text,
@@ -591,6 +729,7 @@ pub fn run_effect(
                         &continued_effect,
                         &continued,
                         settings,
+                        None,
                     )?;
                     // Stage the current direction separately: original attachments belong
                     // to the restart request, not another live user message.
@@ -636,6 +775,9 @@ pub fn run_effect(
                         }),
                     )?;
                     state.tasks.directed(&kept);
+                    if effect.live_or_queue() {
+                        state.panel.settle_direction(effect, now())?;
+                    }
                     Ok(())
                 })
         }
@@ -671,6 +813,13 @@ pub fn run_effect(
     drop(guard);
     ensure_worker(shared, link, kernel, application);
     refused.map_or(Ok(()), Err)
+}
+
+fn needs_payload(attachment: &Value) -> bool {
+    attachment["payloadStored"] == true
+        && !["dataUrl", "dataBase64", "content"]
+            .iter()
+            .any(|key| attachment[*key].is_string())
 }
 /// Keep initial targets and a bounded recent window when references accumulate.
 fn append_restart_targets(prompt: &mut String, attached: &[Value], project: &str, document: u64) {
@@ -750,12 +899,50 @@ mod steering_prompt_tests {
     }
 }
 
+struct StagedFiles {
+    directory: PathBuf,
+    images: Vec<String>,
+    files: Vec<Value>,
+}
+
+fn stage_request_files(environment: &Environment, effect: &Effect) -> Result<StagedFiles, Error> {
+    let directory = workspace(
+        &environment.profile,
+        &effect.target.project,
+        &effect.target.thread,
+    )
+    .map_err(|error| {
+        Error::Host(format!(
+            "The agent's workspace could not be created: {error}"
+        ))
+    })?;
+    let attached = match &effect.kind {
+        EffectKind::Send { attachments, .. } => attachments.as_slice(),
+        _ => &[],
+    };
+    let run = effect.target.run.as_deref().ok_or(Error::Stale)?;
+    let (images, files) = lay_out(
+        &directory
+            .join("attachments")
+            .join(safe(run))
+            .join(effect.id.to_string()),
+        attached,
+    )
+    .map_err(|error| Error::Host(format!("An attachment could not be prepared: {error}")))?;
+    Ok(StagedFiles {
+        directory,
+        images,
+        files,
+    })
+}
+
 fn launch_request(
     state: &AgentState,
     environment: Option<Environment>,
     effect: &Effect,
     text: &str,
     settings: &pm_panel_agentpanel::model::Settings,
+    staged: Option<StagedFiles>,
 ) -> Result<(Environment, Request), Error> {
     let environment = environment.ok_or_else(|| Error::Host(UNAVAILABLE.into()))?;
     let thread = &effect.target.thread;
@@ -807,27 +994,25 @@ fn launch_request(
         return Ok((environment, request));
     }
 
-    let directory = workspace(&environment.profile, &effect.target.project, thread)
-        .map_err(|e| Error::Host(format!("The agent's workspace could not be created: {e}")))?;
+    let StagedFiles {
+        directory,
+        images,
+        files,
+    } = match staged {
+        Some(staged) => staged,
+        None => stage_request_files(&environment, effect)?,
+    };
     let attached = match &effect.kind {
-        pm_panel_agentpanel::model::EffectKind::Send { attachments, .. } => attachments.as_slice(),
+        EffectKind::Send { attachments, .. } => attachments.as_slice(),
         _ => &[],
     };
-    let run = effect.target.run.clone().unwrap_or_default();
-    let (images, files) = lay_out(
-        &directory
-            .join("attachments")
-            .join(safe(&run))
-            .join(effect.id.to_string()),
-        attached,
-    )
-    .map_err(|e| Error::Host(format!("An attachment could not be prepared: {e}")))?;
     let request = Request {
         run: effect.target.run.clone().ok_or(Error::Stale)?,
         prompt: prompt(
             &state.panel,
             thread,
             &expand_attached_request(text, attached),
+            effect.message_id(),
         )?,
         provider: settings.provider,
         model: Some(settings.model.clone()).filter(|m| !m.is_empty()),
@@ -955,24 +1140,37 @@ pub(crate) fn ensure_worker(
     application: bool,
 ) {
     let mut state = shared.shared();
-    if state.worker || state.runs.is_empty() && !state.panel.unsaved() && state.tasks.idle() {
+    if let Some(worker) = &state.worker {
+        worker.unpark();
+        return;
+    }
+    if state.runs.is_empty()
+        && state.sends.is_empty()
+        && !state.panel.unsaved()
+        && state.tasks.idle()
+        && state
+            .panel
+            .queued_thread(|provider| link.available(provider))
+            .is_none()
+    {
         return;
     }
     let (worker, link, kernel) = (shared.clone(), link.clone(), kernel.clone());
     state.worker = std::thread::Builder::new()
         .name("pm-agent-runs".into())
         .spawn(move || deliver(worker, link, kernel, application))
-        .is_ok();
+        .ok()
+        .map(|handle| handle.thread().clone());
 }
 /// Durable delivery, one bounded batch at a time. A failed publication keeps the
 /// exact event for retry. Streamed text and typing are saved once they are a
 /// checkpoint old. Window close cancels what is left, saves, then gives up.
 fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, application: bool) {
-    let mut store = KernelStore::new(kernel, application);
+    let mut store = KernelStore::new(kernel.clone(), application);
     let mut closed: Option<Instant> = None;
     let mut published = Instant::now();
     loop {
-        let (changed, failed, done, running) = {
+        let (changed, failed, done, running, send) = {
             let mut guard = shared.shared();
             let state = &mut *guard;
             if link.closing.load(Ordering::Acquire) && closed.is_none() {
@@ -984,24 +1182,78 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
                 state.runs = ProviderRuns::default();
             }
             let saved = state.panel.save_error.clone();
-            let polled = state.runs.poll(&mut state.panel, &mut store, now(), 64);
-            link.tell(state.runs.take_notices());
-            let tasks = crate::agent_tasks::Tasks::poll(state, &link, now());
-            crate::agent_completion::poll(state, &link, &mut store, now());
-            let mut failed = polled.is_err();
-            if state.runs.is_empty() && state.panel.unsaved() && closed.is_some() {
-                failed |= state.panel.save(&mut store, now()).is_err();
+            // Fresh input goes to the provider before draining old receipts or
+            // taking a disk checkpoint for an unrelated run.
+            let mut send = if closed.is_none() {
+                state.sends.pop_front()
+            } else {
+                None
+            };
+            let mut failed = false;
+            let mut changed = false;
+            if send.is_none() {
+                let polled = state.runs.poll(&mut state.panel, &mut store, now(), 64);
+                link.tell(state.runs.take_notices());
+                let tasks = crate::agent_tasks::Tasks::poll(state, &link, now());
+                crate::agent_completion::poll(state, &link, &mut store, now());
+                failed = polled.is_err();
+                changed = polled.is_ok_and(|count| count > 0) || tasks;
+                if closed.is_some() {
+                    while let Some(effect) = state.sends.pop_front() {
+                        let error = Error::Host("The Agent panel closed before sending.".into());
+                        failed |= state
+                            .runs
+                            .refuse(&mut state.panel, &mut store, &effect, now(), &error)
+                            .is_err();
+                    }
+                    if state.runs.is_empty() && state.panel.unsaved() {
+                        failed |= state.panel.save(&mut store, now()).is_err();
+                    }
+                } else if state.runs.active() < 8
+                    && let Some(thread) = state
+                        .panel
+                        .queued_thread(|provider| link.available(provider))
+                {
+                    let at = now();
+                    match state.panel.submit_queued(
+                        &thread,
+                        &pm_kernel::new_id("run"),
+                        &pm_kernel::new_id("request"),
+                        at,
+                    ) {
+                        Ok(effect) => send = Some(effect),
+                        Err(error) => {
+                            state.panel.save_error = Some(error.to_string());
+                            failed = true;
+                        }
+                    }
+                }
             }
-            let done = state.runs.is_empty() && !state.panel.unsaved() && state.tasks.idle();
+            let done = send.is_none()
+                && !failed
+                && state.runs.is_empty()
+                && !state.panel.unsaved()
+                && state.tasks.idle()
+                && (closed.is_some()
+                    || state
+                        .panel
+                        .queued_thread(|provider| link.available(provider))
+                        .is_none());
             if done {
-                state.worker = false;
+                state.worker = None;
             }
-            let changed = *polled.as_ref().unwrap_or(&0) > 0
-                || tasks
-                || failed
-                || saved != state.panel.save_error;
-            (changed, failed, done, !state.runs.is_empty())
+            let changed = changed || failed || saved != state.panel.save_error;
+            (changed, failed, done, !state.runs.is_empty(), send)
         };
+        if let Some(effect) = send {
+            // A queued message can become active without a UI command.
+            link.touch();
+            link.publish();
+            let _ = run_effect(&shared, &link, &kernel, application, &effect);
+            link.touch();
+            link.publish();
+            continue;
+        }
         // A quiet run still moves its "Working · m:ss" line: once a second.
         if changed || running && published.elapsed() >= Duration::from_secs(1) {
             link.touch();
@@ -1011,7 +1263,7 @@ fn deliver(shared: SharedAgent, link: Arc<AgentLink>, kernel: KernelHandle, appl
         if done {
             return;
         }
-        std::thread::sleep(Duration::from_millis(if failed { 250 } else { 16 }));
+        std::thread::park_timeout(Duration::from_millis(if failed { 250 } else { 16 }));
     }
 }
 #[cfg(test)]
@@ -1128,6 +1380,7 @@ mod tests {
             &effect,
             "CHANGED",
             &settings,
+            None,
         )
         .unwrap();
         assert_eq!(resumed.run, "fresh");
@@ -1151,12 +1404,20 @@ mod tests {
             &effect,
             "CHANGED",
             &settings,
+            None,
         )
         .unwrap_err();
         assert!(format!("{error:?}").contains("original attachment is unavailable"));
         std::fs::remove_dir_all(&request.workspace).unwrap();
-        let error =
-            launch_request(&state, Some(environment), &effect, "CHANGED", &settings).unwrap_err();
+        let error = launch_request(
+            &state,
+            Some(environment),
+            &effect,
+            "CHANGED",
+            &settings,
+            None,
+        )
+        .unwrap_err();
         assert!(format!("{error:?}").contains("original agent workspace is unavailable"));
         assert!(!request.workspace.exists());
     }

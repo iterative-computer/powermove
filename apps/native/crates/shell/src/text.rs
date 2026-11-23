@@ -22,6 +22,7 @@ pub struct TextField {
     tokens: pm_design::Tokens,
     /// A composer's last submitted text, cleared once the model empties it.
     submitted: Option<String>,
+    composer_epoch: Option<u64>,
     /// The newest host replacement this field took (see
     /// [`Self::set_value_from_host`]).
     host_value: u64,
@@ -119,6 +120,7 @@ impl TextField {
             unit: None,
             tokens,
             submitted: None,
+            composer_epoch: None,
             host_value: 0,
             fill: false,
             bare: false,
@@ -479,6 +481,53 @@ impl TextField {
         }
         self.set_value(value, cx);
     }
+    /// Send and Return sample the same native editor. Marked input belongs to
+    /// the input method until the person commits it.
+    pub fn composer_submission(&mut self) -> Option<String> {
+        if self.slot.has_marked_text() {
+            return None;
+        }
+        let text = self.slot.value();
+        self.submitted = Some(text.clone());
+        Some(text)
+    }
+
+    pub fn set_composer_value(&mut self, value: &str, epoch: u64, cx: &mut Context<Self>) {
+        let previous = self.composer_epoch.replace(epoch);
+        if !self.slot.is_editing() {
+            if self.value != value {
+                self.slot.set_value(value);
+                self.value = value.into();
+                cx.notify();
+            }
+            self.submitted = None;
+            return;
+        }
+        if !previous.is_some_and(|previous| previous < epoch) {
+            return;
+        }
+        let editing = self.slot.value();
+        let Some(sent) = self.submitted.take() else {
+            if editing.is_empty() && !value.is_empty() && !self.slot.has_marked_text() {
+                self.replace_text(value, cx);
+            }
+            return;
+        };
+        if editing == sent && !self.slot.has_marked_text() {
+            self.replace_text(value, cx);
+        } else if !self.slot.has_marked_text() {
+            // The person typed while the send was being admitted. Preserve
+            // that input and publish it against the newly opened draft.
+            let draft = if value.is_empty() {
+                editing.strip_prefix(&sent).unwrap_or(&editing)
+            } else {
+                &editing
+            };
+            self.replace_text(draft, cx);
+            cx.emit(TextEvent::Changed(draft.to_owned()));
+        }
+    }
+
     pub fn set_value(&mut self, value: &str, cx: &mut Context<Self>) {
         // A sent message leaves the composer once the model has taken it,
         // unless the person already typed on.

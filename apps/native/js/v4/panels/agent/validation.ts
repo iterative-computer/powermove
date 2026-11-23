@@ -70,6 +70,7 @@ export function publication(
       r.items.length ||
     !record(d) ||
     typeof d.text !== "string" ||
+    (d.sent !== undefined && !count(d.sent)) ||
     (d.citations !== undefined &&
       (!Array.isArray(d.citations) || !d.citations.every(isCitation))) ||
     !nullableString(d.armed) ||

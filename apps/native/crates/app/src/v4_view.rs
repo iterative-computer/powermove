@@ -1552,6 +1552,11 @@ impl SurfaceView {
             .unwrap_or("")
             .to_owned();
         let unit = view.unit.clone();
+        let composer_epoch = node
+            .props
+            .get("metadata")
+            .and_then(|m| m.get("composerEpoch"))
+            .and_then(Value::as_u64);
         if let Some(field) = self.fields.get(&id) {
             let tokens = self.table.tokens.clone();
             // A value the panel's host set (`metadata.hostValue`) replaces
@@ -1567,9 +1572,10 @@ impl SurfaceView {
                 f.set_ink(ink);
                 f.set_placeholder(&placeholder);
                 f.set_unit(unit);
-                match host {
-                    Some(revision) => f.set_value_from_host(&value, revision, cx),
-                    None => f.set_value(&value, cx),
+                match (composer_epoch, host) {
+                    (Some(epoch), _) => f.set_composer_value(&value, epoch, cx),
+                    (None, Some(revision)) => f.set_value_from_host(&value, revision, cx),
+                    (None, None) => f.set_value(&value, cx),
                 }
             });
             return;
@@ -1616,6 +1622,9 @@ impl SurfaceView {
             field.set_placeholder(&placeholder);
             field.set_unit(unit);
             field.set_stepper(stepper);
+            if let Some(epoch) = composer_epoch {
+                field.set_composer_value(&value, epoch, cx);
+            }
             field
         });
         if kind == TextKind::Composer
@@ -1651,7 +1660,7 @@ impl SurfaceView {
                             runtime.agent_attach_for(
                                 &project,
                                 &thread,
-                                crate::media::agent_pasted_records(media)?,
+                                crate::media::agent_pasted_records(media.into_media()?)?,
                             )
                         })
                         .await;
@@ -1726,29 +1735,40 @@ impl SurfaceView {
                             };
                             this.change(id, value, cx);
                         }
-                        // Return in a composer: the panel sees the text as typed,
-                        // then the key, as a keyboard would deliver them.
+                        // Carry the editor text with Return. Publishing a separate
+                        // input first could replay a draft already accepted by Send.
                         TextEvent::Submitted(value) => {
-                            let listens = |event: &str| {
-                                this.publication
-                                    .surface
-                                    .node(id)
-                                    .is_some_and(|n| n.listeners.contains_key(event))
+                            let (listens_input, listens_keydown) = {
+                                let listens = |event: &str| {
+                                    this.publication
+                                        .surface
+                                        .node(id)
+                                        .is_some_and(|n| n.listeners.contains_key(event))
+                                };
+                                (listens("input"), listens("keydown"))
                             };
-                            let (input, keydown) = (listens("input"), listens("keydown"));
-                            if input {
-                                let detail = EventDetail {
-                                    value: Some(json!(value)),
-                                    ..Default::default()
-                                };
-                                this.send(id, "input", detail, cx);
+                            if composer_epoch.is_none() && listens_input {
+                                this.send(
+                                    id,
+                                    "input",
+                                    EventDetail {
+                                        value: Some(json!(value)),
+                                        ..Default::default()
+                                    },
+                                    cx,
+                                );
                             }
-                            if keydown {
-                                let detail = EventDetail {
-                                    key: Some("Enter".into()),
-                                    ..Default::default()
-                                };
-                                this.send(id, "keydown", detail, cx);
+                            if listens_keydown {
+                                this.send(
+                                    id,
+                                    "keydown",
+                                    EventDetail {
+                                        key: Some("Enter".into()),
+                                        value: composer_epoch.map(|_| json!(value)),
+                                        ..Default::default()
+                                    },
+                                    cx,
+                                );
                             }
                         }
                         TextEvent::Cancelled => {
@@ -2429,7 +2449,20 @@ impl SurfaceView {
         })
     }
 
-    pub fn send(&mut self, id: Id, event: &str, detail: EventDetail, cx: &mut Context<Self>) {
+    pub fn send(&mut self, id: Id, event: &str, mut detail: EventDetail, cx: &mut Context<Self>) {
+        if let Some(value) = detail.value.as_mut()
+            && value.is_string()
+            && self.publication.panel == "agent"
+            && let Some(epoch) = self
+                .publication
+                .surface
+                .node(id)
+                .and_then(|node| node.props.get("metadata"))
+                .and_then(|meta| meta.get("composerEpoch"))
+                .and_then(Value::as_u64)
+        {
+            *value = json!({"text": value, "epoch": epoch});
+        }
         #[cfg(test)]
         self.log.push((id, event.into(), detail.clone()));
         let p = &self.publication;
@@ -2747,6 +2780,32 @@ impl SurfaceView {
             return;
         };
         if node.props.get("disabled") == Some(&Value::Bool(true)) {
+            return;
+        }
+        if self.publication.panel == "agent"
+            && self.prepared.semantics.get("agent-send") == Some(&id)
+            && let Some(editor) = self.prepared.semantics.get("agent-composer-text")
+            && let Some(field) = self.fields.get(editor)
+        {
+            let Some(text) = field.update(cx, |field, _| field.composer_submission()) else {
+                return;
+            };
+            let epoch = self
+                .publication
+                .surface
+                .node(*editor)
+                .and_then(|node| node.props.get("metadata"))
+                .and_then(|meta| meta.get("composerEpoch"))
+                .and_then(Value::as_u64);
+            self.send(
+                id,
+                "click",
+                EventDetail {
+                    value: Some(json!({"text": text, "epoch": epoch})),
+                    ..detail
+                },
+                cx,
+            );
             return;
         }
         match Component::of(&node) {
@@ -5013,6 +5072,24 @@ impl SurfaceView {
                 )
             );
         let opens_field = node.opens_field;
+        if !disabled
+            && self.publication.panel == "agent"
+            && node.semantic.as_deref() == Some("agent-send")
+        {
+            element = element.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _: &MouseDownEvent, window, cx| {
+                    if v.prepared
+                        .semantics
+                        .get("agent-composer-text")
+                        .and_then(|id| v.fields.get(id))
+                        .is_some_and(|field| field.read(cx).has_keyboard())
+                    {
+                        window.prevent_default();
+                    }
+                }),
+            );
+        }
         if !disabled && (clickable || events.double_click) {
             let node_layer_drag = node.timeline_layer_drag.is_some();
             element = element.on_click(cx.listener(move |v, event: &ClickEvent, window, cx| {

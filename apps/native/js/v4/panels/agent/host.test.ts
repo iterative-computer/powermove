@@ -12,6 +12,7 @@ function setup() {
   let rejected = false;
   let mismatch = false;
   let beforeRead: (() => void) | undefined;
+  let dispatchValue: Publication | undefined;
   const client = new HostClient(
     { realm: "synthetic-agent", project: "synthetic-project", generation: 1 },
     async (request) => {
@@ -30,7 +31,7 @@ function setup() {
           request.operation.type === "command" &&
           request.operation.command === "registered.read"
             ? (fixture() as unknown as HostAck["value"])
-            : null,
+            : (dispatchValue as unknown as HostAck["value"]) ?? null,
         error: rejected ? "synthetic admission refused" : undefined,
       };
     },
@@ -56,6 +57,7 @@ function setup() {
     reject: () => {
       rejected = true;
     },
+    replyToDispatch: (value: Publication) => { dispatchValue = value; },
     mismatch: () => {
       mismatch = true;
     },
@@ -258,4 +260,19 @@ test("settled L2 actions use the current live target, never the result's old run
     },
   });
   model.dispose();
+});
+
+test("the send button can use the native draft immediately after a typing reply", async () => {
+  const f = setup();
+  const m = await HostAgentModel.connect(f.client, f.registration);
+  const p = fixture();
+  p.sequence = 2;
+  p.snapshot.draft.text = "Ready";
+  p.snapshot.draft.selection = [5, 5];
+  p.snapshot.sendable = true;
+  f.replyToDispatch(p);
+  await m.dispatch({ type: "draft", text: "Ready", selection: [5, 5] });
+  expect(m.inspect().snapshot.draft.text).toBe("Ready");
+  expect(m.inspect().snapshot.sendable).toBe(true);
+  m.dispose();
 });

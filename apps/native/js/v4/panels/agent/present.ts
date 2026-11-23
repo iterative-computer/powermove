@@ -629,6 +629,8 @@ function fold(
  * did folds behind that row. The running turn stays open with its timer.
  */
 export function entries(s: Snapshot, list = messages(s)): Entry[] {
+  const queued = list.filter((message) => message.value.delivery === "queued");
+  if (queued.length) list = list.filter((message) => message.value.delivery !== "queued");
   const out: Entry[] = [];
   const running = s.runId !== null;
   const plain = (m: Message) =>
@@ -669,6 +671,7 @@ export function entries(s: Snapshot, list = messages(s)): Entry[] {
     const at = lastPrompt >= 0 ? lastPrompt + 1 : out.length;
     out.splice(at, 0, { kind: "working", key: "working", label });
   }
+  queued.forEach(plain);
   return out;
 }
 

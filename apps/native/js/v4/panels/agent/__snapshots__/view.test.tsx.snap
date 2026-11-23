@@ -27167,8 +27167,9 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
     18,
     22,
     26,
-    35,
+    34,
     36,
+    37,
   ],
   "nodes": {
     "0": {
@@ -27867,7 +27868,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
     "30": {
       "children": [
         31,
-        39,
+        40,
       ],
       "id": 30,
       "input": null,
@@ -27934,6 +27935,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "children": [
         32,
         34,
+        35,
       ],
       "id": 31,
       "input": null,
@@ -28014,13 +28016,96 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "type": "text",
     },
     "34": {
+      "children": [],
+      "id": 34,
+      "input": {
+        "composing": false,
+        "composition": null,
+        "displayed": "",
+        "observed": "",
+        "selection": [
+          0,
+          0,
+        ],
+        "writes": 0,
+      },
+      "listeners": {
+        "change": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "input": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+        "keydown": {
+          "bubble": true,
+          "capture": false,
+          "keys": [],
+          "preventDefault": false,
+        },
+      },
+      "parent": 31,
+      "props": {
+        "control": "text",
+        "data-pm-component": "text-field",
+        "disabled": false,
+        "id": "agent-composer-text",
+        "label": "Message Powermove agent",
+        "metadata": {
+          "attachmentProject": "synthetic-project",
+          "attachmentThread": "thread",
+          "placeholder": "Describe a change…",
+          "submitOnReturn": true,
+        },
+        "state": {
+          "keyboardFocus": true,
+        },
+        "style": {
+          "background": {
+            "token": "colors.floating",
+          },
+          "borderRadius": {
+            "token": "metrics.control_radius",
+          },
+          "color": {
+            "token": "colors.text",
+          },
+          "fontSize": {
+            "token": "typography.reading",
+          },
+          "height": {
+            "token": "metrics.field",
+          },
+          "lineHeight": {
+            "token": "typography.reading_leading",
+          },
+          "minHeight": {
+            "token": "metrics.hit",
+          },
+          "minWidth": {
+            "token": "metrics.hit",
+          },
+        },
+        "tabIndex": 0,
+        "title": "Return to send · Shift-Return for a new line · / for shortcuts",
+        "value": "",
+      },
+      "text": "",
+      "type": "textarea",
+    },
+    "35": {
       "children": [
-        35,
         36,
         37,
         38,
+        39,
       ],
-      "id": 34,
+      "id": 35,
       "input": null,
       "listeners": {},
       "parent": 31,
@@ -28040,9 +28125,9 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "div",
     },
-    "35": {
+    "36": {
       "children": [],
-      "id": 35,
+      "id": 36,
       "input": null,
       "listeners": {
         "click": {
@@ -28052,7 +28137,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "preventDefault": false,
         },
       },
-      "parent": 34,
+      "parent": 35,
       "props": {
         "data-pm-component": "toolbar-item",
         "disabled": false,
@@ -28081,9 +28166,9 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "button",
     },
-    "36": {
+    "37": {
       "children": [],
-      "id": 36,
+      "id": 37,
       "input": null,
       "listeners": {
         "click": {
@@ -28093,7 +28178,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "preventDefault": false,
         },
       },
-      "parent": 34,
+      "parent": 35,
       "props": {
         "data-pm-component": "toolbar-item",
         "disabled": false,
@@ -28122,12 +28207,12 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "button",
     },
-    "37": {
+    "38": {
       "children": [],
-      "id": 37,
+      "id": 38,
       "input": null,
       "listeners": {},
-      "parent": 34,
+      "parent": 35,
       "props": {
         "style": {
           "flexGrow": 1,
@@ -28136,9 +28221,9 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "div",
     },
-    "38": {
+    "39": {
       "children": [],
-      "id": 38,
+      "id": 39,
       "input": null,
       "listeners": {
         "click": {
@@ -28148,7 +28233,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "preventDefault": false,
         },
       },
-      "parent": 34,
+      "parent": 35,
       "props": {
         "disabled": true,
         "id": "agent-send",
@@ -28194,39 +28279,6 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "button",
     },
-    "39": {
-      "children": [
-        40,
-        44,
-        49,
-      ],
-      "id": 39,
-      "input": null,
-      "listeners": {},
-      "parent": 30,
-      "props": {
-        "id": "agent-options",
-        "style": {
-          "alignItems": "center",
-          "display": "flex",
-          "flexDirection": "row",
-          "gap": {
-            "token": "metrics.gap",
-          },
-          "height": {
-            "token": "metrics.control",
-          },
-          "paddingLeft": {
-            "token": "metrics.gap",
-          },
-          "paddingRight": {
-            "token": "metrics.gap",
-          },
-        },
-      },
-      "text": "",
-      "type": "div",
-    },
     "4": {
       "children": [
         5,
@@ -28258,9 +28310,42 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
     "40": {
       "children": [
         41,
-        43,
+        45,
+        50,
       ],
       "id": 40,
+      "input": null,
+      "listeners": {},
+      "parent": 30,
+      "props": {
+        "id": "agent-options",
+        "style": {
+          "alignItems": "center",
+          "display": "flex",
+          "flexDirection": "row",
+          "gap": {
+            "token": "metrics.gap",
+          },
+          "height": {
+            "token": "metrics.control",
+          },
+          "paddingLeft": {
+            "token": "metrics.gap",
+          },
+          "paddingRight": {
+            "token": "metrics.gap",
+          },
+        },
+      },
+      "text": "",
+      "type": "div",
+    },
+    "41": {
+      "children": [
+        42,
+        44,
+      ],
+      "id": 41,
       "input": null,
       "listeners": {
         "click": {
@@ -28279,7 +28364,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "preventDefault": true,
         },
       },
-      "parent": 39,
+      "parent": 40,
       "props": {
         "aria-expanded": false,
         "aria-haspopup": "menu",
@@ -28337,14 +28422,14 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "button",
     },
-    "41": {
+    "42": {
       "children": [
-        42,
+        43,
       ],
-      "id": 41,
+      "id": 42,
       "input": null,
       "listeners": {},
-      "parent": 40,
+      "parent": 41,
       "props": {
         "metadata": {
           "wordEllipsis": true,
@@ -28368,22 +28453,22 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "text",
     },
-    "42": {
-      "children": [],
-      "id": 42,
-      "input": null,
-      "listeners": {},
-      "parent": 41,
-      "props": {},
-      "text": "GPT-6.1",
-      "type": "text",
-    },
     "43": {
       "children": [],
       "id": 43,
       "input": null,
       "listeners": {},
-      "parent": 40,
+      "parent": 42,
+      "props": {},
+      "text": "GPT-6.1",
+      "type": "text",
+    },
+    "44": {
+      "children": [],
+      "id": 44,
+      "input": null,
+      "listeners": {},
+      "parent": 41,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -28401,13 +28486,13 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "div",
     },
-    "44": {
+    "45": {
       "children": [
-        45,
         46,
-        48,
+        47,
+        49,
       ],
-      "id": 44,
+      "id": 45,
       "input": null,
       "listeners": {
         "click": {
@@ -28426,7 +28511,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "preventDefault": true,
         },
       },
-      "parent": 39,
+      "parent": 40,
       "props": {
         "aria-expanded": false,
         "aria-haspopup": "menu",
@@ -28481,12 +28566,12 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "button",
     },
-    "45": {
+    "46": {
       "children": [],
-      "id": 45,
+      "id": 46,
       "input": null,
       "listeners": {},
-      "parent": 44,
+      "parent": 45,
       "props": {
         "metadata": {
           "symbol": "brain",
@@ -28504,14 +28589,14 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "div",
     },
-    "46": {
+    "47": {
       "children": [
-        47,
+        48,
       ],
-      "id": 46,
+      "id": 47,
       "input": null,
       "listeners": {},
-      "parent": 44,
+      "parent": 45,
       "props": {
         "metadata": {
           "wordEllipsis": true,
@@ -28535,22 +28620,22 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "text",
     },
-    "47": {
-      "children": [],
-      "id": 47,
-      "input": null,
-      "listeners": {},
-      "parent": 46,
-      "props": {},
-      "text": "High",
-      "type": "text",
-    },
     "48": {
       "children": [],
       "id": 48,
       "input": null,
       "listeners": {},
-      "parent": 44,
+      "parent": 47,
+      "props": {},
+      "text": "High",
+      "type": "text",
+    },
+    "49": {
+      "children": [],
+      "id": 49,
+      "input": null,
+      "listeners": {},
+      "parent": 45,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -28568,13 +28653,23 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "div",
     },
-    "49": {
+    "5": {
+      "children": [],
+      "id": 5,
+      "input": null,
+      "listeners": {},
+      "parent": 4,
+      "props": {},
+      "text": "New thread",
+      "type": "text",
+    },
+    "50": {
       "children": [
-        50,
         51,
-        53,
+        52,
+        54,
       ],
-      "id": 49,
+      "id": 50,
       "input": null,
       "listeners": {
         "click": {
@@ -28593,7 +28688,7 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
           "preventDefault": true,
         },
       },
-      "parent": 39,
+      "parent": 40,
       "props": {
         "aria-expanded": false,
         "aria-haspopup": "menu",
@@ -28648,22 +28743,12 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "button",
     },
-    "5": {
+    "51": {
       "children": [],
-      "id": 5,
+      "id": 51,
       "input": null,
       "listeners": {},
-      "parent": 4,
-      "props": {},
-      "text": "New thread",
-      "type": "text",
-    },
-    "50": {
-      "children": [],
-      "id": 50,
-      "input": null,
-      "listeners": {},
-      "parent": 49,
+      "parent": 50,
       "props": {
         "metadata": {
           "symbol": "checkmark.shield",
@@ -28681,14 +28766,14 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "div",
     },
-    "51": {
+    "52": {
       "children": [
-        52,
+        53,
       ],
-      "id": 51,
+      "id": 52,
       "input": null,
       "listeners": {},
-      "parent": 49,
+      "parent": 50,
       "props": {
         "metadata": {
           "wordEllipsis": true,
@@ -28712,22 +28797,22 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
       "text": "",
       "type": "text",
     },
-    "52": {
-      "children": [],
-      "id": 52,
-      "input": null,
-      "listeners": {},
-      "parent": 51,
-      "props": {},
-      "text": "Composition only",
-      "type": "text",
-    },
     "53": {
       "children": [],
       "id": 53,
       "input": null,
       "listeners": {},
-      "parent": 49,
+      "parent": 52,
+      "props": {},
+      "text": "Composition only",
+      "type": "text",
+    },
+    "54": {
+      "children": [],
+      "id": 54,
+      "input": null,
+      "listeners": {},
+      "parent": 50,
       "props": {
         "metadata": {
           "symbol": "chevron.up.chevron.down",
@@ -29021,6 +29106,22 @@ exports[`spec §4 drag-drop: op-tree snapshot and Rust wire/accessibility valida
     "create",
     "setText",
     "insertBefore",
+    "insertBefore",
+    "create",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setListeners",
+    "setListeners",
+    "setListeners",
+    "setProps",
+    "setProps",
+    "setProps",
+    "setProps",
     "insertBefore",
     "create",
     "setProps",

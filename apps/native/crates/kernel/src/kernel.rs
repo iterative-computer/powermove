@@ -178,6 +178,7 @@ pub struct Kernel {
     pub(crate) compacting: bool,
     pub(crate) pending_recovery: BTreeMap<String, crate::session::PendingRecovery>,
     pub(crate) library: Option<crate::persistence::LibraryWriter>,
+    pub(crate) agent_storage: crate::agent_storage::AgentStorage,
     pub(crate) sessions: BTreeMap<String, crate::session::Session>,
     pub(crate) state: crate::state::StateSnapshot,
     /// Disk work a worker did for the call the actor runs next
@@ -213,6 +214,7 @@ impl Kernel {
             durability,
             slots: BTreeMap::new(),
             library: None,
+            agent_storage: Default::default(),
             compacting: false,
             pending_recovery: BTreeMap::new(),
             sessions: BTreeMap::new(),
@@ -944,6 +946,13 @@ impl Kernel {
     ) -> Result<crate::state::StateAck, KernelFailure> {
         for op in &tx.ops {
             match op {
+                crate::state::StateOp::Setting { key, .. }
+                    if self.library.is_some() && crate::agent_storage::legacy_key(key) =>
+                {
+                    return Err(KernelFailure::Storage(
+                        "Use the profile Agent store for Agent history".into(),
+                    ));
+                }
                 crate::state::StateOp::Ui { project, .. }
                 | crate::state::StateOp::UiDocument { project, .. } => {
                     let slot = self

@@ -14,7 +14,7 @@ use pm_agents::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     io,
 };
 
@@ -80,6 +80,8 @@ impl Settings {
 #[derive(Clone, Debug)]
 pub struct Session {
     pub draft: Draft,
+    pub(crate) composer_epoch: u64,
+    queued_messages: VecDeque<String>,
     pub conversation: Rows,
     pub trace: Trace,
     pub run: Option<Run>,
@@ -131,9 +133,10 @@ impl Session {
         let messages = v["conversation"]
             .as_array()
             .ok_or(Error::Invalid("conversation"))?;
+        let mut queued_messages = VecDeque::new();
         for (i, message) in messages.iter().enumerate() {
             let mut message = message.clone();
-            if let Some(steps) = message["steps"].as_array_mut() {
+            if let Some(steps) = message.get_mut("steps").and_then(Value::as_array_mut) {
                 for step in steps {
                     if step["kind"] == "question"
                         && step["transport"] == "reply"
@@ -143,7 +146,11 @@ impl Session {
                     }
                 }
             }
-            conversation.upsert(format!("message-{i}"), message)?;
+            let id = format!("message-{i}");
+            if message["role"] == "user" && message["delivery"] == "queued" {
+                queued_messages.push_back(id.clone());
+            }
+            conversation.upsert(id, message)?;
         }
         let mut trace = Trace::default();
         // A restart keeps checkpoints visible but does not invent a live process.
@@ -165,6 +172,8 @@ impl Session {
         }
         let mut s = Self {
             draft: restored_draft,
+            composer_epoch: 0,
+            queued_messages,
             conversation,
             trace,
             run: None,
@@ -218,7 +227,13 @@ impl Session {
         self.run.as_ref().map(|r| now.saturating_sub(r.started_at))
     }
     pub fn composer_disabled(&self) -> bool {
-        self.applying
+        self.applying || self.archiving
+    }
+    pub fn composer_epoch(&self) -> u64 {
+        self.composer_epoch
+    }
+    pub fn has_queued_messages(&self) -> bool {
+        !self.queued_messages.is_empty()
     }
     pub fn disclosure_open(&self, id: &str, live_group: bool) -> bool {
         self.disclosures.get(id).copied().unwrap_or_else(|| {
@@ -359,6 +374,7 @@ pub enum EffectKind {
         settings: Settings,
         steer: bool,
     },
+    Queued,
     Stop,
     Answer {
         question: String,
@@ -413,6 +429,20 @@ pub struct Effect {
     pub id: u64,
     pub target: Target,
     pub kind: EffectKind,
+    message: Option<String>,
+    composer: Option<(u64, Draft)>,
+    live_or_queue: bool,
+}
+impl Effect {
+    pub fn message_id(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+    pub fn live_or_queue(&self) -> bool {
+        self.live_or_queue
+    }
+    pub fn has_composer_submission(&self) -> bool {
+        self.composer.is_some()
+    }
 }
 #[derive(Clone, Debug)]
 enum Pending {
@@ -440,6 +470,7 @@ pub enum Update {
 pub struct Panel {
     project: String,
     archive: Threads,
+    resolve_attachments_at_send: bool,
     sessions: HashMap<String, Session>,
     pending: HashMap<u64, Pending>,
     archives_after_stop: HashMap<String, String>,
@@ -482,6 +513,13 @@ impl Panel {
                     record["nativeInterruptedRuns"].as_array_mut()
                         .ok_or_else(|| io::Error::other("Unknown interrupted-run archive shape"))?.push(previous);
                     record["lastRunStatus"] = json!("interrupted");
+                    for row in record["conversation"].as_array_mut().into_iter().flatten() {
+                        if row["delivery"] == "steering" {
+                            // The old provider may have accepted it before shutdown.
+                            // Keep its text visible without sending it a second time.
+                            row["delivery"] = json!("failed");
+                        }
+                    }
                 }
                 Ok(())
             }).map_err(host)?;
@@ -498,6 +536,7 @@ impl Panel {
         Ok(Self {
             project: project.into(),
             archive,
+            resolve_attachments_at_send: store.lazy_history_attachments(),
             sessions,
             pending: HashMap::new(),
             archives_after_stop: HashMap::new(),
@@ -552,6 +591,9 @@ impl Panel {
             id: NEXT_EFFECT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             target,
             kind,
+            message: None,
+            composer: None,
+            live_or_queue: false,
         }
     }
     fn no_apply(&self) -> Result<()> {
@@ -564,6 +606,12 @@ impl Panel {
     fn capture(&mut self, id: &str, now: u64) -> Result<()> {
         let s = self.session(id)?;
         let (draft, attachments) = s.draft.legacy();
+        let draft_file_ids = s
+            .draft
+            .stored_ids()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         let citations = s.draft.citations().to_vec();
         let conversation = s.conversation.values().cloned().collect::<Vec<_>>();
         let trace = s.trace.rows.values().cloned().collect::<Vec<_>>();
@@ -584,6 +632,14 @@ impl Panel {
         record["composerCitations"] = json!(citations);
         record["composerDraft"] = json!(draft);
         record["attachments"] = json!(attachments);
+        if draft_file_ids.is_empty() {
+            record
+                .as_object_mut()
+                .expect("thread record")
+                .remove("nativeDraftAttachmentIds");
+        } else {
+            record["nativeDraftAttachmentIds"] = json!(draft_file_ids);
+        }
         record["conversation"] = json!(conversation);
         record["nativeLiveTrace"] = json!(trace);
         record["nativeRunRequest"] = admitted_request.unwrap_or(Value::Null);
@@ -620,8 +676,41 @@ impl Panel {
             self.session_mut(&id)?.archive_result()?;
             self.capture(&id, now)?;
         }
-        match self.archive.save(store) {
+        let lazy = store.lazy_history_attachments();
+        // Drop heavy historical bytes only after every attachment and its
+        // reference have been committed. Draft/queued files are still editable.
+        let stored = if lazy {
+            self.archive.save_without_payloads(store)
+        } else {
+            self.archive.save(store)
+        };
+        match stored {
             Ok(()) => {
+                if lazy {
+                    for (thread, session) in &mut self.sessions {
+                        let saved = self.archive.thread(thread);
+                        if let Some(files) =
+                            saved.and_then(|record| record["attachments"].as_array())
+                        {
+                            session.draft.release_saved_payloads(files);
+                        }
+                        let records = saved
+                            .and_then(|record| record["conversation"].as_array())
+                            .into_iter()
+                            .flatten();
+                        for (index, record) in records.enumerate() {
+                            if !matches!(record["delivery"].as_str(), Some("queued" | "steering"))
+                                && record["attachments"]
+                                    .as_array()
+                                    .is_some_and(|files| !files.is_empty())
+                            {
+                                session
+                                    .conversation
+                                    .replace_stored_attachments(index, &record["attachments"]);
+                            }
+                        }
+                    }
+                }
                 self.save_error = None;
                 self.unsaved_since = None;
                 Ok(())
@@ -951,6 +1040,9 @@ impl Panel {
         }
         Ok(ids)
     }
+    pub fn active_runs(&self) -> usize {
+        self.sessions.values().filter(|s| s.run.is_some()).count()
+    }
     pub fn background_runs(&self) -> usize {
         self.sessions
             .iter()
@@ -990,6 +1082,9 @@ impl Panel {
             return Ok(effect);
         }
         self.capture(id, now)?;
+        if let Some(record) = self.archive.thread_mut(id).and_then(Value::as_object_mut) {
+            record.remove("nativeDraftAttachmentIds");
+        }
         self.archive
             .archive_thread(id, replacement, now)
             .map_err(host)?;
@@ -1003,6 +1098,9 @@ impl Panel {
     }
     pub fn add_attachments(&mut self, id: &str, files: Vec<Attachment>, now: u64) -> Result<()> {
         let draft = self.draft_mut(id)?;
+        Self::add_draft_files(draft, files, now)
+    }
+    fn add_draft_files(draft: &mut Draft, files: Vec<Attachment>, now: u64) -> Result<()> {
         let new_ids: HashSet<_> = files
             .iter()
             .map(Attachment::id)
@@ -1013,7 +1111,52 @@ impl Panel {
         }
         draft.add_files(files, now)
     }
+    /// Persist only the new attachment bodies. Existing chips retain their
+    /// ids and can be rendered and edited without opening the payload files.
+    pub fn attach_records(
+        &mut self,
+        id: &str,
+        records: Vec<Value>,
+        store: &mut impl Store,
+        now: u64,
+    ) -> Result<()> {
+        let mut draft = self.draft_mut(id)?.clone();
+        let mut files = Vec::with_capacity(records.len());
+        let mut payloads = Vec::with_capacity(records.len());
+        for mut record in records {
+            if let Some(payload) =
+                pm_agents::persistence::separate_attachment(&mut record).map_err(host)?
+            {
+                payloads.push(payload);
+            }
+            files.push(Attachment::from_record(record)?);
+        }
+        Self::add_draft_files(&mut draft, files, now)?;
+        let mut writes = Vec::new();
+        for (key, payload) in payloads {
+            match store.get(&key).map_err(host)? {
+                Some(old) if old == payload => {}
+                Some(_) => return Err(Error::Invalid("attachment identity conflict")),
+                None => writes.push((key, payload)),
+            }
+        }
+        for (key, payload) in writes {
+            store.set(&key, &payload).map_err(host)?;
+        }
+        *self.draft_mut(id)? = draft;
+        Ok(())
+    }
     pub fn submit(&mut self, id: &str, run_id: &str, request_id: &str, now: u64) -> Result<Effect> {
+        self.submit_inner(id, run_id, request_id, now, None)
+    }
+    fn submit_inner(
+        &mut self,
+        id: &str,
+        run_id: &str,
+        request_id: &str,
+        now: u64,
+        queued: Option<&str>,
+    ) -> Result<Effect> {
         let target = self.target(id)?;
         // Full access without the person's consent never starts a run that
         // would fail: the consent card asks again, the draft kept for Send.
@@ -1076,8 +1219,9 @@ impl Panel {
                 return Ok(effect);
             }
         }
+        let resolve_attachments = self.resolve_attachments_at_send;
         let session = self.sessions.get_mut(id).expect("target validated");
-        if session.applying || !session.draft.sendable() {
+        if session.composer_disabled() || !session.draft.sendable() {
             return Err(Error::Busy);
         }
         if run_id.is_empty()
@@ -1091,7 +1235,11 @@ impl Panel {
             .attachments()
             .map(|f| f.record().clone())
             .collect();
-        if let Some(file) = session.draft.attachments().find(|f| !f.payload_available()) {
+        if let Some(file) = session
+            .draft
+            .attachments()
+            .find(|f| !(f.payload_available() || resolve_attachments && f.stored()))
+        {
             return Err(Error::MissingPayload(file.id().into()));
         }
         // The agent reads where each attachment sits ("[Attachment: …]");
@@ -1110,7 +1258,14 @@ impl Panel {
         }
         let citations = session.draft.citations().to_vec();
         let provider_text = pm_agents::citations::context(&text, &citations);
-        session.append(json!({"role":"user","text":typed,"citations":citations,"attachments":placed,"steering":steer}))?;
+        let row = json!({"role":"user","text":typed,"citations":citations,"attachments":placed,"steering":steer});
+        let message = if let Some(message) = queued {
+            session.conversation.upsert(message.into(), row)?;
+            session.conversation.move_to_end(message)?;
+            message.into()
+        } else {
+            session.append(row)?
+        };
         session.archive_result()?;
         session.draft.clear_after_send();
         session.plan = None;
@@ -1132,9 +1287,14 @@ impl Panel {
         }
         session.phase = Phase::Running;
         let settings = session.settings.clone();
-        self.capture(id, now)?;
+        let record = self.archive.thread_mut(id).ok_or(Error::Stale)?;
+        record["updatedAt"] = json!(now);
+        if !steer {
+            record["lastRunId"] = json!(run_id);
+            record["lastRunStatus"] = json!("running");
+        }
         let target = self.target(id)?;
-        Ok(self.effect(
+        let mut effect = self.effect(
             target,
             EffectKind::Send {
                 text: provider_text,
@@ -1142,8 +1302,207 @@ impl Panel {
                 settings,
                 steer,
             },
-        ))
+        );
+        effect.message = Some(message);
+        Ok(effect)
     }
+
+    /// Use the original optimistic row and preserve its identity as a queued
+    /// request moves to the next turn.
+    pub fn submit_queued(
+        &mut self,
+        id: &str,
+        run: &str,
+        request: &str,
+        now: u64,
+    ) -> Result<Effect> {
+        let session = self.session(id)?;
+        if session.run.is_some() || session.composer_disabled() {
+            return Err(Error::Busy);
+        }
+        let message = session
+            .queued_messages
+            .front()
+            .cloned()
+            .ok_or(Error::Stale)?;
+        let row = session.conversation.get(&message).ok_or(Error::Stale)?;
+        let mut draft = Draft::from_legacy(
+            row.value["text"].as_str().unwrap_or_default(),
+            row.value["attachments"]
+                .as_array()
+                .map_or(&[], Vec::as_slice),
+        )?;
+        if let Some(citations) = row.value["citations"].as_array() {
+            draft.set_citations(citations.clone())?;
+        }
+        let saved = std::mem::replace(&mut self.session_mut(id)?.draft, draft);
+        let result = self.submit_inner(id, run, request, now, Some(&message));
+        self.session_mut(id)?.draft = saved;
+        let effect = result?;
+        if matches!(effect.kind, EffectKind::Send { .. }) {
+            self.session_mut(id)?.queued_messages.pop_front();
+        }
+        Ok(effect)
+    }
+
+    pub fn queued_thread(&self, available: impl Fn(Provider) -> bool) -> Option<String> {
+        self.sessions
+            .iter()
+            .filter(|(_, session)| {
+                session.has_queued_messages()
+                    && session.run.is_none()
+                    && !session.composer_disabled()
+                    && (session.settings.access != Access::Computer || session.computer_consent)
+                    && available(session.settings.provider)
+            })
+            .map(|(id, _)| id)
+            .min()
+            .cloned()
+    }
+
+    fn queue_message(&mut self, id: &str, draft: &Draft, now: u64) -> Result<Effect> {
+        let target = self.target(id)?;
+        let resolve_attachments = self.resolve_attachments_at_send;
+        let session = self.session_mut(id)?;
+        if session.composer_disabled() || !draft.sendable() {
+            return Err(Error::Busy);
+        }
+        if let Some(file) = draft
+            .attachments()
+            .find(|f| !(f.payload_available() || resolve_attachments && f.stored()))
+        {
+            return Err(Error::MissingPayload(file.id().into()));
+        }
+        let (text, attachments) = draft.legacy();
+        let message = session.append(json!({
+            "role":"user", "text":text, "attachments":attachments,
+            "citations":draft.citations(), "delivery":"queued",
+        }))?;
+        session.queued_messages.push_back(message.clone());
+        self.defer_save(now);
+        let mut effect = self.effect(target, EffectKind::Queued);
+        effect.message = Some(message);
+        Ok(effect)
+    }
+
+    pub fn queue_text(&mut self, id: &str, text: &str, now: u64) -> Result<Effect> {
+        self.queue_message(id, &Draft::from_legacy(text, &[])?, now)
+    }
+
+    pub(crate) fn queue_composer(&mut self, id: &str, now: u64) -> Result<Effect> {
+        let draft = self.session(id)?.draft.clone();
+        let effect = self.queue_message(id, &draft, now)?;
+        self.session_mut(id)?.draft.clear_after_send();
+        Ok(effect)
+    }
+
+    pub(crate) fn track_composer_send(&mut self, effect: &mut Effect, draft: Draft) -> Result<()> {
+        if !matches!(
+            effect.kind,
+            EffectKind::Send { .. } | EffectKind::Answer { .. } | EffectKind::Queued
+        ) {
+            return Ok(());
+        }
+        let session = self.session_mut(&effect.target.thread)?;
+        session.composer_epoch += 1;
+        effect.composer = Some((session.composer_epoch, draft));
+        self.track_live_direction(effect)
+    }
+
+    pub fn track_live_direction(&mut self, effect: &mut Effect) -> Result<()> {
+        if let EffectKind::Send { steer: true, .. } = effect.kind
+            && let Some(message) = &effect.message
+        {
+            effect.live_or_queue = true;
+            self.session_mut(&effect.target.thread)?
+                .conversation
+                .update(message, |row| {
+                    row["delivery"] = json!("steering");
+                })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn queue_direction(&mut self, effect: &Effect) -> Result<()> {
+        let message = effect.message.as_ref().ok_or(Error::Stale)?;
+        let session = self.session_mut(&effect.target.thread)?;
+        session.conversation.update(message, |row| {
+            row["delivery"] = json!("queued");
+            row["steering"] = json!(false);
+        })?;
+        if !session.queued_messages.contains(message) {
+            session.queued_messages.push_back(message.clone());
+            let conversation = &session.conversation;
+            session
+                .queued_messages
+                .make_contiguous()
+                .sort_by_key(|id| conversation.position(id));
+        }
+        Ok(())
+    }
+
+    pub fn settle_direction(&mut self, effect: &Effect, now: u64) -> Result<()> {
+        let message = effect.message_id().ok_or(Error::Stale)?;
+        self.session_mut(&effect.target.thread)?
+            .conversation
+            .update(message, |row| {
+                if let Some(row) = row.as_object_mut() {
+                    row.remove("delivery");
+                }
+            })?;
+        self.defer_save(now);
+        Ok(())
+    }
+
+    pub(crate) fn refuse_admitted_run(
+        &mut self,
+        effect: &Effect,
+        reason: &str,
+        now: u64,
+    ) -> Result<()> {
+        let thread = &effect.target.thread;
+        let run = self.session(thread)?.run.as_ref().ok_or(Error::Stale)?;
+        if effect.target.run.as_deref() != Some(&run.id) {
+            return Err(Error::Stale);
+        }
+        let run_id = run.id.clone();
+        self.receive(
+            thread,
+            &run_id,
+            run.sequence + 1,
+            Update::Complete {
+                text: pm_agents::runtime_exit_error(reason).to_owned(),
+                error: true,
+                cancelled: false,
+            },
+            now,
+        )?;
+        self.defer_save(now);
+        Ok(())
+    }
+
+    pub(crate) fn refused_composer_send(&mut self, effect: &Effect) -> Result<bool> {
+        if !effect.live_or_queue && effect.composer.is_none() {
+            return Ok(false);
+        }
+        let session = self.session_mut(&effect.target.thread)?;
+        if let Some(message) = &effect.message {
+            session.conversation.update(message, |row| {
+                row["delivery"] = json!("failed");
+            })?;
+        }
+        if let Some((epoch, draft)) = &effect.composer
+            && session.composer_epoch == *epoch
+            && session.draft.text().is_empty()
+            && !session.draft.sendable()
+            && session.draft.citations().is_empty()
+        {
+            session.draft = draft.clone();
+            session.composer_epoch += 1;
+        }
+        Ok(true)
+    }
+
     pub fn receive(
         &mut self,
         id: &str,
@@ -1909,6 +2268,7 @@ impl Panel {
         if !file.previewable()
             && !file.payload_available()
             && !file.record()["sourcePath"].is_string()
+            && file.record()["payloadStored"] != true
         {
             return Err(Error::MissingPayload(id.into()));
         }
@@ -2042,6 +2402,9 @@ impl Panel {
         if title.is_empty() {
             return Ok(false);
         }
+        // Snapshot admitted messages before recording the generated title's
+        // timestamp, so the next checkpoint doesn't date them a second time.
+        self.capture(thread, now)?;
         let record = self.archive.thread_mut(thread).ok_or(Error::Stale)?;
         record["title"] = json!(title);
         record["updatedAt"] = json!(now);

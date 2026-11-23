@@ -763,27 +763,33 @@ impl Kernel {
                         self.state =
                             crate::state::StateSnapshot::load(writer.store()).map_err(failure)?;
                         let record = profile.join("kernel-state.json");
-                        match std::fs::read_to_string(&record) {
+                        let old = self.state.settings.clone();
+                        let record_exists = match std::fs::read_to_string(&record) {
                             Ok(text) => {
                                 let value = pm_model::json::parse(&text).map_err(failure)?;
-                                let old = self.state.settings.clone();
                                 self.state.restore_durable(&value).map_err(failure)?;
-                                for key in old
-                                    .keys()
-                                    .chain(self.state.settings.keys())
-                                    .collect::<std::collections::BTreeSet<_>>()
-                                {
-                                    match self.state.settings.get(key) {
-                                        Some(v) => writer.set(key, v.clone()),
-                                        None => writer.delete(key),
-                                    }
-                                    .map_err(failure)?;
-                                }
-                                writer.flush().map_err(failure)?;
+                                true
                             }
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
                             Err(e) => return Err(failure(e)),
+                        };
+                        self.migrate_agent_storage(&profile, record_exists)
+                            .map_err(failure)?;
+                        for key in old
+                            .keys()
+                            .chain(self.state.settings.keys())
+                            .collect::<std::collections::BTreeSet<_>>()
+                        {
+                            if old.get(key) == self.state.settings.get(key) {
+                                continue;
+                            }
+                            match self.state.settings.get(key) {
+                                Some(v) => writer.set(key, v.clone()),
+                                None => writer.delete(key),
+                            }
+                            .map_err(failure)?;
                         }
+                        writer.flush().map_err(failure)?;
                         self.library = Some(writer);
                         Ok(ShellReply::Library(OpenDecision::Writable))
                     }
