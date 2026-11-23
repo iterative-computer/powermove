@@ -14,9 +14,11 @@ use pm_agents::{
 use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, TryRecvError, TrySendError};
 
+type ContinueRun = Box<dyn FnOnce() -> Result<Handle> + Send>;
+
 struct PendingAction {
     effect: Option<u64>,
-    restart: Option<Box<dyn FnOnce() -> Result<Handle> + Send>>,
+    restart: Option<ContinueRun>,
     pending: Receiver<bool>,
     result: Option<bool>,
 }
@@ -28,7 +30,7 @@ struct Running {
     handle: Handle,
     sequence: u64,
     pending: Option<Event>,
-    action: Option<PendingAction>,
+    actions: VecDeque<PendingAction>,
     /// The run settled. Its process only has late cleanup left to report.
     finished: bool,
     /// The run delegated or watched: its turn's completion waits for the
@@ -40,6 +42,16 @@ struct Running {
     release: bool,
     /// Host events (task rows, progress) delivered before the provider's.
     injected: VecDeque<Event>,
+}
+impl Running {
+    fn continue_with(&mut self, continuation: ContinueRun) -> Result<()> {
+        self.handle = continuation()?;
+        self.actions.clear();
+        self.pending = None;
+        self.held = None;
+        self.release = false;
+        Ok(())
+    }
 }
 /// What the host may tell the person outside the app (S114): a run was
 /// sent, finished, or asked a question.
@@ -129,7 +141,7 @@ impl ProviderRuns {
             handle,
             sequence: 0,
             pending: None,
-            action: None,
+            actions: VecDeque::new(),
             finished: false,
             orchestrated: self.completion_gate,
             held: None,
@@ -273,6 +285,7 @@ impl ProviderRuns {
     pub fn cancel_all(&mut self) {
         for running in self.runs.iter_mut().filter(|r| !r.finished) {
             if let Some(run) = running.target.run.clone() {
+                running.actions.retain(|action| action.restart.is_none());
                 if running.held.is_some() {
                     running.held = Some(Event::Completed {
                         run,
@@ -327,7 +340,7 @@ impl ProviderRuns {
         now: u64,
         prompt: String,
         images: Vec<String>,
-        restart: Box<dyn FnOnce() -> Result<Handle> + Send>,
+        restart: ContinueRun,
     ) -> Result<()> {
         Self::validate(panel, &effect.target)?;
         let running = self
@@ -335,7 +348,12 @@ impl ProviderRuns {
             .iter_mut()
             .find(|r| !r.finished && r.target == effect.target)
             .ok_or(Error::Stale)?;
-        if running.action.is_some() {
+        if running.actions.len() >= 128
+            || running
+                .actions
+                .front()
+                .is_some_and(|action| action.restart.is_none())
+        {
             return Err(Error::Busy);
         }
         panel.save(store, now)?;
@@ -344,29 +362,21 @@ impl ProviderRuns {
             _ => return Err(Error::Invalid("steering effect")),
         };
         if !running.handle.supports_live_steering() || running.held.is_some() {
-            running.handle = restart()?;
-            running.pending = None;
-            running.held = None;
-            running.release = false;
+            running.continue_with(restart)?;
         } else {
             match running.handle.send_checked(Action::Steer {
                 run: effect.target.run.clone().ok_or(Error::Stale)?,
                 prompt,
                 images,
             }) {
-                Ok(pending) => {
-                    running.action = Some(PendingAction {
-                        effect: None,
-                        pending,
-                        result: None,
-                        restart: Some(restart),
-                    })
-                }
+                Ok(pending) => running.actions.push_back(PendingAction {
+                    effect: None,
+                    pending,
+                    result: None,
+                    restart: Some(restart),
+                }),
                 Err(TrySendError::Full(_)) => return Err(Error::Busy),
-                Err(TrySendError::Disconnected(_)) => {
-                    running.handle = restart()?;
-                    running.pending = None;
-                }
+                Err(TrySendError::Disconnected(_)) => running.continue_with(restart)?,
             }
         }
         if let EffectKind::Send { attachments, .. } = &effect.kind {
@@ -415,10 +425,10 @@ impl ProviderRuns {
         // Once Cancel is queued, replace the pending steer so it cannot restart the run.
         let stop_supersedes_steer = matches!(effect.kind, EffectKind::Stop)
             && running
-                .action
-                .as_ref()
+                .actions
+                .front()
                 .is_some_and(|action| action.restart.is_some());
-        if running.action.is_some() && !stop_supersedes_steer {
+        if !running.actions.is_empty() && !stop_supersedes_steer {
             return Err(Error::Busy);
         }
         let run = effect.target.run.clone().ok_or(Error::Stale)?;
@@ -477,7 +487,10 @@ impl ProviderRuns {
         panel.save(store, now)?;
         match running.handle.send_checked(action) {
             Ok(pending) => {
-                running.action = Some(PendingAction {
+                if matches!(effect.kind, EffectKind::Stop) {
+                    running.actions.clear();
+                }
+                running.actions.push_back(PendingAction {
                     effect: ack.then_some(effect.id),
                     restart: None,
                     pending,
@@ -507,7 +520,7 @@ impl ProviderRuns {
         while delivered < budget.min(256) && !self.runs.is_empty() {
             self.cursor %= self.runs.len();
             let running = &mut self.runs[self.cursor];
-            if let Some(action) = &mut running.action {
+            while let Some(action) = running.actions.front_mut() {
                 if action.result.is_none() {
                     action.result = match action.pending.try_recv() {
                         Ok(value) => Some(value),
@@ -522,15 +535,20 @@ impl ProviderRuns {
                         next.save(store, now)?;
                         *panel = next;
                     }
-                    let restart = action.restart.take();
-                    running.action = None;
+                    let restart = running
+                        .actions
+                        .pop_front()
+                        .and_then(|action| action.restart);
                     if !accepted && let Some(restart) = restart {
-                        match restart() {
-                            Ok(handle) => { running.handle = handle; running.pending = None; }
-                            Err(error) => running.injected.push_back(Event::Trace {
+                        // A later rejected steer's continuation already includes
+                        // all previous directions. Launch only the latest one.
+                        if running.actions.is_empty()
+                            && let Err(error) = running.continue_with(restart)
+                        {
+                            running.injected.push_back(Event::Trace {
                                 run: running.target.run.clone().ok_or(Error::Stale)?,
                                 value: serde_json::json!({"kind":"answer","text":format!("Your direction could not be delivered: {error}. Please send it again.")}),
-                            }),
+                            });
                         }
                         continue;
                     }
@@ -538,13 +556,16 @@ impl ProviderRuns {
                         return Err(Error::Host("provider rejected action".into()));
                     }
                 } else {
-                    self.cursor += 1;
-                    empty += 1;
-                    if empty >= self.runs.len() {
-                        break;
-                    }
-                    continue;
+                    break;
                 }
+            }
+            if !running.actions.is_empty() {
+                self.cursor += 1;
+                empty += 1;
+                if empty >= self.runs.len() {
+                    break;
+                }
+                continue;
             }
             let mut releasing = false;
             if running.pending.is_none() {

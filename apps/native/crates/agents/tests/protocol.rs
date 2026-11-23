@@ -18,6 +18,7 @@ fn run(id: &str) -> codex::Run {
         image_paths: vec![],
         config: json!({"mcp_servers":{}}),
         resume_thread: None,
+        project: None,
     }
 }
 fn started() -> codex::Client {
@@ -539,4 +540,241 @@ fn actual_provider_failure_keeps_its_diagnostic() {
         [Event::Completed { result: RunResult::Failure { error, cancelled: false, .. }, .. }]
             if error == failure
     ));
+}
+
+fn project_run(access: Access, supervised: bool) -> codex::Run {
+    let mut r = run("p");
+    r.schema = Some(json!({"type":"object","properties":{"reply":{"type":"string"}}}));
+    r.project = Some(codex::Project { access, supervised });
+    r
+}
+fn project_started(access: Access, supervised: bool) -> (codex::Client, Vec<Value>) {
+    let mut c = codex::Client::default();
+    let mut sent = c.run(project_run(access, supervised), 0).unwrap().outgoing;
+    sent.extend(c.receive(json!({"id":1,"result":{}}), 0).outgoing);
+    sent.extend(
+        c.receive(json!({"id":2,"result":{"thread":{"id":"t"}}}), 0)
+            .outgoing,
+    );
+    sent.extend(
+        c.receive(json!({"id":3,"result":{"turn":{"id":"u"}}}), 0)
+            .outgoing,
+    );
+    (c, sent)
+}
+fn sent<'a>(all: &'a [Value], method: &str) -> &'a Value {
+    all.iter()
+        .find(|m| m["method"] == method)
+        .unwrap_or_else(|| panic!("{method} not sent: {all:?}"))
+}
+fn approval(c: &mut codex::Client, method: &str, id: u64) -> Effects {
+    c.receive(
+        json!({"id":id,"method":method,"params":{"threadId":"t","turnId":"u","itemId":"i","command":"curl example.test","reason":"needs network","permissions":{"network":{"enabled":true},"fileSystem":null}}}),
+        1,
+    )
+}
+
+#[test]
+fn project_runs_use_the_app_server_with_the_workspace_sandbox() {
+    let (_, all) = project_started(Access::Project, false);
+    let thread = &sent(&all, "thread/start")["params"];
+    assert_eq!(thread["approvalPolicy"], "on-request");
+    assert_eq!(thread["approvalsReviewer"], "auto_review");
+    assert!(thread.get("sandbox").is_none(), "{thread}");
+    assert_eq!(thread["permissions"], "powermove");
+    assert_eq!(thread["config"]["default_permissions"], "powermove");
+    assert_eq!(
+        thread["config"]["permissions"]["powermove"]["extends"],
+        ":workspace"
+    );
+    assert_eq!(
+        thread["config"]["permissions"]["powermove"]["network"]["enabled"],
+        true
+    );
+    let turn = &sent(&all, "turn/start")["params"];
+    assert_eq!(turn["approvalPolicy"], "on-request");
+    assert!(turn.get("sandboxPolicy").is_none(), "{turn}");
+    assert_eq!(turn["permissions"], "powermove");
+    assert!(turn["outputSchema"].is_object());
+}
+#[test]
+fn supervised_project_routes_escapes_to_the_user_and_full_access_is_unsandboxed() {
+    let (_, all) = project_started(Access::Project, true);
+    assert_eq!(
+        sent(&all, "thread/start")["params"]["approvalsReviewer"],
+        "user"
+    );
+    let (_, all) = project_started(Access::Computer, false);
+    let thread = &sent(&all, "thread/start")["params"];
+    assert_eq!(thread["approvalPolicy"], "never");
+    assert_eq!(thread["sandbox"], "danger-full-access");
+    assert_eq!(
+        sent(&all, "turn/start")["params"]["sandboxPolicy"]["type"],
+        "dangerFullAccess"
+    );
+}
+#[test]
+fn editor_runs_stay_read_only() {
+    let mut c = codex::Client::default();
+    let mut all = c.run(run("a"), 0).unwrap().outgoing;
+    all.extend(c.receive(json!({"id":1,"result":{}}), 0).outgoing);
+    let thread = &sent(&all, "thread/start")["params"];
+    assert_eq!(thread["sandbox"], "read-only");
+    assert!(thread.get("approvalsReviewer").is_none());
+}
+#[test]
+fn project_steer_mid_turn_is_turn_steer_in_the_same_turn() {
+    let (mut c, _) = project_started(Access::Project, false);
+    let e = c.steer("p", "no, do it at 15:26", &[], 5).unwrap();
+    let steer = sent(&e.outgoing, "turn/steer");
+    assert_eq!(steer["params"]["expectedTurnId"], "u");
+    assert_eq!(steer["params"]["threadId"], "t");
+    assert_eq!(completed(&e), 0);
+    // Rapid double steer: both reach the same turn, in order.
+    let e = c.steer("p", "and keep it short", &[], 6).unwrap();
+    assert_eq!(
+        sent(&e.outgoing, "turn/steer")["params"]["input"][0]["text"],
+        "and keep it short"
+    );
+    // The run ends once, with Project access.
+    let done = c.receive(
+        json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"completed"}}}),
+        7,
+    );
+    assert_eq!(completed(&done), 1);
+}
+#[test]
+fn project_steer_before_the_turn_id_is_queued_not_restarted() {
+    let mut c = codex::Client::default();
+    c.run(project_run(Access::Project, false), 0).unwrap();
+    c.receive(json!({"id":1,"result":{}}), 0);
+    c.receive(json!({"id":2,"result":{"thread":{"id":"t"}}}), 0);
+    assert!(c.steer("p", "first", &[], 0).unwrap().outgoing.is_empty());
+    let e = c.receive(json!({"id":3,"result":{"turn":{"id":"u"}}}), 0);
+    assert_eq!(
+        sent(&e.outgoing, "turn/steer")["params"]["input"][0]["text"],
+        "first"
+    );
+}
+#[test]
+fn sandbox_escape_becomes_an_approval_card_and_the_answer_is_sent() {
+    let (mut c, _) = project_started(Access::Project, true);
+    let e = approval(&mut c, "item/commandExecution/requestApproval", 90);
+    assert!(e.outgoing.is_empty(), "held for the user: {:?}", e.outgoing);
+    let card = e
+        .events
+        .iter()
+        .find_map(|ev| match ev {
+            Event::Trace { value, .. } if value["kind"] == "question" => Some(value.clone()),
+            _ => None,
+        })
+        .expect("approval card");
+    assert!(
+        card["questions"][0]["question"]
+            .as_str()
+            .unwrap()
+            .contains("curl example.test")
+    );
+    let item = card["itemId"].as_str().unwrap().to_owned();
+    let allow = BTreeMap::from([("decision".to_owned(), vec!["Allow once".to_owned()])]);
+    let e = c.answer("p", &item, &allow).unwrap();
+    assert_eq!(
+        e.outgoing,
+        vec![json!({"id":90,"result":{"decision":"accept"}})]
+    );
+    // Deny, and a permissions request, use their own response shapes.
+    let e = approval(&mut c, "item/permissions/requestApproval", 91);
+    let item = e
+        .events
+        .iter()
+        .find_map(|ev| match ev {
+            Event::Trace { value, .. } => value["itemId"].as_str().map(str::to_owned),
+            _ => None,
+        })
+        .unwrap();
+    let deny = BTreeMap::from([("decision".to_owned(), vec!["Deny".to_owned()])]);
+    let e = c.answer("p", &item, &deny).unwrap();
+    assert_eq!(
+        e.outgoing,
+        vec![json!({"id":91,"result":{"permissions":{},"scope":"turn"}})]
+    );
+    let e = approval(&mut c, "item/permissions/requestApproval", 92);
+    let item = e
+        .events
+        .iter()
+        .find_map(|ev| match ev {
+            Event::Trace { value, .. } => value["itemId"].as_str().map(str::to_owned),
+            _ => None,
+        })
+        .unwrap();
+    let allow = BTreeMap::from([("decision".to_owned(), vec!["Allow for this run".to_owned()])]);
+    let e = c.answer("p", &item, &allow).unwrap();
+    assert_eq!(
+        e.outgoing,
+        vec![json!({"id":92,"result":{"permissions":{"network":{"enabled":true}},"scope":"turn"}})]
+    );
+    // "Allow for this run" settles the next request without a card.
+    let e = approval(&mut c, "item/commandExecution/requestApproval", 93);
+    assert_eq!(
+        e.outgoing,
+        vec![json!({"id":93,"result":{"decision":"accept"}})]
+    );
+}
+#[test]
+fn full_access_and_editor_runs_decline_escape_requests() {
+    let (mut c, _) = project_started(Access::Computer, false);
+    let e = approval(&mut c, "item/commandExecution/requestApproval", 90);
+    assert_eq!(
+        e.outgoing,
+        vec![json!({"id":90,"result":{"decision":"decline"}})]
+    );
+    let mut c = started();
+    let e = approval(&mut c, "item/fileChange/requestApproval", 91);
+    assert_eq!(
+        e.outgoing,
+        vec![json!({"id":91,"result":{"decision":"decline"}})]
+    );
+}
+#[test]
+fn cancel_and_crash_settle_held_approvals_cleanly() {
+    let (mut c, _) = project_started(Access::Project, true);
+    approval(&mut c, "item/commandExecution/requestApproval", 90);
+    let e = c.cancel("p", 2).unwrap();
+    assert!(
+        e.outgoing
+            .contains(&json!({"id":90,"result":{"decision":"decline"}})),
+        "{:?}",
+        e.outgoing
+    );
+    let (mut c, _) = project_started(Access::Project, true);
+    approval(&mut c, "item/commandExecution/requestApproval", 91);
+    let e = c.stopped("Agent runtime exited without a result.");
+    assert_eq!(completed(&e), 1);
+    assert!(e.events.iter().any(|ev| matches!(
+        ev,
+        Event::Completed {
+            result: RunResult::Failure { .. },
+            ..
+        }
+    )));
+}
+#[test]
+fn project_success_carries_its_access() {
+    let (mut c, _) = project_started(Access::Project, false);
+    c.receive(json!({"method":"item/completed","params":{"threadId":"t","turnId":"u","item":{"type":"agentMessage","id":"m","text":"{\"reply\":\"ok\"}"}}}), 1);
+    let e = c.receive(json!({"method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"completed"}}}), 2);
+    assert!(
+        e.events.iter().any(|ev| matches!(
+            ev,
+            Event::Completed {
+                result: RunResult::Success {
+                    access: Access::Project,
+                    ..
+                },
+                ..
+            }
+        )),
+        "{:?}",
+        e.events
+    );
 }

@@ -17,6 +17,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+mod startup_fallback;
+use startup_fallback::StartupFallback;
+pub(crate) use startup_fallback::{Direction, spawn_project};
 #[derive(Clone, Debug)]
 pub struct ProcessSpec {
     pub executable: PathBuf,
@@ -250,7 +253,24 @@ enum Input {
     WriteFailed,
 }
 /// Process startup, signing checks, all IO and shutdown occur off the caller.
-pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Handle {
+pub fn spawn(spec: ProcessSpec, machine: Machine, initial: Vec<Value>) -> Handle {
+    spawn_process(
+        spec,
+        machine,
+        Effects {
+            outgoing: initial,
+            ..Effects::default()
+        },
+        None,
+    )
+}
+
+fn spawn_process(
+    spec: ProcessSpec,
+    mut machine: Machine,
+    mut initial: Effects,
+    mut fallback: Option<StartupFallback>,
+) -> Handle {
     let surface = machine.surface();
     let (tx, rx) = mpsc::sync_channel::<QueuedAction>(128);
     let (etx, events) = mpsc::sync_channel(256);
@@ -258,10 +278,12 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
         let mut child = match spec.spawn() {
             Ok(c) => c,
             Err(err) => {
-                for e in machine
-                    .stopped(&format!("Could not start agent runtime: {err}"))
-                    .events
-                {
+                let reason = format!("Could not start agent runtime: {err}");
+                if let Some(fallback) = fallback {
+                    fallback.run(rx, etx, &reason);
+                    return;
+                }
+                for e in machine.stopped(&reason).events {
                     let _ = etx.send(e);
                 }
                 return;
@@ -291,10 +313,6 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
         let mut closing = None;
         let mut reason = crate::RUNTIME_STOPPED.to_owned();
         let mut eof = false;
-        let mut initial = Effects {
-            outgoing: initial,
-            ..Effects::default()
-        };
         if let Machine::Codex(c) = &mut machine {
             initial.append(c.start(0));
         }
@@ -305,16 +323,34 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
                     Ok(a) => a,
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        fallback = None;
                         stop = true;
                         break;
                     }
                 };
                 if matches!(action.action, Action::Shutdown) {
+                    fallback = None;
                     if let Some(reply) = action.reply {
                         let _ = reply.try_send(true);
                     }
                     stop = true;
                     break;
+                }
+                if let Some(startup) = &mut fallback {
+                    match &action.action {
+                        Action::Steer {
+                            run,
+                            prompt,
+                            images,
+                        } if *run == startup.run_id => {
+                            startup.directions.push(Direction {
+                                prompt: prompt.clone(),
+                                images: images.clone(),
+                            });
+                        }
+                        Action::Cancel(run) if *run == startup.run_id => fallback = None,
+                        _ => {}
+                    }
                 }
                 let (effects, accepted) = machine.action(action.action, now());
                 let applied = apply(surface, effects, &wtx, &etx, &mut closing);
@@ -340,6 +376,11 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
                                 ..Effects::default()
                             },
                         };
+                        if let Some(failure) = startup_fallback::startup_error(&mut fallback, &e) {
+                            reason = failure.to_owned();
+                            stop = true;
+                            break;
+                        }
                         if let Err(err) = apply(surface, e, &wtx, &etx, &mut closing) {
                             reason = err.to_string();
                             stop = true;
@@ -359,7 +400,12 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
                 }
                 Ok(Input::Eof) => {
                     for v in lines.finish().into_iter().flatten() {
-                        let _ = apply(surface, machine.receive(v, now()), &wtx, &etx, &mut closing);
+                        let e = machine.receive(v, now());
+                        if let Some(failure) = startup_fallback::startup_error(&mut fallback, &e) {
+                            reason = failure.to_owned();
+                            break;
+                        }
+                        let _ = apply(surface, e, &wtx, &etx, &mut closing);
                     }
                     eof = true;
                     stop = true;
@@ -367,7 +413,12 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
                 Err(mpsc::RecvTimeoutError::Disconnected) => stop = true,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
-            if let Err(err) = apply(surface, machine.tick(now()), &wtx, &etx, &mut closing) {
+            let tick = machine.tick(now());
+            if let Some(failure) = startup_fallback::startup_error(&mut fallback, &tick) {
+                reason = failure.to_owned();
+                break;
+            }
+            if let Err(err) = apply(surface, tick, &wtx, &etx, &mut closing) {
                 reason = err.to_string();
                 stop = true;
             }
@@ -408,6 +459,10 @@ pub fn spawn(spec: ProcessSpec, mut machine: Machine, initial: Vec<Value>) -> Ha
             reason = format!("Agent runtime exited without a result ({status}).");
         }
         terminate(&mut child);
+        if let Some(fallback) = fallback {
+            fallback.run(rx, etx, &reason);
+            return;
+        }
         // A slow subscriber cannot keep the runtime alive. After termination the
         // final status may wait for its bounded mailbox to drain.
         for event in machine.stopped(&reason).events {

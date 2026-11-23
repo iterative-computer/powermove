@@ -1424,10 +1424,12 @@ interface Local {
 function UserMessageView({
   m,
   send,
+  pending,
 }: {
   key?: string | number;
   m: Message;
   send: Send;
+  pending?: boolean;
 }) {
   const text = str(m.value.text);
   const files = Array.isArray(m.value.attachments) ? m.value.attachments : [];
@@ -1493,13 +1495,19 @@ function UserMessageView({
           </div>
         )}
         {text && <QuoteSource id={m.rowId} text={text} userMessage />}
+        {pending && (
+          <text role="status" label="Steering" style={faint}>
+            Steering
+          </text>
+        )}
       </div>
     </div>
   );
 }
 const UserMessage = memo(
   UserMessageView,
-  (a, b) => JSON.stringify(a.m) === JSON.stringify(b.m),
+  (a, b) =>
+    JSON.stringify(a.m) === JSON.stringify(b.m) && a.pending === b.pending,
 );
 const MEDIA_KIND: Record<string, string> = {
   image: "Image",
@@ -2489,15 +2497,15 @@ function Conversation({
               }}
             />
           </button>
-          {open && e.items.map(item)}
+          {open && e.items.map((m) => item(m))}
         </div>
       );
     }
-    return item(e.message);
+    return item(e.message, e.pending === true);
   };
-  const item = (m: Message) =>
+  const item = (m: Message, pending = false) =>
     m.role === "user" ? (
-      <UserMessage key={m.key} m={m} send={send} />
+      <UserMessage key={m.key} m={m} send={send} pending={pending} />
     ) : m.role === "assistant" ? (
       <AssistantMessage key={m.key} m={m} s={s} send={send} />
     ) : (
