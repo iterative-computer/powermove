@@ -7850,6 +7850,78 @@ fn token_change(same: bool, stale: bool, open: bool) -> TokenChange {
         TokenChange::Later
     }
 }
+const PALETTE_SEARCH_PAGE: usize = 60;
+
+#[derive(Default)]
+struct PopupLayoutCache {
+    // Only the command palette reuses row controls. Field menus can have
+    // provider disclosures, custom fonts and multiline descriptions.
+    labels: HashMap<(u32, u32, Option<isize>), PopupLabelPool>,
+    buttons: Vec<PopupButton>,
+    line_heights: HashMap<(u32, bool), f64>,
+    shortcut_widths: HashMap<String, f64>,
+    mask: Option<(bool, f64, f64)>,
+}
+
+#[derive(Default)]
+struct PopupLabelPool {
+    views: Vec<(Retained<NSTextField>, String)>,
+    used: usize,
+    visible: usize,
+}
+
+struct PopupButtonText {
+    label: String,
+    identifier: String,
+    help: Option<String>,
+}
+
+struct PopupButton {
+    view: Retained<NSButton>,
+    text: PopupButtonText,
+}
+
+impl PopupLayoutCache {
+    fn clear(&mut self) {
+        for pool in self.labels.values() {
+            for (view, _) in &pool.views {
+                view.removeFromSuperview();
+            }
+        }
+        for button in &self.buttons {
+            button.view.removeFromSuperview();
+        }
+        *self = Self {
+            mask: self.mask,
+            ..Self::default()
+        };
+    }
+
+    fn line_height(&mut self, size: f32, semibold: bool, mtm: MainThreadMarker) -> f64 {
+        *self
+            .line_heights
+            .entry((size.to_bits(), semibold))
+            .or_insert_with(|| {
+                let sample = popup_label("Ag", size, 0, mtm);
+                if semibold {
+                    sample.setFont(Some(&NSFont::systemFontOfSize_weight(
+                        f64::from(size),
+                        unsafe { NSFontWeightSemibold },
+                    )));
+                }
+                sample.fittingSize().height.ceil()
+            })
+    }
+}
+
+fn popup_provider_summary(model: &Picker, chosen: &[PickerRow], index: usize) -> String {
+    model.provider_summary_with_count(index, || {
+        chosen.iter().filter(|row| {
+            matches!(row, PickerRow::Choice(i) if model.choices[*i].provider == model.choices[index].provider)
+        }).count()
+    })
+}
+
 pub struct Popup {
     window: Retained<PopupWindow>,
     parent: Retained<NSWindow>,
@@ -7860,8 +7932,10 @@ pub struct Popup {
     body: Retained<NSView>,
     spring: Option<(std::time::Instant, pm_design::motion::Analytic)>,
     rows: Vec<PopupRow>,
-    /// Headings, titles, checks and shortcut hints of the rows.
+    /// Row decorations that are rebuilt instead of pooled.
     parts: Vec<Retained<NSView>>,
+    layout_cache: PopupLayoutCache,
+    lit_row_place: Option<usize>,
     /// command → shortcut glyphs shown beside palette rows.
     shortcuts: HashMap<String, String>,
     glider: Retained<NSBox>,
@@ -7963,6 +8037,8 @@ impl Popup {
             spring: None,
             rows: vec![],
             parts: vec![],
+            layout_cache: PopupLayoutCache::default(),
+            lit_row_place: None,
             shortcuts: HashMap::new(),
             glider,
             lit: false,
@@ -8059,6 +8135,7 @@ impl Popup {
     /// Rebuilds the material and rows for the current tokens.
     fn restyle(&mut self) {
         self.stale = false;
+        self.layout_cache.clear();
         let t = &self.tokens.clone();
         let surface = self.surface;
         appearance(&self.window, t);
@@ -8077,15 +8154,24 @@ impl Popup {
     /// Lays the rows out again for the query: sections under their headings,
     /// the panel as tall as its results (to `max_height`), its top edge kept.
     /// The rows' identity: the choices shown, in order, and the width.
-    fn rows_key(&self) -> u64 {
+    fn rows_key(&self, chosen: &[PickerRow], unlisted: usize) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        for row in self.model.rows() {
+        for &row in chosen {
             let c = match row {
-                PickerRow::Choice(i) => &self.model.choices[i],
+                PickerRow::Choice(i) => {
+                    i.hash(&mut h);
+                    &self.model.choices[i]
+                }
                 PickerRow::Provider(i) => {
                     let c = &self.model.choices[i];
-                    (i, &c.provider, &c.category, self.model.provider_expanded(i), self.model.provider_summary(i))
+                    (
+                        i,
+                        &c.provider,
+                        &c.category,
+                        self.model.provider_expanded(i),
+                        popup_provider_summary(&self.model, chosen, i),
+                    )
                         .hash(&mut h);
                     continue;
                 }
@@ -8099,22 +8185,25 @@ impl Popup {
                 c.checked,
                 &c.font,
                 &c.provider,
+                self.shortcuts.get(&c.command),
             )
                 .hash(&mut h);
         }
         self.model.has_provider_headers().hash(&mut h);
-        self.model.unlisted().hash(&mut h);
+        unlisted.hash(&mut h);
         self.model.note().hash(&mut h);
         self.composer.map(|kind| kind as u8).hash(&mut h);
         self.searchable.hash(&mut h);
-        (self.max_height as i64).hash(&mut h);
-        (self.window.frame().size.width as i64).hash(&mut h);
+        self.max_height.to_bits().hash(&mut h);
+        self.window.frame().size.width.to_bits().hash(&mut h);
         h.finish()
     }
     /// Builds the rows unless they already show these choices.
     fn refresh_if_changed(&mut self) {
-        if self.built != Some(self.rows_key()) || self.rows.is_empty() {
-            self.refresh();
+        let (chosen, unlisted) = self.model.rows_and_unlisted();
+        let key = self.rows_key(&chosen, unlisted);
+        if self.built != Some(key) || self.rows.is_empty() {
+            self.layout_rows(false, &chosen, unlisted, key);
         } else if let Some(first) = self.rows.first() {
             // Reopened over the same rows: from the top, as a fresh list.
             let mut rect = first.rect;
@@ -8127,7 +8216,20 @@ impl Popup {
     }
 
     fn refresh_rows(&mut self, animate_height: bool) {
-        self.built = Some(self.rows_key());
+        let (chosen, unlisted) = self.model.rows_and_unlisted();
+        let key = self.rows_key(&chosen, unlisted);
+        self.layout_rows(animate_height, &chosen, unlisted, key);
+    }
+
+    fn layout_rows(
+        &mut self,
+        animate_height: bool,
+        chosen: &[PickerRow],
+        unlisted: usize,
+        key: u64,
+    ) {
+        self.built = Some(key);
+        self.update_row_selection(None);
         let mut frame = self.window.frame();
         let old_search = self.search.frame();
         let old_scroll = self.scroll.frame();
@@ -8144,10 +8246,11 @@ impl Popup {
             list: &self.list,
             parts: &mut self.parts,
             rows: &mut self.rows,
+            cache: &mut self.layout_cache,
             target: self.target.as_deref(),
             shortcuts: &self.shortcuts,
         }
-        .rebuild();
+        .rebuild(chosen, unlisted);
         if (frame.size.height - height).abs() > 0.5 {
             if self.composer != Some(ComposerPicker::Model) {
                 frame.origin.y += frame.size.height - height;
@@ -8181,6 +8284,177 @@ impl Popup {
     }
 }
 
+/// Runs the native palette regression on the AppKit main thread.
+#[doc(hidden)]
+pub fn check_palette_typing() {
+    let mtm = MainThreadMarker::new().unwrap();
+    let _app = NSApplication::sharedApplication(mtm);
+    let parent = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            NSRect::new(NSPoint::ZERO, NSSize::new(800., 600.)),
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            true,
+        )
+    };
+    unsafe { parent.setReleasedWhenClosed(false) };
+    let t = Tokens::new(Scheme::Dark, Accessibility::default());
+    let mut choices = Vec::new();
+    for (kind, names) in [
+        ("Layer", [("Delta", 20), ("Desk", 80), ("Door", 200)]),
+        ("Effect", [("Delta", 10), ("Desk", 20), ("Door", 70)]),
+        ("Command", [("Delete", 10), ("Detach", 20), ("Dock", 120)]),
+    ] {
+        for (name, count) in names {
+            for i in 0..count {
+                let prefix = if kind == "Effect" { "Effect · " } else { "" };
+                let choice =
+                    Choice::new(format!("{prefix}{name} {i}"), format!("{kind}:{name}:{i}"))
+                        .within(kind);
+                choices.push(if kind == "Command" {
+                    choice
+                } else {
+                    choice.on_search()
+                });
+            }
+        }
+    }
+    let (sender, _receiver) = async_channel::unbounded();
+    let popup = Popup::new(&parent, &t, Surface::Palette, choices, sender);
+    let mut popup = popup.borrow_mut();
+    popup
+        .shortcuts
+        .insert("Command:Delete:0".into(), "⌘D".into());
+    popup.refresh();
+
+    let first_button = popup.rows[0].button.clone();
+    let mask = popup.scroll.layer().unwrap().mask().unwrap();
+    let shape = popup_shape(&t, Surface::Palette);
+    let selected = |button: &NSButton| {
+        button
+            .accessibilityValue()
+            .and_then(|value| value.downcast::<NSString>().ok())
+            .is_some_and(|value| value.to_string() == "Selected")
+    };
+    for (query, count, unlisted) in [
+        ("d", 60, 490),
+        ("de", 60, 100),
+        ("del", 40, 0),
+        ("", 150, 0),
+    ] {
+        popup.search.setStringValue(&NSString::from_str(query));
+        let start = std::time::Instant::now();
+        popup.searched();
+        let elapsed = start.elapsed().as_secs_f64() * 1000.;
+        println!("{query:?}: {elapsed:.3} ms, {} rows", popup.rows.len());
+
+        assert_eq!(popup.rows.len(), count, "{query:?}");
+        assert_eq!(
+            popup.scroll.layer().unwrap().mask().as_deref(),
+            Some(&*mask)
+        );
+        assert_eq!(popup.lit_row_place, (!query.is_empty()).then_some(0));
+        assert_eq!(popup.rows[0].button, first_button, "row control is reused");
+        assert!(popup.layout_cache.shortcut_widths.contains_key("⌘D"));
+        assert_eq!(
+            popup.rows[0]
+                .button
+                .accessibilityHelp()
+                .unwrap()
+                .to_string(),
+            "⌘D"
+        );
+        let controls = popup.list.subviews().to_vec();
+        let labels: Vec<_> = controls
+            .iter()
+            .filter_map(|view| view.downcast_ref::<NSTextField>())
+            .filter(|label| !label.isHidden())
+            .collect();
+        let overflow: Vec<_> = labels
+            .iter()
+            .map(|label| label.stringValue().to_string())
+            .filter(|text| text.ends_with("more · type to narrow"))
+            .collect();
+        let expected: Vec<_> = (unlisted > 0)
+            .then(|| format!("{unlisted} more · type to narrow"))
+            .into_iter()
+            .collect();
+        assert_eq!(overflow, expected);
+        assert_eq!(
+            controls
+                .iter()
+                .filter_map(|view| view.downcast_ref::<NSButton>())
+                .filter(|button| !button.isHidden())
+                .count(),
+            count
+        );
+        let (rows, _) = popup.model.rows_and_unlisted();
+        let mut previous_end = 0.;
+        for (place, row) in popup.rows.iter().enumerate() {
+            assert_eq!(row.kind, rows[place]);
+            let PickerRow::Choice(index) = row.kind else {
+                panic!("unexpected provider")
+            };
+            let choice = &popup.model.choices[index];
+            assert_eq!(row.button.tag(), place as isize);
+            assert_eq!(row.button.frame(), row.rect);
+            assert_eq!(row.rect.size.height, f64::from(shape.row));
+            assert!(row.rect.origin.y >= previous_end);
+            previous_end = row.rect.origin.y + row.rect.size.height;
+            assert!(!row.button.isHidden());
+            assert_eq!(
+                NSAccessibility::accessibilityIdentifier(&*row.button)
+                    .unwrap()
+                    .to_string(),
+                format!("shell.palette.{}", choice.command)
+            );
+            assert_eq!(
+                NSAccessibility::accessibilityLabel(&*row.button)
+                    .unwrap()
+                    .to_string(),
+                choice.label
+            );
+            assert_eq!(selected(&row.button), place == 0 && !query.is_empty());
+            let title = labels.iter().find(|label| {
+                label.stringValue().to_string() == choice.label
+                    && label.frame().origin.y >= row.rect.origin.y
+                    && label.frame().origin.y + label.frame().size.height <= previous_end
+            });
+            assert!(
+                title.is_some(),
+                "title missing inside the row for {}",
+                choice.label
+            );
+        }
+        if query == "de" {
+            popup.model.navigate("down");
+            popup.light(true);
+            assert!(!selected(&popup.rows[0].button));
+            assert!(selected(&popup.rows[1].button));
+        }
+    }
+    popup.tokens = Tokens::new(Scheme::Light, Accessibility::default());
+    popup.restyle();
+    assert!(
+        unsafe { first_button.superview() }.is_none(),
+        "restyling discards the previous controls"
+    );
+    assert_eq!(popup.rows.len(), 150);
+    let title = popup
+        .list
+        .subviews()
+        .to_vec()
+        .into_iter()
+        .filter_map(|view| view.downcast::<NSTextField>().ok())
+        .find(|label| label.stringValue().to_string() == "Delete 0")
+        .unwrap();
+    assert_eq!(
+        title.textColor().as_deref(),
+        Some(&*native_color(popup.tokens.colors.text))
+    );
+}
+
 /// The field menu's AppKit view layout; does not need a window to paint.
 struct PopupLayout<'a> {
     width: f64,
@@ -8195,26 +8469,155 @@ struct PopupLayout<'a> {
     list: &'a PopupList,
     parts: &'a mut Vec<Retained<NSView>>,
     rows: &'a mut Vec<PopupRow>,
+    cache: &'a mut PopupLayoutCache,
     target: Option<&'a PopupTarget>,
     shortcuts: &'a HashMap<String, String>,
 }
 impl PopupLayout<'_> {
-    fn rebuild(self) -> f64 {
+    fn label(
+        &mut self,
+        text: &str,
+        size: f32,
+        color: u32,
+        align: Option<NSTextAlignment>,
+    ) -> Retained<NSTextField> {
+        let mtm = MainThreadMarker::from(self.list);
+        if self.surface != Surface::Palette {
+            let label = popup_label(text, size, color, mtm);
+            if let Some(align) = align {
+                label.setAlignment(align);
+            }
+            self.list.addSubview(&label);
+            self.parts
+                .push(Retained::into_super(Retained::into_super(label.clone())));
+            return label;
+        }
+        let pool = self
+            .cache
+            .labels
+            .entry((size.to_bits(), color, align.map(|align| align.0)))
+            .or_default();
+        let place = pool.used;
+        pool.used += 1;
+        if let Some((label, previous)) = pool.views.get_mut(place) {
+            if previous != text {
+                label.setStringValue(&NSString::from_str(text));
+                text.clone_into(previous);
+            }
+            if place >= pool.visible {
+                label.setHidden(false);
+            }
+            return label.clone();
+        }
+        let label = popup_label(text, size, color, mtm);
+        if let Some(align) = align {
+            label.setAlignment(align);
+        }
+        // Keep each row's button above labels, including labels added after
+        // the pool has already been used for a different query.
+        if let Some(first) = self.cache.buttons.first() {
+            self.list.addSubview_positioned_relativeTo(
+                &label,
+                NSWindowOrderingMode::Below,
+                Some(&first.view),
+            );
+        } else {
+            self.list.addSubview(&label);
+        }
+        pool.views.push((label.clone(), text.to_owned()));
+        label
+    }
+
+    fn button(
+        &mut self,
+        place: usize,
+        rect: NSRect,
+        text: PopupButtonText,
+        disclosure: Option<bool>,
+        reuse: bool,
+    ) -> Retained<NSButton> {
+        if reuse && let Some(button) = self.cache.buttons.get_mut(place) {
+            if button.text.label != text.label {
+                button
+                    .view
+                    .setAccessibilityLabel(Some(&NSString::from_str(&text.label)));
+            }
+            if button.text.identifier != text.identifier {
+                button
+                    .view
+                    .setAccessibilityIdentifier(Some(&NSString::from_str(&text.identifier)));
+            }
+            if button.text.help != text.help {
+                let help = text.help.as_deref().map(NSString::from_str);
+                button.view.setAccessibilityHelp(help.as_deref());
+            }
+            button.text = text;
+            if button.view.isHidden() {
+                button.view.setHidden(false);
+            }
+            if button.view.frame() != rect {
+                button.view.setFrame(rect);
+            }
+            return button.view.clone();
+        }
+        let button = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                &NSString::from_str(""),
+                self.target.map(|t| t as &AnyObject),
+                Some(sel!(pick:)),
+                MainThreadMarker::from(self.list),
+            )
+        };
+        button.setTransparent(true);
+        if let Some(expanded) = disclosure {
+            unsafe {
+                button.setAccessibilityRole(Some(NSAccessibilityDisclosureTriangleRole));
+                button.setAccessibilityExpanded(expanded);
+            }
+        }
+        button.setAccessibilityLabel(Some(&NSString::from_str(&text.label)));
+        button.setAccessibilityIdentifier(Some(&NSString::from_str(&text.identifier)));
+        if let Some(help) = &text.help {
+            button.setAccessibilityHelp(Some(&NSString::from_str(help)));
+        }
+        button.setTag(place as isize);
+        button.setFrame(rect);
+        self.list.addSubview(&button);
+        if reuse {
+            self.cache.buttons.push(PopupButton {
+                view: button.clone(),
+                text,
+            });
+        }
+        button
+    }
+
+    fn rebuild(mut self, chosen: &[PickerRow], unlisted: usize) -> f64 {
         for part in self.parts.drain(..) {
             part.removeFromSuperview();
         }
         for row in self.rows.drain(..) {
-            row.button.removeFromSuperview();
+            if !self
+                .cache
+                .buttons
+                .get(row.place)
+                .is_some_and(|button| button.view == row.button)
+            {
+                row.button.removeFromSuperview();
+            }
         }
         let mtm = MainThreadMarker::new().unwrap();
         let t = self.tokens;
         let (m, shape) = (t.metrics, popup_shape(t, self.surface));
-        let chosen = self.model.rows();
-        // A long list (every installed font) shows a page; typing narrows it.
-        let more_rows = Some(self.model.unlisted()).filter(|n| *n > 0);
         let width = self.width;
         let (inset, row_h) = (shape.inset as f64, shape.row as f64);
         let model_rows = self.model.choices.iter().any(|c| c.provider.is_some());
+        let reuse_buttons = self.surface == Surface::Palette && !model_rows;
+        if !reuse_buttons {
+            for button in self.cache.buttons.drain(..) {
+                button.view.removeFromSuperview();
+            }
+        }
         let checks = chosen.iter().any(|row| match *row {
             PickerRow::Choice(i) => self.model.choices[i].checked.is_some(),
             PickerRow::Provider(_) => true,
@@ -8230,22 +8633,35 @@ impl PopupLayout<'_> {
                 0.
             };
         let caption = t.text(pm_design::Text::Caption).size;
+        let caption_h = self.cache.line_height(caption, false, mtm);
+        let body_h = self.cache.line_height(t.typography.body, false, mtm);
+        let semibold_body_h = if model_rows {
+            self.cache.line_height(t.typography.body, true, mtm)
+        } else {
+            body_h
+        };
         let mut seen_provider = false;
         let mut y = 0.;
-        let mut category: Option<String> = None;
-        let centred = |view: &NSView, x: f64, top: f64, height: f64, width: f64| {
-            let h = view.fittingSize().height.ceil();
-            view.setFrame(NSRect::new(
+        let mut category = None;
+        let centred = |view: &NSView, x: f64, top: f64, height: f64, width: f64, h: f64| {
+            let frame = NSRect::new(
                 NSPoint::new(x, top + ((height - h) / 2.).floor()),
                 NSSize::new(width, h),
-            ));
+            );
+            if view.frame() != frame {
+                view.setFrame(frame);
+            }
         };
+        // Keep immutable model/shortcut references independent of the view pool.
+        let model = self.model;
+        let shortcuts = self.shortcuts;
         for (place, &row) in chosen.iter().enumerate() {
             let (index, disclosure) = match row {
                 PickerRow::Choice(index) => (index, None),
                 PickerRow::Provider(index) => (index, Some(self.model.provider_expanded(index))),
             };
-            let c = &self.model.choices[index];
+            let c = &model.choices[index];
+            let summary = disclosure.map(|_| popup_provider_summary(model, chosen, index));
             if disclosure.is_some() {
                 if seen_provider {
                     let padding = f64::from(t.space.xs);
@@ -8269,21 +8685,18 @@ impl PopupLayout<'_> {
                 }
                 seen_provider = true;
             }
-            if sections && category.as_deref() != Some(c.category.as_str()) {
-                category = Some(c.category.clone());
+            if sections && category != Some(c.category.as_str()) {
+                category = Some(c.category.as_str());
                 if c.category.is_empty() {
                     y += if place > 0 { t.space.sm as f64 } else { 0. };
                 } else {
                     // A heading sits low in its band, nearer its own rows.
-                    let heading = popup_label(&c.category, caption, t.colors.muted, mtm);
-                    let h = heading.fittingSize().height.ceil();
+                    let heading = self.label(&c.category, caption, t.colors.muted, None);
+                    let h = caption_h;
                     heading.setFrame(NSRect::new(
                         NSPoint::new(edge, y + shape.heading as f64 - h - t.space.xs as f64),
                         NSSize::new(width - edge * 2., h),
                     ));
-                    self.list.addSubview(&heading);
-                    self.parts
-                        .push(Retained::into_super(Retained::into_super(heading)));
                     y += shape.heading as f64;
                 }
             }
@@ -8303,34 +8716,33 @@ impl PopupLayout<'_> {
                 NSSize::new(width - inset * 2., item_h),
             );
             let mut trailing = rect.origin.x + rect.size.width - t.space.md as f64;
-            if let Some(glyphs) = self.shortcuts.get(&c.command) {
-                let hint = popup_label(glyphs, caption, t.colors.faint, mtm);
-                hint.setAlignment(NSTextAlignment::Right);
-                let w = hint.fittingSize().width.ceil();
-                centred(&hint, trailing - w, y, row_h, w);
+            if let Some(glyphs) = shortcuts.get(&c.command) {
+                let hint = self.label(
+                    glyphs,
+                    caption,
+                    t.colors.faint,
+                    Some(NSTextAlignment::Right),
+                );
+                let w = if let Some(&width) = self.cache.shortcut_widths.get(glyphs) {
+                    width
+                } else {
+                    let width = hint.fittingSize().width.ceil();
+                    self.cache.shortcut_widths.insert(glyphs.clone(), width);
+                    width
+                };
+                centred(&hint, trailing - w, y, row_h, w, caption_h);
                 trailing -= w + t.space.lg as f64;
-                self.list.addSubview(&hint);
-                self.parts
-                    .push(Retained::into_super(Retained::into_super(hint)));
             }
-            if let Some(expanded) = disclosure {
+            if let (Some(expanded), Some(summary)) = (disclosure, &summary) {
                 let tertiary = if t.accessibility.increase_contrast {
                     t.colors.muted
                 } else {
                     t.colors.faint
                 };
-                let summary = popup_label(
-                    &self.model.provider_summary(index),
-                    caption,
-                    tertiary,
-                    mtm,
-                );
-                summary.setAlignment(NSTextAlignment::Right);
+                let summary = self.label(summary, caption, tertiary, Some(NSTextAlignment::Right));
                 let w = summary.fittingSize().width.ceil().min((trailing - lead).max(0.) / 2.);
-                centred(&summary, trailing - w, y, row_h, w);
+                centred(&summary, trailing - w, y, row_h, w, caption_h);
                 trailing -= w + t.space.md as f64;
-                self.list.addSubview(&summary);
-                self.parts.push(Retained::into_super(Retained::into_super(summary)));
 
                 let icon = if expanded { "chevron.down" } else { "chevron.right" };
                 let chevron = NSImageView::imageViewWithImage(&symbol(icon, ""), mtm);
@@ -8342,16 +8754,21 @@ impl PopupLayout<'_> {
                 ));
                 chevron.setContentTintColor(Some(&native_color(t.colors.secondary)));
                 chevron.setAccessibilityElement(false);
-                centred(&chevron, edge, y, row_h, m.symbol_inline as f64);
+                centred(
+                    &chevron,
+                    edge,
+                    y,
+                    row_h,
+                    m.symbol_inline as f64,
+                    chevron.fittingSize().height.ceil(),
+                );
                 self.list.addSubview(&chevron);
                 self.parts.push(Retained::into_super(Retained::into_super(chevron)));
             } else if c.is_default {
-                let hint = popup_label("Default", caption, t.colors.muted, mtm);
+                let hint = self.label("Default", caption, t.colors.muted, None);
                 let w = hint.fittingSize().width.ceil();
-                centred(&hint, trailing - w, y, row_h, w);
+                centred(&hint, trailing - w, y, row_h, w, caption_h);
                 trailing -= w + t.space.md as f64;
-                self.list.addSubview(&hint);
-                self.parts.push(Retained::into_super(Retained::into_super(hint)));
             }
             if disclosure.is_none() && c.checked == Some(true) {
                 let mark = NSImageView::imageViewWithImage(&symbol("checkmark", "Checked"), mtm);
@@ -8363,7 +8780,14 @@ impl PopupLayout<'_> {
                 ));
                 mark.setContentTintColor(Some(&native_color(t.colors.text)));
                 mark.setAccessibilityElement(false);
-                centred(&mark, edge, y, row_h, m.symbol_inline as f64);
+                centred(
+                    &mark,
+                    edge,
+                    y,
+                    row_h,
+                    m.symbol_inline as f64,
+                    mark.fittingSize().height.ceil(),
+                );
                 self.list.addSubview(&mark);
                 self.parts
                     .push(Retained::into_super(Retained::into_super(mark)));
@@ -8379,29 +8803,50 @@ impl PopupLayout<'_> {
                 t.colors.text
             };
             let title_size = t.typography.body;
-            let title = popup_label(&display_label, title_size, title_color, mtm);
-            if disclosure.is_some() {
-                title.setFont(Some(&NSFont::systemFontOfSize_weight(
-                    f64::from(title_size),
-                    unsafe { NSFontWeightSemibold },
-                )));
-            } else if let Some(family) = &c.font
-                && let Some(face) = NSFontManager::sharedFontManager(mtm)
-                    .fontWithFamily_traits_weight_size(
+            let (title, title_h) = if disclosure.is_some() || c.font.is_some() {
+                let title = popup_label(&display_label, title_size, title_color, mtm);
+                let height = if disclosure.is_some() {
+                    title.setFont(Some(&NSFont::systemFontOfSize_weight(
+                        f64::from(title_size),
+                        unsafe { NSFontWeightSemibold },
+                    )));
+                    semibold_body_h
+                } else if let Some(face) = c.font.as_ref().and_then(|family| {
+                    NSFontManager::sharedFontManager(mtm).fontWithFamily_traits_weight_size(
                         &NSString::from_str(family),
                         NSFontTraitMask::empty(),
                         5,
                         t.typography.reading as f64,
                     )
-            {
-                title.setFont(Some(&face));
-            }
+                }) {
+                    title.setFont(Some(&face));
+                    title.fittingSize().height.ceil()
+                } else {
+                    body_h
+                };
+                self.list.addSubview(&title);
+                self.parts
+                    .push(Retained::into_super(Retained::into_super(title.clone())));
+                (title, height)
+            } else {
+                (
+                    self.label(&display_label, title_size, title_color, None),
+                    body_h,
+                )
+            };
             let title_lead = if disclosure.is_some() {
                 edge + f64::from(m.symbol_inline + t.space.xs)
             } else {
                 lead
             };
-            centred(&title, title_lead, y, row_h, (trailing - title_lead).max(0.));
+            centred(
+                &title,
+                title_lead,
+                y,
+                row_h,
+                (trailing - title_lead).max(0.),
+                title_h,
+            );
             if let Some((detail, height)) = description {
                 detail.setFrame(NSRect::new(
                     NSPoint::new(lead, y + row_h - t.space.xs as f64),
@@ -8410,57 +8855,44 @@ impl PopupLayout<'_> {
                 self.list.addSubview(&detail);
                 self.parts.push(Retained::into_super(Retained::into_super(detail)));
             } else if !detail.is_empty() {
-                let detail = popup_label(detail, caption, t.colors.secondary, mtm);
+                let detail = self.label(detail, caption, t.colors.secondary, None);
                 centred(
                     &detail,
                     lead,
                     y + row_h - t.space.xs as f64,
                     item_h - row_h,
                     (trailing - lead).max(0.),
+                    caption_h,
                 );
-                self.list.addSubview(&detail);
-                self.parts
-                    .push(Retained::into_super(Retained::into_super(detail)));
             }
-            self.list.addSubview(&title);
-            self.parts
-                .push(Retained::into_super(Retained::into_super(title)));
             // The whole row takes the press; it draws nothing itself.
-            let button = unsafe {
-                NSButton::buttonWithTitle_target_action(
-                    &NSString::from_str(""),
-                    self.target.map(|t| t as &AnyObject),
-                    Some(sel!(pick:)),
-                    mtm,
-                )
-            };
-            button.setTransparent(true);
-            let ax_label = if let Some(expanded) = disclosure {
-                unsafe {
-                    button.setAccessibilityRole(Some(NSAccessibilityDisclosureTriangleRole));
-                    button.setAccessibilityExpanded(expanded);
-                }
-                format!("{display_label}, {}", self.model.provider_summary(index))
+            let label = if let Some(summary) = summary {
+                format!("{display_label}, {summary}")
             } else if c.is_default {
                 format!("{display_label}, Default")
             } else {
                 display_label
             };
-            button.setAccessibilityLabel(Some(&NSString::from_str(&ax_label)));
             let identifier = if disclosure.is_some() {
                 format!("shell.model-provider.{}", c.provider.as_deref().unwrap_or_default())
             } else {
                 format!("shell.palette.{}", c.command)
             };
-            button.setAccessibilityIdentifier(Some(&NSString::from_str(&identifier)));
-            if let Some(glyphs) = self.shortcuts.get(&c.command) {
-                button.setAccessibilityHelp(Some(&NSString::from_str(glyphs)));
-            } else if !detail.is_empty() {
-                button.setAccessibilityHelp(Some(&NSString::from_str(detail)));
-            }
-            button.setTag(place as isize);
-            button.setFrame(rect);
-            self.list.addSubview(&button);
+            let help = shortcuts
+                .get(&c.command)
+                .cloned()
+                .or_else(|| (!detail.is_empty()).then(|| detail.to_owned()));
+            let button = self.button(
+                place,
+                rect,
+                PopupButtonText {
+                    label,
+                    identifier,
+                    help,
+                },
+                disclosure,
+                reuse_buttons,
+            );
             self.rows.push(PopupRow {
                 place,
                 kind: row,
@@ -8469,35 +8901,44 @@ impl PopupLayout<'_> {
             });
             y += item_h;
         }
-        if let Some(rest) = more_rows {
-            let note = popup_label(
-                &format!("{rest} more · type to narrow"),
+        if unlisted > 0 {
+            let note = self.label(
+                &format!("{unlisted} more · type to narrow"),
                 caption,
                 t.colors.muted,
-                mtm,
+                None,
             );
-            centred(&note, edge, y, row_h, width - edge * 2.);
-            self.list.addSubview(&note);
-            self.parts
-                .push(Retained::into_super(Retained::into_super(note)));
+            centred(&note, edge, y, row_h, width - edge * 2., caption_h);
             y += row_h;
         }
-        if let Some(note) = self.model.note() {
+        if let Some(note) = model.note() {
             let note = popup_label(note, t.typography.body, t.colors.muted, mtm);
             note.setAccessibilityElement(true);
-            centred(&note, lead, y, row_h, (width - lead - edge).max(0.));
+            centred(&note, lead, y, row_h, (width - lead - edge).max(0.), body_h);
             self.list.addSubview(&note);
             self.parts
                 .push(Retained::into_super(Retained::into_super(note)));
             y += row_h;
         } else if chosen.is_empty() {
-            let none = popup_label("No Results", t.typography.body, t.colors.muted, mtm);
-            none.setAlignment(NSTextAlignment::Center);
-            centred(&none, inset, 0., row_h, width - inset * 2.);
-            self.list.addSubview(&none);
-            self.parts
-                .push(Retained::into_super(Retained::into_super(none)));
+            let none = self.label(
+                "No Results",
+                t.typography.body,
+                t.colors.muted,
+                Some(NSTextAlignment::Center),
+            );
+            centred(&none, inset, 0., row_h, width - inset * 2., body_h);
             y = row_h;
+        }
+        for pool in self.cache.labels.values_mut() {
+            for (label, _) in pool.views.iter().take(pool.visible).skip(pool.used) {
+                label.setHidden(true);
+            }
+            pool.visible = std::mem::take(&mut pool.used);
+        }
+        for button in self.cache.buttons.iter().skip(chosen.len()) {
+            if !button.view.isHidden() {
+                button.view.setHidden(true);
+            }
         }
         let field_h = if self.searchable { self.search.fittingSize().height.ceil() } else { 0. };
         let above = if self.searchable { inset * 2. + field_h } else { inset };
@@ -8519,8 +8960,13 @@ impl PopupLayout<'_> {
             NSPoint::ZERO,
             NSSize::new(width, if more { y + POPUP_FADE } else { y }),
         ));
-        self.scroll.setWantsLayer(true);
-        if let Some(layer) = self.scroll.layer() {
+        let mask = (more, width, shown);
+        if self.cache.mask != Some(mask) {
+            self.scroll.setWantsLayer(true);
+        }
+        if self.cache.mask != Some(mask)
+            && let Some(layer) = self.scroll.layer()
+        {
             let fade = more.then(|| {
                 let fade = CAGradientLayer::new();
                 unsafe {
@@ -8540,14 +8986,21 @@ impl PopupLayout<'_> {
                 fade
             });
             unsafe { layer.setMask(fade.as_deref().map(|f| &**f)) };
+            self.cache.mask = Some(mask);
         }
         self.list.scrollPoint(NSPoint::ZERO);
         height
     }
 }
 
+fn popup_checked_row<'a>(model: &Picker, rows: &'a [PopupRow]) -> Option<&'a PopupRow> {
+    rows.iter().find(|row| {
+        matches!(row.kind, PickerRow::Choice(index) if model.choices[index].checked == Some(true))
+    })
+}
+
 fn reveal_popup_check(model: &Picker, rows: &[PopupRow], list: &PopupList, scroll: &NSScrollView) {
-    if let Some(row) = model.selected().and_then(|place| rows.get(place)) {
+    if let Some(row) = popup_checked_row(model, rows) {
         let mut rect = row.rect;
         let room = scroll.frame().size.height;
         rect.origin.y = (rect.origin.y - (room - rect.size.height) / 2.).max(0.);
@@ -8563,7 +9016,7 @@ fn popup_checked_offset(
     height: f64,
     row_height: f32,
 ) -> Option<f32> {
-    let row = model.selected().and_then(|place| rows.get(place))?;
+    let row = popup_checked_row(model, rows)?;
     let frame = scroll.frame();
     let row_y = row.rect.origin.y - scroll.contentView().bounds().origin.y;
     Some((height - frame.origin.y - frame.size.height + row_y + row_height as f64 / 2.) as f32)
@@ -8631,7 +9084,8 @@ pub fn capture_agent_picker(
             model.toggle_provider(index, Some(false))?;
         }
     }
-    model.search(query.to_owned());
+    let (chosen, unlisted) = model.search_and_list(query.to_owned());
+    let mut cache = PopupLayoutCache::default();
     let mut parts = vec![];
     let mut rows = vec![];
     let height = PopupLayout {
@@ -8651,9 +9105,11 @@ pub fn capture_agent_picker(
         list: &list,
         parts: &mut parts,
         rows: &mut rows,
+        cache: &mut cache,
         target: None,
         shortcuts: &HashMap::new(),
-    }.rebuild();
+    }
+    .rebuild(&chosen, unlisted);
     if input["verifyProviderStyle"] == true {
         verify_provider_layout(t, &model, &rows, &parts);
     }
@@ -8735,25 +9191,36 @@ fn verify_provider_layout(t: &Tokens, model: &Picker, rows: &[PopupRow], parts: 
 }
 
 impl Popup {
+    fn update_row_selection(&mut self, lit: Option<usize>) {
+        let lit = lit.filter(|&place| {
+            self.rows
+                .get(place)
+                .is_some_and(|row| matches!(row.kind, PickerRow::Choice(_)))
+        });
+        if self.lit_row_place == lit {
+            return;
+        }
+        if let Some(row) = self.lit_row_place.and_then(|place| self.rows.get(place)) {
+            unsafe {
+                row.button
+                    .setAccessibilityValue(Some(&NSString::from_str("")))
+            };
+        }
+        if let Some(row) = lit.and_then(|place| self.rows.get(place)) {
+            unsafe {
+                row.button
+                    .setAccessibilityValue(Some(&NSString::from_str("Selected")))
+            };
+        }
+        self.lit_row_place = lit;
+    }
+
     /// Puts the highlight on the lit row. It appears where it lands when
     /// nothing was lit, glides there on the layout spring when `glide` (the
     /// pointer, or one key press), and fades when nothing is lit any more.
     fn light(&mut self, glide: bool) {
         let lit = self.model.lit();
-        for row in &self.rows {
-            if matches!(row.kind, PickerRow::Provider(_)) {
-                continue;
-            }
-            unsafe {
-                row.button.setAccessibilityValue(Some(&NSString::from_str(
-                    if Some(row.place) == lit {
-                        "Selected"
-                    } else {
-                        ""
-                    },
-                )));
-            }
-        }
+        self.update_row_selection(lit);
         let (reduce, spring) = (
             self.tokens.accessibility.reduce_motion,
             pm_design::motion::Preset::Layout.spring(&self.tokens.motion),
@@ -8895,8 +9362,18 @@ impl Popup {
         }
         let q = self.search.stringValue().to_string();
         if q != self.model.query {
-            self.model.search(q);
-            self.refresh();
+            if self.surface == Surface::Palette {
+                // Keep every command browsable with an empty search.
+                self.model.page = (!q.trim().is_empty()).then_some(PALETTE_SEARCH_PAGE);
+            }
+            let (chosen, unlisted) = self.model.search_and_list(q);
+            let key = self.rows_key(&chosen, unlisted);
+            if self.built == Some(key) {
+                self.list.scrollPoint(NSPoint::ZERO);
+                self.light(false);
+            } else {
+                self.layout_rows(false, &chosen, unlisted, key);
+            }
             if self.composer.is_some() {
                 self.place_at_composer();
             }
@@ -8982,7 +9459,11 @@ impl Popup {
         if self.composer == Some(ComposerPicker::Model) {
             self.model.open_providers(load_provider_state(self.provider_state.as_deref()));
         }
+        if self.surface == Surface::Palette {
+            self.model.page = None;
+        }
         self.model.search(String::new());
+        self.update_row_selection(None);
         self.search.setStringValue(&NSString::from_str(""));
         self.previous = self.parent.firstResponder();
         self.lit = false;

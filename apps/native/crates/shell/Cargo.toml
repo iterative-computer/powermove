@@ -70,3 +70,7 @@ harness = false
 [[test]]
 name = "launch_release"
 harness = false
+
+[[test]]
+name = "palette_typing"
+harness = false
