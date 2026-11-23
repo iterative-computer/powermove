@@ -1620,6 +1620,25 @@ fn edge(value: Option<&Value>) -> Option<Edge> {
         _ => None,
     }
 }
+fn legacy_track_fixture(case: &Value) -> Value {
+    let mut project = fixture();
+    let mut layers = case.get("layers").unwrap().clone();
+    // The Electron oracle packed groups by member timing alone. Model those
+    // as untimed group strips while checking the legacy lane assignments.
+    for layer in layers.as_array_mut().unwrap() {
+        if layer.get("type").and_then(Value::as_str) == Some("group") {
+            layer
+                .as_object_mut()
+                .unwrap()
+                .insert("dur", Value::Number(0.));
+        }
+    }
+    let root = project.as_object_mut().unwrap();
+    root.insert("layers", layers);
+    root.insert("dur", Value::Number(20.));
+    project
+}
+
 #[test]
 fn track_layout_matches_forty_tag_generated_group_audio_caption_and_overlap_cases() {
     for (case_no, case) in oracle()
@@ -1630,16 +1649,7 @@ fn track_layout_matches_forty_tag_generated_group_audio_caption_and_overlap_case
         .iter()
         .enumerate()
     {
-        let mut value = fixture();
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("layers", case.get("layers").unwrap().clone());
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("dur", Value::Number(20.));
-        let mut m = model(value);
+        let mut m = model(legacy_track_fixture(case));
         for id in case.get("collapsed").unwrap().as_array().unwrap() {
             m.reveal
                 .layers
@@ -1797,16 +1807,7 @@ fn track_move_preview_matches_forty_tag_cases_including_group_and_area_slots() {
         .iter()
         .enumerate()
     {
-        let mut value = fixture();
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("layers", case.get("layers").unwrap().clone());
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("dur", Value::Number(20.));
-        let mut m = model(value);
+        let mut m = model(legacy_track_fixture(case));
         for l in &m.index.layers {
             m.reveal.layers.entry(l.id.clone()).or_default();
         }
@@ -3028,6 +3029,200 @@ fn trim_in_gesture_keeps_key_comp_times_and_undoes_once() {
     undo(&mut c);
     assert_eq!(c.model.index.layer("a").unwrap().from, before.from);
     assert_eq!(c.model.index.layer("a").unwrap().duration, before.duration);
+}
+
+fn group_trim_fixture() -> Value {
+    parse(r#"{"id":"P","compId":"C","fps":30,"dur":20,"layers":[
+        {"id":"g","type":"group","from":1,"dur":8,"collapsed":false,"p":{"opacity":{"v":100,"kf":[{"i":"gk","t":4,"v":50}]}}},
+        {"id":"n","type":"group","group":"g","from":2,"dur":6,"collapsed":false,"p":{}},
+        {"id":"leaf","type":"shape","group":"n","from":3,"dur":5,"p":{}},
+        {"id":"locked","type":"shape","group":"g","from":1,"dur":8,"lock":true,"p":{}},
+        {"id":"early","type":"shape","group":"g","from":1,"dur":1,"p":{}},
+        {"id":"late","type":"shape","group":"g","from":6,"dur":2,"p":{}},
+        {"id":"empty","type":"group","from":10,"dur":2,"p":{}}
+    ]}"#).unwrap()
+}
+
+fn trim_spans(c: &TimelineClient, ids: &[&str]) -> Vec<(f64, f64)> {
+    ids.iter()
+        .map(|id| {
+            let l = c.model.index.layer(id).unwrap();
+            (l.from, l.duration)
+        })
+        .collect()
+}
+
+#[test]
+fn group_trim_drag_batches_matching_edges_and_preserves_offsets() {
+    let ids = ["g", "n", "leaf", "locked"];
+    for mode in [TimelineMode::Layers, TimelineMode::Tracks] {
+        let (_a, mut c) = client_with(group_trim_fixture());
+        c.model.mode = mode;
+        c.model.track_snap_disabled = true;
+        let kind = DragKind::TrimOut {
+            ids: strings(&["g"]),
+        };
+        let mut drag = Drag::begin(&c.model, kind.clone()).unwrap();
+        let commands = drag.commands(sample(2.)).unwrap();
+        let trims: Vec<_> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Timing(pm_kernel::TimingCommand::TrimOut { layer_ids, time }) => {
+                    Some((layer_ids.clone(), *time))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            trims,
+            [
+                (strings(&["g"]), 11.),
+                (strings(&["n", "leaf", "late"]), 10.),
+                (strings(&["early"]), 4.),
+            ]
+        );
+
+        let before = trim_spans(&c, &ids);
+        block_on(c.begin_drag(kind)).unwrap();
+        block_on(c.drag(sample(2.))).unwrap();
+        assert_eq!(
+            trim_spans(&c, &ids),
+            [(1., 10.), (2., 8.), (3., 7.), (1., 8.)]
+        );
+        block_on(c.drag(sample(-2.))).unwrap();
+        assert_eq!(
+            trim_spans(&c, &ids),
+            [(1., 6.), (2., 4.), (3., 3.), (1., 8.)]
+        );
+        block_on(c.finish_drag(true)).unwrap();
+        undo(&mut c);
+        assert_eq!(trim_spans(&c, &ids), before);
+
+        block_on(c.begin_drag(DragKind::TrimIn {
+            ids: strings(&["g"]),
+        }))
+        .unwrap();
+        block_on(c.drag(sample(0.5))).unwrap();
+        assert_eq!(
+            trim_spans(&c, &ids),
+            [(1.5, 7.5), (2.5, 5.5), (3.5, 4.5), (1., 8.)]
+        );
+        let group = c.model.index.layer("g").unwrap();
+        assert_eq!(group.from + key_time(&c, "gk"), 5.);
+        block_on(c.finish_drag(true)).unwrap();
+        undo(&mut c);
+        assert_eq!(trim_spans(&c, &ids), before);
+    }
+}
+
+#[test]
+fn group_strip_uses_its_trimmed_edge_for_hit_testing_in_both_modes() {
+    use render::{Interpolation, Label, Media, ModelPresenter, Scene, Viewport};
+
+    struct Presenter;
+    impl ModelPresenter for Presenter {
+        fn accessibility_label(&self, row: &RowId) -> String {
+            format!("{row:?}")
+        }
+        fn layer_label(&self, layer: &Layer) -> Label {
+            Label::for_kind(&layer.kind)
+        }
+        fn media(&self, _: &Layer) -> Media {
+            Media::Ready
+        }
+        fn interpolation(&self, _: &Key) -> Interpolation {
+            Interpolation::Linear
+        }
+        fn track_accessibility_label(&self, _: tracks::Area, lane: usize) -> Option<String> {
+            Some(format!("Track {}", lane + 1))
+        }
+    }
+
+    let tokens = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
+    let viewport = Viewport {
+        width: 1100.,
+        height: 500.,
+        scroll_y: 0.,
+        scroll_time: 0.,
+        pps: 60.,
+        layer_column: 200.,
+    };
+    for mode in [TimelineMode::Layers, TimelineMode::Tracks] {
+        let (_a, mut c) = client_with(group_trim_fixture());
+        c.model.mode = mode;
+        select(&mut c, &["g"]);
+        command(&mut c, "trimOut", 5.);
+        let frame = Scene::from_model(&c.model, &Presenter, &tokens, 0.)
+            .unwrap()
+            .prepare(viewport, &tokens)
+            .unwrap();
+        for (id, end) in [("g", 5.), ("n", 5.), ("empty", 12.)] {
+            let strip = frame
+                .ops
+                .iter()
+                .find(|op| op.id.strip_prefix("clip:") == Some(id))
+                .unwrap_or_else(|| panic!("Missing strip for {id} in {mode:?}"));
+            let x = viewport.layer_column + end * viewport.pps - 1.;
+            let y = strip.bounds.y + strip.bounds.height / 2.;
+            assert_eq!(
+                frame.hit_clip(x, y),
+                Some((id, Some(render::Edge::Out))),
+                "{mode:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn empty_group_trim_snaps_and_updates_the_strip() {
+    let (_a, mut c) = client_with(group_trim_fixture());
+    block_on(c.begin_drag(DragKind::TrimOut {
+        ids: strings(&["empty"]),
+    }))
+    .unwrap();
+    block_on(c.drag(DragSample {
+        time_delta: 1.14,
+        playhead: 13.125,
+        modifiers: Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+        release_tolerance: 0.08,
+        ..sample(0.)
+    }))
+    .unwrap();
+    assert_eq!(
+        c.active_drag().unwrap().snap_target_in(&c.model.index),
+        Some(13.125)
+    );
+    assert_eq!(trim_spans(&c, &["empty"]), [(10., 3.125)]);
+    block_on(c.finish_drag(true)).unwrap();
+}
+
+#[test]
+fn keyboard_group_trim_skips_locked_and_out_of_range_descendants() {
+    let (_a, mut c) = client_with(group_trim_fixture());
+    let ids = ["g", "n", "leaf", "locked", "early", "late"];
+    let before = trim_spans(&c, &ids);
+    select(&mut c, &["g"]);
+    command(&mut c, "trimOut", 5.);
+    assert_eq!(
+        trim_spans(&c, &ids),
+        [(1., 4.), (2., 3.), (3., 2.), (1., 8.), (1., 4.), (6., 2.)]
+    );
+    undo(&mut c);
+    assert_eq!(trim_spans(&c, &ids), before);
+    command(&mut c, "trimIn", 4.);
+    assert_eq!(
+        trim_spans(&c, &ids),
+        [(4., 5.), (4., 4.), (4., 4.), (1., 8.), (1., 1.), (4., 4.)]
+    );
+    select(&mut c, &["g", "early"]);
+    assert!(
+        c.model
+            .command("trimIn", 4., None, false, 0, &PropertyFacts::default())
+            .is_err()
+    );
 }
 
 #[test]

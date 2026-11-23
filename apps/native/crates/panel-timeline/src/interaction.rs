@@ -11,7 +11,10 @@ use pm_kernel::{
     PropertyCommand, SelectionCall, TimingCommand, WriteBody, new_id,
 };
 use pm_model::Value;
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Modifiers {
@@ -259,24 +262,6 @@ impl TimelineModel {
             return self.key_property(property, time);
         }
         let duration = self.index.duration;
-        if matches!(id, "trimIn" | "trimOut")
-            && layers
-                .iter()
-                .filter_map(|id| self.index.layer(id))
-                .any(|l| {
-                    !l.effectively_locked
-                        && l.kind != "group"
-                        && if id == "trimIn" {
-                            time > l.from + l.duration - 1. / self.index.fps
-                        } else {
-                            time < l.from + 1. / self.index.fps
-                        }
-                })
-        {
-            return Err(ModelError::KernelPlan(
-                "Trim refused: the playhead must leave at least one frame in the clip.".into(),
-            ));
-        }
         Ok(match id {
             "timeline.addKeyframe" => self.add_keyframes(time)?,
             "play" => Plan {
@@ -384,20 +369,37 @@ impl TimelineModel {
                 }
                 .into(),
             ),
-            "trimIn" => edit(
-                TimingCommand::TrimIn {
-                    layer_ids: layers,
-                    time,
+            "trimIn" | "trimOut" => {
+                let is_in = id == "trimIn";
+                let selected: HashSet<_> = layers.iter().collect();
+                let min_duration = 1. / self.index.fps;
+                let mut layer_ids = Vec::new();
+                for id in self.index.expanded_ids(&layers) {
+                    let layer = self.index.layer(&id).unwrap();
+                    if layer.effectively_locked {
+                        continue;
+                    }
+                    let valid = if is_in {
+                        time <= layer.from + layer.duration - min_duration
+                    } else {
+                        time >= layer.from + min_duration
+                    };
+                    if valid {
+                        layer_ids.push(id);
+                    } else if selected.contains(&id) {
+                        return Err(ModelError::KernelPlan(
+                            "Trim refused: the playhead must leave at least one frame in the clip.".into(),
+                        ));
+                    }
                 }
-                .into(),
-            ),
-            "trimOut" => edit(
-                TimingCommand::TrimOut {
-                    layer_ids: layers,
-                    time,
+                if layer_ids.is_empty() {
+                    Plan::default()
+                } else if is_in {
+                    edit(TimingCommand::TrimIn { layer_ids, time }.into())
+                } else {
+                    edit(TimingCommand::TrimOut { layer_ids, time }.into())
                 }
-                .into(),
-            ),
+            }
             "split" => {
                 let new_ids: Vec<_> = layers.iter().map(|_| new_id("L")).collect();
                 let tails: Vec<_> = layers
@@ -1435,15 +1437,13 @@ impl Drag {
                 }
             }
             DragKind::TrimIn { ids } | DragKind::TrimOut { ids } => {
+                let is_in = matches!(kind, DragKind::TrimIn { .. });
                 for id in ids {
                     let l = index.layer(id).unwrap();
-                    if l.kind != "group" {
-                        let is_in = matches!(kind, DragKind::TrimIn { .. });
-                        anchors.push(Anchor {
-                            time: if is_in { l.from } else { l.from + l.duration },
-                            edge: Some(if is_in { Edge::In } else { Edge::Out }),
-                        });
-                    }
+                    anchors.push(Anchor {
+                        time: if is_in { l.from } else { l.from + l.duration },
+                        edge: Some(if is_in { Edge::In } else { Edge::Out }),
+                    });
                 }
             }
             DragKind::Transition { layer, edge } => {
@@ -1798,29 +1798,42 @@ impl Drag {
                 );
             }
             DragKind::TrimIn { ids } | DragKind::TrimOut { ids } => {
+                let is_in = matches!(self.kind, DragKind::TrimIn { .. });
+                let min_duration = 1. / self.start.fps;
+                let earliest = if self.track_snap.is_some() {
+                    0.
+                } else {
+                    f64::NEG_INFINITY
+                };
+                let mut batch_by_time = HashMap::new();
+                let mut batches: Vec<(f64, Vec<String>)> = Vec::new();
                 for id in ids {
                     let l = self.start.layer(id).unwrap();
-                    if l.kind == "group" {
+                    let end = l.from + l.duration;
+                    let time = if is_in {
+                        (l.from + delta).min(end - min_duration).max(earliest)
+                    } else {
+                        (end + delta).max(l.from + min_duration)
+                    };
+                    // A clip entirely before zero has no legal In target at zero.
+                    if is_in && time >= end {
                         continue;
                     }
-                    out.push(
-                        if matches!(self.kind, DragKind::TrimIn { .. }) {
-                            TimingCommand::TrimIn {
-                                layer_ids: vec![id.clone()],
-                                time: (l.from + delta)
-                                    .min(l.from + l.duration - 1. / self.start.fps)
-                                    .max(if self.track_snap.is_some() { 0. } else { f64::NEG_INFINITY }),
-                            }
-                        } else {
-                            TimingCommand::TrimOut {
-                                layer_ids: vec![id.clone()],
-                                time: (l.from + l.duration + delta)
-                                    .max(l.from + 1. / self.start.fps),
-                            }
-                        }
-                        .into(),
-                    );
+                    // Normalize signed zero and retain the first-seen order.
+                    let key = if time == 0. { 0 } else { time.to_bits() };
+                    let index = *batch_by_time.entry(key).or_insert_with(|| {
+                        batches.push((time, Vec::new()));
+                        batches.len() - 1
+                    });
+                    batches[index].1.push(id.clone());
                 }
+                out.extend(batches.into_iter().map(|(time, layer_ids)| {
+                    if is_in {
+                        TimingCommand::TrimIn { layer_ids, time }.into()
+                    } else {
+                        TimingCommand::TrimOut { layer_ids, time }.into()
+                    }
+                }));
             }
             DragKind::QuickOffsetLayers { ids } => {
                 let roots: Vec<_> = ids

@@ -34,12 +34,12 @@ pub enum TimingCommand {
     /// and audio cannot start before their source (`earliestStart`) and keep
     /// showing the same source frames (`d.trim` follows the edge); caption
     /// cues stay in place. Keys are re-based to keep their composition times
-    /// unchanged. Group and locked layers are skipped. Send absolute times
-    /// in a drag. Label "Trim Layer".
+    /// unchanged. Applies to the listed unlocked layers, including groups.
+    /// Send absolute times in a drag. Label "Trim Layer".
     TrimIn { layer_ids: Vec<String>, time: f64 },
     /// Drag the Out edge / Option+`]`: the layer ends at `time`, at least
-    /// one frame long. Group and locked layers are skipped. Label "Trim
-    /// Layer".
+    /// one frame long. Applies to the listed unlocked layers, including
+    /// groups. Label "Trim Layer".
     TrimOut { layer_ids: Vec<String>, time: f64 },
     /// `[`: move the layer so its In point is at `time` (Option+Home: the
     /// composition start). Label "Move Layer In".
@@ -513,13 +513,12 @@ fn duplicate_precomp_source(
     Ok(())
 }
 
-/// Trim In / Trim Out (the timeline's `trim`): groups and locked layers are
-/// skipped.
+/// Trim only the requested layers at this time, skipping locked layers.
 fn trim(cx: &mut Cx<'_>, layer_ids: &[String], time: f64, start: bool) -> Result<(), CommandError> {
     let time = values::finite(time, "time")?;
     for id in layer_ids {
         let (loc, layer) = cx.layer(id)?;
-        if values::text(&layer, "type") == Some("group") || cx.check_lock(&loc, id).is_err() {
+        if cx.check_lock(&loc, id).is_err() {
             continue;
         }
         let fps = cx.fps(loc.comp_id.as_deref());

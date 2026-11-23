@@ -658,11 +658,16 @@ impl Scene {
             for item in &layout.items {
                 let layer = model.index.layer(&item.id).ok_or(Error::DuplicateId)?;
                 lane_by_layer.insert(item.id.as_str(), (item.area, item.lane));
+                let (from, duration) = if layer.kind == "group" && layer.duration > 0. {
+                    (layer.from, layer.duration)
+                } else {
+                    (item.from, item.duration)
+                };
                 clips.entry((item.area, item.lane)).or_default().push(Clip {
                     id: item.id.clone(),
                     name: layer.name.to_string_lossy(),
-                    from: item.from,
-                    duration: item.duration,
+                    from,
+                    duration,
                     label: p.layer_label(layer),
                     selected: selected.contains(item.id.as_str()),
                     locked: layer.effectively_locked,

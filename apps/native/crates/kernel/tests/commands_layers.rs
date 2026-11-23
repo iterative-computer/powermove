@@ -686,6 +686,71 @@ fn reorder_and_restack() {
 
 // ── timing ──────────────────────────────────────────────────────────────────
 
+fn trim_group_store() -> DocumentStore {
+    store_with(|project| {
+        project.as_object_mut().unwrap().insert("layers", parse(r#"[
+            {"id":"g","type":"group","from":1,"dur":8,"p":{"opacity":{"v":100,"kf":[{"i":"gk","t":4,"v":50}]}}},
+            {"id":"n","type":"group","group":"g","from":2,"dur":6,"p":{}},
+            {"id":"leaf","type":"shape","group":"n","from":3,"dur":5,"p":{}},
+            {"id":"locked","type":"shape","group":"g","from":1,"dur":8,"lock":true,"p":{}},
+            {"id":"empty","type":"group","from":2,"dur":3,"p":{}}
+        ]"#).unwrap());
+    })
+}
+
+#[test]
+fn group_trim_out_updates_explicit_layers_and_undo_restores_their_spans() {
+    let mut s = trim_group_store();
+    let ids = ["g", "n", "leaf", "locked", "empty"];
+    let durations = |s: &DocumentStore| ids.map(|id| num(&layer(s, id), &["dur"]));
+    let before = durations(&s);
+    for (time, expected) in [(11., [10., 9., 8., 8., 9.]), (6., [5., 4., 3., 8., 4.])] {
+        run(
+            &mut s,
+            TimingCommand::TrimOut {
+                layer_ids: ids.map(str::to_owned).to_vec(),
+                time,
+            },
+        );
+        assert_eq!(durations(&s), expected);
+        s.undo().unwrap();
+        assert_eq!(durations(&s), before);
+    }
+
+    run(
+        &mut s,
+        TimingCommand::TrimOut {
+            layer_ids: vec!["g".into()],
+            time: 7.,
+        },
+    );
+    assert_eq!(durations(&s), [6., 6., 5., 8., 3.]);
+}
+
+#[test]
+fn group_trim_in_rebases_group_keys_and_preserves_the_old_end() {
+    let mut s = trim_group_store();
+    run(
+        &mut s,
+        TimingCommand::TrimIn {
+            layer_ids: ["g", "n", "leaf", "locked"].map(str::to_owned).to_vec(),
+            time: 4.,
+        },
+    );
+    for (id, from, dur) in [
+        ("g", 4., 5.),
+        ("n", 4., 4.),
+        ("leaf", 4., 4.),
+        ("locked", 1., 8.),
+    ] {
+        let l = layer(&s, id);
+        assert_eq!((num(&l, &["from"]), num(&l, &["dur"])), (from, dur), "{id}");
+    }
+    let g = layer(&s, "g");
+    let key = get(&g, &["p", "opacity", "kf", "0"]);
+    assert_eq!(num(&g, &["from"]) + num(key, &["t"]), 5.);
+}
+
 #[test]
 fn trim_in_keeps_media_frames_and_clamps_to_the_source() {
     let mut s = store();
