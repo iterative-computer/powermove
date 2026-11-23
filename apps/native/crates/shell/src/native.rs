@@ -3662,7 +3662,12 @@ pub fn viewer_window(
         NSPoint::new(x0, slot[1] - y1),
         NSSize::new(x1 - x0, y1 - y0),
     );
-    if [x1 - x0, y1 - y0] == canvas {
+    const FIT_EPSILON: f64 = 1e-6;
+    if x0 <= start[0] + FIT_EPSILON
+        && y0 <= start[1] + FIT_EPSILON
+        && (x1 - x0 - canvas[0]).abs() <= FIT_EPSILON
+        && (y1 - y0 - canvas[1]).abs() <= FIT_EPSILON
+    {
         return (frame, None);
     }
     // The drawable is `visible × scale` rounded, as the layer sizes it; the
@@ -9875,6 +9880,17 @@ mod viewer_window_tests {
         assert_eq!(crop, None);
         assert_eq!((frame.origin.x, frame.origin.y), (80., 120.));
         assert_eq!((frame.size.width, frame.size.height), (640., 360.));
+    }
+
+    #[test]
+    fn a_fractional_fit_canvas_is_uncropped() {
+        let slot = [1540.1, 880.];
+        let zoom = slot[0] / 1920.;
+        let canvas = [1920. * zoom, 1080. * zoom];
+        let top = (slot[1] - canvas[1]) / 2.;
+        assert_ne!((top + canvas[1]) - top, canvas[1]);
+        let (_, crop) = viewer_window(slot, canvas, 2., [0., 0.]);
+        assert_eq!(crop, None);
     }
 
     #[test]

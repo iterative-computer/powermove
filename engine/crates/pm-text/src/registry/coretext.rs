@@ -1194,9 +1194,22 @@ impl CoreTextRegistry {
         t
     }
 
+    fn match_font_family(&mut self, family: &str, desc: &FontDesc) -> Option<CFRetained<CTFont>> {
+        self.match_installed_family(family, desc).or_else(|| {
+            // AppKit excludes its UI monospaced font from available families.
+            // An installed SF Mono family takes precedence over this alias.
+            (family.eq_ignore_ascii_case("SF Mono") || family.eq_ignore_ascii_case("ui-monospace"))
+                .then(|| system_monospace(desc))
+        })
+    }
+
     /// `MatchFontFamily` with the feature flags Chromium 152 ships with
     /// (AppKit style matching and AppKit PostScript matching).
-    fn match_font_family(&mut self, family: &str, desc: &FontDesc) -> Option<CFRetained<CTFont>> {
+    fn match_installed_family(
+        &mut self,
+        family: &str,
+        desc: &FontDesc,
+    ) -> Option<CFRetained<CTFont>> {
         if family.is_empty() || self.unavailable.contains(family) {
             return None;
         }
@@ -1675,6 +1688,21 @@ fn skia_exact_copy(ct: &CTFont, size: f32) -> CFRetained<CTFont> {
     );
     let desc = unsafe { CTFontDescriptor::with_attributes(attrs.as_opaque()) };
     unsafe { base.copy_with_attributes(size as f64, std::ptr::null(), Some(&desc)) }
+}
+
+fn system_monospace(desc: &FontDesc) -> CFRetained<CTFont> {
+    let size = f64::from(desc.size);
+    let weight = f64::from(to_ct_weight(desc.weight.clamp(100., 900.) as i32));
+    let font = nsfont_to_ct(&NSFont::monospacedSystemFontOfSize_weight(size, weight));
+    if desc.italic {
+        let italic = CTFontSymbolicTraits::TraitItalic;
+        if let Some(face) =
+            unsafe { font.copy_with_symbolic_traits(size, std::ptr::null(), italic, italic) }
+        {
+            return face;
+        }
+    }
+    font
 }
 
 fn nsfont_to_ct(f: &NSFont) -> CFRetained<CTFont> {

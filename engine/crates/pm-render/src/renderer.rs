@@ -311,6 +311,7 @@ fn build_options(
         final_output: request.output_kind == crate::OutputKind::Final,
         read_ahead: request.read_ahead && !request.export,
         keep_empty_groups: request.depth_id,
+        compat_probe_only: false,
     }
 }
 
@@ -2162,7 +2163,7 @@ impl Renderer {
 
     /// The compatibility needs a frame of `composition` at `time` would ask
     /// the producers for and they have not answered yet, without drawing
-    /// it: only its plan is built (the presenter tells the window what the
+    /// it: probes the plan for overrides (the presenter tells the window what the
     /// frames ahead of playback will need, `pm-node` `present`).
     pub fn compat_missing(
         &mut self,
@@ -2205,12 +2206,15 @@ impl Renderer {
             effect_host(&self.effect_host, &self.effects),
             options3d,
             Some(&mut self.text),
-            build_options(
-                &comp,
-                request,
-                self.shaders.fallback_runner,
-                self.isolate_layers,
-            ),
+            plan::BuildOptions {
+                compat_probe_only: true,
+                ..build_options(
+                    &comp,
+                    request,
+                    self.shaders.fallback_runner,
+                    self.isolate_layers,
+                )
+            },
             self.compat.as_deref(),
             None,
         );

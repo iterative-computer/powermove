@@ -890,6 +890,9 @@ mod tests {
             for coords in weights {
                 for (k, size) in animated_sizes(6).into_iter().enumerate() {
                     let skew = if k % 3 == 2 { -0.2 } else { 0.0 };
+                    // Keep the font cache warm across strikes and give each
+                    // pair of paints room to retain all of its masks.
+                    cache.evict_masks();
                     let masks = batch(&mut cache, *face, coords, glyphs, size, skew);
                     // Fresh font objects per strike: no instance is shared.
                     let mut reference = CoreTextReference::default();

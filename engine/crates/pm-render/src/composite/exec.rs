@@ -580,21 +580,29 @@ impl Exec<'_> {
         let mut pending = Pending::default();
         let mut cleared = false;
         let mut ids: Vec<Resolved> = Vec::new();
-        for draw in &plan.draws {
-            let Content::Composite(node) = &draw.content else {
-                // Group passes among them go back after the flush that
-                // draws them.
-                let (r, groups) = self.resolve_draws_owned(
-                    encoder,
-                    plan,
-                    std::slice::from_ref(draw),
-                    pass_region,
-                );
-                pending.draws.extend(r);
-                for t in groups {
-                    pending.hold(t);
+        let mut remaining = plan.draws.as_slice();
+        while !remaining.is_empty() {
+            let run_len = remaining
+                .iter()
+                .take_while(|draw| !matches!(draw.content, Content::Composite(_)))
+                .count();
+            let (run, rest) = remaining.split_at(run_len);
+            if !run.is_empty() {
+                // Resolve adjacent draws together so their missing vector
+                // scenes can share a coverage pass. Nested targets stay
+                // live until the pending draws that read them are recorded.
+                let (resolved, groups) = self.resolve_draws_owned(encoder, plan, run, pass_region);
+                pending.draws.extend(resolved);
+                for target in groups {
+                    pending.hold(target);
                 }
-                continue;
+            }
+            let Some((draw, rest)) = rest.split_first() else {
+                break;
+            };
+            remaining = rest;
+            let Content::Composite(node) = &draw.content else {
+                unreachable!("the run ends at a compositor node");
             };
             // A frame drawn in slices that is giving way records no further
             // node: each would run its whole effect chain for nothing.
