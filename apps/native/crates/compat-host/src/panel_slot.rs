@@ -44,6 +44,7 @@ impl PanelAttachment {
         body: &NSView,
         aperture: Retained<NSView>,
     ) -> Self {
+        aperture.setClipsToBounds(true);
         aperture.setWantsLayer(true);
         aperture
             .layer()

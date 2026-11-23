@@ -3661,6 +3661,13 @@ fn cached_zoom_frame(
         NSSize::new(frame.size.width * ratio, frame.size.height * ratio),
     )
 }
+#[derive(Clone, Default)]
+pub(crate) struct NativePanelGeometry {
+    pub bodies: Vec<(String, crate::layout::Rect)>,
+    pub clips: Vec<(String, crate::layout::Rect)>,
+    pub fades: Vec<(String, [f64; 2])>,
+}
+
 pub struct Host {
     pub window: Retained<NSWindow>,
     pub gpui: Retained<NSView>,
@@ -3737,6 +3744,7 @@ pub struct Host {
     pub native_panels: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
     pub native_panel_clips: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
     pub native_panel_fades: Rc<RefCell<Vec<(String, [f64; 2])>>>,
+    staged_native_panels: RefCell<Option<NativePanelGeometry>>,
     /// Keeps web panels in sync with resolved appearance and accessibility.
     pub native_style: Option<Rc<dyn Fn(&Tokens)>>,
     /// Runs inside the composition transaction, with the window size.
@@ -3952,6 +3960,7 @@ impl Host {
             native_panels: Rc::default(),
             native_panel_clips: Rc::default(),
             native_panel_fades: Rc::default(),
+            staged_native_panels: RefCell::default(),
             native_style: None,
             native_present: None,
             native_accessibility: vec![],
@@ -6266,10 +6275,18 @@ impl Host {
             }
         })
     }
-    /// Whether `present` would move the viewer slot now (the window asks
-    /// before it moves anything; native panel bodies cannot say beforehand).
+    pub(crate) fn stage_native_panels(&self, geometry: &NativePanelGeometry) {
+        let changed = geometry.bodies != *self.native_panels.borrow()
+            || geometry.clips != *self.native_panel_clips.borrow()
+            || geometry.fades != *self.native_panel_fades.borrow();
+        self.staged_native_panels.replace(changed.then(|| geometry.clone()));
+    }
+
+    /// Tell the compositor before touching a slot so it can acquire a
+    /// drawable that will be presented with the same transaction.
     fn pending(&self) -> bool {
         self.last_geometry != Some(self.viewer_geometry())
+            || self.staged_native_panels.borrow().is_some()
     }
     fn present(&mut self) -> gpui_macos::composition::SlotChange {
         if let (Some((cover, cached, old_zoom, old_pan)), Some((_, Some(zoom), pan)), Some(r)) = (
@@ -6332,6 +6349,13 @@ impl Host {
             }
             self.last_geometry = Some(geometry);
         }
+        let panels = self.staged_native_panels.get_mut().take();
+        let panels_moved = panels.is_some();
+        if let Some(panels) = panels {
+            self.native_panels.replace(panels.bodies);
+            self.native_panel_clips.replace(panels.clips);
+            self.native_panel_fades.replace(panels.fades);
+        }
         let bounds = self.gpui.bounds().size;
         let native = self
             .native_present
@@ -6348,7 +6372,7 @@ impl Host {
                 .map(gpui_macos::composition::AccessibilityItem::Native),
         );
         gpui_macos::composition::publish_accessibility(&self.gpui, order);
-        (moved || native).into()
+        (moved || panels_moved || native).into()
     }
     /// Where the window stands. A tab the group is not showing keeps the
     /// frame it had when it was last shown: its group's frame is the shown
