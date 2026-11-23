@@ -465,7 +465,7 @@ ruler 24, layer rows 30 (strip 26), property rows 22, bottom bar 24.
   is the ruler's one bright mark.
 - Bottom bar (`pm_panel_timeline::footer`): under the layer column, zoom (a
   minus, a slider on a logarithmic scale, a plus; twice on the slider fits
-  the composition) and the composition's length; under the tracks, the
+  the composition); under the tracks, the
   navigator: a thumb as long as the time on screen, dragged to scroll, a
   press beside it bringing the thumb there. Rows scroll with a thumb of the
   same recipe at the tracks' trailing edge. Thumbs are ink at 22 %, 38 %

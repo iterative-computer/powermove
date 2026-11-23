@@ -4723,25 +4723,6 @@ fn timeline_header_has_no_edit_tool_buttons(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn g6_visible_tool_buttons_select_split_and_selection(cx: &mut TestAppContext) {
-    let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
-    let at = bounds(&mut s.vcx, "timeline.tool:split").center();
-    s.vcx.simulate_click(at, Modifiers::none());
-    s.idle(cx);
-    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Split);
-    let cancelled = s.surface.update(&mut s.vcx, |t, cx| t.cancel(cx));
-    assert!(cancelled, "Escape exits Split with no clip selected");
-    s.idle(cx);
-    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Selection);
-    s.vcx.simulate_click(at, Modifiers::none());
-    s.idle(cx);
-    let at = bounds(&mut s.vcx, "timeline.tool:selection").center();
-    s.vcx.simulate_click(at, Modifiers::none());
-    s.idle(cx);
-    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Selection);
-}
-
-#[gpui::test]
 fn g2_transition_delete_removes_the_capsule_instead_of_the_clip(cx: &mut TestAppContext) {
     let mut project: serde_json::Value =
         serde_json::from_str(&crate::v4_view_tests::project_json(2)).unwrap();
@@ -5009,19 +4990,16 @@ fn g2_g6_split_tool_keeps_the_pair_on_the_pieces_adjacent_to_the_cut(cx: &mut Te
     }
 }
 
-/// The native edit tools and the time editor share the same header band.
+/// The live timecode follows the time editor and clips with its transport.
 #[gpui::test]
-fn overlap_timeline_time_starts_after_edit_tools(cx: &mut TestAppContext) {
+fn overlap_timeline_time_follows_the_transport(cx: &mut TestAppContext) {
     let mut stage = stage(cx, 1);
     for width in [1000., 480., 320.] {
         stage.vcx.simulate_resize(gpui::size(px(width), px(420.)));
         stage.idle(cx);
-        let split = bounds(&mut stage.vcx, "timeline.tool:split");
+        let play = bounds(&mut stage.vcx, "timeline:play");
         let time = bounds(&mut stage.vcx, "timeline:time");
-        assert!(
-            split.right() <= time.left(),
-            "{width}: {split:?} and {time:?}"
-        );
+        assert!(play.right() <= time.left(), "{width}: {play:?} and {time:?}");
         let clock = stage.view.read_with(&stage.vcx, |view, _| {
             let slot = crate::playback::timecode_slot(view.tokens());
             view.timeline_timecode_bounds(px(width), px(slot.w))
