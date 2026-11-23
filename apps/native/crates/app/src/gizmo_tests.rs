@@ -810,6 +810,43 @@ fn the_viewer_cursor_says_what_a_press_does(cx: &mut TestAppContext) {
         CursorStyle::ZoomIn
     );
 }
+#[gpui::test]
+fn viewer_tool_menu_and_shortcuts_keep_hand_zoom_and_rotate_available(cx: &mut TestAppContext) {
+    use pm_shell::keyboard::Effect;
+
+    let mut s = stage(cx);
+    let (center, _, _) = s.points();
+    let point = s.point_of(center);
+    let tools = pm_shell::menu::tools();
+    for (key, command, tool, cursor) in [
+        ("h", "toolHand", Tool::Hand, CursorStyle::OpenHand),
+        ("z", "toolZoom", Tool::Zoom, CursorStyle::ZoomIn),
+        ("w", "toolRotate", Tool::Rotate, CursorStyle::Rotate),
+    ] {
+        let item = tools.iter().find(|item| item.command == command).unwrap();
+        assert_eq!(item.chord, key);
+        let mut resolver = pm_shell::keyboard::Resolver::with(pm_shell::keymap::current());
+        let effects = resolver.submit(pm_shell::keyboard::Key {
+            token: 1,
+            chord: key.into(),
+            field: false,
+            repeat: false,
+            up: false,
+            compat: false,
+        });
+        assert!(matches!(
+            effects.first(),
+            Some(Effect::Dispatch { command, args, .. })
+                if command == &item.command && args == &item.args
+        ));
+        // The window's command handler supplies the selected tool to this host.
+        s.recorder.tool.set(Some(tool));
+        s.vcx.simulate_mouse_move(point, None, Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(s.surface.read_with(&s.vcx, |g, _| g.cursor_style()), cursor);
+    }
+}
+
 /// The selection's outline moves with the view while the Hand drags it, not
 /// on release.
 #[gpui::test]

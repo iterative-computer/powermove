@@ -1573,6 +1573,16 @@ mod strip_page_tests {
 }
 #[cfg(test)]
 mod toolbar_tag_tests {
+    #[test]
+    fn toolbar_tool_group_keeps_only_select_anchor_shape_pen_and_text() {
+        assert_eq!(
+            &super::TOOLS.map(|(command, _, _)| command)[..],
+            &["toolSelect", "toolAnchor", "toolShape", "toolPen", "toolText"],
+        );
+        assert_eq!(super::TOOLS[super::SHAPE_SEGMENT as usize].0, "toolShape");
+        assert!(super::TOOLBAR.contains(&"add"));
+    }
+
     /// Each button the toolbar builds has a tag (its `TOOLBAR` slot);
     /// one without would stop the window from opening.
     #[test]

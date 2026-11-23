@@ -360,6 +360,25 @@ mod tests {
         }
     }
     #[test]
+    fn the_footer_retains_its_zoom_slider_without_a_duration_readout() {
+        let l = layout();
+        for scheme in [pm_design::Scheme::Dark, pm_design::Scheme::Light] {
+            let t = Tokens::new(scheme, pm_design::Accessibility::default());
+            let ops = l.ops(None, "00:01:00:00", &t);
+            assert!(ops.iter().all(|op| op.text.is_none()));
+            let zoom = |id| ops.iter().find(|op| op.id == id).unwrap().bounds;
+            assert_eq!(zoom("zoom-out:h").x, t.metrics.inset as f64);
+            let track = zoom("zoom-track");
+            assert_eq!(track.width, ZOOM_TRACK);
+            assert_eq!(
+                zoom("zoom-knob").x + ZOOM_KNOB / 2.,
+                track.x + track.width * l.zoom_fraction(),
+            );
+            assert_eq!(zoom("zoom-in:h").x, track.x + track.width + t.metrics.gap as f64);
+        }
+    }
+
+    #[test]
     fn the_zoom_slider_is_logarithmic_and_reads_back_where_it_was_set() {
         let (l, t) = (
             layout(),

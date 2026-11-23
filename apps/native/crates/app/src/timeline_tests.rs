@@ -4681,6 +4681,48 @@ fn g6_pointer_split_in_both_modes_is_one_undo_and_stays_selected(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn timeline_header_starts_with_play_in_both_modes(cx: &mut TestAppContext) {
+    let mut stage = stage(cx, 2);
+    for mode in ["layers", "tracks"] {
+        stage.surface.update(&mut stage.vcx, |timeline, cx| {
+            timeline.command(&format!("timeline.mode:{mode}"), 0., None, false, cx);
+        });
+        stage.idle(cx);
+        assert_eq!(
+            stage.surface.read_with(&stage.vcx, |t, _| t.toggles().0),
+            mode == "tracks",
+        );
+        let origin = stage.origin();
+        let (inset, gap) = stage.view.read_with(&stage.vcx, |view, _| {
+            let m = &view.tokens().metrics;
+            (m.inset, m.gap)
+        });
+        let play = bounds(&mut stage.vcx, "timeline:play");
+        let time = bounds(&mut stage.vcx, "timeline:time");
+        assert_eq!(play.left(), origin.x + px(inset), "{mode}");
+        assert_eq!(time.left(), play.right() + px(gap), "{mode}");
+    }
+}
+
+#[gpui::test]
+fn timeline_header_has_no_edit_tool_buttons(cx: &mut TestAppContext) {
+    let mut stage = stage(cx, 2);
+    for mode in ["layers", "tracks"] {
+        stage.surface.update(&mut stage.vcx, |timeline, cx| {
+            timeline.command(&format!("timeline.mode:{mode}"), 0., None, false, cx);
+        });
+        stage.idle(cx);
+        assert_eq!(
+            stage.surface.read_with(&stage.vcx, |t, _| t.toggles().0),
+            mode == "tracks",
+        );
+        for id in ["timeline.tool:selection", "timeline.tool:roll", "timeline.tool:split"] {
+            assert!(stage.vcx.debug_bounds(id).is_none(), "{mode}: {id} is still visible");
+        }
+    }
+}
+
+#[gpui::test]
 fn g6_visible_tool_buttons_select_split_and_selection(cx: &mut TestAppContext) {
     let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
     let at = bounds(&mut s.vcx, "timeline.tool:split").center();
