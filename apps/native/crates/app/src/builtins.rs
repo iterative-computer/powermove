@@ -2050,7 +2050,15 @@ impl Controller {
         })
         .detach();
     }
+    pub(crate) fn sync_agent_button(&self, cx: &App) {
+        self.host.borrow().set_agent_button_context(
+            self.session.is_some(),
+            self.builtins.agent_shown || self.agent_open(cx),
+        );
+    }
+
     fn sync_agent_launcher(&self, cx: &App) -> (Option<String>, usize) {
+        self.sync_agent_button(cx);
         let Some(runtime) = &self.builtins.runtime else {
             return (None, 0);
         };
@@ -2113,11 +2121,15 @@ impl Controller {
         gpui_macos::child_window::raise_if_active(&self.host.borrow().window);
         cx.notify();
     }
-    /// The toolbar's Agent item and View ▸ Agent toggle the popover, as the
-    /// original app's launcher does.
-    ///
-    /// Pinned, the docked panel is hidden or shown in place
-    /// (agent-panel.md §1).
+    pub(crate) fn open_agent_from_launcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.builtins.agent_docked || self.builtins.agent_parked {
+            self.host.borrow().send_command("panel:activate:agent", vec![]);
+        } else {
+            self.show_builtin("agent", window, cx);
+        }
+    }
+
+    /// View ▸ Agent and its shortcut toggle the popover or parked panel.
     pub fn toggle_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.builtins.agent_docked {
             self.builtins.agent_parked = true;
@@ -2415,6 +2427,7 @@ impl Controller {
             );
             let _ = this.update(cx, |v, cx| {
                 v.builtins.opening_windows.remove(&id);
+                let agent = id == "agent";
                 match result {
                     Ok(handle) => {
                         // The popover opens ready to type: its composer
@@ -2465,6 +2478,9 @@ impl Controller {
                         v.update_builtins(cx);
                     }
                     Err(error) => v.message = error.to_string(),
+                }
+                if agent {
+                    v.sync_agent_button(cx);
                 }
                 cx.notify();
             });

@@ -7326,6 +7326,44 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(last(), [other]);
     }
+    #[gpui::test]
+    fn the_agent_launcher_follows_the_active_workspace_tab(cx: &mut TestAppContext) {
+        let frames = Rc::new(RefCell::new(vec![]));
+        let record = frames.clone();
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let window = cx.add_window(|_, cx| {
+            let mut editor = Editor::new(tokens, None, cx);
+            editor.integration = Some(Rc::new(Shown(record)));
+            editor
+        });
+        let launcher_shown = || {
+            let frames = frames.borrow();
+            let shown = frames.last().expect("a frame");
+            crate::agent_launcher::show_agent_button(true, shown.iter().any(|id| id == "agent"))
+        };
+
+        window
+            .update(cx, |editor, _, cx| {
+                assert!(editor.run_shell_command("panel:tabwith:inspector:agent", cx));
+                assert!(editor.run_shell_command("panel:activate:inspector", cx));
+                let (dock, group, _) = editor.layout.find("agent").expect("Agent is docked");
+                let (inspector_dock, inspector_group, _) =
+                    editor.layout.find("inspector").expect("Properties is docked");
+                assert_eq!((dock, group), (inspector_dock, inspector_group));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(launcher_shown(), "Agent is behind Properties");
+
+        window
+            .update(cx, |editor, _, cx| {
+                assert!(editor.run_shell_command("panel:activate:agent", cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(!launcher_shown(), "Agent is the active tab");
+    }
+
     // Panel dragging (DESIGN: what shows while dragging is what a release gives).
     fn drag_none() -> gpui::Modifiers {
         gpui::Modifiers::none()

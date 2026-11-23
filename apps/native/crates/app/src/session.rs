@@ -740,6 +740,7 @@ impl pm_shell::integration::Integration for Bridge {
                     let _ = this.update(cx, |v, cx| v.update_builtins(cx));
                 }).detach();
             }
+            v.sync_agent_button(cx);
             let mut effective: Vec<String> = shown.iter().map(|id| (*id).to_owned()).collect();
             for id in shown {
                 if let Some(target) = v.agent_panel_builds.get(*id).and_then(|b| b.target.clone()) {
@@ -4543,12 +4544,13 @@ impl Controller {
             // ⌘, with Settings in front closes it.
             "settings" if self.settings_in_front(cx) => self.close_settings(cx),
             "settings" => self.show_builtin(&cmd.name, window, cx),
+            "agent.launcher.open" => self.open_agent_from_launcher(window, cx),
             "agent.launcher.task" => {
                 if let Some(id) = cmd.args.first().and_then(|v| v.as_str()) {
                     if let Some(runtime) = &self.builtins.runtime {
                         let _ = runtime.agent_launcher_switch(id);
                     }
-                    self.show_builtin("agent", window, cx);
+                    self.open_agent_from_launcher(window, cx);
                 }
             }
             "agent.stop" => {
