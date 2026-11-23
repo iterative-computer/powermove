@@ -581,6 +581,12 @@ pub struct Engine {
         Option<u64>,
         u64,
     )>,
+    /// Whether the scene last looked ahead in draws stills or videos
+    /// ([`Self::has_visual_media`]).
+    visual_media: crate::frame_inputs::VisualMediaCache,
+    /// Asks the font registry ahead, off this thread, for the faces of every
+    /// text layer of the scene's composition tree ([`crate::font_warm`]).
+    font_warm: crate::font_warm::FontWarmer,
     /// The document, composition and contributed definitions the effects
     /// were last registered for (`set_document_effects`): a drag frame of
     /// the same keeps them (`drag_frame`).
@@ -638,6 +644,10 @@ pub struct Engine {
     memory_client: crate::memory::Registration,
     memory_request: Arc<std::sync::atomic::AtomicU64>,
     budgeted_surfaces: u64,
+    budgeted_grant: u64,
+    budgeted_pressure: crate::memory::Pressure,
+    visible_playback: bool,
+    budgeted_playback: bool,
     /// The settling renderer's part of the grant ([`split_for_settling`]).
     settle_budget: u64,
     /// PM_SCRUB_EXTRA_MIB: the borrowed scrub allowance in force (bytes).
@@ -732,7 +742,12 @@ impl Engine {
             .map(|settler| settler.held())
             .unwrap_or_default();
         crate::memory::CacheUsage {
-            target_pool_bytes: self.renderer.target_pool_bytes() + settling.target_pool,
+            // Report both reusable GPU target stores through the existing
+            // cache-usage ABI, including storage awaiting GPU completion.
+            target_pool_bytes: self.renderer.target_pool_bytes()
+                + self.renderer.shader_output_cache_bytes()
+                + self.renderer.retired_playback_target_bytes()
+                + settling.target_pool,
             target_pool_idle: self.renderer.target_pool_idle(),
             targets_created: self.renderer.target_pool_created(),
             image_bytes: self.renderer.image_cache_bytes() + settling.images,
@@ -793,6 +808,7 @@ impl Engine {
             self.renderer.release_idle_media();
         }
         self.renderer.trim(0);
+        self.budgeted_playback = false;
         // The displayed surfaces are presentation state, not an idle cache.
         // Keep their pixels pinned until a replacement (or project close).
         self.invalidate_cache();
@@ -892,6 +908,13 @@ impl Engine {
         (mib << 20) * crate::memory::budget() / (160 << 20)
     }
 
+    /// Called after transport updates, including turns with no new frame.
+    pub fn set_visible_playback(&mut self, active: bool) {
+        if std::mem::replace(&mut self.visible_playback, active) != active {
+            self.govern_memory();
+        }
+    }
+
     /// Applies the grant (and any lease request or pressure) to every
     /// cache, reports the usage to the broker, and returns that usage: the
     /// one sample of [`Self::memory_usage`] a loop pass takes.
@@ -901,18 +924,31 @@ impl Engine {
 
     fn govern_memory_inner(&mut self) -> crate::memory::CacheUsage {
         use std::sync::atomic::Ordering;
+        let pressure = crate::memory::pressure();
         if let Some(disk) = &self.disk {
-            disk.memory_pressure(crate::memory::pressure());
+            disk.memory_pressure(pressure);
         }
         self.renderer
-            .set_memory_pressure(crate::memory::pressure() == crate::memory::Pressure::Critical);
+            .set_memory_pressure(pressure == crate::memory::Pressure::Critical);
         let request = self.memory_request.swap(u64::MAX, Ordering::AcqRel);
         let surfaces = self.surface_bytes();
         let share = self.memory_client.grant();
         let extra = self.scrub_extra();
-        if request != u64::MAX || surfaces != self.budgeted_surfaces || extra != self.budgeted_extra
+        let playback = self.visible_playback
+            && pressure == crate::memory::Pressure::Normal
+            && extra == 0
+            && std::env::var_os("PM_PLAYBACK_RETENTION").is_none_or(|v| v != "0");
+        if request != u64::MAX
+            || surfaces != self.budgeted_surfaces
+            || extra != self.budgeted_extra
+            || share != self.budgeted_grant
+            || pressure != self.budgeted_pressure
+            || playback != self.budgeted_playback
         {
             self.budgeted_extra = extra;
+            self.budgeted_grant = share;
+            self.budgeted_pressure = pressure;
+            self.budgeted_playback = playback;
             // A traced viewer logs why its caches are trimmed (diagnostics).
             if crate::trace::enabled() {
                 eprintln!(
@@ -947,20 +983,44 @@ impl Engine {
             // to the grant.
             let shares = knob("PM_FIX_SHARES") == Some(1);
             let (frame_part, image_part) = if shares { (35, 10) } else { (15, 20) };
+            // Fund retention from the still and decoded-frame shares.
+            // An explicit diagnostic share remains in force.
+            let images = cache * image_part / 100;
+            let frames =
+                knob("PM_ABL_FRAME_CACHE_MIB").map_or(cache * frame_part / 100, |m| m << 20);
+            let (image_donor, frame_donor) = if playback {
+                (
+                    images / 2,
+                    if knob("PM_ABL_FRAME_CACHE_MIB").is_none() {
+                        frames / 2
+                    } else {
+                        0
+                    },
+                )
+            } else {
+                (0, 0)
+            };
+            let loan = image_donor + frame_donor;
+            let shader_limit = (loan / 2).min(32 << 20);
+            let pool_limit = if playback {
+                ((cache / 10).min(pm_gpu::TargetPool::FREE_BUDGET) + loan - shader_limit)
+                    .min(96 << 20)
+            } else {
+                0
+            };
             self.renderer
                 .apply_media_lease(pm_media::decode::service::MediaLease {
-                    frame_cache: knob("PM_ABL_FRAME_CACHE_MIB")
-                        .map_or((cache * frame_part / 100) as usize, |m| (m << 20) as usize)
-                        + (extra * 6 / 10) as usize,
+                    frame_cache: (frames - frame_donor + extra * 6 / 10) as usize,
                     decoders: knob("PM_ABL_DECODERS_MIB")
                         .map_or((cache / 4) as usize, |m| (m << 20) as usize),
                 });
-            self.renderer
-                .set_image_cache_budget(cache * image_part / 100);
+            self.renderer.set_image_cache_budget(images - image_donor);
             self.renderer.set_converted_frame_budget(
                 knob("PM_ABL_CONVERTED_MIB").map_or(cache / 10, |m| m << 20) + extra * 4 / 10,
             );
             self.renderer.set_target_pool_budget(cache / 10);
+            self.renderer
+                .set_playback_retention(pool_limit, shader_limit);
             self.renderer.set_vector_cache_budget(cache / 20, 512);
             self.renderer.trim(cache / 20);
             if request != u64::MAX {
@@ -1200,6 +1260,8 @@ impl Engine {
             capture_target: None,
             cache_enabled: true,
             studio_content: None,
+            visual_media: Default::default(),
+            font_warm: Default::default(),
             effects_for: None,
             drag_frame: false,
             #[cfg(test)]
@@ -1229,6 +1291,10 @@ impl Engine {
             memory_client,
             memory_request,
             budgeted_surfaces: u64::MAX,
+            budgeted_grant: 0,
+            budgeted_pressure: crate::memory::Pressure::Normal,
+            visible_playback: false,
+            budgeted_playback: false,
             settle_budget: split_for_settling(DEFAULT_GRANT).1,
             budgeted_extra: 0,
         })
@@ -1261,6 +1327,7 @@ impl Engine {
         self.settler = None;
         self.fonts = Some(fonts);
         self.font_generation = None;
+        self.font_warm.reset();
         // A replacement broker can reuse generation numbers. It is an
         // explicit engine reset, unlike a generation update on that broker.
         self.clear_cache();
@@ -1492,6 +1559,15 @@ impl Engine {
         self.disk_next = None;
     }
 
+    /// Whether `scene` draws a still, a video or an image sequence anywhere
+    /// (nested compositions too, whatever their time): without one,
+    /// [`Self::prepare`] would plan a whole frame ahead to warm nothing.
+    /// Pixel-neutral to skip: it only warms media caches. Kept per document,
+    /// revision, content and composition.
+    pub fn has_visual_media(&mut self, scene: &Scene) -> bool {
+        self.visual_media.get(&scene.doc, scene.content, &scene.comp)
+    }
+
     /// Opens and warms the videos of a coming frame on background workers, so
     /// a clip entering the playhead does not stall the frame that meets it.
     /// The video draws planned at `time`: (layer, instance).
@@ -1572,6 +1648,13 @@ impl Engine {
             .map_err(anyhow::Error::msg)
     }
     fn sync_studio(&mut self, scene: &Scene, time: Ticks) -> Result<()> {
+        // A new scene's fonts are asked for now, off this thread, so no
+        // frame met later (while playing) waits for the registry's first
+        // answer; the same scene costs a comparison. Before the effects:
+        // definitions still loading must not hold it back.
+        if let Some(fonts) = &self.fonts {
+            self.font_warm.request(&scene.doc, &scene.comp, fonts);
+        }
         let key = (
             Arc::as_ptr(&scene.doc) as usize,
             scene.content,

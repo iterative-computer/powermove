@@ -18,6 +18,8 @@ pub use crate::composite::region::Region;
 
 /// A draw with its source resolved to textures.
 pub(crate) struct Resolved {
+    pub transient_source: bool,
+    pub sample_bounds: Option<[f32; 4]>,
     pub matrix: [f64; 6],
     pub view: Option<wgpu::TextureView>,
     /// Linear view depth of a 3D layer (`r32float`).
@@ -225,8 +227,19 @@ pub(crate) struct Exec<'a> {
     /// The frame also renders the depth and id surface (3D layers then
     /// produce their linear view depth).
     pub depth_id: bool,
+    /// Targets go back to the pool as soon as the last pass reading them is
+    /// recorded, for this frame's later passes (`TargetPool::recycle`):
+    /// node content, masks and mattes, effect intermediates and results,
+    /// accumulators, and group passes. Off with the depth and id surface,
+    /// which reads the frame's images after the frame (they stay in
+    /// `taken`), and for the reference renders
+    /// (`Renderer::set_early_target_release`).
+    pub recycle: bool,
     /// Pool targets to give back after the frame is submitted.
     pub taken: Vec<Target>,
+    /// Group passes resolved but not yet drawn: the pass drawing them gives
+    /// them back ([`Exec::resolve_draws_owned`]).
+    pub drawn: Vec<Target>,
     /// Mip pyramids of level 2 stills, kept across frames.
     pub pyramids: &'a mut crate::sampling::gpu::PyramidCache,
     pub failures: Vec<LayerFailure>,
@@ -380,8 +393,38 @@ impl Exec<'_> {
     }
 
     /// Resolves the sources of `draws` (of `plan`), recording any passes
-    /// they need.
+    /// they need. Their targets are given back after the frame.
     pub(crate) fn resolve_draws(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &CompPlan,
+        draws: &[Draw],
+        region: Option<Region>,
+    ) -> Vec<Resolved> {
+        let (resolved, owned) = self.resolve_draws_owned(encoder, plan, draws, region);
+        self.taken.extend(owned);
+        resolved
+    }
+
+    /// [`Self::resolve_draws`], and the group passes it rendered that only
+    /// the pass drawing `resolved` reads: the caller gives them back
+    /// (`release`) once that pass is recorded. Empty without
+    /// [`Exec::recycle`].
+    pub(crate) fn resolve_draws_owned(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &CompPlan,
+        draws: &[Draw],
+        region: Option<Region>,
+    ) -> (Vec<Resolved>, Vec<Target>) {
+        // Nested resolves hand theirs to their own passes first, so what is
+        // above the mark is this call's.
+        let mark = self.drawn.len();
+        let resolved = self.resolve_draws_inner(encoder, plan, draws, region);
+        (resolved, self.drawn.split_off(mark))
+    }
+
+    fn resolve_draws_inner(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         plan: &CompPlan,
@@ -421,6 +464,8 @@ impl Exec<'_> {
                 break;
             }
             let mut r = Resolved {
+                transient_source: false,
+                sample_bounds: None,
                 matrix: draw.matrix,
                 view: None,
                 depth: None,
@@ -491,6 +536,7 @@ impl Exec<'_> {
                             let texture = kept.texture.clone();
                             let revision = kept.revision;
                             r.view = Some(kept.view.clone());
+                            r.transient_source = self.pool.playback_retention();
                             self.prepare_level2(encoder, r, &texture, Some(revision));
                             r.from_fbo = true;
                             return;
@@ -536,6 +582,7 @@ impl Exec<'_> {
                             });
                         }
                         r.view = Some(target.view.clone());
+                        r.transient_source = self.pool.playback_retention();
                         self.prepare_level2(encoder, r, &target.texture, Some(revision));
                         r.from_fbo = true;
                         // The depth and id surface sees 3D inside the
@@ -571,7 +618,16 @@ impl Exec<'_> {
                                 f64::from(g.y),
                             ];
                         }
-                        self.taken.push(target);
+                        // A group pass is read only by the pass drawing this
+                        // draw (never shared as a twin, `comp_twins`): that
+                        // pass gives it back (`resolve_draws_owned`). A
+                        // nested composition may be a later twin's source,
+                        // and an accumulation keeps today's lifetime.
+                        if self.recycle && group && !accumulate {
+                            self.drawn.push(target);
+                        } else {
+                            self.taken.push(target);
+                        }
                     }
                     Source::Image {
                         path,
@@ -754,6 +810,7 @@ impl Exec<'_> {
                         }
                     }
                     Source::Text(text) => {
+                        r.transient_source = self.pool.playback_retention();
                         match self.text.render(
                             self.device,
                             self.queue,
@@ -785,6 +842,7 @@ impl Exec<'_> {
                     }
                     Source::Shader(shader) => match self.shader_source(encoder, shader) {
                         Ok((target, pooled)) => {
+                            r.transient_source = true;
                             // Legacy programs evaluate their authored formula in E.
                             // Decode the texels before linear-light reconstruction.
                             if self.working == WorkingEncoding::LinearLight && r.level2.is_some() {
@@ -797,11 +855,19 @@ impl Exec<'_> {
                                 r.encoded = true;
                             }
                             r.from_fbo = true;
-                            // Uploaded fallback pixels are not the
-                            // pool's; wgpu keeps them alive until the
-                            // frame's commands are done.
+                            // Cached and fallback targets have their own owners.
                             if pooled {
-                                self.taken.push(target);
+                                static EARLY: std::sync::OnceLock<bool> =
+                                    std::sync::OnceLock::new();
+                                let early = EARLY.get_or_init(|| {
+                                    std::env::var_os("PM_SHADER_EARLY_RECYCLE")
+                                        .is_none_or(|v| v != "0")
+                                });
+                                if self.recycle && *early {
+                                    self.drawn.push(target);
+                                } else {
+                                    self.taken.push(target);
+                                }
                             }
                         }
                         // Turned off by the watchdog: nothing drawn; its
@@ -824,6 +890,7 @@ impl Exec<'_> {
                         }
                     },
                     Source::Object3d(object) => {
+                        r.transient_source = self.pool.playback_retention();
                         self.scene3d
                             .prepare_svg_maps(self.device, self.queue, encoder, object);
                         let (device, queue, pipelines) = (self.device, self.queue, self.pipelines);
@@ -922,6 +989,12 @@ impl Exec<'_> {
         if let Some(sampling) = r.level2 {
             let levels = r.mip_levels(texture, sampling);
             let view = r.view.as_ref().filter(|v| v.texture() == texture);
+            let mut transient = crate::sampling::gpu::PyramidCache::new();
+            let cache = if r.transient_source {
+                &mut transient
+            } else {
+                &mut *self.pyramids
+            };
             r.pyramid = Some(self.pipelines.resample.pyramid_for(
                 self.device,
                 encoder,
@@ -929,7 +1002,7 @@ impl Exec<'_> {
                 view,
                 levels,
                 revision,
-                self.pyramids,
+                cache,
             ));
         }
     }
@@ -986,7 +1059,13 @@ impl Exec<'_> {
             );
             let done: Vec<Target> = self.taken.drain(mark..).collect();
             for t in done {
-                self.pool.give(t);
+                // Kept for the next sample past the free budget, which
+                // would destroy a full-frame target as soon as it is given.
+                if self.recycle {
+                    self.pool.recycle(t);
+                } else {
+                    self.pool.give(t);
+                }
             }
             // Compositions rendered for this sample lived in those targets,
             // which the pool hands out again: they are no longer there to
@@ -1022,8 +1101,12 @@ impl Exec<'_> {
         blend: PassBlend,
         clear: bool,
     ) -> Vec<Resolved> {
-        let resolved = self.resolve_draws(encoder, plan, draws, region);
+        let (resolved, owned) = self.resolve_draws_owned(encoder, plan, draws, region);
         self.draw_pass_with(encoder, plan, &resolved, region, target, clear, blend);
+        // The pass that reads the group passes is recorded.
+        for t in owned {
+            self.release(t);
+        }
         resolved
     }
 
@@ -1126,6 +1209,9 @@ impl Exec<'_> {
             ]);
             let mut u = quad(r.matrix, r.uv, color);
             u.m = r.uniform_matrix();
+            if let Some(bounds) = r.sample_bounds {
+                u.scene = bounds;
+            }
             if let Some((exposure, background, weighted)) = r.scene {
                 u.color[2] = if self.working == WorkingEncoding::LinearLight {
                     2.0
@@ -1150,13 +1236,19 @@ impl Exec<'_> {
             .pipelines
             .resample
             .bind_uniform(self.device, self.binds, &buffer);
+        let mut transient_binds = crate::binds::BindCache::default();
         let sample_binds: Vec<Option<wgpu::BindGroup>> = resolved
             .iter()
             .zip(&level2)
             .map(|(r, u)| {
-                u.as_ref()
-                    .and(r.pyramid.as_ref())
-                    .map(|p| self.pipelines.resample.bind(self.device, self.binds, p))
+                u.as_ref().and(r.pyramid.as_ref()).map(|p| {
+                    let cache = if r.transient_source {
+                        &mut transient_binds
+                    } else {
+                        &mut *self.binds
+                    };
+                    self.pipelines.resample.bind(self.device, cache, p)
+                })
             })
             .collect();
         let fill_bind = match &plan.background {
@@ -1219,7 +1311,12 @@ impl Exec<'_> {
             .iter()
             .map(|r| {
                 r.view.as_ref().filter(|_| r.level2.is_none()).map(|view| {
-                    self.binds.texture(
+                    let cache = if r.transient_source {
+                        &mut transient_binds
+                    } else {
+                        &mut *self.binds
+                    };
+                    cache.texture(
                         self.device,
                         &self.pipelines.texture_layout,
                         &self.pipelines.linear,
@@ -1298,6 +1395,8 @@ impl Exec<'_> {
                     &mut pass,
                     if r.scene.is_some() {
                         self.pipelines.scene_with(format, blend)
+                    } else if r.sample_bounds.is_some() && matches!(blend, PassBlend::Over) {
+                        self.pipelines.draw_bounded(format)
                     } else {
                         self.pipelines.draw_with(format, blend)
                     },
@@ -1459,7 +1558,13 @@ impl Exec<'_> {
             &buffer,
             DRAW_UNIFORM_SIZE,
         );
-        let tex = self.binds.texture(
+        let mut transient = crate::binds::BindCache::default();
+        let cache = if self.pool.playback_retention() {
+            &mut transient
+        } else {
+            &mut *self.binds
+        };
+        let tex = cache.texture(
             self.device,
             &self.pipelines.texture_layout,
             &self.pipelines.linear,

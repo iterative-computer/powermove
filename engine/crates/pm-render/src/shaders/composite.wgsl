@@ -84,6 +84,20 @@ fn fs_draw(in: VsOut) -> @location(0) vec4<f32> {
     return c * q.color.x;
 }
 
+// The same quad and blend as fs_draw, with a certified +0 source outside
+// the last writer's scissor and the footprint of the level-zero sampler.
+@fragment
+fn fs_draw_bounded(in: VsOut) -> @location(0) vec4<f32> {
+    var c = vec4<f32>(0.0);
+    if (all(in.pos.xy >= q.scene.xy) && all(in.pos.xy < q.scene.zw)) {
+        c = sample_quad(in);
+    }
+    if (q.color.z > 0.5) {
+        c = pm_premultiplied_e_to_linear(c);
+    }
+    return c * q.color.x;
+}
+
 // Solid layers: the premultiplied color times the exact area coverage of
 // each pixel by the layer's box, `q.uv.xy` layer units with `q.uv.z`
 // circular corners (0 for square ones).

@@ -28,6 +28,14 @@ pub const MAX_PAGE: u32 = 2048;
 pub const CACHE_BYTES: u64 = 4 * 1024 * 1024;
 const RETIRED_BYTES: u64 = 2 * 1024 * 1024;
 const IMAGE_CACHE_BYTES: u64 = 8 * 1024 * 1024;
+/// Bytes of one color glyph texel (`Rgba32Float`).
+const IMAGE_TEXEL_BYTES: u64 = 16;
+/// The largest side of a color glyph atlas page. A full page is 4 MiB,
+/// half of [`IMAGE_CACHE_BYTES`], so every page fits the cache; an image
+/// wider or taller takes a page of its own size, as before atlases.
+const IMAGE_ATLAS_SIDE: u32 = 512;
+/// Floats of conversion scratch kept across rasters (1 MiB).
+const IMAGE_SCRATCH_KEEP: usize = 1 << 18;
 const DIRECT_CACHE_BYTES: u64 = 8 * 1024 * 1024;
 /// Texels of one glyph's packing at most: every index stays below 2^24,
 /// where the shader's f32 metadata is exact.
@@ -85,6 +93,9 @@ pub struct TextStats {
     /// Color glyph images converted and uploaded (an image the image cache
     /// did not hold).
     pub image_uploads: u64,
+    /// Atlas pages those images were packed into: one texture, one copy
+    /// and one bind group each.
+    pub image_pages: u64,
 }
 
 struct Cached {
@@ -109,7 +120,9 @@ struct DirectMeta {
 struct DirectCacheEntry {
     // Retaining the lines makes their pointer identity safe as a key.
     _lines: Arc<BezPath>,
-    view: wgpu::TextureView,
+    /// The glyph's chunk texture bound for paint, made once per chunk.
+    bind: wgpu::BindGroup,
+    chunk: u64,
     meta: DirectMeta,
 }
 
@@ -118,22 +131,23 @@ type DirectKey = (usize, [u64; 4]);
 /// Glyph entries grouped by the chunk texture they share. A chunk's texture
 /// is charged once, when it is made, and leaves with all of its glyphs, so
 /// the retained textures stay within the bound however glyphs share them.
-struct DirectCache<C, E> {
-    entries: HashMap<DirectKey, (u64, E)>,
-    chunks: HashMap<u64, DirectChunk<C>>,
+/// Color glyph atlas pages are cached the same way, by image content key.
+struct DirectCache<C, E, K = DirectKey> {
+    entries: HashMap<K, (u64, E)>,
+    chunks: HashMap<u64, DirectChunk<C, K>>,
     bytes: u64,
     limit: u64,
     next: u64,
 }
 
-struct DirectChunk<C> {
+struct DirectChunk<C, K = DirectKey> {
     payload: C,
     bytes: u64,
-    keys: Vec<DirectKey>,
+    keys: Vec<K>,
     used: u64,
 }
 
-impl<C, E> DirectCache<C, E> {
+impl<C, E, K: Copy + Eq + std::hash::Hash> DirectCache<C, E, K> {
     fn new(limit: u64) -> Self {
         Self {
             entries: HashMap::new(),
@@ -144,7 +158,7 @@ impl<C, E> DirectCache<C, E> {
         }
     }
 
-    fn hit(&mut self, key: &DirectKey, tick: u64) -> Option<&E> {
+    fn hit(&mut self, key: &K, tick: u64) -> Option<&E> {
         let (chunk, entry) = self.entries.get(key)?;
         if let Some(chunk) = self.chunks.get_mut(chunk) {
             chunk.used = tick;
@@ -177,7 +191,7 @@ impl<C, E> DirectCache<C, E> {
         id
     }
 
-    fn insert(&mut self, chunk: u64, key: DirectKey, entry: E) {
+    fn insert(&mut self, chunk: u64, key: K, entry: E) {
         if let Some(c) = self.chunks.get_mut(&chunk) {
             c.keys.push(key);
             self.entries.insert(key, (chunk, entry));
@@ -204,9 +218,215 @@ impl<C, E> DirectCache<C, E> {
 }
 
 struct DirectSource {
-    view: wgpu::TextureView,
+    bind: wgpu::BindGroup,
+    chunk: u64,
     meta: DirectMeta,
     translation: [f64; 2],
+}
+
+/// A cached color glyph image: its atlas page, bound for paint (one bind
+/// group per page, shared by every image on it), and its texel region.
+#[derive(Clone)]
+struct ImageEntry {
+    bind: wgpu::BindGroup,
+    page: u64,
+    /// The region's origin and size in the page: x, y, width, height.
+    region: [u32; 4],
+}
+
+const FRAME_GLYPH_PAGE_BYTES: u64 =
+    IMAGE_ATLAS_SIDE as u64 * IMAGE_ATLAS_SIDE as u64 * IMAGE_TEXEL_BYTES;
+
+#[derive(Default)]
+struct GlyphShelf {
+    x: u32,
+    y: u32,
+    height: u32,
+}
+
+impl GlyphShelf {
+    fn append(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
+        if width == 0 || height == 0 || width > IMAGE_ATLAS_SIDE || height > IMAGE_ATLAS_SIDE {
+            return None;
+        }
+        let (x, y, shelf) = if self.x + width > IMAGE_ATLAS_SIDE {
+            (0, self.y + self.height, 0)
+        } else {
+            (self.x, self.y, self.height)
+        };
+        if y + height > IMAGE_ATLAS_SIDE {
+            return None;
+        }
+        self.x = x + width;
+        self.y = y;
+        self.height = shelf.max(height);
+        Some((x, y))
+    }
+}
+
+struct FrameGlyphPage {
+    texture: wgpu::Texture,
+    bind: wgpu::BindGroup,
+    shelf: GlyphShelf,
+}
+
+#[derive(Default)]
+struct FrameGlyphPages {
+    pages: Vec<FrameGlyphPage>,
+    entries: HashMap<u64, (WorkingEncoding, ImagePixels, ImageEntry)>,
+    recycle: bool,
+}
+
+impl FrameGlyphPages {
+    fn bytes(&self) -> u64 {
+        self.pages.len() as u64 * FRAME_GLYPH_PAGE_BYTES
+    }
+
+    fn submitted(&mut self) {
+        if std::mem::take(&mut self.recycle) {
+            self.entries.clear();
+            for page in &mut self.pages {
+                page.shelf = GlyphShelf::default();
+            }
+        }
+    }
+}
+
+fn same_image(a: &ImagePixels, b: &ImagePixels) -> bool {
+    match (a, b) {
+        (ImagePixels::Rgba8(a), ImagePixels::Rgba8(b)) => {
+            Arc::ptr_eq(a, b) || (a.width == b.width && a.height == b.height && a.data == b.data)
+        }
+        (ImagePixels::WorkingF32(a), ImagePixels::WorkingF32(b)) => {
+            Arc::ptr_eq(a, b)
+                || (a.width == b.width
+                    && a.height == b.height
+                    && a.data.len() == b.data.len()
+                    && a.data
+                        .iter()
+                        .zip(&b.data)
+                        .all(|(a, b)| a.to_bits() == b.to_bits()))
+        }
+        (ImagePixels::Colr(a), ImagePixels::Colr(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    }
+}
+
+const ITEM_UNIFORM_CHUNK_BYTES: u64 = 64 * 1024;
+const MAX_ITEM_UNIFORM_CHUNKS: usize = 4;
+
+#[derive(Default)]
+struct UniformPool {
+    chunks: Vec<UniformChunk>,
+}
+
+struct UniformChunk {
+    buffer: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+    bytes: Vec<u8>,
+    flushed: usize,
+}
+
+impl UniformPool {
+    fn reset(&mut self) {
+        for chunk in &mut self.chunks {
+            chunk.bytes.clear();
+            chunk.flushed = 0;
+        }
+    }
+
+    fn flush(&mut self, queue: &wgpu::Queue) {
+        for chunk in &mut self.chunks {
+            if chunk.flushed < chunk.bytes.len() {
+                queue.write_buffer(
+                    &chunk.buffer,
+                    chunk.flushed as u64,
+                    &chunk.bytes[chunk.flushed..],
+                );
+                chunk.flushed = chunk.bytes.len();
+            }
+        }
+    }
+
+    fn put(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        draws: &[Draw],
+        use_pool: bool,
+    ) -> (wgpu::BindGroup, u32) {
+        let size = draws.len() as u64 * UNIFORM_STRIDE;
+        let capacity = ITEM_UNIFORM_CHUNK_BYTES.min(device.limits().max_buffer_size);
+        if use_pool && size <= capacity {
+            let mut index = self
+                .chunks
+                .iter()
+                .position(|chunk| chunk.bytes.len() as u64 + size <= capacity);
+            if index.is_none() && self.chunks.len() < MAX_ITEM_UNIFORM_CHUNKS {
+                index = Some(self.chunks.len());
+                self.chunks
+                    .push(UniformChunk::new(device, layout, capacity));
+            }
+            if let Some(index) = index {
+                let chunk = &mut self.chunks[index];
+                let base = chunk.append(draws);
+                return (chunk.bind.clone(), base);
+            }
+        }
+        let mut spill = UniformChunk::new(device, layout, size);
+        spill.append(draws);
+        queue.write_buffer(&spill.buffer, 0, &spill.bytes);
+        (spill.bind, 0)
+    }
+}
+
+impl UniformChunk {
+    fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, size: u64) -> Self {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pm text items"),
+            size,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pm text items"),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(size_of::<ItemUniform>() as u64),
+                }),
+            }],
+        });
+        Self {
+            buffer,
+            bind,
+            bytes: Vec::new(),
+            flushed: 0,
+        }
+    }
+
+    fn append(&mut self, draws: &[Draw]) -> u32 {
+        let stride = UNIFORM_STRIDE as usize;
+        let base = self.bytes.len();
+        self.bytes.resize(base + draws.len() * stride, 0);
+        for (slot, draw) in self.bytes[base..].chunks_exact_mut(stride).zip(draws) {
+            slot[..size_of::<ItemUniform>()].copy_from_slice(bytes_of(&draw.u));
+        }
+        base as u32
+    }
+}
+
+/// What a draw binds at group 1: `id` identifies the bound texture within a
+/// pass, so consecutive draws from one texture bind it once.
+struct ImageSource {
+    bind: wgpu::BindGroup,
+    id: (u8, u64),
+    /// An image's region in its atlas page (`ItemUniform::map`).
+    region: [u32; 4],
 }
 
 /// What each scene item draws from, by item index.
@@ -215,8 +435,142 @@ struct ItemSources {
     cells: HashMap<usize, Vec<Cell>>,
     /// Direct coverage sources (when the scene integrates outlines directly).
     direct: HashMap<usize, DirectSource>,
-    /// Color glyph textures and the direct sources' views.
-    images: HashMap<usize, wgpu::TextureView>,
+    /// Color glyph atlas regions and the direct sources' chunk textures.
+    images: HashMap<usize, ImageSource>,
+}
+
+/// Color glyph images shelf-packed into atlas pages: each page's texel size,
+/// and where each image goes (`None` for an image without texels).
+#[derive(Debug, PartialEq, Eq)]
+struct ShelfPack {
+    pages: Vec<(u32, u32)>,
+    places: Vec<Option<ShelfPlace>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShelfPlace {
+    page: usize,
+    x: u32,
+    y: u32,
+}
+
+/// Shelf-packs images of `sizes` (width, height) into pages of at most
+/// `side` texels a side, with no gutter: paint reads only inside each
+/// image's own region. Images are placed tallest first along shelves of a
+/// width near the square root of their area; a page closes when the next
+/// shelf would pass `side`. Pages are trimmed to what they hold. An image
+/// wider or taller than `side` gets a page of exactly its size, and so does
+/// every image when `single` (one texture per image, the reference layout).
+fn shelf_pack(sizes: &[(u32, u32)], side: u32, single: bool) -> ShelfPack {
+    let side = side.max(1);
+    let mut places = vec![None; sizes.len()];
+    let mut pages = Vec::new();
+    let mut shared = Vec::new();
+    for (index, &(w, h)) in sizes.iter().enumerate() {
+        if w == 0 || h == 0 {
+            continue;
+        }
+        if single || w > side || h > side {
+            places[index] = Some(ShelfPlace {
+                page: pages.len(),
+                x: 0,
+                y: 0,
+            });
+            pages.push((w, h));
+        } else {
+            shared.push(index);
+        }
+    }
+    if shared.is_empty() {
+        return ShelfPack { pages, places };
+    }
+    // Tallest first keeps each shelf's height close to its images'. Ties
+    // keep scene order, so the same images always pack the same way.
+    shared.sort_by_key(|&index| (std::cmp::Reverse(sizes[index].1), index));
+    let area: u64 = shared
+        .iter()
+        .map(|&index| u64::from(sizes[index].0) * u64::from(sizes[index].1))
+        .sum();
+    let widest = shared
+        .iter()
+        .map(|&index| sizes[index].0)
+        .max()
+        .unwrap_or(1);
+    let width = ((area as f64).sqrt().ceil() as u32).clamp(widest, side);
+    let (mut x, mut y, mut shelf) = (0u32, 0u32, 0u32);
+    let mut used = (0u32, 0u32);
+    let mut page = pages.len();
+    for index in shared {
+        let (w, h) = sizes[index];
+        if x + w > width {
+            // The next shelf, below the tallest image of this one.
+            y += shelf;
+            x = 0;
+            shelf = 0;
+        }
+        if y + h > side {
+            pages.push(used);
+            page = pages.len();
+            (x, y, shelf) = (0, 0, 0);
+            used = (0, 0);
+        }
+        places[index] = Some(ShelfPlace { page, x, y });
+        x += w;
+        shelf = shelf.max(h);
+        used = (used.0.max(x), used.1.max(y + h));
+    }
+    pages.push(used);
+    ShelfPack { pages, places }
+}
+
+/// Writes `image`'s premultiplied texels, decoded into the working domain,
+/// into the RGBA rows of a `page_width`-texel-wide page at (`x`, `y`). The
+/// arithmetic is the one each image's own texture was filled with.
+///
+/// Premultiplied E is decoded into the project's working domain before area
+/// filtering. The original texels are retained so the shader can integrate
+/// each inverse output pixel against source texel squares.
+fn write_working(
+    image: &ImagePixels,
+    working: WorkingEncoding,
+    page: &mut [f32],
+    page_width: u32,
+    x: u32,
+    y: u32,
+) {
+    let (width, height) = image.dimensions();
+    let (width, height, page_width) = (width as usize, height as usize, page_width as usize);
+    let colr = if let ImagePixels::Colr(program) = image {
+        let raster = program.rasterize(working);
+        debug_assert_eq!(
+            (raster.width as usize, raster.height as usize),
+            (width, height)
+        );
+        Some(raster.data)
+    } else {
+        None
+    };
+    for row in 0..height {
+        let at = ((y as usize + row) * page_width + x as usize) * 4;
+        let out = &mut page[at..at + width * 4];
+        let o = row * width * 4;
+        match image {
+            ImagePixels::Rgba8(i) => {
+                for (rgba, source) in out
+                    .chunks_exact_mut(4)
+                    .zip(i.data[o..o + width * 4].chunks_exact(4))
+                {
+                    let source: [f32; 4] = std::array::from_fn(|c| f32::from(source[c]) / 255.0);
+                    rgba.copy_from_slice(&to_working(source, working));
+                }
+            }
+            ImagePixels::WorkingF32(i) => out.copy_from_slice(&i.data[o..o + width * 4]),
+            ImagePixels::Colr(_) => {
+                let data = colr.as_deref().expect("COLR raster");
+                out.copy_from_slice(&data[o..o + width * 4]);
+            }
+        }
+    }
 }
 
 /// Coverage storage for one atlas page. Each page recorded in one encoder
@@ -258,8 +612,20 @@ pub struct TextGpu {
     image_paint: [crate::pipelines::LazyRenderPipeline; 2],
     blur_layout: wgpu::BindGroupLayout,
     blur: [crate::pipelines::LazyRenderPipeline; 2],
-    images: HashMap<u64, (wgpu::Texture, wgpu::TextureView)>,
-    image_bytes: u64,
+    /// Color glyph images by content key, on the atlas pages that hold them
+    /// (a page is charged whole and leaves with all of its images).
+    images: DirectCache<wgpu::Texture, ImageEntry, u64>,
+    /// Conversion scratch of one atlas page, reused across rasters.
+    frame_glyphs: FrameGlyphPages,
+    item_uniforms: UniformPool,
+    image_scratch: Vec<f32>,
+    /// Ids of atlas pages too large to cache (used by one raster only).
+    uncached_pages: u64,
+    /// The largest atlas page side (tests shrink it to force more pages).
+    atlas_side: u32,
+    /// One texture per image, the layout before atlas pages (tests only).
+    #[cfg(test)]
+    single_images: bool,
     direct: DirectCache<wgpu::Texture, DirectCacheEntry>,
     direct_scratch: Vec<[f32; 2]>,
     raster_pool: TargetPool,
@@ -278,6 +644,62 @@ pub struct TextGpu {
     belt: crate::upload::Belt,
     tick: u64,
     pub stats: TextStats,
+}
+
+fn frame_image_source(entry: &ImageEntry) -> ImageSource {
+    ImageSource {
+        bind: entry.bind.clone(),
+        id: (3, entry.page),
+        region: entry.region,
+    }
+}
+
+fn glyph_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("pm text color glyph atlas"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+fn upload_glyph_texels(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    texels: &[f32],
+    [x, y, width, height]: [u32; 4],
+) {
+    // f32 has no padding: both routes upload the same native-endian texels.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(texels.as_ptr().cast::<u8>(), std::mem::size_of_val(texels))
+    };
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x, y, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * IMAGE_TEXEL_BYTES as u32),
+            rows_per_image: None,
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
 }
 
 fn format_index(precision: Precision) -> usize {
@@ -602,19 +1024,108 @@ fn fragment_source(body: &str, paint: &str, fs: &str, format: wgpu::TextureForma
     )
 }
 
+/// Premultiplied source-over.
+const SOURCE_OVER: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
+
+/// The quad vertex module every paint pipeline shares.
+fn vertex_module(device: &wgpu::Device) -> wgpu::ShaderModule {
+    let common = include_str!("../shaders/text_common.wgsl");
+    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("pm-render text quad"),
+        source: wgpu::ShaderSource::Wgsl(
+            format!("{common}\n{}", include_str!("../shaders/text_vertex.wgsl")).into(),
+        ),
+    })
+}
+
+/// The paint pipeline layout: an item's uniforms, then its source texture.
+fn paint_layout(
+    device: &wgpu::Device,
+    item: &wgpu::BindGroupLayout,
+    texture: &wgpu::BindGroupLayout,
+) -> wgpu::PipelineLayout {
+    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[Some(item), Some(texture)],
+        immediate_size: 0,
+    })
+}
+
+/// A text pipeline drawing `body`'s `paint` into `format`. `vertex`: the
+/// quad's module, or `None` for the fragment module's own vertex entry.
+fn text_pipeline(
+    device: &wgpu::Device,
+    vertex: Option<&wgpu::ShaderModule>,
+    (label, body, paint): (&'static str, &'static str, &'static str),
+    layout: &wgpu::PipelineLayout,
+    (vs, fs): (&'static str, &'static str),
+    format: wgpu::TextureFormat,
+    blend: Option<wgpu::BlendState>,
+) -> crate::pipelines::LazyRenderPipeline {
+    let device = device.clone();
+    let vertex = vertex.cloned();
+    let layout = layout.clone();
+    let module = move |device: &wgpu::Device| {
+        device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(fragment_source(body, paint, fs, format).into()),
+        })
+    };
+    // The working format's (RGBA16F) module is made now, as every
+    // text module was; an RGBA32F one when a 32-bit frame needs it.
+    let ready = (format == wgpu::TextureFormat::Rgba16Float).then(|| module(&device));
+    crate::pipelines::LazyRenderPipeline::new(move || {
+        let fragment = ready.clone().unwrap_or_else(|| module(&device));
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(fs),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: vertex.as_ref().unwrap_or(&fragment),
+                entry_point: Some(vs),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &fragment,
+                entry_point: Some(fs),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
+    })
+}
+
 impl TextGpu {
     pub fn new(device: &wgpu::Device) -> TextGpu {
         // Each text module has one entry point. Metal's shader translation
         // can borrow its IR directly, and plain glyphs never compile the
         // polygon clipping functions used only by bitmap images. Fragment
         // modules are made per target format (`fragment_source`).
-        let common = include_str!("../shaders/text_common.wgsl");
-        let vertex_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("pm-render text quad"),
-            source: wgpu::ShaderSource::Wgsl(
-                format!("{common}\n{}", include_str!("../shaders/text_vertex.wgsl")).into(),
-            ),
-        });
+        let vertex_module = vertex_module(device);
         let uniform = |binding, dynamic, size: u64| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -651,7 +1162,7 @@ impl TextGpu {
                 immediate_size: 0,
             })
         };
-        let paint_layout = layout(&[&item_layout, &texture_layout]);
+        let paint_layout = paint_layout(device, &item_layout, &texture_layout);
         let blur_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pm text Gaussian"),
             entries: &[
@@ -679,73 +1190,6 @@ impl TextGpu {
             ],
         });
         let blur_pipeline_layout = layout(&[&blur_layout]);
-        let over = wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                operation: wgpu::BlendOperation::Add,
-            },
-            alpha: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::One,
-                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                operation: wgpu::BlendOperation::Add,
-            },
-        };
-        // `vertex`: the quad's module, or `None` for the fragment module's
-        // own vertex entry.
-        let pipeline = |vertex: Option<&wgpu::ShaderModule>,
-                        (label, body, paint): (&'static str, &'static str, &'static str),
-                        layout: &wgpu::PipelineLayout,
-                        (vs, fs): (&'static str, &'static str),
-                        format: wgpu::TextureFormat,
-                        blend: Option<wgpu::BlendState>| {
-            let device = device.clone();
-            let vertex = vertex.cloned();
-            let layout = layout.clone();
-            let module = move |device: &wgpu::Device| {
-                device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(label),
-                    source: wgpu::ShaderSource::Wgsl(
-                        fragment_source(body, paint, fs, format).into(),
-                    ),
-                })
-            };
-            // The working format's (RGBA16F) module is made now, as every
-            // text module was; an RGBA32F one when a 32-bit frame needs it.
-            let ready = (format == wgpu::TextureFormat::Rgba16Float).then(|| module(&device));
-            crate::pipelines::LazyRenderPipeline::new(move || {
-                let fragment = ready.clone().unwrap_or_else(|| module(&device));
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(fs),
-                    layout: Some(&layout),
-                    vertex: wgpu::VertexState {
-                        module: vertex.as_ref().unwrap_or(&fragment),
-                        entry_point: Some(vs),
-                        compilation_options: Default::default(),
-                        buffers: &[],
-                    },
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleStrip,
-                        cull_mode: None,
-                        ..Default::default()
-                    },
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: &fragment,
-                        entry_point: Some(fs),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format,
-                            blend,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                })
-            })
-        };
         let formats = [Precision::Float16, Precision::Float32].map(working_format);
         let outline = (
             "pm-render text outline",
@@ -771,27 +1215,30 @@ impl TextGpu {
             "blur_pass",
         );
         let paint = formats.map(|f| {
-            pipeline(
+            text_pipeline(
+                device,
                 Some(&vertex_module),
                 outline,
                 &paint_layout,
                 ("vs", "fs_outline"),
                 f,
-                Some(over),
+                Some(SOURCE_OVER),
             )
         });
         let image_paint = formats.map(|f| {
-            pipeline(
+            text_pipeline(
+                device,
                 Some(&vertex_module),
                 image,
                 &paint_layout,
                 ("vs", "fs_image"),
                 f,
-                Some(over),
+                Some(SOURCE_OVER),
             )
         });
         let blur = formats.map(|f| {
-            pipeline(
+            text_pipeline(
+                device,
                 None,
                 gaussian,
                 &blur_pipeline_layout,
@@ -813,8 +1260,14 @@ impl TextGpu {
             image_paint,
             blur_layout,
             blur,
-            images: HashMap::new(),
-            image_bytes: 0,
+            images: DirectCache::new(IMAGE_CACHE_BYTES),
+            frame_glyphs: FrameGlyphPages::default(),
+            item_uniforms: UniformPool::default(),
+            image_scratch: Vec::new(),
+            uncached_pages: 0,
+            atlas_side: IMAGE_ATLAS_SIDE,
+            #[cfg(test)]
+            single_images: false,
             direct: DirectCache::new(DIRECT_CACHE_BYTES),
             direct_scratch: Vec::new(),
             raster_pool: TargetPool::new(),
@@ -842,6 +1295,39 @@ impl TextGpu {
                 .iter()
                 .filter(|pipeline| pipeline.is_built())
                 .count()
+    }
+
+    /// The reference layout and shader of color glyph images before atlas
+    /// pages: one texture per image, painted by the image shader as it was
+    /// (`image_reference.wgsl`), which bounds texels by the texture's size.
+    #[cfg(test)]
+    pub(crate) fn use_reference_images(&mut self, device: &wgpu::Device) {
+        let vertex = vertex_module(device);
+        let layout = paint_layout(device, &self.item_layout, &self.texture_layout);
+        let image = (
+            "pm-render text image reference",
+            concat!(
+                include_str!("../shaders/text_common.wgsl"),
+                "\n",
+                include_str!("image_reference.wgsl")
+            ),
+            "paint_image",
+        );
+        self.image_paint = [Precision::Float16, Precision::Float32]
+            .map(working_format)
+            .map(|f| {
+                text_pipeline(
+                    device,
+                    Some(&vertex),
+                    image,
+                    &layout,
+                    ("vs", "fs_image"),
+                    f,
+                    Some(SOURCE_OVER),
+                )
+            });
+        self.single_images = true;
+        self.clear();
     }
 
     /// Compiles the text pipelines frames at `precision` draw with (outline
@@ -879,6 +1365,8 @@ impl TextGpu {
     /// Marks a new submitted frame so area buffers can be reused without
     /// aliasing two text pages recorded in the same command encoder.
     pub fn begin_frame(&mut self) {
+        self.frame_glyphs.submitted();
+        self.item_uniforms.reset();
         self.area_cursor = 0;
         let mut kept = 0;
         self.area_slots.retain(|slot| {
@@ -915,7 +1403,10 @@ impl TextGpu {
         self.raster_pool.trim(0);
         self.cache_bytes = 0;
         self.images.clear();
-        self.image_bytes = 0;
+        self.images.limit = IMAGE_CACHE_BYTES;
+        self.frame_glyphs = FrameGlyphPages::default();
+        self.item_uniforms = UniformPool::default();
+        self.image_scratch = Vec::new();
         self.direct.clear();
         self.chunks_retired.clear();
         self.chunks_free.clear();
@@ -925,7 +1416,14 @@ impl TextGpu {
         self.area_slots.iter().map(AreaSlot::bytes).sum::<u64>()
             + self.batch.capacity_bytes()
             + self.raster_pool.bytes()
-            + self.image_bytes
+            + self.images.bytes
+            + self.frame_glyphs.bytes()
+            + self
+                .item_uniforms
+                .chunks
+                .iter()
+                .map(|c| c.buffer.size())
+                .sum::<u64>()
             + self.direct.bytes
             + self
                 .chunks_retired
@@ -939,91 +1437,216 @@ impl TextGpu {
                 .sum::<u64>()
     }
 
-    fn image(
+    /// The caller records and submits every reader before beginning a new
+    /// frame. Within that window, a page is append-only across all rasters.
+    fn place_frame_image(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        img: &ImagePixels,
+        key: u64,
+        image: &ImagePixels,
         working: WorkingEncoding,
-    ) -> wgpu::TextureView {
-        let key = image_key(img, working);
-        let (width, height) = img.dimensions();
-        if let Some((_, view)) = self.images.get(&key) {
-            return view.clone();
+    ) -> Option<ImageSource> {
+        let (width, height) = image.dimensions();
+        if width > IMAGE_ATLAS_SIDE
+            || height > IMAGE_ATLAS_SIDE
+            || device.limits().max_texture_dimension_2d < IMAGE_ATLAS_SIDE
+        {
+            return None;
         }
-        // Decode premultiplied E into the project's working domain before
-        // area filtering. The original texels are retained so the shader can
-        // integrate each inverse output pixel against source texel squares.
-        let base = if let ImagePixels::Colr(program) = img {
-            let raster = program.rasterize(working);
-            debug_assert_eq!((raster.width, raster.height), (width, height));
-            raster.data
+        let placement = self
+            .frame_glyphs
+            .pages
+            .iter_mut()
+            .enumerate()
+            .find_map(|(index, page)| page.shelf.append(width, height).map(|(x, y)| (index, x, y)));
+        let (index, x, y) = if let Some(placement) = placement {
+            placement
         } else {
-            let mut base = vec![0.0f32; width as usize * height as usize * 4];
-            for (index, rgba) in base.chunks_exact_mut(4).enumerate() {
-                let o = index * 4;
-                let source: [f32; 4] = match img {
-                    ImagePixels::Rgba8(i) => {
-                        std::array::from_fn(|c| f32::from(i.data[o + c]) / 255.0)
-                    }
-                    ImagePixels::WorkingF32(i) => i.data[o..o + 4].try_into().expect("RGBA pixel"),
-                    ImagePixels::Colr(_) => unreachable!(),
-                };
-                let pixel = match img {
-                    ImagePixels::Rgba8(_) => to_working(source, working),
-                    ImagePixels::WorkingF32(_) => source,
-                    ImagePixels::Colr(_) => unreachable!(),
-                };
-                rgba.copy_from_slice(&pixel);
+            let reserved = self.frame_glyphs.bytes() + FRAME_GLYPH_PAGE_BYTES;
+            if reserved + self.images.bytes > IMAGE_CACHE_BYTES {
+                self.frame_glyphs.recycle = true;
+                return None;
             }
-            base
+            let texture = glyph_texture(device, IMAGE_ATLAS_SIDE, IMAGE_ATLAS_SIDE);
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let bind = self.source_bind(device, &view);
+            let mut shelf = GlyphShelf::default();
+            let (x, y) = shelf.append(width, height)?;
+            let index = self.frame_glyphs.pages.len();
+            self.frame_glyphs.pages.push(FrameGlyphPage {
+                texture,
+                bind,
+                shelf,
+            });
+            self.images.limit = IMAGE_CACHE_BYTES - reserved;
+            self.stats.image_pages += 1;
+            (index, x, y)
         };
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("pm text color glyph source"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let data: Vec<u8> = base.iter().flat_map(|v| v.to_ne_bytes()).collect();
-        self.stats.image_uploads += 1;
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 16),
-                rows_per_image: None,
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        let bytes = u64::from(width) * u64::from(height) * 16;
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        if bytes <= IMAGE_CACHE_BYTES / 2 {
-            if self.image_bytes + bytes > IMAGE_CACHE_BYTES {
-                self.images.clear();
-                self.image_bytes = 0;
-            }
-            self.image_bytes += bytes;
-            self.images.insert(key, (texture, view.clone()));
+        let page = &self.frame_glyphs.pages[index];
+        let mut scratch = std::mem::take(&mut self.image_scratch);
+        scratch.resize(width as usize * height as usize * 4, 0.0);
+        write_working(image, working, &mut scratch, width, 0, 0);
+        upload_glyph_texels(queue, &page.texture, &scratch, [x, y, width, height]);
+        if scratch.capacity() <= IMAGE_SCRATCH_KEEP {
+            scratch.clear();
+            self.image_scratch = scratch;
         }
-        view
+        self.stats.image_uploads += 1;
+        let entry = ImageEntry {
+            bind: page.bind.clone(),
+            page: index as u64,
+            region: [x, y, width, height],
+        };
+        let source = frame_image_source(&entry);
+        self.frame_glyphs
+            .entries
+            .insert(key, (working, image.clone(), entry));
+        Some(source)
+    }
+
+    /// The atlas regions of the color glyph images `wanted` (item index,
+    /// image), by item index. Images the cache holds keep their regions.
+    /// The rest are decoded into the working domain once per content key
+    /// (as each image's own texture was filled) and shelf-packed into atlas
+    /// pages: per page one texture, one copy and one bind group, not one per
+    /// image. Pages within half the image cache are cached whole.
+    ///
+    /// Paint reads an image's texels at its region's whole-texel origin
+    /// plus the same integer coordinates, and treats texels outside the
+    /// region's size as outside the image, so every painted value is the
+    /// one an image's own texture gave.
+    fn place_images(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        wanted: &[(usize, &ImagePixels)],
+        working: WorkingEncoding,
+    ) -> HashMap<usize, ImageSource> {
+        let source = |entry: &ImageEntry| ImageSource {
+            bind: entry.bind.clone(),
+            id: (1, entry.page),
+            region: entry.region,
+        };
+        let mut out = HashMap::with_capacity(wanted.len());
+        #[cfg(test)]
+        let single = self.single_images;
+        #[cfg(not(test))]
+        let single = false;
+        let requested: Vec<_> = wanted
+            .iter()
+            .copied()
+            .filter(|(_, image)| {
+                let (w, h) = image.dimensions();
+                w > 0 && h > 0
+            })
+            .map(|(i, image)| (i, image, image_key(image, working)))
+            .collect();
+        let mut distinct = HashMap::new();
+        let shared = !single
+            && self.atlas_side == IMAGE_ATLAS_SIDE
+            && requested.iter().all(|&(_, image, key)| {
+                distinct
+                    .insert(key, image)
+                    .is_none_or(|other| same_image(image, other))
+                    && self
+                        .frame_glyphs
+                        .entries
+                        .get(&key)
+                        .is_none_or(|(domain, other, _)| {
+                            working == *domain && same_image(image, other)
+                        })
+            });
+        // Images the cache misses, once per content key, in scene order.
+        let mut missing: Vec<(u64, &ImagePixels)> = Vec::new();
+        let mut missing_at: HashMap<u64, usize> = HashMap::new();
+        let mut staged: Vec<(usize, usize)> = Vec::new();
+        for (i, image, key) in requested {
+            if let Some(entry) = self.images.hit(&key, self.tick) {
+                out.insert(i, source(entry));
+            } else if shared && let Some((_, _, entry)) = self.frame_glyphs.entries.get(&key) {
+                out.insert(i, frame_image_source(entry));
+            } else if shared
+                && let Some(entry) = self.place_frame_image(device, queue, key, image, working)
+            {
+                out.insert(i, entry);
+            } else if let Some(&at) = missing_at.get(&key) {
+                staged.push((i, at));
+            } else {
+                missing_at.insert(key, missing.len());
+                staged.push((i, missing.len()));
+                missing.push((key, image));
+            }
+        }
+        if missing.is_empty() {
+            return out;
+        }
+        let sizes: Vec<(u32, u32)> = missing
+            .iter()
+            .map(|(_, image)| image.dimensions())
+            .collect();
+        let side = self
+            .atlas_side
+            .min(device.limits().max_texture_dimension_2d)
+            .max(1);
+        let pack = shelf_pack(&sizes, side, single || shared);
+        let mut on_page: Vec<Vec<usize>> = vec![Vec::new(); pack.pages.len()];
+        for (m, place) in pack.places.iter().enumerate() {
+            if let Some(place) = place {
+                on_page[place.page].push(m);
+            }
+        }
+        let mut placed: Vec<Option<ImageEntry>> = vec![None; missing.len()];
+        let mut scratch = std::mem::take(&mut self.image_scratch);
+        for (&(width, height), images) in pack.pages.iter().zip(&on_page) {
+            scratch.clear();
+            scratch.resize(width as usize * height as usize * 4, 0.0);
+            for &m in images {
+                let place = pack.places[m].expect("placed on this page");
+                write_working(missing[m].1, working, &mut scratch, width, place.x, place.y);
+            }
+            self.stats.image_uploads += images.len() as u64;
+            self.stats.image_pages += 1;
+            let texture = glyph_texture(device, width, height);
+            upload_glyph_texels(queue, &texture, &scratch, [0, 0, width, height]);
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let bind = self.source_bind(device, &view);
+            let page_bytes = u64::from(width) * u64::from(height) * IMAGE_TEXEL_BYTES;
+            // A page the cache cannot hold is this raster's alone; recorded
+            // commands keep its texture until they complete.
+            let chunk = (page_bytes <= self.images.limit.min(IMAGE_CACHE_BYTES / 2)).then(|| {
+                self.images
+                    .admit(texture, page_bytes, self.tick, &mut Vec::new())
+            });
+            let page = chunk.unwrap_or_else(|| {
+                self.uncached_pages += 1;
+                u64::MAX - self.uncached_pages
+            });
+            for &m in images {
+                let place = pack.places[m].expect("placed on this page");
+                let (w, h) = sizes[m];
+                let entry = ImageEntry {
+                    bind: bind.clone(),
+                    page,
+                    region: [place.x, place.y, w, h],
+                };
+                if let Some(chunk) = chunk {
+                    self.images.insert(chunk, missing[m].0, entry.clone());
+                }
+                placed[m] = Some(entry);
+            }
+        }
+        // Keep a common page's scratch; not an unusually large one's.
+        if scratch.capacity() <= IMAGE_SCRATCH_KEEP {
+            scratch.clear();
+            self.image_scratch = scratch;
+        }
+        for (i, at) in staged {
+            if let Some(entry) = &placed[at] {
+                out.insert(i, source(entry));
+            }
+        }
+        out
     }
 
     /// The cached direct source of `lines`, or `None` to stage it.
@@ -1034,7 +1657,8 @@ impl TextGpu {
     ) -> Option<DirectSource> {
         let entry = self.direct.hit(&lines.key(), self.tick)?;
         Some(DirectSource {
-            view: entry.view.clone(),
+            bind: entry.bind.clone(),
+            chunk: entry.chunk,
             meta: entry.meta,
             translation,
         })
@@ -1051,7 +1675,7 @@ impl TextGpu {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         planned: Vec<(pm_text::render::scene::CoverageLines, DirectPlan)>,
-    ) -> Option<Vec<(wgpu::TextureView, DirectMeta)>> {
+    ) -> Option<Vec<(wgpu::BindGroup, u64, DirectMeta)>> {
         let max_side = device.limits().max_texture_dimension_2d.max(1) as usize;
         self.stats.glyph_uploads += planned.len() as u64;
         let mut out = Vec::with_capacity(planned.len());
@@ -1155,6 +1779,8 @@ impl TextGpu {
                 );
             }
             let view = texture.create_view(&Default::default());
+            // One bind group per chunk, shared by its glyphs' draws.
+            let bind = self.source_bind(device, &view);
             // The whole texture is retained while any of its glyphs is.
             let mut evicted = Vec::new();
             let id = self.direct.admit(
@@ -1177,11 +1803,12 @@ impl TextGpu {
                     key,
                     DirectCacheEntry {
                         _lines: lines.lines,
-                        view: view.clone(),
+                        bind: bind.clone(),
+                        chunk: id,
                         meta,
                     },
                 );
-                out.push((view.clone(), meta));
+                out.push((bind.clone(), id, meta));
             }
         }
         // Keep the common chunk's scratch; not an unusually large glyph's.
@@ -1393,11 +2020,12 @@ impl TextGpu {
                 match uploaded {
                     Some(flushed) => {
                         for (i, at, translation) in staged_items {
-                            let (view, meta) = &flushed[at];
+                            let (bind, chunk, meta) = &flushed[at];
                             direct_sources.insert(
                                 i,
                                 DirectSource {
-                                    view: view.clone(),
+                                    bind: bind.clone(),
+                                    chunk: *chunk,
                                     meta: *meta,
                                     translation,
                                 },
@@ -1435,16 +2063,27 @@ impl TextGpu {
         for c in &atlas.cells {
             cells.entry(c.item).or_default().push(*c);
         }
-        // Color glyph textures (uploaded before the passes are recorded).
-        let mut images: HashMap<usize, wgpu::TextureView> = HashMap::new();
-        for (i, item) in scene.items.iter().enumerate() {
-            if !needed(item) { continue; }
-            if let ItemContent::Image { image, .. } = &item.content {
-                images.insert(i, self.image(device, queue, image, working));
-            }
-        }
+        // Color glyph atlas pages (uploaded before the passes are recorded).
+        let wanted: Vec<(usize, &ImagePixels)> = scene
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| needed(item))
+            .filter_map(|(i, item)| match &item.content {
+                ItemContent::Image { image, .. } => Some((i, image)),
+                ItemContent::Coverage { .. } => None,
+            })
+            .collect();
+        let mut images = self.place_images(device, queue, &wanted, working);
         for (&i, source) in &direct_sources {
-            images.insert(i, source.view.clone());
+            images.insert(
+                i,
+                ImageSource {
+                    bind: source.bind.clone(),
+                    id: (2, source.chunk),
+                    region: [0; 4],
+                },
+            );
         }
         let sources = ItemSources {
             cells,
@@ -1504,6 +2143,9 @@ impl TextGpu {
                 &mut cleared,
             );
         }
+        // Some callers submit this encoder immediately. Send only the new
+        // tails now, and never rewrite a range used by any earlier raster.
+        self.item_uniforms.flush(queue);
         self.stats.painted += 1;
         let view = raster.view.clone();
         self.insert(plan, precision, working, raster);
@@ -1518,6 +2160,8 @@ impl TextGpu {
     /// images, [`DIRECT_CACHE_BYTES`] of glyph outlines), so text a later
     /// frame draws unchanged is neither resolved nor uploaded again.
     pub fn end_frame(&mut self) {
+        self.frame_glyphs.submitted();
+        self.item_uniforms.reset();
         for target in self.retired.drain(..) {
             self.raster_pool.release(target);
         }
@@ -1533,11 +2177,14 @@ impl TextGpu {
             self.area_cursor = 0;
             self.batch = coverage::Batch::default();
             self.direct_scratch = Vec::new();
+            self.image_scratch = Vec::new();
+            self.item_uniforms = UniformPool::default();
             self.belt = Default::default();
         }
-        if self.image_bytes + self.direct.bytes > bytes {
+        if self.images.bytes + self.frame_glyphs.bytes() + self.direct.bytes > bytes {
+            self.frame_glyphs = FrameGlyphPages::default();
+            self.images.limit = IMAGE_CACHE_BYTES;
             self.images.clear();
-            self.image_bytes = 0;
             self.direct.clear();
             self.chunks_retired.clear();
             self.chunks_free.clear();
@@ -1708,9 +2355,10 @@ impl TextGpu {
                     }
                 }
                 ItemContent::Image { transform, .. } => {
-                    if !sources.images.contains_key(&i) {
+                    let Some(source) = sources.images.get(&i) else {
                         continue;
-                    }
+                    };
+                    let [ax, ay, aw, ah] = source.region;
                     let b: Rect = item.bounds.inflate(1.0, 1.0);
                     let rect = [
                         (b.x0.floor() - origin[0]) as f32,
@@ -1736,6 +2384,8 @@ impl TextGpu {
                         u: ItemUniform {
                             rect,
                             color: [0.0, 0.0, 0.0, alpha],
+                            // The image's atlas region: whole texels, exact.
+                            map: [ax as f32, ay as f32, aw as f32, ah as f32],
                             params: [1.0, if downscale { 1.0 } else { 0.0 }, tw, th],
                             inv0: [a as f32, c as f32, e as f32, 0.0],
                             inv1: [bb as f32, d as f32, f as f32, 0.0],
@@ -1750,48 +2400,27 @@ impl TextGpu {
 
     #[allow(clippy::too_many_arguments)]
     fn pass(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         target: &Target,
         draws: &[Draw],
         pages: &[wgpu::TextureView],
-        images: &HashMap<usize, wgpu::TextureView>,
+        images: &HashMap<usize, ImageSource>,
         precision: Precision,
         cleared: &mut bool,
     ) {
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pm text items"),
-            size: (draws.len().max(1) as u64) * UNIFORM_STRIDE,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut data = vec![0u8; draws.len().max(1) * UNIFORM_STRIDE as usize];
-        for (k, d) in draws.iter().enumerate() {
-            let at = k * UNIFORM_STRIDE as usize;
-            data[at..at + size_of::<ItemUniform>()].copy_from_slice(bytes_of(&d.u));
-        }
-        queue.write_buffer(&buffer, 0, &data);
-        let item_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pm text items"),
-            layout: &self.item_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &buffer,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(size_of::<ItemUniform>() as u64),
-                }),
-            }],
+        #[cfg(test)]
+        let pooled = !self.single_images;
+        #[cfg(not(test))]
+        let pooled = true;
+        let uniforms = (!draws.is_empty()).then(|| {
+            self.item_uniforms
+                .put(device, queue, &self.item_layout, draws, pooled)
         });
         let page_binds: Vec<wgpu::BindGroup> =
             pages.iter().map(|v| self.source_bind(device, v)).collect();
-        let image_binds: HashMap<usize, wgpu::BindGroup> = draws
-            .iter()
-            .filter_map(|d| d.image)
-            .map(|i| (i, self.source_bind(device, &images[&i])))
-            .collect();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("pm text paint"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1814,10 +2443,16 @@ impl TextGpu {
         });
         *cleared = true;
         let mut bound_image = None;
+        // The texture bound at group 1: draws reading the same atlas page,
+        // direct chunk or coverage page bind it once.
+        let mut bound_source = None;
         for (k, d) in draws.iter().enumerate() {
-            let bind = match (d.page, d.image) {
-                (Some(p), _) => &page_binds[p],
-                (None, Some(i)) => &image_binds[&i],
+            let (bind, id) = match (d.page, d.image) {
+                (Some(p), _) => (&page_binds[p], (0, p as u64)),
+                (None, Some(i)) => {
+                    let source = &images[&i];
+                    (&source.bind, source.id)
+                }
                 (None, None) => continue,
             };
             let is_image = d.u.params[0] == 1.0;
@@ -1829,9 +2464,18 @@ impl TextGpu {
                 };
                 pass.set_pipeline(pipeline.get());
                 bound_image = Some(is_image);
+                bound_source = None;
             }
-            pass.set_bind_group(0, &item_bind, &[(k as u64 * UNIFORM_STRIDE) as u32]);
-            pass.set_bind_group(1, bind, &[]);
+            let (uniform_bind, base) = uniforms.as_ref().expect("draw has uniforms");
+            pass.set_bind_group(
+                0,
+                uniform_bind,
+                &[*base + (k as u64 * UNIFORM_STRIDE) as u32],
+            );
+            if bound_source != Some(id) {
+                pass.set_bind_group(1, bind, &[]);
+                bound_source = Some(id);
+            }
             pass.draw(0..4, 0..1);
         }
     }
@@ -1840,7 +2484,7 @@ impl TextGpu {
     /// then composited into the float text target.
     #[allow(clippy::too_many_arguments)]
     fn blurred(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -2316,5 +2960,566 @@ mod direct_tests {
         cache.admit(4, 2 * 4096, 4, &mut evicted);
         evicted.sort();
         assert_eq!(evicted, [1, 2, 3]);
+    }
+}
+
+#[cfg(test)]
+mod atlas_tests {
+    use super::*;
+    use pm_text::render::bitmap::Rgba8;
+    use pm_text::render::colr::RgbaF32;
+    use pm_text::render::scene::{Item, PathStyle, PlacedPath};
+
+    /// Every placed image lies inside its page, pages stay within `side`
+    /// unless they hold one oversized image, and no two images on a page
+    /// share a texel.
+    fn assert_valid(sizes: &[(u32, u32)], pack: &ShelfPack, side: u32) {
+        assert_eq!(pack.places.len(), sizes.len());
+        let mut on_page: Vec<Vec<(u32, u32, u32, u32)>> = vec![Vec::new(); pack.pages.len()];
+        for (index, (&(w, h), place)) in sizes.iter().zip(&pack.places).enumerate() {
+            let Some(place) = place else {
+                assert!(w == 0 || h == 0, "image {index} has texels but no place");
+                continue;
+            };
+            let (pw, ph) = pack.pages[place.page];
+            assert!(
+                place.x + w <= pw && place.y + h <= ph,
+                "image {index} ({w}×{h} at {},{}) leaves its {pw}×{ph} page",
+                place.x,
+                place.y
+            );
+            on_page[place.page].push((place.x, place.y, w, h));
+        }
+        for (page, rects) in on_page.iter().enumerate() {
+            let (pw, ph) = pack.pages[page];
+            assert!(!rects.is_empty(), "page {page} holds nothing");
+            assert!(
+                (pw <= side && ph <= side) || rects.len() == 1,
+                "page {page} is {pw}×{ph} beyond side {side} with several images"
+            );
+            for (a, &(ax, ay, aw, ah)) in rects.iter().enumerate() {
+                for &(bx, by, bw, bh) in &rects[a + 1..] {
+                    let apart = ax + aw <= bx || bx + bw <= ax || ay + ah <= by || by + bh <= ay;
+                    assert!(apart, "images overlap on page {page}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shelf_pack_of_nothing_is_empty() {
+        let pack = shelf_pack(&[], 64, false);
+        assert!(pack.pages.is_empty() && pack.places.is_empty());
+    }
+
+    #[test]
+    fn one_image_gets_a_page_of_its_size() {
+        let pack = shelf_pack(&[(5, 7)], 64, false);
+        assert_eq!(pack.pages, [(5, 7)]);
+        assert_eq!(
+            pack.places,
+            [Some(ShelfPlace {
+                page: 0,
+                x: 0,
+                y: 0
+            })]
+        );
+    }
+
+    #[test]
+    fn images_fill_shelves_tallest_first() {
+        // 56 texels: shelves 8 wide. The tallest starts the first shelf.
+        let sizes = [(4, 4), (4, 8), (4, 2)];
+        let pack = shelf_pack(&sizes, 64, false);
+        assert_eq!(pack.pages, [(8, 10)]);
+        assert_eq!(
+            pack.places,
+            [
+                Some(ShelfPlace {
+                    page: 0,
+                    x: 4,
+                    y: 0
+                }),
+                Some(ShelfPlace {
+                    page: 0,
+                    x: 0,
+                    y: 0
+                }),
+                Some(ShelfPlace {
+                    page: 0,
+                    x: 0,
+                    y: 8
+                }),
+            ]
+        );
+        assert_valid(&sizes, &pack, 64);
+    }
+
+    #[test]
+    fn an_exact_fit_fills_one_page() {
+        let sizes = [(8, 8); 4];
+        let pack = shelf_pack(&sizes, 16, false);
+        assert_eq!(pack.pages, [(16, 16)]);
+        let corners: Vec<_> = pack.places.iter().map(|p| p.map(|p| (p.x, p.y))).collect();
+        assert_eq!(
+            corners,
+            [Some((0, 0)), Some((8, 0)), Some((0, 8)), Some((8, 8))]
+        );
+        assert_valid(&sizes, &pack, 16);
+    }
+
+    #[test]
+    fn a_full_page_opens_the_next() {
+        let sizes = [(8, 8); 5];
+        let pack = shelf_pack(&sizes, 16, false);
+        assert_eq!(pack.pages, [(16, 16), (8, 8)]);
+        assert_eq!(
+            pack.places[4],
+            Some(ShelfPlace {
+                page: 1,
+                x: 0,
+                y: 0
+            })
+        );
+        assert_valid(&sizes, &pack, 16);
+    }
+
+    #[test]
+    fn oversized_and_empty_images() {
+        // Wider or taller than a page: a page of its own size. No texels:
+        // no place, no page.
+        let sizes = [(3, 3), (40, 2), (0, 9), (2, 33), (9, 0), (4, 4)];
+        let pack = shelf_pack(&sizes, 32, false);
+        assert_eq!(pack.places[2], None);
+        assert_eq!(pack.places[4], None);
+        let own = |index: usize| {
+            let place = pack.places[index].expect("placed");
+            (place.x, place.y, pack.pages[place.page])
+        };
+        assert_eq!(own(1), (0, 0, (40, 2)));
+        assert_eq!(own(3), (0, 0, (2, 33)));
+        assert_eq!(pack.places[0].unwrap().page, pack.places[5].unwrap().page);
+        assert_eq!(pack.pages.len(), 3);
+        assert_valid(&sizes, &pack, 32);
+    }
+
+    #[test]
+    fn single_mode_gives_every_image_its_own_texture() {
+        let sizes = [(3, 3), (5, 2), (0, 4), (7, 7)];
+        let pack = shelf_pack(&sizes, 64, true);
+        assert_eq!(pack.pages, [(3, 3), (5, 2), (7, 7)]);
+        assert!(pack.places.iter().flatten().all(|p| (p.x, p.y) == (0, 0)));
+        assert_valid(&sizes, &pack, 64);
+    }
+
+    #[test]
+    fn random_packs_are_disjoint_and_within_their_pages() {
+        let mut state = 0x2545_f491_u32;
+        let mut next = |limit: u32| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) % limit
+        };
+        for side in [16, 64, 512] {
+            for count in [1, 7, 64, 400] {
+                let sizes: Vec<(u32, u32)> = (0..count).map(|_| (next(48), next(48))).collect();
+                let pack = shelf_pack(&sizes, side, false);
+                assert_valid(&sizes, &pack, side);
+                assert_eq!(pack, shelf_pack(&sizes, side, false), "deterministic");
+            }
+        }
+    }
+
+    fn gpu() -> pm_gpu::Gpu {
+        pm_gpu::Gpu::new("text glyph atlas bit identity").expect("a Metal device")
+    }
+
+    /// A deterministic premultiplied RGBA8 glyph mask with transparent,
+    /// partial and opaque texels.
+    fn mask(width: u32, height: u32, seed: u32) -> ImagePixels {
+        let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(12_345);
+        let mut data = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..width * height {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let a = match (state >> 24) as u8 {
+                a if a < 48 => 0,
+                a if a > 224 => 255,
+                a => a,
+            };
+            for c in 0..3u32 {
+                let v = (state >> (c * 7)) & 0xff;
+                data.push((v * u32::from(a) / 255) as u8);
+            }
+            data.push(a);
+        }
+        ImagePixels::Rgba8(Arc::new(Rgba8 {
+            width,
+            height,
+            data,
+        }))
+    }
+
+    fn image_item(image: ImagePixels, transform: Affine, alpha: f64, blur: f64) -> Item {
+        let (w, h) = image.dimensions();
+        Item {
+            bounds: transform.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(w), f64::from(h))),
+            content: ItemContent::Image { image, transform },
+            color: [1.0, 1.0, 1.0, alpha],
+            opacity: 1.0,
+            blur,
+            curve: pm_text::render::smoothing::IDENTITY,
+        }
+    }
+
+    /// An underline-like coverage bar drawn between glyph images.
+    fn bar(x: f64, y: f64, w: f64, h: f64) -> Item {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((w, 0.0));
+        path.line_to((w, h));
+        path.line_to((0.0, h));
+        path.close_path();
+        Item {
+            content: ItemContent::Coverage {
+                paths: vec![PlacedPath {
+                    path: Arc::new(path),
+                    transform: Affine::translate((x, y)),
+                    style: PathStyle::Fill,
+                }],
+            },
+            color: [0.2, 0.6, 0.9, 0.8],
+            opacity: 1.0,
+            blur: 0.0,
+            bounds: Rect::new(x, y, x + w, y + h),
+            curve: pm_text::render::smoothing::IDENTITY,
+        }
+    }
+
+    /// Three lines of kerned, subpixel-placed glyph masks at `scale` (glyphs
+    /// repeat, so masks are shared), coverage bars between them, a rotated
+    /// translucent mask, a blurred one (its own passes) and a working-domain
+    /// float image.
+    fn scene(scale: f64, phase: f64, extra: Option<Item>) -> TextScene {
+        let glyphs: Vec<ImagePixels> = (0..14)
+            .map(|g| mask(6 + (g * 3) % 17, 9 + (g * 5) % 19, g))
+            .collect();
+        let mut items = Vec::new();
+        for line in 0..3u32 {
+            let mut x = 5.0 + phase + f64::from(line) * 0.37;
+            let y = 6.0 + f64::from(line) * (4.0 + 28.0 * scale) + 0.21 * f64::from(line);
+            for k in 0..12usize {
+                let glyph = &glyphs[(line as usize * 5 + k * 3) % glyphs.len()];
+                let transform = Affine::translate((x, y)) * Affine::scale(scale);
+                items.push(image_item(glyph.clone(), transform, 0.9, 0.0));
+                // Kerned: the next glyph overlaps this one, at a new phase.
+                x += f64::from(glyph.dimensions().0) * scale * 0.8 + 0.173;
+                if k == 5 {
+                    items.push(bar(x - 9.0, y + 18.0 * scale, 14.25, 1.5));
+                }
+            }
+        }
+        items.push(image_item(
+            mask(20, 16, 99),
+            Affine::translate((40.3, 70.6)) * Affine::rotate(0.35) * Affine::scale(scale * 1.3),
+            0.6,
+            0.0,
+        ));
+        items.push(image_item(
+            glyphs[3].clone(),
+            Affine::translate((60.45, 20.7)) * Affine::scale(scale),
+            1.0,
+            1.25,
+        ));
+        items.push(image_item(
+            ImagePixels::WorkingF32(Arc::new(RgbaF32 {
+                width: 6,
+                height: 5,
+                data: (0..30)
+                    .flat_map(|i| {
+                        let a = (i % 7) as f32 / 6.0;
+                        [0.3 * a, 0.7 * a, 0.1 * a, a]
+                    })
+                    .collect(),
+            })),
+            Affine::translate((90.6, 50.2)) * Affine::scale(scale * 1.7),
+            0.85,
+            0.0,
+        ));
+        items.extend(extra);
+        TextScene {
+            width: 320,
+            height: 160,
+            items,
+        }
+    }
+
+    fn render(
+        painter: &mut TextGpu,
+        gpu: &pm_gpu::Gpu,
+        plan: &TextPlan,
+        precision: Precision,
+        working: WorkingEncoding,
+    ) -> Vec<u32> {
+        let mut pool = TargetPool::new();
+        let mut held = Vec::new();
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("text glyph atlas bit identity"),
+            });
+        let view = painter
+            .render(
+                &gpu.device,
+                &gpu.queue,
+                &mut encoder,
+                &mut pool,
+                &mut held,
+                plan,
+                precision,
+                working,
+            )
+            .expect("text raster");
+        gpu.queue.submit([encoder.finish()]);
+        let pixels = pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, view.texture())
+            .expect("text raster readback");
+        for target in held {
+            pool.give(target);
+        }
+        // The frame is submitted.
+        painter.begin_frame();
+        pixels.into_iter().map(f32::to_bits).collect()
+    }
+
+    fn differing(a: &[u32], b: &[u32]) -> usize {
+        assert_eq!(a.len(), b.len());
+        a.iter().zip(b).filter(|(a, b)| a != b).count()
+    }
+
+    /// Glyph masks packed into shared atlas pages paint every texel of the
+    /// raster with exactly the bits one texture per mask painted with the
+    /// image shader as it was: across scales that enlarge (bilinear) and
+    /// shrink (area integration, e.g. 0.25 × 1.03), subpixel phases,
+    /// overlapping translucent glyphs, coverage drawn between them, rotation,
+    /// blur, both working encodings, f32 and f16 rasters, small pages (many
+    /// pages, own pages for larger masks) and masks the cache already holds.
+    #[test]
+    fn atlas_pages_paint_the_bits_of_one_texture_per_image() {
+        let gpu = gpu();
+        let mut reference = TextGpu::new(&gpu.device);
+        reference.use_reference_images(&gpu.device);
+        let mut atlas = TextGpu::new(&gpu.device);
+        let mut small = TextGpu::new(&gpu.device);
+        small.atlas_side = 24;
+        let mut checked = 0usize;
+        // Masks are cached by content and working encoding: only the first
+        // raster of each encoding uploads them.
+        let mut uploaded: Vec<WorkingEncoding> = Vec::new();
+        for precision in [Precision::Float32, Precision::Float16] {
+            for working in [WorkingEncoding::Standard, WorkingEncoding::LinearLight] {
+                for scale in [1.0, 0.25 * 1.03, 0.25 * 1.03 * 4.0, 0.7, 1.6] {
+                    for phase in [0.0, 0.37] {
+                        let plan = TextPlan::whole(scene(scale, phase, None));
+                        let before = atlas.stats;
+                        let want = render(&mut reference, &gpu, &plan, precision, working);
+                        let got = render(&mut atlas, &gpu, &plan, precision, working);
+                        let paged = render(&mut small, &gpu, &plan, precision, working);
+                        let label =
+                            format!("{precision:?} {working:?} scale {scale} phase {phase}");
+                        assert_eq!(differing(&want, &got), 0, "atlas pages, {label}");
+                        assert_eq!(differing(&want, &paged), 0, "small atlas pages, {label}");
+                        let painted = want
+                            .chunks_exact(4)
+                            .filter(|p| f32::from_bits(p[3]) > 0.0)
+                            .count();
+                        assert!(painted > 100, "{label}: only {painted} pixels painted");
+                        let uploads = atlas.stats.image_uploads - before.image_uploads;
+                        let pages = atlas.stats.image_pages - before.image_pages;
+                        if !uploaded.contains(&working) {
+                            uploaded.push(working);
+                            // 14 masks (one also blurred), a rotated mask
+                            // and a float image, on one page.
+                            assert_eq!((uploads, pages), (16, 1), "{label}");
+                        } else {
+                            // The same masks at another scale, phase or
+                            // precision: all cached.
+                            assert_eq!((uploads, pages), (0, 0), "{label}");
+                        }
+                        checked += want.len();
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            reference.stats.image_pages, reference.stats.image_uploads,
+            "the reference keeps one texture per image"
+        );
+        assert!(small.stats.image_pages > 2 * atlas.stats.image_pages);
+        println!("{checked} channel values compared: 0 differing bits");
+    }
+
+    #[test]
+    fn glyph_shelf_never_reuses_an_uploaded_subrect() {
+        let mut shelf = GlyphShelf::default();
+        let first = shelf.append(256, 128).unwrap();
+        let second = shelf.append(256, 256).unwrap();
+        let third = shelf.append(512, 256).unwrap();
+        assert_eq!((first, second, third), ((0, 0), (256, 0), (0, 256)));
+        assert_eq!(shelf.append(1, 1), None);
+        assert_eq!(shelf.append(513, 1), None);
+    }
+
+    #[test]
+    fn multiple_unsubmitted_rasters_share_pages_and_keep_their_original_bits() {
+        let gpu = gpu();
+        let mut atlas = TextGpu::new(&gpu.device);
+        let mut reference = TextGpu::new(&gpu.device);
+        reference.use_reference_images(&gpu.device);
+        let plans: Vec<_> = [(16, 12), (16, 12), (512, 512), (512, 512), (513, 12)]
+            .into_iter()
+            .enumerate()
+            .map(|(seed, (w, h))| {
+                TextPlan::whole(TextScene {
+                    width: 48,
+                    height: 32,
+                    items: vec![image_item(
+                        mask(w, h, 10 + seed as u32),
+                        Affine::translate((1.125, 2.5)),
+                        0.75,
+                        0.0,
+                    )],
+                })
+            })
+            .collect();
+        let mut pool = TargetPool::new();
+        let mut taken = Vec::new();
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let mut views = Vec::new();
+        for plan in &plans {
+            views.push(
+                atlas
+                    .render(
+                        &gpu.device,
+                        &gpu.queue,
+                        &mut encoder,
+                        &mut pool,
+                        &mut taken,
+                        plan,
+                        Precision::Float32,
+                        WorkingEncoding::Standard,
+                    )
+                    .expect("text raster"),
+            );
+        }
+        assert_eq!(atlas.frame_glyphs.bytes(), IMAGE_CACHE_BYTES);
+        assert_eq!(atlas.images.bytes, 0, "overflow images are transient");
+        assert_eq!(atlas.frame_glyphs.entries.len(), 3);
+        assert_eq!(atlas.item_uniforms.chunks.len(), 1);
+        let regions: Vec<_> = plans[..2]
+            .iter()
+            .map(|p| {
+                let ItemContent::Image { image, .. } = &p.scene.items[0].content else {
+                    panic!("expected test image");
+                };
+                let entry =
+                    &atlas.frame_glyphs.entries[&image_key(image, WorkingEncoding::Standard)].2;
+                (entry.page, entry.region)
+            })
+            .collect();
+        assert_eq!(regions, vec![(0, [0, 0, 16, 12]), (0, [16, 0, 16, 12])]);
+        gpu.queue.submit([encoder.finish()]);
+        atlas.end_frame();
+        assert!(
+            atlas.frame_glyphs.entries.is_empty(),
+            "full pages can recycle after submit"
+        );
+
+        for (plan, view) in plans.iter().zip(views) {
+            let want = render(
+                &mut reference,
+                &gpu,
+                plan,
+                Precision::Float32,
+                WorkingEncoding::Standard,
+            );
+            let got: Vec<_> = pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, view.texture())
+                .expect("text raster readback")
+                .into_iter()
+                .map(f32::to_bits)
+                .collect();
+            assert!(want.iter().any(|&value| value != 0));
+            assert_eq!(differing(&want, &got), 0);
+        }
+    }
+
+    /// A mask without texels draws nothing (one texture per image could not
+    /// even make its texture).
+    #[test]
+    fn an_empty_mask_draws_nothing() {
+        let gpu = gpu();
+        let mut atlas = TextGpu::new(&gpu.device);
+        let empty = image_item(
+            ImagePixels::Rgba8(Arc::new(Rgba8 {
+                width: 0,
+                height: 3,
+                data: Vec::new(),
+            })),
+            Affine::translate((30.5, 30.5)),
+            1.0,
+            0.0,
+        );
+        let plain = TextPlan::whole(scene(1.0, 0.0, None));
+        let with_empty = TextPlan::whole(scene(1.0, 0.0, Some(empty)));
+        let a = render(
+            &mut atlas,
+            &gpu,
+            &plain,
+            Precision::Float32,
+            WorkingEncoding::Standard,
+        );
+        let b = render(
+            &mut atlas,
+            &gpu,
+            &with_empty,
+            Precision::Float32,
+            WorkingEncoding::Standard,
+        );
+        assert_eq!(differing(&a, &b), 0);
+    }
+
+    /// Pages stay within the image cache's bytes, and clearing the caches
+    /// releases them.
+    #[test]
+    fn atlas_pages_are_bounded_and_released() {
+        let gpu = gpu();
+        let mut atlas = TextGpu::new(&gpu.device);
+        for phase in 0..40 {
+            // New masks every raster: the cache evicts whole pages.
+            let glyphs: Vec<Item> = (0..60u32)
+                .map(|g| {
+                    image_item(
+                        mask(40, 48, phase * 100 + g),
+                        Affine::translate((f64::from(g % 10) * 30.0, f64::from(g / 10) * 25.0)),
+                        1.0,
+                        0.0,
+                    )
+                })
+                .collect();
+            let plan = TextPlan::whole(TextScene {
+                width: 320,
+                height: 160,
+                items: glyphs,
+            });
+            render(
+                &mut atlas,
+                &gpu,
+                &plan,
+                Precision::Float16,
+                WorkingEncoding::Standard,
+            );
+            assert!(atlas.images.bytes + atlas.frame_glyphs.bytes() <= IMAGE_CACHE_BYTES);
+        }
+        assert!(atlas.images.bytes + atlas.frame_glyphs.bytes() > 0);
+        atlas.trim(0);
+        assert_eq!(atlas.images.bytes + atlas.frame_glyphs.bytes(), 0);
+        assert!(atlas.image_scratch.capacity() == 0);
     }
 }

@@ -24,6 +24,18 @@
 //!   `WatchdogTimeout` until it is registered again, a shader layer until
 //!   its code changes; built-ins never) is off unless a renderer opts in,
 //!   and no production renderer does.
+//!
+//!   **Sampled while it only records.** Two marker passes per program cut
+//!   the frame's render passes apart around every effect instance (about
+//!   128 compute passes and bind groups in a heavy frame). While the budget
+//!   is not enforced, an interactive renderer puts timestamps in one frame
+//!   of every [`SAMPLE_EVERY`] ([`Watchdog::set_sample_every`]), and in any
+//!   frame [`SAMPLE_INTERVAL`] after the last timed one (a paused viewer's
+//!   frames, drawn one at a time, are all timed). Every frame is timed with
+//!   an enforced budget, in a job renderer, and while a program has an
+//!   unexplained hang against it (so the next hang it is in carries the
+//!   timestamps that clear or convict it). The markers only read a texel
+//!   into a sink: no pixel depends on whether a frame is timed.
 //! - **The hang guard** (every renderer): a program that does not finish (a
 //!   runaway loop the GPU runs until the operating system's GPU timeout
 //!   aborts the command buffer) is disabled and reported; a job stops. Its
@@ -97,6 +109,15 @@ pub const JOB_HANG: Duration = HANG;
 /// Timed programs per frame (two queries each).
 pub const CAPACITY: u32 = 64;
 
+/// While the budget only records, an interactive renderer times one frame
+/// in this many on the GPU (once a second at 30 fps); the default of
+/// [`Watchdog::set_sample_every`].
+pub const SAMPLE_EVERY: u64 = 30;
+
+/// While the budget only records, a frame encoded this long after the last
+/// frame timed on the GPU is timed too, whatever the count.
+pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Frames timed at once (query sets; Metal's counter sample buffers are a
 /// scarce resource).
 const SLOTS: usize = 2;
@@ -136,7 +157,7 @@ pub enum Subject {
 }
 
 /// One program drawn in a frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Span {
     pub subject: Subject,
     pub layer: LayerId,
@@ -275,6 +296,9 @@ pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 /// a frame cannot start before the one submitted before it completes).
 struct Inflight {
     spans: Vec<Span>,
+    timed_span_indices: Vec<usize>,
+    sparse: bool,
+    census: Option<Vec<SpanIdentity>>,
     /// The query slot holding its timestamps, when timed.
     slot: Option<usize>,
     stage: Stage,
@@ -321,9 +345,42 @@ struct Timing {
 /// A frame's spans while it is being encoded.
 pub struct FrameTimer {
     pub(crate) spans: Vec<Span>,
+    timed_span_indices: Vec<usize>,
+    sparse: bool,
+    selection: Option<SparseFrame>,
     /// The frame's query set and marker, when it is timed on the GPU.
     gpu: Option<(wgpu::QuerySet, Marker)>,
     slot: Option<usize>,
+}
+
+const SPARSE_PAIRS: usize = 2;
+const SPAN_CENSUS: usize = 256;
+fn sparse_timing_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PM_WATCHDOG_SPARSE").is_none_or(|v| v != "0"))
+}
+
+type SpanIdentity = (Span, usize);
+
+#[derive(Default)]
+struct SparseFrame {
+    selected: Vec<SpanIdentity>,
+    observed: Vec<SpanIdentity>,
+    occurrences: BTreeMap<Span, usize>,
+}
+
+impl SparseFrame {
+    fn select(&mut self, span: &Span) -> bool {
+        if self.observed.len() == SPAN_CENSUS {
+            return false;
+        }
+        let ordinal = self.occurrences.entry(span.clone()).or_default();
+        let identity = (span.clone(), *ordinal);
+        *ordinal += 1;
+        let selected = self.selected.is_empty() || self.selected.contains(&identity);
+        self.observed.push(identity);
+        selected
+    }
 }
 
 /// The marker dispatch: reads one texel of a texture into a sink.
@@ -403,12 +460,19 @@ impl FrameTimer {
     /// Records a program drawn in the frame; the query indices of its
     /// markers when the frame is timed on the GPU and the set has room.
     pub(crate) fn begin(&mut self, span: Span) -> Option<(u32, u32)> {
-        let index = self.spans.len() as u32;
+        let index = self.spans.len();
+        let (selected, limit) = match &mut self.selection {
+            Some(sparse) => (sparse.select(&span), SPARSE_PAIRS),
+            None => (true, CAPACITY as usize),
+        };
         self.spans.push(span);
-        if self.gpu.is_none() || index >= CAPACITY {
+        let pair = self.timed_span_indices.len();
+        if self.gpu.is_none() || !selected || pair >= limit {
             return None;
         }
-        Some((index * 2, index * 2 + 1))
+        self.timed_span_indices.push(index);
+        let begin = 2 * pair as u32;
+        Some((begin, begin + 1))
     }
 
     /// A marker dispatch reading `texture`, its end sampled into `query`.
@@ -483,6 +547,16 @@ pub struct Watchdog {
     /// The frame being encoded left a held program out
     /// ([`Watchdog::hold`]).
     held_frame: bool,
+    /// While the budget only records, one frame in this many is timed on
+    /// the GPU ([`Watchdog::set_sample_every`]; 1: every frame).
+    sample_every: u64,
+    /// Frames encoded without GPU timestamps since the last one timed
+    /// (`None`: none timed yet on this device, so the next one is).
+    untimed: Option<u64>,
+    /// When the last frame timed on the GPU was encoded.
+    last_timed: Option<Instant>,
+    census: Vec<SpanIdentity>,
+    recovery: BTreeSet<Subject>,
 }
 
 impl Default for Watchdog {
@@ -506,6 +580,11 @@ impl Default for Watchdog {
             clock: None,
             last_done: None,
             held_frame: false,
+            sample_every: SAMPLE_EVERY,
+            untimed: None,
+            last_timed: None,
+            census: Vec::new(),
+            recovery: BTreeSet::new(),
         }
     }
 }
@@ -526,6 +605,30 @@ impl Watchdog {
     /// The enforced budget (`None`: recorded only).
     pub fn budget(&self) -> Option<Duration> {
         self.budget
+    }
+
+    pub(crate) fn permits_shader_output_reuse(&self, subject: &Subject) -> bool {
+        self.budget.is_none()
+            && self.policy != Policy::Job
+            && self.sample_every != 1
+            && self.source.is_none()
+            && !self.strikes.contains_key(subject)
+            && !self.recovery.contains(subject)
+    }
+
+    /// While the budget only records, an interactive renderer times one
+    /// frame in `frames` on the GPU (and any frame [`SAMPLE_INTERVAL`]
+    /// after the last timed one); 1 times every frame (tests of the
+    /// timestamps themselves, a profile of every frame). The default is
+    /// [`SAMPLE_EVERY`]. An enforced budget and a job renderer time every
+    /// frame whatever this says.
+    pub fn set_sample_every(&mut self, frames: u64) {
+        self.sample_every = frames.max(1);
+    }
+
+    /// See [`Watchdog::set_sample_every`].
+    pub fn sample_every(&self) -> u64 {
+        self.sample_every
     }
 
     /// Program times measured and recorded so far (every timed span of
@@ -624,6 +727,7 @@ impl Watchdog {
         self.disabled.remove(&subject);
         self.measured.remove(&subject);
         self.strikes.remove(&subject);
+        self.recovery.remove(&subject);
     }
 
     /// Re-enables everything (the user asked to try again; a job starts).
@@ -631,6 +735,7 @@ impl Watchdog {
         self.disabled.clear();
         self.disabled_code.clear();
         self.strikes.clear();
+        self.recovery.clear();
         self.stopped = None;
     }
 
@@ -690,17 +795,52 @@ impl Watchdog {
         self.last_tick = 0;
         self.last_done = None;
         self.held_frame = false;
+        // The first frame on the next device is timed.
+        self.untimed = None;
+        self.last_timed = None;
+        self.census.clear();
+        self.recovery.clear();
         true
+    }
+
+    /// Whether the frame being encoded at `now` gets GPU timestamps (when
+    /// the device can, no test source is set, and a query slot is free):
+    /// every frame with an enforced budget, in a job, while a program has
+    /// an unexplained hang against it (the next hang it is in then carries
+    /// the evidence that clears or convicts it), or at
+    /// [`Watchdog::set_sample_every`] 1; else one frame in
+    /// [`Watchdog::sample_every`] and any frame [`SAMPLE_INTERVAL`] after
+    /// the last timed one.
+    fn timing_due(&self, now: Instant) -> bool {
+        self.budget.is_some()
+            || self.policy == Policy::Job
+            || self.sample_every <= 1
+            || !self.strikes.is_empty()
+            || !self.recovery.is_empty()
+            || self
+                .untimed
+                .is_none_or(|n| n.saturating_add(1) >= self.sample_every)
+            || self
+                .last_timed
+                .is_none_or(|t| now.saturating_duration_since(t) >= SAMPLE_INTERVAL)
     }
 
     /// The timer for a frame: spans are always recorded (the hang guard);
     /// GPU queries are added when the device can time passes, no test
-    /// source is set, and a query slot is free.
+    /// source is set, the frame is due ([`Watchdog::timing_due`]: every
+    /// frame unless the budget only records), and a query slot is free. A
+    /// frame without them records no marker pass, bind group, or resolve,
+    /// and is judged as a frame without timestamps.
     pub(crate) fn frame_timer(&mut self, device: &wgpu::Device) -> FrameTimer {
+        // An abandoned encoder never writes its queries or advances cadence.
+        self.inflight
+            .retain(|frame| !matches!(frame.stage, Stage::Encoded));
         let timestamps =
             self.source.is_none() && device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let now = self.now();
+        let due = timestamps && self.timing_due(now);
         let busy: BTreeSet<usize> = self.inflight.iter().filter_map(|f| f.slot).collect();
-        let slot = timestamps
+        let slot = due
             .then(|| (0..SLOTS).find(|s| !busy.contains(s)))
             .flatten();
         let gpu = slot.map(|slot| {
@@ -732,8 +872,33 @@ impl Watchdog {
             }
             (self.slots[slot].set.clone(), marker)
         });
+        let sparse = timestamps
+            && self.budget.is_none()
+            && self.policy != Policy::Job
+            && self.sample_every > 1
+            && sparse_timing_enabled();
+        let selection = (sparse && gpu.is_some()).then(|| {
+            let suspect = |span: &Span| {
+                self.recovery.contains(&span.subject) || self.strikes.contains_key(&span.subject)
+            };
+            let selected = self
+                .census
+                .iter()
+                .filter(|(span, _)| suspect(span))
+                .chain(self.census.iter().filter(|(span, _)| !suspect(span)))
+                .take(SPARSE_PAIRS)
+                .cloned()
+                .collect();
+            SparseFrame {
+                selected,
+                ..Default::default()
+            }
+        });
         FrameTimer {
             spans: Vec::new(),
+            timed_span_indices: Vec::new(),
+            sparse,
+            selection,
             slot: gpu.as_ref().and(slot),
             gpu,
         }
@@ -759,8 +924,31 @@ impl Watchdog {
             }
         }
         self.inflight.push_back(Inflight {
-            slot: timer.slot.filter(|_| !timer.spans.is_empty()),
+            slot: timer.slot.filter(|_| !timer.timed_span_indices.is_empty()),
+            census: timer.selection.as_ref().map(|s| {
+                let mut census: Vec<_> = self
+                    .census
+                    .iter()
+                    .filter(|identity| s.observed.contains(identity))
+                    .cloned()
+                    .collect();
+                for identity in &s.observed {
+                    if !census.contains(identity) {
+                        census.push(identity.clone());
+                    }
+                }
+                for &index in &timer.timed_span_indices {
+                    let identity = &s.observed[index];
+                    if let Some(i) = census.iter().position(|item| item == identity) {
+                        let selected = census.remove(i);
+                        census.push(selected);
+                    }
+                }
+                census
+            }),
+            sparse: timer.sparse,
             spans: timer.spans,
+            timed_span_indices: timer.timed_span_indices,
             stage: Stage::Encoded,
             submitted: None,
             completed: Arc::new(Mutex::new(None)),
@@ -781,6 +969,17 @@ impl Watchdog {
         };
         frame.stage = Stage::Submitted;
         frame.submitted = Some(now);
+        if frame.slot.is_some() {
+            self.untimed = Some(0);
+            self.last_timed = Some(now);
+        } else {
+            self.untimed = self.untimed.map(|n| n.saturating_add(1));
+        }
+        if let Some(census) = frame.census.take() {
+            self.census = census;
+            self.recovery
+                .retain(|subject| self.census.iter().any(|(span, _)| &span.subject == subject));
+        }
         let completed = frame.completed.clone();
         queue.on_submitted_work_done(move || {
             if let Ok(mut c) = completed.lock() {
@@ -876,14 +1075,14 @@ impl Watchdog {
             let Some(slot) = frame.slot.filter(|s| *s < self.slots.len()) else {
                 let frame = self.remove(i);
                 let times = vec![SpanTime::Unknown; frame.spans.len()];
-                self.judge(&frame.spans, &times, frame.suspect);
+                self.judge_frame(&frame, &times);
                 progressed = true;
                 continue;
             };
             let timing = &self.slots[slot];
             let frame = &mut self.inflight[i];
             if matches!(frame.stage, Stage::Submitted) {
-                let count = frame.spans.len().min(CAPACITY as usize) as u32 * 2;
+                let count = frame.timed_span_indices.len() as u32 * 2;
                 let bytes = u64::from(count) * 8;
                 let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("pm effect watchdog resolve"),
@@ -921,7 +1120,7 @@ impl Watchdog {
                 // No readback (the map failed): judged without timestamps.
                 vec![SpanTime::Unknown; frame.spans.len()]
             };
-            self.judge(&frame.spans, &times, frame.suspect);
+            self.judge_frame(&frame, &times);
             progressed = true;
         }
         progressed
@@ -947,7 +1146,7 @@ impl Watchdog {
     ) -> Vec<SpanTime> {
         let timing = &self.slots[slot];
         let period = f64::from(queue.get_timestamp_period());
-        let timed = frame.spans.len().min(CAPACITY as usize);
+        let timed = frame.timed_span_indices.len();
         let ticks: Vec<u64> = {
             let data = timing
                 .readback
@@ -963,10 +1162,34 @@ impl Watchdog {
         // A span can take no longer than its frame did (plus the poll's
         // granularity); anything longer is not a sample of this frame.
         let ceiling_ms = wall.as_secs_f64() * 1000.0 + 50.0;
-        let (mut times, floor) = plausible_spans(&ticks, self.last_tick, period, ceiling_ms);
+        let (samples, floor) = plausible_spans(&ticks, self.last_tick, period, ceiling_ms);
         self.last_tick = floor;
-        times.resize(frame.spans.len(), SpanTime::Unknown);
+        let mut times = vec![SpanTime::Unknown; frame.spans.len()];
+        for (&index, sample) in frame.timed_span_indices.iter().zip(samples) {
+            times[index] = sample;
+        }
         times
+    }
+
+    fn judge_frame(&mut self, frame: &Inflight, times: &[SpanTime]) {
+        if !frame.sparse {
+            self.judge(&frame.spans, times, frame.suspect);
+            return;
+        }
+        let mut spans = Vec::with_capacity(frame.timed_span_indices.len());
+        let mut selected = Vec::with_capacity(frame.timed_span_indices.len());
+        for (index, span) in frame.spans.iter().enumerate() {
+            if frame.timed_span_indices.contains(&index) {
+                spans.push(span.clone());
+                selected.push(times[index]);
+            } else if frame.suspect && !span.builtin && !self.disabled.contains_key(&span.subject) {
+                self.recovery.insert(span.subject.clone());
+            }
+        }
+        for span in &spans {
+            self.recovery.remove(&span.subject);
+        }
+        self.judge(&spans, &selected, frame.suspect);
     }
 
     /// Judges a completed frame: the budget for every measured program and,
@@ -1017,6 +1240,7 @@ impl Watchdog {
     fn attribute(&mut self, spans: &[Span], times: &[SpanTime]) {
         let hang_ms = self.hang.as_secs_f64() * 1000.0;
         let mut guilty: Vec<(Span, String)> = Vec::new();
+        let mut struck = BTreeSet::new();
         for (span, time) in spans.iter().zip(times) {
             if span.builtin
                 || self.disabled.contains_key(&span.subject)
@@ -1031,6 +1255,9 @@ impl Watchdog {
                 SpanTime::Measured(_) => continue,
                 SpanTime::Unfinished => "did not finish: its frame stopped inside it".to_owned(),
                 SpanTime::Unknown => {
+                    if !struck.insert(&span.subject) {
+                        continue;
+                    }
                     let strikes = self.strikes.entry(span.subject.clone()).or_insert(0);
                     *strikes += 1;
                     if *strikes < STRIKES {
@@ -1160,9 +1387,11 @@ pub(crate) fn plausible_spans(
 #[cfg(test)]
 mod tests {
     use super::{
-        FrameTimer, INFLIGHT, Inflight, MAPPED, SpanTime, Stage, Watchdog, plausible_spans,
+        FrameTimer, INFLIGHT, Inflight, MAPPED, SAMPLE_EVERY, Span, SpanTime, Stage, Watchdog,
+        plausible_spans,
     };
-    use std::sync::atomic::AtomicU8;
+    use pm_protocol::definitions::DefinitionKind;
+    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -1172,6 +1401,9 @@ mod tests {
         watchdog.set_budget(Duration::from_millis(7));
         watchdog.inflight.push_back(Inflight {
             spans: Vec::new(),
+            timed_span_indices: Vec::new(),
+            sparse: false,
+            census: None,
             slot: None,
             stage: Stage::Encoded,
             submitted: None,
@@ -1212,6 +1444,9 @@ mod tests {
             .unwrap();
         let frame = |stage, slot| Inflight {
             spans: Vec::new(),
+            timed_span_indices: Vec::new(),
+            sparse: false,
+            census: None,
             slot,
             stage,
             submitted: Some(Instant::now()),
@@ -1230,6 +1465,9 @@ mod tests {
             &mut encoder,
             FrameTimer {
                 spans: Vec::new(),
+                timed_span_indices: Vec::new(),
+                sparse: false,
+                selection: None,
                 gpu: None,
                 slot: None,
             },
@@ -1240,6 +1478,96 @@ mod tests {
         gpu.queue.submit([encoder.finish()]);
         assert!(pollster::block_on(scope.pop()).is_none());
         assert_eq!(watchdog.frames_in_flight(), INFLIGHT);
+    }
+
+    #[test]
+    fn sparse_pairs_rotate_across_layers_and_record_every_span() {
+        let gpu = pm_gpu::Gpu::new("watchdog sparse rotation").unwrap();
+        if !gpu
+            .device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+        {
+            return;
+        }
+        assert!(super::sparse_timing_enabled());
+        let spans: Vec<_> = (0..6)
+            .map(|i| {
+                Span::definition(
+                    DefinitionKind::Effect,
+                    "same-effect",
+                    &i.to_string(),
+                    None,
+                    false,
+                )
+            })
+            .collect();
+        let mut watchdog = Watchdog::default();
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        for expected in [[0, 1], [2, 3], [4, 5], [0, 1]] {
+            let mut timer = watchdog.frame_timer(&gpu.device);
+            let mut queries = Vec::new();
+            for (i, span) in spans.iter().enumerate() {
+                if let Some(pair) = timer.begin(span.clone()) {
+                    queries.push((i, pair));
+                }
+            }
+            assert_eq!(queries, vec![(expected[0], (0, 1)), (expected[1], (2, 3))]);
+            assert_eq!(timer.spans, spans);
+            watchdog.finish(&mut encoder, timer);
+            watchdog.submitted(&gpu.queue);
+            watchdog.inflight.clear();
+            watchdog.untimed = None;
+        }
+        for (policy, budget, sample_every) in [
+            (super::Policy::Job, None, 30),
+            (
+                super::Policy::Interactive,
+                Some(Duration::from_millis(3)),
+                30,
+            ),
+            (super::Policy::Interactive, None, 1),
+        ] {
+            watchdog.set_policy(policy);
+            watchdog.budget = budget;
+            watchdog.set_sample_every(sample_every);
+            let mut timer = watchdog.frame_timer(&gpu.device);
+            for i in 0..70 {
+                assert_eq!(timer.begin(spans[0].clone()).is_some(), i < 64);
+            }
+            assert_eq!(timer.spans.len(), 70);
+        }
+    }
+
+    #[test]
+    fn unselected_spans_stay_in_recovery_without_wall_time_strikes() {
+        let mut watchdog = Watchdog::default();
+        let spans: Vec<_> = ["slow", "fast", "unmeasured"]
+            .iter()
+            .map(|id| Span::definition(DefinitionKind::Effect, id, id, None, false))
+            .collect();
+        let suspect = Inflight {
+            spans: spans.clone(),
+            timed_span_indices: vec![0, 1],
+            sparse: true,
+            census: None,
+            slot: Some(0),
+            stage: Stage::Submitted,
+            submitted: Some(Instant::now()),
+            completed: Default::default(),
+            suspect: true,
+        };
+        for _ in 0..4 {
+            watchdog.judge_frame(
+                &suspect,
+                &[SpanTime::Unfinished, ms(1.0), SpanTime::Unknown],
+            );
+        }
+        assert!(watchdog.is_disabled(DefinitionKind::Effect, "slow"));
+        assert!(!watchdog.is_disabled(DefinitionKind::Effect, "fast"));
+        assert!(!watchdog.is_disabled(DefinitionKind::Effect, "unmeasured"));
+        assert!(watchdog.recovery.contains(&spans[2].subject));
+        assert!(watchdog.strikes.is_empty());
     }
 
     fn ms(v: f64) -> SpanTime {
@@ -1294,6 +1622,221 @@ mod tests {
             vec![ms(0.001), SpanTime::Unfinished, SpanTime::Unknown]
         );
         assert_eq!(floor, 2_000);
+    }
+
+    /// A device that can time passes (`None`: the test is not run).
+    fn timestamp_gpu(what: &str) -> Option<pm_gpu::Gpu> {
+        let gpu = pm_gpu::Gpu::new(what).unwrap();
+        if !gpu
+            .device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+        {
+            eprintln!("NOT RUN: no timestamp queries on this device");
+            return None;
+        }
+        Some(gpu)
+    }
+
+    /// A clock the test moves (milliseconds after a fixed start).
+    fn held_clock(watchdog: &mut Watchdog) -> Arc<AtomicU64> {
+        let base = Instant::now();
+        let offset = Arc::new(AtomicU64::new(0));
+        let o = offset.clone();
+        watchdog.set_clock(Some(Arc::new(move || {
+            base + Duration::from_millis(o.load(Ordering::Relaxed))
+        })));
+        offset
+    }
+
+    /// Encodes a frame drawing one user program and follows it (as
+    /// `Renderer::render_into` does); whether it was timed on the GPU.
+    /// With `keep`, the frame stays in flight holding its query slot;
+    /// else it is dropped right away, as if judged.
+    fn encode(watchdog: &mut Watchdog, device: &wgpu::Device, keep: bool) -> bool {
+        let mut timer = watchdog.frame_timer(device);
+        let queries = timer.begin(Span::definition(
+            DefinitionKind::Effect,
+            "acme.dots",
+            "l1",
+            Some("f1"),
+            false,
+        ));
+        let timed = timer.gpu.is_some();
+        assert_eq!(queries.is_some(), timed, "markers only in a timed frame");
+        assert_eq!(timer.slot.is_some(), timed);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        watchdog.finish(&mut encoder, timer);
+        let frame = watchdog.inflight.back().expect("every frame is followed");
+        // The hang guard sees every frame's programs, timed or not.
+        assert_eq!(frame.spans.len(), 1, "the span is recorded either way");
+        assert_eq!(frame.slot.is_some(), timed);
+        if !keep {
+            watchdog.inflight.pop_back();
+        }
+        timed
+    }
+
+    fn frames(watchdog: &mut Watchdog, device: &wgpu::Device, n: usize) -> Vec<bool> {
+        (0..n).map(|_| encode(watchdog, device, false)).collect()
+    }
+
+    #[test]
+    fn a_recording_viewer_times_one_frame_in_sample_every() {
+        let Some(gpu) = timestamp_gpu("watchdog sampling test") else {
+            return;
+        };
+        let mut watchdog = Watchdog::default();
+        assert_eq!(watchdog.budget(), None, "records only");
+        assert_eq!(watchdog.sample_every(), SAMPLE_EVERY);
+        // The clock stands still: only the count decides.
+        held_clock(&mut watchdog);
+        let n = SAMPLE_EVERY as usize;
+        let timed = frames(&mut watchdog, &gpu.device, 2 * n + 2);
+        let expected: Vec<bool> = (0..2 * n + 2).map(|i| i % n == 0).collect();
+        assert_eq!(timed, expected, "frames 0, {n} and {}", 2 * n);
+    }
+
+    #[test]
+    fn a_frame_a_second_after_the_last_timed_one_is_timed() {
+        let Some(gpu) = timestamp_gpu("watchdog sampling interval test") else {
+            return;
+        };
+        let mut watchdog = Watchdog::default();
+        let clock = held_clock(&mut watchdog);
+        let at = |ms: u64, watchdog: &mut Watchdog| {
+            clock.store(ms, Ordering::Relaxed);
+            encode(watchdog, &gpu.device, false)
+        };
+        assert!(at(0, &mut watchdog), "the first frame");
+        assert!(!at(400, &mut watchdog));
+        assert!(!at(999, &mut watchdog));
+        assert!(
+            at(1_000, &mut watchdog),
+            "a second after the last timed one"
+        );
+        assert!(!at(1_999, &mut watchdog));
+        // A paused viewer's frames, seconds apart: every one is timed.
+        assert!(at(5_000, &mut watchdog));
+        assert!(at(9_000, &mut watchdog));
+    }
+
+    #[test]
+    fn every_frame_is_timed_with_an_enforced_budget_in_a_job_or_at_one() {
+        let Some(gpu) = timestamp_gpu("watchdog every frame test") else {
+            return;
+        };
+        let n = SAMPLE_EVERY as usize + 3;
+        let mut budget = Watchdog::default();
+        held_clock(&mut budget);
+        budget.set_budget(Duration::from_millis(250));
+        assert!(frames(&mut budget, &gpu.device, n).iter().all(|t| *t));
+        // Back to recording only: sampled again from the last timed frame.
+        budget.clear_budget();
+        assert_eq!(frames(&mut budget, &gpu.device, 2), vec![false, false]);
+        let mut job = Watchdog::default();
+        held_clock(&mut job);
+        job.set_policy(super::Policy::Job);
+        assert!(frames(&mut job, &gpu.device, n).iter().all(|t| *t));
+        let mut every = Watchdog::default();
+        held_clock(&mut every);
+        every.set_sample_every(1);
+        assert!(frames(&mut every, &gpu.device, n).iter().all(|t| *t));
+        every.set_sample_every(0);
+        assert_eq!(every.sample_every(), 1, "0 is every frame too");
+    }
+
+    #[test]
+    fn an_unexplained_hang_times_every_frame_until_it_is_cleared() {
+        let Some(gpu) = timestamp_gpu("watchdog strike test") else {
+            return;
+        };
+        let mut watchdog = Watchdog::default();
+        held_clock(&mut watchdog);
+        assert!(encode(&mut watchdog, &gpu.device, false));
+        assert!(!encode(&mut watchdog, &gpu.device, false));
+        // An untimed frame did not finish: the next hang it is in must
+        // carry timestamps (cleared by them, or convicted).
+        let span = Span::definition(DefinitionKind::Effect, "acme.dots", "l1", Some("f1"), false);
+        watchdog.judge(std::slice::from_ref(&span), &[SpanTime::Unknown], true);
+        assert!(watchdog.reports.is_empty(), "one strike turns nothing off");
+        assert!(frames(&mut watchdog, &gpu.device, 5).iter().all(|t| *t));
+        // A timed frame shows it finished: forgiven, sampled again.
+        watchdog.judge(std::slice::from_ref(&span), &[ms(2.0)], false);
+        assert!(watchdog.strikes.is_empty());
+        assert_eq!(frames(&mut watchdog, &gpu.device, 3), vec![false; 3]);
+    }
+
+    #[test]
+    fn a_due_frame_without_a_free_slot_leaves_the_next_one_due() {
+        let Some(gpu) = timestamp_gpu("watchdog busy slot test") else {
+            return;
+        };
+        let mut watchdog = Watchdog::default();
+        held_clock(&mut watchdog);
+        let n = SAMPLE_EVERY as usize;
+        // Frames 0 and n hold both query slots.
+        assert!(encode(&mut watchdog, &gpu.device, true));
+        assert_eq!(
+            frames(&mut watchdog, &gpu.device, n - 1),
+            vec![false; n - 1]
+        );
+        assert!(encode(&mut watchdog, &gpu.device, true));
+        assert_eq!(
+            frames(&mut watchdog, &gpu.device, n - 1),
+            vec![false; n - 1]
+        );
+        // Due, but no slot is free: untimed, and still due after it.
+        assert_eq!(frames(&mut watchdog, &gpu.device, 2), vec![false, false]);
+        watchdog.inflight.clear();
+        assert!(
+            encode(&mut watchdog, &gpu.device, false),
+            "due once a slot is free"
+        );
+        assert!(!encode(&mut watchdog, &gpu.device, false));
+    }
+
+    #[test]
+    fn an_untimed_frame_records_no_marker_pass() {
+        let Some(gpu) = timestamp_gpu("watchdog marker test") else {
+            return;
+        };
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("watchdog marker test"),
+            size: wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let mut watchdog = Watchdog::default();
+        held_clock(&mut watchdog);
+        // Marker passes per frame, for one program (two markers).
+        let mut passes = Vec::new();
+        for _ in 0..3 {
+            let mut timer = watchdog.frame_timer(&gpu.device);
+            let span = Span::definition(DefinitionKind::Effect, "acme.dots", "l1", None, false);
+            let queries = timer.begin(span);
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            let scope = pm_perf::Scope::begin();
+            let (b, e) = queries.unwrap_or((0, 1));
+            timer.mark(&gpu.device, &mut encoder, &view, b);
+            timer.mark(&gpu.device, &mut encoder, &view, e);
+            passes.push(scope.finish().get(pm_perf::Counter::ComputePasses));
+            watchdog.finish(&mut encoder, timer);
+            watchdog.inflight.clear();
+            gpu.queue.submit([encoder.finish()]);
+        }
+        if pm_perf::ENABLED {
+            assert_eq!(passes, vec![2, 0, 0]);
+        }
     }
 
     #[test]

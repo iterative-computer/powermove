@@ -51,14 +51,7 @@ fn effect_space(
     origin: [f64; 2],
     resolution: [f64; 2],
 ) -> [(String, Call); 9] {
-    let d = if !step.raster_space
-        && step.owner.is_none()
-        && step.density.iter().all(|d| d.is_finite() && *d > 0.)
-    {
-        step.density
-    } else {
-        [1., 1.]
-    };
+    let d = effect_density(step);
     let (ow, oh) = (f64::from(out.0) / d[0], f64::from(out.1) / d[1]);
     [
         (
@@ -91,6 +84,22 @@ fn effect_space(
             ]),
         ),
     ]
+}
+
+/// Output pixels per pixel of the space a step's program sees (`u_res` is
+/// its output size divided by this, [`effect_space`]): the step's density
+/// for a viewer-frame step without an owner binding, else 1 (owner bound
+/// steps, `raster_space` final output, or a density that is not finite and
+/// positive). Finite and positive on both axes.
+pub(crate) fn effect_density(step: &EffectStep) -> [f64; 2] {
+    if !step.raster_space
+        && step.owner.is_none()
+        && step.density.iter().all(|d| d.is_finite() && *d > 0.)
+    {
+        step.density
+    } else {
+        [1., 1.]
+    }
 }
 
 /// A transition's `u_m`, `u_res` and `u_texel` for a `w` × `h` stack: in
@@ -339,6 +348,10 @@ fn span_scope(span: &Span) -> ErrorScope {
     }
 }
 
+/// The final writer cleared to +0 and only drew within this rectangle.
+#[derive(Clone, Copy)]
+pub(crate) struct EffectOutputBounds(pub (u32, u32, u32, u32));
+
 /// The renderer's own effect state, lent to the chains it prepared.
 pub(crate) struct Native<'a> {
     pub inputs: &'a [super::resources::Ready],
@@ -352,6 +365,7 @@ pub(crate) struct Native<'a> {
     /// Zero-preserving steps then shade only what they can change
     /// ([`super::bounds`]). `None`: anywhere.
     pub content: Option<(u32, u32, u32, u32)>,
+    pub output_bounds: Option<EffectOutputBounds>,
 }
 
 /// Everything a chain records with.
@@ -363,6 +377,9 @@ pub(crate) struct Gpu<'c> {
     precision: Precision,
     /// Intermediates, given back after the frame is submitted.
     taken: &'c mut Vec<Target>,
+    /// [`EffectContext::recycle`]: intermediates go back to `pool` once the
+    /// last pass reading them is recorded ([`Gpu::retire`]).
+    recycle: bool,
     inputs: Vec<super::resources::Ready>,
     effects: &'c mut Effects,
     timer: Option<&'c mut FrameTimer>,
@@ -373,6 +390,7 @@ pub(crate) struct Gpu<'c> {
     /// A step of the running chain was drawn by the fallback runner: its
     /// output is not known to keep the chain's bounds.
     unbounded: bool,
+    output_bounds: Option<EffectOutputBounds>,
 }
 
 impl<'c> Gpu<'c> {
@@ -385,6 +403,7 @@ impl<'c> Gpu<'c> {
             pool: &mut *cx.pool,
             precision: cx.precision,
             taken: &mut *cx.taken,
+            recycle: cx.recycle,
             inputs: native.inputs.to_vec(),
             effects: &mut *native.effects,
             timer: native.timer.as_deref_mut(),
@@ -392,6 +411,7 @@ impl<'c> Gpu<'c> {
             unsupported: &mut *native.unsupported,
             content: native.content,
             unbounded: false,
+            output_bounds: None,
         })
     }
 
@@ -415,6 +435,18 @@ impl<'c> Gpu<'c> {
 
     fn take(&mut self, w: u32, h: u32) -> Target {
         self.pool.take_working(self.device, w, h, self.precision)
+    }
+
+    /// An intermediate this chain took whose last read is recorded: back
+    /// to the pool for the frame's later passes ([`Self::recycle`]; each
+    /// pass clears its target first, `LoadOp::Clear`), else given back
+    /// after the frame is submitted.
+    fn retire(&mut self, target: Target) {
+        if self.recycle {
+            self.pool.recycle(target);
+        } else {
+            self.taken.push(target);
+        }
     }
 
     /// An exact copy of `source` in a new working target.
@@ -450,7 +482,8 @@ impl<'c> Gpu<'c> {
         }
         let out = self.take(result.width(), result.height());
         self.simple_pass(SimpleOp::DecodeE, &result, &out);
-        self.taken.push(result);
+        // Read only by the decode.
+        self.retire(result);
         out
     }
 
@@ -481,22 +514,42 @@ impl<'c> Gpu<'c> {
         let size = (input.width(), input.height());
         let mut bounds = self.content.filter(|_| self.effects.scissor_passes);
         self.unbounded = false;
+        let mut output_bounds = None;
         for step in steps {
             bounds = bounds.and_then(|b| {
                 let definition = self.effects.get(DefinitionKind::Effect, &step.definition)?;
                 Some(super::bounds::grow(b, super::bounds::reach(step, definition)?, size))
             });
             let from = current.as_ref().unwrap_or(&input).clone();
-            if let Some(next) =
-                self.run_effect(layer, step, &from, backdrop.as_ref(), time, coordinates, bounds)
-                && let Some(previous) = current.replace(next)
-            {
-                self.taken.push(previous);
+            self.output_bounds = None;
+            if let Some(next) = self.run_effect(
+                layer,
+                step,
+                &from,
+                backdrop.as_ref(),
+                time,
+                coordinates,
+                bounds,
+            ) {
+                output_bounds = self.output_bounds;
+                if let Some(previous) = current.replace(next) {
+                    // A later step no longer reads this intermediate.
+                    let same = |t: &Target| t.texture == previous.texture;
+                    let kept = same(&input)
+                        || backdrop.as_ref().is_some_and(same)
+                        || current.as_ref().is_some_and(same)
+                        || self.inputs.iter().any(|r| same(&r.target));
+                    if !kept {
+                        self.retire(previous);
+                    }
+                }
             }
             if std::mem::take(&mut self.unbounded) {
                 bounds = None;
             }
         }
+        // DecodeE is a same-coordinate textureLoad and maps +0 to +0.
+        self.output_bounds = output_bounds;
         current.map(|r| self.decode_e(r, working))
     }
 
@@ -550,7 +603,9 @@ impl<'c> Gpu<'c> {
             if step.clamp {
                 let clamped = self.take(w, h);
                 self.simple_pass(SimpleOp::Clamp, &result, &clamped);
-                self.taken.push(std::mem::replace(&mut result, clamped));
+                // Read only by the clamp.
+                let unclamped = std::mem::replace(&mut result, clamped);
+                self.retire(unclamped);
             }
             return Some(result);
         }
@@ -813,6 +868,9 @@ impl<'c> Gpu<'c> {
                 (Some(a), Some(b)) => Some(super::bounds::intersect(a, b)),
                 (a, b) => a.or(b),
             };
+            // Only inherit a certificate from the actual last full-size
+            // reviewed writer, with its actual clip (including any intersection).
+            self.output_bounds = bounds.and(clip).map(EffectOutputBounds);
             self.legacy_pass_clipped(
                 DefinitionKind::Effect,
                 &step.definition,
@@ -824,6 +882,14 @@ impl<'c> Gpu<'c> {
             drop(units);
             self.inputs = ready;
             outputs.push(out);
+            // A pass reads only the one before it (`u_tex`, or the mips
+            // copied from it) besides the step's input, backdrop, prepared
+            // inputs, and assets: the pass before this one has had its last
+            // read. The next pass takes a target other than this one's.
+            if self.recycle && outputs.len() >= 2 {
+                let read = outputs.remove(outputs.len() - 2);
+                self.retire(read);
+            }
         }
         if let (Some(timer), Some((_, e)), Some(last)) =
             (self.timer.as_deref(), span, outputs.last())
@@ -831,11 +897,15 @@ impl<'c> Gpu<'c> {
             timer.mark(device, self.encoder, &last.view, e);
         }
         let mut result = outputs.pop().expect("at least one pass");
-        self.taken.extend(outputs);
+        for read in outputs {
+            self.retire(read);
+        }
         if step.clamp {
             let clamped = self.take(w, h);
             self.simple_pass(SimpleOp::Clamp, &result, &clamped);
-            self.taken.push(std::mem::replace(&mut result, clamped));
+            // Read only by the clamp.
+            let unclamped = std::mem::replace(&mut result, clamped);
+            self.retire(unclamped);
         }
         Some(result)
     }
@@ -1431,9 +1501,17 @@ pub(crate) struct Chain {
     pub time: f64,
     /// The steps' program sources (a hot reload changes the key).
     pub sources: Vec<Option<pm_glsl::Key>>,
+    /// Every step is a translated (`Status::Ready`), reviewed,
+    /// zero-preserving program when the chain was prepared
+    /// ([`super::bounds::chain_preserves_zero`]). Removing steps keeps it
+    /// true; a chain with input plans never has it (references refuse it).
+    pub zero_preserving: bool,
 }
 
 impl EffectPasses for Chain {
+    fn preserves_zero(&self) -> bool {
+        self.zero_preserving && self.inputs.is_empty()
+    }
     fn source_allocation_bytes(&self, (w, h): (u32, u32)) -> Option<u64> {
         self.steps.first()?.source_domain?;
         let bytes = |w: u32, h: u32| u64::from(w).checked_mul(u64::from(h))?.checked_mul(16);
@@ -1545,6 +1623,10 @@ impl EffectPasses for Chain {
         );
         if let Some(t) = &out {
             gpu.taken.push(t.clone());
+        }
+        let output_bounds = gpu.output_bounds;
+        if let Some(native) = &mut cx.native {
+            native.output_bounds = output_bounds;
         }
         Ok(out)
     }
