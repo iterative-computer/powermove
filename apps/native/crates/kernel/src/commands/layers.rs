@@ -349,6 +349,18 @@ pub(crate) const CHANNELS_3D: [(&str, f64); 9] = [
     ("orientation.z", 0.0),
 ];
 
+const PLANAR_CHANNELS: [(&str, f64); 9] = [
+    ("anchor.x", 0.0),
+    ("anchor.y", 0.0),
+    ("position.x", 0.0),
+    ("position.y", 0.0),
+    ("scale.x", 100.0),
+    ("scale.y", 100.0),
+    ("rotation", 0.0),
+    ("opacity", 100.0),
+    ("skew", 0.0),
+];
+
 fn n(x: f64) -> Value {
     Value::Number(x)
 }
@@ -382,17 +394,12 @@ pub(crate) fn make_layer(
         for (k, v) in CHANNELS_3D {
             p.insert(k, property(n(v)));
         }
-        for (k, v) in [
-            ("anchor.x", 0.0),
-            ("anchor.y", 0.0),
-            ("position.x", w / 2.0),
-            ("position.y", h / 2.0),
-            ("scale.x", 100.0),
-            ("scale.y", 100.0),
-            ("rotation", 0.0),
-            ("opacity", 100.0),
-            ("skew", 0.0),
-        ] {
+        for (k, default) in PLANAR_CHANNELS {
+            let v = match k {
+                "position.x" => w / 2.0,
+                "position.y" => h / 2.0,
+                _ => default,
+            };
             p.insert(k, property(n(v)));
         }
     }
@@ -1039,6 +1046,28 @@ fn set_layer(cx: &mut Cx<'_>, layer_id: &str, p: &LayerPatch) -> Result<(), Comm
             return Err(CommandError::Invalid(
                 "This layer cannot be a 3D layer".into(),
             ));
+        }
+        if three_d {
+            let mut transform = layer
+                .get("p")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let mut initialized = false;
+            for (path, default) in CHANNELS_3D.into_iter().chain(PLANAR_CHANNELS) {
+                if !transform.contains_key(path) {
+                    transform.insert(path, property(n(default)));
+                    initialized = true;
+                }
+            }
+            if initialized {
+                cx.replace(at("p"), Value::Object(transform))?;
+            }
+            // Source-space effects are available only in 2D. Keep the
+            // existing effects and move their processing to the composition.
+            if p.effect_space.is_none() && values::text(&layer, "effectSpace") == Some("source") {
+                cx.set(at("effectSpace"), values::s("composition"))?;
+            }
         }
         cx.set(at("threeD"), Value::Bool(three_d))?;
     }

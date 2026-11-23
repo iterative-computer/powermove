@@ -4542,6 +4542,16 @@ impl Controller {
         {
             return true;
         }
+        if cmd.name == "delete"
+            && cmd.args.is_empty()
+            && ["inspector", "layer-effects"].into_iter().any(|panel| {
+                self.builtins.views.get(panel).cloned().is_some_and(|view| {
+                    view.update(cx, |view, cx| view.delete_focused_effect(window, cx))
+                })
+            })
+        {
+            return true;
+        }
         use crate::layer_commands::Route;
         match crate::layer_commands::route(&cmd.name, &cmd.args) {
             Some(Route::Plan(name)) => return self.run_plan(name, &cmd.args, cx),

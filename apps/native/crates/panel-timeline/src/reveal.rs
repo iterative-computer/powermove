@@ -57,11 +57,9 @@ impl RevealState {
         self.layers
             .get(layer)
             .and_then(|d| d.paths.as_ref())
-            .map_or(
-                !channel.keys.is_empty()
-                    || channel.expression.as_ref().is_some_and(|e| !e.as_bytes().is_empty()),
-                |paths| paths.iter().any(|p| p == "*" || p == &channel.path),
-            )
+            .map_or(!channel.keys.is_empty(), |paths| {
+                paths.iter().any(|p| p == "*" || p == &channel.path)
+            })
     }
 }
 impl TimelineModel {
@@ -129,6 +127,9 @@ impl TimelineModel {
                     l.channels
                         .iter()
                         .filter(|c| {
+                            if !l.channel_available(&c.path) {
+                                return false;
+                            }
                             let p = c.path.as_str();
                             let pair = (l.id.clone(), c.path.clone());
                             match (key, double) {
@@ -258,23 +259,18 @@ impl TimelineModel {
             .index
             .layer(layer)
             .ok_or_else(|| ModelError::UnknownId(layer.into()))?;
-        let current = self
+        let mut paths = self
             .reveal
             .layers
             .get(layer)
-            .cloned()
-            .unwrap_or(Disclosure {
-                collapsed: l.collapsed,
-                group_collapsed: l.group_collapsed,
-                paths: None,
+            .and_then(|d| d.paths.clone())
+            .unwrap_or_else(|| {
+                l.channels
+                    .iter()
+                    .filter(|c| !c.keys.is_empty())
+                    .map(|c| c.path.clone())
+                    .collect()
             });
-        let mut paths = current.paths.clone().unwrap_or_else(|| {
-            l.channels
-                .iter()
-                .filter(|c| !c.keys.is_empty())
-                .map(|c| c.path.clone())
-                .collect()
-        });
         if !paths.iter().any(|p| p == "*") {
             for key in keys {
                 if !paths.contains(key) {
@@ -282,14 +278,29 @@ impl TimelineModel {
                 }
             }
         }
-        self.reveal.layers.insert(
-            layer.into(),
-            Disclosure {
-                collapsed: false,
-                paths: Some(paths),
-                ..current
-            },
-        );
+        self.open_property_rows(layer, Some(paths))
+    }
+
+    pub(crate) fn open_property_rows(
+        &mut self,
+        layer: &str,
+        paths: Option<Vec<String>>,
+    ) -> Result<(), ModelError> {
+        let l = self
+            .index
+            .layer(layer)
+            .ok_or_else(|| ModelError::UnknownId(layer.into()))?;
+        let d = self
+            .reveal
+            .layers
+            .entry(layer.into())
+            .or_insert_with(|| Disclosure {
+                collapsed: l.collapsed,
+                group_collapsed: l.group_collapsed,
+                paths: None,
+            });
+        d.collapsed = false;
+        d.paths = paths;
         let mut parent = l.group.clone();
         let mut seen = HashSet::new();
         while let Some(id) = parent {

@@ -3226,7 +3226,7 @@ fn keyboard_group_trim_skips_locked_and_out_of_range_descendants() {
 }
 
 #[test]
-fn animated_rows_include_expressions_and_only_animated_effect_parameters() {
+fn default_rows_include_only_keyframed_transforms_and_effect_parameters() {
     let m = model(parse(r#"{"id":"P","compId":"C","layers":[{"id":"a","type":"shape","collapsed":false,"p":{"opacity":{"v":100,"kf":[]},"position.y":{"v":0,"kf":[{"i":"k","t":0,"v":0}]},"rotation":{"v":0,"kf":[],"expr":"time*10"},"anchor.x":{"v":0,"kf":[],"expr":""}},"fx":[{"id":"blur","type":"Blur","p":{"radius":{"v":10,"kf":[{"i":"r","t":0,"v":10}]},"quality":{"v":1,"kf":[]}}},{"id":"empty","type":"Glow","p":{"amount":{"v":0,"kf":[]}}}]}]}"#).unwrap());
     let paths: Vec<_> = m
         .rows()
@@ -3236,7 +3236,7 @@ fn animated_rows_include_expressions_and_only_animated_effect_parameters() {
             _ => None,
         })
         .collect();
-    assert_eq!(paths, ["position.y", "rotation", "blur.radius"]);
+    assert_eq!(paths, ["position.y", "blur.radius"]);
     assert_eq!(
         m.rows()
             .iter()
@@ -3246,8 +3246,8 @@ fn animated_rows_include_expressions_and_only_animated_effect_parameters() {
     );
     assert_eq!(m.rows().last().unwrap().depth, 2);
     let frame = v4::project_window(&m, 0, 20).unwrap();
-    assert_eq!(frame["window"]["rows"][3]["kind"], "heading");
-    assert_eq!(frame["window"]["rows"][3]["label"], "Blur");
+    assert_eq!(frame["window"]["rows"][2]["kind"], "heading");
+    assert_eq!(frame["window"]["rows"][2]["label"], "Blur");
 }
 
 #[test]
@@ -3281,15 +3281,18 @@ fn first_and_last_keys_refresh_rows_and_active_value_field_survives() {
 }
 
 #[test]
-fn explicit_reveal_all_is_preserved_by_normal_and_cascade_twirls() {
+fn explicit_reveal_can_show_static_properties_until_the_strip_is_closed() {
     let mut m = model(fixture());
     m.reveal_property('*', false, 100, &PropertyFacts::default())
         .unwrap();
     assert!(m.layer_disclosable("c"));
+    assert!(m.property_visible("c", m.index.channel("c", "opacity").unwrap()));
     m.toggle_disclosure("c").unwrap();
-    m.toggle_disclosure("c").unwrap();
-    assert_eq!(m.reveal.layers["c"].paths, Some(vec!["*".into()]));
-    assert!(m.rows().iter().any(|r| matches!(&r.id, RowId::Property { layer_id, channel } if layer_id=="c" && channel=="opacity")));
+    assert!(!m.layer_disclosable("c"));
+    assert!(m.layer_disclosable("b"));
+    m.toggle_disclosure("b").unwrap(); // Close the explicit reveal.
+    m.toggle_disclosure("b").unwrap(); // Open with only keys.
+    assert!(m.reveal.layers["b"].paths.is_none());
 }
 
 #[test]
@@ -4704,6 +4707,7 @@ fn keyframe_reveal_keeps_the_last_removed_keys_row_until_animated_refresh() {
         ],
     );
     assert!(has_property(&c, "c", "opacity"));
+    assert!(!c.model.layer_disclosable("c"));
     assert_eq!(c.model.reveal_serial, serial);
     select(&mut c, &["c"]);
     c.model
@@ -4963,4 +4967,102 @@ fn g6_pointer_and_playhead_split_use_identical_kernel_payload() {
         _ => panic!("Expected one transaction"),
     };
     assert_eq!(split(&pointer), split(&playhead));
+}
+
+#[test]
+fn effect_add_does_not_reopen_a_layer_with_existing_keys() {
+    use pm_kernel::commands::effects::{AddEffect, EffectCommand, EffectDefinition, EffectPatch};
+    let mut saved = fixture();
+    layer_mut(&mut saved, 2).insert("collapsed", Value::Bool(false));
+    let (_actor, mut c) = client_with(saved);
+    assert!(!has_property(&c, "b", "opacity"));
+    let add = |layer: &str, id: &str, enabled_animation| {
+        EffectCommand::Add(Box::new(AddEffect {
+            layer_id: layer.into(),
+            effect_id: id.into(),
+            definition: EffectDefinition {
+                effect_type: "test-effect".into(),
+                version: 1,
+                label: "Test Effect".into(),
+                params: vec![],
+                source_processing: false,
+                backdrop: false,
+            },
+            parameters: Default::default(),
+            inputs: None,
+            open: true,
+            enabled: true,
+            enabled_animation,
+            index: None,
+        }))
+        .into()
+    };
+    edit(&mut c, vec![add("b", "new-effect", None)]);
+    edit(
+        &mut c,
+        vec![add(
+            "b",
+            "animated-effect",
+            Some(parse(r#"{"v":true,"kf":[{"i":"old","t":0,"v":true}],"expr":null}"#).unwrap()),
+        )],
+    );
+    edit(
+        &mut c,
+        vec![EffectCommand::Set {
+            layer_id: "b".into(),
+            effect: "animated-effect".into(),
+            patch: EffectPatch {
+                enabled: Some(false),
+                time: 6.,
+                ..Default::default()
+            },
+        }
+        .into()],
+    );
+    assert_eq!(
+        c.model.index.channel("b", "animated-effect.$enabled").unwrap().keys.len(),
+        2
+    );
+    edit(
+        &mut c,
+        vec![add(
+            "c",
+            "saved-effect",
+            Some(parse(r#"{"v":true,"kf":[{"i":"old","t":2,"v":true}]}"#).unwrap()),
+        )],
+    );
+    assert_eq!(c.model.index.channel("c", "saved-effect.$enabled").unwrap().keys.len(), 1);
+    assert!(!c.model.layer_expanded("c"));
+    assert_eq!(c.model.index.layer("b").unwrap().effects.len(), 2);
+    assert!(!has_property(&c, "b", "opacity"));
+    assert_eq!(c.model.reveal_serial, 0);
+}
+
+#[test]
+fn adding_a_key_replaces_the_static_reveal_with_keyframed_rows() {
+    let (_actor, mut c) = client();
+    c.model
+        .reveal_property('*', false, 100, &PropertyFacts::default())
+        .unwrap();
+    assert!(has_property(&c, "a", "position.x"));
+    // Use a layer whose old keys and static transforms coexist.
+    edit(
+        &mut c,
+        vec![
+            pm_kernel::LayerCommand::Set {
+                layer_id: "a".into(),
+                patch: pm_kernel::commands::layers::LayerPatch {
+                    three_d: Some(true),
+                    ..Default::default()
+                },
+            }
+            .into(),
+        ],
+    );
+    assert!(has_property(&c, "a", "orientation.x"));
+    add_reveal_key(&mut c, "a", "opacity", "new-opacity", 2.);
+    assert!(!has_property(&c, "a", "orientation.x"));
+    assert!(has_property(&c, "a", "opacity"));
+    assert!(has_property(&c, "a", "position.x"));
+    assert!(c.model.reveal.layers["a"].paths.is_none());
 }

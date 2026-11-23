@@ -4284,9 +4284,16 @@ impl Host {
                         if p.model.open
                             && e.windowNumber() == p.parent.windowNumber()
                             && e.r#type() == NSEventType::KeyDown
-                            && chord(e) == "escape"
                         {
-                            p.hide();
+                            match chord(e).as_str() {
+                                "escape" => p.hide(),
+                                // Keep Return in the palette even if AppKit
+                                // sends it to the editor window.
+                                "enter" if p.surface == Surface::Palette => {
+                                    p.key("enter", e.isARepeat())
+                                }
+                                _ => continue,
+                            }
                             return std::ptr::null_mut();
                         }
                         if e.windowNumber() == p.window.windowNumber() && p.model.open {

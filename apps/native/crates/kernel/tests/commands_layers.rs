@@ -2037,3 +2037,36 @@ fn g3_intentional_time_remaps_keep_their_authored_length() {
     run(&mut s, TimingCommand::TrimOut { layer_ids: vec!["clip".into()], time: 20.0 });
     assert_eq!(num(&layer(&s, "clip"), &["dur"]), 18.0);
 }
+
+#[test]
+fn enabling_three_d_initializes_missing_channels_and_depth_affects_projection() {
+    let mut store = DocumentStore::new_untitled(parse(PROJECT).unwrap());
+    let before = projected_anchor(&store, "box");
+    run(
+        &mut store,
+        LayerCommand::Set {
+            layer_id: "box".into(),
+            patch: LayerPatch {
+                three_d: Some(true),
+                ..Default::default()
+            },
+        },
+    );
+    let layer = layer(&store, "box");
+    assert_eq!(num(&layer, &["p", "perspective", "v"]), 50.);
+    assert_eq!(num(&layer, &["p", "scale.z", "v"]), 100.);
+    assert_eq!(num(&layer, &["p", "orientation.z", "v"]), 0.);
+    assert_eq!(num(&layer, &["p", "position.x", "v"]), 50.);
+    assert_eq!(projected_anchor(&store, "box"), before);
+
+    run(
+        &mut store,
+        pm_kernel::PropertyCommand::Set(pm_kernel::commands::properties::SetProperty::new(
+            "box",
+            "position.z",
+            100.,
+            0.,
+        )),
+    );
+    assert_ne!(projected_anchor(&store, "box"), before);
+}

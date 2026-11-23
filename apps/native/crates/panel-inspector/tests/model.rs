@@ -1554,3 +1554,25 @@ fn a_known_effect_keeps_its_display_name_when_the_saved_version_is_unavailable()
     let effect = parse(r#"{"type":"blur","version":99}"#).unwrap();
     assert_eq!(fixture.model.effect_display_name(&effect), "Deep Glow");
 }
+
+#[test]
+fn linked_three_d_scale_edits_all_three_axes() {
+    let mut f = Fixture::new();
+    f.set(layer("a", "threeD"), true);
+    f.set(layer("a", "scaleLinked"), true);
+    f.set(prop("a", "scale.z"), 200.0);
+    assert_eq!(f.value("a", "scale.x"), 200.0.into());
+    assert_eq!(f.value("a", "scale.y"), 100.0.into());
+    assert_eq!(f.value("a", "scale.z"), 200.0.into());
+}
+
+#[test]
+fn remove_button_on_an_unselected_effect_targets_that_effect() {
+    let mut f = Fixture::new();
+    f.model
+        .select_effect("a", "f1", Modifiers::default())
+        .unwrap();
+    let (request, _) = f.model.delete_effects(Caller::native(), "a", "f3").unwrap();
+    f.run(request);
+    assert_eq!(f.model.effect_ids("a").unwrap(), ["f1", "f2"]);
+}

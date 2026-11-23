@@ -52,6 +52,18 @@ export function EffectControls(props: PanelProps) {
   const send = (intent: Intent) => {
     if (editable) c.send(intent);
   };
+  const select = (id: string, e: SurfaceEvent) => {
+    if (!editable) return;
+    stop(e);
+    c.platform.focus(`${PANEL_ID}:list`);
+    send({
+      type: "select",
+      id,
+      meta: !!e.metaKey,
+      ctrl: !!e.ctrlKey,
+      shift: !!e.shiftKey,
+    });
+  };
   const add = () => {
     void c.add().catch((error) => c.platform.report(error));
   };
@@ -81,7 +93,7 @@ export function EffectControls(props: PanelProps) {
     else if ((e.metaKey || e.ctrlKey) && k === "v" && p.clipboardCount)
       intent = { type: "paste" };
     else if (k === "backspace" || k === "delete")
-      intent = { type: "remove", id: p.focus };
+      intent = { type: "remove-selection" };
     else if (k === "arrowright" || k === "arrowleft")
       intent = { type: "disclose", id: p.focus, open: k === "arrowright" };
     else if (k === " ") intent = { type: "toggle", id: p.focus };
@@ -292,6 +304,11 @@ export function EffectControls(props: PanelProps) {
             onFocus={() => setKeyboard(props.keyboardFocus === true)}
             onPointerDown={() => setKeyboard(false)}
             onKeyDown={key}
+            preventDefault={
+              p.focus && editable
+                ? { keydown: ["backspace", "delete", "Backspace", "Delete"] }
+                : undefined
+            }
             onDragOver={(e) => dragOver(e, p.effectCount)}
             onDrop={drop}
           >
@@ -414,16 +431,7 @@ export function EffectControls(props: PanelProps) {
                       setDrag(null);
                     }}
                     onClickCapture={(e) => {
-                      if (e.target === e.currentTarget && editable) {
-                        e.stopPropagation();
-                        send({
-                          type: "select",
-                          id: row.id,
-                          meta: !!e.metaKey,
-                          ctrl: !!e.ctrlKey,
-                          shift: !!e.shiftKey,
-                        });
-                      }
+                      if (e.target === e.currentTarget) select(row.id, e);
                     }}
                     onPointerDown={(e) => {
                       setKeyboard(false);
@@ -545,16 +553,7 @@ export function EffectControls(props: PanelProps) {
                           textOverflow: "ellipsis",
                           paddingLeft: t("metrics.gap"),
                         }}
-                        onClick={(e) => {
-                          stop(e);
-                          send({
-                            type: "select",
-                            id: row.id,
-                            meta: !!e.metaKey,
-                            ctrl: !!e.ctrlKey,
-                            shift: !!e.shiftKey,
-                          });
-                        }}
+                        onClick={(e) => select(row.id, e)}
                       >
                         {row.label}
                       </text>
@@ -573,42 +572,39 @@ export function EffectControls(props: PanelProps) {
                         </text>
                       )}
                     </div>
-                    {(hover === row.id ||
-                      row.selected ||
-                      (keyboard && p.focus === row.id)) && (
-                      <div
-                        style={{
-                          display: "flex",
-                          flexDirection: "row",
-                          alignItems: "center",
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "row",
+                        alignItems: "center",
+                        flexShrink: 0,
+                      }}
+                    >
+                      <UI.ToolbarItem
+                        label={`Reset ${row.label}`}
+                        title="Reset Effect"
+                        disabled={p.locked || row.missing}
+                        tabIndex={-1}
+                        attr={{ symbol: "arrow.counterclockwise" }}
+                        onClick={(e) => {
+                          stop(e);
+                          send({ type: "reset", id: row.id });
                         }}
-                      >
-                        <UI.ToolbarItem
-                          label={`Reset ${row.label}`}
-                          title="Reset Effect"
-                          disabled={p.locked || row.missing}
-                          tabIndex={-1}
-                          attr={{ symbol: "arrow.counterclockwise" }}
-                          onClick={(e) => {
-                            stop(e);
-                            send({ type: "reset", id: row.id });
-                          }}
-                          style={{ symbolSize: t("metrics.symbol_inline") }}
-                        />
-                        <UI.ToolbarItem
-                          label={`Remove ${row.label}`}
-                          title="Remove Effect"
-                          disabled={p.locked}
-                          tabIndex={-1}
-                          attr={{ symbol: "xmark" }}
-                          onClick={(e) => {
-                            stop(e);
-                            send({ type: "remove", id: row.id });
-                          }}
-                          style={{ symbolSize: t("metrics.symbol_inline") }}
-                        />
-                      </div>
-                    )}
+                        style={{ symbolSize: t("metrics.symbol_inline") }}
+                      />
+                      <UI.ToolbarItem
+                        label={`Remove ${row.label}`}
+                        title="Remove Effect"
+                        disabled={p.locked}
+                        tabIndex={-1}
+                        attr={{ symbol: "xmark" }}
+                        onClick={(e) => {
+                          stop(e);
+                          send({ type: "remove", id: row.id });
+                        }}
+                        style={{ symbolSize: t("metrics.symbol_inline") }}
+                      />
+                    </div>
                   </UI.ListItem>
                 ),
               )}

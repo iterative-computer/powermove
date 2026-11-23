@@ -83,6 +83,8 @@ export interface LayerRow extends RowBase {
   expanded: boolean;
   visible: boolean;
   solo: boolean;
+  threeD?: boolean;
+  canBe3D?: boolean;
   /** Shy: no row while Hide Shy Layers is on. */
   shy?: boolean;
   transformable: boolean;
@@ -183,7 +185,14 @@ export type Intent =
   | {
       type: "switch";
       id: string;
-      name: "visibility" | "lock" | "solo" | "shy" | "parent" | "mute";
+      name:
+        | "visibility"
+        | "lock"
+        | "solo"
+        | "shy"
+        | "threeD"
+        | "parent"
+        | "mute";
     }
   | { type: "keyToggle"; layer: string; path: string }
   | {

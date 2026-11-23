@@ -906,7 +906,17 @@ impl EffectsPanel {
                 )?);
                 label = "Duplicate Effect".into();
             }
-            "remove" => {
+            "remove" | "remove-selection" => {
+                let id = if action == "remove-selection" {
+                    let Some(selected) = model.effects.ids.first().filter(|_| {
+                        model.effects.layer.as_deref() == Some(&layer)
+                    }) else {
+                        return Ok(plan.pin_document());
+                    };
+                    selected
+                } else {
+                    id
+                };
                 let (r, s) = model.delete_effects(caller, &layer, id)?;
                 let count = if let Call::Transact {
                     body: WriteBody::Commands(commands),

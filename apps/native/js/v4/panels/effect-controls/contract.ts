@@ -149,7 +149,7 @@ export type Intent =
   | { type: "navigate"; direction: -1 | 1; shift: boolean }
   | { type: "disclose"; id: string; open: boolean }
   | { type: "toggle" | "reset" | "remove" | "copy" | "duplicate"; id: string }
-  | { type: "paste" | "clear" }
+  | { type: "paste" | "clear" | "remove-selection" }
   | { type: "reorder"; id: string; direction: -1 | 1 }
   | { type: "drop"; id: string; slot: number }
   | { type: "add"; definition: string; slot?: number }

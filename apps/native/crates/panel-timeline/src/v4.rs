@@ -292,37 +292,22 @@ pub async fn dispatch(
         "disclosure" => {
             let id = layer_row(intent)?;
             let open = boolean(intent, "open")?;
-            let layer = client
-                .model
-                .index
-                .layer(&id)
-                .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
-            let current = client.model.reveal.layers.get(&id);
-            let closed = if layer.kind == "group" {
-                current
-                    .map(|d| d.group_collapsed)
-                    .unwrap_or(layer.group_collapsed)
-            } else {
-                current.map(|d| d.collapsed).unwrap_or(layer.collapsed)
-            };
             if intent.get("all").and_then(Value::as_bool) == Some(true) {
                 let ids: Vec<_> = client
                     .model
                     .index
                     .layers
                     .iter()
-                    .map(|l| l.id.clone())
+                    .filter(|layer| client.model.layer_disclosable(&layer.id))
+                    .map(|layer| layer.id.clone())
                     .collect();
                 for id in ids {
-                    let layer = client.model.index.layer(&id).unwrap();
-                    let d = client.model.reveal.layers.entry(id).or_default();
-                    d.collapsed = !open;
-                    if layer.kind == "group" {
-                        d.group_collapsed = !open;
-                    }
+                    client.model.set_disclosure(&id, open)?;
                 }
                 client.model.rebuild_rows();
-            } else if open == closed {
+            } else if open != client.model.layer_expanded(&id)
+                && client.model.layer_disclosable(&id)
+            {
                 client.model.toggle_disclosure(&id)?;
             }
             persist = true;
@@ -342,6 +327,7 @@ pub async fn dispatch(
                 "lock" => client.model.switch(&id, LayerSwitch::Locked)?,
                 "solo" => client.model.switch(&id, LayerSwitch::Solo)?,
                 "shy" => client.model.switch(&id, LayerSwitch::Shy)?,
+                "threeD" => client.model.switch(&id, LayerSwitch::ThreeD)?,
                 "mute" => client.model.mute(&id, context.time)?,
                 _ => return Err(Error::InvalidIntent("switch")),
             }
@@ -627,7 +613,6 @@ pub fn project_window(
                         .index
                         .layer(id)
                         .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
-                    let disclosure = model.reveal.layers.get(id);
                     value["kind"] = json!("layer");
                     value["canOpen"] = json!(model.layer_disclosable(id));
                     value["layer"] = json!(id);
@@ -643,13 +628,9 @@ pub fn project_window(
                     value["visible"] = json!(layer.visible);
                     value["solo"] = json!(layer.solo);
                     value["shy"] = json!(layer.shy);
-                    value["expanded"] = json!(!if layer.kind == "group" {
-                        disclosure
-                            .map(|d| d.group_collapsed)
-                            .unwrap_or(layer.group_collapsed)
-                    } else {
-                        disclosure.map(|d| d.collapsed).unwrap_or(layer.collapsed)
-                    });
+                    value["threeD"] = json!(layer.three_d);
+                    value["canBe3D"] = json!(layer.can_be_3d());
+                    value["expanded"] = json!(model.layer_expanded(id));
                     if layer.effectively_locked {
                         value["lockRow"] = json!(
                             model

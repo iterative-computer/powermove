@@ -524,7 +524,13 @@ impl Properties {
                 }
             } else if !audio {
                 let mut rows = vec![];
-                for (id, label, paths, unit, step) in [
+                let three_d = model
+                    .layer(&layer)
+                    .map_err(|e| e.to_string())?
+                    .get("threeD")
+                    .and_then(pm_model::Value::as_bool)
+                    == Some(true);
+                let mut groups = vec![
                     (
                         "position",
                         "Position",
@@ -533,17 +539,36 @@ impl Properties {
                         1.,
                     ),
                     ("scale", "Scale", vec!["scale.x", "scale.y"], "%", 1.),
-                    ("rotation", "Rotation", vec!["rotation"], "°", 1.),
+                ];
+                if three_d {
+                    groups[0].2.push("position.z");
+                    groups[1].2.push("scale.z");
+                    groups.extend([
+                        (
+                            "orientation",
+                            "Orientation",
+                            vec!["orientation.x", "orientation.y", "orientation.z"],
+                            "°",
+                            1.,
+                        ),
+                        ("rotation.x", "X Rotation", vec!["rotation.x"], "°", 1.),
+                        ("rotation.y", "Y Rotation", vec!["rotation.y"], "°", 1.),
+                        ("rotation", "Z Rotation", vec!["rotation"], "°", 1.),
+                        ("perspective", "Perspective", vec!["perspective"], "mm", 1.),
+                    ]);
+                } else {
+                    groups.push(("rotation", "Rotation", vec!["rotation"], "°", 1.));
+                }
+                let mut anchor = vec!["anchor.x", "anchor.y"];
+                if three_d {
+                    anchor.push("anchor.z");
+                }
+                groups.extend([
                     ("skew", "Skew", vec!["skew"], "°", 1.),
-                    (
-                        "anchor",
-                        "Anchor Point",
-                        vec!["anchor.x", "anchor.y"],
-                        "px",
-                        1.,
-                    ),
+                    ("anchor", "Anchor Point", anchor, "px", 1.),
                     ("opacity", "Opacity", vec!["opacity"], "%", 1.),
-                ] {
+                ]);
+                for (id, label, paths, unit, step) in groups {
                     let mut axes = vec![];
                     let mut animation = "static";
                     let (mut bound, mut expression) = (vec![], None);
@@ -560,18 +585,20 @@ impl Properties {
                             .ok_or_else(|| format!("Non-numeric {path}"))?;
                         if state.key_at_playhead {
                             animation = "key-at-playhead";
-                        } else if state.animated {
+                        } else if state.animated && animation == "static" {
                             animation = "animated";
                         }
                         bound.push(binding.clone());
                         expression = expression.or_else(|| state.expression.clone());
                         let mut axis = json!({"binding":self.lease(model,path,binding)?,"value":value,"unit":unit,"step":step,"precision":2,"mixed":state.mixed,"animation": if state.key_at_playhead { "key-at-playhead" } else if state.animated { "animated" } else { "static" }});
                         if paths.len() > 1 {
-                            axis["axis"] = json!(if index == 0 { "X" } else { "Y" });
+                            axis["axis"] = json!(["X", "Y", "Z"][index]);
                         }
                         if *path == "opacity" {
                             axis["min"] = json!(0);
                             axis["max"] = json!(100);
+                        } else if *path == "perspective" {
+                            axis["min"] = json!(0.001);
                         }
                         axes.push(axis);
                     }

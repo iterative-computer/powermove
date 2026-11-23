@@ -24,6 +24,8 @@ test("§4 header selection, disclosure, checkbox, reset/remove, and outside cont
   const c = h.controller;
   try {
     const header = () => find(root, (p) => p.id === "layer-effects:effect:f1");
+    expect(find(root, (p) => p.label === "Reset Glow")).toBeDefined();
+    expect(find(root, (p) => p.label === "Remove Glow")).toBeDefined();
     await event(root, header().id, "click");
     await settle();
     expect(c.snapshot().rows[0]).toMatchObject({
@@ -71,8 +73,6 @@ test("§4 header selection, disclosure, checkbox, reset/remove, and outside cont
     await event(root, identity.id, "click", {}, [panel.id]);
     await settle();
     expect(c.snapshot().selectedCount).toBe(0);
-    await event(root, header().id, "click");
-    await settle();
     await event(
       root,
       find(root, (p) => p.label === "Remove Glow").id,
@@ -241,3 +241,39 @@ test.each([false, true])(
     }
   },
 );
+
+for (const key of ["Backspace", "Delete"]) {
+  test(`${key} removes selected effects from the focused list and keeps their layer`, async () => {
+    const h = new ModelHost();
+    const { root, settle } = await mount(h);
+    try {
+      const header = (id: string) =>
+        find(root, (p) => p.id === `layer-effects:effect:${id}`);
+      await event(root, header("f1").id, "click");
+      await settle();
+      if (key === "Delete") {
+        await event(root, header("f3").id, "click", { shiftKey: true });
+        await settle();
+        await event(root, header("f2").id, "click", { metaKey: true });
+        await settle();
+        expect(h.controller.snapshot().focus).toBe("f2");
+      } else {
+        await event(root, header("f2").id, "click", { shiftKey: true });
+        await settle();
+      }
+      expect(h.kit.focus.at(-1)).toBe("layer-effects:list");
+      expect(h.controller.snapshot().selectedCount).toBe(2);
+      const list = find(root, (p) => p.id === "layer-effects:list");
+      await event(root, list.id, "keydown", { key });
+      await settle();
+      expect(h.controller.snapshot().effectCount).toBe(1);
+      expect(h.controller.snapshot().rows[0].id).toBe(
+        key === "Delete" ? "f2" : "f3",
+      );
+      expect(h.controller.snapshot().layer).toBe("a");
+    } finally {
+      await root.dispose();
+      await h.close();
+    }
+  });
+}

@@ -7643,14 +7643,14 @@ pub fn default_layer_column(m: &pm_design::Metrics) -> f64 {
 /// v1's least layer column (`GUTTER_MIN`, 320 pt).
 const V1_LEAST_LAYER_COLUMN: f64 = 320.;
 /// The narrowest the layer column goes: a layer row's number, disclosure,
-/// kind badge, three slots of name and its five switches (parent link, Shy,
-/// Solo, Lock, Visibility), with its insets and gaps, and never narrower
+/// kind badge, three slots of name and its four switches (parent link, 3D,
+/// Lock, Visibility), with its insets and gaps, and never narrower
 /// than v1's. The name truncates first; the switches always fit.
 pub fn least_layer_column(m: &pm_design::Metrics) -> f64 {
     let (gap, hit) = (m.gap as f64, m.hit as f64);
     // Insets and the gaps between number, disclosure, badge and name.
     let room = 2. * gap + 4. * gap;
-    let row = room + hit + hit + m.kind_badge as f64 + 3. * hit + 5. * hit;
+    let row = room + hit + hit + m.kind_badge as f64 + 3. * hit + 4. * hit;
     row.max(V1_LEAST_LAYER_COLUMN).ceil()
 }
 

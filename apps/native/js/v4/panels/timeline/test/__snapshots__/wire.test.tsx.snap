@@ -1647,6 +1647,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -1677,39 +1678,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:headline",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -1732,6 +1727,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -2548,6 +2544,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -2580,11 +2577,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "aria-pressed": false,
                                     "data-pm-component": "toolbar-item",
-                                    "id": "timeline:shy:layer:headline",
-                                    "label": "Toggle Shy",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:headline",
+                                    "label": "Toggle 3D Layer",
                                     "metadata": {
                                       "designTodo": "T1",
-                                      "requiredSymbol": "face.dashed",
+                                      "requiredSymbol": "cube",
                                     },
                                     "style": {
                                       "color": {
@@ -2601,42 +2599,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       },
                                     },
                                     "tabIndex": -1,
-                                    "title": "Toggle Shy",
-                                  },
-                                  "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "aria-pressed": false,
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:solo:layer:headline",
-                                    "label": "Toggle Solo",
-                                    "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "s.circle",
-                                    },
-                                    "style": {
-                                      "color": {
-                                        "token": "colors.accent_text",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_panel",
-                                      },
-                                    },
-                                    "tabIndex": -1,
-                                    "title": "Toggle Solo",
+                                    "title": "Toggle 3D Layer",
                                   },
                                   "type": "button",
                                 },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:lock:layer:headline",
                                     "label": "Toggle Lock",
                                     "metadata": {
@@ -2665,6 +2635,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -3484,6 +3455,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -3516,11 +3488,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "aria-pressed": false,
                                     "data-pm-component": "toolbar-item",
-                                    "id": "timeline:shy:layer:headline",
-                                    "label": "Toggle Shy",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:headline",
+                                    "label": "Toggle 3D Layer",
                                     "metadata": {
                                       "designTodo": "T1",
-                                      "requiredSymbol": "face.dashed",
+                                      "requiredSymbol": "cube",
                                     },
                                     "style": {
                                       "color": {
@@ -3537,42 +3510,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       },
                                     },
                                     "tabIndex": -1,
-                                    "title": "Toggle Shy",
-                                  },
-                                  "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "aria-pressed": false,
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:solo:layer:headline",
-                                    "label": "Toggle Solo",
-                                    "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "s.circle",
-                                    },
-                                    "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_panel",
-                                      },
-                                    },
-                                    "tabIndex": -1,
-                                    "title": "Toggle Solo",
+                                    "title": "Toggle 3D Layer",
                                   },
                                   "type": "button",
                                 },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:lock:layer:headline",
                                     "label": "Toggle Lock",
                                     "metadata": {
@@ -3601,6 +3546,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -4420,6 +4366,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -4452,11 +4399,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "aria-pressed": false,
                                     "data-pm-component": "toolbar-item",
-                                    "id": "timeline:shy:layer:headline",
-                                    "label": "Toggle Shy",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:headline",
+                                    "label": "Toggle 3D Layer",
                                     "metadata": {
                                       "designTodo": "T1",
-                                      "requiredSymbol": "face.dashed",
+                                      "requiredSymbol": "cube",
                                     },
                                     "style": {
                                       "color": {
@@ -4473,42 +4421,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       },
                                     },
                                     "tabIndex": -1,
-                                    "title": "Toggle Shy",
-                                  },
-                                  "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "aria-pressed": false,
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:solo:layer:headline",
-                                    "label": "Toggle Solo",
-                                    "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "s.circle",
-                                    },
-                                    "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_panel",
-                                      },
-                                    },
-                                    "tabIndex": -1,
-                                    "title": "Toggle Solo",
+                                    "title": "Toggle 3D Layer",
                                   },
                                   "type": "button",
                                 },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:lock:layer:headline",
                                     "label": "Toggle Lock",
                                     "metadata": {
@@ -4537,6 +4457,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -5353,6 +5274,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -5383,43 +5305,38 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": true,
+                                    "id": "timeline:threeD:layer:headline",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:lock:layer:headline",
                                     "label": "Toggle Lock",
                                     "metadata": {
@@ -5448,6 +5365,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -6503,6 +6421,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -6533,39 +6452,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:headline",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -6588,6 +6501,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -7456,6 +7370,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -7488,11 +7403,12 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   "props": {
                                     "aria-pressed": false,
                                     "data-pm-component": "toolbar-item",
-                                    "id": "timeline:shy:layer:headline",
-                                    "label": "Toggle Shy",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:headline",
+                                    "label": "Toggle 3D Layer",
                                     "metadata": {
                                       "designTodo": "T1",
-                                      "requiredSymbol": "face.dashed",
+                                      "requiredSymbol": "cube",
                                     },
                                     "style": {
                                       "color": {
@@ -7509,42 +7425,14 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                       },
                                     },
                                     "tabIndex": -1,
-                                    "title": "Toggle Shy",
-                                  },
-                                  "type": "button",
-                                },
-                                {
-                                  "props": {
-                                    "aria-pressed": false,
-                                    "data-pm-component": "toolbar-item",
-                                    "id": "timeline:solo:layer:headline",
-                                    "label": "Toggle Solo",
-                                    "metadata": {
-                                      "designTodo": "T1",
-                                      "requiredSymbol": "s.circle",
-                                    },
-                                    "style": {
-                                      "color": {
-                                        "token": "colors.muted",
-                                      },
-                                      "minHeight": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "symbolSize": {
-                                        "token": "metrics.symbol_panel",
-                                      },
-                                    },
-                                    "tabIndex": -1,
-                                    "title": "Toggle Solo",
+                                    "title": "Toggle 3D Layer",
                                   },
                                   "type": "button",
                                 },
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:lock:layer:headline",
                                     "label": "Toggle Lock",
                                     "metadata": {
@@ -7573,6 +7461,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -8398,6 +8287,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -8428,39 +8318,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:headline",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.accent_text",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -8483,6 +8367,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -8741,6 +8626,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:kicker",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -8771,39 +8657,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:kicker",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.accent_text",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -8826,6 +8706,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:kicker",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -9653,6 +9534,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -9683,39 +9565,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:headline",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -9738,6 +9614,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -10554,6 +10431,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-29990",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -10584,39 +10462,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-29990",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -10639,6 +10511,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-29990",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -10894,6 +10767,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-29991",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -10924,39 +10798,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-29991",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -10979,6 +10847,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-29991",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -11234,6 +11103,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-29992",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -11264,39 +11134,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-29992",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -11319,6 +11183,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-29992",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -11574,6 +11439,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-29993",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -11604,39 +11470,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-29993",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -11659,6 +11519,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-29993",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -11914,6 +11775,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-29994",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -11944,39 +11806,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-29994",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -11999,6 +11855,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-29994",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -12254,6 +12111,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-29995",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -12284,39 +12142,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-29995",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -12339,6 +12191,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-29995",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -12594,6 +12447,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-29996",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -12624,39 +12478,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-29996",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -12679,6 +12527,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-29996",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -12934,6 +12783,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-29997",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -12964,39 +12814,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-29997",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -13019,6 +12863,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-29997",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -13274,6 +13119,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-29998",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -13304,39 +13150,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-29998",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -13359,6 +13199,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-29998",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -13614,6 +13455,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-29999",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -13644,39 +13486,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-29999",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -13699,6 +13535,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-29999",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -13954,6 +13791,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30000",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -13984,39 +13822,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30000",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -14039,6 +13871,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30000",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -14294,6 +14127,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30001",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -14324,39 +14158,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30001",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -14379,6 +14207,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30001",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -14634,6 +14463,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30002",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -14664,39 +14494,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30002",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -14719,6 +14543,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30002",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -14974,6 +14799,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30003",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -15004,39 +14830,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30003",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -15059,6 +14879,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30003",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -15314,6 +15135,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30004",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -15344,39 +15166,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30004",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -15399,6 +15215,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30004",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -15654,6 +15471,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30005",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -15684,39 +15502,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30005",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -15739,6 +15551,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30005",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -15994,6 +15807,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30006",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -16024,39 +15838,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30006",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -16079,6 +15887,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30006",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -16334,6 +16143,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30007",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -16364,39 +16174,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30007",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -16419,6 +16223,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30007",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -16674,6 +16479,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30008",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -16704,39 +16510,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30008",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -16759,6 +16559,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30008",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -17014,6 +16815,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30009",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -17044,39 +16846,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30009",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -17099,6 +16895,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30009",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -17354,6 +17151,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30010",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -17384,39 +17182,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30010",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -17439,6 +17231,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30010",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -17694,6 +17487,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30011",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -17724,39 +17518,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30011",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -17779,6 +17567,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30011",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -18034,6 +17823,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30012",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -18064,39 +17854,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30012",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -18119,6 +17903,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30012",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -18374,6 +18159,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30013",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -18404,39 +18190,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30013",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -18459,6 +18239,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30013",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -18714,6 +18495,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30014",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -18744,39 +18526,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30014",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -18799,6 +18575,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30014",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -19054,6 +18831,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30015",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -19084,39 +18862,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30015",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -19139,6 +18911,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30015",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -19394,6 +19167,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30016",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -19424,39 +19198,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30016",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -19479,6 +19247,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30016",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -19734,6 +19503,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30017",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -19764,39 +19534,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30017",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -19819,6 +19583,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30017",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -20074,6 +19839,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30018",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -20104,39 +19870,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30018",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -20159,6 +19919,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30018",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -20414,6 +20175,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:row-30019",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -20444,39 +20206,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:row-30019",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -20499,6 +20255,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:row-30019",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -21345,6 +21102,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -21375,39 +21133,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:headline",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -21430,6 +21182,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -22276,6 +22029,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -22306,39 +22060,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:headline",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -22361,6 +22109,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -23935,6 +23684,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -23965,39 +23715,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:headline",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -24020,6 +23764,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
                                     "metadata": {
@@ -25008,6 +24753,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:parent:layer:headline",
                                     "label": "Parent: None · Drag to a layer",
                                     "metadata": {
@@ -25038,39 +24784,33 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 },
                                 {
                                   "props": {
-                                    "role": "presentation",
+                                    "aria-pressed": false,
+                                    "data-pm-component": "toolbar-item",
+                                    "disabled": false,
+                                    "id": "timeline:threeD:layer:headline",
+                                    "label": "Toggle 3D Layer",
+                                    "metadata": {
+                                      "designTodo": "T1",
+                                      "requiredSymbol": "cube",
+                                    },
                                     "style": {
-                                      "flexShrink": 0,
-                                      "height": {
+                                      "color": {
+                                        "token": "colors.muted",
+                                      },
+                                      "minHeight": {
                                         "token": "metrics.hit",
                                       },
                                       "minWidth": {
                                         "token": "metrics.hit",
                                       },
-                                      "width": {
-                                        "token": "metrics.hit",
+                                      "symbolSize": {
+                                        "token": "metrics.symbol_panel",
                                       },
                                     },
+                                    "tabIndex": -1,
+                                    "title": "Toggle 3D Layer",
                                   },
-                                  "type": "div",
-                                },
-                                {
-                                  "props": {
-                                    "role": "presentation",
-                                    "style": {
-                                      "flexShrink": 0,
-                                      "height": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "minWidth": {
-                                        "token": "metrics.hit",
-                                      },
-                                      "width": {
-                                        "token": "metrics.hit",
-                                      },
-                                    },
-                                  },
-                                  "type": "div",
+                                  "type": "button",
                                 },
                                 {
                                   "props": {
@@ -25093,6 +24833,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                 {
                                   "props": {
                                     "data-pm-component": "toolbar-item",
+                                    "disabled": false,
                                     "id": "timeline:visibility:layer:headline",
                                     "label": "Toggle Visibility",
                                     "metadata": {

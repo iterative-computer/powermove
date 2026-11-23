@@ -190,9 +190,8 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
   ).toMatchObject({
     timelineLayerDrag: { layer: "headline" },
   });
-  // At rest (not hovered, not selected): five columns, the parent link and
-  // visibility drawn (as v1), Shy, Solo and Lock held open (PM-367).
-  expect(switches.children.length).toBe(5);
+  // Parent, cube and visibility are visible at rest. Lock keeps its space.
+  expect(switches.children.length).toBe(4);
   expect(byId(root, "timeline:parent:layer:headline")).toBeDefined();
   expect(byId(root, "timeline:visibility:layer:headline")).toBeDefined();
   for (const name of ["shy", "solo", "lock"])
@@ -202,7 +201,7 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
     expect(slot.props.style).toMatchObject({
       minWidth: { token: "metrics.hit" },
     });
-  // Hovered: every switch, in the same five columns.
+  // Hovered: every switch, in the same four columns.
   await root.render(
     <TimelinePanel
       frame={frame({
@@ -212,8 +211,8 @@ test("a layer row's switches keep fixed columns at its trailing edge; the name g
     />,
   );
   const hovered = byId(root, "timeline:row:layer:headline").children[1];
-  expect(hovered.children.length).toBe(5);
-  for (const name of ["parent", "shy", "solo", "lock", "visibility"])
+  expect(hovered.children.length).toBe(4);
+  for (const name of ["parent", "threeD", "lock", "visibility"])
     expect(byId(root, `timeline:${name}:layer:headline`)).toBeDefined();
   await root.dispose();
 });
@@ -287,7 +286,9 @@ test("an empty composition: the layer area holds a centred, inset invitation; th
     "Import…",
   ]);
   expect(
-    buttons.children.every((b) => b.props["data-pm-component"] === "push-button"),
+    buttons.children.every(
+      (b) => b.props["data-pm-component"] === "push-button",
+    ),
   ).toBe(true);
   expect(buttons.children[1].props.title).toBe("Shape (⇧⌘Y)");
   await drive(root, "timeline:empty:newText");
@@ -319,6 +320,7 @@ test("modifiers reach native selection, child switches never also select the row
     metaKey: true,
   });
   await drive(root, "timeline:lock:layer:headline");
+  await drive(root, "timeline:threeD:layer:headline");
   expect(actions).toEqual([
     {
       type: "selectRow",
@@ -331,6 +333,7 @@ test("modifiers reach native selection, child switches never also select the row
       },
     },
     { type: "switch", id: "layer:headline", name: "lock" },
+    { type: "switch", id: "layer:headline", name: "threeD" },
   ]);
   await root.dispose();
 });
@@ -455,7 +458,7 @@ test("60k projection mounts only the bounded native window and exposes full coun
     indexDigits: 5,
   });
   // Bounded by the visible window, not the 60k rows (each row now holds
-  // its five switch columns, drawn or held open).
+  // its four switch columns, drawn or held open).
   expect(root.host.nodes.size).toBeLessThan(500);
   expect(replay(commits).at(-1).accessibilityNodes).toBe(root.host.nodes.size);
   await root.dispose();
@@ -662,9 +665,7 @@ test("track headers keep the disclosure column and toggle their lane", async () 
     window: { total: 2, first: 0, rows: [openTrack, bareTrack] },
   });
   checkFrame(f, { first: 0, visible: 10 });
-  await root.render(
-    <TimelinePanel frame={f} send={(a) => actions.push(a)} />,
-  );
+  await root.render(<TimelinePanel frame={f} send={(a) => actions.push(a)} />);
   expect(byId(root, `timeline:disclosure:${bareTrack.id}`)).toBeUndefined();
   expect(byId(root, chevron)?.props.metadata).toMatchObject({
     requiredSymbol: "chevron.down",

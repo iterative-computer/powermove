@@ -721,9 +721,7 @@ impl TimelineModel {
         if targets.is_empty() {
             return Ok(Plan::default());
         }
-        let plan = self.property_diamond(&targets, time)?;
-        self.show_channels(&targets);
-        Ok(plan)
+        self.property_diamond(&targets, time)
     }
     /// Add Keyframe: a key at the playhead on the selected property (the
     /// properties of the selected keys, else every animated property) of the
@@ -767,7 +765,6 @@ impl TimelineModel {
         if commands.is_empty() {
             return Ok(Plan::default());
         }
-        self.show_channels(&targets);
         Ok(Plan::edit(commands, self.index.revision))
     }
     /// `(layer, channel)` of the selected, unlocked layers whose channel
@@ -783,37 +780,13 @@ impl TimelineModel {
             .flat_map(|l| {
                 l.channels
                     .iter()
-                    .filter(|c| wanted(&l.id, &c.path, !c.keys.is_empty()))
+                    .filter(|c| {
+                        l.channel_available(&c.path) && wanted(&l.id, &c.path, !c.keys.is_empty())
+                    })
                     .map(|c| (l.id.clone(), c.path.clone()))
                     .collect::<Vec<_>>()
             })
             .collect()
-    }
-    /// Opens these layers' rows on these channels (with what they showed).
-    fn show_channels(&mut self, targets: &[(String, String)]) {
-        for (layer, path) in targets {
-            let Some(l) = self.index.layer(layer) else {
-                continue;
-            };
-            let shown = self.reveal.layers.entry(layer.clone()).or_insert_with(|| {
-                crate::reveal::Disclosure {
-                    collapsed: l.collapsed,
-                    group_collapsed: l.group_collapsed,
-                    paths: None,
-                }
-            });
-            if shown.collapsed {
-                // Closed, it showed nothing: open on what gets a key.
-                shown.collapsed = false;
-                shown.paths = Some(vec![]);
-            }
-            // `None` lists the animated channels, which these now are.
-            if let Some(paths) = &mut shown.paths
-                && !paths.iter().any(|p| p == "*" || p == path)
-            {
-                paths.push(path.clone());
-            }
-        }
     }
     /// Every one of these keys holds its value to the next key: the legacy
     /// `hold` flag, or the outgoing interpolation the kernel writes now.

@@ -7068,3 +7068,96 @@ fn settings_extensions_use_host_health_and_only_reload_an_enabled_error() {
         op == "command" && request["name"] == "extensionReload.broken"
     }));
 }
+
+#[test]
+fn properties_expose_editable_3d_transforms_when_enabled_on_a_saved_layer() {
+    let actor = actor();
+    let kernel = actor.handle();
+    select_layer(&kernel, "a");
+    let mut model = pm_panel_inspector::Inspector::new(
+        kernel.published("synthetic").unwrap(),
+        Default::default(),
+    );
+    let mut presenter = properties::Properties::default();
+    let plane = presenter.snapshot(&mut model, 0., false).unwrap();
+    let transform = |snapshot: &Value| {
+        snapshot["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|section| section["id"] == "transform")
+            .unwrap()["rows"]
+            .clone()
+    };
+    assert!(
+        transform(&plane)
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["id"] != "orientation")
+    );
+    let request = model
+        .set(
+            Caller::native(),
+            pm_panel_inspector::Binding::Layer {
+                layer: "a".into(),
+                field: "threeD".into(),
+            },
+            true.into(),
+            0.,
+        )
+        .unwrap();
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    model.sync(kernel.published("synthetic").unwrap());
+
+    let projection = presenter.snapshot(&mut model, 0., false).unwrap();
+    let rows = transform(&projection);
+    let row = |id: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap()
+    };
+    for id in ["position", "scale", "anchor", "orientation"] {
+        let axes = row(id)["control"]["axes"].as_array().unwrap();
+        assert_eq!(
+            axes.iter()
+                .map(|axis| axis["axis"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["X", "Y", "Z"]
+        );
+    }
+    assert_eq!(row("rotation.x")["label"], "X Rotation");
+    assert_eq!(row("rotation.y")["label"], "Y Rotation");
+    assert_eq!(row("rotation")["label"], "Z Rotation");
+    let perspective = &row("perspective")["control"]["axes"][0];
+    assert_eq!(perspective["value"], 50.);
+    assert_eq!(perspective["unit"], "mm");
+    let request = presenter
+        .write(
+            &mut model,
+            Caller::native(),
+            perspective["binding"]["handle"].as_str().unwrap(),
+            35.into(),
+            0.,
+        )
+        .unwrap();
+    let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+    assert!(!matches!(ack.reply, pm_kernel::Reply::Throw(_)));
+    model.sync(kernel.published("synthetic").unwrap());
+    assert_eq!(
+        model
+            .layer("a")
+            .unwrap()
+            .get("p")
+            .unwrap()
+            .get("perspective")
+            .unwrap()
+            .get("v")
+            .unwrap()
+            .as_f64(),
+        Some(35.)
+    );
+}
