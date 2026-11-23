@@ -335,8 +335,7 @@ pub fn sheet(
             }
         });
         let view = cx.new(|cx| pm_shell::welcome_view::WelcomeView::new(tokens, frame, action, cx));
-        let focus = view.read(cx).focus_handle();
-        focus.focus(window, cx);
+        view.update(cx, |view, cx| view.hold_focus(window, cx));
         view
     })
     .ok()?;
