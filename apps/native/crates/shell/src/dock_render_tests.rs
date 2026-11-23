@@ -285,59 +285,65 @@ fn dock_render_body_fades_only_edges_with_more_content() {
 /// the column it ends above the status bar, corners and inset intact.
 struct BottomRowFixture(Rc<RefCell<Vec<Probe>>>);
 
+const LIST_EXTENSIONS: [(&str, &str); 4] = [
+    ("background-remover.panel", "Remove Background"),
+    ("pexels", "Pexels"),
+    ("split-text.panel", "Split Text"),
+    ("motion-notes", "Motion Notes"),
+];
+
 impl crate::integration::Integration for BottomRowFixture {
     fn observe(&self, _: &mut Context<Editor>) {}
     fn command(&self, _: &Command, _: &mut Window, _: &mut App) -> bool {
         false
     }
     fn panel(&self, id: &str, rect: Rect, _: &mut Window, _: &mut App) -> Option<AnyElement> {
-        ["ext.logos", "ext.pixel", "ext.notes"].contains(&id).then(|| {
-            let probes = self.0.clone();
-            let header = Tokens::new(Scheme::Dark, Accessibility::default())
-                .metrics
-                .header;
-            let id = id.to_owned();
-            div()
-                .relative()
-                .h(px((rect.h - header).max(0.)))
-                .w_full()
-                .child(
-                    div()
-                        .absolute()
-                        .bottom(px(6.))
-                        .left(px(10.))
-                        .w(px(155.))
-                        .h(px(24.))
-                        .rounded(px(4.))
-                        .bg(hsla(0.59, 0.45, 0.46, 1.0))
-                        .text_color(rgb(0xffffff))
-                        .child("Last row")
-                        .child(
-                            canvas(
-                                |_, _, _| (),
-                                move |bounds, _, window, _| {
-                                    probes.borrow_mut().push((
-                                        id.clone(),
-                                        bounds,
-                                        window.content_mask().bounds,
-                                    ));
-                                },
-                            )
+        LIST_EXTENSIONS
+            .iter()
+            .any(|(panel, _)| *panel == id)
+            .then(|| {
+                let probes = self.0.clone();
+                let header = Tokens::new(Scheme::Dark, Accessibility::default())
+                    .metrics
+                    .header;
+                let id = id.to_owned();
+                div()
+                    .relative()
+                    .h(px((rect.h - header).max(0.)))
+                    .w_full()
+                    .child(
+                        div()
                             .absolute()
-                            .inset_0(),
-                        ),
-                )
-                .into_any_element()
-        })
+                            .bottom(px(6.))
+                            .left(px(10.))
+                            .w(px(155.))
+                            .h(px(24.))
+                            .rounded(px(4.))
+                            .bg(hsla(0.59, 0.45, 0.46, 1.0))
+                            .text_color(rgb(0xffffff))
+                            .child("Last row")
+                            .child(
+                                canvas(
+                                    |_, _, _| (),
+                                    move |bounds, _, window, _| {
+                                        probes.borrow_mut().push((
+                                            id.clone(),
+                                            bounds,
+                                            window.content_mask().bounds,
+                                        ));
+                                    },
+                                )
+                                .absolute()
+                                .inset_0(),
+                            ),
+                    )
+                    .into_any_element()
+            })
     }
     fn contributed_panels(&self, _: &App) -> Vec<(String, String)> {
-        [
-            ("ext.logos", "Commons Logos"),
-            ("ext.pixel", "Pixel comparison"),
-            ("ext.notes", "Motion Notes"),
-        ]
-        .map(|(id, title)| (id.into(), title.into()))
-        .into()
+        LIST_EXTENSIONS
+            .map(|(id, title)| (id.into(), title.into()))
+            .into()
     }
     fn project_id(&self, _: &App) -> Option<String> {
         None
@@ -350,8 +356,9 @@ impl crate::integration::Integration for BottomRowFixture {
 
 #[::core::prelude::v1::test]
 fn dock_render_bounds_a_tall_extension_body_above_the_status_bar() {
+    let mut failures = Vec::new();
     for (theme, scheme) in [("dark", Scheme::Dark), ("light", Scheme::Light)] {
-        for (tag, window_h, size) in [("tall", 760., 2400.), ("short", 430., 900.)] {
+        for (tag, window_h, saved_height) in [("tall", 760., 2400.), ("short", 430., 900.)] {
             let probes = Rc::new(RefCell::new(Vec::new()));
             let mut cx = HeadlessAppContext::with_platform(
                 Arc::new(gpui_parley::ParleyTextSystem::new(
@@ -378,9 +385,9 @@ fn dock_render_bounds_a_tall_extension_body_above_the_status_bar() {
                             .find(|dock| dock.id == "right")
                             .unwrap();
                         right.groups = vec![layout::Group {
-                            tabs: vec!["ext.logos".to_owned()],
+                            tabs: vec![LIST_EXTENSIONS[0].0.to_owned()],
                             active: 0,
-                            size: Some(size),
+                            size: Some(saved_height),
                             collapsed: false,
                         }];
                         editor
@@ -389,7 +396,7 @@ fn dock_render_bounds_a_tall_extension_body_above_the_status_bar() {
                 .unwrap();
             cx.run_until_parked();
             // The shipped long-list extensions share this geometry.
-            for panel_id in ["ext.logos", "ext.pixel", "ext.notes"] {
+            for (panel_id, _) in LIST_EXTENSIONS {
                 window
                     .update(&mut cx, |editor, _, cx| {
                         let right = editor
@@ -405,9 +412,7 @@ fn dock_render_bounds_a_tall_extension_body_above_the_status_bar() {
                 cx.run_until_parked();
                 let image = cx.capture_screenshot(window.into()).unwrap();
                 let panel = window
-                    .update(&mut cx, |editor, _, _| {
-                        editor.panel_rect(panel_id).unwrap()
-                    })
+                    .update(&mut cx, |editor, _, _| editor.panel_rect(panel_id).unwrap())
                     .unwrap();
                 if let Some(dir) = std::env::var_os("PM_DOCK_RENDER_CAPTURE") {
                     let dir = std::path::PathBuf::from(dir);
@@ -422,31 +427,32 @@ fn dock_render_bounds_a_tall_extension_body_above_the_status_bar() {
                 }
                 let dock_bottom = window_h - m.status - m.dock_gap;
                 let status_top = window_h - m.status;
-                assert!(
-                    panel.y + panel.h <= dock_bottom + 0.01,
-                    "{theme}/{tag}/{panel_id}: panel bottom {} below the column viewport {}",
-                    panel.y + panel.h,
-                    dock_bottom,
-                );
+                if panel.y + panel.h > dock_bottom + 0.01 {
+                    failures.push(format!(
+                        "{theme}/{tag}/{panel_id}: panel bottom {} below the column viewport {dock_bottom}",
+                        panel.y + panel.h,
+                    ));
+                }
                 let body_bottom = panel.y + panel.h - m.border.max(m.splitter_reach);
-                assert!(
-                    body_bottom <= status_top - m.inset + 0.01,
-                    "{theme}/{tag}/{panel_id}: content bottom {body_bottom} inside the status inset {}",
-                    status_top - m.inset,
-                );
+                if body_bottom > status_top - m.inset + 0.01 {
+                    failures.push(format!(
+                        "{theme}/{tag}/{panel_id}: content bottom {body_bottom} inside the status inset {}",
+                        status_top - m.inset,
+                    ));
+                }
                 let row = probes
                     .borrow()
                     .iter()
                     .filter(|(id, _, _)| id == panel_id)
                     .last()
-                    .map(|(_, bounds, mask)| (*bounds, *mask))
-                    .expect("the last row painted");
-                let visible = row.0.intersect(&row.1);
-                assert_eq!(
-                    visible.size.height, row.0.size.height,
-                    "{theme}/{tag}/{panel_id}: the last row is fully inside its mask"
-                );
+                    .map(|(_, bounds, mask)| (*bounds, *mask));
+                if !row.is_some_and(|(bounds, mask)| {
+                    bounds.intersect(&mask).size.height == bounds.size.height
+                }) {
+                    failures.push(format!("{theme}/{tag}/{panel_id}: the last row is clipped"));
+                }
             }
         }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
