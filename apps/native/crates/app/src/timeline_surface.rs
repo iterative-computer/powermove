@@ -331,6 +331,7 @@ struct Built {
     scene: Arc<Scene>,
     graph: Option<Arc<Graph>>,
     model: Arc<TimelineModel>,
+    outline_requested: bool,
     /// Audio clips whose waveforms the scene drew as still reading.
     wanted: Vec<crate::waveforms::Key>,
 }
@@ -472,6 +473,7 @@ pub struct TimelineSurface {
     model: Arc<TimelineModel>,
     scene: Option<Arc<Scene>>,
     pending_scene: Option<(Built, bool)>,
+    outline_runtime: std::sync::Weak<pm_builtins::Builtins>,
     /// The timeline panel holds the keyboard (the shell says, as it lays
     /// the panel out): selected rows take the accent tint only then.
     focused: bool,
@@ -638,6 +640,7 @@ impl TimelineSurface {
             model: Default::default(),
             scene: None,
             pending_scene: None,
+            outline_runtime: std::sync::Weak::new(),
             snap_guide: None,
             graph: None,
             graph_fitted: None,
@@ -851,6 +854,10 @@ impl TimelineSurface {
         serde_json::json!({"frames":self.agent_ink_frames,"paint_p95_ms":if n==0 {0.}else{samples[(n-1)*95/100]},"samples":self.agent_ink_sample_count})
     }
     /// A kernel publication landed: follow it on a worker.
+    pub fn set_outline_runtime(&mut self, runtime: &Arc<pm_builtins::Builtins>) {
+        self.outline_runtime = Arc::downgrade(runtime);
+    }
+
     pub fn published(&mut self, cx: &mut Context<Self>) {
         if self.scene.is_some() && !self.current_composition(&self.model) {
             let timeline = cx.entity().downgrade();
@@ -1495,6 +1502,8 @@ impl TimelineSurface {
             .scene
             .as_ref()
             .map(|scene| (scene.clone(), self.model.clone()));
+        let previous_mode = self.model.mode;
+        let outline = self.outline_runtime.upgrade();
         let preview_update = matches!(&job, Job::Sample(_));
         let finish_gain = matches!(&job, Job::Finish(true));
         let (tokens, offline, sources) = (
@@ -1514,7 +1523,7 @@ impl TimelineSurface {
                     let built = if let Some(gain) =
                         preview.as_ref().filter(|p| p.gain_commands.is_some())
                     {
-                        build_with(&client, &tokens, offline, sources, Some(&gain.snapshot))
+                        build_with(&client, &tokens, offline, sources, Some(&gain.snapshot), None)
                     } else if preview_update
                         && preview.is_some()
                         && let Some((scene, model)) = previous_scene
@@ -1528,10 +1537,12 @@ impl TimelineSurface {
                             scene: Arc::new(scene),
                             graph: None,
                             model: Arc::new(client.model.clone()),
+                            outline_requested: false,
                             wanted: vec![],
                         })
                     } else {
-                        let mut built = build(&client, &tokens, offline, sources);
+                        let outline = outline.as_deref().map(|runtime| (runtime, previous_mode));
+                        let mut built = build_with(&client, &tokens, offline, sources, None, outline);
                         if let (Some(built), Some(preview)) = (&mut built, &preview) {
                             Arc::make_mut(&mut built.scene)
                                 .preview_times(&client.model, &preview.starts);
@@ -1617,11 +1628,14 @@ impl TimelineSurface {
             return;
         }
         let model = built.model.clone();
+        let outline_requested = built.outline_requested;
         self.pending_scene = Some((built, hold_time_mapping));
         self.show_pending_scene(cx);
-        let delegate = self.delegate.clone();
         let refresh = self.pending_scene.is_some();
-        cx.defer(move |cx| delegate.timeline_outline(model, refresh, cx));
+        if !outline_requested {
+            let delegate = self.delegate.clone();
+            cx.defer(move |cx| delegate.timeline_outline(model, refresh, cx));
+        }
         if refresh {
             self.outline.reconcile_timeline(cx);
         }
@@ -4262,6 +4276,10 @@ impl TimelineSurface {
         }
         if matches!(context, MenuContext::Empty) {
             host_row(&mut rows, empty_new_menu());
+            host_row(&mut rows, serde_json::json!({
+                "command":"pasteLayers", "label":"Paste",
+                "disabled": !crate::layer_commands::can_paste(),
+            }));
         }
         // What v1's extensions added under the ruler and between rows: New
         // Composition…, Import Captions…, Add 3D Layer.
@@ -5636,7 +5654,7 @@ fn build(
     offline: Arc<BTreeSet<String>>,
     sources: Sources,
 ) -> Option<Built> {
-    build_with(client, tokens, offline, sources, None)
+    build_with(client, tokens, offline, sources, None, None)
 }
 fn build_with(
     client: &TimelineClient,
@@ -5644,6 +5662,7 @@ fn build_with(
     offline: Arc<BTreeSet<String>>,
     sources: Sources,
     preview: Option<&pm_kernel::Snapshot>,
+    outline: Option<(&pm_builtins::Builtins, pm_panel_timeline::TimelineMode)>,
 ) -> Option<Built> {
     let mut published = client.kernel.published(&client.project)?;
     let mut model = client.model.clone();
@@ -5651,6 +5670,12 @@ fn build_with(
         Arc::make_mut(&mut published).snapshot = snapshot.clone();
     }
     model.sync(&published);
+    let model = Arc::new(model);
+    // Run the outline worker and scene build in parallel on a mode switch.
+    // The host still swaps them together after verifying the row identities.
+    let outline_requested = outline.is_some_and(|(runtime, previous_mode)| {
+        model.mode != previous_mode && runtime.update_timeline_outline(model.clone(), true)
+    });
     let presenter = Presenter {
         offline,
         sources,
@@ -5684,7 +5709,8 @@ fn build_with(
     Some(Built {
         scene: Arc::new(scene),
         graph: graph.map(Arc::new),
-        model: Arc::new(model),
+        model,
+        outline_requested,
         wanted: presenter.wanted.into_inner(),
     })
 }

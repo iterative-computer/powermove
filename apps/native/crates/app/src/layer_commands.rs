@@ -6,6 +6,7 @@ use pm_kernel::commands::content::ContentCommand;
 use pm_kernel::commands::groups::GroupCommand;
 use pm_kernel::commands::keyframes::{KeyframeCommand, SimplifyScope};
 use pm_kernel::commands::layers::{AddLayer, LayerPatch, ParentChange, Restack};
+use pm_kernel::commands::media::{CopiedMedia, MediaCommand};
 use pm_kernel::commands::precompose::{can_leave_attributes, next_name};
 use pm_kernel::commands::properties::SetProperty;
 use pm_kernel::commands::text::{SplitMode, TextCommand};
@@ -14,7 +15,9 @@ use pm_kernel::commands::transform::{AlignMode, Spread, TransformCommand};
 use pm_kernel::model::{LayerInfo, list_layers};
 use pm_kernel::{Command, CompCommand, LayerCommand, PropertyCommand, Published, new_id};
 use pm_model::{Map, Value};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 pub struct Plan {
     pub label: String,
@@ -204,8 +207,223 @@ pub fn plan(name: &str, published: &Published, time: f64) -> Option<Plan> {
 pub enum Clipboard {
     #[default]
     Empty,
-    Layers(Vec<Value>),
+    Layers(Arc<CopiedLayers>),
     Keys(Vec<pm_panel_timeline::ClipboardTrack>),
+}
+static CLIPBOARD: Mutex<Clipboard> = Mutex::new(Clipboard::Empty);
+
+pub fn shared_clipboard() -> Clipboard {
+    CLIPBOARD.lock().unwrap().clone()
+}
+
+pub fn set_clipboard(value: Clipboard) {
+    *CLIPBOARD.lock().unwrap() = value;
+}
+
+pub fn can_paste() -> bool {
+    let has_copy = !matches!(*CLIPBOARD.lock().unwrap(), Clipboard::Empty);
+    has_copy || crate::platform::has_pasteboard_content()
+}
+
+#[derive(Debug)]
+pub struct CopiedLayers {
+    document: u64,
+    pub layers: Vec<Value>,
+    assets: BTreeMap<String, (Value, Option<CopiedMedia>)>,
+    comps: BTreeMap<String, Value>,
+}
+
+const ASSET_REFS: &[&str] = &["assetId", "asset"];
+const COMP_REFS: &[&str] = &["compId", "comp"];
+
+fn references<'a>(layer: &'a Value, fields: &[&str]) -> Vec<&'a str> {
+    [Some(layer), layer.get("d")]
+        .into_iter()
+        .flatten()
+        .flat_map(|node| fields.iter().filter_map(|key| node.get(key).and_then(Value::as_str)))
+        .collect()
+}
+
+fn remap_fields(node: &mut Value, fields: &[&str], ids: &HashMap<String, String>) {
+    let Some(node) = node.as_object_mut() else { return };
+    for field in fields {
+        if let Some(value) = node.get_mut(*field)
+            && let Some(id) = value.as_str().and_then(|id| ids.get(id))
+        {
+            *value = Value::from(id.as_str());
+        }
+    }
+}
+
+fn remap_sources(layer: &mut Value, assets: &HashMap<String, String>, comps: &HashMap<String, String>) {
+    remap_fields(layer, ASSET_REFS, assets);
+    remap_fields(layer, COMP_REFS, comps);
+    if let Some(data) = layer.as_object_mut().and_then(|layer| layer.get_mut("d")) {
+        remap_fields(data, ASSET_REFS, assets);
+        remap_fields(data, COMP_REFS, comps);
+    }
+}
+
+fn copied_asset(
+    published: &Published,
+    id: &str,
+    mut asset: Value,
+    resolved: Option<&Path>,
+) -> Option<(Value, Option<CopiedMedia>)> {
+    let fields = asset.as_object_mut()?;
+    let media = published.media.get(id).filter(|entry| {
+        !published.media.is_linked(&entry.id) && !published.media.is_proxy_only(id)
+    });
+    fields.remove("folder");
+    fields.remove("originalVersion");
+    if media.is_none() {
+        let path = fields
+            .get("sourcePath")
+            .or_else(|| fields.get("path"))
+            .and_then(Value::as_str)
+            .map(Path::new);
+        let absolute = path.filter(|path| path.is_absolute()).map(Path::to_owned)
+            .or_else(|| resolved.map(Path::to_owned))
+            .or_else(|| Some(published.path.as_deref()?.parent()?.join(path?)));
+        if let Some(path) = absolute {
+            fields.insert("sourcePath", Value::from(path.to_string_lossy().as_ref()));
+        }
+    }
+    Some((asset, media.cloned().map(|entry| CopiedMedia(Arc::new(entry)))))
+}
+
+/// Capture the selected block in stack order and walk the referenced precomps once.
+pub fn copy_layers(
+    published: &Published,
+    pressed: Option<&str>,
+    cut: bool,
+    originals: &BTreeMap<String, PathBuf>,
+) -> Option<(CopiedLayers, Vec<String>)> {
+    let facts = Facts::read(published, pressed)?;
+    if facts.selected.is_empty() || cut && !facts.cuttable() {
+        return None;
+    }
+    let expanded = facts.expanded();
+    let root = published.snapshot.root()?;
+    let open = published.snapshot.open_comp();
+    let source_comp = pm_kernel::model::comp_node(root, open.as_deref())?;
+    let layers: Vec<_> = pm_kernel::model::layers_of(source_comp)
+        .filter(|layer| layer.get("id").and_then(crate::node_string).is_some_and(|id| expanded.contains(id)))
+        .map(pm_model::Node::to_value)
+        .collect();
+    if layers.is_empty() {
+        return None;
+    }
+    let mut clipboard = CopiedLayers {
+        document: published.snapshot.doc_id,
+        layers,
+        assets: BTreeMap::new(),
+        comps: BTreeMap::new(),
+    };
+    let mut pending = Vec::new();
+    let mut assets = BTreeSet::new();
+    let mut scan = |layers: &[Value], pending: &mut Vec<String>| {
+        for layer in layers {
+            assets.extend(references(layer, ASSET_REFS).into_iter().map(str::to_owned));
+            pending.extend(references(layer, COMP_REFS).into_iter().map(str::to_owned));
+        }
+    };
+    scan(&clipboard.layers, &mut pending);
+    let comps = root.get("comps");
+    let mut seen = HashSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(comp) = comps.and_then(|comps| comps.get(&id)).map(pm_model::Node::to_value) else {
+            continue;
+        };
+        if let Some(layers) = comp.get("layers").and_then(Value::as_array) {
+            scan(layers, &mut pending);
+        }
+        clipboard.comps.insert(id, comp);
+    }
+    if let Some(records) = root.get("assets") {
+        for id in assets {
+            if let Some(asset) = records.get(&id).and_then(|node| {
+                copied_asset(published, &id, node.to_value(), originals.get(&id).map(PathBuf::as_path))
+            }) {
+                clipboard.assets.insert(id, asset);
+            }
+        }
+    }
+    Some((clipboard, facts.ids()))
+}
+
+impl CopiedLayers {
+    pub fn paste(&self, target: &Published, time: f64) -> Option<Plan> {
+        let mut plan = paste_plan(self.layers.clone(), time);
+        if self.document == target.snapshot.doc_id {
+            return Some(plan);
+        }
+        let root = target.snapshot.root()?;
+        let asset_ids = self.assets.keys().map(|id| {
+            let taken = root.get("assets").is_some_and(|assets| assets.get(id).is_some())
+                || target.media.get(id).is_some();
+            (id.clone(), if taken { new_id("A") } else { id.clone() })
+        }).collect::<HashMap<_, _>>();
+        let comp_ids = self.comps.keys().map(|id| {
+            let taken = root.get("comps").is_some_and(|comps| comps.get(id).is_some())
+                || root.get("id").and_then(crate::node_string) == Some(id);
+            (id.clone(), if taken { new_id("C") } else { id.clone() })
+        }).collect::<HashMap<_, _>>();
+        let mut commands = Vec::new();
+        for (id, (asset, media)) in &self.assets {
+            commands.push(MediaCommand::AddCopy {
+                asset_id: asset_ids[id].clone(),
+                asset: asset.clone(),
+                media: media.clone(),
+            }.into());
+        }
+        let mut layer_ids = HashMap::new();
+        for comp in self.comps.values() {
+            if let Some(layers) = comp.get("layers").and_then(Value::as_array) {
+                for layer in layers {
+                    if let Some(id) = layer.get("id").and_then(Value::as_str)
+                        && pm_kernel::model::find_layer(root, id).is_some()
+                    {
+                        layer_ids.entry(id.to_owned()).or_insert_with(|| new_id("L"));
+                    }
+                }
+            }
+        }
+        for (id, comp) in &self.comps {
+            let mut comp = comp.clone();
+            let Some(fields) = comp.as_object_mut() else { continue };
+            let comp_id = comp_ids[id].clone();
+            fields.insert("id", Value::from(comp_id.as_str()));
+            fields.remove("folder");
+            if let Some(layers) = fields.get_mut("layers").and_then(Value::as_array_mut) {
+                for layer in layers {
+                    remap_sources(layer, &asset_ids, &comp_ids);
+                    remap_fields(layer, &["id", "group", "parent", "matteSource"], &layer_ids);
+                    if let Some(effects) = layer.as_object_mut().and_then(|layer| layer.get_mut("fx")).and_then(Value::as_array_mut) {
+                        for effect in effects {
+                            if let Some(inputs) = effect.as_object_mut().and_then(|effect| effect.get_mut("inputs")).and_then(Value::as_object_mut) {
+                                for (_, input) in inputs.iter_mut() {
+                                    remap_fields(input, &["layerId"], &layer_ids);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            commands.push(CompCommand::AddCopy { comp_id, composition: comp }.into());
+        }
+        if let Some(Command::Layer(LayerCommand::Paste { layers, .. })) = plan.commands.first_mut() {
+            for layer in layers {
+                remap_sources(layer, &asset_ids, &comp_ids);
+            }
+        }
+        commands.append(&mut plan.commands);
+        plan.commands = commands;
+        Some(plan)
+    }
 }
 /// Where a menu, palette or keyboard command runs. `None`: the session or
 /// the shell owns it.
@@ -341,6 +559,10 @@ impl Facts {
     /// No selected layer is locked or inside a locked group.
     fn editable(&self) -> bool {
         self.selected.iter().all(|l| !l.effectively_locked)
+    }
+    fn cuttable(&self) -> bool {
+        let expanded = self.expanded();
+        self.layers.iter().all(|l| !expanded.contains(l.id.as_str()) || !l.effectively_locked)
     }
     fn info(&self, id: &str) -> Option<&LayerInfo> {
         self.layers.iter().find(|l| l.id == id)
@@ -558,7 +780,7 @@ fn shown(published: &Published, info: &LayerInfo, time: f64) -> bool {
 /// (`layer-menu.ts`): the same rows in the same order, shown and enabled by
 /// the same rules. Each row is a command with its arguments; `null` is a
 /// separator and `children` a submenu. Preorder positions identify rows.
-pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_json::Value> {
+pub fn layer_menu(published: &Published, pressed: &str, time: f64, can_paste: bool) -> Vec<serde_json::Value> {
     use serde_json::json;
     let Some(facts) = Facts::read(published, Some(pressed)) else {
         return vec![];
@@ -583,6 +805,10 @@ pub fn layer_menu(published: &Published, pressed: &str, time: f64) -> Vec<serde_
         rows.push(plain("Rename…", "renameLayer"));
     }
     rows.extend([
+        row("Cut", "cutLayers", json!([pressed]), facts.cuttable()),
+        row("Copy", "copyLayers", json!([pressed]), true),
+        row("Paste", "pasteLayers", json!([]), can_paste),
+        serde_json::Value::Null,
         plain("Save Animation Preset…", "saveAnimationPreset"),
         plain("Duplicate", "duplicate"),
         plain("Group Layers", "groupLayers"),
@@ -1929,9 +2155,10 @@ fn lock_patch(locked: bool, time: f64) -> LayerPatch {
 pub fn disabled(
     published: Option<&Published>,
     layers: &[LayerInfo],
-    clipboard: &Clipboard,
 ) -> BTreeSet<String> {
     let mut off: BTreeSet<String> = UNAVAILABLE.iter().map(|c| (*c).to_owned()).collect();
+    // The controller enables Paste from the live app and system clipboards.
+    off.insert("pasteLayers".into());
     let Some(published) = published else {
         off.extend(PLANNED.iter().map(|c| (*c).to_owned()));
         off.extend(DOCUMENT.iter().map(|c| (*c).to_owned()));
@@ -1982,9 +2209,10 @@ pub fn disabled(
         "text.editSelected",
         matches!(selected.as_slice(), [l] if l.kind == "text" && !l.effectively_locked),
     );
-    for name in ["copyLayers", "cutLayers", "delete"] {
+    for name in ["copyLayers", "delete"] {
         set(name, chosen || keys);
     }
+    set("cutLayers", (chosen || keys) && selected.iter().all(|l| !l.effectively_locked));
     for name in [
         "nudgeKeyframes",
         "easyEase",
@@ -2078,7 +2306,6 @@ pub fn disabled(
     set("unlockSelectedLayers", selected.iter().any(|l| l.locked));
     set("lockSelectedLayers", selected.iter().any(|l| !l.locked));
     set("unlockAllLayers", layers.iter().any(|l| l.locked));
-    set("pasteLayers", !matches!(clipboard, Clipboard::Empty));
     off
 }
 /// Rows that act on the selected layers.

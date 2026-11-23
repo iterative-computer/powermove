@@ -2984,7 +2984,12 @@ fn the_timeline_panel_hears_of_a_view_change_made_outside_it() {
     // Timeline in Tracks: the header's mode follows.
     save("mode", pm_model::Value::from("tracks"));
     assert_ne!(subscribed(&mut service).value, hidden.value);
-    assert_eq!(frame(&backend)["mode"], "Tracks");
+    let tracks = frame(&backend);
+    assert_eq!(tracks["mode"], "Tracks");
+    assert_eq!(tracks["window"]["retained"], true);
+    assert!(tracks["window"]["rows"].as_array().unwrap().iter().all(|row| row["kind"] == "track"));
+    save("mode", pm_model::Value::from("layers"));
+    assert_eq!(frame(&backend)["window"]["rows"], shown["window"]["rows"]);
 }
 
 /// The Export sheet's commands edit no document: Cancel (and the others)

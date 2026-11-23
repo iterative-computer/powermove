@@ -473,6 +473,42 @@ fn sixty_thousand_clips_in_one_track_cull_by_time() {
 }
 
 #[test]
+fn marquee_ignores_layer_summary_dots_but_includes_property_keys() {
+    use pm_panel_timeline::{RowId, v4::row_id};
+
+    let t = tokens();
+    let layer_row = |id: &str| row(&row_id(&RowId::Layer(id.into())), RowContent::Layer {
+        clip: Some(clip(id)),
+        summary: vec![key("summary", 2.)].into(),
+    });
+    let property = row(&row_id(&RowId::Property {
+        layer_id: "expanded".into(), channel: "opacity".into(),
+    }), RowContent::Property {
+        state: KeyState::Animated,
+        keys: vec![key("authored", 2.)],
+    });
+    let scene = Scene::new(vec![layer_row("collapsed"), layer_row("expanded"), property], 10., 30., &t).unwrap();
+    let v = viewport(&t);
+    let band = |first: usize, end: usize| {
+        let top = t.metrics.ruler as f64 + scene.span(first).unwrap().1;
+        let bottom = t.metrics.ruler as f64 + scene.span(end - 1).unwrap().2;
+        Rect::new(v.layer_column + 90., top + 1., 20., bottom - top - 2.)
+    };
+
+    let collapsed = scene.marquee(v, &t, band(0, 1));
+    assert_eq!(collapsed.clips, ["collapsed"]);
+    assert!(collapsed.keys.is_empty());
+
+    let mixed = scene.marquee(v, &t, band(0, 3));
+    assert_eq!(mixed.clips, ["collapsed", "expanded"]);
+    assert_eq!(mixed.keys, [("expanded".into(), "authored".into())]);
+
+    let property = scene.marquee(v, &t, band(2, 3));
+    assert!(property.clips.is_empty());
+    assert_eq!(property.keys, mixed.keys);
+}
+
+#[test]
 fn a_marquee_covers_rows_the_frame_did_not_build_above_and_below_the_panel() {
     let t = tokens();
     let rows = (0..40)

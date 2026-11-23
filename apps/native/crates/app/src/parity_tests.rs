@@ -398,7 +398,7 @@ fn child_labels(rows: &[serde_json::Value], parent: &str) -> Vec<String> {
     labels(row["children"].as_array().unwrap())
 }
 fn menu(desk: &Desk, pressed: &str, time: f64) -> Vec<serde_json::Value> {
-    crate::layer_commands::layer_menu(&desk.published(), pressed, time)
+    crate::layer_commands::layer_menu(&desk.published(), pressed, time, false)
 }
 /// Chooses a row as the menu does: by its preorder position.
 fn choose(desk: &Desk, pressed: &str, time: f64, path: &[&str]) {
@@ -445,6 +445,10 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
         labels(&menu(&desk, "a", 1.)),
         [
             "Rename…",
+            "Cut",
+            "Copy",
+            "(Paste)",
+            "-",
             "Save Animation Preset…",
             "Duplicate",
             "Group Layers",
@@ -495,9 +499,13 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
     desk.select(&["a", "b"]);
     let two = labels(&menu(&desk, "a", 1.));
     assert_eq!(
-        &two[..7],
+        &two[..11],
         [
             "2 Layers",
+            "Cut",
+            "Copy",
+            "(Paste)",
+            "-",
             "Save Animation Preset…",
             "Duplicate",
             "Group Layers",
@@ -509,7 +517,7 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
     // Text layers split; nothing else offers it.
     desk.select(&["t"]);
     // One layer: Rename… leads (v1).
-    assert_eq!(labels(&menu(&desk, "t", 1.))[5], "Split Text into Layers");
+    assert_eq!(labels(&menu(&desk, "t", 1.))[9], "Split Text into Layers");
     assert_eq!(
         child_labels(&menu(&desk, "t", 1.), "Split Text into Layers"),
         ["By Word", "By Character", "By Line"]
@@ -517,12 +525,12 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
     // A group ungroups, right after Group Layers, and has no timing of its own.
     desk.select(&["g"]);
     let group = labels(&menu(&desk, "g", 1.));
-    assert_eq!(group[3..5], ["Group Layers", "Ungroup Layers"]);
+    assert_eq!(group[7..9], ["Group Layers", "Ungroup Layers"]);
     assert!(!group.contains(&"Timing".to_owned()));
     // One pre-comp releases into its layers and can rasterize continuously.
     desk.select(&["p"]);
     let precomp = labels(&menu(&desk, "p", 1.));
-    assert_eq!(precomp[4..6], ["Pre-compose…", "Release Pre-comp"]);
+    assert_eq!(precomp[8..10], ["Pre-compose…", "Release Pre-comp"]);
     let raster = precomp.iter().position(|l| l == "Continuously Rasterize");
     assert_eq!(raster, Some(precomp.len() - 3), "{precomp:?}");
     // A video that carries its soundtrack.
@@ -534,12 +542,16 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
         .expect("Mute Audio");
     assert_eq!(video[at + 1], "Separate Audio");
     assert_eq!(video[at + 2], "-");
-    // A locked layer: only Unlock is live.
+    // Locked layers can be copied and unlocked.
     desk.select(&["locked"]);
     assert_eq!(
         labels(&menu(&desk, "locked", 1.)),
         [
             "(Rename…)",
+            "(Cut)",
+            "Copy",
+            "(Paste)",
+            "-",
             "(Save Animation Preset…)",
             "(Duplicate)",
             "(Group Layers)",
@@ -561,6 +573,88 @@ fn the_layer_menu_has_the_shipped_rows_in_the_shipped_order() {
     // A row pressed outside the selection is the menu's only layer.
     desk.select(&["a", "b"]);
     assert!(!labels(&menu(&desk, "v", 1.)).contains(&"Use Bottom Layer as Mask".to_owned()));
+}
+
+#[test]
+fn copied_groups_keep_stack_order_and_import_nested_sources_in_one_step() {
+    use crate::layer_commands::copy_layers;
+    let shape = |id: &str, group: Option<&str>| {
+        json!({"id":id,"name":id,"type":"shape","group":group,"from":0,"dur":2,"p":{},"d":{}})
+    };
+    let precomp = |id: &str, nested: &str, group: Option<&str>| {
+        json!({"id":id,"name":id,"type":"precomp","group":group,"from":0,"dur":2,"p":{},
+               "d":{"comp":nested,"w":32,"h":18}})
+    };
+    let comp = |id: &str, layers: Vec<serde_json::Value>| {
+        json!({"id":id,"name":id,"w":32,"h":18,"fps":30,"dur":4,"layers":layers})
+    };
+    let group = |id: &str, parent: Option<&str>| {
+        json!({"id":id,"name":id,"type":"group","group":parent,"from":0,"dur":4,"p":{},"d":{}})
+    };
+    let source = Desk::new(json!({
+        "id":"source","compId":"main","name":"Source","w":32,"h":18,"fps":30,"dur":8,
+        "assets":{"media":{"id":"media","kind":"image","name":"Source image","sourcePath":"source.png"}},
+        "layers":[group("g", None), group("inner", Some("g")), precomp("placed", "nested", Some("inner")), shape("standalone", None)],
+        "comps":{
+            "nested":comp("nested", vec![precomp("nested-layer", "deep", None)]),
+            "deep":comp("deep", vec![json!({"id":"deep-image","type":"image","name":"Image","from":0,"dur":2,"p":{},"d":{"asset":"media","assetId":"media"}})]),
+            "other":comp("other", vec![])
+        }
+    }));
+    let originals = [("media".to_owned(), std::path::PathBuf::from("/synthetic/source.png"))].into();
+    source.select(&["standalone", "g"]);
+    let (copied, selected) = copy_layers(&source.published(), None, false, &originals).unwrap();
+    assert_eq!(selected, ["g", "standalone"]);
+    assert_eq!(
+        copied.layers.iter().map(|l| l.get("id").and_then(Value::as_str).unwrap()).collect::<Vec<_>>(),
+        ["g", "inner", "placed", "standalone"],
+    );
+    let apply = |desk: &Desk| {
+        let p = desk.published();
+        let plan = copied.paste(&p, 2.).unwrap();
+        desk.call(transaction(&plan, Some(p.revision())).unwrap());
+        assert_eq!(desk.selected(), *plan.select.as_ref().unwrap());
+        plan.select.unwrap()
+    };
+    let from = source.published();
+    source.call(Call::OpenComposition { comp_id: "other".into(), document: from.snapshot.doc_id });
+    let same_project = apply(&source);
+    let placed = layer_of(&source.published(), &same_project[2]);
+    assert_eq!(placed.get("d").unwrap().get("comp").unwrap().as_str(), Some("nested"));
+    assert_eq!(source.document().get("assets").unwrap().as_object().unwrap().len(), 1);
+
+    let target = Desk::new(json!({
+        "id":"target","compId":"main","name":"Target","w":32,"h":18,"fps":30,"dur":8,
+        "assets":{"media":{"id":"media","kind":"image","name":"Target image"}},
+        "layers":[shape("nested-layer", None)],
+        "comps":{"nested":comp("nested", vec![])}
+    }));
+    let before = target.document();
+    let new = apply(&target);
+    let p = target.published();
+    let placed = layer_of(&p, &new[2]);
+    assert_eq!(placed.get("group").and_then(Value::as_str), Some(new[1].as_str()));
+    let nested = placed.get("d").unwrap().get("comp").unwrap().as_str().unwrap();
+    assert_ne!(nested, "nested");
+    let doc = target.document();
+    let comps = doc.get("comps").unwrap();
+    assert_eq!(comps.get("nested"), before.get("comps").unwrap().get("nested"));
+    let layer = &comps.get(nested).unwrap().get("layers").unwrap().as_array().unwrap()[0];
+    assert_ne!(layer.get("id").and_then(Value::as_str), Some("nested-layer"));
+    let deep = layer.get("d").unwrap().get("comp").unwrap().as_str().unwrap();
+    let image = &comps.get(deep).unwrap().get("layers").unwrap().as_array().unwrap()[0];
+    let data = image.get("d").unwrap();
+    let asset = data.get("asset").and_then(Value::as_str).unwrap();
+    assert_ne!(asset, "media");
+    assert_eq!(data.get("assetId").and_then(Value::as_str), Some(asset));
+    let assets = doc.get("assets").unwrap();
+    assert_eq!(assets.get("media"), before.get("assets").unwrap().get("media"));
+    assert_eq!(assets.get(asset).unwrap().get("sourcePath").and_then(Value::as_str), Some("/synthetic/source.png"));
+    assert_eq!(p.history.undo_label.as_deref(), Some("Paste"));
+    target.undo();
+    assert_eq!(target.document(), before);
+    target.redo();
+    assert_eq!(target.document(), doc);
 }
 
 #[test]
@@ -620,7 +714,7 @@ fn layer_menu_rows_change_the_project_as_the_shipped_app_did_with_one_undo_each(
     step("a", &["Hide"], "Hide Layers", &|| {
         assert_eq!(flag("a", "on"), Some(false))
     });
-    assert_eq!(labels(&menu(&desk, "a", 1.))[10], "Show");
+    assert!(labels(&menu(&desk, "a", 1.)).iter().any(|label| label == "Show"));
     step("a", &["Show"], "Show Layers", &|| {
         assert_eq!(flag("a", "on"), Some(true))
     });
@@ -906,7 +1000,7 @@ fn ripple_delete_closes_each_removed_span_and_a_moving_group_carries_its_members
     let published = desk.published();
     assert!(command_plan("rippleDelete", &[], &published, 0.).is_none());
     assert!(
-        crate::layer_commands::disabled(Some(&published), &desk.layers(), &Default::default())
+        crate::layer_commands::disabled(Some(&published), &desk.layers())
             .contains("rippleDelete")
     );
 }
@@ -1125,7 +1219,7 @@ fn align_and_distribute_run_on_the_selection_as_one_undo_step() {
     let published = desk.published();
     assert!(command_plan("distributeLayers", &[json!("horizontal")], &published, 0.).is_none());
     let off =
-        crate::layer_commands::disabled(Some(&published), &desk.layers(), &Default::default());
+        crate::layer_commands::disabled(Some(&published), &desk.layers());
     assert!(off.contains("distributeLayers") && !off.contains("alignLayers"));
     // Each selected anchor meets the leftmost selected anchor.
     desk.run("alignLayers", &[json!("left")], 0.);
@@ -1148,7 +1242,7 @@ fn import_folder_is_live_in_the_file_menu_and_keeps_the_folders_as_media_folders
     );
     let desk = Desk::new(project(vec![shape("a")]));
     let off = |published: Option<&Published>| {
-        crate::layer_commands::disabled(published, &[], &Default::default())
+        crate::layer_commands::disabled(published, &[])
     };
     assert!(!off(Some(&desk.published())).contains("importFolder"));
     assert!(off(None).contains("importFolder"));

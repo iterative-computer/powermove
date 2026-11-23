@@ -127,6 +127,8 @@ pub enum CompCommand {
     /// n`). It does not open it (the shell switches compositions). Label
     /// "New Composition".
     Create { comp_id: String, settings: NewComp },
+    /// Register a complete composition copied from another project.
+    AddCopy { comp_id: String, composition: Value },
     /// Duplicate Composition (`PM.Comps.duplicate`): a copy under `new_id`
     /// named `<name> 2` (unique), layers cloned with fresh layer and key ids
     /// and their links remapped. Label "Duplicate Composition".
@@ -170,6 +172,7 @@ impl CompCommand {
             CompCommand::ResetWorkArea { .. } => "Reset Work Area",
             CompCommand::SetSceneParameter { .. } => "Set Parameter",
             CompCommand::Create { .. } => "New Composition",
+            CompCommand::AddCopy { .. } => "Paste",
             CompCommand::Duplicate { .. } => "Duplicate Composition",
             CompCommand::Delete { .. } => "Delete Composition",
             CompCommand::ReleasePrecomp { .. } => "Release Pre-comp",
@@ -180,6 +183,16 @@ impl CompCommand {
 
     pub(super) fn plan(&self, cx: &mut Cx<'_>) -> Result<(), CommandError> {
         match self {
+            CompCommand::AddCopy { comp_id, composition } => {
+                let path = vec!["comps".into(), comp_id.as_str().into()];
+                if cx.lookup(&path).is_some() || values::text(composition, "id") != Some(comp_id) {
+                    return Err(CommandError::Invalid(format!("Invalid copied composition: {comp_id}")));
+                }
+                if cx.lookup(&path[..1]).is_none() {
+                    cx.set(vec!["comps".into()], Value::Object(Map::new()))?;
+                }
+                cx.set(path, composition.clone())
+            }
             CompCommand::Open { comp_id } => {
                 cx.comp_node(Some(comp_id))?;
                 cx.set(vec!["compId".into()], values::s(comp_id))

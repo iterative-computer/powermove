@@ -30,6 +30,10 @@ impl MarqueeSession {
     }
     pub fn update(&mut self, picked: Vec<(String, String)>, layers: Vec<String>) -> Plan {
         self.picked.clear();
+        if !self.graph && !layers.is_empty() {
+            let previous = self.layers.iter().filter(|_| self.additive).cloned();
+            return selection(unique_ids(previous.chain(layers)), Vec::new());
+        }
         for pair in picked {
             if !self.picked.contains(&pair) {
                 self.picked.push(pair);

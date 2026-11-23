@@ -238,8 +238,10 @@ impl Drop for Busy {
 
 /// Hands a web link to the default browser.
 pub fn open_url(url: &str) -> bool {
-    objc2_foundation::NSURL::URLWithString(&NSString::from_str(url))
-        .is_some_and(|url| objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url))
+    objc2::rc::autoreleasepool(|_| {
+        objc2_foundation::NSURL::URLWithString(&NSString::from_str(url))
+            .is_some_and(|url| objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url))
+    })
 }
 
 /// Import Media: several items at once, filtered to `extensions` when it has any.
@@ -381,14 +383,16 @@ pub(crate) fn agent_pasteboard() -> Option<AgentPaste> {
     crate::media::agent_pasted_path(&text.to_string()).map(|p| AgentPaste::Files(vec![p]))
 }
 fn pasteboard_files(board: &NSPasteboard) -> Vec<PathBuf> {
-    board
-        .pasteboardItems()
-        .iter()
-        .flat_map(|items| items.iter())
-        .filter_map(|item| item.stringForType(unsafe { NSPasteboardTypeFileURL }))
-        .filter_map(|url| objc2_foundation::NSURL::URLWithString(&url)?.path())
-        .map(|path| PathBuf::from(path.to_string()))
-        .collect()
+    objc2::rc::autoreleasepool(|_| {
+        board
+            .pasteboardItems()
+            .iter()
+            .flat_map(|items| items.iter())
+            .filter_map(|item| item.stringForType(unsafe { NSPasteboardTypeFileURL }))
+            .filter_map(|url| objc2_foundation::NSURL::URLWithString(&url)?.path())
+            .map(|path| PathBuf::from(path.to_string()))
+            .collect()
+    })
 }
 fn pasteboard_picture(board: &NSPasteboard) -> Option<(Retained<NSData>, bool)> {
     let picture = |kind, png| {
@@ -422,6 +426,17 @@ pub fn tiff_to_png(tiff: &[u8]) -> Option<Vec<u8>> {
         )
     }?;
     Some(png.to_vec())
+}
+
+/// Whether Paste can handle the system clipboard without reading image bytes.
+pub fn has_pasteboard_content() -> bool {
+    let board = paste_board();
+    let types = objc2_foundation::NSArray::from_slice(&unsafe {
+        [NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeTIFF]
+    });
+    board.availableTypeFromArray(&types).is_some()
+        || board.stringForType(unsafe { NSPasteboardTypeHTML })
+            .is_some_and(|html| html.to_string().contains("(figma)"))
 }
 
 /// The pasteboard's HTML and PNG, for Figma paste. Main thread: the
@@ -625,51 +640,57 @@ fn media_type(kind: &objc2::runtime::AnyObject) -> bool {
 /// resolved file, not the name the reply wrote) is an image, movie or sound.
 /// Disk and Launch Services work: never on the main thread.
 pub fn media_document(path: &std::path::Path) -> Result<PathBuf, &'static str> {
-    use std::os::unix::fs::PermissionsExt;
-    const MOVED: &str = "That file couldn’t be found. It may have moved.";
-    const REFUSED: &str = "That file isn’t an image, video or sound, so it wasn’t opened.";
-    let resolved = std::fs::canonicalize(path).map_err(|_| MOVED)?;
-    let metadata = std::fs::symlink_metadata(&resolved).map_err(|_| MOVED)?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o111 != 0 {
-        return Err(REFUSED);
-    }
-    match content_type(&resolved) {
-        Some(kind) if media_type(&kind) => Ok(resolved),
-        _ => Err(REFUSED),
-    }
+    objc2::rc::autoreleasepool(|_| {
+        use std::os::unix::fs::PermissionsExt;
+        const MOVED: &str = "That file couldn’t be found. It may have moved.";
+        const REFUSED: &str = "That file isn’t an image, video or sound, so it wasn’t opened.";
+        let resolved = std::fs::canonicalize(path).map_err(|_| MOVED)?;
+        let metadata = std::fs::symlink_metadata(&resolved).map_err(|_| MOVED)?;
+        if !metadata.is_file() || metadata.permissions().mode() & 0o111 != 0 {
+            return Err(REFUSED);
+        }
+        match content_type(&resolved) {
+            Some(kind) if media_type(&kind) => Ok(resolved),
+            _ => Err(REFUSED),
+        }
+    })
 }
 /// Opens a checked media file ([`media_document`]) as a document in the
 /// default viewer for its content type, never through a URL Launch Services
 /// could run as an app.
 pub fn open_document(path: &std::path::Path) -> bool {
-    use objc2::msg_send;
-    use objc2_foundation::{NSArray, NSURL};
-    let (Some(url), Some(kind)) = (NSURL::from_file_path(path), content_type(path)) else {
-        return false;
-    };
-    let workspace = NSWorkspace::sharedWorkspace();
-    let viewer: Option<Retained<NSURL>> =
-        unsafe { msg_send![&*workspace, URLForApplicationToOpenContentType: &*kind] };
-    let Some(viewer) = viewer else {
-        return false;
-    };
-    let configuration = NSWorkspaceOpenConfiguration::configuration();
-    workspace.openURLs_withApplicationAtURL_configuration_completionHandler(
-        &NSArray::from_retained_slice(&[url]),
-        &viewer,
-        &configuration,
-        None,
-    );
-    true
+    objc2::rc::autoreleasepool(|_| {
+        use objc2::msg_send;
+        use objc2_foundation::{NSArray, NSURL};
+        let (Some(url), Some(kind)) = (NSURL::from_file_path(path), content_type(path)) else {
+            return false;
+        };
+        let workspace = NSWorkspace::sharedWorkspace();
+        let viewer: Option<Retained<NSURL>> =
+            unsafe { msg_send![&*workspace, URLForApplicationToOpenContentType: &*kind] };
+        let Some(viewer) = viewer else {
+            return false;
+        };
+        let configuration = NSWorkspaceOpenConfiguration::configuration();
+        workspace.openURLs_withApplicationAtURL_configuration_completionHandler(
+            &NSArray::from_retained_slice(&[url]),
+            &viewer,
+            &configuration,
+            None,
+        );
+        true
+    })
 }
 /// Selects `path` in Finder.
 pub fn reveal(path: &std::path::Path) {
-    use objc2_app_kit::NSWorkspace;
-    use objc2_foundation::{NSArray, NSURL};
-    if let Some(url) = NSURL::from_file_path(path) {
-        NSWorkspace::sharedWorkspace()
-            .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
-    }
+    objc2::rc::autoreleasepool(|_| {
+        use objc2_app_kit::NSWorkspace;
+        use objc2_foundation::{NSArray, NSURL};
+        if let Some(url) = NSURL::from_file_path(path) {
+            NSWorkspace::sharedWorkspace()
+                .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
+        }
+    })
 }
 pub fn history_labels(undo: Option<&str>, redo: Option<&str>) {
     pm_shell::history_titles(undo, redo);

@@ -293,6 +293,7 @@ pub const TASK: &str = r#"TASK FOCUS
 Use the simplest supported workflow. Questions: no edits. Preserve decisions; newest corrections win. Recover omissions with thread_read.
 Inspect live targets/frames. get_project_state indexOnly/layerSearch/nextLayerOffset discovers targets; then read properties. Missing entries are not missing capabilities.
 Access is enforced by native tools, never by this brief. Read the start_session access and available tools before authoring; Full access changes permissions only.
+Add timeline markers only when requested or when a few sparse structural cues would help.
 Relevant procedures only. Never replace effects with panels or simple keyframes with extensions; no test scenes in the user's project."#;
 
 pub const CREATIVE: &str = r#"CREATIVE JUDGMENT

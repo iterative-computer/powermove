@@ -142,17 +142,19 @@ pub fn available_files() -> Vec<PathBuf> {
     LISTINGS.fetch_add(1, Ordering::Relaxed);
     #[cfg(all(target_os = "macos", feature = "system"))]
     {
-        use objc2_core_foundation::CFURL;
-        let urls = unsafe { objc2_core_text::CTFontManagerCopyAvailableFontURLs() };
-        let urls: &objc2_core_foundation::CFArray<CFURL> = unsafe { urls.cast_unchecked() };
-        let mut files: Vec<PathBuf> = urls
-            .iter()
-            .filter_map(|url| url.to_file_path())
-            .map(one_spelling)
-            .collect();
-        files.sort();
-        files.dedup();
-        files
+        objc2::rc::autoreleasepool(|_| {
+            use objc2_core_foundation::CFURL;
+            let urls = unsafe { objc2_core_text::CTFontManagerCopyAvailableFontURLs() };
+            let urls: &objc2_core_foundation::CFArray<CFURL> = unsafe { urls.cast_unchecked() };
+            let mut files: Vec<PathBuf> = urls
+                .iter()
+                .filter_map(|url| url.to_file_path())
+                .map(one_spelling)
+                .collect();
+            files.sort();
+            files.dedup();
+            files
+        })
     }
     #[cfg(not(all(target_os = "macos", feature = "system")))]
     Vec::new()
@@ -323,36 +325,38 @@ pub fn unregister_for_process(path: &std::path::Path) -> Result<(), String> {
 fn scope_process(path: &std::path::Path, register: bool) -> Result<(), String> {
     #[cfg(all(target_os = "macos", feature = "system"))]
     {
-        use objc2_core_text::{
-            CTFontManagerRegisterFontsForURL, CTFontManagerScope,
-            CTFontManagerUnregisterFontsForURL,
-        };
-        let url = objc2_core_foundation::CFURL::from_file_path(path)
-            .ok_or_else(|| format!("{} is not a file path", path.display()))?;
-        let ok = unsafe {
-            if register {
-                CTFontManagerRegisterFontsForURL(
-                    &url,
-                    CTFontManagerScope::Process,
-                    std::ptr::null_mut(),
-                )
+        objc2::rc::autoreleasepool(|_| {
+            use objc2_core_text::{
+                CTFontManagerRegisterFontsForURL, CTFontManagerScope,
+                CTFontManagerUnregisterFontsForURL,
+            };
+            let url = objc2_core_foundation::CFURL::from_file_path(path)
+                .ok_or_else(|| format!("{} is not a file path", path.display()))?;
+            let ok = unsafe {
+                if register {
+                    CTFontManagerRegisterFontsForURL(
+                        &url,
+                        CTFontManagerScope::Process,
+                        std::ptr::null_mut(),
+                    )
+                } else {
+                    CTFontManagerUnregisterFontsForURL(
+                        &url,
+                        CTFontManagerScope::Process,
+                        std::ptr::null_mut(),
+                    )
+                }
+            };
+            if ok {
+                Ok(())
             } else {
-                CTFontManagerUnregisterFontsForURL(
-                    &url,
-                    CTFontManagerScope::Process,
-                    std::ptr::null_mut(),
-                )
+                Err(format!(
+                    "CoreText refused to {} {}",
+                    if register { "register" } else { "unregister" },
+                    path.display()
+                ))
             }
-        };
-        if ok {
-            Ok(())
-        } else {
-            Err(format!(
-                "CoreText refused to {} {}",
-                if register { "register" } else { "unregister" },
-                path.display()
-            ))
-        }
+        })
     }
     #[cfg(not(all(target_os = "macos", feature = "system")))]
     {

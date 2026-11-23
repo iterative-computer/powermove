@@ -159,7 +159,7 @@ fn slip_and_slide_keys_move_by_frames() {
     desk.select(&["c"]);
     let published = desk.published();
     assert!(command_plan("slipLayers", &[json!(-1)], &published, 0.).is_none());
-    assert!(!disabled(Some(&published), &desk.layers(), &Default::default()).contains("slipLayers"));
+    assert!(!disabled(Some(&published), &desk.layers()).contains("slipLayers"));
     assert_eq!(
         crate::layer_commands::nothing_reason("slipLayers", &published),
         Some("Slip moves a clip's video or audio; the selected layers have none")
@@ -255,7 +255,7 @@ fn time_remap_freeze_and_reverse_keys_write_the_source_time_channel() {
     let published = desk.published();
     for name in ["timeRemapLayers", "freezeFrame", "reverseLayers"] {
         assert!(command_plan(name, &[], &published, 0.).is_none());
-        assert!(disabled(Some(&published), &desk.layers(), &Default::default()).contains(name));
+        assert!(disabled(Some(&published), &desk.layers()).contains(name));
     }
 }
 

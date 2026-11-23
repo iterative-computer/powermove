@@ -544,6 +544,62 @@ fn paste_moves_the_block_to_the_playhead_and_remaps_links() {
 }
 
 #[test]
+fn paste_keeps_a_matte_in_the_target_and_clears_an_absent_one() {
+    let mut s = store();
+    for (matte, id, expected) in [
+        ("top", "with-matte", Some("top")),
+        ("foreign", "without-matte", None),
+    ] {
+        let mut copied = layer(&s, "box");
+        copied.as_object_mut().unwrap().insert("matteSource", Value::from(matte));
+        run(&mut s, LayerCommand::Paste {
+            comp: None, layers: vec![copied], new_ids: vec![id.into()], index: None, time: None,
+        });
+        assert_eq!(layer(&s, id).get("matteSource").and_then(Value::as_str), expected);
+    }
+}
+
+#[test]
+fn pasted_embedded_media_is_admitted_atomically_with_the_layer() {
+    use pm_kernel::commands::media::{CopiedMedia, MediaCommand};
+    use pm_kernel::project_io::{MediaEntry, MediaSource};
+    use std::sync::Arc;
+
+    let mut s = store();
+    let asset = MediaCommand::AddCopy {
+        asset_id: "pasted-image".into(),
+        asset: parse(r#"{"kind":"image","name":"Pasted image","persisted":true}"#).unwrap(),
+        media: Some(CopiedMedia(Arc::new(MediaEntry {
+            id: "source-image".into(),
+            media_type: "image/png".into(),
+            revision: "source-revision".into(),
+            source: MediaSource::Memory(Arc::from(&b"synthetic image bytes"[..])),
+        }))),
+    };
+    let mut clipboard = layer(&s, "clip");
+    clipboard.as_object_mut().unwrap().get_mut("d").unwrap().as_object_mut().unwrap()
+        .insert("asset", Value::from("pasted-image"));
+    let paste = |id: &str| LayerCommand::Paste {
+        comp: None, layers: vec![clipboard.clone()], new_ids: vec![id.into()], index: None, time: None,
+    };
+    assert!(s.transact("Paste", Origin::Interface, &[asset.clone().into(), paste("top").into()]).is_err());
+    assert!(s.media().get("pasted-image").is_none());
+    assert!(s.root().unwrap().get("assets").unwrap().get("pasted-image").is_none());
+
+    s.transact("Paste", Origin::Interface, &[asset.into(), paste("pasted-layer").into()]).unwrap().unwrap();
+    assert_eq!(get(&layer(&s, "pasted-layer"), &["d", "asset"]).as_str(), Some("pasted-image"));
+    let copied = s.media().get("pasted-image").unwrap();
+    let MediaSource::Memory(bytes) = &copied.source else { panic!("clipboard bytes were lost") };
+    assert_eq!(bytes.as_ref(), b"synthetic image bytes");
+    s.undo().unwrap();
+    assert!(!ids(&s).contains(&"pasted-layer".into()));
+    assert!(s.root().unwrap().get("assets").unwrap().get("pasted-image").is_none());
+    s.redo().unwrap();
+    assert_eq!(get(&layer(&s, "pasted-layer"), &["d", "asset"]).as_str(), Some("pasted-image"));
+    assert!(s.media().get("pasted-image").is_some());
+}
+
+#[test]
 fn an_inserted_block_keeps_names_group_local_poses_and_locks_in_one_step() {
     let mut s = store();
     let before = s.revision();

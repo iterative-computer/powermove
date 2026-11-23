@@ -89,6 +89,13 @@ pub enum GraphDisplay {
     Graph,
 }
 
+#[derive(Debug)]
+struct CachedTrackLayout {
+    index: Arc<TimelineIndex>,
+    held: HashMap<String, reveal::Held>,
+    layout: Arc<tracks::Layout>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct TimelineModel {
     pub index: Arc<TimelineIndex>,
@@ -125,6 +132,7 @@ pub struct TimelineModel {
     pub(crate) anchor: Option<String>,
     rows: Vec<Row>,
     row_positions: HashMap<RowId, usize>,
+    track_layout: Arc<std::sync::Mutex<Option<CachedTrackLayout>>>,
     pub rebuilds: u64,
     /// Monotonic request, consumed once by the native scroll host.
     pub reveal_serial: u64,
@@ -137,6 +145,25 @@ pub struct TimelineModel {
 }
 
 impl TimelineModel {
+    /// Lane packing depends on the immutable index and the held lane assignments.
+    /// Model clones used by the canvas and outline share the packed result.
+    pub fn track_layout(&self) -> Arc<tracks::Layout> {
+        let mut cached = self.track_layout.lock().unwrap();
+        if let Some(entry) = &*cached
+            && Arc::ptr_eq(&entry.index, &self.index)
+            && entry.held == self.reveal.held
+        {
+            return entry.layout.clone();
+        }
+        let layout = Arc::new(tracks::layout(&self.index, &self.reveal));
+        *cached = Some(CachedTrackLayout {
+            index: self.index.clone(),
+            held: self.reveal.held.clone(),
+            layout: layout.clone(),
+        });
+        layout
+    }
+
     pub fn follows_publication(&self, published: &Published) -> bool {
         self.follows_snapshot(&published.snapshot)
             && self.ui_seen.as_ref() == Some(&published.ui_state.timeline)
@@ -967,7 +994,7 @@ impl TimelineModel {
     /// Option-click on a track header opens or closes every track at once,
     /// as the layer rows' `all` disclosure does for every layer.
     pub fn disclose_all_tracks(&mut self, open: bool) {
-        let layout = crate::tracks::layout(&self.index, &self.reveal);
+        let layout = self.track_layout();
         let tracks = self
             .reveal
             .tracks

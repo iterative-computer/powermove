@@ -173,7 +173,7 @@ fn a_command_that_cannot_run_is_disabled_and_lives_with_a_selection(cx: &mut Tes
     let mut s = stage(cx, 2);
     let off = |s: &Stage| {
         let p = published(&s.rig.kernel);
-        disabled(Some(&p), &layers(s), &Clipboard::Empty)
+        disabled(Some(&p), &layers(s))
     };
     for name in ["trimIn", "split", "duplicate", "groupLayers", "easyEase"] {
         assert!(off(&s).contains(name), "{name}");
@@ -191,7 +191,7 @@ fn a_command_that_cannot_run_is_disabled_and_lives_with_a_selection(cx: &mut Tes
     }
     assert!(off(&s).contains("ungroupLayers"));
     assert!(off(&s).contains("easyEase"));
-    let none = disabled(None, &[], &Clipboard::Empty);
+    let none = disabled(None, &[]);
     assert!(none.contains("newSolid"));
     assert!(none.contains("workIn"));
 }
@@ -346,7 +346,7 @@ fn shy_layers_leave_the_timeline_while_hide_shy_layers_is_on(cx: &mut TestAppCon
     ] {
         assert!(palette.iter().any(|(m, _, l)| *m == menu && l == label));
     }
-    let off = disabled(None, &[], &Clipboard::Empty);
+    let off = disabled(None, &[]);
     assert!(off.contains("toggleShy") && off.contains("timeline.toggleShy"));
 }
 #[gpui::test]
@@ -445,7 +445,7 @@ fn edge_and_selected_event_commands_step_the_playhead(cx: &mut TestAppContext) {
     // Nothing selected: no event to go to, and the rows say so.
     let off = |s: &Stage| {
         let p = published(&s.rig.kernel);
-        disabled(Some(&p), &layers(s), &Clipboard::Empty)
+        disabled(Some(&p), &layers(s))
     };
     assert!(off(&s).contains("nextSelectedEvent") && !off(&s).contains("nextEdge"));
     assert_eq!(walk(&mut s, cx, "nextSelectedEvent", 1), [0.]);
@@ -475,13 +475,13 @@ fn edge_and_selected_event_commands_step_the_playhead(cx: &mut TestAppContext) {
             .iter()
             .any(|b| b.chord == "cmd+shift+," && b.command == "projectSettings")
     );
-    assert!(disabled(None, &[], &Clipboard::Empty).contains("projectSettings"));
+    assert!(disabled(None, &[]).contains("projectSettings"));
 }
 /// Over Home there is nothing to export: File ▸ Export and its keys are off
 /// (v1's dimmed row), and they come back while a project opens (PM-472).
 #[test]
 fn export_is_off_without_a_project() {
-    assert!(disabled(None, &[], &Clipboard::Empty).contains("export"));
+    assert!(disabled(None, &[]).contains("export"));
     assert!(crate::layer_commands::waits_for_project("export"));
 }
 fn key_times(s: &Stage, id: &str, channel: &str) -> Vec<f64> {
@@ -1017,7 +1017,7 @@ fn slip_on_a_layer_with_no_media_says_why(cx: &mut TestAppContext) {
     let mut s = stage(cx, 2);
     select(&mut s, cx, &["l0"]);
     let p = published(&s.rig.kernel);
-    assert!(!disabled(Some(&p), &layers(&s), &Clipboard::Empty).contains("slipLayers"));
+    assert!(!disabled(Some(&p), &layers(&s)).contains("slipLayers"));
     assert!(crate::layer_commands::command_plan("slipLayers", &[serde_json::json!(1)], &p, 0.).is_none());
     assert_eq!(
         crate::layer_commands::nothing_reason("slipLayers", &p),

@@ -722,7 +722,21 @@ fn track_window(
     visible: usize,
 ) -> Result<Value, Error> {
     use crate::tracks::Area;
-    let layout = crate::tracks::layout(&model.index, &model.reveal);
+    let layout = model.track_layout();
+    let mut clips_by_lane = std::collections::HashMap::<_, Vec<_>>::new();
+    for item in &layout.items {
+        if let Some(clip) = model.index.layer(&item.id) {
+            clips_by_lane.entry((item.area, item.lane)).or_default().push(clip);
+        }
+    }
+    let mut properties_by_lane = std::collections::HashMap::<_, Vec<_>>::new();
+    for row in model.rows() {
+        if let RowId::Path { layer_id, .. } | RowId::Property { layer_id, .. } = &row.id
+            && let Some(item) = layout.item(layer_id)
+        {
+            properties_by_lane.entry((item.area, item.lane)).or_default().push((row, layer_id));
+        }
+    }
     let mut rows = vec![];
     for (area, lane) in layout.display_order() {
         let (short, audio) = match area {
@@ -730,12 +744,7 @@ fn track_window(
             Area::Audio => ("A", true),
             Area::Captions => ("C", false),
         };
-        let clips: Vec<_> = layout
-            .items
-            .iter()
-            .filter(|i| i.area == area && i.lane == lane)
-            .filter_map(|i| model.index.layer(&i.id))
-            .collect();
+        let clips = clips_by_lane.remove(&(area, lane)).unwrap_or_default();
         let label = format!("{short}{}", lane + 1);
         let enabled = clips
             .iter()
@@ -749,19 +758,9 @@ fn track_window(
         };
         let collapsed = model.track_collapsed(area, lane);
         let mut lane_rows = vec![];
-        let mut can_open = false;
-        for row in model.rows() {
-            let layer = match &row.id {
-                RowId::Path { layer_id, .. } | RowId::Property { layer_id, .. } => layer_id,
-                _ => continue,
-            };
-            if !clips.iter().any(|clip| clip.id == *layer) {
-                continue;
-            }
-            can_open = true;
-            if collapsed {
-                break;
-            }
+        let properties = properties_by_lane.remove(&(area, lane)).unwrap_or_default();
+        let can_open = !properties.is_empty();
+        for (row, layer) in properties.into_iter().filter(|_| !collapsed) {
             match &row.id {
                 RowId::Path { path, .. } => lane_rows.push(path_heading(model, row, layer, path)?),
                 RowId::Property { channel, .. } => lane_rows.push(json!({

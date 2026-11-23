@@ -1601,7 +1601,8 @@ fn paste(
             mapped(parent).or_else(|| parent.filter(|p| current.contains(*p)).map(str::to_owned));
         let group =
             mapped(group).or_else(|| group.filter(|g| current.contains(*g)).map(str::to_owned));
-        let matte = values::text(source, "matteSource").and_then(|m| mapped(Some(m)));
+        let matte = values::text(source, "matteSource")
+            .and_then(|id| mapped(Some(id)).or_else(|| current.contains(id).then(|| id.to_owned())));
         let m = values::obj(&mut clone);
         m.insert("from", n(from));
         m.insert(
@@ -1614,6 +1615,8 @@ fn paste(
         );
         if let Some(matte) = matte {
             m.insert("matteSource", values::s(&matte));
+        } else {
+            m.remove("matteSource");
         }
         // `remapLayerInputs(clone, idMap)`.
         if let Some(fx) = m.get_mut("fx").and_then(Value::as_array_mut) {

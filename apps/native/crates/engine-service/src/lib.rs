@@ -822,6 +822,9 @@ impl View {
         Ok(())
     }
 }
+/// Retire playback queues that grew beyond this after a document closes.
+const PROJECT_GPU_RENEWAL_BYTES: u64 = 128 << 20;
+
 /// Viewers that keep a settled picture at once, at most (the front tab's,
 /// popouts, windows side by side).
 const SETTLED_PICTURES: usize = 4;
@@ -885,6 +888,8 @@ struct Shared {
     memory: Mutex<memory::CacheUsage>,
     /// Times a closed document's caches were released (`CacheUsage`).
     project_releases: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    project_device_renewals: std::sync::atomic::AtomicU64,
     wake: std::sync::mpsc::SyncSender<()>,
     /// Moves when a frame being drawn is superseded (a transport command, a
     /// new revision, other media or quality, a viewer closing): a frame
@@ -1740,6 +1745,8 @@ impl EngineService {
             state: Mutex::new(State::default()),
             memory: Mutex::default(),
             project_releases: Default::default(),
+            #[cfg(test)]
+            project_device_renewals: Default::default(),
             wake,
             superseded: Default::default(),
             interactive: {
@@ -1866,8 +1873,8 @@ impl EngineService {
         self.shared.state.lock().unwrap().subscribers.push(tx);
         rx
     }
-    /// The device viewer layers and popouts must use. It changes after a
-    /// GPU loss; the worker re-points layers it already draws into.
+    /// The device viewer layers and popouts start with. On device renewal,
+    /// the worker re-points layers it already draws into.
     pub fn metal_device(&self) -> metal::Device {
         self.shared.device.lock().unwrap().clone()
     }
@@ -2634,6 +2641,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
     shared.disk.set_activity(shared.interactive.clone());
     let mut runtime = BTreeMap::<u64, Runtime>::new();
     let mut flights = VecDeque::<Flight>::new();
+    let mut project_gpu_peak = 0;
     // Each view's last played frame (disk render cache index).
     let mut played: std::collections::HashMap<u64, i64> = Default::default();
     let trace_path = trace::path().map(std::ffi::OsStr::to_os_string);
@@ -2700,6 +2708,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
         let mut usage = engine.govern_memory();
         engine.poll();
         usage.gpu_allocated_bytes = engine.metal().current_allocated_size();
+        project_gpu_peak = project_gpu_peak.max(usage.gpu_allocated_bytes);
         *shared.memory.lock().unwrap() = usage;
         pass.mark("memory");
         if engine.lost() {
@@ -2740,6 +2749,7 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     engine = next;
                     settling = None;
                     rebuilt_at = Some(std::time::Instant::now());
+                    project_gpu_peak = 0;
                     *shared.device.lock().unwrap() = engine.metal().to_owned();
                     for (id, v) in state.views.iter_mut() {
                         v.status.device_losses += 1;
@@ -3140,6 +3150,15 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             .collect();
         if !retired.is_empty() || !closed.is_empty() {
             let last_view_closed = state.views.is_empty();
+            if !closed.is_empty() && !flights.is_empty() {
+                // Let completion/presentation handlers give up the old
+                // command buffers before retiring their queues. No new work
+                // is submitted while a document is waiting for this drain.
+                state.retired_documents.extend(closed);
+                drop(state);
+                let _ = wakes.recv_timeout(Duration::from_millis(4));
+                continue;
+            }
             if !closed.is_empty() {
                 for v in state.views.values_mut() {
                     v.dirty = true;
@@ -3157,21 +3176,35 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
                     shared.disk.forget_document(doc);
                 }
                 engine.release_project_memory();
-                if last_view_closed {
-                    // Metal command queues and wgpu encoder pools retain
-                    // their playback high-water storage after caches empty.
-                    // No viewer uses this device now; retire those owners as
-                    // well. The ordinary rebuild path preserves fonts/cache
-                    // configuration and recreates programs on next use.
-                    match engine.rebuild() {
-                        Ok(next) => {
-                            engine = next;
-                            settling = None;
+                settling = None;
+                // Queues and encoders can retain their high-water storage
+                // even after the renderer's caches have emptied.
+                if last_view_closed || project_gpu_peak >= PROJECT_GPU_RENEWAL_BYTES
+                    || engine.metal().current_allocated_size() >= PROJECT_GPU_RENEWAL_BYTES
+                {
+                    match objc2::rc::autoreleasepool(|_| {
+                        engine.rebuild().map(|next| engine = next)
+                    }) {
+                        Ok(()) => {
+                            project_gpu_peak = 0;
+                            let mut state = shared.state.lock().unwrap();
                             *shared.device.lock().unwrap() = engine.metal().to_owned();
+                            for (id, view) in &mut state.views {
+                                view.stamp.sequence += 1;
+                                bump_site(line!(), "");
+                                view.dirty = true;
+                                if let Some(r) = runtime.get_mut(id) {
+                                    r.last = None;
+                                    (r.full_owed, r.settle_at, r.full_for) = (None, None, None);
+                                }
+                            }
+                            // The next submission retargets CAMetalLayer on
+                            // this worker, just as after a GPU loss.
+                            state.notify();
+                            #[cfg(test)]
+                            shared.project_device_renewals.fetch_add(1, std::sync::atomic::Ordering::Release);
                         }
-                        Err(error) => {
-                            eprintln!("Viewer cleanup could not renew the idle device: {error:#}")
-                        }
+                        Err(error) => eprintln!("Viewer cleanup could not renew the device: {error:#}"),
                     }
                     crate::memory::pressure_relief();
                 }
@@ -6874,6 +6907,43 @@ mod worker_tests {
         }
         assert!(!Arc::ptr_eq(&service.compat(doc), &store));
         other.retire();
+    }
+
+    #[test]
+    fn replacing_a_high_water_document_renews_the_device_and_draws_the_new_viewer() {
+        use std::sync::atomic::Ordering;
+
+        let service = EngineService::start(pm_gpu::Gpu::new("project-renew-test").unwrap()).unwrap();
+        let old = shapes_viewer(&service, None);
+        let first = wait_for(&old, "the first document's frame", |s| {
+            s.frame.as_ref().is_some_and(|f| f.gpu_ok)
+        });
+        let old_doc = first.frame.unwrap().stamp.doc_id;
+        let allocation = service.metal_device().new_buffer(
+            PROJECT_GPU_RENEWAL_BYTES,
+            metal::MTLResourceOptions::StorageModeShared,
+        );
+        old.scrub(Ticks::ZERO).unwrap();
+        wait_for(&old, "the worker to observe the allocation", |_| {
+            service.memory_usage().gpu_allocated_bytes >= PROJECT_GPU_RENEWAL_BYTES
+        });
+        drop(allocation);
+
+        let layer = metal::MetalLayer::new();
+        layer.set_device(&service.metal_device());
+        layer.set_pixel_format(metal::MTLPixelFormat::RGBA16Float);
+        layer.set_drawable_size(core_graphics_types::geometry::CGSize::new(160., 90.));
+        let mut config = shapes_config(Some(layer));
+        // The test also builds without the kernel's document ID allocator.
+        config.snapshot.doc_id = old_doc + 1;
+        let viewer = service.replace_viewer(&old, config).unwrap();
+        wait_for(&viewer, "project cleanup and the replacement frame", |s| {
+            service.memory_usage().project_releases == 1
+                && s.frame.as_ref().is_some_and(|f| f.gpu_ok && f.stamp.doc_id == old_doc + 1)
+        });
+        assert_eq!(service.shared.project_device_renewals.load(Ordering::Acquire), 1);
+        assert_eq!(viewer.status().device_losses, 0);
+        viewer.retire();
     }
 
     /// A capture is an exact read: full resolution and paused whatever the

@@ -2504,11 +2504,26 @@ fn shift_marquee_toggles_keys_against_captured_selection_each_sample() {
     }
 }
 #[test]
+fn a_mixed_timeline_marquee_selects_clips_and_clears_even_additive_keys() {
+    let (_actor, mut client) = client();
+    select(&mut client, &["a"]);
+    select_keys(&mut client, &["a0"]);
+    let mut marquee = MarqueeSession::begin(&client.model, true, false);
+    let mixed = marquee.update(on("a", &["a2"]), strings(&["b"]));
+    run(&mut client, mixed);
+    assert_eq!(client.model.selection.layers(), strings(&["a", "b"]));
+    assert!(client.model.selection.keys().is_empty());
+    let properties = marquee.update(on("a", &["a2"]), Vec::new());
+    run(&mut client, properties);
+    assert_eq!(client.model.selection.keys(), strings(&["a0", "a2"]));
+}
+
+#[test]
 fn graph_marquee_retains_original_during_preview_then_replaces_on_release() {
     let (_a, mut c) = client();
     select_keys(&mut c, &["a0"]);
     let mut marquee = MarqueeSession::begin(&c.model, false, true);
-    let p = marquee.update(on("a", &["a2"]), Vec::new());
+    let p = marquee.update(on("a", &["a2"]), strings(&["b"]));
     run(&mut c, p);
     assert_eq!(c.model.selection.keys(), strings(&["a0", "a2"]));
     let p = marquee.finish();

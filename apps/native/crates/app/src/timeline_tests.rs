@@ -110,7 +110,7 @@ impl Delegate for Recording {
         match &*self.0.published.borrow() {
             Some(kernel) => kernel
                 .published(crate::v4_view_tests::PROJECT)
-                .map(|p| crate::layer_commands::layer_menu(&p, layer, *self.0.time.borrow()))
+                .map(|p| crate::layer_commands::layer_menu(&p, layer, *self.0.time.borrow(), false))
                 .unwrap_or_default(),
             None => vec![],
         }
@@ -222,7 +222,7 @@ fn stage_opened(cx: &mut TestAppContext, rig: Rig, docked: bool) -> Stage {
     let delegate = Rc::new(Recording(recorder.clone()));
     let (kernel, outline) = (rig.kernel.clone(), natives.outline.clone());
     let surface = cx.new(|cx| {
-        TimelineSurface::new(
+        let mut surface = TimelineSurface::new(
             kernel,
             PROJECT.into(),
             tokens(),
@@ -230,7 +230,9 @@ fn stage_opened(cx: &mut TestAppContext, rig: Rig, docked: bool) -> Stage {
             outline,
             Default::default(),
             cx,
-        )
+        );
+        surface.set_outline_runtime(&rig.runtime);
+        surface
     });
     natives
         .views
@@ -420,6 +422,14 @@ fn op_center(s: &mut Stage, prefix: &str) -> Point<Pixels> {
             px((op.bounds.y + op.bounds.height / 2.) as f32),
         )
 }
+fn property_key_center(s: &mut Stage, layer: &str, channel: &str) -> Point<Pixels> {
+    let row = pm_panel_timeline::v4::row_id(&pm_panel_timeline::RowId::Property {
+        layer_id: layer.into(),
+        channel: channel.into(),
+    });
+    let prefix = format!("key:[{},", serde_json::to_string(&row).unwrap());
+    op_center(s, &prefix)
+}
 fn keyed(s: &mut Stage, cx: &mut TestAppContext, times: &[f64]) -> Vec<String> {
     let mut ids = vec![];
     for (i, time) in times.iter().enumerate() {
@@ -481,8 +491,8 @@ fn dragging_a_keyframe_moves_it_and_undo_restores_it(cx: &mut TestAppContext) {
 fn marquee_selects_keys_without_seeking(cx: &mut TestAppContext) {
     let mut s = stage(cx, 2);
     keyed(&mut s, cx, &[0.5, 1.]);
-    let key = op_center(&mut s, "key:");
-    let start = s.at(0, 3.);
+    let key = property_key_center(&mut s, "l0", "opacity");
+    let start = point(s.at(0, 3.).x, key.y);
     s.drag(cx, start, key + point(px(-12.), px(6.)), Modifiers::none());
     assert!(
         s.recorder.reports.borrow().is_empty(),
@@ -644,9 +654,9 @@ fn a_double_click_on_a_key_opens_its_value_editor(cx: &mut TestAppContext) {
 fn option_dragging_the_last_selected_key_stretches_the_keys(cx: &mut TestAppContext) {
     let mut s = stage(cx, 1);
     let ids = keyed(&mut s, cx, &[0.5, 1.]);
-    let key = op_center(&mut s, "key:");
+    let key = property_key_center(&mut s, "l0", "opacity");
     // Both keys, by a marquee from empty space.
-    let start = s.at(0, 3.);
+    let start = point(s.at(0, 3.).x, key.y);
     s.drag(cx, start, key + point(px(-12.), px(6.)), Modifiers::none());
     let pps = s.surface.read_with(&s.vcx, |t, _| t.pps()) as f32;
     let last = point(s.at(0, 1.).x, key.y);
@@ -2005,8 +2015,8 @@ fn a_marquee_dragged_past_the_panel_selects_the_rows_it_covers_off_screen(cx: &m
         .unwrap();
     s.surface.update(&mut s.vcx, |t, cx| t.published(cx));
     s.idle(cx);
-    // Bulk keying now reveals its last edited row. This marquee begins at
-    // the top of the timeline and reaches layers below the viewport.
+    // Bulk keying reveals its last edited row. Return to the top before
+    // dragging across animated layers and below the viewport.
     let origin = s.origin();
     let column = s.surface.read_with(&s.vcx, |t, _| t.layer_column()) as f32;
     s.vcx.simulate_event(ScrollWheelEvent {
@@ -2043,11 +2053,11 @@ fn a_marquee_dragged_past_the_panel_selects_the_rows_it_covers_off_screen(cx: &m
         .published(PROJECT)
         .unwrap()
         .selection
-        .keys()
-        .to_vec();
-    assert_eq!(selected.len(), 61, "{selected:?}");
-    assert!(selected.iter().any(|k| k == "k60"), "{selected:?}");
-    assert!(!selected.iter().any(|k| k == "k61"), "{selected:?}");
+        .clone();
+    assert_eq!(selected.layers().len(), 61, "{selected:?}");
+    assert!(selected.contains("l60"), "{selected:?}");
+    assert!(!selected.contains("l61"), "{selected:?}");
+    assert!(selected.keys().is_empty(), "{selected:?}");
 }
 /// PM-310: a wheel step through the rows moves the strips and the outline
 /// as they were drawn (their scroll layers), with no render of the panel;

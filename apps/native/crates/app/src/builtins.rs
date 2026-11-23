@@ -472,6 +472,9 @@ impl Controller {
         }
         let runtime = Arc::new(runtime);
         self.builtins.runtime = Some(runtime.clone());
+        if let Some(timeline) = &self.builtins.timeline {
+            timeline.update(cx, |timeline, _| timeline.set_outline_runtime(&runtime));
+        }
         // Recover may have received the extension publication before this
         // runtime existed. Replay it, including surfaces mounted in Home's
         // retired runtime, even if discovery's revision has not changed.
@@ -3605,8 +3608,8 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
             E::FrameComposition => v.host.borrow().send_command("viewer.fit", vec![]),
             E::OpenComposition(id) => v.open_builtin_composition(&id, cx),
             E::CopyKeys(tracks) => {
-                v.clipboard = crate::layer_commands::Clipboard::Keys(tracks);
-                v.update_disabled();
+                crate::layer_commands::set_clipboard(crate::layer_commands::Clipboard::Keys(tracks));
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string("Powermove keyframes".into()));
             }
             // The keyframe sheets on the keys the right-click was on.
             E::EditKeyValues(keys) => {
@@ -3675,7 +3678,7 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
         controller
             .published
             .as_ref()
-            .map(|p| crate::layer_commands::layer_menu(p, layer, controller.time()))
+            .map(|p| crate::layer_commands::layer_menu(p, layer, controller.time(), crate::layer_commands::can_paste()))
             .unwrap_or_default()
     }
     fn menu(
@@ -3908,7 +3911,7 @@ impl crate::gizmo::Host for ControllerDelegate {
                     ),
                 ];
                 // Then the whole composition, then the view (viewer.ts).
-                let tail = canvas_menu_tail(!v.layers().is_empty());
+                let tail = canvas_menu_tail(!v.layers().is_empty(), crate::layer_commands::can_paste());
                 let locations = vec![("viewer:context", json!({"layerId":null,"time":time}))];
                 if let Some(entries) = v.extension_menu_with_tail(locations, entries, tail, at, cx)
                 {
@@ -3923,7 +3926,7 @@ impl crate::gizmo::Host for ControllerDelegate {
             .read(cx)
             .published
             .as_ref()
-            .map(|p| crate::layer_commands::layer_menu(p, &id, time))
+            .map(|p| crate::layer_commands::layer_menu(p, &id, time, crate::layer_commands::can_paste()))
             .unwrap_or_default();
         let chosen = rows.clone();
         let choose: crate::timeline_surface::Choose = Box::new(move |index, cx| {
@@ -4733,11 +4736,13 @@ mod follow_selection_tests {
 
 /// The viewer canvas menu's closing rows (viewer.ts): the composition's
 /// Paste and Select All Layers, then its view and settings.
-pub(crate) fn canvas_menu_tail(has_layers: bool) -> Vec<pm_shell::MenuEntry> {
+pub(crate) fn canvas_menu_tail(has_layers: bool, can_paste: bool) -> Vec<pm_shell::MenuEntry> {
     let mut select = pm_shell::MenuEntry::item("Select All Layers", "selectAll");
     select.enabled = has_layers;
+    let mut paste = pm_shell::MenuEntry::item("Paste", "pasteLayers");
+    paste.enabled = can_paste;
     vec![
-        pm_shell::MenuEntry::item("Paste", "pasteLayers"),
+        paste,
         select,
         pm_shell::MenuEntry::separator(),
         pm_shell::MenuEntry::item("Fit Composition in View", "fitComposition"),
@@ -4752,7 +4757,7 @@ mod canvas_menu_tests {
     /// and Composition Settings…, each a command the app routes.
     #[test]
     fn the_canvas_menu_closes_with_the_composition_rows_in_electrons_order() {
-        let rows = super::canvas_menu_tail(true);
+        let rows = super::canvas_menu_tail(true, true);
         let labels: Vec<_> = rows.iter().map(|r| r.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -4776,9 +4781,10 @@ mod canvas_menu_tests {
             ]
         );
         assert!(rows.iter().all(|r| r.enabled || r.label.is_empty()));
-        let empty = super::canvas_menu_tail(false);
+        let empty = super::canvas_menu_tail(false, false);
         assert!(!empty[1].enabled, "nothing to select");
-        assert!(empty[0].enabled && empty[3].enabled && empty[4].enabled);
+        assert!(!empty[0].enabled, "clipboard is empty");
+        assert!(empty[3].enabled && empty[4].enabled);
     }
 }
 

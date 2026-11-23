@@ -539,6 +539,10 @@ impl Scene {
         let rows = model
             .rows()
             .iter()
+            .filter(|row| {
+                model.mode != crate::TimelineMode::Tracks
+                    || matches!(row.id, RowId::Property { .. } | RowId::Path { .. })
+            })
             .map(|row| {
                 let (content, is_selected) = match &row.id {
                     RowId::Layer(id) => {
@@ -648,7 +652,7 @@ impl Scene {
             .collect::<Result<Vec<_>, Error>>()?;
         let rows = if model.mode == crate::TimelineMode::Tracks {
             use crate::tracks::Area;
-            let layout = crate::tracks::layout(&model.index, &model.reveal);
+            let layout = model.track_layout();
             let mut clips: HashMap<(Area, usize), Vec<Clip>> = HashMap::new();
             let mut lane_by_layer = HashMap::new();
             for item in &layout.items {
@@ -1363,7 +1367,9 @@ impl Scene {
             for o in ops.iter().filter(|o| intersects(o.bounds, area)) {
                 if let Some(id) = o.id.strip_prefix("clip:") {
                     covered.clips.push(id.to_owned());
-                } else if o.id.starts_with("key:") {
+                } else if o.id.starts_with("key:")
+                    && matches!(self.rows[i].content, RowContent::Property { .. })
+                {
                     covered.keys.extend(key_identity(o).and_then(on_layer));
                 }
             }

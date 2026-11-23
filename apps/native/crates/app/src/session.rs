@@ -274,7 +274,6 @@ pub struct Controller {
     pub view: crate::gizmo::ViewPlacement,
     /// The pending or running write of `view`.
     pub(crate) view_write: Option<gpui::Task<()>>,
-    pub clipboard: crate::layer_commands::Clipboard,
     /// Commands that cannot run now; menus and the palette show them off.
     pub disabled: std::collections::BTreeSet<String>,
     transition_menu: std::cell::RefCell<crate::layer_commands::TransitionMenuFacts>,
@@ -921,6 +920,11 @@ impl Controller {
     pub(crate) fn unavailable_commands(&self) -> std::collections::BTreeSet<String> {
         let v = self;
         let mut off = v.disabled.clone();
+        // Read at menu time so copies and pasteboard changes in another
+        // window are visible without a fresh project publication here.
+        if v.published.is_some() && crate::layer_commands::can_paste() {
+            off.remove("pasteLayers");
+        }
         if v.transition_refusal().is_some() {
             off.insert("addDefaultTransition".into());
         }
@@ -1401,8 +1405,7 @@ impl Controller {
             shape_variant: "rect".into(),
             view: Default::default(),
             view_write: None,
-            clipboard: Default::default(),
-            disabled: crate::layer_commands::disabled(None, &[], &Default::default()),
+            disabled: crate::layer_commands::disabled(None, &[]),
             transition_menu: Default::default(),
             save_pending: false,
             choosing_save_path: false,
@@ -2098,8 +2101,8 @@ impl Controller {
         .detach();
     }
     /// Selected keyframes take precedence over their layers, as Delete does.
-    fn copy_selection(&mut self, cut: bool, cx: &mut Context<Self>) -> bool {
-        use crate::layer_commands::Clipboard;
+    fn copy_selection(&mut self, cut: bool, pressed: Option<&str>, cx: &mut Context<Self>) -> bool {
+        use crate::layer_commands::{self, Clipboard};
         let Some(published) = self.published.clone() else {
             return false;
         };
@@ -2107,38 +2110,40 @@ impl Controller {
             .builtins
             .timeline
             .as_ref()
+            .filter(|_| pressed.is_none())
             .map(|t| t.read(cx).copied_keys())
             .unwrap_or_default();
-        let (clipboard, text) = if !keys.is_empty() {
-            (Clipboard::Keys(keys), "Powermove keyframes".to_owned())
+        let (clipboard, text, cut_layers) = if keys.is_empty() {
+            let Some((copied, ids)) = layer_commands::copy_layers(
+                &published, pressed, cut, &self.media.originals,
+            ) else {
+                return false;
+            };
+            let text = copied.layers.iter()
+                .filter_map(|layer| layer.get("name").and_then(pm_model::Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (Clipboard::Layers(Arc::new(copied)), text, Some(ids))
         } else {
-            let selected = published.selection.layers();
-            let root = published.snapshot.root();
-            let layers: Vec<pm_model::Value> = selected
-                .iter()
-                .filter_map(|id| {
-                    let root = root?;
-                    let at = pm_kernel::model::find_layer(root, id)?;
-                    Some(pm_kernel::model::layer_at(root, &at)?.to_value())
-                })
-                .collect();
-            if layers.is_empty() {
+            if cut && self.disabled.contains("cutLayers") {
                 return false;
             }
-            let names: Vec<&str> = layers
-                .iter()
-                .filter_map(|l| l.get("name").and_then(pm_model::Value::as_str))
-                .collect();
-            let text = names.join("\n");
-            (Clipboard::Layers(layers), text)
+            (Clipboard::Keys(keys), "Powermove keyframes".to_owned(), None)
         };
-        self.clipboard = clipboard;
-        // Replaces any older system media, as a text copy does.
+        layer_commands::set_clipboard(clipboard);
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-        self.update_disabled();
-        if cut && let Some(timeline) = self.builtins.timeline.clone() {
-            let time = self.time();
-            timeline.update(cx, |t, cx| t.command("delete", time, None, false, cx));
+        if cut {
+            if let Some(layer_ids) = cut_layers {
+                self.run_layer_plan(layer_commands::Plan {
+                    label: "Cut".into(),
+                    commands: vec![pm_kernel::LayerCommand::Delete { layer_ids }.into()],
+                    select: Some(Vec::new()),
+                    count_keys: None,
+                }, cx);
+            } else if let Some(timeline) = self.builtins.timeline.clone() {
+                let time = self.time();
+                timeline.update(cx, |t, cx| t.command("delete", time, None, false, cx));
+            }
         }
         true
     }
@@ -2154,7 +2159,7 @@ impl Controller {
             return true;
         }
         let time = self.time();
-        match self.clipboard.clone() {
+        match crate::layer_commands::shared_clipboard() {
             Clipboard::Empty => false,
             Clipboard::Keys(tracks) => {
                 let Some(timeline) = self.builtins.timeline.clone() else {
@@ -2164,18 +2169,17 @@ impl Controller {
                 true
             }
             Clipboard::Layers(layers) => {
-                self.run_layer_plan(crate::layer_commands::paste_plan(layers, time), cx);
+                let Some(plan) = self.published.as_ref().and_then(|p| layers.paste(p, time)) else {
+                    return false;
+                };
+                self.run_layer_plan(plan, cx);
                 true
             }
         }
     }
     /// Menus, palette and toolbar enablement for the current document state.
     pub fn update_disabled(&mut self) {
-        self.disabled = crate::layer_commands::disabled(
-            self.published.as_deref(),
-            self.layers(),
-            &self.clipboard,
-        );
+        self.disabled = crate::layer_commands::disabled(self.published.as_deref(), self.layers());
     }
     /// One Undo step, then the selection it leads to.
     /// Project items as layers at the playhead, the first on top, in one
@@ -4164,7 +4168,7 @@ impl Controller {
                 .cloned()
                 .is_some_and(|view| view.update(cx, |v, cx| v.cite_selection(window, cx)));
         }
-        if matches!(cmd.name.as_str(), "copyLayers" | "contextCopy") {
+        if matches!(cmd.name.as_str(), "copyLayers" | "contextCopy") && cmd.args.is_empty() {
             if self.builtins.views.get("agent").cloned().is_some_and(|view| {
                 view.update(cx, |v, cx| v.copy_selection(window, cx))
             }) {
@@ -4241,7 +4245,7 @@ impl Controller {
                 let Some(published) = self.published.as_ref() else {
                     return false;
                 };
-                let rows = crate::layer_commands::layer_menu(published, id, self.time());
+                let rows = crate::layer_commands::layer_menu(published, id, self.time(), crate::layer_commands::can_paste());
                 let items = rows
                     .iter()
                     .find(|row| row["label"] == "Parent")
@@ -4491,7 +4495,9 @@ impl Controller {
         use crate::layer_commands::Route;
         match crate::layer_commands::route(&cmd.name, &cmd.args) {
             Some(Route::Plan(name)) => return self.run_plan(name, &cmd.args, cx),
-            Some(Route::Copy { cut }) => return self.copy_selection(cut, cx),
+            Some(Route::Copy { cut }) => {
+                return self.copy_selection(cut, cmd.args.first().and_then(serde_json::Value::as_str), cx);
+            }
             Some(Route::Paste) => return self.paste_clipboard(cx),
             Some(Route::Timeline { frames, shift }) => {
                 let Some(timeline) = self.builtins.timeline.clone() else {

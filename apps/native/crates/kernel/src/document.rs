@@ -1269,7 +1269,11 @@ impl DocumentStore {
         validate(&document, &forward)?;
         let media = commands
             .iter()
-            .flat_map(crate::commands::scene3d::import_media)
+            .flat_map(|command| {
+                crate::commands::scene3d::import_media(command)
+                    .into_iter()
+                    .chain(crate::commands::media::copied_media(command))
+            })
             .collect::<Vec<_>>();
         for item in &media {
             if self
