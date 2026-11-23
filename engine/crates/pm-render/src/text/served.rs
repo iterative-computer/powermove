@@ -87,6 +87,9 @@ pub struct ServedFonts {
     /// The server generation `measure` was built for.
     generation: u64,
     rebuilds: u64,
+    /// Grows past every [`TextFonts::measurer`] answered so far whenever
+    /// `measure` is replaced (see [`ServedFonts::replaced`]).
+    epoch: u64,
 }
 
 impl ServedFonts {
@@ -102,6 +105,7 @@ impl ServedFonts {
             parked: Vec::new(),
             generation,
             rebuilds: 0,
+            epoch: 0,
         }
     }
 
@@ -122,6 +126,14 @@ impl ServedFonts {
     /// The scope layouts are measured for now.
     pub fn scope(&self) -> SeedScope {
         self.scope
+    }
+
+    /// `measure` is about to be replaced: every later [`TextFonts::measurer`]
+    /// is past every earlier one (each is `epoch` plus the current
+    /// measurer's round trips, which only grow while it is current).
+    fn replaced(&mut self) {
+        let asked = self.measure.compat().resolver().round_trips();
+        self.epoch = self.epoch.wrapping_add(asked).wrapping_add(1);
     }
 
     /// Times the measurer was replaced after a generation change.
@@ -156,6 +168,7 @@ impl ServedFonts {
             Some(i) => self.parked.remove(i),
             None => Self::measure_for(&self.server, seeds),
         };
+        self.replaced();
         let previous = std::mem::replace(&mut self.measure, next);
         self.parked.insert(0, previous);
         self.parked.truncate(PARKED_MEASURERS);
@@ -196,6 +209,7 @@ impl TextFonts for ServedFonts {
         if now != self.generation || !self.measure.compat().resolver().is_current() {
             // New fonts or seeds: every measurer starts over.
             self.parked.clear();
+            self.replaced();
             self.measure = Self::measure_for(&self.server, self.seeds.seeds(self.scope));
             self.generation = self.server.generation();
             self.rebuilds += 1;
@@ -210,5 +224,13 @@ impl TextFonts for ServedFonts {
 
     fn take_failures(&mut self) -> Vec<String> {
         self.measure.compat().resolver_mut().take_failures()
+    }
+
+    /// The measurer changes when `sync` replaces it, and its answers can
+    /// change whenever it asks the registry (an ask that failed is asked
+    /// again): both move this value.
+    fn measurer(&mut self) -> Option<u64> {
+        let asked = self.measure.compat().resolver().round_trips();
+        Some(self.epoch.wrapping_add(asked))
     }
 }

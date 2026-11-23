@@ -19,6 +19,8 @@ use pm_text::host::{BrokerResolver, FontBroker, FontHealth};
 pub struct EngineFonts {
     measure: pm_eval::text_measure::CompatMeasure<BrokerResolver>,
     generation: u64,
+    /// The broker `measure` asks ([`crate::text::TextFonts::measurer`]).
+    broker: FontBroker,
 }
 
 #[cfg(target_os = "macos")]
@@ -32,6 +34,7 @@ impl EngineFonts {
                 health.clone(),
             )),
             generation,
+            broker: broker.clone(),
         }
     }
 }
@@ -62,6 +65,13 @@ impl crate::text::TextFonts for EngineFonts {
     }
     fn generation(&self) -> u64 {
         self.generation
+    }
+    /// `sync` never replaces this measurer (new fonts are new
+    /// `EngineFonts`, which `TextContext::set_fonts` keys apart), and its
+    /// answers change only when it asks the broker: every ask on the broker
+    /// (any renderer's, so possibly more often than needed) moves this value.
+    fn measurer(&mut self) -> Option<u64> {
+        Some(self.broker.counts().0)
     }
 }
 

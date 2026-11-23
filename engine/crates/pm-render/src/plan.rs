@@ -1766,7 +1766,10 @@ fn native_content_quad<'d>(
             }));
         }
     }
-    if let Some(quad) = compat_quad(scope, b, layer, &ty, time, scale)? {
+    // What today's preview crop measured of a plain text layer, handed to
+    // its native draw below instead of measured again.
+    let mut measured = None;
+    if let Some(quad) = compat_quad(scope, b, layer, &ty, time, scale, &mut measured)? {
         return Ok(quad);
     }
     let (wf, hf) = b
@@ -2249,7 +2252,9 @@ fn native_content_quad<'d>(
                 },
             }
         }
-        "text" | "captions" => text_quad(scope, b, layer, &ty, time, (width, height), scale),
+        "text" | "captions" => {
+            text_quad(scope, b, layer, &ty, time, (width, height), scale, measured)
+        }
         "null" | "audio" | "group" => Ok(None),
         other => {
             b.unsupported.push(Unsupported::layer(
@@ -2268,6 +2273,7 @@ fn native_content_quad<'d>(
 /// session has a `raster` override. `None`: drawn natively. `Some(None)`:
 /// nothing is drawn (between caption cues, or still missing: the frame
 /// then needs it).
+#[allow(clippy::too_many_arguments)]
 fn compat_quad<'d>(
     scope: &mut Scope<'_, 'd>,
     b: &mut Build<'_>,
@@ -2275,6 +2281,7 @@ fn compat_quad<'d>(
     ty: &str,
     time: f64,
     scale: (f64, f64),
+    measured: &mut Option<crate::text::Level1Measured>,
 ) -> JsResult<Option<Option<Quad>>> {
     use crate::compat::{CompatAnswer, CompatSource};
     let Some(compat) = b.compat else {
@@ -2298,9 +2305,13 @@ fn compat_quad<'d>(
     let raster_scale = crate::text::continuous_raster_scale(&world);
     // Today's preview source clipping: the window the compositor passes to
     // `PM.raster` in a viewer frame, or no raster call at all.
-    let crop = match preview_crop(scope, b, layer, ty, time, scale, raster_scale)? {
+    let (crop, text) = preview_crop(scope, b, layer, ty, time, scale, raster_scale)?;
+    let crop = match crop {
         crate::compat_crop::CropPlan::Outside => return Ok(Some(None)),
-        crate::compat_crop::CropPlan::Solid => return Ok(None),
+        crate::compat_crop::CropPlan::Solid => {
+            *measured = text;
+            return Ok(None);
+        }
         crate::compat_crop::CropPlan::Full => None,
         crate::compat_crop::CropPlan::Crop(window) => Some(window),
     };
@@ -2314,7 +2325,10 @@ fn compat_quad<'d>(
         CompatSource::RasterOverride,
         crop,
     ) {
-        CompatAnswer::Native => Ok(None),
+        CompatAnswer::Native => {
+            *measured = text;
+            Ok(None)
+        }
         CompatAnswer::Raster(raster) => {
             let [w, h] = raster.size;
             // Today's compositor centres a plain shape's raster on the layer
@@ -2368,7 +2382,9 @@ fn compat_quad<'d>(
 /// of the open root composition, for a plain 2D text or shape layer (no
 /// paths, renderable effects, masks, track matte, or transitions; text
 /// without animators, styles, or typography anchoring). Anything else is
-/// drawn from the whole raster, as today.
+/// drawn from the whole raster, as today. With it, what was measured of a
+/// plain text layer ([`crate::text::TextContext::level1_raster`]), for the
+/// layer's native draw.
 #[allow(clippy::too_many_arguments)]
 fn preview_crop<'d>(
     scope: &mut Scope<'_, 'd>,
@@ -2378,16 +2394,19 @@ fn preview_crop<'d>(
     time: f64,
     scale: (f64, f64),
     raster_scale: f64,
-) -> JsResult<crate::compat_crop::CropPlan> {
+) -> JsResult<(
+    crate::compat_crop::CropPlan,
+    Option<crate::text::Level1Measured>,
+)> {
     use crate::compat_crop::{CropPlan, ShapeFacts, TextGeometry};
     let Some(window) = b.preview else {
-        return Ok(CropPlan::Full);
+        return Ok((CropPlan::Full, None));
     };
     if !matches!(ty, "text" | "shape")
         || !(scope.comp.at_root() || scope.comp.is_open_canonical())
         || b.precomp_depth > 0
     {
-        return Ok(CropPlan::Full);
+        return Ok((CropPlan::Full, None));
     }
     let d = node::member(Some(layer), "d");
     let listed = |n: Option<&Node>, key: &str| {
@@ -2403,12 +2422,12 @@ fn preview_crop<'d>(
         || node::truthy(node::member(Some(layer), "transitionOut"))
         || scope.has_renderable_effects(layer, time)?
     {
-        return Ok(CropPlan::Full);
+        return Ok((CropPlan::Full, None));
     }
     // A 3D layer's plane: drawn from the whole raster here (see
     // docs/engine/extensions-compat.md, "Crop").
     if scope.is_3d_layer(layer)? {
-        return Ok(CropPlan::Full);
+        return Ok((CropPlan::Full, None));
     }
     let mut visible = vector_world(scope, b, layer, time, scale)?;
     visible[4] -= window.x;
@@ -2429,24 +2448,27 @@ fn preview_crop<'d>(
             plain_rect,
             corner_inset: pm_vector::corner::corner_inset(&shape.corners()),
         };
-        return Ok(crate::compat_crop::shape_plan(
+        let plan = crate::compat_crop::shape_plan(
             &facts,
             raster_scale,
             &visible,
             window.width,
             window.height,
-        ));
+        );
+        return Ok((plan, None));
     }
     if listed(d, "animators")
         || listed(d, "styles")
         || node::truthy(node::member(d, "fontAnchorBounds"))
     {
-        return Ok(CropPlan::Full);
+        return Ok((CropPlan::Full, None));
     }
-    let Some(fonts) = b.text.as_deref_mut().and_then(|t| t.fonts.as_deref_mut()) else {
-        return Ok(CropPlan::Full);
+    let Some(text) = b.text.as_deref_mut().filter(|t| t.has_fonts()) else {
+        return Ok((CropPlan::Full, None));
     };
-    let placed = scope.text_raster(layer, time, fonts.measure())?;
+    // `scope.text_raster` with the fonts as they stand (not synced here),
+    // and what it was measured from.
+    let (placed, measured) = text.level1_raster(scope, layer, time)?;
     let g = TextGeometry::at(
         placed.w,
         placed.h,
@@ -2454,12 +2476,8 @@ fn preview_crop<'d>(
         placed.anchor_y,
         raster_scale,
     );
-    Ok(crate::compat_crop::text_plan(
-        &g,
-        &visible,
-        window.width,
-        window.height,
-    ))
+    let plan = crate::compat_crop::text_plan(&g, &visible, window.width, window.height);
+    Ok((plan, measured))
 }
 
 /// The quad of a planned shader or extension fragment layer: `{tex, w, h,
@@ -2752,7 +2770,9 @@ fn device_quad(q: crate::vector::VectorQuad) -> Quad {
 }
 
 /// A text or captions layer's raster quad (`crate::text`), at the density
-/// `continuousRasterScale(scaledWorld(L, T, W, H))` asks for.
+/// `continuousRasterScale(scaledWorld(L, T, W, H))` asks for. `measured`:
+/// what the layer's preview crop measured of it this frame, if anything
+/// (used only while it still holds, see `TextContext::level1_raster`).
 #[allow(clippy::too_many_arguments)]
 fn text_quad<'d>(
     scope: &mut Scope<'_, 'd>,
@@ -2762,6 +2782,7 @@ fn text_quad<'d>(
     time: f64,
     target: (u32, u32),
     scale: (f64, f64),
+    measured: Option<crate::text::Level1Measured>,
 ) -> JsResult<Option<Quad>> {
     let comp_id = scope.comp.id().to_string_lossy();
     let world = b.world(scope, layer, time, scale)?;
@@ -2808,7 +2829,7 @@ fn text_quad<'d>(
     if !scope.is_3d_layer(layer)? && !crate::raster_roi::at_rest(&world) {
         let m = kurbo::Affine::new(world);
         let plan = if ty == "text" {
-            text.text_layer_level1_device(scope, layer, time, m, target)?
+            text.text_layer_level1_device_measured(scope, layer, time, m, target, measured)?
         } else {
             text.captions_layer_level1_device(scope, layer, time, m, target)?
         };
@@ -2826,7 +2847,7 @@ fn text_quad<'d>(
     }
     let density = crate::text::continuous_raster_scale(&world);
     let quad = if ty == "text" {
-        text.text_layer(scope, layer, time, density)?
+        text.text_layer_measured(scope, layer, time, density, measured)?
     } else {
         text.captions_layer(scope, layer, time, density)?
     };
