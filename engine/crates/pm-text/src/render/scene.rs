@@ -1153,6 +1153,172 @@ fn canvas_mask_item(
     }
 }
 
+/// Deferred mask rows for one scene. Items have their final order and
+/// retain their outline fallback until the wave is admitted.
+#[derive(Default)]
+pub struct CanvasRows {
+    #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+    rows: Vec<PreparedCanvasPaint>,
+}
+
+/// One indexed mask result returned by the renderer's worker pool.
+pub struct CanvasMaskResult(
+    #[cfg(all(target_os = "macos", feature = "canvas2d"))] Option<super::canvas2d::GlyphMask>,
+);
+
+impl CanvasRows {
+    pub fn available() -> bool {
+        cfg!(all(target_os = "macos", feature = "canvas2d"))
+    }
+
+    pub fn reserve_bytes(&self) -> Option<usize> {
+        #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+        {
+            self.rows.iter().try_fold(0usize, |bytes, row| {
+                bytes.checked_add(row.masks.reserve_bytes()?)
+            })
+        }
+        #[cfg(not(all(target_os = "macos", feature = "canvas2d")))]
+        {
+            None
+        }
+    }
+
+    pub fn fits_mask_cache(bitmaps: &Bitmaps, bytes: usize) -> bool {
+        #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+        return bitmaps.canvas.can_admit_wave(bytes);
+
+        #[cfg(not(all(target_os = "macos", feature = "canvas2d")))]
+        {
+            let _ = (bitmaps, bytes);
+            false
+        }
+    }
+
+    /// Rasterize all rows in one wave and apply the masks in paint order.
+    /// On a possible eviction, the caller replays the original serial
+    /// planning path before publishing any scene from this wave.
+    pub fn resolve_wave(
+        bitmaps: &mut Bitmaps,
+        scenes: &mut [(CanvasRows, TextScene)],
+        map: impl FnOnce(usize, &(dyn Fn(usize) -> CanvasMaskResult + Sync)) -> Vec<CanvasMaskResult>,
+    ) -> bool {
+        #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+        {
+            let bytes = scenes.iter().try_fold(0usize, |bytes, (scene, _)| {
+                bytes.checked_add(scene.reserve_bytes()?)
+            });
+            let canvas = &mut bitmaps.canvas;
+            if !bytes.is_some_and(|n| canvas.can_admit_wave(n)) {
+                return false;
+            }
+            let mut job_index = HashMap::new();
+            let mut jobs = Vec::new();
+            let mut slots = Vec::new();
+            for (scene, _) in scenes.iter() {
+                for row in &scene.rows {
+                    slots.push(
+                        row.masks
+                            .jobs()
+                            .map(|(key, job)| {
+                                *job_index
+                                    .entry((key, job.geometry_key()))
+                                    .or_insert_with(|| {
+                                        let i = jobs.len();
+                                        jobs.push(job);
+                                        i
+                                    })
+                            })
+                            .collect::<Vec<_>>(),
+                    );
+                }
+            }
+            drop(job_index);
+            if jobs.is_empty() {
+                return true;
+            }
+            let results = map(jobs.len(), &|i| CanvasMaskResult(jobs[i].rasterize()));
+            assert_eq!(results.len(), jobs.len());
+            let mut results: Vec<_> = results
+                .into_iter()
+                .map(|result| (result.0.map(Arc::new), false))
+                .collect();
+            let mut slots = slots.into_iter();
+            for (prepared, scene) in scenes {
+                for row in prepared.rows.drain(..) {
+                    let indices = slots.next().expect("one index list per mask row");
+                    // Keep the jobs available for failed-mask retries.
+                    let jobs: Vec<_> = row.masks.jobs().map(|(_, job)| job).collect();
+                    let masks = canvas.admit_row(&row.masks, |slot| {
+                        let (mask, attempted) = &mut results[indices[slot]];
+                        if mask.is_none() && *attempted {
+                            *mask = jobs[slot].rasterize().map(Arc::new);
+                        }
+                        *attempted = true;
+                        mask.clone()
+                    });
+                    PreparedCanvasPaint::apply(row.slots, row.table, &masks, &mut scene.items);
+                }
+            }
+            true
+        }
+        #[cfg(not(all(target_os = "macos", feature = "canvas2d")))]
+        {
+            let _ = (bitmaps, scenes, map);
+            false
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "canvas2d"))]
+struct PreparedCanvasPaint {
+    masks: super::canvas2d::PendingMasks,
+    // (item index, mask job, pen x, pen y)
+    slots: Vec<(usize, usize, f64, f64)>,
+    table: &'static [u8; 256],
+}
+
+#[cfg(all(target_os = "macos", feature = "canvas2d"))]
+impl PreparedCanvasPaint {
+    fn new(color: Rgba) -> Self {
+        Self {
+            masks: super::canvas2d::PendingMasks::default(),
+            slots: Vec::new(),
+            table: super::canvas2d::mask_table([color[0], color[1], color[2]]),
+        }
+    }
+
+    fn finish(self, canvas: &mut super::canvas2d::CanvasMasks, out: &mut [Item]) {
+        if self.masks.is_empty() {
+            return;
+        }
+        let masks = canvas.resolve(self.masks);
+        Self::apply(self.slots, self.table, &masks, out);
+    }
+
+    fn apply(
+        slots: Vec<(usize, usize, f64, f64)>,
+        table: &'static [u8; 256],
+        masks: &[Option<Arc<super::canvas2d::GlyphMask>>],
+        out: &mut [Item],
+    ) {
+        for (slot, job, x, y) in slots {
+            if let Some(mask) = &masks[job] {
+                let original = &out[slot];
+                out[slot] = canvas_mask_item(
+                    mask,
+                    table,
+                    x,
+                    y,
+                    original.color,
+                    original.opacity,
+                    original.blur,
+                );
+            }
+        }
+    }
+}
+
 impl Painter<'_> {
     #[allow(clippy::too_many_arguments)]
     fn draw(
@@ -1165,7 +1331,10 @@ impl Painter<'_> {
         color: Rgba,
         opacity: f64,
         blur: f64,
+        deferred: Option<&mut CanvasRows>,
     ) {
+        #[cfg(not(all(target_os = "macos", feature = "canvas2d")))]
+        let _ = deferred;
         let scale = device_scale(m);
         if scale <= 0.0 || !scale.is_finite() {
             return;
@@ -1178,12 +1347,7 @@ impl Painter<'_> {
         // index, and the mask's item replaces it once drawn; a glyph whose
         // mask cannot be drawn keeps it, as before.
         #[cfg(all(target_os = "macos", feature = "canvas2d"))]
-        let mut pending = super::canvas2d::PendingMasks::default();
-        // (item index, job, pen x, pen y)
-        #[cfg(all(target_os = "macos", feature = "canvas2d"))]
-        let mut deferred: Vec<(usize, usize, f64, f64)> = Vec::new();
-        #[cfg(all(target_os = "macos", feature = "canvas2d"))]
-        let table = super::canvas2d::mask_table([color[0], color[1], color[2]]);
+        let mut prepared = PreparedCanvasPaint::new(color);
         for run in runs {
             let device_size = f64::from(run.size) * scale;
             let [a, b, c, d, _, _] = m.as_coeffs();
@@ -1309,7 +1473,7 @@ impl Painter<'_> {
                         let quarter = ((x - x.floor()) * 4.0).round() as u8;
                         let bounds = Affine::scale(scale).transform_rect_bbox(outline.bounds);
                         match self.bitmaps.canvas.lookup(
-                            &mut pending,
+                            &mut prepared.masks,
                             run.face,
                             coords,
                             id,
@@ -1321,7 +1485,13 @@ impl Painter<'_> {
                         ) {
                             super::canvas2d::MaskLookup::Ready(Some(mask)) => {
                                 out.push(canvas_mask_item(
-                                    &mask, table, x, y, color, opacity, blur,
+                                    &mask,
+                                    prepared.table,
+                                    x,
+                                    y,
+                                    color,
+                                    opacity,
+                                    blur,
                                 ));
                                 continue;
                             }
@@ -1354,7 +1524,7 @@ impl Painter<'_> {
                 }
                 #[cfg(all(target_os = "macos", feature = "canvas2d"))]
                 if let Some((job, x, y)) = defer {
-                    deferred.push((out.len(), job, x, y));
+                    prepared.slots.push((out.len(), job, x, y));
                 }
                 out.push(Item {
                     content: ItemContent::Coverage {
@@ -1373,13 +1543,10 @@ impl Painter<'_> {
             }
         }
         #[cfg(all(target_os = "macos", feature = "canvas2d"))]
-        if !pending.is_empty() {
-            let masks = self.bitmaps.canvas.resolve(pending);
-            for (slot, job, x, y) in deferred {
-                if let Some(mask) = &masks[job] {
-                    out[slot] = canvas_mask_item(mask, table, x, y, color, opacity, blur);
-                }
-            }
+        if let Some(deferred) = deferred {
+            deferred.rows.push(prepared);
+        } else {
+            prepared.finish(&mut self.bitmaps.canvas, out);
         }
     }
 
@@ -1394,7 +1561,21 @@ impl Painter<'_> {
         opacity: f64,
         blur: f64,
     ) {
-        self.draw(out, runs, origin, m, None, color, opacity, blur);
+        self.draw(out, runs, origin, m, None, color, opacity, blur, None);
+    }
+
+    /// Prepare ordinary fills for a wave. Callers keep synthetic bold and
+    /// color glyph runs on the immediate path.
+    pub fn prepare_canvas_fill(
+        &mut self,
+        out: &mut Vec<Item>,
+        runs: &[Run<'_>],
+        origin: (f64, f64),
+        m: Affine,
+        color: Rgba,
+        rows: &mut CanvasRows,
+    ) {
+        self.draw(out, runs, origin, m, None, color, 1.0, 0.0, Some(rows));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1409,7 +1590,7 @@ impl Painter<'_> {
         opacity: f64,
     ) {
         if width > 0.0 {
-            self.draw(out, runs, origin, m, Some(width), color, opacity, 0.0);
+            self.draw(out, runs, origin, m, Some(width), color, opacity, 0.0, None);
         }
     }
 }
@@ -1593,6 +1774,112 @@ mod tests {
             assert_same_items(&cold, &serial, &format!("scale {scale} cold vs serial"));
         }
     }
+    #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+    #[test]
+    fn canvas_mask_wave_matches_rows_with_one_two_and_many_workers() {
+        use read_fonts::TableProvider;
+
+        let data = std::fs::read("/System/Library/Fonts/SFNS.ttf").expect("SF Pro");
+        let cmap = read_fonts::FontRef::new(&data).unwrap().cmap().unwrap();
+        let glyphs: Vec<_> = "Parallel canvas masks"
+            .chars()
+            .enumerate()
+            .map(|(i, ch)| PlacedGlyph {
+                id: cmap.map_codepoint(ch as u32).unwrap().to_u32(),
+                x: i as f64 * 18.75,
+                y: 0.0,
+            })
+            .collect();
+        let runs = [Run {
+            face: FaceRef {
+                data: &data,
+                index: 0,
+                id: 1,
+            },
+            size: 24.0,
+            coords: Coords::User(&[]),
+            glyphs: &glyphs,
+            bitmap_size: None,
+            synthetic_bold: false,
+            synthetic_italic: false,
+            oblique: 0.0,
+        }];
+        let paint = |outlines: &mut Outlines, bitmaps: &mut Bitmaps, deferred: bool| {
+            let mut painter = Painter {
+                outlines,
+                bitmaps,
+                unsupported: Vec::new(),
+                smoothing: super::super::smoothing::Smoothing::Canvas2d,
+            };
+            (0..3)
+                .map(|layer| {
+                    let mut scene = TextScene {
+                        width: 600,
+                        height: 300,
+                        items: Vec::new(),
+                    };
+                    let mut rows = CanvasRows::default();
+                    for row in 0..2 {
+                        let origin = (5.25, f64::from(90 * layer + 32 * row + 28));
+                        let m = Affine::scale(0.875 + f64::from(layer) * 0.0625);
+                        let color = [0.3, 0.5, f64::from(layer) * 0.25, 1.0];
+                        if deferred {
+                            painter.prepare_canvas_fill(
+                                &mut scene.items,
+                                &runs,
+                                origin,
+                                m,
+                                color,
+                                &mut rows,
+                            );
+                        } else {
+                            painter.fill_text(&mut scene.items, &runs, origin, m, color, 1.0, 0.0);
+                        }
+                    }
+                    (rows, scene)
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected = paint(&mut Outlines::new(), &mut Bitmaps::new(), false);
+        let many = std::thread::available_parallelism().map_or(3, |n| n.get().max(3));
+        for workers in [1, 2, many] {
+            let mut bitmaps = Bitmaps::new();
+            let mut scenes = paint(&mut Outlines::new(), &mut bitmaps, true);
+            let mut waves = 0;
+            assert!(CanvasRows::resolve_wave(
+                &mut bitmaps,
+                &mut scenes,
+                |n, run| {
+                    waves += 1;
+                    assert!(n > glyphs.len());
+                    if workers == 1 {
+                        return (0..n).map(run).collect();
+                    }
+                    std::thread::scope(|scope| {
+                        let chunk = n.div_ceil(workers);
+                        let handles: Vec<_> = (0..n)
+                            .step_by(chunk)
+                            .map(|start| {
+                                scope.spawn(move || {
+                                    (start..(start + chunk).min(n)).map(run).collect::<Vec<_>>()
+                                })
+                            })
+                            .collect();
+                        handles
+                            .into_iter()
+                            .flat_map(|h| h.join().unwrap())
+                            .collect()
+                    })
+                }
+            ));
+            assert_eq!(waves, 1);
+            for ((_, got), (_, want)) in scenes.iter().zip(&expected) {
+                assert_eq!(got.ink(), want.ink());
+                assert_same_items(&got.items, &want.items, &format!("{workers} workers"));
+            }
+        }
+    }
+
     use i_overlay::float::simplify::SimplifyShape;
 
     fn fresh_union(contours: &[Vec<[f64; 2]>]) -> BezPath {

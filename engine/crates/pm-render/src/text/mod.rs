@@ -31,7 +31,7 @@ use pm_text::render::bitmap::Bitmaps;
 use pm_text::render::color::{self, Rgba};
 use pm_text::render::outline::Outlines;
 use pm_text::render::scene::{
-    ImagePixels, ItemContent, Painter, PathStyle, TextScene, fill_path, rounded_rect,
+    CanvasRows, ImagePixels, ItemContent, Painter, PathStyle, TextScene, fill_path, rounded_rect,
 };
 
 /// The fonts a renderer lays text out with: `pm-text`'s level 1 layout
@@ -275,6 +275,51 @@ struct Level1Plan {
     unsupported: Vec<String>,
 }
 
+type Level1Faces = Vec<Vec<(FaceInfo, Option<f32>)>>;
+
+struct QueuedLevel1 {
+    slot: usize,
+    id: usize,
+    cache: Level1Plan,
+    faces: Level1Faces,
+}
+
+#[derive(Default)]
+pub(crate) struct Level1PaintRun {
+    queued: Vec<QueuedLevel1>,
+    scenes: Vec<(CanvasRows, TextScene)>,
+    reserved_mask_bytes: usize,
+    pub(crate) completed: Vec<(usize, Option<TextPlan>)>,
+}
+
+impl Level1PaintRun {
+    pub(crate) fn is_queued(&self, slot: usize) -> bool {
+        self.queued.last().is_some_and(|entry| entry.slot == slot)
+    }
+
+    pub(crate) fn flush(&mut self, text: &mut TextContext) {
+        if self.queued.is_empty() {
+            return;
+        }
+        self.reserved_mask_bytes = 0;
+        let _span = pm_perf::Span::new(pm_perf::Counter::TextLayoutMicros);
+        let admitted = CanvasRows::resolve_wave(&mut text.bitmaps, &mut self.scenes, |n, run| {
+            crate::parallel::map(n, run)
+        });
+        for (entry, (_, scene)) in self.queued.drain(..).zip(self.scenes.drain(..)) {
+            let scene = if admitted {
+                scene
+            } else {
+                // The original row-by-row cache behavior runs at a possible
+                // eviction. The broker already resolved these exact faces.
+                text.paint_level1_faces(&entry.cache, &entry.faces, None)
+            };
+            self.completed
+                .push((entry.slot, text.admit_level1(entry.id, entry.cache, scene)));
+        }
+    }
+}
+
 /// A plain level 1 layer's lines: each line's glyph runs and pen origin.
 struct Level1Layout {
     lines: Vec<(Vec<GlyphRun>, (f64, f64))>,
@@ -410,10 +455,15 @@ impl TextContext {
     /// font generation makes every later raster key new (cached rasters of
     /// the old fonts are never reused).
     fn sync_fonts(&mut self) {
+        self.sync_fonts_before_reset(|_| {});
+    }
+
+    fn sync_fonts_before_reset(&mut self, before_reset: impl FnOnce(&mut Self)) {
         if let Some(fonts) = self.fonts.as_deref_mut() {
             fonts.sync();
             let g = fonts.generation();
             if g != self.fonts_generation {
+                before_reset(self);
                 self.fonts_generation = g;
                 self.generation += 1;
                 self.forget_glyphs();
@@ -973,9 +1023,30 @@ impl TextContext {
         target: (u32, u32),
         measured: Option<Level1Measured>,
     ) -> JsResult<Option<TextPlan>> {
+        self.level1_device(scope, layer, time, world, target, measured, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn level1_device<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        world: Affine,
+        target: (u32, u32),
+        measured: Option<Level1Measured>,
+        mut defer: Option<(&mut Level1PaintRun, usize)>,
+    ) -> JsResult<Option<TextPlan>> {
         let _span = pm_perf::Span::new(pm_perf::Counter::TextLayoutMicros);
-        self.sync_fonts();
+        self.sync_fonts_before_reset(|text| {
+            if let Some((run, _)) = defer.as_mut() {
+                run.flush(text);
+            }
+        });
         if level1_animated(layer) {
+            if let Some((run, _)) = defer {
+                run.flush(self);
+            }
             let raster = {
                 let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
                 scope.text_raster(layer, time, fonts.measure())?
@@ -997,6 +1068,12 @@ impl TextContext {
         // A layer whose content stays is laid out once; one that also stays
         // in place is not painted or keyed again either.
         let id = std::ptr::from_ref(layer) as usize;
+        if let Some((run, _)) = defer.as_mut()
+            && (self.level1_plans.len() + run.queued.len() >= LEVEL1_PLANS
+                || run.queued.iter().any(|entry| entry.id == id))
+        {
+            run.flush(self);
+        }
         let matrix = m.as_coeffs().map(f64::to_bits);
         let kept = self
             .level1_plans
@@ -1012,31 +1089,141 @@ impl TextContext {
             None => Arc::new(self.layout_level1(&d)),
         };
         self.unsupported.extend_from_slice(&layout.unsupported);
+        let mut cache = Level1Plan {
+            content: d,
+            matrix,
+            target,
+            generation: self.generation,
+            layout,
+            plan: None,
+            unsupported: Vec::new(),
+        };
+        if let Some((run, slot)) = defer {
+            let [a, b, c, d, _, _] = m.as_coeffs();
+            if CanvasRows::available()
+                && self.smoothing.level1() == pm_text::render::smoothing::Smoothing::Canvas2d
+                && b == 0.0
+                && c == 0.0
+                && a > 0.0
+                && (a - d).abs() < 1e-9
+                && !cache
+                    .layout
+                    .lines
+                    .iter()
+                    .any(|(runs, _)| runs.iter().any(|r| r.synthetic_bold))
+            {
+                let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+                let faces: Level1Faces = cache
+                    .layout
+                    .lines
+                    .iter()
+                    .map(|(runs, _)| run_faces(fonts, runs, m))
+                    .collect();
+                let plain = faces.iter().flatten().all(|(face, _)| {
+                    !face.facts.has_color_table
+                        && !pm_text::render::bitmap::has_bitmaps(
+                            pm_text::render::outline::FaceRef::of(face),
+                        )
+                });
+                if plain {
+                    let mut rows = CanvasRows::default();
+                    let scene = self.paint_level1_faces(&cache, &faces, Some(&mut rows));
+                    let reserved = rows
+                        .reserve_bytes()
+                        .and_then(|bytes| run.reserved_mask_bytes.checked_add(bytes));
+                    if let Some(bytes) =
+                        reserved.filter(|&bytes| CanvasRows::fits_mask_cache(&self.bitmaps, bytes))
+                    {
+                        run.reserved_mask_bytes = bytes;
+                        run.queued.push(QueuedLevel1 {
+                            slot,
+                            id,
+                            cache,
+                            faces,
+                        });
+                        run.scenes.push((rows, scene));
+                        return Ok(None);
+                    }
+                }
+                run.flush(self);
+                let reported = self.unsupported.len();
+                let scene = self.paint_level1_faces(&cache, &faces, None);
+                cache.unsupported = self.unsupported[reported..].to_vec();
+                return Ok(self.admit_level1(id, cache, scene));
+            }
+            run.flush(self);
+        }
         let reported = self.unsupported.len();
-        let scene = self.paint_level1(&layout, m, target);
-        // The scene is a function of the layout, matrix, target, and
-        // fonts: its key is made from those, not from every glyph path.
+        let scene = self.paint_level1(&cache.layout, m, target);
+        cache.unsupported = self.unsupported[reported..].to_vec();
+        Ok(self.admit_level1(id, cache, scene))
+    }
+
+    fn admit_level1(
+        &mut self,
+        id: usize,
+        mut cache: Level1Plan,
+        scene: TextScene,
+    ) -> Option<TextPlan> {
+        // The scene key follows the layout and target, preserving the
+        // existing cache identity regardless of how the masks were drawn.
         let plan = scene.ink().map(|crop| TextPlan {
-            key: level1_key(&layout, matrix, target, self.generation, crop),
+            key: level1_key(
+                &cache.layout,
+                cache.matrix,
+                cache.target,
+                cache.generation,
+                crop,
+            ),
             scene: Arc::new(scene),
             crop,
         });
         if self.level1_plans.len() >= LEVEL1_PLANS {
             self.level1_plans.clear();
         }
-        self.level1_plans.insert(
-            id,
-            Level1Plan {
-                content: d,
-                matrix,
-                target,
-                generation: self.generation,
-                layout,
-                plan: plan.clone(),
-                unsupported: self.unsupported[reported..].to_vec(),
-            },
-        );
-        Ok(plan)
+        cache.plan = plan.clone();
+        self.level1_plans.insert(id, cache);
+        plan
+    }
+
+    fn paint_level1_faces(
+        &mut self,
+        cache: &Level1Plan,
+        faces: &Level1Faces,
+        mut deferred: Option<&mut CanvasRows>,
+    ) -> TextScene {
+        let m = Affine::new(cache.matrix.map(f64::from_bits));
+        let mut scene = TextScene {
+            width: cache.target.0,
+            height: cache.target.1,
+            items: Vec::new(),
+        };
+        let (mut painter, _, unsupported) = self.painter();
+        for ((runs, origin), faces) in cache.layout.lines.iter().zip(faces) {
+            let refs = run_refs(runs, faces);
+            if let Some(rows) = deferred.as_deref_mut() {
+                painter.prepare_canvas_fill(
+                    &mut scene.items,
+                    &refs,
+                    *origin,
+                    m,
+                    cache.layout.fill,
+                    rows,
+                );
+            } else {
+                painter.fill_text(
+                    &mut scene.items,
+                    &refs,
+                    *origin,
+                    m,
+                    cache.layout.fill,
+                    1.0,
+                    0.0,
+                );
+            }
+        }
+        unsupported.append(&mut painter.unsupported);
+        scene
     }
 
     fn text_scene_level1<'d>(

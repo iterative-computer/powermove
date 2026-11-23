@@ -661,6 +661,60 @@ fn layer_failure(b: &mut Build<'_>, comp: &Comp<'_>, layer: &Node, message: Stri
     });
 }
 
+#[derive(Default)]
+struct TextDrawRun {
+    paint: crate::text::Level1PaintRun,
+    draws: Vec<TextDrawSlot>,
+    pending: Option<(String, f64)>,
+}
+
+enum TextDrawSlot {
+    Ready(Vec<Draw>),
+    Pending { layer: String, alpha: f64 },
+}
+
+impl TextDrawRun {
+    fn flush(&mut self, b: &mut Build<'_>, out: &mut Vec<Draw>) {
+        if self.draws.is_empty() {
+            return;
+        }
+        self.paint
+            .flush(b.text.as_deref_mut().expect("configured fonts"));
+        let mut ready = self.paint.completed.drain(..).peekable();
+        for (slot, draw) in self.draws.drain(..).enumerate() {
+            let painted = ready
+                .next_if(|(index, _)| *index == slot)
+                .and_then(|(_, p)| p);
+            match draw {
+                TextDrawSlot::Ready(draws) => out.extend(draws),
+                TextDrawSlot::Pending { layer, alpha } => {
+                    if let Some(p) = painted {
+                        let [x0, y0, x1, y1] = p.crop.map(f64::from);
+                        out.push(device_draw(
+                            layer,
+                            Source::Text(Box::new(p)),
+                            [x0, y0, x1 - x0, y1 - y0],
+                            alpha,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn device_draw(layer: String, source: Source, rect: [f64; 4], alpha: f64) -> Draw {
+    Draw {
+        layer,
+        matrix: [rect[2], 0.0, 0.0, rect[3], rect[0], rect[1]],
+        content: Content::Texture {
+            source,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            alpha,
+        },
+    }
+}
+
 /// `renderProject(proj, T, W, H, opt)` for one pass.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn comp_pass<'d>(
@@ -771,7 +825,9 @@ pub(crate) fn comp_pass<'d>(
         && let Some(material) = b.material.filter(|m| m.in_comp(scope.comp))
     {
         if let Some(layer) = all.iter().copied().find(|l| material.owns(l)) {
-            match draw_layer(scope, b, layer, time, width, height, scale, false, &all) {
+            match draw_layer(
+                scope, b, layer, time, width, height, scale, false, &all, None,
+            ) {
                 Ok(Some(draws)) => plan.draws = draws,
                 Ok(None) => {}
                 Err(error) => {
@@ -866,17 +922,70 @@ pub(crate) fn comp_pass<'d>(
         }
     }
     let solo = facts.solo;
+    let mut text_run = TextDrawRun::default();
+    let batch_text = pm_text::render::scene::CanvasRows::available()
+        && b.text.as_deref().is_some_and(|text| text.has_fonts())
+        && b.material.is_none()
+        && b.source_raster.is_none()
+        && b.forced_on.is_none()
+        && b.options3d.studio.is_none()
+        && b.video_center.is_none()
+        && b.matte_depth == 0
+        && !b
+            .compat
+            .is_some_and(|compat| compat.producing(crate::compat::CompatSource::RasterOverride));
     // Bottom (last) to top (first).
     for &layer in pass.iter().rev() {
         let id = node::get(layer, b"id").to_js();
         if facts.matte_sources.contains(&id) {
+            text_run.flush(b, &mut plan.draws);
             continue;
+        }
+        let candidate = batch_text
+            && js::layer_type(layer) == "text"
+            && !pm_eval::text_level2::is_level2(layer)
+            && ["fx", "masks"].into_iter().all(|key| {
+                node::array(node::member(Some(layer), key)).is_none_or(|v| v.is_empty())
+            })
+            && ["matteSource", "transitionIn", "transitionOut"]
+                .into_iter()
+                .all(|key| !node::truthy(node::member(Some(layer), key)));
+        if !candidate {
+            text_run.flush(b, &mut plan.draws);
         }
         let drawn =
             crate::reuse::draw(scope, b, layer, time, width, height, scale, solo, |s, b| {
                 pm_perf::bump(pm_perf::Counter::LayersPlanned);
-                draw_layer(s, b, layer, time, width, height, scale, solo, &all)
+                draw_layer(
+                    s,
+                    b,
+                    layer,
+                    time,
+                    width,
+                    height,
+                    scale,
+                    solo,
+                    &all,
+                    candidate.then_some(&mut text_run),
+                )
             });
+        if candidate {
+            let draws = match drawn {
+                Ok(draws) => draws.unwrap_or_default(),
+                Err(e) => {
+                    let comp = scope.comp.clone();
+                    layer_failure(b, &comp, layer, e.to_string());
+                    Vec::new()
+                }
+            };
+            let slot = if let Some((layer, alpha)) = text_run.pending.take() {
+                TextDrawSlot::Pending { layer, alpha }
+            } else {
+                TextDrawSlot::Ready(draws)
+            };
+            text_run.draws.push(slot);
+            continue;
+        }
         match drawn {
             Ok(Some(draws)) => plan.draws.extend(draws),
             Ok(None) => {}
@@ -886,6 +995,7 @@ pub(crate) fn comp_pass<'d>(
             }
         }
     }
+    text_run.flush(b, &mut plan.draws);
     b.pass3d.pop();
     plan
 }
@@ -925,6 +1035,7 @@ fn draw_layer<'d>(
     scale: (f64, f64),
     solo: bool,
     all: &[&'d Node],
+    mut text_run: Option<&mut TextDrawRun>,
 ) -> JsResult<Option<Vec<Draw>>> {
     let ty = js::layer_type(layer);
     if solo && !js::flag(layer, "solo") {
@@ -965,6 +1076,12 @@ fn draw_layer<'d>(
     let source_owner = has_fx && node::is_str(node::member(Some(layer), "effectSpace"), "source");
     let has_masks = composite::build::has_masks(scope, layer, time)?;
     let blend = composite::build::blend_mode(scope, layer, time)?;
+    if (has_fx || has_masks || blend != BlendMode::Normal)
+        && let Some(run) = text_run.take()
+    {
+        run.paint
+            .flush(b.text.as_deref_mut().expect("configured fonts"));
+    }
     // Effects prepared by the host (the effects lane); without one, a layer
     // with renderable effects is routed.
     let effects = if has_fx && !source_owner {
@@ -1088,6 +1205,12 @@ fn draw_layer<'d>(
     // Today's fast path draws straight into the accumulator; anything else
     // goes through the layer's own target.
     let slow = has_masks || has_fx || blend != BlendMode::Normal || matted || transition.is_some();
+    if (slow || blur.is_some())
+        && let Some(run) = text_run.take()
+    {
+        run.paint
+            .flush(b.text.as_deref_mut().expect("configured fonts"));
+    }
     // Motion blur samples draw straight into their accumulation. A blurred
     // layer that also needs its own target (masks, effects, matte, blend
     // mode, transition) takes the accumulation as its layer target, as
@@ -1285,9 +1408,30 @@ fn draw_layer<'d>(
     let padding = effects
         .as_ref()
         .map_or(composite::effects::Padding::NONE, |e| e.padding);
-    let Some(draw) =
-        layer_draw_with_padding(scope, b, layer, time, width, height, scale, alpha, padding)?
-    else {
+    let draw = if let Some(run) = text_run {
+        let slot = run.draws.len();
+        let result = layer_draw_with_padding(
+            scope,
+            b,
+            layer,
+            time,
+            width,
+            height,
+            scale,
+            alpha,
+            padding,
+            Some((&mut run.paint, slot)),
+        )?;
+        if run.paint.is_queued(slot) {
+            run.pending = Some((id.clone(), alpha));
+        }
+        result
+    } else {
+        layer_draw_with_padding(
+            scope, b, layer, time, width, height, scale, alpha, padding, None,
+        )?
+    };
+    let Some(draw) = draw else {
         return Ok(None);
     };
     if slow {
@@ -1317,7 +1461,9 @@ pub(crate) fn layer_draw<'d>(
     } else {
         composite::effects::Padding::NONE
     };
-    layer_draw_with_padding(scope, b, layer, time, width, height, scale, alpha, padding)
+    layer_draw_with_padding(
+        scope, b, layer, time, width, height, scale, alpha, padding, None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1331,8 +1477,9 @@ fn layer_draw_with_padding<'d>(
     scale: (f64, f64),
     alpha: f64,
     padding: composite::effects::Padding,
+    text: Option<(&mut crate::text::Level1PaintRun, usize)>,
 ) -> JsResult<Option<Draw>> {
-    let Some(mut quad) = content_quad(scope, b, layer, time, width, height, scale)? else {
+    let Some(mut quad) = content_quad(scope, b, layer, time, width, height, scale, text)? else {
         return Ok(None);
     };
     if matches!(quad, Quad::Screen { .. })
@@ -1475,15 +1622,7 @@ fn layer_draw_with_padding<'d>(
                 alpha,
             },
         },
-        Quad::Device { source, rect } => Draw {
-            layer: id.clone(),
-            matrix: [rect[2], 0.0, 0.0, rect[3], rect[0], rect[1]],
-            content: Content::Texture {
-                source,
-                uv: [0.0, 0.0, 1.0, 1.0],
-                alpha,
-            },
-        },
+        Quad::Device { source, rect } => device_draw(id, source, rect, alpha),
     };
     Ok(Some(draw))
 }
@@ -1638,7 +1777,9 @@ fn matte_pass<'d>(
     };
     let all = [source];
     let solo = js::flag(source, "solo");
-    match draw_layer(scope, b, source, time, width, height, scale, solo, &all) {
+    match draw_layer(
+        scope, b, source, time, width, height, scale, solo, &all, None,
+    ) {
         Ok(Some(draws)) => plan.draws.extend(draws),
         Ok(None) => {}
         Err(e) => {
@@ -1699,6 +1840,7 @@ enum Quad {
 }
 
 /// `contentQuad(L, T, W, H)`: `nativeContentQuad` plus the size anchor.
+#[allow(clippy::too_many_arguments)]
 fn content_quad<'d>(
     scope: &mut Scope<'_, 'd>,
     b: &mut Build<'_>,
@@ -1707,8 +1849,9 @@ fn content_quad<'d>(
     width: u32,
     height: u32,
     scale: (f64, f64),
+    text: Option<(&mut crate::text::Level1PaintRun, usize)>,
 ) -> JsResult<Option<Quad>> {
-    let quad = native_content_quad(scope, b, layer, time, width, height, scale)?;
+    let quad = native_content_quad(scope, b, layer, time, width, height, scale, text)?;
     let Some(mut quad) = quad else {
         return Ok(None);
     };
@@ -1737,6 +1880,7 @@ fn native_content_quad<'d>(
     width: u32,
     height: u32,
     scale: (f64, f64),
+    text: Option<(&mut crate::text::Level1PaintRun, usize)>,
 ) -> JsResult<Option<Quad>> {
     let ty = js::layer_type(layer);
     let comp_id = scope.comp.id().to_string_lossy();
@@ -2252,9 +2396,17 @@ fn native_content_quad<'d>(
                 },
             }
         }
-        "text" | "captions" => {
-            text_quad(scope, b, layer, &ty, time, (width, height), scale, measured)
-        }
+        "text" | "captions" => text_quad(
+            scope,
+            b,
+            layer,
+            &ty,
+            time,
+            (width, height),
+            scale,
+            measured,
+            text,
+        ),
         "null" | "audio" | "group" => Ok(None),
         other => {
             b.unsupported.push(Unsupported::layer(
@@ -2774,6 +2926,7 @@ fn device_quad(q: crate::vector::VectorQuad) -> Quad {
 /// what the layer's preview crop measured of it this frame, if anything
 /// (used only while it still holds, see `TextContext::level1_raster`).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn text_quad<'d>(
     scope: &mut Scope<'_, 'd>,
     b: &mut Build<'_>,
@@ -2783,6 +2936,7 @@ fn text_quad<'d>(
     target: (u32, u32),
     scale: (f64, f64),
     measured: Option<crate::text::Level1Measured>,
+    mut deferred: Option<(&mut crate::text::Level1PaintRun, usize)>,
 ) -> JsResult<Option<Quad>> {
     let comp_id = scope.comp.id().to_string_lossy();
     let world = b.world(scope, layer, time, scale)?;
@@ -2798,6 +2952,9 @@ fn text_quad<'d>(
         return Ok(None);
     }
     let level2 = node::to_number(node::member(Some(layer), "compat")) >= 2.0;
+    if level2 && let Some((run, _)) = deferred.take() {
+        run.flush(text);
+    }
     if level2 && scope.is_3d_layer(layer)? {
         return local_text(scope, b, layer, ty, time, scale);
     }
@@ -2829,7 +2986,7 @@ fn text_quad<'d>(
     if !scope.is_3d_layer(layer)? && !crate::raster_roi::at_rest(&world) {
         let m = kurbo::Affine::new(world);
         let plan = if ty == "text" {
-            text.text_layer_level1_device_measured(scope, layer, time, m, target, measured)?
+            text.level1_device(scope, layer, time, m, target, measured, deferred)?
         } else {
             text.captions_layer_level1_device(scope, layer, time, m, target)?
         };
@@ -2844,6 +3001,9 @@ fn text_quad<'d>(
                 rect: [x0, y0, x1 - x0, y1 - y0],
             }
         }));
+    }
+    if let Some((run, _)) = deferred {
+        run.flush(text);
     }
     let density = crate::text::continuous_raster_scale(&world);
     let quad = if ty == "text" {

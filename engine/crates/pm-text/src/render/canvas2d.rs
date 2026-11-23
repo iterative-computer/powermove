@@ -62,7 +62,7 @@ unsafe impl Send for SharedFont {}
 unsafe impl Sync for SharedFont {}
 
 /// One CoreGraphics mask to draw: a pure function of these fields.
-struct MaskJob {
+pub(super) struct MaskJob {
     font: SharedFont,
     glyph: u16,
     style: MaskStyle,
@@ -74,6 +74,26 @@ impl MaskJob {
     }
 }
 
+impl MaskJob {
+    pub(super) fn rasterize(&self) -> Option<GlyphMask> {
+        objc2::rc::autoreleasepool(|_| self.run())
+    }
+
+    pub(super) fn geometry_key(&self) -> [u64; 4] {
+        [
+            self.bounds.x0,
+            self.bounds.y0,
+            self.bounds.x1,
+            self.bounds.y1,
+        ]
+        .map(f64::to_bits)
+    }
+
+    fn bytes(&self) -> usize {
+        mask_rect(self.bounds).map_or(0, |(_, _, w, h)| w * h)
+    }
+}
+
 /// Masks a paint still has to draw, deduplicated by key; drawn together
 /// (in parallel when there are enough) by [`CanvasMasks::resolve`].
 #[derive(Default)]
@@ -81,10 +101,24 @@ pub(crate) struct PendingMasks {
     jobs: Vec<MaskJob>,
     keys: Vec<Key>,
     index: HashMap<Key, usize>,
+    font_failed: bool,
 }
 impl PendingMasks {
     pub fn is_empty(&self) -> bool {
         self.jobs.is_empty()
+    }
+
+    pub(super) fn jobs(&self) -> impl Iterator<Item = (&Key, &MaskJob)> {
+        self.keys.iter().zip(&self.jobs)
+    }
+
+    pub(super) fn reserve_bytes(&self) -> Option<usize> {
+        if self.font_failed {
+            return None;
+        }
+        self.jobs
+            .iter()
+            .try_fold(0usize, |bytes, job| bytes.checked_add(job.bytes()))
     }
 }
 
@@ -208,6 +242,7 @@ impl CanvasMasks {
                 };
                 // Fonts resolve here, on the caller's thread, in paint order.
                 let Some(font) = self.fonts.font_of(face.id, &run) else {
+                    pending.font_failed = true;
                     return MaskLookup::Ready(None);
                 };
                 let job = pending.jobs.len();
@@ -223,6 +258,34 @@ impl CanvasMasks {
             }
         }
     }
+    /// Each row looked up keys against the same cache snapshot. Reuse
+    /// that preparation only while all its original hits remain valid.
+    pub(super) fn can_admit_wave(&self, bytes: usize) -> bool {
+        bytes == 0 || self.bytes.saturating_add(bytes) <= MASK_BYTES
+    }
+
+    pub(super) fn admit_row(
+        &mut self,
+        pending: &PendingMasks,
+        mut get: impl FnMut(usize) -> Option<Arc<GlyphMask>>,
+    ) -> Vec<Option<Arc<GlyphMask>>> {
+        pending
+            .keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| {
+                if let Some(mask) = self.masks.get(key) {
+                    // A previous row may have admitted this key. A failed
+                    // result was never cached, so it cannot hide a later retry.
+                    return Some(mask.clone());
+                }
+                let mask = get(i)?;
+                self.keep(key.clone(), mask.clone());
+                Some(mask)
+            })
+            .collect()
+    }
+
     /// Draws the pending masks, keeps the drawn ones, and returns them by
     /// job index (`None` where CoreGraphics could not draw).
     pub fn resolve(&mut self, pending: PendingMasks) -> Vec<Option<Arc<GlyphMask>>> {
@@ -418,6 +481,22 @@ fn draw_path(
         coverage: pixels.data().iter().map(|p| p.a).collect(),
     })
 }
+fn mask_rect(bounds: kurbo::Rect) -> Option<(i32, i32, usize, usize)> {
+    if ![bounds.x0, bounds.y0, bounds.x1, bounds.y1]
+        .into_iter()
+        .all(f64::is_finite)
+    {
+        return None;
+    }
+    let left = (bounds.x0.floor() as i32).checked_sub(PAD)?;
+    let top = (bounds.y0.floor() as i32).checked_sub(PAD)?;
+    let right = (bounds.x1.ceil() as i32).checked_add(PAD + 1)?;
+    let bottom = (bounds.y1.ceil() as i32).checked_add(PAD)?;
+    let w = right.checked_sub(left)?.max(1) as usize;
+    let h = bottom.checked_sub(top)?.max(1) as usize;
+    (w <= 4096 && h <= 4096).then_some((left, top, w, h))
+}
+
 fn draw(
     font: &CFRetained<CTFont>,
     glyph: u16,
@@ -425,24 +504,7 @@ fn draw(
     bounds: kurbo::Rect,
 ) -> Option<GlyphMask> {
     let sub_x = f64::from(style.quarter) / 4.0;
-    if !(bounds.x0.is_finite()
-        && bounds.y0.is_finite()
-        && bounds.x1.is_finite()
-        && bounds.y1.is_finite())
-    {
-        return None;
-    }
-    let left = bounds.x0.floor() as i32 - PAD;
-    let top = bounds.y0.floor() as i32 - PAD;
-    let right = bounds.x1.ceil() as i32 + PAD + 1;
-    let bottom = bounds.y1.ceil() as i32 + PAD;
-    let (w, h) = (
-        (right - left).max(1) as usize,
-        (bottom - top).max(1) as usize,
-    );
-    if w > 4096 || h > 4096 {
-        return None;
-    }
+    let (left, top, w, h) = mask_rect(bounds)?;
     // Skia's offscreen: device RGB, 32 bits, no alpha, host byte order.
     let mut pixels = vec![0xffff_ffffu32; w * h];
     let space = CGColorSpace::new_device_rgb()?;
@@ -548,6 +610,34 @@ pub fn mask_table(rgb: [f64; 3]) -> &'static [u8; 256] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canvas_mask_wave_keeps_failed_keys_retryable_and_reserves_before_eviction() {
+        let mut canvas = CanvasMasks::default();
+        let pending = PendingMasks {
+            keys: vec![(1, 0, 10, 24.0f32.to_bits(), Vec::new(), 0, 0, None)],
+            ..PendingMasks::default()
+        };
+        assert!(canvas.admit_row(&pending, |_| None)[0].is_none());
+        assert!(canvas.masks.is_empty());
+
+        canvas.bytes = MASK_BYTES - 1;
+        assert!(canvas.can_admit_wave(1));
+        assert!(!canvas.can_admit_wave(2));
+        let mask = Arc::new(GlyphMask {
+            width: 1,
+            height: 1,
+            left: 0,
+            top: 0,
+            coverage: vec![128],
+        });
+        let result = canvas.admit_row(&pending, |_| Some(mask.clone()));
+        assert!(Arc::ptr_eq(result[0].as_ref().unwrap(), &mask));
+        assert_eq!(canvas.bytes, MASK_BYTES);
+        assert!(!canvas.can_admit_wave(1));
+        let cached = canvas.admit_row(&pending, |_| panic!("cached mask should not be retried"));
+        assert!(Arc::ptr_eq(cached[0].as_ref().unwrap(), &mask));
+    }
     use kurbo::Shape;
 
     /// Selection/seek repaints nested text at new device sizes while Properties
