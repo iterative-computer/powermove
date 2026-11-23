@@ -51,14 +51,7 @@ fn effect_space(
     origin: [f64; 2],
     resolution: [f64; 2],
 ) -> [(String, Call); 9] {
-    let d = if !step.raster_space
-        && step.owner.is_none()
-        && step.density.iter().all(|d| d.is_finite() && *d > 0.)
-    {
-        step.density
-    } else {
-        [1., 1.]
-    };
+    let d = effect_density(step);
     let (ow, oh) = (f64::from(out.0) / d[0], f64::from(out.1) / d[1]);
     [
         (
@@ -91,6 +84,22 @@ fn effect_space(
             ]),
         ),
     ]
+}
+
+/// Output pixels per pixel of the space a step's program sees (`u_res` is
+/// its output size divided by this, [`effect_space`]): the step's density
+/// for a viewer-frame step without an owner binding, else 1 (owner bound
+/// steps, `raster_space` final output, or a density that is not finite and
+/// positive). Finite and positive on both axes.
+pub(crate) fn effect_density(step: &EffectStep) -> [f64; 2] {
+    if !step.raster_space
+        && step.owner.is_none()
+        && step.density.iter().all(|d| d.is_finite() && *d > 0.)
+    {
+        step.density
+    } else {
+        [1., 1.]
+    }
 }
 
 /// A transition's `u_m`, `u_res` and `u_texel` for a `w` × `h` stack: in

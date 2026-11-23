@@ -107,37 +107,131 @@ fn layer_rect(n: &LayerNode, rect: Region, full: (u32, u32)) -> Option<Region> {
 /// The union of a layer's content placements in top-down device pixels
 /// (with the sampler's analytic edge support): `Ok(None)` when nothing is
 /// placed, `Err(())` when the layer holds a composite, whose bounds are
-/// not known here.
+/// not known here. A group boundary counts as its whole quad.
 fn placed_bounds(n: &LayerNode) -> Result<Option<[f64; 4]>, ()> {
+    draws_bounds(&n.content, None)
+}
+
+/// [`placed_bounds`], looking through group boundaries drawn 1:1
+/// ([`group_bounds`]): where a layer's own target can be non-zero.
+fn content_bounds(n: &LayerNode) -> Result<Option<[f64; 4]>, ()> {
+    draws_bounds(&n.content, Some(0))
+}
+
+/// How many group boundaries deep [`content_bounds`] looks; deeper nests
+/// count as unknown.
+const GROUP_DEPTH_MAX: u32 = 32;
+
+/// The union of `draws`' bounds ([`draw_bounds`]). `groups`: the nesting
+/// depth when group boundaries are looked through, `None` when each counts
+/// as its whole quad.
+fn draws_bounds(draws: &[crate::plan::Draw], groups: Option<u32>) -> Result<Option<[f64; 4]>, ()> {
     let mut bounds: Option<[f64; 4]> = None;
-    for d in &n.content {
-        let (plane, uv) = match &d.content {
-            Content::Placed(p) => {
-                let uv = match &p.content {
-                    Content::Texture { uv, .. } => *uv,
-                    _ => [0.0, 0.0, 1.0, 1.0],
-                };
-                (p.plane, uv)
-            }
-            Content::Composite(_) => return Err(()),
-            Content::Texture { uv, .. } => (None, *uv),
-            Content::Solid(_) => (None, [0.0, 0.0, 1.0, 1.0]),
+    for d in draws {
+        let placed = match (&d.content, groups) {
+            (
+                Content::Texture {
+                    source: crate::plan::Source::Comp(child),
+                    uv,
+                    alpha,
+                },
+                Some(depth),
+            ) => group_bounds(d, child, *uv, *alpha, depth)?,
+            _ => draw_bounds(d)?,
         };
-        let matrix = plane.unwrap_or_else(|| crate::sampling::gpu::affine3(&d.matrix));
-        let Some(p) = crate::sampling::gpu::placement(matrix, uv) else {
+        let Some(p) = placed else {
             continue;
         };
         bounds = Some(match bounds {
-            None => p.bounds,
+            None => p,
             Some(b) => [
-                b[0].min(p.bounds[0]),
-                b[1].min(p.bounds[1]),
-                b[2].max(p.bounds[2]),
-                b[3].max(p.bounds[3]),
+                b[0].min(p[0]),
+                b[1].min(p[1]),
+                b[2].max(p[2]),
+                b[3].max(p[3]),
             ],
         });
     }
     Ok(bounds)
+}
+
+/// One draw's placement bounds (with the sampler's analytic edge
+/// support): `Ok(None)` when it places nothing, `Err(())` for a composite.
+fn draw_bounds(d: &crate::plan::Draw) -> Result<Option<[f64; 4]>, ()> {
+    let (plane, uv) = match &d.content {
+        Content::Placed(p) => {
+            let uv = match &p.content {
+                Content::Texture { uv, .. } => *uv,
+                _ => [0.0, 0.0, 1.0, 1.0],
+            };
+            (p.plane, uv)
+        }
+        Content::Composite(_) => return Err(()),
+        Content::Texture { uv, .. } => (None, *uv),
+        Content::Solid(_) => (None, [0.0, 0.0, 1.0, 1.0]),
+    };
+    let matrix = plane.unwrap_or_else(|| crate::sampling::gpu::affine3(&d.matrix));
+    Ok(crate::sampling::gpu::placement(matrix, uv).map(|p| p.bounds))
+}
+
+/// Where a draw of a group boundary's target can be non-zero.
+///
+/// A group boundary (`CompPlan::group`) drawn through the unit quad scaled
+/// to its own size (`[w, 0, 0, h, 0, 0]`), the whole UV window, and an
+/// alpha in `0..=1` (an f32 `+0 × alpha` stays zero) shares its parent's
+/// pixel space 1:1: its members render
+/// into its target (over the parent's region, `Exec::resolve_content`) at
+/// the parent's device coordinates, and the draw samples texel `p` at pixel
+/// `p`. A transparent background leaves the target `+0` outside its
+/// members' bounds, and a bilinear sample there reads texels within one
+/// pixel of it: the members' bounds (recursively), out to whole pixels
+/// and grown by one, within the quad's own bounds. `Err(())` when a member
+/// is a composite (its bounds are not known here) or the nesting is deeper
+/// than [`GROUP_DEPTH_MAX`]; any other draw of a composition is its quad.
+fn group_bounds(
+    d: &crate::plan::Draw,
+    child: &crate::plan::CompPlan,
+    uv: [f64; 4],
+    alpha: f64,
+    depth: u32,
+) -> Result<Option<[f64; 4]>, ()> {
+    let Some(quad) = draw_bounds(d)? else {
+        return Ok(None);
+    };
+    let one_to_one = child.group
+        && matches!(child.background, crate::plan::Background::Transparent)
+        && uv == [0.0, 0.0, 1.0, 1.0]
+        && (0.0..=1.0).contains(&alpha)
+        && d.matrix
+            == [
+                f64::from(child.width),
+                0.0,
+                0.0,
+                f64::from(child.height),
+                0.0,
+                0.0,
+            ];
+    if !one_to_one {
+        return Ok(Some(quad));
+    }
+    if depth >= GROUP_DEPTH_MAX {
+        return Err(());
+    }
+    let Some(inner) = draws_bounds(&child.draws, Some(depth + 1))? else {
+        // No member placed: the target is its clear.
+        return Ok(None);
+    };
+    if !inner.iter().all(|v| v.is_finite()) {
+        return Ok(Some(quad));
+    }
+    let b = [
+        (inner[0].floor() - 1.0).max(quad[0]),
+        (inner[1].floor() - 1.0).max(quad[1]),
+        (inner[2].ceil() + 1.0).min(quad[2]),
+        (inner[3].ceil() + 1.0).min(quad[3]),
+    ];
+    // Members wholly outside the quad: nothing is drawn.
+    Ok((b[2] > b[0] && b[3] > b[1]).then_some(b))
 }
 
 /// Where a layer's effect input (its content, then its masks, which only
@@ -146,7 +240,7 @@ fn placed_bounds(n: &LayerNode) -> Result<Option<[f64; 4]>, ()> {
 /// its placements touch, one more on every side. Outside, the input is
 /// exactly transparent. `None` when that is not known (a composite).
 fn effect_input_bounds(n: &LayerNode, rect: Region) -> Option<(u32, u32, u32, u32)> {
-    let Some(b) = placed_bounds(n).ok()? else {
+    let Some(b) = content_bounds(n).ok()? else {
         // Nothing placed: transparent everywhere.
         return Some((0, 0, 0, 0));
     };
@@ -1184,4 +1278,368 @@ fn copy_same(encoder: &mut wgpu::CommandEncoder, source: &Target, target: &Targe
             depth_or_array_layers: 1,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::{Background, Draw, Solid, Source};
+
+    const W: u32 = 256;
+    const H: u32 = 144;
+    const FULL: [f64; 6] = [W as f64, 0.0, 0.0, H as f64, 0.0, 0.0];
+
+    fn solid(w: f64, h: f64, x: f64, y: f64) -> Draw {
+        Draw {
+            layer: "s".into(),
+            matrix: [w, 0.0, 0.0, h, x, y],
+            content: Content::Solid(Solid {
+                color: [1.0, 0.5, 0.25, 1.0],
+                size: [w, h],
+                radius: 0.0,
+            }),
+        }
+    }
+
+    fn plan(group: bool, draws: Vec<Draw>) -> CompPlan {
+        CompPlan {
+            composition: "c".into(),
+            group,
+            width: W,
+            height: H,
+            background: Background::Transparent,
+            draws,
+            view: None,
+        }
+    }
+
+    /// A draw of `child` through the full quad (a boundary group's draw).
+    fn comp(child: CompPlan, alpha: f64) -> Draw {
+        Draw {
+            layer: "g".into(),
+            matrix: FULL,
+            content: Content::Texture {
+                source: Source::Comp(Box::new(child)),
+                uv: [0.0, 0.0, 1.0, 1.0],
+                alpha,
+            },
+        }
+    }
+
+    fn node(content: Vec<Draw>) -> LayerNode {
+        LayerNode {
+            layer: "n".into(),
+            content,
+            masks: None,
+            effects: None,
+            matte: None,
+            blend: BlendMode::Normal,
+            alpha: 1.0,
+            transition: None,
+        }
+    }
+
+    fn full() -> Region {
+        Region::full(W, H)
+    }
+
+    /// The full quad's own placement (one pixel of edge support).
+    const QUAD: [f64; 4] = [-1.0, -1.0, W as f64 + 1.0, H as f64 + 1.0];
+
+    /// A group boundary's members, recursively: their union, out to whole
+    /// pixels and one more per level, within the quad. Without looking
+    /// through groups (`layer_rect`'s bounds) it is the whole quad.
+    #[test]
+    fn group_bounds_are_the_union_of_their_members() {
+        // [29, 39, 51, 51] and [99, 59, 111, 71] (each grown by one).
+        let group = comp(
+            plan(
+                true,
+                vec![solid(20., 10., 30., 40.), solid(10., 10., 100., 60.)],
+            ),
+            1.0,
+        );
+        let n = node(vec![group]);
+        assert_eq!(placed_bounds(&n), Ok(Some(QUAD)));
+        assert_eq!(content_bounds(&n), Ok(Some([28., 38., 112., 72.])));
+        // Texels: [27, 113) × [37, 73), rows from the bottom.
+        assert_eq!(
+            effect_input_bounds(&n, full()),
+            Some((27, H - 73, 113 - 27, 73 - 37))
+        );
+        // A region: relative to its corner, clamped to it.
+        let rect = Region {
+            x: 40,
+            y: 20,
+            width: 100,
+            height: 40,
+        };
+        assert_eq!(effect_input_bounds(&n, rect), Some((0, 0, 73, 23)));
+        // Any finite alpha (a boundary at half opacity), and fractional
+        // placements round outwards.
+        let half = comp(plan(true, vec![solid(10.5, 10.25, 30.25, 40.5)]), 0.5);
+        // Solid: [29, 39, 42, 52]; the group: one more.
+        assert_eq!(
+            content_bounds(&node(vec![half])),
+            Ok(Some([28., 38., 43., 53.]))
+        );
+    }
+
+    /// Nested boundaries add a pixel per level; a leaf beside the group
+    /// joins the union.
+    #[test]
+    fn nested_groups_are_looked_through() {
+        let inner = comp(plan(true, vec![solid(10., 10., 100., 60.)]), 0.5);
+        let outer = comp(plan(true, vec![solid(20., 10., 30., 40.), inner]), 1.0);
+        // Inner: [99, 59, 111, 71] → [98, 58, 112, 72]; with the solid
+        // [29, 39, 51, 51]: [29, 39, 112, 72] → [28, 38, 113, 73].
+        assert_eq!(
+            content_bounds(&node(vec![outer.clone()])),
+            Ok(Some([28., 38., 113., 73.]))
+        );
+        let leaf = solid(4., 4., 200., 10.);
+        // Leaf [199, 9, 205, 15].
+        assert_eq!(
+            content_bounds(&node(vec![outer, leaf])),
+            Ok(Some([28., 9., 205., 73.]))
+        );
+        // Too deep: unknown.
+        let mut deep = comp(plan(true, vec![solid(4., 4., 10., 10.)]), 1.0);
+        for _ in 0..GROUP_DEPTH_MAX {
+            deep = comp(plan(true, vec![deep]), 1.0);
+        }
+        assert_eq!(content_bounds(&node(vec![deep.clone()])), Err(()));
+        assert_eq!(effect_input_bounds(&node(vec![deep]), full()), None);
+        let mut shallow = comp(plan(true, vec![solid(4., 4., 10., 10.)]), 1.0);
+        for _ in 1..GROUP_DEPTH_MAX {
+            shallow = comp(plan(true, vec![shallow]), 1.0);
+        }
+        assert!(content_bounds(&node(vec![shallow])).unwrap().is_some());
+    }
+
+    /// Only a group boundary drawn 1:1 with a transparent clear is looked
+    /// through; any other draw of a composition counts as its quad, and a
+    /// member through its own target is unknown.
+    #[test]
+    fn other_compositions_count_as_their_quad() {
+        let members = || vec![solid(20., 10., 30., 40.)];
+        let bounds = |d: Draw| content_bounds(&node(vec![d]));
+        // A precomp (sampled through its layer's transform).
+        assert_eq!(bounds(comp(plan(false, members()), 1.0)), Ok(Some(QUAD)));
+        // A filled background.
+        let mut filled = plan(true, members());
+        filled.background = Background::Solid([0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(bounds(comp(filled, 1.0)), Ok(Some(QUAD)));
+        // Not 1:1: moved, scaled, or through a UV window.
+        for matrix in [
+            [W as f64, 0.0, 0.0, H as f64, 1.0, 0.0],
+            [W as f64 / 2.0, 0.0, 0.0, H as f64 / 2.0, 0.0, 0.0],
+        ] {
+            let mut d = comp(plan(true, members()), 1.0);
+            d.matrix = matrix;
+            let quad = crate::sampling::gpu::placement(
+                crate::sampling::gpu::affine3(&matrix),
+                [0.0, 0.0, 1.0, 1.0],
+            )
+            .unwrap()
+            .bounds;
+            assert_eq!(bounds(d), Ok(Some(quad)), "{matrix:?}");
+        }
+        let mut window = comp(plan(true, members()), 1.0);
+        if let Content::Texture { uv, .. } = &mut window.content {
+            *uv = [0.0, 0.0, 0.5, 1.0];
+        }
+        assert!(bounds(window).unwrap().unwrap()[2] > 100.0);
+        // An alpha outside `0..=1` (`NaN × 0`, and `1e300` as f32 is `inf`).
+        for alpha in [f64::NAN, f64::INFINITY, 1e300, 2.0, -1.0] {
+            assert_eq!(bounds(comp(plan(true, members()), alpha)), Ok(Some(QUAD)));
+        }
+        // A member through its own target.
+        let member = Draw {
+            layer: "m".into(),
+            matrix: FULL,
+            content: Content::Composite(Box::new(Node::Layer(node(members())))),
+        };
+        let group = comp(plan(true, vec![solid(4., 4., 0., 0.), member]), 1.0);
+        assert_eq!(bounds(group.clone()), Err(()));
+        assert_eq!(effect_input_bounds(&node(vec![group]), full()), None);
+    }
+
+    /// Members partly or wholly off the frame, and groups that place
+    /// nothing.
+    #[test]
+    fn group_bounds_clamp_to_the_frame() {
+        let bounds =
+            |members: Vec<Draw>| content_bounds(&node(vec![comp(plan(true, members), 1.0)]));
+        // [-11, 19, 21, 31] → [-12, 18, 22, 32], within the quad.
+        let partly = vec![solid(30., 10., -10., 20.)];
+        assert_eq!(bounds(partly.clone()), Ok(Some([-1., 18., 22., 32.])));
+        assert_eq!(
+            effect_input_bounds(&node(vec![comp(plan(true, partly), 1.0)]), full()),
+            Some((0, H - 33, 23, 33 - 17))
+        );
+        // Wholly off the frame, or nothing placed: transparent.
+        for members in [
+            vec![solid(30., 10., -500., 20.)],
+            vec![solid(30., 10., 20., 900.)],
+            vec![],
+            vec![comp(plan(true, vec![]), 1.0)],
+            // A singular placement draws nothing.
+            vec![solid(0., 10., 20., 20.)],
+        ] {
+            assert_eq!(bounds(members.clone()), Ok(None), "{members:?}");
+            assert_eq!(
+                effect_input_bounds(&node(vec![comp(plan(true, members), 1.0)]), full()),
+                Some((0, 0, 0, 0))
+            );
+        }
+    }
+
+    /// Scissored effect passes of group boundaries render exactly the bits
+    /// of whole passes, through the pinned extension stand-in
+    /// (`effects::bounds::tests::DOT_MATRIX`) and a built-in blur, in final
+    /// output and viewer frames at several densities; and the group's
+    /// passes are scissored at all (before looking through groups they
+    /// shaded the whole frame).
+    #[test]
+    fn scissored_group_effects_are_bit_identical() {
+        use crate::effects::bounds::tests::{DOT_MATRIX, dot_matrix_definition};
+        use crate::{MapResolver, OutputKind, RenderRequest, Renderer};
+        use pm_protocol::color::Precision;
+        use pm_protocol::common::{Size, Ticks};
+        use serde_json::{Value, json};
+        let ch = |v: Value| json!({ "v": v, "kf": [], "expr": null });
+        let layer = |id: &str, ty: &str, d: Value, x: f64, y: f64, group: Option<&str>| {
+            json!({
+                "id": id, "type": ty, "name": id, "from": 0, "dur": 2, "on": true,
+                "lock": false, "shy": false, "collapsed": true, "threeD": false,
+                "solo": false, "color": "#4C8DFF", "blend": "normal", "mblur": false,
+                "parent": null, "group": group, "matteSource": null,
+                "p": {
+                    "anchor.x": ch(json!(0)), "anchor.y": ch(json!(0)),
+                    "position.x": ch(json!(x)), "position.y": ch(json!(y)),
+                    "scale.x": ch(json!(100)), "scale.y": ch(json!(100)),
+                    "rotation": ch(json!(0)), "opacity": ch(json!(100)), "skew": ch(json!(0))
+                },
+                "fx": [], "transitionIn": null, "transitionOut": null, "masks": [], "d": d,
+                "locked_intent": {}
+            })
+        };
+        let solid = |id: &str, color: &str, w: u32, h: u32, x: f64, y: f64, group: &str| {
+            layer(
+                id,
+                "solid",
+                json!({"w": w, "h": h, "color": color}),
+                x,
+                y,
+                Some(group),
+            )
+        };
+        let dots = |pitch: f64| {
+            json!({"id": "dm", "type": "dot-matrix-resolve", "on": true,
+                "p": {"pitch": ch(json!(pitch)), "detail": ch(json!(2)), "resolve": ch(json!(30))}})
+        };
+        let blur = json!({"id": "b", "type": "blur", "version": 2, "on": true, "p": {
+            "amount": ch(json!(4)), "dimensions": ch(json!(0)), "repeatEdgePixels": ch(json!(false))}});
+        let document = |fx: Value| {
+            let mut g = layer("g", "group", json!({}), 0., 0., None);
+            g["fx"] = fx;
+            // A nested boundary (half opacity), a member partly off the
+            // frame, and a rotated one.
+            let mut h = layer("h", "group", json!({}), 0., 0., Some("g"));
+            h["p"]["opacity"] = ch(json!(50));
+            let mut r = solid("r", "#40A0F0", 20, 12, 150., 90., "g");
+            r["p"]["rotation"] = ch(json!(30));
+            let layers = vec![
+                g,
+                solid("a", "#F0C040", 24, 16, 60., 40., "g"),
+                h,
+                solid("b", "#E04080", 16, 16, 110., 30., "h"),
+                solid("c", "#FFFFFF", 30, 10, -12., 120., "g"),
+                r,
+            ];
+            let doc = json!({
+                "id": "P", "name": "p", "w": W, "h": H, "fps": 30, "dur": 2, "bg": "#000000",
+                "backgroundFill": {"type": "none", "angle": 0,
+                    "stops": [{"id": "s1", "color": "#000000", "position": 0}]},
+                "compId": "P-root", "compName": "p", "markers": [], "work": [0, 2],
+                "params": {}, "revision": 0, "edits": [], "created": 0, "shutter": 0.5,
+                "layers": layers, "assets": {}, "comps": {}
+            });
+            pm_model::Document::new(Some(pm_model::json::parse(&doc.to_string()).unwrap()), 1)
+        };
+        let mut r = Renderer::headless().unwrap();
+        let render = |r: &mut Renderer,
+                      doc: &pm_model::Document,
+                      kind: OutputKind,
+                      scale: f64,
+                      precision: Precision| {
+            let failures = r
+                .set_document_effects(doc, &[dot_matrix_definition(DOT_MATRIX)])
+                .unwrap();
+            assert!(failures.is_empty(), "{failures:?}");
+            let mut req = RenderRequest::at_scale(Size::new(W, H), scale, precision);
+            req.viewer = kind == OutputKind::Preview;
+            req.output_kind = kind;
+            req.background = false;
+            let frame = r
+                .render(doc, "P-root", Ticks::ZERO, &req, &MapResolver::default())
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            r.read_rgba(&frame)
+                .unwrap()
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<u32>>()
+        };
+        // Without effects, for telling that each chain ran.
+        let plain = render(
+            &mut r,
+            &document(json!([])),
+            OutputKind::Final,
+            1.0,
+            Precision::Float16,
+        );
+        for (what, fx) in [
+            ("dot matrix pitch 4", json!([dots(4.)])),
+            ("dot matrix pitch 1", json!([dots(1.)])),
+            ("dot matrix pitch 30", json!([dots(30.)])),
+            ("blur, dot matrix", json!([blur.clone(), dots(6.)])),
+            ("dot matrix, blur", json!([dots(6.), blur.clone()])),
+        ] {
+            let doc = document(fx);
+            for kind in [OutputKind::Final, OutputKind::Preview] {
+                for scale in [1.0, 0.75, 1.5] {
+                    for precision in [Precision::Float16, Precision::Float32] {
+                        let what = format!("{what} {kind:?} ×{scale} {precision:?}");
+                        r.set_effect_scissor(false);
+                        let scope = pm_perf::Scope::begin();
+                        let whole = render(&mut r, &doc, kind, scale, precision);
+                        let off = scope.finish().get(pm_perf::Counter::EffectScissorHits);
+                        assert_eq!(off, 0, "{what}: scissored with the scissor off");
+                        r.set_effect_scissor(true);
+                        let scope = pm_perf::Scope::begin();
+                        let kept = render(&mut r, &doc, kind, scale, precision);
+                        let hits = scope.finish().get(pm_perf::Counter::EffectScissorHits);
+                        assert_eq!(whole.len(), kept.len(), "{what}");
+                        if let Some(i) = whole.iter().zip(&kept).position(|(a, b)| a != b) {
+                            panic!(
+                                "{what}: pixel {} channel {} differs: whole {:?} scissored {:?}",
+                                i / 4,
+                                i % 4,
+                                f32::from_bits(whole[i]),
+                                f32::from_bits(kept[i])
+                            );
+                        }
+                        assert!(whole.iter().any(|b| *b != 0), "{what}: drew nothing");
+                        if (kind, scale, precision) == (OutputKind::Final, 1.0, Precision::Float16)
+                        {
+                            assert_ne!(whole, plain, "{what}: the effects did not run");
+                        }
+                        assert!(hits > 0, "{what}: the group's passes were not scissored");
+                    }
+                }
+            }
+        }
+    }
 }

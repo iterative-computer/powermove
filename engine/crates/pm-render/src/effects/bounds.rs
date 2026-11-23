@@ -21,18 +21,18 @@
 //!
 //! Inside the scissor the same program runs on the same inputs (outside it
 //! both runs hold zeros, by induction over the passes), so every pixel is
-//! bit-identical. Only reviewed built-in sources qualify: each is pinned by
-//! its SHA-256, so an extension's fork of `blur` or a changed catalog shader
-//! is never scissored until it is reviewed again.
+//! bit-identical. Only reviewed sources qualify: each is pinned by its
+//! SHA-256, so an extension's fork of `blur`, a changed catalog shader, or
+//! a changed extension source is never scissored until it is reviewed
+//! again. Reviewed extension sources ([`REVIEWED_EXTENSIONS`]) are pinned by
+//! the SHA-256 of the wrapped source their definition snapshot carries;
+//! their reach is their own (see [`Kind::DotMatrixResolve`]).
 //!
 //! Zero preservation alone ([`preserves_zero`], [`chain_preserves_zero`])
 //! also lets the plan leave out a boundary group whose members draw
 //! nothing (`plan::draw_layer`): its target is all `+0`, so a chain that
 //! maps an all-`+0` input to an all-`+0` output leaves it so, and its
-//! normal composite changes nothing beneath it. That needs no locality, so
-//! it also holds for reviewed extension sources ([`REVIEWED_EXTENSIONS`],
-//! pinned by the SHA-256 of the wrapped source their definition snapshot
-//! carries), which [`reach`] does not scissor (yet).
+//! normal composite changes nothing beneath it. That needs no locality.
 
 use super::plan::{Binding, EffectStep};
 use pm_protocol::definitions::{DefinitionOrigin, DefinitionSnapshot};
@@ -56,24 +56,18 @@ enum Kind {
     /// Levels v2: zero outside the layer; inside, a zero pixel maps through
     /// `level` (checked on the parameters).
     Levels2,
-    /// The `dot-matrix-resolve` 1.2.0 extension (one pass, apiVersion 1;
-    /// review: scene-30fps ANALYSIS §2.1). When every texel it reads is
-    /// `+0`: the passthrough branch (`resolve ≥ 99.9 %`) writes `crisp =
-    /// +0`; otherwise every generation's 3×3 average `s` is `+0`, so
-    /// `cov = 0 < .04` skips it, `best` stays `vec4(0)`, `dots = +0`, and
-    /// `o = mix(+0, +0, t) = +0` for `t ∈ [0, 1]`. No time, position, or
-    /// colour term reaches the output without a non-zero tap (`u_color`
-    /// only enters through `best`, written only when `cov ≥ .04`). With
-    /// finite parameters there is no NaN path (`max(s.a, .001)` runs only
-    /// when `cov ≥ .04`).
-    ///
-    /// Not scissored: [`reach`] refuses it, so the empty-group skip and the
-    /// scissor are measured as separate optimizations. To scissor it
-    /// (scene-30fps Opt 3, ANALYSIS §5.3), give [`reach`] the reach
-    /// `ceil(0.83 · max(pitch, 2) · density) + 2` output pixels (taps at
-    /// `gp ± 0.33·Pk` with `|gp − px| ≤ Pk / 2`) without its
-    /// `viewport_safe` and `raster_space` refusals (the argument above does
-    /// not depend on position).
+    /// A reviewed extension (`dot-matrix-resolve` 1.2.0: one pass, reading
+    /// only its input, `u_tex`), pinned by its SHA-256. Reviewed properties,
+    /// for finite parameters:
+    /// - zero preserving: an output pixel whose every input texel within
+    ///   its reach is `+0` is `+0`, whatever its position (no time,
+    ///   position, or parameter term reaches the output without a non-zero
+    ///   input texel, and there is no NaN path);
+    /// - finite reach: a pixel reads input texels at most
+    ///   `0.83 · max(pitch, 2)` program pixels away from itself on each
+    ///   axis, in the coordinates of its own target (`v_st`, `u_res`), so
+    ///   the bound needs no `viewport_safe` or `raster_space` refusal
+    ///   ([`dot_matrix_reach`]).
     DotMatrixResolve,
 }
 
@@ -298,15 +292,51 @@ pub(crate) fn chain_preserves_zero<'d>(
         .all(|step| definition(&step.definition).is_some_and(|d| preserves_zero(step, d)))
 }
 
+/// The scissor growth of a [`Kind::DotMatrixResolve`] step in output
+/// pixels on every side, `None` when a parameter it depends on is missing,
+/// repeated, or not finite.
+///
+/// A pixel reads input texels at most `s = 0.83 · max(pitch, 2)` program
+/// pixels away from its centre per axis. The program sees its own target
+/// (`v_st` spans it, `u_res` is its size over [`effect_density`]), so a
+/// program pixel is at most `d` output pixels on an axis whose density is
+/// `d` (fewer where `u_res` is raised to 1). Bilinear taps read texels
+/// whose centres lie within one pixel of the tap; clamping a tap to the
+/// edge only moves it towards the pixel. So every texel read is within
+/// `ceil(s · max(d)) + 1` pixels of the output pixel; one more absorbs f32
+/// rounding of the coordinates.
+///
+/// [`effect_density`]: super::exec::effect_density
+fn dot_matrix_reach(step: &EffectStep) -> Option<u32> {
+    let mut pitches = step.params.iter().filter(|p| p.key == "pitch");
+    let pitch = match (pitches.next(), pitches.next()) {
+        (Some(p), None) => match p.value {
+            Binding::Float(v) if v.is_finite() => v,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let [dx, dy] = super::exec::effect_density(step);
+    let spread = (0.83 * pitch.max(2.0) * dx.max(dy)).ceil();
+    if !spread.is_finite() || spread < 0. {
+        return None;
+    }
+    // Saturating: a reach past the target is the whole target (`grow`).
+    Some((spread as u32).saturating_add(2))
+}
+
 /// The scissor growth of a zero-preserving step (output pixels on every
 /// side), or `None` when the step must shade its whole target (and every
 /// step after it, the chain's bounds being lost).
 pub(crate) fn reach(step: &EffectStep, definition: &DefinitionSnapshot) -> Option<u32> {
-    // Reviewed extension sources only preserve zero for now: not
-    // scissored (scene-30fps Opt 3 adds `DotMatrixResolve`'s reach here;
-    // see [`Kind::DotMatrixResolve`]).
     if kind_of(definition)? == Kind::DotMatrixResolve {
-        return None;
+        // Its reach is in the coordinates of its own target, whatever the
+        // output addressing (`raster_space`) or viewport: no refusal for
+        // either. A reduced-resolution input (mips) is not reviewed.
+        if step.spatial.is_some() || !preserves_zero(step, definition) {
+            return None;
+        }
+        return dot_matrix_reach(step);
     }
     // Inputs other than the layer itself, a different-size grid target,
     // or output-raster addressing: not covered by the argument above.
@@ -538,8 +568,9 @@ pub(crate) mod tests {
         assert!(check(&[step(&blur)]));
         assert!(check(&[step(&dots)]));
         assert!(check(&[step(&dots), step(&blur), step(&dots)]));
-        // Not scissored yet (scene-30fps Opt 3).
-        assert_eq!(reach(&step(&dots), &dots), None);
+        // Scissored with its own reach (`dot_matrix_reach`): pitch 16 at
+        // density 1, `ceil(13.28) + 2`.
+        assert_eq!(reach(&step(&dots), &dots), Some(16));
         // A generator draws from nothing.
         assert!(!check(&[step(&gradient)]));
         assert!(!check(&[step(&dots), step(&gradient)]));
@@ -578,6 +609,138 @@ pub(crate) mod tests {
         raster.raster_space = true;
         raster.viewport_safe = false;
         assert!(check(&[raster.clone()]));
+        assert_eq!(reach(&raster, &blur), None);
+    }
+
+    /// `dot-matrix-resolve`'s reach: `ceil(0.83 · max(pitch, 2) · d) + 2`
+    /// output pixels, `d` the larger density its program sees (the step's
+    /// in a viewer frame; 1 in raster-space final output, with an owner
+    /// binding, or for a density that is not finite and positive), whatever
+    /// `viewport_safe` says. Refused for a missing, repeated, mistyped, or
+    /// non-finite parameter, a reduced-resolution input, a changed source,
+    /// or reads beyond its input.
+    #[test]
+    fn dot_matrix_resolve_reach_follows_pitch_and_density() {
+        let dots = dot_matrix_definition(DOT_MATRIX);
+        let with = |pitch: f64, density: [f64; 2], raster_space: bool| {
+            let mut s = step(&dots);
+            let p = s.params.iter_mut().find(|p| p.key == "pitch").unwrap();
+            p.value = Binding::Float(pitch);
+            s.density = density;
+            s.raster_space = raster_space;
+            s
+        };
+        let at = |pitch: f64, density: f64, raster_space: bool| {
+            let s = with(pitch, [density, density], raster_space);
+            let unsafe_viewport = reach(&s, &dots);
+            let mut safe = s;
+            safe.viewport_safe = true;
+            assert_eq!(reach(&safe, &dots), unsafe_viewport, "viewport_safe");
+            unsafe_viewport
+        };
+        // Viewer frames (`raster_space` cleared): the step's density.
+        for (pitch, density, expected) in [
+            // ceil(6.64) + 2, ceil(4.98) + 2, ceil(9.96) + 2
+            (8., 1., 9),
+            (8., 0.75, 7),
+            (8., 1.5, 12),
+            // ceil(8.3) + 2, ceil(6.225) + 2, ceil(12.45) + 2
+            (10., 1., 11),
+            (10., 0.75, 9),
+            (10., 1.5, 15),
+            // ceil(13.28) + 2, ceil(19.92) + 2
+            (16., 1., 16),
+            (16., 1.5, 22),
+            // Below 2 the program spaces at 2: ceil(1.66) + 2, ceil(2.49) + 2
+            (1., 1., 4),
+            (0., 1., 4),
+            (-5., 1., 4),
+            (0.5, 1.5, 5),
+            // The extremes of the parameter's range: ceil(53.12) + 2.
+            (64., 1., 56),
+        ] {
+            assert_eq!(
+                at(pitch, density, false),
+                Some(expected),
+                "pitch {pitch} density {density}"
+            );
+        }
+        // Raster-space final output: density 1, whatever the step's.
+        assert_eq!(at(10., 0.75, true), Some(11));
+        assert_eq!(at(16., 1.5, true), Some(16));
+        assert_eq!(at(8., 2., true), Some(9));
+        // Anisotropic: the larger axis.
+        assert_eq!(reach(&with(10., [0.5, 1.5], false), &dots), Some(15));
+        assert_eq!(reach(&with(10., [1.5, 0.5], false), &dots), Some(15));
+        // A density the program does not see (not finite or not positive)
+        // falls back to 1, as `effect_space` does.
+        for density in [f64::NAN, f64::INFINITY, 0., -1.] {
+            assert_eq!(at(10., density, false), Some(11), "density {density}");
+        }
+        // An owner binding: the program sees output pixels.
+        let mut owned = with(10., [1.5, 1.5], false);
+        owned.owner = Some(std::sync::Arc::new(super::super::plan::Owner {
+            valid: true,
+            uv: [1., 0., 0., 0., 1., 0., 0., 0., 1.],
+            size: [10., 10.],
+            bounds: [0., 0., 10., 10.],
+            pixel_scale: [1.5, 1.5],
+        }));
+        assert_eq!(reach(&owned, &dots), Some(11));
+        // A huge pitch saturates (the whole target, `grow`); one whose
+        // spread overflows is refused.
+        assert_eq!(at(1e300, 1., false), Some(u32::MAX));
+        assert_eq!(grow((10, 10, 5, 5), u32::MAX, (100, 100)), (0, 0, 100, 100));
+        assert_eq!(at(f64::MAX, 1.5, false), None);
+        // Non-finite parameters.
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            assert_eq!(at(bad, 1., false), None, "pitch {bad}");
+            let mut s = step(&dots);
+            let detail = s.params.iter_mut().find(|p| p.key == "detail").unwrap();
+            detail.value = Binding::Float(bad);
+            assert_eq!(reach(&s, &dots), None, "detail {bad}");
+        }
+        // Missing, repeated, or not a number.
+        let mut missing = step(&dots);
+        missing.params.retain(|p| p.key != "pitch");
+        assert_eq!(reach(&missing, &dots), None);
+        let mut repeated = step(&dots);
+        let pitch = repeated
+            .params
+            .iter()
+            .find(|p| p.key == "pitch")
+            .unwrap()
+            .clone();
+        repeated.params.push(pitch);
+        assert_eq!(reach(&repeated, &dots), None);
+        let mut colour = step(&dots);
+        let p = colour.params.iter_mut().find(|p| p.key == "pitch").unwrap();
+        p.value = Binding::Color([1., 0., 0.]);
+        assert_eq!(reach(&colour, &dots), None);
+        // A reduced-resolution input, reads beyond its input, more passes.
+        let edits: [fn(&mut EffectStep); 6] = [
+            |s| s.spatial = Some(super::super::plan::Spatial { lod: 0, grid: None }),
+            |s| s.spatial = Some(super::super::plan::Spatial { lod: 2, grid: None }),
+            |s| s.backdrop = true,
+            |s| s.keep_orig = true,
+            |s| s.passes = 2,
+            |s| s.temporal = true,
+        ];
+        for edit in edits {
+            let mut s = step(&dots);
+            edit(&mut s);
+            assert_eq!(reach(&s, &dots), None, "{s:?}");
+        }
+        // A changed source, or the source under another id.
+        let changed = dot_matrix_definition(&DOT_MATRIX.replace("* 0.5", "* 0.6"));
+        assert_eq!(reach(&step(&changed), &changed), None);
+        let mut renamed = dots.clone();
+        renamed.id = pm_protocol::common::DefinitionId::from("dot-matrix-resolve-2");
+        assert_eq!(reach(&step(&renamed), &renamed), None);
+        // Built-in blurs keep their own rules (`raster_space` refused).
+        let blur = builtin("blur");
+        let mut raster = step(&blur);
+        raster.raster_space = true;
         assert_eq!(reach(&raster, &blur), None);
     }
 

@@ -157,10 +157,12 @@ fn compare(r: &mut Renderer, v: &Value, t: f64, variant: &Variant, what: &str) -
         );
     }
     assert_eq!(whole.len(), kept.len(), "{what}");
-    assert!(
-        whole.iter().any(|b| *b != 0),
-        "{what}: the frame drew nothing"
-    );
+    if !what.contains("detail 0 resolve 0 ") {
+        assert!(
+            whole.iter().any(|b| *b != 0),
+            "{what}: the frame drew nothing"
+        );
+    }
     hits
 }
 
@@ -270,4 +272,196 @@ fn steps_that_do_not_keep_zero_are_not_scissored() {
         let hits = compare(&mut r, &v, 0., &variant, what);
         assert_eq!(hits, 0, "{what} was scissored");
     }
+}
+
+/// The reviewed `dot-matrix-resolve` extension (pinned in
+/// `effects::bounds` by the SHA-256 of its wrapped source) scissored to
+/// its reach renders exactly the bits of whole passes: on its own layers
+/// and on group boundaries (looked through to their members), across its
+/// parameter range, in final output (raster space) and viewer frames at
+/// several densities.
+///
+/// Its source is a user's extension and is not committed: point
+/// `PM_DOT_MATRIX_DEFINITIONS` at a `DefinitionSetSnapshot` JSON holding it
+/// (the scene bench's `<rundir>/definitions.json`). Without it the test
+/// passes without rendering.
+#[test]
+fn reviewed_extension_scissor_is_bit_identical() {
+    use sha2::Digest;
+    let Ok(path) = std::env::var("PM_DOT_MATRIX_DEFINITIONS") else {
+        eprintln!("PM_DOT_MATRIX_DEFINITIONS is not set: skipped");
+        return;
+    };
+    let snapshot: pm_protocol::definitions::DefinitionSetSnapshot =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let definition = snapshot
+        .definitions
+        .into_iter()
+        .find(|d| d.id.as_str() == "dot-matrix-resolve")
+        .expect("dot-matrix-resolve in the definitions");
+    let source = &definition.glsl.as_ref().unwrap().source;
+    let digest: String = sha2::Sha256::digest(source.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    eprintln!(
+        "dot-matrix-resolve: {} bytes, sha256 {digest}",
+        source.len()
+    );
+    let _gpu = gpu();
+    let mut r = Renderer::headless().unwrap();
+    let dots = |pitch: f64, detail: f64, resolve: f64, heat: f64| {
+        json!({"id":"dm","type":"dot-matrix-resolve","on":true,"p":{
+            "pitch":ch(json!(pitch)),"detail":ch(json!(detail)),"dot":ch(json!(1.35)),
+            "heat":ch(json!(heat)),"resolve":ch(json!(resolve)),"color":ch(json!("#FF690F"))}})
+    };
+    // A group boundary with the effect over a nested boundary (half
+    // opacity), a rotated member, and one partly off the frame; and a
+    // layer with the effect of its own.
+    let document = |fx: Value| {
+        let mut g = layer("g", "group", json!({}), 0., 0., 2.);
+        g["fx"] = json!([fx.clone()]);
+        let mut h = layer("h", "group", json!({}), 0., 0., 2.);
+        h["group"] = json!("g");
+        set(&mut h, "opacity", json!(50));
+        let member = |id: &str, color: &str, w: u32, h: u32, x: f64, y: f64, group: &str| {
+            let mut l = solid(id, color, w, h, x, y);
+            l["group"] = json!(group);
+            l
+        };
+        let mut rotated = member("r", "#40A0F0", 20, 12, 150., 90., "g");
+        set(&mut rotated, "rotation", json!(30));
+        let mut own = solid("o", "#FFFFFF", 28, 18, 210., 60.);
+        own["fx"] = json!([fx]);
+        project(
+            W,
+            H,
+            2.,
+            no_fill(),
+            vec![
+                g,
+                member("a", "#F0C040", 24, 16, 60., 40., "g"),
+                h,
+                member("b", "#E04080", 16, 16, 110., 30., "h"),
+                member("c", "#FFFFFF", 30, 10, -12., 120., "g"),
+                rotated,
+                own,
+            ],
+        )
+    };
+    let mut hits = 0;
+    for (pitch, detail, resolve, heat) in [
+        (8., 3., 0., 100.),
+        (10., 1.6, 40., 55.),
+        (10., 0., 0., 100.),
+        (2., 5., 20., 0.),
+        (1., 2., 10., 50.),
+        (16., 2.5, 70., 100.),
+        (64., 5., 0., 100.),
+        (9., 3., 100., 0.),
+    ] {
+        let v = document(dots(pitch, detail, resolve, heat));
+        for (kind, scale, region) in [
+            (OutputKind::Final, 1., None),
+            (OutputKind::Final, 0.75, None),
+            (OutputKind::Final, 1.5, None),
+            (OutputKind::Preview, 1., None),
+            (OutputKind::Preview, 0.75, None),
+            (OutputKind::Preview, 1.5, None),
+            (
+                OutputKind::Preview,
+                1.,
+                Some(PixelRect {
+                    x: 40,
+                    y: 24,
+                    width: 160,
+                    height: 96,
+                }),
+            ),
+        ] {
+            for precision in [Precision::Float16, Precision::Float32] {
+                let variant = Variant {
+                    precision,
+                    linear: false,
+                    kind,
+                    region,
+                    scale,
+                };
+                let what = format!(
+                    "pitch {pitch} detail {detail} resolve {resolve} heat {heat} \
+                     {kind:?} ×{scale} {region:?} {precision:?}"
+                );
+                hits += compare_with(&mut r, &v, 0., &variant, &what, &[definition.clone()]);
+            }
+        }
+    }
+    assert!(
+        hits > 0,
+        "no pass was scissored: is sha256 {digest} the reviewed pin?"
+    );
+}
+
+/// [`compare`] with contributed definitions.
+fn compare_with(
+    r: &mut Renderer,
+    v: &Value,
+    t: f64,
+    variant: &Variant,
+    what: &str,
+    contributed: &[pm_protocol::definitions::DefinitionSnapshot],
+) -> u64 {
+    let run = |r: &mut Renderer, scissor: bool| {
+        r.set_effect_scissor(scissor);
+        let mut v = v.clone();
+        v["colorDepth"] = json!(match variant.precision {
+            Precision::Unorm8 => 8,
+            Precision::Float16 => 16,
+            Precision::Float32 => 32,
+        });
+        v["color"] = json!({"mode":"standard","linearBlending":variant.linear});
+        let mut doc = load(&v);
+        doc.set_saving_app_version(Some("1.3.0".into()));
+        let refused = r.set_document_effects(&doc, contributed).unwrap();
+        assert!(refused.is_empty(), "{what}: {refused:?}");
+        let mut req = RenderRequest::at_scale(Size::new(W, H), variant.scale, variant.precision);
+        req.viewer = variant.kind == OutputKind::Preview;
+        req.output_kind = variant.kind;
+        req.region = variant.region;
+        req.background = false;
+        let scope = pm_perf::Scope::begin();
+        let frame = r
+            .render(&doc, "Ptest-root", ticks(t), &req, &MapResolver::default())
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{what}: {:?}", frame.failures);
+        let bits: Vec<u32> = r
+            .read_rgba(&frame)
+            .unwrap()
+            .into_iter()
+            .map(f32::to_bits)
+            .collect();
+        (
+            bits,
+            scope.finish().get(pm_perf::Counter::EffectScissorHits),
+        )
+    };
+    let (whole, off) = run(r, false);
+    assert_eq!(off, 0, "{what}: scissored with the scissor off");
+    let (kept, hits) = run(r, true);
+    assert_eq!(whole.len(), kept.len(), "{what}");
+    if let Some(i) = whole.iter().zip(&kept).position(|(a, b)| a != b) {
+        panic!(
+            "{what}: pixel {} channel {} differs: whole {:?} scissored {:?}",
+            i / 4,
+            i % 4,
+            f32::from_bits(whole[i]),
+            f32::from_bits(kept[i])
+        );
+    }
+    if !what.contains("detail 0 resolve 0 ") {
+        assert!(
+            whole.iter().any(|b| *b != 0),
+            "{what}: the frame drew nothing"
+        );
+    }
+    hits
 }
