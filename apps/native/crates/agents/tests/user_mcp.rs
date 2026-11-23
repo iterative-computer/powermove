@@ -120,24 +120,15 @@ for line in sys.stdin:
                     access == Access::Project
                 );
             }
-        } else if access == Access::Editor {
-            assert_eq!(value["config"]["mcp_servers"]["fixture"]["required"], false);
-            assert_eq!(
-                value["config"]["mcp_servers"]["powermove"]["required"],
-                true
-            );
         } else {
-            let args = value.as_array().unwrap();
-            let pair = args
-                .iter()
-                .filter_map(Value::as_str)
-                .find(|s| s.starts_with("mcp_servers.\"fixture\"="))
-                .unwrap();
-            let doc: toml_edit::DocumentMut = pair.parse().unwrap();
+            let servers = &value["config"]["mcp_servers"];
+            assert_eq!(servers["fixture"]["required"], false);
             assert_eq!(
-                doc["mcp_servers"]["fixture"]["required"].as_bool(),
-                Some(false)
+                servers["fixture"]["command"],
+                "fixture-only-never-execute"
             );
+            assert_eq!(servers["powermove"]["required"], true);
+            assert_eq!(servers["powermove"]["command"], "/fixture/powermove");
         }
         drop(h);
     }
