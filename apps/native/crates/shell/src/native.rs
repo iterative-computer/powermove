@@ -3,6 +3,8 @@
 mod coedit_presence;
 #[path = "flowchart.rs"]
 mod flowchart;
+#[path = "spotlight.rs"]
+mod spotlight;
 #[path = "tab_scroll.rs"]
 mod tab_scroll;
 use coedit_presence::CoeditPresence;
@@ -4100,6 +4102,15 @@ impl Host {
                     return event.as_ptr();
                 }
                 if let Some(host) = weak.upgrade() {
+                    if e.r#type() == NSEventType::FlagsChanged {
+                        if let Ok(h) = host.try_borrow()
+                            && let Ok(mut palette) = h.palette.try_borrow_mut()
+                            && palette.model.open
+                        {
+                            palette.set_cmd_held(spotlight::command_held(e.modifierFlags()));
+                        }
+                        return event.as_ptr();
+                    }
                     if consumes_dismissed_gesture(e) {
                         return std::ptr::null_mut();
                     }
@@ -4263,6 +4274,13 @@ impl Host {
                     }
                     for popup in [&palette, &fields] {
                         let mut p = popup.borrow_mut();
+                        if e.r#type() == NSEventType::KeyDown
+                            && (e.windowNumber() == p.window.windowNumber()
+                                || e.windowNumber() == p.parent.windowNumber())
+                            && p.handle_quick_pick(e)
+                        {
+                            return std::ptr::null_mut();
+                        }
                         if p.model.open
                             && e.windowNumber() == p.parent.windowNumber()
                             && e.r#type() == NSEventType::KeyDown
@@ -4496,6 +4514,7 @@ impl Host {
             NSEvent::addLocalMonitorForEventsMatchingMask_handler(
                 NSEventMask::KeyDown
                     | NSEventMask::KeyUp
+                    | NSEventMask::FlagsChanged
                     | NSEventMask::LeftMouseDown
                     | NSEventMask::LeftMouseUp
                     | NSEventMask::LeftMouseDragged
@@ -7192,8 +7211,18 @@ define_class!(
     unsafe impl NSControlTextEditingDelegate for PopupTarget {
         #[unsafe(method(controlTextDidChange:))]
         fn changed(&self, _: &objc2_foundation::NSNotification) {
-            if let Some(p) = self.ivars().upgrade() {
-                p.borrow_mut().searched();
+            if let Some(p) = self.ivars().upgrade()
+                && let Ok(mut p) = p.try_borrow_mut()
+            {
+                p.searched();
+            }
+        }
+        #[unsafe(method(controlTextDidBeginEditing:))]
+        fn began(&self, _: &objc2_foundation::NSNotification) {
+            if let Some(p) = self.ivars().upgrade()
+                && let Ok(p) = p.try_borrow()
+            {
+                p.color_search_caret();
             }
         }
     }
@@ -7205,6 +7234,13 @@ define_class!(
                 && let Ok(mut p) = p.try_borrow_mut()
             {
                 p.searched();
+            }
+        }
+        #[unsafe(method(clearSearch:))]
+        fn clear_search(&self, _: &NSControl) {
+            if let Some(p) = self.ivars().upgrade() {
+                let mut p = p.borrow_mut();
+                p.clear_search();
             }
         }
         #[unsafe(method(pick:))]
@@ -7222,18 +7258,7 @@ define_class!(
                     }
                     PickerRow::Choice(index) => index,
                 };
-                let chosen = p.model.choices.get(index).map(|c| (c.command.clone(), c.stays));
-                if let Some((command, _)) = &chosen {
-                    if p.anchor.is_none() { save_palette_recent(&mut p.model.recents, command); }
-                    let (name, args) = menu::split_palette_command(command);
-                    let _ = p.sender.try_send(Command { name: name.to_owned(), args, token: None });
-                }
-                // A row that stays (a provider) keeps the menu up for the
-                // rows its owner sends next; any other choice closes it.
-                if !chosen.as_ref().is_some_and(|(_, stays)| *stays) {
-                    p.picked = chosen.is_some();
-                    p.hide();
-                }
+                p.pick_choice(index, false);
             }
         }
     }
@@ -7684,10 +7709,10 @@ struct PopupShape {
 fn popup_shape(t: &Tokens, surface: Surface) -> PopupShape {
     if surface == Surface::Palette {
         PopupShape {
-            radius: t.radius.xl,
-            inset: t.space.sm,
-            row: t.metrics.menu_row,
-            heading: t.metrics.menu_row - t.space.xs,
+            radius: spotlight::RADIUS,
+            inset: 8.,
+            row: 34.,
+            heading: 28.,
         }
     } else {
         PopupShape {
@@ -7728,6 +7753,9 @@ fn popup_material(
         contents(&view).addSubview(&under);
     } else if let Ok(solid) = view.clone().downcast::<NSBox>() {
         solid.setCornerRadius(radius);
+        if surface == Surface::Palette {
+            solid.setBorderWidth(0.);
+        }
     }
     view
 }
@@ -7740,11 +7768,31 @@ fn popup_controls(
     body: &NSView,
     t: &Tokens,
     placeholder: &str,
-) -> (Retained<NSSearchField>, Retained<NSScrollView>, Retained<PopupList>) {
-    let search = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), NSRect::ZERO);
+    surface: Surface,
+) -> (
+    Retained<NSTextField>,
+    Retained<NSScrollView>,
+    Retained<PopupList>,
+) {
+    let search = if surface == Surface::Palette {
+        let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), NSRect::ZERO);
+        field.setBezeled(false);
+        field.setBordered(false);
+        field.setDrawsBackground(false);
+        field.setEditable(true);
+        field.setSelectable(true);
+        if let Some(cell) = field.cell() {
+            cell.setUsesSingleLineMode(true);
+            cell.setScrollable(true);
+        }
+        field
+    } else {
+        let field = NSSearchField::initWithFrame(NSSearchField::alloc(mtm), NSRect::ZERO);
+        field.setControlSize(NSControlSize::Large);
+        Retained::into_super(field)
+    };
     search.setPlaceholderString(Some(&NSString::from_str(placeholder)));
-    search.setControlSize(NSControlSize::Large);
-    search.setFont(Some(&NSFont::systemFontOfSize(t.typography.title as f64)));
+    style_popup_search(&search, t, surface);
     search.setFocusRingType(NSFocusRingType::None);
     search.setAccessibilityLabel(Some(&NSString::from_str("Search")));
     body.addSubview(&search);
@@ -7762,6 +7810,20 @@ fn popup_controls(
     body.addSubview(&scroll);
     (search, scroll, list)
 }
+fn style_popup_search(search: &NSTextField, t: &Tokens, surface: Surface) {
+    if surface == Surface::Palette {
+        search.setFont(Some(&NSFont::systemFontOfSize(16.)));
+        search.setTextColor(Some(&native_color(t.colors.text)));
+        search.setPlaceholderAttributedString(Some(&coedit_presence::title(
+            "Search commands",
+            16.,
+            &native_color(t.colors.muted),
+        )));
+    } else {
+        search.setFont(Some(&NSFont::systemFontOfSize(t.typography.title as f64)));
+    }
+}
+
 /// The field menu's search placeholder (`fieldMenu`).
 const FIELD_PLACEHOLDER: &str = "Search fields";
 /// The field menu's own rows (`fieldMenu`).
@@ -7860,6 +7922,9 @@ struct PopupLayoutCache {
     buttons: Vec<PopupButton>,
     line_heights: HashMap<(u32, bool), f64>,
     shortcut_widths: HashMap<String, f64>,
+    palette_rows: Vec<spotlight::RowDecoration>,
+    badges: Vec<spotlight::Badge>,
+    palette_theme: Option<spotlight::RowTheme>,
     mask: Option<(bool, f64, f64)>,
 }
 
@@ -7890,6 +7955,12 @@ impl PopupLayoutCache {
         }
         for button in &self.buttons {
             button.view.removeFromSuperview();
+        }
+        for row in &self.palette_rows {
+            row.remove();
+        }
+        for badge in &self.badges {
+            badge.label.removeFromSuperview();
         }
         *self = Self {
             mask: self.mask,
@@ -7926,7 +7997,9 @@ pub struct Popup {
     window: Retained<PopupWindow>,
     parent: Retained<NSWindow>,
     surface: Surface,
-    search: Retained<NSSearchField>,
+    search: Retained<NSTextField>,
+    chrome: Option<spotlight::Chrome>,
+    cmd_held: bool,
     scroll: Retained<NSScrollView>,
     list: Retained<PopupList>,
     body: Retained<NSView>,
@@ -7936,7 +8009,7 @@ pub struct Popup {
     parts: Vec<Retained<NSView>>,
     layout_cache: PopupLayoutCache,
     lit_row_place: Option<usize>,
-    /// command → shortcut glyphs shown beside palette rows.
+    /// Command → shortcut glyphs for accessibility help.
     shortcuts: HashMap<String, String>,
     glider: Retained<NSBox>,
     /// The highlight is on a row (it fades in where it lands, then glides).
@@ -7984,7 +8057,7 @@ impl Popup {
         let mtm = MainThreadMarker::new().unwrap();
         let m = t.metrics;
         let (width, height) = if surface == Surface::Palette {
-            (m.palette_width, m.palette_height)
+            (spotlight::WIDTH, m.palette_height)
         } else {
             (m.field_menu_width, m.field_menu_height)
         };
@@ -8013,17 +8086,29 @@ impl Popup {
         if let Some(layer) = mat.layer() {
             layer.setOpacity(0.);
         }
-        let (search, scroll, list) = popup_controls(mtm, &body, t, if surface == Surface::Palette {
-            "Search commands"
-        } else {
-            FIELD_PLACEHOLDER
-        });
+        let (search, scroll, list) = popup_controls(
+            mtm,
+            &body,
+            t,
+            if surface == Surface::Palette {
+                "Search commands"
+            } else {
+                FIELD_PLACEHOLDER
+            },
+            surface,
+        );
+        let chrome = (surface == Surface::Palette)
+            .then(|| spotlight::Chrome::new(mtm, &body, t, window.backingScaleFactor().recip()));
         let glider = NSBox::initWithFrame(NSBox::alloc(mtm), NSRect::ZERO);
         glider.setBoxType(NSBoxType::Custom);
         glider.setFillColor(&popup_highlight(t));
         glider.setBorderWidth(0.);
         let shape = popup_shape(t, surface);
-        glider.setCornerRadius(t.radius.nested(shape.radius, shape.inset) as f64);
+        glider.setCornerRadius(if surface == Surface::Palette {
+            spotlight::ROW_RADIUS
+        } else {
+            t.radius.nested(shape.radius, shape.inset) as f64
+        });
         glider.setAlphaValue(0.);
         list.addSubview(&glider);
         let popup = Rc::new(RefCell::new(Self {
@@ -8031,6 +8116,8 @@ impl Popup {
             parent: unsafe { Retained::retain(parent as *const _ as *mut _).unwrap() },
             surface,
             search,
+            chrome,
+            cmd_held: false,
             scroll,
             list,
             body,
@@ -8078,6 +8165,9 @@ impl Popup {
             // The clear button empties the field without an edit.
             p.search.setTarget(Some(&target));
             p.search.setAction(Some(sel!(searched:)));
+            if let Some(chrome) = &p.chrome {
+                chrome.clear.setTarget(Some(&target));
+            }
             *p.list.ivars().borrow_mut() = Rc::downgrade(&popup);
         }
         popup.borrow_mut().me = Rc::downgrade(&popup);
@@ -8108,6 +8198,23 @@ impl Popup {
     }
     fn focus_search(&self) {
         self.window.makeFirstResponder(if self.searchable { Some(&self.search) } else { None });
+        self.color_search_caret();
+    }
+    fn color_search_caret(&self) {
+        if self.surface == Surface::Palette
+            && let Some(editor) = self.search.currentEditor()
+            && let Some(view) = editor.downcast_ref::<NSTextView>()
+        {
+            view.setInsertionPointColor(Some(&native_color(self.tokens.colors.accent)));
+        }
+    }
+    fn clear_search(&mut self) {
+        self.focus_search();
+        if let Some(editor) = self.search.currentEditor() {
+            editor.setString(&NSString::from_str(""));
+        }
+        self.search.setStringValue(&NSString::from_str(""));
+        self.searched();
     }
     fn configure_field(&mut self, composer: Option<(ComposerPicker, bool)>) {
         self.composer = composer.map(|(kind, _)| kind);
@@ -8146,6 +8253,22 @@ impl Popup {
         self.scroll.removeFromSuperview();
         body.addSubview(&self.search);
         body.addSubview(&self.scroll);
+        if surface == Surface::Palette {
+            style_popup_search(&self.search, t, surface);
+            let chrome = spotlight::Chrome::new(
+                self.window.mtm(),
+                &body,
+                t,
+                self.window.backingScaleFactor().recip(),
+            );
+            unsafe {
+                chrome
+                    .clear
+                    .setTarget(self.target.as_deref().map(|target| target as &AnyObject));
+            }
+            self.chrome = Some(chrome);
+            self.color_search_caret();
+        }
         self.glider.setFillColor(&popup_highlight(t));
         self.window.setContentView(Some(&mat));
         self.body = body;
@@ -8176,8 +8299,12 @@ impl Popup {
                     continue;
                 }
             };
+            if self.surface == Surface::Palette {
+                (&c.label, &c.aliases).hash(&mut h);
+            } else {
+                c.display_label(&self.model.query).hash(&mut h);
+            }
             (
-                c.display_label(&self.model.query),
                 &c.command,
                 &c.category,
                 &c.detail,
@@ -8188,6 +8315,9 @@ impl Popup {
                 self.shortcuts.get(&c.command),
             )
                 .hash(&mut h);
+        }
+        if self.surface == Surface::Palette {
+            self.model.query.hash(&mut h);
         }
         self.model.has_provider_headers().hash(&mut h);
         unlisted.hash(&mut h);
@@ -8251,6 +8381,14 @@ impl Popup {
             shortcuts: &self.shortcuts,
         }
         .rebuild(chosen, unlisted);
+        if let Some(chrome) = &mut self.chrome {
+            chrome.layout(
+                frame.size.width,
+                height,
+                self.window.backingScaleFactor().recip(),
+            );
+            chrome.update(&self.model.query, chosen.len(), unlisted);
+        }
         if (frame.size.height - height).abs() > 0.5 {
             if self.composer != Some(ComposerPicker::Model) {
                 frame.origin.y += frame.size.height - height;
@@ -8309,9 +8447,12 @@ pub fn check_palette_typing() {
         for (name, count) in names {
             for i in 0..count {
                 let prefix = if kind == "Effect" { "Effect · " } else { "" };
-                let choice =
-                    Choice::new(format!("{prefix}{name} {i}"), format!("{kind}:{name}:{i}"))
-                        .within(kind);
+                let command = if name == "Delete" {
+                    menu::palette_command("delete", &[serde_json::json!(i)])
+                } else {
+                    format!("{kind}:{name}:{i}")
+                };
+                let choice = Choice::new(format!("{prefix}{name} {i}"), command).within(kind);
                 choices.push(if kind == "Command" {
                     choice
                 } else {
@@ -8320,13 +8461,27 @@ pub fn check_palette_typing() {
             }
         }
     }
-    let (sender, _receiver) = async_channel::unbounded();
-    let popup = Popup::new(&parent, &t, Surface::Palette, choices, sender);
-    let mut popup = popup.borrow_mut();
-    popup
-        .shortcuts
-        .insert("Command:Delete:0".into(), "⌘D".into());
+    assert_eq!(choices.len(), 550);
+    let (sender, receiver) = async_channel::unbounded();
+    let palette = Popup::new(
+        &parent,
+        &t,
+        Surface::Palette,
+        choices.clone(),
+        sender.clone(),
+    );
+    let mut popup = palette.borrow_mut();
+    popup.shortcuts.insert(
+        menu::palette_command("delete", &[serde_json::json!(0)]),
+        "⌘D".into(),
+    );
     popup.refresh();
+    assert_eq!(popup.window.frame().size.width, 540.);
+    assert!(!popup.search.isBezeled());
+    assert!(!popup.search.drawsBackground());
+    assert_eq!(popup.glider.cornerRadius(), 10.);
+    assert_eq!(popup.scroll.frame().origin.y, spotlight::FOOTER);
+    assert!(popup.chrome.as_ref().unwrap().clear.isHidden());
 
     let first_button = popup.rows[0].button.clone();
     let mask = popup.scroll.layer().unwrap().mask().unwrap();
@@ -8337,12 +8492,13 @@ pub fn check_palette_typing() {
             .and_then(|value| value.downcast::<NSString>().ok())
             .is_some_and(|value| value.to_string() == "Selected")
     };
-    for (query, count, unlisted) in [
-        ("d", 60, 490),
-        ("de", 60, 100),
-        ("del", 40, 0),
-        ("", 150, 0),
-    ] {
+    let edits = [
+        ("d", 60, "60 shown · 490 more"),
+        ("de", 60, "60 shown · 100 more"),
+        ("del", 40, "40 results"),
+        ("", 150, "150 results"),
+    ];
+    for (query, count, footer) in edits {
         popup.search.setStringValue(&NSString::from_str(query));
         let start = std::time::Instant::now();
         popup.searched();
@@ -8356,7 +8512,10 @@ pub fn check_palette_typing() {
         );
         assert_eq!(popup.lit_row_place, (!query.is_empty()).then_some(0));
         assert_eq!(popup.rows[0].button, first_button, "row control is reused");
-        assert!(popup.layout_cache.shortcut_widths.contains_key("⌘D"));
+        assert!(popup.layout_cache.shortcut_widths.is_empty());
+        let chrome = popup.chrome.as_ref().unwrap();
+        assert_eq!(chrome.count.stringValue().to_string(), footer);
+        assert_eq!(chrome.clear.isHidden(), query.is_empty());
         assert_eq!(
             popup.rows[0]
                 .button
@@ -8371,16 +8530,10 @@ pub fn check_palette_typing() {
             .filter_map(|view| view.downcast_ref::<NSTextField>())
             .filter(|label| !label.isHidden())
             .collect();
-        let overflow: Vec<_> = labels
-            .iter()
-            .map(|label| label.stringValue().to_string())
-            .filter(|text| text.ends_with("more · type to narrow"))
-            .collect();
-        let expected: Vec<_> = (unlisted > 0)
-            .then(|| format!("{unlisted} more · type to narrow"))
-            .into_iter()
-            .collect();
-        assert_eq!(overflow, expected);
+        assert!(labels.iter().all(|label| {
+            let text = label.stringValue().to_string();
+            text != "⌘D" && !text.ends_with("more · type to narrow")
+        }));
         assert_eq!(
             controls
                 .iter()
@@ -8434,6 +8587,31 @@ pub fn check_palette_typing() {
             assert!(selected(&popup.rows[1].button));
         }
     }
+    // Measure edits with the row pools warm, including clearing the query
+    // back to the unpaged list. Track each query so a slower path cannot hide
+    // behind the other edits.
+    let mut samples: [Vec<f64>; 4] = Default::default();
+    for _ in 0..30 {
+        for (sample, (query, _, _)) in samples.iter_mut().zip(edits) {
+            objc2::rc::autoreleasepool(|_| {
+                popup.search.setStringValue(&NSString::from_str(query));
+                let start = std::time::Instant::now();
+                popup.searched();
+                sample.push(start.elapsed().as_secs_f64() * 1000.);
+            });
+        }
+    }
+    for (sample, (query, _, _)) in samples.iter_mut().zip(edits) {
+        sample.sort_by(f64::total_cmp);
+        let median = sample[sample.len() / 2];
+        let p95 = sample[(sample.len() * 95).div_ceil(100) - 1];
+        let max = sample[sample.len() - 1];
+        println!("{query:?}: median {median:.3} ms, p95 {p95:.3} ms, max {max:.3} ms");
+        if !cfg!(debug_assertions) {
+            assert!(p95 < 2., "{query:?} p95 took {p95:.3} ms");
+        }
+    }
+
     popup.tokens = Tokens::new(Scheme::Light, Accessibility::default());
     popup.restyle();
     assert!(
@@ -8441,18 +8619,177 @@ pub fn check_palette_typing() {
         "restyling discards the previous controls"
     );
     assert_eq!(popup.rows.len(), 150);
+    popup.search.setStringValue(&NSString::from_str("de"));
+    popup.searched();
     let title = popup
         .list
         .subviews()
         .to_vec()
         .into_iter()
         .filter_map(|view| view.downcast::<NSTextField>().ok())
-        .find(|label| label.stringValue().to_string() == "Delete 0")
+        .find(|label| !label.isHidden() && label.stringValue().to_string() == "Delete 0")
         .unwrap();
+    let attr = title.attributedStringValue();
+    let font_at = |at| unsafe {
+        attr.attribute_atIndex_effectiveRange(NSFontAttributeName, at, std::ptr::null_mut())
+            .unwrap()
+            .downcast::<NSFont>()
+            .unwrap()
+    };
+    let color_at = |at| unsafe {
+        attr.attribute_atIndex_effectiveRange(
+            NSForegroundColorAttributeName,
+            at,
+            std::ptr::null_mut(),
+        )
+        .unwrap()
+        .downcast::<NSColor>()
+        .unwrap()
+    };
     assert_eq!(
-        title.textColor().as_deref(),
-        Some(&*native_color(popup.tokens.colors.text))
+        font_at(0),
+        NSFont::systemFontOfSize_weight(f64::from(t.typography.body), unsafe {
+            NSFontWeightSemibold
+        },)
     );
+    assert_eq!(
+        font_at(2),
+        NSFont::systemFontOfSize(f64::from(t.typography.body))
+    );
+    assert_eq!(
+        color_at(0),
+        native_color(popup.tokens.colors.selected_danger)
+    );
+    assert!(color_at(2).alphaComponent() < color_at(0).alphaComponent());
+
+    popup.model.open = true;
+    let original_frame = popup.window.frame();
+    popup.set_cmd_held(true);
+    assert_eq!(popup.layout_cache.badges.len(), 9);
+    for (place, badge) in popup.layout_cache.badges.iter().enumerate() {
+        assert!(!badge.label.isHidden());
+        assert_eq!(
+            badge.label.stringValue().to_string(),
+            (place + 1).to_string()
+        );
+        assert_eq!(
+            badge.label.frame().origin.y,
+            popup.rows[place].rect.origin.y + 7.
+        );
+        assert_eq!(badge.label.frame().size, NSSize::new(20., 20.));
+    }
+    assert_eq!(
+        popup.layout_cache.badges[0].label.textColor().unwrap(),
+        native_color(popup.tokens.colors.accent)
+    );
+    popup.key("down", false);
+    assert_eq!(
+        popup.layout_cache.badges[1].label.textColor().unwrap(),
+        native_color(popup.tokens.colors.accent)
+    );
+    popup.set_cmd_held(false);
+    assert!(
+        popup
+            .layout_cache
+            .badges
+            .iter()
+            .all(|badge| badge.label.isHidden())
+    );
+    assert_eq!(popup.window.frame(), original_frame);
+    let clear = popup.chrome.as_ref().unwrap().clear.clone();
+    drop(popup);
+    unsafe { clear.performClick(None) };
+    let mut popup = palette.borrow_mut();
+    assert!(popup.model.query.is_empty());
+    assert!(clear.isHidden());
+
+    let digit_event = |place: usize, flags, window| {
+        let digit = NSString::from_str(&(place + 1).to_string());
+        NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            NSEventType::KeyDown, NSPoint::ZERO, flags, 0., window, None, &digit, &digit, false,
+            [18, 19, 20, 21, 23, 22, 26, 28, 25][place],
+        ).unwrap()
+    };
+    let cmd = NSEventModifierFlags::Command;
+    let flags = cmd | NSEventModifierFlags::Option;
+    assert!(!spotlight::command_held(flags));
+    let modified = digit_event(0, flags, popup.window.windowNumber());
+    assert!(!popup.handle_quick_pick(&modified));
+    // Save the user's defaults before exercising the real dispatch path.
+    let defaults = objc2_foundation::NSUserDefaults::standardUserDefaults();
+    let recents_key = NSString::from_str("PowermovePaletteRecents");
+    let saved = defaults.objectForKey(&recents_key);
+    for place in 0..9 {
+        popup.model.open = true;
+        popup.search.setStringValue(&NSString::from_str("de"));
+        popup.searched();
+        popup.set_cmd_held(true);
+        let PickerRow::Choice(index) = popup.rows[place].kind else {
+            panic!("expected choice")
+        };
+        let expected = popup.model.choices[index].command.clone();
+        let event = digit_event(place, cmd, popup.window.windowNumber());
+        assert!(popup.handle_quick_pick(&event));
+        let command = receiver.try_recv().unwrap();
+        let (name, args) = menu::split_palette_command(&expected);
+        assert_eq!((command.name.as_str(), command.args), (name, args));
+        assert_eq!(popup.model.recents.first(), Some(&expected));
+        assert!(!popup.model.open);
+        assert!(!popup.cmd_held);
+        assert!(
+            popup
+                .layout_cache
+                .badges
+                .iter()
+                .all(|badge| badge.label.isHidden())
+        );
+    }
+    if let Some(saved) = saved {
+        unsafe { defaults.setObject_forKey(Some(&saved), &recents_key) };
+    } else {
+        defaults.removeObjectForKey(&recents_key);
+    }
+
+    popup.model.open = true;
+    popup
+        .search
+        .setStringValue(&NSString::from_str("no matching command"));
+    popup.searched();
+    popup.set_cmd_held(true);
+    assert_eq!(
+        popup
+            .chrome
+            .as_ref()
+            .unwrap()
+            .count
+            .stringValue()
+            .to_string(),
+        "0 results"
+    );
+    assert!(
+        popup
+            .layout_cache
+            .badges
+            .iter()
+            .all(|badge| badge.label.isHidden())
+    );
+    let event = digit_event(0, cmd, popup.window.windowNumber());
+    assert!(popup.handle_quick_pick(&event));
+    assert!(receiver.is_empty());
+    assert!(popup.model.open);
+
+    let fields = Popup::new(&parent, &t, Surface::Menu, choices, sender);
+    let mut fields = fields.borrow_mut();
+    fields.model.page = Some(2);
+    fields.search.setStringValue(&NSString::from_str("de"));
+    fields.searched();
+    assert!(fields.search.downcast_ref::<NSSearchField>().is_some());
+    assert!(fields.chrome.is_none());
+    assert_eq!(fields.rows.len(), 2);
+    assert!(fields.list.subviews().to_vec().iter().any(|view| {
+        view.downcast_ref::<NSTextField>()
+            .is_some_and(|label| label.stringValue().to_string() == "158 more · type to narrow")
+    }));
 }
 
 /// The field menu's AppKit view layout; does not need a window to paint.
@@ -8464,7 +8801,7 @@ struct PopupLayout<'a> {
     tokens: &'a Tokens,
     surface: Surface,
     model: &'a Picker,
-    search: &'a NSSearchField,
+    search: &'a NSTextField,
     scroll: &'a NSScrollView,
     list: &'a PopupList,
     parts: &'a mut Vec<Retained<NSView>>,
@@ -8612,7 +8949,12 @@ impl PopupLayout<'_> {
         let width = self.width;
         let (inset, row_h) = (shape.inset as f64, shape.row as f64);
         let model_rows = self.model.choices.iter().any(|c| c.provider.is_some());
-        let reuse_buttons = self.surface == Surface::Palette && !model_rows;
+        let is_palette = self.surface == Surface::Palette;
+        let reuse_buttons = is_palette && !model_rows;
+        let palette_query = is_palette.then(|| self.model.query.trim().to_lowercase());
+        if is_palette && self.cache.palette_theme.is_none() {
+            self.cache.palette_theme = Some(spotlight::RowTheme::new(t));
+        }
         if !reuse_buttons {
             for button in self.cache.buttons.drain(..) {
                 button.view.removeFromSuperview();
@@ -8700,7 +9042,11 @@ impl PopupLayout<'_> {
                     y += shape.heading as f64;
                 }
             }
-            let detail = if disclosure.is_some() { "" } else { c.detail.as_str() };
+            let detail = if disclosure.is_some() || is_palette {
+                ""
+            } else {
+                c.detail.as_str()
+            };
             let description = (!detail.is_empty() && self.composer == Some(ComposerPicker::Access))
                 .then(|| popup_description(detail, caption, t.colors.secondary, (width - edge - lead).max(1.), mtm));
             let item_h = row_h
@@ -8716,7 +9062,7 @@ impl PopupLayout<'_> {
                 NSSize::new(width - inset * 2., item_h),
             );
             let mut trailing = rect.origin.x + rect.size.width - t.space.md as f64;
-            if let Some(glyphs) = shortcuts.get(&c.command) {
+            if !is_palette && let Some(glyphs) = shortcuts.get(&c.command) {
                 let hint = self.label(
                     glyphs,
                     caption,
@@ -8764,13 +9110,13 @@ impl PopupLayout<'_> {
                 );
                 self.list.addSubview(&chevron);
                 self.parts.push(Retained::into_super(Retained::into_super(chevron)));
-            } else if c.is_default {
+            } else if !is_palette && c.is_default {
                 let hint = self.label("Default", caption, t.colors.muted, None);
                 let w = hint.fittingSize().width.ceil();
                 centred(&hint, trailing - w, y, row_h, w, caption_h);
                 trailing -= w + t.space.md as f64;
             }
-            if disclosure.is_none() && c.checked == Some(true) {
+            if !is_palette && disclosure.is_none() && c.checked == Some(true) {
                 let mark = NSImageView::imageViewWithImage(&symbol("checkmark", "Checked"), mtm);
                 mark.setSymbolConfiguration(Some(
                     &NSImageSymbolConfiguration::configurationWithPointSize_weight(
@@ -8803,50 +9149,74 @@ impl PopupLayout<'_> {
                 t.colors.text
             };
             let title_size = t.typography.body;
-            let (title, title_h) = if disclosure.is_some() || c.font.is_some() {
-                let title = popup_label(&display_label, title_size, title_color, mtm);
-                let height = if disclosure.is_some() {
-                    title.setFont(Some(&NSFont::systemFontOfSize_weight(
-                        f64::from(title_size),
-                        unsafe { NSFontWeightSemibold },
-                    )));
-                    semibold_body_h
-                } else if let Some(face) = c.font.as_ref().and_then(|family| {
-                    NSFontManager::sharedFontManager(mtm).fontWithFamily_traits_weight_size(
-                        &NSString::from_str(family),
-                        NSFontTraitMask::empty(),
-                        5,
-                        t.typography.reading as f64,
-                    )
-                }) {
-                    title.setFont(Some(&face));
-                    title.fittingSize().height.ceil()
+            if let Some(query) = &palette_query {
+                if place == self.cache.palette_rows.len() {
+                    let below = self
+                        .cache
+                        .buttons
+                        .first()
+                        .map(|button| &*button.view as &NSView);
+                    self.cache
+                        .palette_rows
+                        .push(spotlight::RowDecoration::new(self.list, below, t));
+                }
+                let decoration = &mut self.cache.palette_rows[place];
+                decoration.update(
+                    self.cache.palette_theme.as_mut().unwrap(),
+                    &display_label,
+                    &c.command,
+                    &c.category,
+                    query,
+                    self.model.lit() == Some(place),
+                );
+                decoration.layout(rect, body_h);
+                decoration.set_hidden(false);
+            } else {
+                let (title, title_h) = if disclosure.is_some() || c.font.is_some() {
+                    let title = popup_label(&display_label, title_size, title_color, mtm);
+                    let height = if disclosure.is_some() {
+                        title.setFont(Some(&NSFont::systemFontOfSize_weight(
+                            f64::from(title_size),
+                            unsafe { NSFontWeightSemibold },
+                        )));
+                        semibold_body_h
+                    } else if let Some(face) = c.font.as_ref().and_then(|family| {
+                        NSFontManager::sharedFontManager(mtm).fontWithFamily_traits_weight_size(
+                            &NSString::from_str(family),
+                            NSFontTraitMask::empty(),
+                            5,
+                            t.typography.reading as f64,
+                        )
+                    }) {
+                        title.setFont(Some(&face));
+                        title.fittingSize().height.ceil()
+                    } else {
+                        body_h
+                    };
+                    self.list.addSubview(&title);
+                    self.parts
+                        .push(Retained::into_super(Retained::into_super(title.clone())));
+                    (title, height)
                 } else {
-                    body_h
+                    (
+                        self.label(&display_label, title_size, title_color, None),
+                        body_h,
+                    )
                 };
-                self.list.addSubview(&title);
-                self.parts
-                    .push(Retained::into_super(Retained::into_super(title.clone())));
-                (title, height)
-            } else {
-                (
-                    self.label(&display_label, title_size, title_color, None),
-                    body_h,
-                )
-            };
-            let title_lead = if disclosure.is_some() {
-                edge + f64::from(m.symbol_inline + t.space.xs)
-            } else {
-                lead
-            };
-            centred(
-                &title,
-                title_lead,
-                y,
-                row_h,
-                (trailing - title_lead).max(0.),
-                title_h,
-            );
+                let title_lead = if disclosure.is_some() {
+                    edge + f64::from(m.symbol_inline + t.space.xs)
+                } else {
+                    lead
+                };
+                centred(
+                    &title,
+                    title_lead,
+                    y,
+                    row_h,
+                    (trailing - title_lead).max(0.),
+                    title_h,
+                );
+            }
             if let Some((detail, height)) = description {
                 detail.setFrame(NSRect::new(
                     NSPoint::new(lead, y + row_h - t.space.xs as f64),
@@ -8901,7 +9271,7 @@ impl PopupLayout<'_> {
             });
             y += item_h;
         }
-        if unlisted > 0 {
+        if unlisted > 0 && !is_palette {
             let note = self.label(
                 &format!("{unlisted} more · type to narrow"),
                 caption,
@@ -8940,26 +9310,57 @@ impl PopupLayout<'_> {
                 button.view.setHidden(true);
             }
         }
-        let field_h = if self.searchable { self.search.fittingSize().height.ceil() } else { 0. };
-        let above = if self.searchable { inset * 2. + field_h } else { inset };
-        let shown = y.min(self.max_height as f64 - above - inset).max(row_h);
-        let height = above + shown + inset;
-        self.search.setFrame(NSRect::new(
-            NSPoint::new(inset, height - inset - field_h),
-            NSSize::new(width - inset * 2., field_h),
-        ));
-        self.scroll.setFrame(NSRect::new(
-            NSPoint::new(0., inset),
-            NSSize::new(width, shown),
-        ));
+        for decoration in self.cache.palette_rows.iter().skip(chosen.len()) {
+            decoration.set_hidden(true);
+        }
+        let field_h = if is_palette {
+            24.
+        } else if self.searchable {
+            self.search.fittingSize().height.ceil()
+        } else {
+            0.
+        };
+        let (above, below) = if is_palette {
+            (spotlight::HEADER, spotlight::FOOTER)
+        } else {
+            (
+                if self.searchable {
+                    inset * 2. + field_h
+                } else {
+                    inset
+                },
+                inset,
+            )
+        };
+        let shown = y.min(self.max_height as f64 - above - below).max(row_h);
+        let height = above + shown + below;
+        let (left, right, top) = if is_palette {
+            (44., 44., (spotlight::HEADER - field_h) / 2.)
+        } else {
+            (inset, inset, inset)
+        };
+        let search_frame = NSRect::new(
+            NSPoint::new(left, height - top - field_h),
+            NSSize::new(width - left - right, field_h),
+        );
+        if self.search.frame() != search_frame {
+            self.search.setFrame(search_frame);
+        }
+        let scroll_frame = NSRect::new(NSPoint::new(0., below), NSSize::new(width, shown));
+        if self.scroll.frame() != scroll_frame {
+            self.scroll.setFrame(scroll_frame);
+        }
         // More rows than fit: the list fades out at the bottom edge, so a
         // row is never cut there, and scrolls a fade's length past its end,
         // so the last row comes clear of it.
         let more = y > shown + 0.5;
-        self.list.setFrame(NSRect::new(
+        let list_frame = NSRect::new(
             NSPoint::ZERO,
             NSSize::new(width, if more { y + POPUP_FADE } else { y }),
-        ));
+        );
+        if self.list.frame() != list_frame {
+            self.list.setFrame(list_frame);
+        }
         let mask = (more, width, shown);
         if self.cache.mask != Some(mask) {
             self.scroll.setWantsLayer(true);
@@ -9058,7 +9459,13 @@ pub fn capture_agent_picker(
     })?;
     root.setAppearance(Some(&appearance));
     let body = root.contentView()?;
-    let (search, scroll, list) = popup_controls(mtm, &body, t, input["placeholder"].as_str().unwrap_or_default());
+    let (search, scroll, list) = popup_controls(
+        mtm,
+        &body,
+        t,
+        input["placeholder"].as_str().unwrap_or_default(),
+        surface,
+    );
     search.setHidden(!searchable);
     search.setStringValue(&NSString::from_str(query));
     let mut model = Picker {
@@ -9191,6 +9598,86 @@ fn verify_provider_layout(t: &Tokens, model: &Picker, rows: &[PopupRow], parts: 
 }
 
 impl Popup {
+    fn set_cmd_held(&mut self, held: bool) {
+        if self.surface == Surface::Palette && self.cmd_held != held {
+            self.cmd_held = held;
+            self.sync_badges();
+        }
+    }
+
+    fn sync_badges(&mut self) {
+        let count = if self.cmd_held && self.model.open {
+            self.rows.len().min(spotlight::QUICK_PICKS)
+        } else {
+            0
+        };
+        let cache = &mut self.layout_cache;
+        for (place, row) in self.rows.iter().take(count).enumerate() {
+            if cache.badges.len() == place {
+                cache.badges.push(spotlight::Badge::new(
+                    place,
+                    &self.list,
+                    &row.button,
+                    &self.tokens,
+                ));
+            }
+            cache.badges[place].show(
+                row.rect,
+                cache.palette_theme.as_ref().unwrap(),
+                self.lit_row_place == Some(place),
+            );
+        }
+        for badge in cache.badges.iter().skip(count) {
+            if !badge.label.isHidden() {
+                badge.label.setHidden(true);
+            }
+        }
+    }
+
+    fn handle_quick_pick(&mut self, event: &NSEvent) -> bool {
+        if self.surface != Surface::Palette
+            || !self.model.open
+            || !spotlight::command_held(event.modifierFlags())
+        {
+            return false;
+        }
+        let key = chord(event);
+        let Some([digit @ b'1'..=b'9']) = key.strip_prefix("cmd+").map(str::as_bytes) else {
+            return false;
+        };
+        let place = usize::from(digit - b'1');
+        if let Some(PickerRow::Choice(index)) = self.rows.get(place).map(|row| row.kind) {
+            self.pick_choice(index, true);
+        }
+        // The palette owns these chords even when that place is empty.
+        true
+    }
+
+    fn dispatch_choice(&mut self, name: &str) {
+        if self.anchor.is_none() {
+            save_palette_recent(&mut self.model.recents, name);
+        }
+        let (command, args) = menu::split_palette_command(name);
+        let _ = self.sender.try_send(Command {
+            name: command.to_owned(),
+            args,
+            token: None,
+        });
+    }
+
+    fn pick_choice(&mut self, index: usize, close: bool) {
+        let Some(choice) = self.model.choices.get(index) else {
+            self.hide();
+            return;
+        };
+        let (name, stays) = (choice.command.clone(), choice.stays);
+        self.dispatch_choice(&name);
+        if close || !stays {
+            self.picked = true;
+            self.hide();
+        }
+    }
+
     fn update_row_selection(&mut self, lit: Option<usize>) {
         let lit = lit.filter(|&place| {
             self.rows
@@ -9212,6 +9699,13 @@ impl Popup {
                     .setAccessibilityValue(Some(&NSString::from_str("Selected")))
             };
         }
+        if let Some(theme) = &self.layout_cache.palette_theme {
+            for place in [self.lit_row_place, lit].into_iter().flatten() {
+                if let Some(row) = self.layout_cache.palette_rows.get_mut(place) {
+                    row.light(theme, lit == Some(place));
+                }
+            }
+        }
         self.lit_row_place = lit;
     }
 
@@ -9221,6 +9715,7 @@ impl Popup {
     fn light(&mut self, glide: bool) {
         let lit = self.model.lit();
         self.update_row_selection(lit);
+        self.sync_badges();
         let (reduce, spring) = (
             self.tokens.accessibility.reduce_motion,
             pm_design::motion::Preset::Layout.spring(&self.tokens.motion),
@@ -9461,6 +9956,7 @@ impl Popup {
         }
         if self.surface == Surface::Palette {
             self.model.page = None;
+            self.cmd_held = spotlight::command_held(NSEvent::modifierFlags_class());
         }
         self.model.search(String::new());
         self.update_row_selection(None);
@@ -9474,6 +9970,7 @@ impl Popup {
         } else {
             self.refresh_if_changed();
         }
+        self.sync_badges();
         let p = self.parent.frame();
         let s = self.window.frame().size;
         let origin = match self.anchor {
@@ -9527,6 +10024,7 @@ impl Popup {
     }
     fn dismiss(&mut self, restore_focus: bool) {
         self.model.open = false;
+        self.set_cmd_held(false);
         self.window.setIgnoresMouseEvents(true);
         // Closed with nothing chosen: the one who asked hears so.
         if !std::mem::take(&mut self.picked)
@@ -9637,15 +10135,7 @@ impl Popup {
         if let Some(name) = self.model.navigate(key) {
             // A row that stays leaves the menu open (`navigate` kept it so).
             self.picked = !self.model.open;
-            if self.anchor.is_none() {
-                save_palette_recent(&mut self.model.recents, &name);
-            }
-            let (command, args) = menu::split_palette_command(&name);
-            let _ = self.sender.try_send(Command {
-                name: command.to_owned(),
-                args,
-                token: None,
-            });
+            self.dispatch_choice(&name);
         }
         if !self.model.open {
             self.hide();
