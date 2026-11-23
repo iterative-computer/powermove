@@ -584,6 +584,9 @@ pub struct Engine {
     /// Whether the scene last looked ahead in draws stills or videos
     /// ([`Self::has_visual_media`]).
     visual_media: crate::frame_inputs::VisualMediaCache,
+    /// Asks the font registry ahead, off this thread, for the faces of every
+    /// text layer of the scene's composition tree ([`crate::font_warm`]).
+    font_warm: crate::font_warm::FontWarmer,
     /// The document, composition and contributed definitions the effects
     /// were last registered for (`set_document_effects`): a drag frame of
     /// the same keeps them (`drag_frame`).
@@ -1204,6 +1207,7 @@ impl Engine {
             cache_enabled: true,
             studio_content: None,
             visual_media: Default::default(),
+            font_warm: Default::default(),
             effects_for: None,
             drag_frame: false,
             #[cfg(test)]
@@ -1265,6 +1269,7 @@ impl Engine {
         self.settler = None;
         self.fonts = Some(fonts);
         self.font_generation = None;
+        self.font_warm.reset();
         // A replacement broker can reuse generation numbers. It is an
         // explicit engine reset, unlike a generation update on that broker.
         self.clear_cache();
@@ -1585,6 +1590,13 @@ impl Engine {
             .map_err(anyhow::Error::msg)
     }
     fn sync_studio(&mut self, scene: &Scene, time: Ticks) -> Result<()> {
+        // A new scene's fonts are asked for now, off this thread, so no
+        // frame met later (while playing) waits for the registry's first
+        // answer; the same scene costs a comparison. Before the effects:
+        // definitions still loading must not hold it back.
+        if let Some(fonts) = &self.fonts {
+            self.font_warm.request(&scene.doc, &scene.comp, fonts);
+        }
         let key = (
             Arc::as_ptr(&scene.doc) as usize,
             scene.content,

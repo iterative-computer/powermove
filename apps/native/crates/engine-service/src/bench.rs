@@ -279,6 +279,20 @@ fn drag_pass(
         "trace_window":[window_start, pm_engine_service::trace::now()]}))
 }
 
+/// Closes the font broker when the bench returns, before the engine service
+/// is dropped, as the app does when it quits (`broker.close()`). This thread
+/// stops answering font asks once its loops end, and a render still asking
+/// then (a look-ahead plan meeting a face for the first time) would hold
+/// `EngineService::drop`'s join for `pm_text::host::ASK_TIMEOUT`: the 60 s
+/// a warmup run's last "ahead" pass waited. Closed, its ask fails at once.
+struct CloseFonts(pm_text::host::FontBroker);
+
+impl Drop for CloseFonts {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 pub fn run() -> anyhow::Result<()> {
     let _scratch = Scratch;
     let hz: f64 = arg("hz", "120").parse()?;
@@ -306,6 +320,8 @@ pub fn run() -> anyhow::Result<()> {
         pm_render::text::host::RenderFonts::new(fonts.clone()),
         None,
     )?;
+    // Dropped before `service` (declared after it), on every return.
+    let _close_fonts = CloseFonts(fonts.clone());
     let viewer = service.viewer(ViewerConfig {
         composition: snapshot
             .open_comp()

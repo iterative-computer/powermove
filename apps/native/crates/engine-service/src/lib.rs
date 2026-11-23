@@ -6,6 +6,7 @@ pub mod color;
 pub mod compat;
 pub mod export_estimate;
 pub use export_estimate::{ExportEstimate, ExportEstimateState, PresetEstimate};
+mod font_warm;
 pub mod frame_codec;
 mod frame_inputs;
 pub mod jobs;
