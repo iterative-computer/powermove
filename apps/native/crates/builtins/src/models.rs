@@ -7,7 +7,7 @@ use crate::{
 };
 use pm_kernel::*;
 use pm_panel_media::{Catalog, readiness::ObservedRuntime, v4::ProjectBridge};
-use pm_panel_timeline::{PropertyFacts, TimelineClient};
+use pm_panel_timeline::{PropertyFacts, Row, RowId, TimelineClient};
 use pm_surface::host_api::Query;
 use serde_json::{Value, json};
 
@@ -99,6 +99,26 @@ pub(crate) struct Models {
     pub(crate) timeline_effect_result: Option<Result<(), String>>,
     timeline_editor: Option<TimelineEditor>,
 }
+/// Keep small outlines mounted so their wheel steps need no JS publication.
+fn retained_outline(rows: &[Row]) -> bool {
+    const BUDGET: usize = 768;
+    if rows.len() > BUDGET {
+        return false;
+    }
+    // A property can carry several values, editors and keyframe controls.
+    // Count those rows more heavily than layer rows and section headings.
+    let mut cost = rows.len();
+    for row in rows {
+        if matches!(row.id, RowId::Property { .. }) {
+            cost += 3;
+            if cost > BUDGET {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 impl Models {
     /// The timeline client, made on first use ([`Models::timeline_source`]).
     pub(crate) fn ensure_timeline(&mut self) -> Result<(), String> {
@@ -305,9 +325,9 @@ impl Backend {
             client.model.editing_property = editing;
             client.model.rebuild_rows();
         }
-        // Retain modest outlines across scrolls. Only the native host mounts rows;
-        // wheel input must never wait for another JS publication.
-        let retained = client.model.rows().len() <= 1536;
+        // Window large or property-heavy outlines, including the rows
+        // exposed by U/M across many layers.
+        let retained = retained_outline(client.model.rows());
         let (first, visible) = if retained {
             (0, client.model.rows().len().max(1))
         } else {

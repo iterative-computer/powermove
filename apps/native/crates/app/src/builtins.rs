@@ -181,6 +181,7 @@ pub struct Host {
     /// The window's open panels, and closed built-ins whose isolates are going.
     open: BTreeSet<String>,
     parking: BTreeSet<String>,
+    memory_recovery: BTreeMap<String, MemoryRecovery>,
     /// The clip painters' revision the timeline last asked for.
     painters: u64,
     /// v4 extensions' viewer overlays (`overlays.viewer`).
@@ -493,26 +494,11 @@ impl Controller {
                     }
                     match result {
                         Ok(generation) => {
-                            v.builtins.generations.insert(id.clone(), generation);
-                            // A panel window kept open across a restart (Export
-                            // asked for before the project arrived) shows its
-                            // panel from the new realm, not an empty sheet.
-                            // Settings, on the section it was showing.
-                            let live = v
-                                .builtins
-                                .windows
-                                .get(&id)
-                                .is_some_and(|h| h.update(cx, |_, _, _| ()).is_ok());
-                            if live {
-                                let _ = match v.builtins.settings_history.current() {
-                                    Some(page) if id == "settings" => {
-                                        check.show_section(&id, &page)
-                                    }
-                                    _ => check.show(&id),
-                                };
-                            }
-                            v.builtins.ready.insert(id);
+                            v.builtin_did_mount(&check, id, generation, cx);
                         }
+                        // The owner also reports memory failures when there's
+                        // no ticket. The wake/drain handles both cases once.
+                        Err(error) if error.is_memory() => {}
                         Err(error) => {
                             check.close_panel(&id);
                             v.message = format!("Panel {id} could not start: {error}");
@@ -589,11 +575,25 @@ impl Controller {
     /// A surface extension's first commit landed; its panel can render and its
     /// platform requests are accepted.
     pub fn surface_ready(&mut self, id: String, generation: u64) {
+        self.builtins.memory_recovery.remove(&id);
         self.builtins.generations.insert(id.clone(), generation);
         self.builtins.ready.insert(id);
     }
 }
 impl Host {
+    fn owns_runtime(&self, runtime: &Arc<Builtins>) -> bool {
+        self.runtime
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, runtime))
+    }
+
+    fn recovery_in_progress_or_failed(&self, id: &str) -> bool {
+        matches!(
+            self.memory_recovery.get(id),
+            Some(MemoryRecovery::Restarting | MemoryRecovery::Failed)
+        )
+    }
+
     fn set_media_observation_current(&mut self, current: bool) {
         if self.media_observation_current != current {
             self.media_observation_current = current;
@@ -1226,6 +1226,9 @@ impl Controller {
             .filter(|p| p.parks)
             .map(|p| p.id.as_str())
         {
+            if self.builtins.recovery_in_progress_or_failed(id) {
+                continue;
+            }
             let shown = open.contains(&id);
             if shown && runtime.is_parked(id) {
                 self.unpark(id, cx);
@@ -1272,18 +1275,176 @@ impl Controller {
                 Ok(ticket) => ticket.await.map(|evaluation| evaluation.generation.number),
                 Err(error) => Err(error),
             };
-            let _ = this.update(cx, |v, cx| match result {
-                Ok(generation) => {
-                    v.builtins.generations.insert(id.clone(), generation);
-                    v.builtins.ready.insert(id);
-                    v.drain_builtins(cx);
-                    cx.notify();
+            let _ = this.update(cx, |v, cx| {
+                if !v.builtins.owns_runtime(&runtime) {
+                    return;
                 }
-                Err(error) => v.message = format!("Panel {id} could not start: {error}"),
+                match result {
+                    Ok(generation) => v.builtin_did_mount(&runtime, id, generation, cx),
+                    Err(error) => {
+                        v.drain_builtins(cx);
+                        if !v.builtins.recovery_in_progress_or_failed(&id) {
+                            v.message = format!("Panel {id} could not start: {error}");
+                        }
+                        cx.notify();
+                        return;
+                    }
+                }
+                v.drain_builtins(cx);
+                cx.notify();
             });
         })
         .detach();
     }
+
+    fn builtin_did_mount(
+        &mut self,
+        runtime: &Builtins,
+        id: String,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if self.builtins.recovery_in_progress_or_failed(&id) {
+            return;
+        }
+        self.builtins.generations.insert(id.clone(), generation);
+        // Restore the open popover/sheet after a project change or a memory
+        // restart, including the Settings page that was showing.
+        let live = self
+            .builtins
+            .windows
+            .get(&id)
+            .is_some_and(|handle| handle.update(cx, |_, _, _| ()).is_ok());
+        if live {
+            let _ = match self.builtins.settings_history.current() {
+                Some(page) if id == "settings" => runtime.show_section(&id, &page),
+                _ => runtime.show(&id),
+            };
+        }
+        self.builtins.ready.insert(id);
+    }
+
+    fn recover_builtin(
+        &mut self,
+        runtime: &Arc<Builtins>,
+        id: String,
+        error: pm_runtime_v8::Error,
+        cx: &mut Context<Self>,
+    ) {
+        if self.builtins.parking.contains(&id) {
+            // The owner has already been asked to retire. Opening the panel
+            // again will mount a fresh realm.
+            return;
+        }
+        self.builtins.forget_surface(&id);
+        let state = MemoryRecovery::after_failure(self.builtins.memory_recovery.get(&id).copied());
+        self.set_panel_recovery(&id, state, cx);
+        if state == MemoryRecovery::Restarting {
+            eprintln!("Panel {id} restarting after {error}");
+            self.restart_builtin(runtime.clone(), id, cx);
+        } else {
+            self.message = format!("{} — Reload", panel_recovery_message(&id, true));
+        }
+        cx.notify();
+    }
+
+    fn restart_builtin(&mut self, runtime: Arc<Builtins>, id: String, cx: &mut Context<Self>) {
+        let check = runtime.clone();
+        cx.spawn(async move |this, cx| {
+            let ticket = cx
+                .background_executor()
+                .spawn({
+                    let id = id.clone();
+                    async move { runtime.restart(&id) }
+                })
+                .await;
+            let result = match ticket {
+                Ok(ticket) => ticket.await.map(|evaluation| evaluation.generation.number),
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |v, cx| {
+                if !v.builtins.owns_runtime(&check)
+                    || v.builtins.memory_recovery.get(&id) != Some(&MemoryRecovery::Restarting)
+                {
+                    return;
+                }
+                match result {
+                    Ok(generation) => {
+                        v.set_panel_recovery(&id, MemoryRecovery::Restarted, cx);
+                        v.builtin_did_mount(&check, id, generation, cx);
+                    }
+                    Err(error) if error.is_memory() => {}
+                    Err(pm_runtime_v8::Error::StaleGeneration) => {
+                        // A user fork took over while the old realm was leaving.
+                        v.builtins.memory_recovery.remove(&id);
+                    }
+                    Err(error) => {
+                        v.message = format!("Panel {id} could not reload: {error}");
+                        eprintln!("{}", v.message);
+                        v.set_panel_recovery(&id, MemoryRecovery::Failed, cx);
+                    }
+                }
+                v.drain_builtins(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn set_panel_recovery(&mut self, id: &str, state: MemoryRecovery, cx: &mut Context<Self>) {
+        self.builtins.memory_recovery.insert(id.to_owned(), state);
+        if id == "settings" && self.builtins.settings_form.is_some() {
+            self.mount_settings_form(cx);
+        }
+    }
+
+    pub(crate) fn reload_builtin(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return;
+        };
+        if self.builtins.memory_recovery.get(id) != Some(&MemoryRecovery::Failed) {
+            return;
+        }
+        self.set_panel_recovery(id, MemoryRecovery::Restarting, cx);
+        if self.message == format!("{} — Reload", panel_recovery_message(id, true)) {
+            self.message.clear();
+        }
+        self.restart_builtin(runtime, id.to_owned(), cx);
+        cx.notify();
+    }
+
+    fn memory_status_panel(&self, id: &str, retry: bool, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.host.borrow().tokens.clone();
+        let panel = id.to_owned();
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .p(px(t.space.sm))
+            .bg(pm_shell::kit::ink(t.colors.panel, 1.))
+            .text_color(pm_shell::kit::ink(t.colors.text, 1.))
+            .child(panel_recovery_message(id, retry))
+            .when(retry, |body| {
+                body.child(
+                    div()
+                        .id(SharedString::from(format!("reload-{id}")))
+                        .px(px(12.))
+                        .py(px(4.))
+                        .rounded(px(t.metrics.control_radius))
+                        .bg(pm_shell::kit::ink(t.colors.raised, 1.))
+                        .role(Role::Button)
+                        .tab_index(0)
+                        .aria_label("Reload")
+                        .child("Reload")
+                        .on_click(cx.listener(move |v, _, _, cx| v.reload_builtin(&panel, cx))),
+                )
+            })
+            .into_any_element()
+    }
+
     pub(crate) fn drain_builtins(&mut self, cx: &mut Context<Self>) {
         self.refresh_native_effects();
         // Settings › General › Open Projects In may have changed.
@@ -1291,6 +1452,9 @@ impl Controller {
         let Some(runtime) = self.builtins.runtime.clone() else {
             return;
         };
+        for (id, error) in runtime.take_panel_memory_failures() {
+            self.recover_builtin(&runtime, id, error, cx);
+        }
         // The Export sheet's checks finished on their worker: its new state
         // is published, then drained as any other publication.
         if let Some(Ok(ticket)) = runtime.publish_finished_checks() {
@@ -1308,6 +1472,9 @@ impl Controller {
             }
         }
         for p in runtime.take_publications() {
+            if self.builtins.memory_recovery.get(&p.panel) == Some(&MemoryRecovery::Failed) {
+                continue;
+            }
             effect_controls_changed |= matches!(p.panel.as_str(),"layer-effects"|"inspector");
             if p.panel.ends_with(pm_builtins::VIEWER_OVERLAY) {
                 if let Some(overlays) = &self.builtins.overlays {
@@ -1316,7 +1483,10 @@ impl Controller {
                 }
                 continue;
             }
-            if p.panel == "settings" && self.builtins.settings_form.is_some() {
+            if p.panel == "settings"
+                && self.builtins.settings_form.is_some()
+                && !self.builtins.recovery_in_progress_or_failed("settings")
+            {
                 self.publish_settings_form(p, cx);
             } else if let Some(view) = self.builtins.views.get(&p.panel) {
                 view.update(cx, |v, cx| v.publish(p, cx));
@@ -1372,6 +1542,19 @@ impl Controller {
         }
     }
     pub(crate) fn mount_settings_form(&mut self, cx: &mut Context<Self>) {
+        if self.builtins.recovery_in_progress_or_failed("settings") {
+            if let Some(form) = &mut self.builtins.settings_form {
+                let retry = self.builtins.memory_recovery.get("settings")
+                    == Some(&MemoryRecovery::Failed);
+                form.show_memory_status(
+                    &panel_recovery_message("settings", retry),
+                    retry,
+                    &self.host.borrow().tokens,
+                    cx,
+                );
+            }
+            return;
+        }
         if let Some(publication) = self.builtins.pending.remove("settings") {
             self.publish_settings_form(publication, cx);
         }
@@ -1398,6 +1581,13 @@ impl Controller {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        match self.builtins.memory_recovery.get(id) {
+            Some(MemoryRecovery::Restarting) => {
+                return Some(self.memory_status_panel(id, false, cx));
+            }
+            Some(MemoryRecovery::Failed) => return Some(self.memory_status_panel(id, true, cx)),
+            _ => {}
+        }
         if !self.builtins.ready.contains(id) {
             return None;
         }
@@ -1427,7 +1617,10 @@ impl Controller {
             if id == "timeline" {
                 outline.bind(view.downgrade());
                 let wake = self.playback_wake.clone();
-                view.update(cx, |v, _| v.installed = wake);
+                view.update(cx, |v, cx| {
+                    v.installed = wake;
+                    v.sync_outline_window(cx);
+                });
             }
             if id == "inspector"
                 && let Some(layer) = self.extensions.focus_text.take()
@@ -4488,6 +4681,69 @@ pub(crate) fn viewer_new_menu() -> pm_shell::MenuEntry {
             pm_shell::MenuEntry::item("Composition…", "newComposition"),
         ],
     )
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemoryRecovery {
+    Restarting,
+    Restarted,
+    Failed,
+}
+impl MemoryRecovery {
+    fn after_failure(previous: Option<Self>) -> Self {
+        if previous.is_none() {
+            Self::Restarting
+        } else {
+            Self::Failed
+        }
+    }
+}
+fn builtin_title(id: &str) -> &str {
+    pm_builtins::builtin_panel(id).map_or(id, |panel| panel.title.as_str())
+}
+fn panel_recovery_message(id: &str, retry: bool) -> String {
+    let title = builtin_title(id);
+    if retry {
+        format!("{title} ran out of memory")
+    } else {
+        format!("Reloading {title}…")
+    }
+}
+
+#[cfg(test)]
+mod memory_recovery_tests {
+    use super::{MemoryRecovery, panel_recovery_message};
+
+    #[test]
+    fn restarts_once_then_shows_the_reload_error() {
+        let first = MemoryRecovery::after_failure(None);
+        assert_eq!(first, MemoryRecovery::Restarting);
+        assert_eq!(
+            MemoryRecovery::after_failure(Some(first)),
+            MemoryRecovery::Failed
+        );
+        assert_eq!(
+            MemoryRecovery::after_failure(Some(MemoryRecovery::Restarted)),
+            MemoryRecovery::Failed
+        );
+        assert_eq!(
+            panel_recovery_message("timeline", true),
+            "Timeline ran out of memory"
+        );
+        assert_eq!(
+            panel_recovery_message("inspector", true),
+            "Properties ran out of memory"
+        );
+    }
+
+    #[test]
+    fn only_memory_errors_recover() {
+        use pm_runtime_v8::{Error, HEAP_FULL};
+        assert!(Error::Quota("heap").is_memory());
+        assert!(Error::Quota(HEAP_FULL).is_memory());
+        assert!(Error::Quota("external memory").is_memory());
+        assert!(!Error::Quota("source bytes").is_memory());
+        assert!(!Error::Closed.is_memory());
+    }
 }
 /// A side panel's body: the scroller, a scroll layer, around the panel. A
 /// view of its own, cached, so a wheel step that only moves the offset

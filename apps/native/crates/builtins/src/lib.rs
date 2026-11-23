@@ -81,6 +81,7 @@ use std::{
 /// mounts, forks copy and the build bundles.
 pub struct BuiltinPanel {
     pub id: String,
+    pub title: String,
     /// Parks while closed: its isolate goes until it opens again. The viewer
     /// and timeline are always shown, the agent holds live runs, and window
     /// panels close with their window.
@@ -99,6 +100,7 @@ pub static BUILTIN_PANELS: std::sync::LazyLock<Vec<BuiltinPanel>> =
                 let flag = |name: &str| p[name].as_bool().unwrap_or(false);
                 BuiltinPanel {
                     id: p["id"].as_str().expect("panel id").to_owned(),
+                    title: p["title"].as_str().expect("panel title").to_owned(),
                     parks: flag("parks"),
                     application: flag("application"),
                     window: flag("window"),
@@ -280,6 +282,7 @@ pub struct Builtins {
     broker: Arc<Broker>,
     /// Built-in panels by id; a fork that replaces one runs in its place here.
     realms: Mutex<BTreeMap<String, Realm>>,
+    panel_replacements: Mutex<()>,
     extension_realms: Mutex<BTreeMap<String, Realm>>,
     /// User forks running in place of a built-in (`replace`): the fork's id
     /// and module graph by panel, so a parked fork starts again as itself.
@@ -1401,7 +1404,7 @@ impl Builtins {
                 cache: CodeCache::new(4 * 1024 * 1024),
                 // The process's one cage account: each isolate (the nine
                 // built-ins and the user's v4 extensions, §3.4/§3.7) starts
-                // at a 16 MiB slice and grows toward its 64 MiB ceiling only
+                // at a 16 MiB slice and grows toward its own ceiling only
                 // while every window's isolates together leave room. Closed
                 // panels park to give theirs back.
                 admission: Admission::cage(),
@@ -1412,6 +1415,7 @@ impl Builtins {
             pool,
             broker,
             realms: Mutex::default(),
+            panel_replacements: Mutex::default(),
             extension_realms: Mutex::default(),
             forks: Mutex::default(),
         })
@@ -1441,6 +1445,7 @@ impl Builtins {
     /// returns to the cage account; `unpark` starts it again from its first
     /// commit. Waits (bounded) for the isolate: call off the main thread.
     pub fn park(&self, panel: &str) -> bool {
+        let _replacement = self.panel_replacements.shared();
         if !builtin_panel(panel).is_some_and(|p| p.parks)
             || !self.realms.shared().contains_key(panel)
         {
@@ -1473,18 +1478,64 @@ impl Builtins {
         {
             return Err(Error::Invalid("unregistered/already mounted built-in"));
         }
-        self.start(
+        let realm = self
+            .pool
+            .builtin_panel_realm(panel, self.broker.wake.clone())?;
+        self.start_in(
             panel,
             format!("{BUNDLE}\n__pmBuiltin.mount({})", json!(panel)),
+            realm,
         )
     }
+    /// A built-in panel whose realm ran out of memory: its isolate goes and a
+    /// fresh one mounts it again. Off the main thread (it waits for the old
+    /// isolate's reservation to come back).
+    pub fn restart(&self, panel: &str) -> Result<Ticket<Evaluation>> {
+        let _replacement = self.panel_replacements.shared();
+        if self
+            .broker
+            .closing
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(Error::Closed);
+        }
+        if self.forks.shared().contains_key(panel) {
+            return Err(Error::StaleGeneration);
+        }
+        // Agent runs live in the native model. Move that model to the next
+        // realm in the same way an application window carries it to a project.
+        if panel == "agent"
+            && let Ok(backend) = self.backend(panel)
+            && let Some(agent) = backend.shared().native.agent.clone()
+        {
+            *self.broker.carried.shared() = Some(agent);
+        }
+        self.retire(panel);
+        self.broker.parked.shared().remove(panel);
+        self.mount_builtin(panel)
+    }
+
+    pub fn take_panel_memory_failures(&self) -> Vec<(String, Error)> {
+        self.realms
+            .shared()
+            .iter()
+            .filter_map(|(panel, realm)| Some((panel.clone(), realm.take_panel_memory_failure()?)))
+            .collect()
+    }
+
     fn start(&self, panel: &str, source: String) -> Result<Ticket<Evaluation>> {
         let realm = self.pool.realm(RealmKind::V4Extension(panel.into()))?;
+        self.start_in(panel, source, realm)
+    }
+    fn start_in(&self, panel: &str, source: String, realm: Realm) -> Result<Ticket<Evaluation>> {
         if matches!(panel, "agent" | "settings") {
             self.broker.agent.add_realm(realm.clone());
         }
+        // Register the realm while queuing its first evaluation. The owner can
+        // wake the host with a failure as soon as it starts evaluating.
+        let mut realms = self.realms.shared();
         let ticket = realm.eval(source)?;
-        self.realms.shared().insert(panel.into(), realm);
+        realms.insert(panel.into(), realm);
         Ok(ticket)
     }
     /// Retire a built-in panel's realm, its writer and its surface, so the next
@@ -1516,6 +1567,7 @@ impl Builtins {
         if builtin_panel(panel).is_none_or(|p| self.broker.application && !p.application) {
             return Err(Error::Invalid("unregistered built-in"));
         }
+        let _replacement = self.panel_replacements.shared();
         self.retire(panel);
         self.forks
             .shared()
@@ -1524,6 +1576,7 @@ impl Builtins {
     }
     /// The fork went away: the shipped panel comes back.
     pub fn restore(&self, panel: &str) -> Result<Ticket<Evaluation>> {
+        let _replacement = self.panel_replacements.shared();
         self.retire(panel);
         self.forks.shared().remove(panel);
         self.broker.parked.shared().remove(panel);

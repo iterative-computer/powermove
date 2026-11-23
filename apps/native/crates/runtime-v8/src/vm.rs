@@ -404,12 +404,19 @@ pub(crate) struct HeapPlan {
 impl HeapPlan {
     pub fn new(limits: &Limits) -> Self {
         let params = v8::CreateParams::default().heap_limits(0, limits.heap_bytes);
-        let young = params.max_young_generation_size_in_bytes().min(YOUNG_MAX);
         let ceiling_old = params.max_old_generation_size_in_bytes();
+        let minimum_old = ceiling_old.min(4 * MIB);
+        // A high ceiling can give V8 a young generation as large as the
+        // entire initial slice. Leave room for old objects inside that slice.
+        let young_budget = limits.initial_heap_bytes.saturating_sub(minimum_old);
+        let young = params
+            .max_young_generation_size_in_bytes()
+            .min(YOUNG_MAX)
+            .min(young_budget.max(4 * MIB));
         let initial_old = limits
             .initial_heap_bytes
             .saturating_sub(young)
-            .clamp(ceiling_old.min(4 * MIB), ceiling_old);
+            .clamp(minimum_old, ceiling_old);
         Self {
             young,
             initial_old,
