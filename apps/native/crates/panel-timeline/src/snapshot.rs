@@ -154,6 +154,7 @@ pub struct TimelineIndex {
     pub layers: Vec<Arc<Layer>>,
     pub markers: Vec<Marker>,
     by_id: HashMap<String, usize>,
+    locked_descendants: HashSet<String>,
     /// Key ids by layer position, [`KEY_BLOCK`] layers a block. A block whose
     /// layers are all reused is reused, so an edit re-indexes one block.
     key_blocks: Vec<Arc<KeyBlock>>,
@@ -217,6 +218,7 @@ impl Default for TimelineIndex {
             layers: Vec::new(),
             markers: Vec::new(),
             by_id: HashMap::new(),
+            locked_descendants: HashSet::new(),
             key_blocks: Vec::new(),
         }
     }
@@ -287,27 +289,35 @@ impl TimelineIndex {
             number(comp.get("work").and_then(|v| v.at(0))).unwrap_or(0.),
             number(comp.get("work").and_then(|v| v.at(1))).unwrap_or(result.duration),
         ];
-        for layer in model::layers_of(comp) {
-            let reused = same
-                .then(|| string(layer.get("id")))
-                .flatten()
-                .and_then(|id| self.layer_arc(&id))
-                .filter(|l| l.rev == layer.rev());
-            match reused {
-                Some(l) => result.layers.push(l.clone()),
-                None => {
-                    if let Some(read) = Self::read_layer(layer) {
-                        result.layers.push(Arc::new(read));
-                    }
-                }
+        for (ordinal, layer) in model::layers_of(comp).enumerate() {
+            let Some(id) = string(layer.get("id")).filter(|id| !id.is_empty()) else {
+                eprintln!("Timeline skipped layer {} with no usable id", ordinal + 1);
+                continue;
+            };
+            if result.by_id.contains_key(&id) {
+                eprintln!("Timeline skipped duplicate layer id at row {}", ordinal + 1);
+                continue;
             }
+            let from = number(layer.get("from")).unwrap_or(0.);
+            let duration = number(layer.get("dur")).unwrap_or(0.);
+            if !from.is_finite()
+                || !duration.is_finite()
+                || duration < 0.
+                || !(from + duration).is_finite()
+            {
+                eprintln!("Timeline skipped layer {} with invalid timing", ordinal + 1);
+                continue;
+            }
+            let reused = same
+                .then(|| self.layer_arc(&id))
+                .flatten()
+                .filter(|previous| previous.rev == layer.rev());
+            result.by_id.insert(id.clone(), result.layers.len());
+            let layer = reused
+                .cloned()
+                .unwrap_or_else(|| Arc::new(Self::read_layer(layer, id, from, duration)));
+            result.layers.push(layer);
         }
-        result.by_id = result
-            .layers
-            .iter()
-            .enumerate()
-            .map(|(i, l)| (l.id.clone(), i))
-            .collect();
         // Memoised group locks, bounded even on corrupt/cyclic input. Transform parents
         // do not imply group locks (kernel's lock policy).
         let mut locked = vec![None; result.layers.len()];
@@ -343,6 +353,21 @@ impl TimelineIndex {
                 Arc::make_mut(l).effectively_locked = effective;
             }
         }
+        for layer in result.layers.iter().filter(|layer| layer.locked) {
+            let mut parent = layer.group.clone();
+            while let Some(id) = parent {
+                let Some(group) = result.layer(&id) else {
+                    break;
+                };
+                if group.id == layer.id || group.kind != "group" {
+                    break;
+                }
+                parent = group.group.clone();
+                if !result.locked_descendants.insert(id) {
+                    break;
+                }
+            }
+        }
         let previous: HashMap<*const Layer, &Arc<KeyBlock>> = self
             .key_blocks
             .iter()
@@ -371,8 +396,7 @@ impl TimelineIndex {
         result
     }
     /// One stored layer as the timeline reads it.
-    fn read_layer(layer: &Node) -> Option<Layer> {
-        let id = string(layer.get("id"))?;
+    fn read_layer(layer: &Node, id: String, from: f64, duration: f64) -> Layer {
         let mut channels = Vec::new();
         let mut path_groups = HashMap::new();
         collect_channels(layer.get("p"), "", &mut channels);
@@ -529,8 +553,8 @@ impl TimelineIndex {
             kind: string(layer.get("type")).unwrap_or_default(),
             group: string(layer.get("group")),
             parent: string(layer.get("parent")),
-            from: number(layer.get("from")).unwrap_or(0.),
-            duration: number(layer.get("dur")).unwrap_or(0.),
+            from,
+            duration,
             locked: boolean(layer.get("lock")),
             effectively_locked: false,
             visible: match layer.get("on").map(Node::kind) {
@@ -575,7 +599,7 @@ impl TimelineIndex {
                 read.key_at.insert(key.id.clone(), (c, k));
             }
         }
-        Some(read)
+        read
     }
     fn layer_arc(&self, id: &str) -> Option<&Arc<Layer>> {
         self.by_id.get(id).map(|i| &self.layers[*i])
@@ -586,6 +610,21 @@ impl TimelineIndex {
     }
     pub fn layer(&self, id: &str) -> Option<&Layer> {
         self.by_id.get(id).map(|i| &*self.layers[*i])
+    }
+    pub fn has_locked_descendant(&self, group: &str) -> bool {
+        self.locked_descendants.contains(group)
+    }
+
+    /// The nearest explicit lock, including a lock inherited from a group.
+    pub fn locking_layer(&self, id: &str) -> Option<&Layer> {
+        let mut layer = self.layer(id)?;
+        for _ in 0..self.layers.len() {
+            if layer.locked {
+                return Some(layer);
+            }
+            layer = self.layer(layer.group.as_deref()?)?;
+        }
+        None
     }
     pub fn channel(&self, layer: &str, channel: &str) -> Option<&Channel> {
         let layer = self.layer(layer)?;

@@ -638,6 +638,19 @@ pub fn project_window(
                     } else {
                         disclosure.map(|d| d.collapsed).unwrap_or(layer.collapsed)
                     });
+                    if layer.effectively_locked {
+                        value["lockRow"] = json!(
+                            model
+                                .index
+                                .locking_layer(id)
+                                .map(|owner| row_id(&RowId::Layer(owner.id.clone())))
+                        );
+                    } else if layer.kind == "group"
+                        && value["expanded"] == false
+                        && model.index.has_locked_descendant(id)
+                    {
+                        value["containsLockedLayers"] = json!(true);
+                    }
                     // Keep authored timing exact. Never convert these to frames on read.
                     value["from"] = json!(layer.from);
                     value["duration"] = json!(layer.duration);

@@ -137,11 +137,26 @@ pub struct TimelineModel {
 }
 
 impl TimelineModel {
+    pub fn follows_publication(&self, published: &Published) -> bool {
+        self.follows_snapshot(&published.snapshot)
+            && self.ui_seen.as_ref() == Some(&published.ui_state.timeline)
+            && self.selection == published.selection
+    }
+
+    fn follows_snapshot(&self, snapshot: &pm_kernel::Snapshot) -> bool {
+        self.index.source.as_ref().is_some_and(|s| {
+            s.doc_id == snapshot.doc_id
+                && s.revision == snapshot.revision
+                && s.document.edition() == snapshot.document.edition()
+        })
+    }
+
     /// Consume immutable publication; selection/transport-only changes never scan rows.
     pub fn sync(&mut self, published: &Published) {
         let new_document = self.index.doc_id != published.snapshot.doc_id;
-        let changed = self.index.doc_id != published.snapshot.doc_id
-            || self.index.revision != published.revision();
+        let changed = !self.follows_snapshot(&published.snapshot);
+        let same_composition =
+            !new_document && self.index.comp_id == published.snapshot.open_comp();
         if new_document {
             *self = Self::default();
         }
@@ -153,7 +168,24 @@ impl TimelineModel {
         self.history_applied = published.history.applied;
         self.history_entries = published.history.entries;
         self.selection = published.selection.clone();
-        let previous = (changed && !new_document).then(|| self.index.clone());
+        let previous = (changed && same_composition).then(|| self.index.clone());
+        let agent_edit = changed
+            && published.changes.last().is_some_and(|change| {
+                if change.revision != published.revision() {
+                    return false;
+                }
+                use pm_kernel::{ChangeCause, commands::Origin};
+                matches!(
+                    change.cause,
+                    ChangeCause::Write {
+                        origin: Origin::Agent | Origin::Mcp,
+                        ..
+                    } | ChangeCause::Edit {
+                        origin: Origin::Agent | Origin::Mcp,
+                        ..
+                    }
+                )
+            });
         let entry = published.entry.as_ref().map(|e| e.id);
         if entry != self.reveal.entry || entry.is_none() {
             self.reveal.entry = entry;
@@ -162,7 +194,7 @@ impl TimelineModel {
         if changed {
             // Tracks mode: the lanes shown now hold through whatever changed
             // the document (the timeline, a menu, Properties, an agent).
-            if self.mode == TimelineMode::Tracks && !new_document {
+            if self.mode == TimelineMode::Tracks && same_composition {
                 self.reveal.held = crate::tracks::shown(&self.index, &self.reveal);
             } else {
                 self.reveal.held.clear();
@@ -247,6 +279,11 @@ impl TimelineModel {
             }
             for (layer, path) in added {
                 self.reveal.retained_empty.remove(&(layer.clone(), path.clone()));
+                // An agent can animate layers without taking over the user's
+                // outline or changing which descendants are visible.
+                if agent_edit && self.has_closed_group(&layer) {
+                    continue;
+                }
                 if entry.is_some() && !self.reveal.revealed_in_entry.insert((layer.clone(), path.clone())) {
                     continue;
                 }
@@ -258,7 +295,7 @@ impl TimelineModel {
                 self.rebuild_rows();
             }
         }
-        if selection_changed {
+        if selection_changed && !agent_edit {
             let mut seen = HashSet::new();
             let mut opened = false;
             for id in self.selection.layers() {
@@ -286,6 +323,28 @@ impl TimelineModel {
                 self.rebuild_rows();
             }
         }
+    }
+
+    fn has_closed_group(&self, layer: &str) -> bool {
+        let mut ancestor = self.index.layer(layer).and_then(|l| l.group.as_deref());
+        let mut seen = HashSet::new();
+        while let Some(id) = ancestor {
+            if !seen.insert(id) {
+                break;
+            }
+            let parent = self.index.layer(id);
+            if self
+                .reveal
+                .layers
+                .get(id)
+                .map(|d| d.group_collapsed)
+                .unwrap_or_else(|| parent.is_some_and(|group| group.group_collapsed))
+            {
+                return true;
+            }
+            ancestor = parent.and_then(|group| group.group.as_deref());
+        }
+        false
     }
 
     pub fn rebuild_rows(&mut self) {
@@ -645,6 +704,36 @@ impl TimelineModel {
     }
     pub fn rows(&self) -> &[Row] {
         &self.rows
+    }
+
+    /// Select sibling layers in the focused group, or the composition's roots.
+    pub fn select_all(&mut self, focused_layer: Option<&str>) -> Call {
+        let children = self.index.children();
+        let group = focused_layer
+            .filter(|id| self.row_position(&RowId::Layer((*id).into())).is_some())
+            .and_then(|id| self.index.layer(id)?.group.clone())
+            .filter(|id| {
+                self.index.layer(id).is_some_and(|group| {
+                    !self
+                        .reveal
+                        .layers
+                        .get(id)
+                        .map_or(group.group_collapsed, |state| state.group_collapsed)
+                })
+            });
+        let siblings = if group.is_some() {
+            children.get(&group).cloned().unwrap_or_default()
+        } else {
+            self.index.roots(&children)
+        };
+        let ids = siblings
+            .into_iter()
+            .map(|i| &self.index.layers[i])
+            .filter(|layer| !layer.effectively_locked)
+            .map(|layer| layer.id.clone())
+            .collect();
+        self.key_selection_active = false;
+        SelectionCall::Layers { ids, add: false }.user().into()
     }
 
     /// timeline.ts:3110–3135. Shift ranges only visible layer rows and keeps its anchor.

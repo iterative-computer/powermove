@@ -451,6 +451,60 @@ fn inherited_group_lock_is_indexed() {
     );
 }
 #[test]
+fn mixed_selection_with_a_locked_layer_moves_the_unlocked_ones() {
+    let mut v = fixture();
+    layer_mut(&mut v, 1).insert("lock", Value::Bool(true));
+    let (_a, mut c) = client_with(v);
+    let b_from = c.model.index.layer("b").unwrap().from;
+    block_on(c.begin_drag(DragKind::Layers {
+        ids: strings(&["a", "b"]),
+    }))
+    .unwrap();
+    let note = c.active_drag().unwrap().locked_note();
+    assert_eq!(
+        note,
+        Some(HostEffect::Status("1 locked layer didn't move".into()))
+    );
+    block_on(c.drag(sample(2.))).unwrap();
+    assert_eq!(c.model.index.layer("a").unwrap().from, 3.);
+    assert_eq!(c.model.index.layer("b").unwrap().from, b_from);
+    block_on(c.finish_drag(true)).unwrap();
+    assert_eq!(c.kernel.published("P").unwrap().history.entries, 1);
+}
+#[test]
+fn mixed_selection_with_a_locked_layer_trims_the_unlocked_ones() {
+    let mut v = fixture();
+    layer_mut(&mut v, 1).insert("lock", Value::Bool(true));
+    let (_a, mut c) = client_with(v);
+    let a_duration = c.model.index.layer("a").unwrap().duration;
+    let b = c.model.index.layer("b").unwrap().clone();
+    block_on(c.begin_drag(DragKind::TrimOut {
+        ids: strings(&["a", "b"]),
+    }))
+    .unwrap();
+    assert_eq!(
+        c.active_drag().unwrap().locked_note(),
+        Some(HostEffect::Status("1 locked layer didn't trim".into()))
+    );
+    block_on(c.drag(sample(-0.5))).unwrap();
+    assert!(c.model.index.layer("a").unwrap().duration < a_duration);
+    assert_eq!(c.model.index.layer("b").unwrap().duration, b.duration);
+    block_on(c.finish_drag(true)).unwrap();
+}
+#[test]
+fn only_locked_selection_still_refuses_the_drag() {
+    let mut v = fixture();
+    layer_mut(&mut v, 0).insert("lock", Value::Bool(true));
+    layer_mut(&mut v, 1).insert("lock", Value::Bool(true));
+    let (_a, mut c) = client_with(v);
+    assert!(
+        block_on(c.begin_drag(DragKind::Layers {
+            ids: strings(&["a", "b"])
+        }))
+        .is_err()
+    );
+}
+#[test]
 fn adjacent_navigation_uses_local_offsets_selected_scope_and_no_wrap() {
     let (_a, mut c) = client();
     select(&mut c, &["a"]);

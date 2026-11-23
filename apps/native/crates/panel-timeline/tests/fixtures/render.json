@@ -2386,6 +2386,32 @@
           ]
         },
         {
+          "id": "clip-lock-hatch:locked",
+          "shape": "stripes-45",
+          "bounds": [
+            308.9799995422363,
+            116.0,
+            460.0200004577637,
+            26.0
+          ],
+          "color": 6711147,
+          "opacity": 0.2800000011920929,
+          "radius": 7.020000457763672,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 13.5,
+            "stripe": 5.3999999999999995
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
           "id": "key:[\"locked\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -5576,6 +5602,32 @@
           ]
         },
         {
+          "id": "clip-lock-hatch:locked",
+          "shape": "stripes-45",
+          "bounds": [
+            308.9799995422363,
+            116.0,
+            460.0200004577637,
+            26.0
+          ],
+          "color": 6711147,
+          "opacity": 0.2800000011920929,
+          "radius": 7.020000457763672,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 13.5,
+            "stripe": 5.3999999999999995
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
           "id": "key:[\"locked\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -8732,6 +8784,32 @@
           ]
         },
         {
+          "id": "clip-lock-hatch:locked",
+          "shape": "stripes-45",
+          "bounds": [
+            306.0,
+            118.0,
+            462.0,
+            22.0
+          ],
+          "color": 5724509,
+          "opacity": 0.2800000011920929,
+          "radius": 6.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 13.5,
+            "stripe": 5.3999999999999995
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
           "id": "key:[\"locked\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -11911,6 +11989,32 @@
           ]
         },
         {
+          "id": "clip-lock-hatch:locked",
+          "shape": "stripes-45",
+          "bounds": [
+            306.0,
+            118.0,
+            462.0,
+            22.0
+          ],
+          "color": 5724509,
+          "opacity": 0.2800000011920929,
+          "radius": 6.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 13.5,
+            "stripe": 5.3999999999999995
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
           "id": "key:[\"locked\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -15124,6 +15228,32 @@
           ]
         },
         {
+          "id": "clip-lock-hatch:locked",
+          "shape": "stripes-45",
+          "bounds": [
+            308.9799995422363,
+            116.0,
+            460.0200004577637,
+            26.0
+          ],
+          "color": 10263449,
+          "opacity": 0.2800000011920929,
+          "radius": 7.020000457763672,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 13.5,
+            "stripe": 5.3999999999999995
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
           "id": "key:[\"locked\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -18314,6 +18444,32 @@
           ]
         },
         {
+          "id": "clip-lock-hatch:locked",
+          "shape": "stripes-45",
+          "bounds": [
+            308.9799995422363,
+            116.0,
+            460.0200004577637,
+            26.0
+          ],
+          "color": 10263449,
+          "opacity": 0.2800000011920929,
+          "radius": 7.020000457763672,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 13.5,
+            "stripe": 5.3999999999999995
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
           "id": "key:[\"locked\",\"linear\"]",
           "shape": "diamond",
           "bounds": [
@@ -21461,6 +21617,32 @@
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
             "shadowBlur": 0.0
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-lock-hatch:locked",
+          "shape": "stripes-45",
+          "bounds": [
+            306.0,
+            118.0,
+            462.0,
+            22.0
+          ],
+          "color": 12434619,
+          "opacity": 0.2800000011920929,
+          "radius": 6.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 13.5,
+            "stripe": 5.3999999999999995
           },
           "clip": [
             320.0,
@@ -24640,6 +24822,32 @@
             "shadowAlpha": 0.0,
             "shadowY": 0.0,
             "shadowBlur": 0.0
+          },
+          "clip": [
+            320.0,
+            24.0,
+            640.0,
+            416.0
+          ]
+        },
+        {
+          "id": "clip-lock-hatch:locked",
+          "shape": "stripes-45",
+          "bounds": [
+            306.0,
+            118.0,
+            462.0,
+            22.0
+          ],
+          "color": 12434619,
+          "opacity": 0.2800000011920929,
+          "radius": 6.0,
+          "stroke": 0.0,
+          "text": null,
+          "fontSize": 0.0,
+          "detail": {
+            "period": 13.5,
+            "stripe": 5.3999999999999995
           },
           "clip": [
             320.0,

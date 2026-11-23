@@ -534,6 +534,22 @@ fn track_ground_is_the_themed_panel_material() {
     }
 }
 #[test]
+fn locked_clips_wear_a_quiet_hatch_and_others_do_not() {
+    for scheme in [Scheme::Light, Scheme::Dark] {
+        let t = Tokens::new(scheme, Accessibility::default());
+        let f = scene(&t).prepare(viewport(&t), &t).unwrap();
+        let hatch = f
+            .ops
+            .iter()
+            .find(|o| o.id == "clip-lock-hatch:locked")
+            .unwrap();
+        assert_eq!((hatch.shape, hatch.color), ("stripes-45", t.colors.muted));
+        assert_eq!(hatch.opacity, t.translucency.offline_hatch as f64);
+        assert!(!f.ops.iter().any(|o| o.id == "clip-lock-hatch:selected"));
+        assert!(!f.ops.iter().any(|o| o.id == "clip-lock-hatch:offline"));
+    }
+}
+#[test]
 fn offline_clips_carry_the_media_offline_sign() {
     for scheme in [Scheme::Light, Scheme::Dark] {
         let t = Tokens::new(scheme, Accessibility::default());

@@ -63,6 +63,12 @@ pub enum HostEffect {
     Run(String),
     Seek(f64),
     Status(String),
+    LockedStrip {
+        layer: String,
+        document: u64,
+        composition: Option<String>,
+        trim: bool,
+    },
     TogglePlayback,
     /// Fit Selected Curves: show this span of composition time.
     FitCurves(f64, f64),
@@ -1203,6 +1209,9 @@ pub struct Drag {
     /// A handle drag: its key's layer-local time and value, and the other
     /// side's ease, which follows the dragged side unless ⌥ splits them (v1).
     handle_key: Option<(f64, f64, Option<TemporalEase>)>,
+    /// Locked layers a move or trim left where they were (After Effects skips
+    /// locked layers in a mixed selection instead of refusing the gesture).
+    skipped_locked: usize,
 }
 /// Each side's ease of the keys `ids` as the graph shows it: the speed (value
 /// units per second) and influence (percent) of its direction handle, so a
@@ -1264,6 +1273,7 @@ impl Drag {
     /// Captures identities and baselines once; never keeps a writer lease itself.
     pub fn begin(model: &TimelineModel, mut kind: DragKind) -> Result<Self, ModelError> {
         let index = &model.index;
+        let mut skipped_locked = 0;
         match &mut kind {
             DragKind::ProEdit(command) => {
                 use pm_kernel::commands::pro_edit::ProEditCommand as Pro;
@@ -1298,10 +1308,20 @@ impl Drag {
                         .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
                 }
                 *ids = index.expanded_ids(ids);
-                for id in ids.iter() {
-                    if index.layer(id).unwrap().effectively_locked {
-                        return Err(ModelError::Locked(id.clone()));
+                // A mixed selection moves or trims its unlocked layers; the
+                // locked ones stay put. Only a selection with nothing
+                // unlocked left refuses the gesture.
+                let first_locked = ids
+                    .iter()
+                    .find(|id| index.layer(id).unwrap().effectively_locked)
+                    .cloned();
+                if let Some(locked) = first_locked {
+                    let before = ids.len();
+                    ids.retain(|id| !index.layer(id).unwrap().effectively_locked);
+                    if ids.is_empty() {
+                        return Err(ModelError::Locked(locked));
                     }
+                    skipped_locked = before - ids.len();
                 }
             }
             DragKind::Transition { layer, edge } => {
@@ -1494,6 +1514,7 @@ impl Drag {
         Ok(Self {
             lanes,
             handle_key,
+            skipped_locked,
             speed_eases,
             kind,
             start: index.clone(),
@@ -2106,6 +2127,21 @@ impl Drag {
             | DragKind::QuickOffsetLayers { ids } => ids,
             _ => &[],
         }
+    }
+    /// The one-line note for locked layers this gesture left alone.
+    pub fn locked_note(&self) -> Option<HostEffect> {
+        let n = self.skipped_locked;
+        if n == 0 {
+            return None;
+        }
+        let verb = match self.kind {
+            DragKind::TrimIn { .. } | DragKind::TrimOut { .. } => "trim",
+            _ => "move",
+        };
+        Some(HostEffect::Status(format!(
+            "{n} locked {} didn't {verb}",
+            if n == 1 { "layer" } else { "layers" }
+        )))
     }
     /// The copies an Option-drag made, to select when it ends.
     pub fn copies(&self) -> Option<&[String]> {

@@ -45,7 +45,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use pm_model::canonical::{canonical_project, open_comp_id};
+use pm_model::canonical::open_comp_id;
 use pm_model::container::{ContainerFormat, MediaRecord, ReadOptions, read_container};
 use pm_model::{JsString, Map, Value};
 use sha2::{Digest, Sha256};
@@ -739,8 +739,7 @@ pub(crate) fn from_container(
     let raw_history = fields.remove("history");
     let workspace = fields.remove("ws");
     normalize_compositions(&mut project);
-    let mut canonical = canonical_project(project);
-    crate::model::name_keys_without_ids(&mut canonical);
+    let canonical = crate::model::to_canonical(project);
     let open_comp = open_comp_id(&canonical).map(str::to_owned);
     let (retained_history, history) = pm_model::parallel::join(
         || {

@@ -299,6 +299,7 @@ struct Broker {
     errors: Mutex<Vec<String>>,
     facts: Mutex<Value>,
     timeline_view: Arc<Mutex<Option<Arc<pm_panel_timeline::TimelineModel>>>>,
+    timeline_outline: Arc<Mutex<Option<Arc<pm_panel_timeline::TimelineModel>>>>,
     platform_replies: Mutex<BTreeMap<u64, Value>>,
     timeline_requests: Mutex<BTreeMap<u64, (String, u64)>>,
     platform_ids: std::sync::atomic::AtomicU64,
@@ -1365,6 +1366,7 @@ impl Builtins {
             errors: Default::default(),
             facts: Mutex::new(json!({})),
             timeline_view: Default::default(),
+            timeline_outline: Default::default(),
             platform_replies: Default::default(),
             timeline_requests: Default::default(),
             platform_ids: std::sync::atomic::AtomicU64::new(1),
@@ -1794,6 +1796,18 @@ impl Builtins {
     /// or project writes to painting; speed edits consume it on the worker.
     pub fn update_timeline_view(&self, view: Arc<pm_panel_timeline::TimelineModel>) {
         *self.broker.timeline_view.shared() = Some(view);
+    }
+    pub fn update_timeline_outline(
+        &self,
+        view: Arc<pm_panel_timeline::TimelineModel>,
+        refresh: bool,
+    ) {
+        *self.broker.timeline_outline.shared() = Some(view);
+        if refresh && let Ok(realm) = self.realm_of("timeline") {
+            // Geometry can change without a new project, selection, or time
+            // subscription value. Refresh the outline's native projection.
+            let _ = realm.notify_latest(StateChannel::TimelineOutline, "__pmBuiltin.publish(true)");
+        }
     }
     fn prepare_timeline_request(
         &self,
@@ -2590,6 +2604,7 @@ impl EngineProxy for Broker {
             ));
             backend.shared().native.agent_link = self.agent.clone();
             backend.shared().native.timeline_view = self.timeline_view.clone();
+            backend.shared().native.timeline_outline = self.timeline_outline.clone();
             if let Some(model) = backend.shared().model.as_mut() {
                 model.clipboard = self.effect_clipboard.shared().clone();
             }

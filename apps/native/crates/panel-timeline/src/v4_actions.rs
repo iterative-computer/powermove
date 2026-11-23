@@ -230,7 +230,12 @@ pub(super) async fn dispatch(
         "beginDrag" => {
             let kind = drag_kind(c, v, context.time)?;
             c.begin_drag(kind).await?;
-            return Ok(Some(vec![]));
+            return Ok(Some(
+                c.active_drag()
+                    .and_then(|d| d.locked_note())
+                    .into_iter()
+                    .collect(),
+            ));
         }
         "drag" => {
             let m = &v["modifiers"];

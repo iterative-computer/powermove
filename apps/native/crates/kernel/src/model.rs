@@ -462,8 +462,21 @@ pub fn layer_ids(root: &Node, comp_id: Option<&str>) -> std::collections::HashSe
 /// value that is already canonical is returned unchanged
 /// (`canonical_project` is not idempotent: it would replace the open
 /// composition with an empty one).
-pub fn to_canonical(project: pm_model::Value) -> pm_model::Value {
+pub fn to_canonical(mut project: pm_model::Value) -> pm_model::Value {
     use pm_model::Value;
+    // The stored active composition lives in the top-level fields. A legacy
+    // null or invalid alternate-composition map must not strand those rows.
+    if let Value::Object(map) = &mut project
+        && map
+            .get("layers")
+            .is_some_and(|layers| layers.as_array().is_some())
+        && map
+            .get("comps")
+            .is_some_and(|comps| comps.as_object().is_none())
+    {
+        eprintln!("Recovered the active composition from the stored project fields");
+        map.insert("comps", Value::Object(pm_model::Map::new()));
+    }
     let already = match &project {
         Value::Object(map) => {
             let open = map
