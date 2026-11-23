@@ -384,6 +384,198 @@ fn capture_builtin_panels() {
     }
 }
 
+/// Headless before and after pictures from clicking a Tracks header's chevron.
+#[test]
+#[ignore = "writes PNGs; set PM_PANEL_CAPTURE"]
+fn capture_track_disclosure() {
+    use crate::timeline_tests::{Recorder, Recording};
+    use gpui::{Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, point};
+    use pm_panel_timeline::{RowId, TimelineClient, tracks, v4};
+    use serde_json::json;
+    use std::rc::Rc;
+    use std::time::{Duration, Instant};
+
+    let dir = std::env::var("PM_PANEL_CAPTURE")
+        .unwrap_or_else(|_| "/tmp/pm-shots/track-disclosure".into());
+    std::fs::create_dir_all(&dir).unwrap();
+    let clip = |id: &str, name: &str, from: f64| {
+        let animated = |channel: &str, value: i32| json!({
+            "v": value,
+            "kf": [{"i": format!("{id}-{channel}"), "t": 3, "v": value, "ei": [1, 1], "eo": [0, 0]}],
+        });
+        json!({
+            "id": id, "name": name, "type": "shape", "from": from, "dur": 6, "on": true,
+            "p": {
+                "anchor.x": animated("ax", 50),
+                "anchor.y": animated("ay", 50),
+                "opacity": animated("opacity", 60),
+                "position.x": animated("x", 320),
+                "position.y": animated("y", 180),
+                "rotation": animated("rotation", 0),
+                "scale.x": animated("sx", 100),
+                "scale.y": animated("sy", 100),
+                "skew": animated("skew", 0),
+            },
+            "d": {"w": 100, "h": 100}, "fx": [],
+        })
+    };
+    // Overlapping clips fill V1, V2 and V3. Only the middle clip's rows are revealed.
+    let project = json!({
+        "id": "integration", "name": "Tracks", "compId": "c", "w": 640, "h": 360, "fps": 30,
+        "dur": 10, "bg": "#000000", "assets": {}, "comps": {},
+        "layers": [clip("a", "Lower Third", 0.), clip("b", "Middle", 1.), clip("c", "Upper", 2.)],
+    });
+    let r = rig_project("timeline", &project.to_string());
+    let act = |action| {
+        let ticket = r.runtime.timeline_action(action).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            if let Some(result) = ticket.try_take() {
+                result.unwrap();
+                return;
+            }
+            assert!(Instant::now() < deadline, "timeline setup stalled");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
+    act(json!({"type": "mode", "mode": "Tracks"}));
+    act(json!({
+        "type": "disclosure", "id": v4::row_id(&RowId::Layer("b".into())), "open": true,
+    }));
+    let client =
+        TimelineClient::new(r.kernel.clone(), PROJECT, pm_kernel::Caller::native()).unwrap();
+    let layout = tracks::layout(&client.model.index, &client.model.reveal);
+    assert_eq!(layout.video, 3);
+    let lane = layout.item("b").unwrap().lane;
+    let header = json!(["track", "Video", lane]).to_string();
+    let disclosure = format!("timeline:disclosure:{header}");
+    let property_id = v4::row_id(&RowId::Property {
+        layer_id: "b".into(),
+        channel: "opacity".into(),
+    });
+    let property = format!("timeline:row:{property_id}");
+    let first = publication(&r);
+    let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+    let panel_fill = tokens.colors.panel;
+    let runtime = r.runtime.clone();
+    let mut cx = HeadlessAppContext::with_platform(
+        Arc::new(
+            gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                .with_automatic_optical_sizing(),
+        ),
+        Arc::new(()),
+        || {
+            Some(Box::new(
+                gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+            ))
+        },
+    );
+    cx.allow_parking();
+    let mut timeline = None;
+    let window = cx
+        .open_window(size(px(1100.), px(340.)), |window, cx| {
+            let natives = Natives::default();
+            let outline = natives.outline.clone();
+            let native = cx.new(|cx| {
+                crate::timeline_surface::TimelineSurface::new(
+                    r.kernel.clone(),
+                    PROJECT.into(),
+                    tokens.clone(),
+                    Rc::new(Recording(Rc::new(Recorder::default()))),
+                    outline.clone(),
+                    Default::default(),
+                    cx,
+                )
+            });
+            timeline = Some(native.clone());
+            natives
+                .views
+                .borrow_mut()
+                .insert("timeline".into(), native.into());
+            let view = cx.new(|cx| SurfaceView::new(runtime, first, tokens, natives, window, cx));
+            outline.bind(view.downgrade());
+            cx.new(|_| Frame {
+                view,
+                fill: panel_fill,
+                timecode: None,
+            })
+        })
+        .unwrap();
+    let timeline = timeline.unwrap();
+    let settle = |cx: &mut HeadlessAppContext, open: bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            for next in r.runtime.take_publications() {
+                window
+                    .update(cx, |frame, _, cx| {
+                        frame.view.update(cx, |view, cx| view.publish(next, cx));
+                        timeline.update(cx, |timeline, cx| timeline.published(cx));
+                    })
+                    .unwrap();
+            }
+            cx.run_until_parked();
+            let paint_matches = cx.update(|cx| {
+                timeline.read(cx).scene().is_some_and(|scene| {
+                    scene.row(&header).is_some() && scene.row(&property_id).is_some() == open
+                })
+            });
+            if paint_matches {
+                let shot = cx.capture_screenshot(window.into()).unwrap();
+                if cx
+                    .debug_bounds(window.into(), &disclosure)
+                    .unwrap()
+                    .is_some()
+                    && cx.debug_bounds(window.into(), &property).unwrap().is_some() == open
+                {
+                    return shot;
+                }
+            }
+            assert!(Instant::now() < deadline, "track did not reach open={open}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    settle(&mut cx, true)
+        .save(format!("{dir}/track-expanded.png"))
+        .unwrap();
+    for (open, name) in [(false, "collapsed"), (true, "reopened")] {
+        let position = cx
+            .debug_bounds(window.into(), &disclosure)
+            .unwrap()
+            .unwrap()
+            .center();
+        cx.simulate_event(
+            window.into(),
+            MouseDownEvent {
+                position,
+                modifiers: Modifiers::none(),
+                button: MouseButton::Left,
+                click_count: 1,
+                first_mouse: false,
+            },
+        );
+        cx.simulate_event(
+            window.into(),
+            MouseUpEvent {
+                position,
+                modifiers: Modifiers::none(),
+                button: MouseButton::Left,
+                click_count: 1,
+            },
+        );
+        cx.simulate_event(
+            window.into(),
+            MouseMoveEvent {
+                position: point(px(1000.), px(330.)),
+                modifiers: Modifiers::none(),
+                pressed_button: None,
+            },
+        );
+        settle(&mut cx, open)
+            .save(format!("{dir}/track-{name}.png"))
+            .unwrap();
+    }
+}
+
 /// The panel on solid `colors.panel`, as Reduce Transparency shows it.
 struct Frame {
     view: gpui::Entity<SurfaceView>,

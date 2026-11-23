@@ -114,6 +114,8 @@ export interface TrackRow extends RowBase {
   summary?: string;
   audio: boolean;
   enabled: boolean;
+  /** The lane has property rows to show; without it no chevron is drawn. */
+  canOpen: boolean;
   expanded: boolean;
 }
 export interface HeadingRow extends RowBase {

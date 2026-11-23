@@ -23024,6 +23024,24 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             {
                               "children": [
                                 {
+                                  "props": {
+                                    "role": "presentation",
+                                    "style": {
+                                      "flexShrink": 0,
+                                      "height": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "minWidth": {
+                                        "token": "metrics.hit",
+                                      },
+                                      "width": {
+                                        "token": "metrics.hit",
+                                      },
+                                    },
+                                  },
+                                  "type": "div",
+                                },
+                                {
                                   "children": [
                                     {
                                       "props": {},
@@ -23061,7 +23079,7 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                                   },
                                   "overflow": "hidden",
                                   "paddingLeft": {
-                                    "token": "metrics.inset",
+                                    "token": "metrics.gap",
                                   },
                                 },
                               },
@@ -23141,7 +23159,6 @@ exports[`timeline: accepted six-op trees (provisional placeholders, not visual a
                             },
                           ],
                           "props": {
-                            "aria-expanded": false,
                             "aria-selected": false,
                             "data-pm-component": "tree-item",
                             "data-pm-variant": "band",

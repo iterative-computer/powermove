@@ -856,6 +856,39 @@ impl TimelineModel {
         Ok(())
     }
 
+    /// A Tracks header's disclosure: absent means expanded, as every track
+    /// showed its rows before headers could close.
+    pub fn track_collapsed(&self, area: tracks::Area, lane: usize) -> bool {
+        self.reveal
+            .tracks
+            .get(self.index.comp_id.as_deref().unwrap_or_default())
+            .and_then(|tracks| tracks.get(&(area, lane)))
+            .copied()
+            .unwrap_or(false)
+    }
+    /// A Tracks header's chevron press: `open` is the state asked for, the
+    /// same idempotent write the layer rows' disclosure makes.
+    pub fn disclose_track(&mut self, area: tracks::Area, lane: usize, open: bool) {
+        self.reveal
+            .tracks
+            .entry(self.index.comp_id.clone().unwrap_or_default())
+            .or_default()
+            .insert((area, lane), !open);
+    }
+    /// Option-click on a track header opens or closes every track at once,
+    /// as the layer rows' `all` disclosure does for every layer.
+    pub fn disclose_all_tracks(&mut self, open: bool) {
+        let layout = crate::tracks::layout(&self.index, &self.reveal);
+        let tracks = self
+            .reveal
+            .tracks
+            .entry(self.index.comp_id.clone().unwrap_or_default())
+            .or_default();
+        for (area, lane) in layout.display_order() {
+            tracks.insert((area, lane), !open);
+        }
+    }
+
     pub fn adjacent_key(&self, direction: i8, time: f64, row: Option<(&str, &str)>) -> Option<f64> {
         let mut times = Vec::new();
         for layer in &self.index.layers {

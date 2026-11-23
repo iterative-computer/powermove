@@ -628,6 +628,76 @@ test("effect headings validate without editable controls and static layers hide 
   await root.dispose();
 });
 
+test("track headers keep the disclosure column and toggle their lane", async () => {
+  const { root } = recorder();
+  const openTrack = {
+    id: '["track","Video",0]',
+    kind: "track" as const,
+    track: "V1",
+    label: "V1",
+    accessibilityLabel: "V1",
+    depth: 0,
+    selected: false,
+    focused: false,
+    hovered: false,
+    locked: false,
+    audio: false,
+    enabled: true,
+    canOpen: true,
+    expanded: true,
+  };
+  const bareTrack = {
+    ...openTrack,
+    id: '["track","Video",1]',
+    track: "V2",
+    label: "V2",
+    accessibilityLabel: "V2",
+    canOpen: false,
+    expanded: false,
+  };
+  const actions: Intent[] = [];
+  const chevron = `timeline:disclosure:${openTrack.id}`;
+  const f = frame({
+    mode: "Tracks",
+    window: { total: 2, first: 0, rows: [openTrack, bareTrack] },
+  });
+  checkFrame(f, { first: 0, visible: 10 });
+  await root.render(
+    <TimelinePanel frame={f} send={(a) => actions.push(a)} />,
+  );
+  expect(byId(root, `timeline:disclosure:${bareTrack.id}`)).toBeUndefined();
+  expect(byId(root, chevron)?.props.metadata).toMatchObject({
+    requiredSymbol: "chevron.down",
+  });
+  await drive(root, chevron, "click");
+  expect(actions).toEqual([
+    { type: "disclosure", id: openTrack.id, open: false, all: false },
+  ]);
+  await drive(root, chevron, "click", {
+    altKey: true,
+  });
+  expect(actions[1]).toEqual({
+    type: "disclosure",
+    id: openTrack.id,
+    open: false,
+    all: true,
+  });
+  f.window.rows = [{ ...openTrack, expanded: false }, bareTrack];
+  await root.render(
+    <TimelinePanel frame={{ ...f }} send={(a) => actions.push(a)} />,
+  );
+  expect(byId(root, chevron).props.metadata).toMatchObject({
+    requiredSymbol: "chevron.right",
+  });
+  await drive(root, chevron, "click");
+  expect(actions[2]).toEqual({
+    type: "disclosure",
+    id: openTrack.id,
+    open: true,
+    all: false,
+  });
+  await root.dispose();
+});
 
 test("reorder sources belong to layer headers and pause during inline rename", async () => {
   const { root } = recorder();
