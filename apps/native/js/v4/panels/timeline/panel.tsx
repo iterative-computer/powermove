@@ -480,7 +480,7 @@ function Layer({
     {
       name: "lock" as const,
       on: row.locked,
-      label: "Toggle Lock",
+      label: row.lockRow ? "Unlock Layer" : "Toggle Lock",
       symbol: row.locked ? "lock" : "lock.open",
       active: undefined,
       always: false,
@@ -632,7 +632,26 @@ function Layer({
       </div>
       <div style={{ ...line, flexShrink: 0 }}>
         {switches.map((item) =>
-          item.on || item.always || show ? (
+          item.name === "lock" && row.containsLockedLayers ? (
+            <div
+              key={item.name}
+              id={`timeline:locked-children:${row.id}`}
+              role="img"
+              label="Contains locked layers"
+              title="Contains locked layers"
+              attr={{ symbol: "lock" }}
+              style={{
+                ...line,
+                justifyContent: "center",
+                width: t("metrics.hit"),
+                minWidth: t("metrics.hit"),
+                height: t("metrics.hit"),
+                flexShrink: 0,
+                color: t("colors.muted"),
+                symbolSize: t("metrics.symbol_inline"),
+              }}
+            />
+          ) : item.on || item.always || show ? (
             <Icon
               key={item.name}
               parentPick={item.name === "parent" ? row.layer : undefined}
@@ -655,7 +674,11 @@ function Layer({
               active={item.active}
               tabIndex={-1}
               send={send}
-              intent={{ type: "switch", id: row.id, name: item.name }}
+              intent={{
+                type: "switch",
+                id: item.name === "lock" ? row.lockRow ?? row.id : row.id,
+                name: item.name,
+              }}
             />
           ) : (
             // An unset switch keeps its column, so the name never reflows.
@@ -867,6 +890,7 @@ const TimelineRow = memo(
           id={`timeline:heading:${published.id}`}
           role="row"
           label={published.label}
+          metadata={{ nativeRow: published.id }}
           style={{
             ...line,
             height: t("metrics.property_row"),
@@ -1050,6 +1074,7 @@ export function TimelinePanel({
       role="group"
       metadata={{
         document: f.document,
+        ...(f.composition !== undefined ? { composition: f.composition } : {}),
         revision: f.revision,
         feedback: f.feedback,
       }}

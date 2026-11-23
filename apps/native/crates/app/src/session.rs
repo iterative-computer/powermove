@@ -201,7 +201,7 @@ pub struct Controller {
     pub message: String,
     /// The revision [`RAW_ERROR_NOTE`] was shown at ([`Self::settle_message`]).
     raw_note_at: Option<u64>,
-    pub(crate) delete_toast: Option<Entity<crate::action_toast::ToastView>>,
+    pub(crate) action_toast: Option<Entity<crate::action_toast::ToastView>>,
     pub path: Option<PathBuf>,
     pub recent: Vec<(String, String)>,
     /// What the shell reads from the project on every frame, kept per
@@ -590,7 +590,11 @@ impl pm_shell::integration::Integration for Bridge {
         })
     }
     fn action_toast(&self, cx: &mut App) -> Option<AnyElement> {
-        self.0.read(cx).delete_toast.clone().map(|v| v.into_any_element())
+        self.0
+            .read(cx)
+            .action_toast
+            .clone()
+            .map(|v| v.into_any_element())
     }
     fn paints_own_ground(&self, id: &str, cx: &App) -> bool {
         id == "timeline" && !self.0.read(cx).extensions.owns_panel(id)
@@ -1355,7 +1359,7 @@ impl Controller {
             // The status bar holds facts, not instructions (review shell 2 #11).
             message: "No project".into(),
             raw_note_at: None,
-            delete_toast: None,
+            action_toast: None,
             path: None,
             recent: vec![],
             frame_facts: Default::default(),
@@ -4439,6 +4443,12 @@ impl Controller {
         }
         if cmd.name == "new3d" && cmd.args.first().and_then(|a| a.as_str()) == Some("import") {
             self.pick_models(cx);
+            return true;
+        }
+        if matches!(cmd.name.as_str(), "selectAll" | "contextSelectAll")
+            && let Some(timeline) = self.builtins.timeline.clone()
+            && timeline.update(cx, |timeline, cx| timeline.select_all(cx))
+        {
             return true;
         }
         use crate::layer_commands::Route;

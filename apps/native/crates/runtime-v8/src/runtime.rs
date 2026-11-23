@@ -302,6 +302,7 @@ enum Source {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateChannel {
     Publication,
+    TimelineOutline,
     ViewerFrame,
     ExportProgress,
     Pointer { panel: String, pointer: u64 },

@@ -35,6 +35,8 @@ pub(crate) struct Models {
     pub timeline: Option<TimelineClient>,
     pub(crate) timeline_view:
         std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<pm_panel_timeline::TimelineModel>>>>,
+    pub(crate) timeline_outline:
+        std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<pm_panel_timeline::TimelineModel>>>>,
     /// Where the timeline client comes from, until a panel first asks for it:
     /// indexing every channel of a large project costs seconds, and only the
     /// Timeline panel reads it.
@@ -101,7 +103,7 @@ pub(crate) struct Models {
 }
 /// Keep small outlines mounted so their wheel steps need no JS publication.
 fn retained_outline(rows: &[Row]) -> bool {
-    const BUDGET: usize = 768;
+    const BUDGET: usize = 512;
     if rows.len() > BUDGET {
         return false;
     }
@@ -157,6 +159,7 @@ impl Models {
             properties: Properties::default(),
             timeline: None,
             timeline_view: Default::default(),
+            timeline_outline: Default::default(),
             timeline_source,
             viewer: Default::default(),
             composition_tabs: vec![],
@@ -302,6 +305,7 @@ impl Backend {
         let time = self.time();
         let playing = self.native.facts["playing"].as_bool().unwrap_or(false);
         let p = self.published().ok_or("closed")?;
+        let outline = self.native.timeline_outline.shared().clone();
         let client = self
             .native
             .timeline
@@ -325,17 +329,27 @@ impl Backend {
             client.model.editing_property = editing;
             client.model.rebuild_rows();
         }
-        // Window large or property-heavy outlines, including the rows
-        // exposed by U/M across many layers.
-        let retained = retained_outline(client.model.rows());
+        // A hosted outline decorates the same immutable model the canvas
+        // drew. A standalone panel has its own client for the same API.
+        let timeline = outline
+            .as_deref()
+            .filter(|model| model.follows_publication(&p))
+            .unwrap_or(&client.model);
+        // Retain modest outlines across scrolls. Only the native host mounts rows;
+        // wheel input must never wait for another JS publication. Property
+        // rows carry more controls and readouts than ordinary layer rows.
+        let rows = timeline.rows();
+        let retained = timeline.mode == pm_panel_timeline::TimelineMode::Layers
+            && retained_outline(rows);
         let (first, visible) = if retained {
-            (0, client.model.rows().len().max(1))
+            (0, rows.len().max(1))
         } else {
             (first, visible)
         };
-        let mut frame = pm_panel_timeline::v4::project_window(&client.model, first, visible)
+        let mut frame = pm_panel_timeline::v4::project_window(timeline, first, visible)
             .map_err(|e| e.to_string())?;
-        let fps = client.model.index.fps;
+        frame["composition"] = json!(timeline.index.comp_id);
+        let fps = timeline.index.fps;
         let numbers = layer_numbers(&p);
         let mut display = vec![];
         let editor_field = format!(
@@ -356,15 +370,15 @@ impl Backend {
                 if !numbers {
                     row["index"] = Value::Null;
                 }
-                let l = client.model.index.layer(&layer).ok_or("layer")?;
+                let l = timeline.index.layer(&layer).ok_or("layer")?;
                 row["accessibilityLabel"] = json!(format!(
                     "{}, {}",
                     l.name.to_string_lossy(),
                     super::data::kind_label(&l.kind)
                 ));
-                row["canOpen"] = json!(client.model.layer_disclosable(&layer));
+                row["canOpen"] = json!(timeline.layer_disclosable(&layer));
                 row["transformable"] = json!(l.kind != "audio");
-                row["parent"] = json!({"name":l.parent.as_deref().and_then(|p|client.model.index.layer(p)).map(|p|p.name.to_string_lossy()).unwrap_or_default(),"set":l.parent.is_some()});
+                row["parent"] = json!({"name":l.parent.as_deref().and_then(|p|timeline.index.layer(p)).map(|p|p.name.to_string_lossy()).unwrap_or_default(),"set":l.parent.is_some()});
                 if self.native.timeline_editor == Some(TimelineEditor::Name(layer.clone())) {
                     row["nameEditor"] = json!({
                         "value": l.name.to_string_lossy(),
@@ -379,7 +393,7 @@ impl Backend {
             } else {
                 let path = row["path"].as_str().ok_or("property path")?.to_owned();
                 let label = row["label"].as_str().ok_or("property label")?.to_owned();
-                let channels = client.model.track_channels(&layer, &path);
+                let channels = timeline.track_channels(&layer, &path);
                 let mut values = Vec::new();
                 let mut numeric = Vec::new();
                 let mut animated = false;
@@ -475,14 +489,12 @@ impl Backend {
                 row["animated"] = json!(animated);
                 row["keyAtPlayhead"] = json!(at_key);
                 row["previous"] = json!(
-                    client
-                        .model
+                    timeline
                         .adjacent_key(-1, time, Some((&layer, &path)))
                         .is_some()
                 );
                 row["next"] = json!(
-                    client
-                        .model
+                    timeline
                         .adjacent_key(1, time, Some((&layer, &path)))
                         .is_some()
                 );
@@ -505,8 +517,7 @@ impl Backend {
         frame["frameRate"] = json!(format!("{fps} fps"));
 
         let root = p.snapshot.root().ok_or("closed")?;
-        let active = client
-            .model
+        let active = timeline
             .index
             .comp_id
             .as_deref()
@@ -1139,6 +1150,7 @@ impl Backend {
             use pm_panel_timeline::HostEffect;
             let action = match effect {
                 HostEffect::Seek(time) => json!({"kind":"seek","time":time}),
+                HostEffect::Status(message) => json!({"kind":"status","message":message}),
                 HostEffect::TogglePlayback => json!({"kind":"command","name":"play"}),
                 HostEffect::FrameComposition => json!({"kind":"command","name":"viewer.fit"}),
                 // The editor's own timeline fits its view to the curves.

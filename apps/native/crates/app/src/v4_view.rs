@@ -56,10 +56,86 @@ pub struct Outline {
     handle: ScrollHandle,
     rows: Cell<(usize, usize)>,
     scene: RefCell<Option<Arc<pm_panel_timeline::render::Scene>>>,
+    layout: RefCell<Option<TimelineOutline>>,
+    waiting_for_composition: Cell<bool>,
+    native_only: Cell<bool>,
     view: RefCell<Option<WeakEntity<SurfaceView>>>,
     surface: RefCell<Option<WeakEntity<crate::timeline_surface::TimelineSurface>>>,
     pub layer_dragged: Cell<bool>,
 }
+
+/// The desktop outline's mounted rows, in the order produced by its native
+/// projection. The canvas can only publish geometry this outline represents.
+pub(crate) struct TimelineOutline {
+    document: u64,
+    composition: Option<String>,
+    mode: pm_panel_timeline::TimelineMode,
+    total: usize,
+    first: usize,
+    rows: Vec<SharedString>,
+}
+
+impl TimelineOutline {
+    fn from_surface(publication: &Publication, prepared: &Prepared) -> Option<Self> {
+        if publication.panel != "timeline" {
+            return None;
+        }
+        let node = |name| publication.surface.node(*prepared.semantics.get(name)?);
+        let root = node("timeline")?.props.get("metadata")?;
+        let document = root.get("document")?.as_str()?.parse().ok()?;
+        let composition = root.get("composition")?.as_str().map(str::to_owned);
+        let tree = node("timeline:tracks")?;
+        let mode = match tree.props.get("label")?.as_str()? {
+            "Layers" => pm_panel_timeline::TimelineMode::Layers,
+            "Tracks" => pm_panel_timeline::TimelineMode::Tracks,
+            _ => return None,
+        };
+        let total =
+            usize::try_from(tree.props.get("metadata")?.get("totalRows")?.as_u64()?).ok()?;
+        let (first, count) = prepared.node(tree.id)?.outline_window?;
+        let rows = tree
+            .children
+            .iter()
+            .filter_map(|id| {
+                let row = publication.surface.node(*id)?;
+                let id = row.props.get("metadata")?.get("nativeRow")?.as_str()?;
+                Some(SharedString::from(id.to_owned()))
+            })
+            .collect::<Vec<_>>();
+        (rows.len() == count).then_some(Self {
+            document,
+            composition,
+            mode,
+            total,
+            first,
+            rows,
+        })
+    }
+
+    pub(crate) fn covers(
+        &self,
+        model: &pm_panel_timeline::TimelineModel,
+        scene: &pm_panel_timeline::render::Scene,
+        visible: std::ops::Range<usize>,
+    ) -> bool {
+        self.document == model.index.doc_id
+            && self.composition == model.index.comp_id
+            && self.mode == model.mode
+            && self.total == scene.total()
+            && visible.start >= self.first
+            && visible.end <= self.first + self.rows.len()
+            && visible.into_iter().all(|i| {
+                scene.span(i).is_some_and(|(row, _, _)| {
+                    self.rows[i - self.first].as_ref() == row.id.as_str()
+                })
+            })
+    }
+
+    pub(crate) fn is_for(&self, snapshot: &pm_kernel::Snapshot) -> bool {
+        self.document == snapshot.doc_id && self.composition == snapshot.open_comp()
+    }
+}
+
 impl Outline {
     pub fn bind_surface(&self, surface: WeakEntity<crate::timeline_surface::TimelineSurface>) {
         *self.surface.borrow_mut() = Some(surface);
@@ -71,21 +147,34 @@ impl Outline {
             .as_ref()
             .and_then(|s| s.upgrade())
             .is_some_and(|s| {
-                s.update(cx, |s, _| s.press_property(layer.into(), path.into(), at));
+                s.update(cx, |s, cx| {
+                    s.press_property(layer.into(), path.into(), at, cx)
+                });
                 true
             })
     }
     fn parent_pick(&self, layer: &str, at: Point<Pixels>, cx: &mut App) {
         if let Some(surface) = self.surface.borrow().as_ref().and_then(|s| s.upgrade()) {
-            surface.update(cx, |s, _| s.press_parent(layer.into(), at));
+            surface.update(cx, |s, cx| s.press_parent(layer.into(), at, cx));
         }
+    }
+    fn toggle_disclosure(&self, row: &str, cx: &mut App) -> bool {
+        let Ok(pm_panel_timeline::RowId::Layer(layer)) = pm_panel_timeline::v4::parse_row(row)
+        else {
+            return false;
+        };
+        if let Some(surface) = self.surface.borrow().as_ref().and_then(WeakEntity::upgrade) {
+            surface.update(cx, |s, cx| s.toggle_disclosure(layer, cx));
+            return true;
+        }
+        false
     }
     /// A layer name pressed: the surface may lift it into a reorder (the
     /// row still takes the click).
     fn press_layer(&self, layer: &str, at: Point<Pixels>, cx: &mut App) {
         self.layer_dragged.set(false);
         if let Some(surface) = self.surface.borrow().as_ref().and_then(|s| s.upgrade()) {
-            surface.update(cx, |s, _| s.press_layer_row(layer.into(), at));
+            surface.update(cx, |s, cx| s.press_layer_row(layer.into(), at, cx));
         }
     }
     fn move_layer(&self, event: &MouseMoveEvent, window: &mut Window, cx: &mut App) {
@@ -99,10 +188,59 @@ impl Outline {
         }
     }
     pub fn set_scene(&self, scene: Option<Arc<pm_panel_timeline::render::Scene>>) {
+        self.waiting_for_composition.set(false);
         *self.scene.borrow_mut() = scene;
+    }
+    pub(crate) fn clear_composition(&self, cx: &mut App) {
+        *self.scene.borrow_mut() = None;
+        self.waiting_for_composition.set(true);
+        if let Some(view) = self.view.borrow().as_ref().and_then(WeakEntity::upgrade) {
+            cx.defer(move |cx| view.update(cx, |_, cx| cx.notify()));
+        }
+    }
+    pub(crate) fn covers(
+        &self,
+        model: &pm_panel_timeline::TimelineModel,
+        scene: &pm_panel_timeline::render::Scene,
+        visible: std::ops::Range<usize>,
+    ) -> bool {
+        if !self.has_view() {
+            return true;
+        }
+        self.layout
+            .borrow()
+            .as_ref()
+            .is_none_or(|layout| layout.covers(model, scene, visible))
+    }
+    pub(crate) fn reconcile_timeline(&self, cx: &mut App) {
+        if let Some(view) = self.view.borrow().as_ref().and_then(WeakEntity::upgrade) {
+            cx.defer(move |cx| {
+                let window = view.read(cx).window;
+                let _ = cx.update_window(window, |_, window, cx| {
+                    view.update(cx, |v, cx| {
+                        if let Some(compiled) = v.outline_waiting.take() {
+                            v.install(compiled, window, cx);
+                        }
+                    });
+                });
+            });
+        }
     }
     pub fn bind(&self, view: WeakEntity<SurfaceView>) {
         *self.view.borrow_mut() = Some(view);
+    }
+    pub(crate) fn set_native_only(&self, native_only: bool) -> bool {
+        self.native_only.replace(native_only) != native_only
+    }
+
+    pub(crate) fn has_view(&self) -> bool {
+        !self.native_only.get()
+            && self
+                .view
+                .borrow()
+                .as_ref()
+                .and_then(WeakEntity::upgrade)
+                .is_some()
     }
     #[cfg(test)]
     pub fn scroll_for_test(&self) -> f32 { self.scroll_y.get() }
@@ -310,6 +448,7 @@ struct Compiled {
     publication: Publication,
     table: Arc<TokenTable>,
     prepared: Prepared,
+    outline: Option<TimelineOutline>,
 }
 pub struct SurfaceView {
     panel_build: Option<crate::generated_panel::panel_build::State>,
@@ -408,6 +547,7 @@ pub struct SurfaceView {
     /// The newest compiled tree, kept when it finished while the view had no
     /// live window (a closed sheet); the next window installs it on attach.
     parked: Option<Compiled>,
+    outline_waiting: Option<Compiled>,
     /// A text layer whose Properties text to focus once its row shows
     /// (`inspector.focusText`), until the moment passes.
     focus_text: Option<(String, std::time::Instant)>,
@@ -513,6 +653,10 @@ impl SurfaceView {
         use raw_window_handle::HasWindowHandle;
         let table = Arc::new(TokenTable::new(tokens));
         let prepared = Rc::new(Prepared::new(publication.surface.clone(), &table));
+        if publication.panel == "timeline" {
+            *natives.outline.layout.borrow_mut() =
+                TimelineOutline::from_surface(&publication, &prepared);
+        }
         cx.on_release(|view, cx| {
             if let Some(scrub) = view.gain_scrub.take() {
                 let natives = view.natives.clone();
@@ -590,6 +734,7 @@ impl SurfaceView {
             handling: 0,
             wake_idle: false,
             parked: None,
+            outline_waiting: None,
             focus_text: None,
             focus_requested: None,
             reveal: None,
@@ -823,7 +968,13 @@ impl SurfaceView {
     }
     pub fn retheme(&mut self, tokens: pm_design::Tokens, cx: &mut Context<Self>) {
         let table = Arc::new(TokenTable::new(tokens));
-        self.compile(self.publication.clone(), table, cx);
+        let publication = self
+            .outline_waiting
+            .as_ref()
+            .filter(|c| c.ticket == self.latest)
+            .map_or(&self.publication, |c| &c.publication)
+            .clone();
+        self.compile(publication, table, cx);
     }
     fn compile(
         &mut self,
@@ -834,22 +985,24 @@ impl SurfaceView {
         self.latest += 1;
         let ticket = self.latest;
         cx.spawn(async move |this, cx| {
-            let surface = publication.surface.clone();
+            let source = publication.clone();
             let worker = table.clone();
-            let prepared = cx
+            let (prepared, outline) = cx
                 .background_executor()
                 .spawn(async move {
                     let started = std::time::Instant::now();
-                    let prepared = Prepared::new(surface, &worker);
+                    let prepared = Prepared::new(source.surface.clone(), &worker);
+                    let outline = TimelineOutline::from_surface(&source, &prepared);
                     if crate::diag::enabled() {
                         crate::diag::line(serde_json::json!({"ui": "prepared",
                             "ms": started.elapsed().as_secs_f64() * 1000.}));
                     }
-                    prepared
+                    (prepared, outline)
                 })
                 .await;
             let mut compiled = Some(Compiled {
                 ticket,
+                outline,
                 publication,
                 table,
                 prepared,
@@ -879,6 +1032,23 @@ impl SurfaceView {
         if compiled.ticket != self.latest {
             return;
         }
+        let timeline = self
+            .natives
+            .outline
+            .surface
+            .borrow()
+            .as_ref()
+            .and_then(WeakEntity::upgrade);
+        if let (Some(layout), Some(timeline)) = (&compiled.outline, &timeline)
+            && !timeline.read(cx).can_show_outline(layout)
+        {
+            self.outline_waiting = Some(compiled);
+            if let Some(rows) = timeline.read(cx).pending_outline_range() {
+                self.outline_rows(rows, cx);
+            }
+            return;
+        }
+        self.outline_waiting = None;
         let _span = crate::diag::span("panel.install");
         if crate::diag::enabled() {
             crate::diag::line(
@@ -909,6 +1079,12 @@ impl SurfaceView {
             }
         }
         self.table = compiled.table;
+        if compiled.publication.panel == "timeline" {
+            *self.natives.outline.layout.borrow_mut() = compiled.outline;
+            if let Some(timeline) = timeline {
+                cx.defer(move |cx| timeline.update(cx, |t, cx| t.show_pending_scene(cx)));
+            }
+        }
         self.publication = compiled.publication;
         self.prepared = Rc::new(compiled.prepared);
         self.quote_selection
@@ -1860,6 +2036,33 @@ impl SurfaceView {
     pub(crate) fn sync_outline_window(&mut self, cx: &mut Context<Self>) {
         self.outline_rows(self.natives.outline.rows.get(), cx);
     }
+    #[cfg(test)]
+    pub(crate) fn timeline_outline_rows(&self) -> (usize, Vec<String>) {
+        let Some(tree) = self
+            .prepared
+            .semantics
+            .get("timeline:tracks")
+            .and_then(|id| self.publication.surface.node(*id))
+        else {
+            return (0, vec![]);
+        };
+        let (first, _) = self.prepared.node(tree.id).unwrap().outline_window.unwrap();
+        let ids = tree
+            .children
+            .iter()
+            .filter_map(|id| {
+                let row = self.publication.surface.node(*id)?;
+                Some(
+                    row.props
+                        .get("metadata")?
+                        .get("nativeRow")?
+                        .as_str()?
+                        .to_owned(),
+                )
+            })
+            .collect();
+        (first, ids)
+    }
     /// Ask JS for the row window that covers native scroll, when it left the
     /// published one. Rows already overscan a viewport on each side.
     pub fn outline_rows(&mut self, rows: (usize, usize), cx: &mut Context<Self>) {
@@ -1871,12 +2074,19 @@ impl SurfaceView {
         else {
             return;
         };
-        if node.outline_retained {
+        let proposed = self
+            .outline_waiting
+            .as_ref()
+            .and_then(|waiting| waiting.outline.as_ref());
+        if node.outline_retained && proposed.is_none() {
             return;
         }
         let (id, (first, count)) = (node.id, node.outline_window.unwrap());
+        let (from, to) = proposed.map_or((first, first + count), |p| {
+            (p.first, p.first + p.rows.len())
+        });
         if rows.1 > rows.0
-            && (rows.0 < first || rows.1 > first + count || self.pending_ranges.contains_key(&id))
+            && (rows.0 < from || rows.1 > to || self.pending_ranges.contains_key(&id))
         {
             self.request_range(
                 id,
@@ -2761,6 +2971,16 @@ impl SurfaceView {
             return;
         };
         if node.props.get("disabled") == Some(&Value::Bool(true)) {
+            return;
+        }
+        if self.publication.panel == "timeline"
+            && let Some(row) = self
+                .prepared
+                .node(id)
+                .and_then(|node| node.semantic.as_deref())
+                .and_then(|id| id.strip_prefix("timeline:disclosure:"))
+            && self.natives.outline.toggle_disclosure(row, cx)
+        {
             return;
         }
         match Component::of(&node) {
@@ -4744,14 +4964,16 @@ impl SurfaceView {
         if !parent.outline_retained && parent.outline_first.is_none() {
             return element;
         }
-        let Some(row) = node
-            .semantic
-            .as_ref()
-            .and_then(|s| s.strip_prefix("timeline:row:"))
-        else {
+        let Some(row) = node.semantic.as_ref().and_then(|s| {
+            s.strip_prefix("timeline:row:")
+                .or_else(|| s.strip_prefix("timeline:heading:"))
+        }) else {
             return element;
         };
         let outline = &self.natives.outline;
+        if outline.waiting_for_composition.get() {
+            return element.absolute().top_0().invisible();
+        }
         // No timeline drawing the bars: the rows' own order stands.
         if outline.scene.borrow().is_none() {
             return element;

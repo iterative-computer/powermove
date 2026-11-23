@@ -203,8 +203,8 @@ fn drag_latency_app_property_scrub(cx: &mut TestAppContext) {
     };
     let before = value(&s);
     let from = s.at(0, 0.5);
-    s.surface.update(&mut s.vcx, |t, _| {
-        t.press_property("l0".into(), "opacity".into(), from)
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.press_property("l0".into(), "opacity".into(), from, cx)
     });
     for (event, dx) in [-12., -24., -36., -48., -36., -24., -12.]
         .into_iter()

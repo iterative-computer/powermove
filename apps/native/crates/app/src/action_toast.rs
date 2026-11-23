@@ -7,12 +7,22 @@ use std::time::{Duration, Instant};
 pub(crate) struct ToastView {
     toast: Option<ActionToast<()>>,
     action: Box<dyn Fn(&mut App)>,
+    action_label: &'static str,
     hovered: bool,
     motion: pm_shell::motion::Motion<u64>,
 }
 impl ToastView {
     pub(crate) fn new(
         message: String,
+        action: impl Fn(&mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_action(message, "Undo", action, cx)
+    }
+
+    pub(crate) fn with_action(
+        message: String,
+        action_label: &'static str,
         action: impl Fn(&mut App) + 'static,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -40,6 +50,7 @@ impl ToastView {
         Self {
             toast: Some(ActionToast::new(message, (), Instant::now())),
             action: Box::new(action),
+            action_label,
             hovered: false,
             motion: Default::default(),
         }
@@ -53,8 +64,14 @@ impl Render for ToastView {
         let message = toast.message.clone();
         let tokens = pm_shell::tokens();
         let kit = Kit::new(&tokens, &self.motion, |v| &mut v.motion, window, cx);
-        let undo = kit
-            .button("delete-undo", "Undo", Button::Neutral, None, None)
+        let action = kit
+            .button(
+                "toast-action",
+                self.action_label,
+                Button::Neutral,
+                None,
+                None,
+            )
             .on_click(cx.listener(|v, _, _, cx| {
                 if v.toast.take().is_some() {
                     (v.action)(cx);
@@ -69,7 +86,7 @@ impl Render for ToastView {
             .flex()
             .justify_center()
             .child(
-                kit.action_toast(message, undo)
+                kit.action_toast(message, action)
                     .role(Role::Status)
                     .on_hover(cx.listener(|v, hovered: &bool, _, cx| {
                         if let Some(toast) = &mut v.toast {

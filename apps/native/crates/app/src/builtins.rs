@@ -1656,6 +1656,36 @@ impl Controller {
         }
     }
 
+    fn native_timeline_body(
+        &mut self,
+        bounds: pm_shell::layout::Rect,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.published.as_ref()?.snapshot.root()?;
+        let tokens = self.host.borrow().tokens.clone();
+        let body = (bounds.h - tokens.metrics.header).max(0.);
+        self.builtins.timeline_place = Some((bounds, tokens.metrics.header));
+        let panel = div().w_full().h(px(body)).overflow_hidden();
+        if self.builtins.natives.outline.set_native_only(true)
+            && let Some(timeline) = &self.builtins.timeline
+        {
+            timeline.update(cx, |t, cx| {
+                t.show_pending_scene(cx);
+                cx.notify();
+            });
+        }
+        Some(match &self.builtins.timeline {
+            Some(timeline) => panel.child(timeline.clone()).into_any_element(),
+            None => panel
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(rgb(tokens.colors.muted))
+                .child("Opening timeline…")
+                .into_any_element(),
+        })
+    }
+
     pub fn builtin_panel(
         &mut self,
         id: &str,
@@ -1671,9 +1701,16 @@ impl Controller {
             _ => {}
         }
         if !self.builtins.ready.contains(id) {
+            if id == "timeline" {
+                return self.native_timeline_body(bounds, cx);
+            }
             return None;
         }
-        let runtime = self.builtins.runtime.clone()?;
+        let Some(runtime) = self.builtins.runtime.clone() else {
+            return (id == "timeline")
+                .then(|| self.native_timeline_body(bounds, cx))
+                .flatten();
+        };
         let mut t = self.host.borrow().tokens.clone();
         if id == "timeline"
             && let Some(p) = &self.published
@@ -1698,6 +1735,9 @@ impl Controller {
             }
             if id == "timeline" {
                 outline.bind(view.downgrade());
+                if let Some(timeline) = &self.builtins.timeline {
+                    timeline.update(cx, |_, cx| cx.notify());
+                }
                 let wake = self.playback_wake.clone();
                 view.update(cx, |v, cx| {
                     v.installed = wake;
@@ -1711,7 +1751,13 @@ impl Controller {
             }
             self.builtins.views.insert(id.into(), view);
         }
-        let view = self.builtins.views.get(id)?.clone();
+        let Some(view) = self.builtins.views.get(id).cloned() else {
+            return if id == "timeline" {
+                self.native_timeline_body(bounds, cx)
+            } else {
+                None
+            };
+        };
         let build = self
             .agent_panel_builds
             .iter()
@@ -1727,8 +1773,14 @@ impl Controller {
             v.set_panel_build(build, cx);
         });
         if id == "timeline" {
+            let restored = self.builtins.natives.outline.set_native_only(false);
             if let Some(timeline) = self.builtins.timeline.clone() {
-                timeline.update(cx, |timeline, cx| timeline.set_tokens(t.clone(), cx));
+                timeline.update(cx, |timeline, cx| {
+                    timeline.set_tokens(t.clone(), cx);
+                    if restored {
+                        timeline.published(cx);
+                    }
+                });
             }
             self.builtins.timeline_place = Some((bounds, t.metrics.header));
         }
@@ -2489,6 +2541,11 @@ impl Controller {
                                 self.seek(time);
                             }
                         }
+                        Some("status") => {
+                            if let Some(message) = request.input["message"].as_str() {
+                                self.note(message.to_owned(), cx);
+                            }
+                        }
                         Some("pause") => {
                             if let Some(viewer) = &self.viewer {
                                 let _ = viewer.command(pm_protocol::clock::TransportCommand::Pause);
@@ -2538,10 +2595,27 @@ impl Controller {
                                     let owner = effect.owner;
                                     crate::v4_native::announce(&self.host.borrow().window, &message);
                                     let kernel = self.kernel.clone();
-                                    self.delete_toast = Some(cx.new(|cx| crate::action_toast::ToastView::new(message, move |cx| {
-                                        let pending = kernel.call(&owner.project, pm_kernel::Request::new(pm_kernel::Caller::native(), pm_kernel::HistoryCall::Undo).with_document(owner.document).outside_revision(owner.revision));
-                                        cx.spawn(async move |_| { let _ = pending.await; }).detach();
-                                    }, cx)));
+                                    self.action_toast = Some(cx.new(|cx| {
+                                        crate::action_toast::ToastView::new(
+                                            message,
+                                            move |cx| {
+                                                let pending = kernel.call(
+                                                    &owner.project,
+                                                    pm_kernel::Request::new(
+                                                        pm_kernel::Caller::native(),
+                                                        pm_kernel::HistoryCall::Undo,
+                                                    )
+                                                    .with_document(owner.document)
+                                                    .outside_revision(owner.revision),
+                                                );
+                                                cx.spawn(async move |_| {
+                                                    let _ = pending.await;
+                                                })
+                                                .detach();
+                                            },
+                                            cx,
+                                        )
+                                    }));
                                     cx.notify();
                                 }
                                 pm_panel_media::Effect::OpenComposition(id) => {
@@ -3427,8 +3501,59 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
     fn effect(&self, effect: pm_panel_timeline::HostEffect, cx: &mut App) {
         use pm_panel_timeline::HostEffect as E;
         let _ = self.0.update(cx, |v, cx| match effect {
-            E::Status(message) => {
-                v.message = message;
+            E::Status(message) => v.note(message, cx),
+            E::LockedStrip {
+                layer,
+                document,
+                composition,
+                trim,
+            } => {
+                let Some(session) = v.session.as_ref() else {
+                    return;
+                };
+                let project = session.project.clone();
+                let kernel = v.kernel.clone();
+                let message = if trim {
+                    "1 locked layer didn't trim"
+                } else {
+                    "1 locked layer didn't move"
+                };
+                crate::v4_native::announce(&v.host.borrow().window, message);
+                v.action_toast = Some(cx.new(|cx| {
+                    crate::action_toast::ToastView::with_action(
+                        message.into(),
+                        "Unlock",
+                        move |cx| {
+                            let Some(publication) = kernel.published(&project) else {
+                                return;
+                            };
+                            if publication.snapshot.doc_id != document
+                                || publication.snapshot.open_comp() != composition
+                            {
+                                return;
+                            }
+                            let command = pm_kernel::Command::SetLayerLocked {
+                                layer_id: layer.clone(),
+                                locked: false,
+                            };
+                            let request = pm_kernel::Request::new(
+                                pm_kernel::Caller::native(),
+                                pm_kernel::Call::Transact {
+                                    label: Some("Unlock Layer".into()),
+                                    body: pm_kernel::WriteBody::Commands(vec![command]),
+                                    expected_revision: Some(publication.revision()),
+                                },
+                            )
+                            .with_document(document);
+                            let pending = kernel.call(&project, request);
+                            cx.spawn(async move |_| {
+                                let _ = pending.await;
+                            })
+                            .detach();
+                        },
+                        cx,
+                    )
+                }));
                 cx.notify();
             }
             E::Seek(time) => v.seek(time),
@@ -3468,6 +3593,18 @@ impl crate::timeline_surface::Delegate for ControllerDelegate {
             && let Some(runtime) = &controller.read(cx).builtins.runtime
         {
             runtime.update_timeline_view(view);
+        }
+    }
+    fn timeline_outline(
+        &self,
+        view: Arc<pm_panel_timeline::TimelineModel>,
+        refresh: bool,
+        cx: &mut App,
+    ) {
+        if let Some(controller) = self.0.upgrade()
+            && let Some(runtime) = &controller.read(cx).builtins.runtime
+        {
+            runtime.update_timeline_outline(view, refresh);
         }
     }
     fn view_facts(&self, facts: serde_json::Value, cx: &mut App) {

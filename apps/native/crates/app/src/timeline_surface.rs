@@ -4,7 +4,7 @@
 //! No sample waits on V8, and the main thread never waits on the kernel.
 #[path = "timeline_audio.rs"]
 mod audio;
-use crate::v4_view::Outline;
+use crate::v4_view::{Outline, TimelineOutline};
 use gpui::{prelude::*, *};
 use pm_design::Tokens;
 use pm_engine_service::audio::GainPreview;
@@ -86,6 +86,8 @@ pub trait Delegate: 'static {
     /// The immutable model behind the displayed lanes, for native edits
     /// made outside the timeline (notably speed in Properties).
     fn tracks_view(&self, _view: Arc<TimelineModel>, _cx: &mut App) {}
+    /// The model whose row geometry the outline worker should project.
+    fn timeline_outline(&self, _view: Arc<TimelineModel>, _refresh: bool, _cx: &mut App) {}
     fn time(&self, cx: &App) -> f64;
     /// Media dropped on the timeline (Finder files, Project items).
     fn drop_media(&self, _drop: MediaDrop, _cx: &mut App) {}
@@ -162,6 +164,10 @@ enum Spec {
     /// Option-drag: copies follow the pointer, the originals stay.
     Duplicate,
     Trim(Edge),
+    Locked {
+        layer: String,
+        trim: bool,
+    },
     Offset,
     Ripple(Edge),
     Roll(Edge),
@@ -267,7 +273,9 @@ impl TransformBox {
 }
 enum Job {
     Sync,
+    Disclosure(String),
     SelectLayer(String, Mods),
+    SelectAll(Option<(u64, Option<String>, String)>),
     /// The transition selected on a clip's edge, or none.
     SelectTransition(Option<(String, pm_panel_timeline::render::Edge)>),
     SelectKey {
@@ -463,9 +471,13 @@ pub struct TimelineSurface {
     audio: audio::AudioState,
     model: Arc<TimelineModel>,
     scene: Option<Arc<Scene>>,
+    pending_scene: Option<(Built, bool)>,
     /// The timeline panel holds the keyboard (the shell says, as it lays
     /// the panel out): selected rows take the accent tint only then.
     focused: bool,
+    focused_layer: Option<(u64, Option<String>, String)>,
+    last_pointer_activity: std::time::Instant,
+    pointer_timeout: Option<Task<()>>,
     snap_guide: Option<f64>,
     /// The graph on screen; its value range may be held (`steady_graph`).
     graph: Option<Arc<Graph>>,
@@ -625,6 +637,7 @@ impl TimelineSurface {
             audio: Default::default(),
             model: Default::default(),
             scene: None,
+            pending_scene: None,
             snap_guide: None,
             graph: None,
             graph_fitted: None,
@@ -666,6 +679,9 @@ impl TimelineSurface {
             // word (unfocused, at the first layout) is then a change, and
             // both hear it.
             focused: true,
+            focused_layer: None,
+            last_pointer_activity: std::time::Instant::now(),
+            pointer_timeout: None,
             activation: None,
             split_modifiers: None,
             split_preview_hidden: false,
@@ -836,9 +852,27 @@ impl TimelineSurface {
     }
     /// A kernel publication landed: follow it on a worker.
     pub fn published(&mut self, cx: &mut Context<Self>) {
+        if self.scene.is_some() && !self.current_composition(&self.model) {
+            let timeline = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = timeline.update(cx, |t, cx| t.cancel_pointer_gesture(cx));
+            });
+            self.focused_layer = None;
+            self.pending_scene = None;
+            self.scene = None;
+            self.frame = None;
+            self.graph = None;
+            self.graph_fitted = None;
+            self.outline.clear_composition(cx);
+            cx.notify();
+        }
         if !matches!(self.queue.back(), Some(Job::Sync)) {
             self.queue.push_back(Job::Sync);
         }
+        self.pump(cx);
+    }
+    pub(crate) fn toggle_disclosure(&mut self, layer: String, cx: &mut Context<Self>) {
+        self.queue.push_back(Job::Disclosure(layer));
         self.pump(cx);
     }
     pub fn set_offline_media(&mut self, offline: BTreeSet<String>, cx: &mut Context<Self>) {
@@ -920,6 +954,16 @@ impl TimelineSurface {
         });
         self.pump(cx);
     }
+    pub fn select_all(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.focused {
+            return false;
+        }
+        self.queue
+            .push_back(Job::SelectAll(self.focused_layer.clone()));
+        self.pump(cx);
+        true
+    }
+
     /// A row chosen from one of the timeline's own context menus.
     pub(crate) fn choose_menu(&mut self, context: MenuContext, action: &str, cx: &mut Context<Self>) {
         let time = self.delegate.time(cx);
@@ -968,19 +1012,40 @@ impl TimelineSurface {
             });
         }
     }
-    /// Escape: cancel the active gesture. Foreign edits survive in the kernel.
+    /// Escape also leaves the split tool, even when no pointer gesture is active.
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> bool {
+        let cancelled = self.cancel_pointer_gesture(cx);
+        if self.model.edit_tool != EditTool::Split {
+            return cancelled;
+        }
+        self.queue.push_back(Job::Command {
+            id: "timeline.tool:selection".into(),
+            time: 0.,
+            frames: None,
+            shift: false,
+        });
+        self.pump(cx);
+        true
+    }
+
+    fn cancel_pointer_gesture(&mut self, cx: &mut Context<Self>) -> bool {
+        self.pointer_timeout = None;
         self.row_scroll = None;
         if self.audio_cancel(cx) {
             return true;
         }
-        if !matches!(self.gesture, Gesture::Idle) {
-            self.finish_key_gain(None, cx);
+        let gesture = std::mem::replace(&mut self.gesture, Gesture::Idle);
+        if matches!(gesture, Gesture::Idle) {
+            return false;
         }
-        let split = self.model.edit_tool == EditTool::Split;
-        match std::mem::replace(&mut self.gesture, Gesture::Idle) {
-            Gesture::Idle if !split => return false,
-            Gesture::Idle => (),
+        self.finish_key_gain(None, cx);
+        self.cursor = CursorStyle::Arrow;
+        self.lit = None;
+        self.transform = None;
+        self.graph_axis = false;
+        self.readout = None;
+        self.outline.layer_dragged.set(false);
+        match gesture {
             Gesture::Dragging { .. } => {
                 self.queue.retain(|job| !matches!(job, Job::Sample(_)));
                 self.sample_scheduled = false;
@@ -1002,13 +1067,35 @@ impl TimelineSurface {
             Gesture::Scrub(..) => self.delegate.scrubbing(false, cx),
             _ => {}
         }
-        if split {
-            self.queue.push_back(Job::Command { id: "timeline.tool:selection".into(), time: 0., frames: None, shift: false });
-        }
         cx.notify();
         self.pump(cx);
         true
     }
+
+    fn start_pointer_gesture(&mut self, cx: &mut Context<Self>) {
+        self.cancel_pointer_gesture(cx);
+        self.last_pointer_activity = std::time::Instant::now();
+        self.pointer_timeout = Some(cx.spawn(async move |timeline, cx| {
+            const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+            let mut remaining = TIMEOUT;
+            loop {
+                cx.background_executor().timer(remaining).await;
+                let update = timeline.update(cx, |timeline, cx| {
+                    let remaining =
+                        TIMEOUT.saturating_sub(timeline.last_pointer_activity.elapsed());
+                    if remaining.is_zero() {
+                        timeline.cancel_pointer_gesture(cx);
+                    }
+                    remaining
+                });
+                match update {
+                    Ok(delay) if !delay.is_zero() => remaining = delay,
+                    _ => break,
+                }
+            }
+        }));
+    }
+
     pub fn fit_time(&mut self, cx: &mut Context<Self>) {
         let width = (f32::from(self.bounds.size.width) as f64 - self.view.layer_column).max(1.);
         if self.model.index.duration > 0. {
@@ -1178,6 +1265,7 @@ impl TimelineSurface {
         cx: &mut Context<Self>,
     ) {
         use pm_panel_timeline::footer::ZOOM_STEP;
+        self.start_pointer_gesture(cx);
         let t = &self.tokens;
         self.lit = Some(part);
         match part {
@@ -1405,7 +1493,10 @@ impl TimelineSurface {
         };
         let work_update = client.active_drag().is_some_and(|drag| drag.is_work_area());
         self.busy = true;
-        let previous_scene = self.scene.clone();
+        let previous_scene = self
+            .scene
+            .as_ref()
+            .map(|scene| (scene.clone(), self.model.clone()));
         let preview_update = matches!(&job, Job::Sample(_));
         let finish_gain = matches!(&job, Job::Finish(true));
         let (tokens, offline, sources) = (
@@ -1426,8 +1517,14 @@ impl TimelineSurface {
                         preview.as_ref().filter(|p| p.gain_commands.is_some())
                     {
                         build_with(&client, &tokens, offline, sources, Some(&gain.snapshot))
-                    } else if preview_update && preview.is_some() && previous_scene.is_some() {
-                        let mut scene = (*previous_scene.unwrap()).clone();
+                    } else if preview_update
+                        && preview.is_some()
+                        && let Some((scene, model)) = previous_scene
+                        && Arc::ptr_eq(&model.index, &client.model.index)
+                        && model.mode == client.model.mode
+                        && model.rebuilds == client.model.rebuilds
+                    {
+                        let mut scene = (*scene).clone();
                         scene.preview_times(&client.model, &preview.as_ref().unwrap().starts);
                         Some(Built {
                             scene: Arc::new(scene),
@@ -1518,6 +1615,144 @@ impl TimelineSurface {
         let Some(built) = built else {
             return;
         };
+        if !self.current_composition(&built.model) {
+            return;
+        }
+        let model = built.model.clone();
+        self.pending_scene = Some((built, hold_time_mapping));
+        self.show_pending_scene(cx);
+        let delegate = self.delegate.clone();
+        let refresh = self.pending_scene.is_some();
+        cx.defer(move |cx| delegate.timeline_outline(model, refresh, cx));
+        if refresh {
+            self.outline.reconcile_timeline(cx);
+        }
+    }
+
+    fn current_composition(&self, model: &TimelineModel) -> bool {
+        self.kernel.published(&self.project).is_some_and(|p| {
+            p.snapshot.doc_id == model.index.doc_id && p.snapshot.open_comp() == model.index.comp_id
+        })
+    }
+
+    pub(crate) fn pending_outline_range(&self) -> Option<(usize, usize)> {
+        let (built, _) = self.pending_scene.as_ref()?;
+        let range = self.scene_range(&built.model, &built.scene);
+        Some((range.start, range.end))
+    }
+
+    fn row_viewport_height(&self) -> f64 {
+        (f32::from(self.bounds.size.height) as f64 - self.tokens.metrics.ruler as f64).max(0.)
+    }
+
+    /// Keep a project timeline usable while its richer outline mounts, or if
+    /// that worker was retired. The names use the very same scene as the bars.
+    fn fallback_outline(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.outline.has_view() {
+            return None;
+        }
+        let scene = self.scene.as_ref()?;
+        let height = self.row_viewport_height();
+        let metrics = &self.tokens.metrics;
+        let scroll = self.view.scroll_y;
+        let rows = scene
+            .visible_range(scroll, height)
+            .filter_map(|ordinal| {
+                let (row, top, bottom) = scene.span(ordinal)?;
+                let name = match &row.content {
+                    pm_panel_timeline::render::RowContent::Layer {
+                        clip: Some(clip), ..
+                    } => &clip.name,
+                    _ => &row.accessibility_label,
+                };
+                let id = SharedString::from(format!("timeline:fallback:{}", row.id));
+                let tag = id.clone();
+                let row_view = div()
+                    .id(id)
+                    .debug_selector(move || tag.to_string())
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top(px((top - scroll) as f32))
+                    .h(px((bottom - top) as f32))
+                    .flex()
+                    .items_center()
+                    .pl(px(
+                        metrics.inset + metrics.timeline_indent * row.depth.min(4) as f32
+                    ))
+                    .overflow_hidden()
+                    .child(SharedString::from(name.clone()));
+                Some(match pm_panel_timeline::v4::parse_row(&row.id) {
+                    Ok(RowId::Layer(layer)) => {
+                        row_view.on_click(cx.listener(move |s, event: &ClickEvent, _, cx| {
+                            s.queue.push_back(Job::SelectLayer(
+                                layer.clone(),
+                                Self::mods(event.modifiers()),
+                            ));
+                            s.pump(cx);
+                        }))
+                    }
+                    _ => row_view,
+                })
+            })
+            .collect::<Vec<_>>();
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .top(px(metrics.ruler))
+                .w(px(self.view.layer_column as f32))
+                .h(px(height as f32))
+                .overflow_hidden()
+                .text_color(rgb(self.tokens.colors.text))
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    fn scene_range(&self, model: &TimelineModel, scene: &Scene) -> std::ops::Range<usize> {
+        let height = self.row_viewport_height();
+        scene.mount_range(self.scroll_for_scene(model, scene, height), height)
+    }
+
+    pub(crate) fn can_show_outline(&self, outline: &TimelineOutline) -> bool {
+        if !self
+            .kernel
+            .published(&self.project)
+            .is_some_and(|p| outline.is_for(&p.snapshot))
+        {
+            return false;
+        }
+        let covers = |model, scene| outline.covers(model, scene, self.scene_range(model, scene));
+        self.pending_scene
+            .as_ref()
+            .is_some_and(|(built, _)| covers(&built.model, &built.scene))
+            || self
+                .scene
+                .as_ref()
+                .is_some_and(|scene| covers(&self.model, scene))
+            || (self.pending_scene.is_none() && self.scene.is_none())
+    }
+
+    pub(crate) fn show_pending_scene(&mut self, cx: &mut Context<Self>) {
+        let Some((built, _)) = &self.pending_scene else {
+            return;
+        };
+        if !self.current_composition(&built.model) {
+            self.pending_scene = None;
+            return;
+        }
+        if self.outline.covers(
+            &built.model,
+            &built.scene,
+            self.scene_range(&built.model, &built.scene),
+        ) {
+            let (built, hold_time_mapping) = self.pending_scene.take().unwrap();
+            self.install_scene(built, hold_time_mapping, cx);
+        }
+    }
+
+    fn install_scene(&mut self, built: Built, hold_time_mapping: bool, cx: &mut Context<Self>) {
         for key in built.wanted {
             if self.reading.insert(key.clone()) {
                 // Peaks are a full decode: a background task, then one rebuild.
@@ -1536,31 +1771,8 @@ impl TimelineSurface {
                 .detach();
             }
         }
-        if built.model.reveal_serial != self.model.reveal_serial {
-            if let Some((layer, path)) = &built.model.reveal_target {
-                let target = built.model.rows().iter().find(|row| match &row.id {
-                    RowId::Property { layer_id, channel } if layer_id == layer => built
-                        .model
-                        .track_channels(layer, channel)
-                        .iter()
-                        .any(|c| &c.path == path),
-                    _ => false,
-                });
-                if let Some(top) =
-                    target.and_then(|row| built.scene.scroll_for(&pm_panel_timeline::v4::row_id(&row.id)))
-                {
-                    let height = (f32::from(self.bounds.size.height) as f64
-                        - self.tokens.metrics.ruler as f64)
-                        .max(0.);
-                    let bottom = top + self.tokens.metrics.track_row as f64;
-                    if top < self.view.scroll_y {
-                        self.view.scroll_y = top;
-                    } else if bottom > self.view.scroll_y + height {
-                        self.view.scroll_y = (bottom - height).max(0.);
-                    }
-                }
-            }
-        }
+        self.view.scroll_y =
+            self.scroll_for_scene(&built.model, &built.scene, self.row_viewport_height());
         self.model = built.model;
         let delegate = self.delegate.clone();
         let view = self.model.clone();
@@ -1628,6 +1840,32 @@ impl TimelineSurface {
             self.fit_duration = duration;
         }
         self.changed(false, cx);
+    }
+
+    fn scroll_for_scene(&self, model: &TimelineModel, scene: &Scene, height: f64) -> f64 {
+        let mut scroll = self.view.scroll_y;
+        if model.reveal_serial != self.model.reveal_serial
+            && let Some((layer, path)) = &model.reveal_target
+        {
+            let target = model.rows().iter().find(|row| match &row.id {
+                RowId::Property { layer_id, channel } if layer_id == layer => model
+                    .track_channels(layer, channel)
+                    .iter()
+                    .any(|c| &c.path == path),
+                _ => false,
+            });
+            if let Some(top) =
+                target.and_then(|row| scene.scroll_for(&pm_panel_timeline::v4::row_id(&row.id)))
+            {
+                let bottom = top + self.tokens.metrics.track_row as f64;
+                if top < scroll {
+                    scroll = top;
+                } else if bottom > scroll + height {
+                    scroll = (bottom - height).max(0.);
+                }
+            }
+        }
+        scene.clamp_scroll(scroll, height)
     }
     fn clamp_scroll(&mut self) {
         let Some(scene) = &self.scene else {
@@ -2234,6 +2472,23 @@ impl TimelineSurface {
         }
     }
     fn on_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let (x, _) = self.local(event.position);
+        // The outline can arm a gesture before this same press bubbles to
+        // the canvas. Only the divider owns presses on the name side here.
+        if x < self.view.layer_column
+            && matches!(
+                self.gesture,
+                Gesture::LayerPress { .. }
+                    | Gesture::ParentPick { .. }
+                    | Gesture::Pressed(Press {
+                        spec: Some(Spec::Property { .. }),
+                        ..
+                    })
+            )
+        {
+            return;
+        }
+        self.start_pointer_gesture(cx);
         if self.audio_down(event, cx) { return; }
         self.pointer = Some(event.position);
         self.sideways = false;
@@ -2408,7 +2663,9 @@ impl TimelineSurface {
         };
         let m = self.tokens.metrics;
         let column = self.view.layer_column;
-        if (x - column).abs() <= m.hit as f64 / 4. && y >= m.ruler as f64 {
+        // Preserve the divider on its line and on the name side. A strip
+        // starting at the viewport edge still needs a usable trim grip.
+        if self.column_splitter_at(x, y) {
             if event.click_count == 2 {
                 self.view.layer_column = default_layer_column(&m);
                 self.view.column_chosen = false;
@@ -2563,17 +2820,17 @@ impl TimelineSurface {
         }
         if let Some((layer, edge)) = frame.hit_clip(x, y) {
             let layer = layer.to_owned();
-            if self
+            self.focused_layer = Some((
+                self.model.index.doc_id,
+                self.model.index.comp_id.clone(),
+                layer.clone(),
+            ));
+            let lock = self
                 .model
                 .index
-                .layer(&layer)
-                .is_some_and(|l| l.effectively_locked)
-            {
-                self.queue.push_back(Job::SelectLayer(layer, mods));
-                self.pump(cx);
-                return;
-            }
-            if event.click_count == 2 {
+                .locking_layer(&layer)
+                .map(|owner| owner.id.clone());
+            if event.click_count == 2 && lock.is_none() {
                 if let Some(id) = self.model.index.layer(&layer).and_then(|l| {
                     (l.kind == "precomp")
                         .then(|| l.definition.clone())
@@ -2612,6 +2869,29 @@ impl TimelineSurface {
                 None => Spec::Layers,
             };
             let selected = self.model.selection.contains(&layer);
+            if let Some(owner) = lock {
+                let index = &self.model.index;
+                let can_edit_selection = selected
+                    && !additive
+                    && matches!(spec, Spec::Layers | Spec::Trim(_))
+                    && index
+                        .expanded_ids(self.model.selection.layers())
+                        .iter()
+                        .any(|id| index.layer(id).is_some_and(|l| !l.effectively_locked));
+                if !can_edit_selection {
+                    self.queue.push_back(Job::SelectLayer(layer, mods));
+                    self.gesture = Gesture::Pressed(Press {
+                        origin: event.position,
+                        spec: Some(Spec::Locked {
+                            layer: owner,
+                            trim: edge.is_some(),
+                        }),
+                        release: None,
+                    });
+                    self.pump(cx);
+                    return;
+                }
+            }
             // Pro-edit modifiers choose the tool; they must not toggle selection.
             let picking = if matches!(
                 spec,
@@ -2653,10 +2933,19 @@ impl TimelineSurface {
     }
     /// The layer header was pressed (the JSX outline): a reorder
     /// starts here if the pointer travels.
-    pub fn press_layer_row(&mut self, layer: String, origin: Point<Pixels>) {
-        if matches!(self.gesture, Gesture::Idle) {
-            self.gesture = Gesture::LayerPress { layer, origin };
-        }
+    pub fn press_layer_row(
+        &mut self,
+        layer: String,
+        origin: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_pointer_gesture(cx);
+        self.focused_layer = Some((
+            self.model.index.doc_id,
+            self.model.index.comp_id.clone(),
+            layer.clone(),
+        ));
+        self.gesture = Gesture::LayerPress { layer, origin };
     }
     /// The outline captures its own pointer. Accept that stream here as well
     /// as the native canvas listener, without ever taking a bar/key gesture.
@@ -2756,7 +3045,8 @@ impl TimelineSurface {
             self.changed(false, cx);
         }
     }
-    pub fn press_parent(&mut self, layer: String, origin: Point<Pixels>) {
+    pub fn press_parent(&mut self, layer: String, origin: Point<Pixels>, cx: &mut Context<Self>) {
+        self.start_pointer_gesture(cx);
         let selected = self.model.selection.layers();
         let ids = if selected.contains(&layer) {
             selected.to_vec()
@@ -2844,7 +3134,14 @@ impl TimelineSurface {
         }
         Some(id)
     }
-    pub fn press_property(&mut self, layer: String, path: String, origin: Point<Pixels>) {
+    pub fn press_property(
+        &mut self,
+        layer: String,
+        path: String,
+        origin: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_pointer_gesture(cx);
         self.gesture = Gesture::Pressed(Press {
             origin,
             spec: Some(Spec::Property { layer, path }),
@@ -3076,6 +3373,11 @@ impl TimelineSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if event.pressed_button.is_none() {
+            self.cancel_pointer_gesture(cx);
+        } else {
+            self.last_pointer_activity = std::time::Instant::now();
+        }
         if self.audio_move(event, cx) { return true; }
         let stale_transition = matches!(&self.gesture, Gesture::Transition(drag) if drag.document != self.model.index.doc_id || drag.revision != self.model.index.revision);
         if stale_transition {
@@ -3293,6 +3595,19 @@ impl TimelineSurface {
                     self.gesture = Gesture::Idle;
                     return true;
                 };
+                if let Spec::Locked { layer, trim } = spec {
+                    self.gesture = Gesture::Idle;
+                    self.delegate.effect(
+                        HostEffect::LockedStrip {
+                            layer,
+                            document: self.model.index.doc_id,
+                            composition: self.model.index.comp_id.clone(),
+                            trim,
+                        },
+                        cx,
+                    );
+                    return true;
+                }
                 let proedit = matches!(
                     spec,
                     Spec::Ripple(_) | Spec::Roll(_) | Spec::Slip | Spec::Slide
@@ -3611,6 +3926,7 @@ impl TimelineSurface {
         self.pump(cx);
     }
     fn on_up(&mut self, cx: &mut Context<Self>) -> bool {
+        self.pointer_timeout = None;
         self.row_scroll = None;
         if self.audio_up(cx) { return true; }
         self.transform = None;
@@ -4241,6 +4557,17 @@ impl TimelineSurface {
         self.graph_region()
             .is_some_and(|r| x >= r.x && y >= r.y && y <= r.y + r.height)
     }
+    /// The divider keeps its line and name side while a visible strip edge
+    /// owns its trim grip to the right.
+    fn column_splitter_at(&self, x: f64, y: f64) -> bool {
+        let m = self.tokens.metrics;
+        let offset = x - self.view.layer_column;
+        offset.abs() <= m.hit as f64 / 4.
+            && y >= m.ruler as f64
+            && (offset <= 0.
+                || self.clip_at(x, y).is_none_or(|(_, edge)| edge.is_none()))
+    }
+
     /// The layer bar at `(x, y)` and the edge under it, where a bar shows.
     fn clip_at(&self, x: f64, y: f64) -> Option<(String, Option<Edge>)> {
         if self.covered(x, y) {
@@ -4315,9 +4642,7 @@ impl TimelineSurface {
             CursorStyle::Split
         } else if let Some(cursor) = self.graph_cursor(x, y) {
             cursor
-        } else if (x - self.view.layer_column).abs() <= m.hit as f64 / 4.
-            && y >= m.ruler as f64
-        {
+        } else if self.column_splitter_at(x, y) {
             CursorStyle::ResizeColumn
         } else if self.work_handle_at(x, y).is_some() {
             CursorStyle::ResizeLeftRight
@@ -4532,6 +4857,22 @@ impl TimelineSurface {
         !self.busy && self.queue.is_empty() && self.client.is_some()
     }
     #[cfg(test)]
+    pub(crate) fn outline_settled(&self) -> bool {
+        self.pending_scene.is_none()
+    }
+    #[cfg(test)]
+    pub(crate) fn gesture_state(&self) -> String {
+        match &self.gesture {
+            Gesture::Idle => "idle".into(),
+            Gesture::Column => "column divider".into(),
+            Gesture::Marquee { .. } => "marquee".into(),
+            Gesture::Scrub(..) => "scrub".into(),
+            Gesture::Pressed(press) => format!("pressed {:?}", press.spec),
+            Gesture::Dragging { .. } => "dragging".into(),
+            _ => "other gesture".into(),
+        }
+    }
+    #[cfg(test)]
     pub fn pps(&self) -> f64 {
         self.view.pps
     }
@@ -4600,6 +4941,33 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             client.adopt_view().map_err(text)?;
             Ok(vec![])
         }
+        Job::Disclosure(layer) => {
+            client.sync().map_err(text)?;
+            client
+                .model
+                .toggle_disclosure(&layer)
+                .map_err(|error| error.to_string())?;
+            client.publish_view_if_changed().await.map_err(text)?;
+            Ok(vec![])
+        }
+        Job::SelectAll(focused) => {
+            client.sync().map_err(text)?;
+            client.adopt_view().map_err(text)?;
+            let focused = focused
+                .as_ref()
+                .filter(|(doc, comp, _)| {
+                    *doc == client.model.index.doc_id && comp == &client.model.index.comp_id
+                })
+                .map(|(_, _, layer)| layer.as_str());
+            let select = client.model.select_all(focused);
+            client
+                .dispatch(Plan {
+                    calls: vec![select],
+                    ..Default::default()
+                })
+                .await
+                .map_err(text)
+        }
         Job::SelectLayer(id, mods) => {
             let calls = if client.model.mode == TimelineMode::Tracks {
                 client.model.select_track_layer(&id, mods).map(|r| r.0)
@@ -4645,7 +5013,11 @@ async fn run(client: &mut TimelineClient, job: Job) -> Result<Vec<HostEffect>, S
             } else {
                 client.begin_drag(kind).await.map_err(text)?;
             }
-            Ok(vec![])
+            Ok(client
+                .active_drag()
+                .and_then(|d| d.locked_note())
+                .into_iter()
+                .collect())
         }
         Job::Sample(sample) => {
             if client.active_drag().is_some() {
@@ -4853,6 +5225,7 @@ fn drag_kind(model: &TimelineModel, spec: Spec, time: f64) -> Result<DragKind, S
         }));
     }
     Ok(match spec {
+        Spec::Locked { .. } => return Err("That layer is locked.".into()),
         Spec::Layers => DragKind::Layers { ids },
         Spec::Duplicate => {
             // A selected group brings its members: only the tops are copied.
@@ -5273,15 +5646,24 @@ fn build_with(
     let mut model = client.model.clone();
     if let Some(snapshot) = preview {
         Arc::make_mut(&mut published).snapshot = snapshot.clone();
-        model.sync(&published);
     }
+    model.sync(&published);
     let presenter = Presenter {
         offline,
         sources,
         wanted: Default::default(),
         published: published.clone(),
     };
-    let mut scene = Scene::from_model(&model, &presenter, tokens, 0.).ok()?;
+    let mut scene = match Scene::from_model(&model, &presenter, tokens, 0.) {
+        Ok(scene) => scene,
+        Err(error) => {
+            eprintln!(
+                "Timeline scene rejected at revision {}: {error:?}",
+                model.index.revision
+            );
+            return None;
+        }
+    };
     scene.bars = crate::render_frames::bars(model.index.comp_id.as_deref());
     let graph = (model.graph_display != GraphDisplay::DopeSheet)
         .then(|| {
@@ -5329,6 +5711,7 @@ impl Render for TimelineSurface {
         if self.activation.is_none() {
             self.activation = Some(cx.observe_window_activation(window, |s, window, cx| {
                 if !window.is_window_active() {
+                    s.cancel_pointer_gesture(cx);
                     s.set_skimmer(None, cx);
                 }
             }));
@@ -6137,6 +6520,7 @@ impl Render for TimelineSurface {
             .children(reorder.into_iter().flatten().flatten())
             .children(effect_row)
             .children(tip)
+            .children(self.fallback_outline(cx))
             // The DOM outline's scroll hitbox covers the column, including
             // its transparent ruler band. Keep these native controls above it.
             .child(gpui::deferred(tools))

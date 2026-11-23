@@ -418,10 +418,11 @@ async function mountExtension(
     for (const dispose of hot.disposers) dispose(hot.data);
     return JSON.stringify(hot.data);
   },
-  async publish() {
+  async publish(refresh = false) {
     for (const p of native("host.publications") as HostPublication[])
       host.publish(p);
     mounted?.publish?.();
+    if (refresh) await mounted?.refresh?.();
     await settle();
     return true;
   },

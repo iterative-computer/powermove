@@ -83,6 +83,10 @@ pub(crate) fn rig_source(panel: &str, source: OpenSource) -> Rig {
             .unwrap()
             .unwrap();
     }
+    rig_opened(panel, actor)
+}
+pub(crate) fn rig_opened(panel: &str, actor: KernelActor) -> Rig {
+    let kernel = actor.handle();
     let mut runtime = Builtins::new(kernel.clone(), PROJECT, || {}).unwrap();
     let ticket = runtime.mount(panel).unwrap();
     // A mount waits its turn in the process's shared heap account while

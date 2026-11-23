@@ -186,9 +186,19 @@ pub fn connect_engine(
     activity: pm_engine_service::jobs::Activity,
     overrides: OverrideWindows,
 ) -> AnyResult<Arc<EngineJobs>> {
+    connect_engine_with_executable(tools, activity, overrides, std::env::current_exe()?)
+}
+
+/// Shared service wiring for the app and an isolated engine-worker fixture.
+pub(crate) fn connect_engine_with_executable(
+    tools: &Tools,
+    activity: pm_engine_service::jobs::Activity,
+    overrides: OverrideWindows,
+    executable: PathBuf,
+) -> AnyResult<Arc<EngineJobs>> {
     let jobs = EngineJobs::new(
         tools.host.kernel.clone(),
-        std::env::current_exe()?,
+        executable,
         activity,
         tools.host.profile.clone(),
         overrides,
