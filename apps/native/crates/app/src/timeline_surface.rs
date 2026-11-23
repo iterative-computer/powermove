@@ -6442,6 +6442,7 @@ fn strip_rim(
     ring: (u32, f32),
     width: Pixels,
     light: (u32, f32),
+    glow: (u32, f32),
     window: &mut Window,
 ) {
     let ink = |(rgb, alpha): (u32, f32)| -> Background {
@@ -6454,6 +6455,21 @@ fn strip_rim(
             offset: point(px(0.), px(0.)),
             blur_radius: px(0.),
             spread_radius: width,
+            inset: true,
+        };
+        window.paint_inset_shadows(area, corners, smoothing, &[shadow]);
+    }
+    // The light pooled at the foot: a soft band inside the bottom edge that
+    // follows the strip's corners, full at the edge and gone `GLOW_REACH`
+    // of the way up (the shadow's shape reaches past the sides, so none of
+    // it falls there or along the top).
+    if glow.1 > 0. {
+        let soft = area.size.height * pm_design::GLOW_REACH / 3.3;
+        let shadow = BoxShadow {
+            color: ink(glow),
+            offset: point(px(0.), -soft * 3.),
+            blur_radius: soft,
+            spread_radius: -soft * 2.,
             inset: true,
         };
         window.paint_inset_shadows(area, corners, smoothing, &[shadow]);
@@ -6488,6 +6504,8 @@ fn strip_hover(op: &Op, pointer_x: f64, origin: Point<Pixels>, t: &Tokens, windo
         hover.ring,
         px(hover.ring_width),
         hover.light,
+        // The glow is the body's, painted with it: the hover adds the rim.
+        (0, 0.),
         window,
     );
     let grip = t.trim_grip();
@@ -6664,6 +6682,7 @@ fn paint(op: &Op, origin: Point<Pixels>, t: &Tokens, window: &mut Window, cx: &m
                 (hex("ring"), number("ringAlpha") as f32),
                 ring,
                 (hex("light"), number("lightAlpha") as f32),
+                (hex("glow"), number("glowAlpha") as f32),
                 window,
             );
         }
