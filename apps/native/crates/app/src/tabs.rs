@@ -11,7 +11,7 @@ pub(crate) fn setting(kernel: &KernelHandle) -> bool {
         .settings
         .get("openProjectsIn")
         .and_then(pm_model::Value::as_str)
-        != Some("windows")
+        == Some("tabs")
 }
 
 /// The setting changed: the shell follows it (the next project opened opens

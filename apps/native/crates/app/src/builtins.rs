@@ -2907,68 +2907,67 @@ impl Controller {
                         break 'pick Err("The attachment's thread is unavailable.".into());
                     };
                     let (project, thread) = (project.to_owned(), thread.to_owned());
+                    if self.builtins.agent_picking {
+                        break 'pick Ok(Value::Null);
+                    }
                     let editor = self.host.borrow().window.clone();
-                    // The answer goes to the editor's window: the popover that
-                    // asked closes now, and its handle with it.
-                    let handle = cx
-                        .windows()
-                        .into_iter()
-                        .find(|h| {
-                            h.update(cx, |_, w, _| {
-                                crate::platform::ns_window(w).is_some_and(|n| {
-                                    objc2::rc::Retained::as_ptr(&n)
-                                        == objc2::rc::Retained::as_ptr(&editor)
-                                })
-                            })
-                            .unwrap_or(false)
+                    let current = window.window_handle();
+                    let native = crate::platform::ns_window(window);
+                    let editor_handle = native.as_ref()
+                        .filter(|native| {
+                            objc2::rc::Retained::as_ptr(native) == objc2::rc::Retained::as_ptr(&editor)
                         })
-                        .unwrap_or_else(|| window.window_handle());
-                    // The popover steps aside, kept as it is: back, it shows
-                    // the new chip at once instead of rebuilding first.
-                    let popover = self
-                        .builtins
-                        .windows
-                        .get("agent")
-                        .copied()
-                        .and_then(|h| h.update(cx, |_, w, _| crate::platform::ns_window(w)).ok())
-                        .flatten();
-                    if let Some(popover) = &popover {
-                        if let Some(parent) = popover.parentWindow() {
-                            parent.removeChildWindow(popover);
-                        }
-                        popover.orderOut(None);
-                    }
-                    self.builtins.agent_picking = popover.is_some();
-                    let picked = pm_shell::region_pick::pick(&editor);
-                    // The overlay takes the pointer from here: no layer stays
-                    // outlined under it, nor after.
-                    // Deferred: the viewer's redraw reads this controller.
-                    if let Some(gizmos) = self.builtins.gizmos.clone() {
-                        cx.defer(move |cx| gizmos.update(cx, |g, cx| g.clear_hover(cx)));
-                    }
+                        .map(|_| current)
+                        .or(self.close_window);
+                    let Some(editor_handle) = editor_handle else {
+                        break 'pick Err("The editor window is unavailable.".into());
+                    };
+                    let popover_handle = self.builtins.windows.get("agent").copied();
+                    self.builtins.agent_picking = true;
+                    let gizmos = self.builtins.gizmos.clone();
                     cx.spawn(async move |this, cx| {
-                        let picked = picked.recv().await.ok().flatten();
-                        let _ = handle.update(cx, |_, window, cx| {
-                            if let Some(rect) = picked {
+                        let popover = popover_handle.and_then(|handle| {
+                            if handle == current {
+                                native
+                            } else {
+                                handle.update(cx, |_, w, _| crate::platform::ns_window(w))
+                                    .ok().flatten()
+                            }
+                        });
+                        if let Some(gizmos) = gizmos {
+                            gizmos.update(cx, |g, cx| g.clear_hover(cx));
+                        }
+                        // AppKit sends delegate callbacks synchronously. Leave
+                        // both GPUI's app and entity updates before ordering windows.
+                        if let Some(popover) = &popover {
+                            if let Some(parent) = popover.parentWindow() {
+                                parent.removeChildWindow(popover);
+                            }
+                            popover.orderOut(None);
+                            if editor.isVisible() && !editor.isKeyWindow() {
+                                editor.makeKeyWindow();
+                            }
+                        }
+                        let picked = pm_shell::region_pick::pick(&editor).recv().await.ok().flatten();
+                        if let Some(rect) = picked {
+                            let _ = editor_handle.update(cx, |_, window, cx| {
                                 let _ = this.update(cx, |v, cx| {
                                     v.attach_region(rect, project, thread, window, cx)
                                 });
-                            }
-                            // Put the popover back after the deferred capture has drawn.
-                            window.defer(cx, move |window, cx| {
-                                let _ = this.update(cx, |v, cx| {
-                                    v.builtins.agent_picking = false;
-                                    match &popover {
-                                        Some(popover) if v.builtins.windows.contains_key("agent") => {
-                                            let editor = v.host.borrow().window.clone();
-                                            gpui_macos::child_window::attach(popover, &editor);
-                                            gpui_macos::child_window::show(popover, true);
-                                        }
-                                        _ => v.show_builtin("agent", window, cx),
-                                    }
-                                });
                             });
-                        });
+                        }
+                        // The editor update flushes its deferred capture before
+                        // the popover is ordered back in.
+                        let restore = this.update(cx, |v, _| {
+                            v.builtins.agent_picking = false;
+                            popover_handle.is_some()
+                                && v.builtins.windows.get("agent").copied() == popover_handle
+                        }).unwrap_or(false);
+                        if restore && editor.isVisible() && let Some(popover) = popover {
+                            let key = editor.isKeyWindow();
+                            gpui_macos::child_window::attach(&popover, &editor);
+                            gpui_macos::child_window::show(&popover, key);
+                        }
                     })
                     .detach();
                     Ok(Value::Null)

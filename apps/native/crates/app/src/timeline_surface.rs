@@ -7591,6 +7591,7 @@ mod cull_tests {
             detail: serde_json::json!({"half": null}),
             clip: None,
             covered,
+            decorative: false,
         }
     }
 

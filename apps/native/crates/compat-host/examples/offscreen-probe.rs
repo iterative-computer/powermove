@@ -773,7 +773,12 @@ fn verify_isolated_stack(
         );
         if !shown {
             assert!(labels.iter().all(|(id, ..)| host.panel_probe(id).is_none()));
-            assert_eq!(host.warm_panels().len(), 2);
+            let warm = host.warm_panels();
+            assert_eq!(warm.len(), retired.len());
+            // Exercise cold snapshot handoff after first checking retention.
+            for (id, _) in warm.into_iter().take(4) {
+                host.evict_warm_panel(&id);
+            }
             assert!(
                 labels
                     .iter()

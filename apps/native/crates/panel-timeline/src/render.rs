@@ -46,6 +46,8 @@ pub struct Op {
     /// half-pixel: painting it changes nothing. It stays for hit testing and
     /// marquee selection.
     pub covered: bool,
+    /// Summary markers are visible but never take pointer input.
+    pub decorative: bool,
 }
 impl Op {
     pub(crate) fn new(
@@ -67,6 +69,7 @@ impl Op {
             detail: Value::Null,
             clip: None,
             covered: false,
+            decorative: false,
         }
     }
     pub fn wire(&self) -> Value {
@@ -372,7 +375,8 @@ struct TransitionCapsule {
 #[derive(Clone, Debug)]
 pub struct Scene {
     rows: Vec<std::sync::Arc<PaintRow>>,
-    time_preview: HashMap<String, f64>,
+    // The previewed start and its offset from the stored layer start.
+    time_preview: HashMap<String, (f64, f64)>,
     tops: Vec<f64>,
     positions: HashMap<String, usize>,
     control_times: HashMap<String, std::sync::Arc<[f64]>>,
@@ -438,7 +442,9 @@ impl Scene {
     pub fn preview_times(&mut self, model: &crate::TimelineModel, starts: &[(String, f64)]) {
         let offsets: HashMap<_, _> = starts
             .iter()
-            .filter_map(|(id, from)| model.index.layer(id).map(|l| (id.clone(), from - l.from)))
+            .filter_map(|(id, from)| {
+                model.index.layer(id).map(|layer| (id.clone(), (*from, from - layer.from)))
+            })
             .collect();
         for row in &mut self.rows {
             let Ok(id) = crate::v4::parse_row(&row.id) else {
@@ -450,11 +456,12 @@ impl Scene {
                 | crate::RowId::Path { layer_id, .. }
                 | crate::RowId::Effect { layer_id, .. } => layer_id,
             };
-            let Some(offset) = offsets.get(layer) else {
+            let Some(&(from, offset)) = offsets.get(layer) else {
                 continue;
             };
-            let delta = offset - self.time_preview.get(layer).copied().unwrap_or(0.);
-            if delta == 0. {
+            let delta = offset - self.time_preview.get(layer).map_or(0., |&(_, offset)| offset);
+            let moving_strip = matches!(&row.content, RowContent::Layer { clip: Some(clip), .. } if clip.from != from);
+            if delta == 0. && !moving_strip {
                 continue;
             }
             let row = std::sync::Arc::make_mut(row);
@@ -464,7 +471,7 @@ impl Scene {
                         for band in bands {band.start += delta;band.end += delta;}
                     }
                     if let Some(clip) = clip {
-                        clip.from += delta;
+                        clip.from = from;
                     }
                     *summary = summary
                         .iter()
@@ -534,8 +541,6 @@ impl Scene {
                 .collect::<Vec<_>>()
         };
         // Layers with a selected key: only their marks are copied to show it.
-        let marked: HashSet<&str> = selected_keys.iter().map(|(layer, _)| *layer).collect();
-        let mut summaries = HashMap::new();
         let rows = model
             .rows()
             .iter()
@@ -547,39 +552,20 @@ impl Scene {
                 let (content, is_selected) = match &row.id {
                     RowId::Layer(id) => {
                         let layer = model.index.layer(id).ok_or(Error::DuplicateId)?;
-                        let summary = summaries
-                            .entry(id.clone())
-                            .or_insert_with(|| {
-                                let shared = layer.summary(|layer| {
-                                    keys(layer, layer.channels.iter().collect())
-                                        .into_iter()
-                                        .map(|k| Key {
-                                            selected: false,
-                                            ..k
-                                        })
-                                        .collect()
-                                });
-                                if marked.contains(id.as_str()) {
-                                    shared
-                                        .iter()
-                                        .map(|k| Key {
-                                            selected: selected_keys
-                                                .contains(&(id.as_str(), k.id.as_str())),
-                                            ..k.clone()
-                                        })
-                                        .collect()
-                                } else {
-                                    shared
-                                }
-                            })
-                            .clone();
+                        let summary = layer.summary(|layer| {
+                            keys(layer, layer.channels.iter().collect())
+                                .into_iter()
+                                .map(|key| Key { selected: false, ..key })
+                                .collect()
+                        });
+                        let (from, duration) = model.index.strip_span(layer);
                         (
                             RowContent::Layer {
                                 clip: Some(Clip {
                                     id: id.clone(),
                                     name: layer.name.to_string_lossy(),
-                                    from: layer.from,
-                                    duration: layer.duration,
+                                    from,
+                                    duration,
                                     label: p.layer_label(layer),
                                     selected: selected.contains(id.as_str()),
                                     locked: layer.effectively_locked,
@@ -658,11 +644,7 @@ impl Scene {
             for item in &layout.items {
                 let layer = model.index.layer(&item.id).ok_or(Error::DuplicateId)?;
                 lane_by_layer.insert(item.id.as_str(), (item.area, item.lane));
-                let (from, duration) = if layer.kind == "group" && layer.duration > 0. {
-                    (layer.from, layer.duration)
-                } else {
-                    (item.from, item.duration)
-                };
+                let (from, duration) = model.index.strip_span(layer);
                 clips.entry((item.area, item.lane)).or_default().push(Clip {
                     id: item.id.clone(),
                     name: layer.name.to_string_lossy(),
@@ -2469,9 +2451,10 @@ fn paint_keys(
                 Interpolation::Hold => "square",
             }
         };
+        let selected = summary.is_none() && key.selected;
         let color = match summary {
-            _ if key.selected => t.colors.accent,
             Some(ink) => ink,
+            None if selected => t.colors.accent,
             None => t.colors.text,
         };
         let mut id = prefix.clone();
@@ -2484,8 +2467,8 @@ fn paint_keys(
             color,
         );
         o.opacity = match summary {
-            _ if key.selected => 1.,
             Some(_) => 0.8,
+            None if selected => 1.,
             None => 0.85,
         };
         // A lone key is solid; the ends of a span are half filled toward it.
@@ -2500,23 +2483,22 @@ fn paint_keys(
                 }
             })
             .flatten();
-        o.detail = json!({"keyline":if key.selected {Some(t.colors.panel)}else{None},"keylineWidth":t.metrics.border,"half":half,"seconds":key.seconds});
-        let glyph = ((x * 2.).round() as i64, (shape, color, key.selected, half));
+        o.detail = json!({"keyline":if selected {Some(t.colors.panel)}else{None},"keylineWidth":t.metrics.border,"half":half,"seconds":key.seconds});
+        let glyph = ((x * 2.).round() as i64, (shape, color, selected, half));
         o.covered = on_top == Some(glyph);
         on_top = Some(glyph);
         if summary.is_some() {
-            // Clipped to the strip; a mark within one glyph of the last
-            // one drawn stays for hit-testing but is not painted (a
-            // selected mark always is).
+            // Summary marks are decorative and thin out when crowded.
+            o.decorative = true;
             o.clip = within.map(|w| w.strip);
-            if x - drawn < size && !key.selected {
+            if x - drawn < size {
                 o.covered = true;
             } else {
                 drawn = x;
             }
         }
         ops.push(o);
-        if key.focused {
+        if summary.is_none() && key.focused {
             // The ring may cover keys under it: the next one draws again.
             on_top = None;
             let mut o = Op::new(
@@ -2546,6 +2528,9 @@ fn on_layer((row, key): (String, String)) -> Option<(String, String)> {
     }
 }
 fn key_identity(op: &Op) -> Option<(String, String)> {
+    if op.decorative {
+        return None;
+    }
     serde_json::from_str(op.id.strip_prefix("key:")?).ok()
 }
 fn intersection(a: Rect, b: Rect) -> Option<Rect> {
@@ -2736,7 +2721,7 @@ impl Frame {
     pub fn hit_op(&self, prefix: &str, x: f64, y: f64, slop: f64) -> Option<&Op> {
         self.ops.iter().rev().find(|o| {
             let b = o.bounds;
-            o.id.starts_with(prefix)
+            !o.decorative && o.id.starts_with(prefix)
                 && Rect::new(
                     b.x - slop,
                     b.y - slop,
@@ -2766,7 +2751,7 @@ impl Frame {
         let op = self
             .ops
             .iter()
-            .filter(|o| o.id.starts_with("key:") && o.clip.is_none_or(|clip| clip.contains(x, y)))
+            .filter(|o| !o.decorative && o.id.starts_with("key:") && o.clip.is_none_or(|clip| clip.contains(x, y)))
             .filter(|o| {
                 let (cx, cy) = centre(o);
                 (cx - x).abs() < reach && (cy - y).abs() <= row / 2.
@@ -3034,6 +3019,7 @@ pub fn decoration_ops(ops: &[Op], decorations: &Decorations) -> Vec<Op> {
                 detail: Value::Null,
                 clip: within,
                 covered: false,
+                decorative: false,
             };
             out.push(match shape {
                 Decoration::Rect {

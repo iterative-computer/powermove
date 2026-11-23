@@ -422,7 +422,11 @@ impl TimelineClient {
             })
             .collect();
         let mut ops = Vec::with_capacity(starts.len());
-        for (id, from) in &starts {
+        for command in &commands {
+            let pm_kernel::Command::Layer(pm_kernel::LayerCommand::Set { layer_id: id, patch }) = command else {
+                continue;
+            };
+            let Some(from) = patch.from else { continue };
             let index = *locations
                 .get(id)
                 .ok_or_else(|| ModelError::UnknownId(id.clone()))?;
@@ -431,8 +435,13 @@ impl TimelineClient {
                 index,
             }
             .path();
+            if let Some(duration) = patch.duration {
+                let mut duration_path = path.clone();
+                duration_path.push("dur".into());
+                ops.push(Op::Leaf(Patch::set(duration_path, pm_model::Value::Number(duration))));
+            }
             path.push("from".into());
-            ops.push(Op::Leaf(Patch::set(path, pm_model::Value::Number(*from))));
+            ops.push(Op::Leaf(Patch::set(path, pm_model::Value::Number(from))));
         }
         preview.serial += 1;
         let revision = p.revision() + preview.serial;

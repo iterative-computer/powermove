@@ -103,6 +103,7 @@ fn op(id: String, bounds: Rect, color: u32) -> Op {
         detail: serde_json::Value::Null,
         clip: None,
         covered: false,
+        decorative: false,
     }
 }
 fn clip_control(op: &Op) -> bool {

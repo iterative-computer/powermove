@@ -426,6 +426,10 @@
       waitForSeed = !!event.wait_for_seed;
       slotReady = false;
       refreshSlot();
+    } else if (event.kind === "panel_stage") {
+      const style = document.createElement("style");
+      style.textContent = "[data-pm-contribution]{opacity:0!important;pointer-events:none!important}";
+      document.head.appendChild(style);
     } else if (event.kind === "panel_layout") {
       panelLayouts.enqueue(event.placements, event.active, event.sequence);
     } else if (event.kind === "fonts") {

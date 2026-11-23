@@ -379,10 +379,11 @@ impl TimelineModel {
                     if layer.effectively_locked {
                         continue;
                     }
+                    let (from, duration) = self.index.strip_span(layer);
                     let valid = if is_in {
-                        time <= layer.from + layer.duration - min_duration
+                        time <= from + duration - min_duration
                     } else {
-                        time >= layer.from + min_duration
+                        time >= from + min_duration
                     };
                     if valid {
                         layer_ids.push(id);
@@ -1413,8 +1414,9 @@ impl Drag {
                 let is_in = matches!(kind, DragKind::TrimIn { .. });
                 for id in ids {
                     let l = index.layer(id).unwrap();
+                    let (from, duration) = index.strip_span(l);
                     anchors.push(Anchor {
-                        time: if is_in { l.from } else { l.from + l.duration },
+                        time: if is_in { from } else { from + duration },
                         edge: Some(if is_in { Edge::In } else { Edge::Out }),
                     });
                 }
@@ -1724,17 +1726,24 @@ impl Drag {
                 };
                 for id in ids {
                     let l = self.start.layer(id).unwrap();
+                    let (start, duration) = self.start.strip_span(l);
                     let from = if self.snap.lock.is_some() {
-                        l.from + clamp(delta)
+                        start + clamp(delta)
                     } else {
-                        let rounded = frame(l.from + sample.time_delta, self.start.fps);
-                        if self.track_snap.is_some() { l.from + clamp(rounded - l.from) } else { rounded }
+                        let rounded = frame(start + sample.time_delta, self.start.fps);
+                        if self.track_snap.is_some() {
+                            start + clamp(rounded - start)
+                        } else {
+                            rounded
+                        }
                     };
                     out.push(
                         LayerCommand::Set {
                             layer_id: id.clone(),
                             patch: LayerPatch {
                                 from: Some(from),
+                                duration: (l.kind == "group" && l.duration == 0. && duration > 0.)
+                                    .then_some(duration),
                                 ..Default::default()
                             },
                         }
@@ -1778,18 +1787,26 @@ impl Drag {
                 } else {
                     f64::NEG_INFINITY
                 };
+                let mut legacy_groups = Vec::new();
                 let mut batch_by_time = HashMap::new();
                 let mut batches: Vec<(f64, Vec<String>)> = Vec::new();
                 for id in ids {
                     let l = self.start.layer(id).unwrap();
-                    let end = l.from + l.duration;
+                    let (from, duration) = self.start.strip_span(l);
+                    let end = from + duration;
                     let time = if is_in {
-                        (l.from + delta).min(end - min_duration).max(earliest)
+                        (from + delta).min(end - min_duration).max(earliest)
                     } else {
-                        (end + delta).max(l.from + min_duration)
+                        (end + delta).max(from + min_duration)
                     };
                     // A clip entirely before zero has no legal In target at zero.
                     if is_in && time >= end {
+                        continue;
+                    }
+                    // An untimed group's In/Out comes from its original
+                    // members. Materialize those spans before trimming any member.
+                    if l.kind == "group" && l.duration == 0. {
+                        legacy_groups.push((time, vec![id.clone()]));
                         continue;
                     }
                     // Normalize signed zero and retain the first-seen order.
@@ -1800,7 +1817,7 @@ impl Drag {
                     });
                     batches[index].1.push(id.clone());
                 }
-                out.extend(batches.into_iter().map(|(time, layer_ids)| {
+                out.extend(legacy_groups.into_iter().chain(batches).map(|(time, layer_ids)| {
                     if is_in {
                         TimingCommand::TrimIn { layer_ids, time }.into()
                     } else {

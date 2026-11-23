@@ -95,12 +95,21 @@ fn finish(view: &PickView, picked: Picked) {
     if state.done.replace(true) {
         return;
     }
-    if let (Some(overlay), Some(parent)) = (state.overlay.borrow_mut().take(), state.parent.borrow_mut().take()) {
-        parent.removeChildWindow(&overlay);
+    // Keep the responder alive through teardown and clear the active entry
+    // before AppKit calls back into the application.
+    let active = PICKING.with(|p| p.borrow_mut().take());
+    let overlay = state.overlay.borrow_mut().take();
+    let parent = state.parent.borrow_mut().take();
+    if let Some(overlay) = overlay {
+        if let Some(parent) = parent.filter(|parent| {
+            overlay.parentWindow().is_some_and(|attached| std::ptr::eq(&*attached, &**parent))
+        }) {
+            parent.removeChildWindow(&overlay);
+        }
         overlay.orderOut(None);
     }
     let _ = state.tx.try_send(picked);
-    PICKING.with(|p| p.borrow_mut().take());
+    drop(active);
 }
 
 thread_local! {
@@ -125,10 +134,16 @@ pub fn pick(window: &NSWindow) -> async_channel::Receiver<Picked> {
         let _ = tx.try_send(None);
         return rx;
     };
-    if let Some(old) = PICKING.with(|p| p.borrow().clone()) {
-        finish(&old, None);
-    }
     let frame = window.contentRectForFrameRect(window.frame());
+    if !window.isVisible() || window.contentView().is_none()
+        || ![frame.origin.x, frame.origin.y, frame.size.width, frame.size.height]
+            .into_iter().all(f64::is_finite)
+        || frame.size.width <= 0. || frame.size.height <= 0.
+    {
+        let _ = tx.try_send(None);
+        return rx;
+    }
+    cancel();
     let overlay = NSPanel::initWithContentRect_styleMask_backing_defer(
         NSPanel::alloc(mtm),
         frame,
@@ -155,8 +170,14 @@ pub fn pick(window: &NSWindow) -> async_channel::Receiver<Picked> {
     overlay.setContentView(Some(&view));
     // Escape cancels through the shell's key monitor (`cancel`): the
     // editor keeps the keyboard, the overlay never becomes key.
+    PICKING.with(|p| *p.borrow_mut() = Some(view.clone()));
     unsafe { window.addChildWindow_ordered(&overlay, NSWindowOrderingMode::Above) };
-    overlay.invalidateCursorRectsForView(&view);
-    PICKING.with(|p| *p.borrow_mut() = Some(view));
+    if !view.ivars().done.get() {
+        if overlay.parentWindow().is_some() {
+            overlay.invalidateCursorRectsForView(&view);
+        } else {
+            finish(&view, None);
+        }
+    }
     rx
 }

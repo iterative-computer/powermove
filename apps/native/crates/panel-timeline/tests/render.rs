@@ -772,7 +772,7 @@ fn hidden_layers_draw_at_half_strength_and_keys_mark_their_span_ends() {
 /// A collapsed layer's summary marks stay inside its strip (v1's closed
 /// clip): keys before its in point or after its out point are not drawn, the
 /// keys at its ends stand just inside them, a dense run is thinned to one
-/// mark per glyph width (the rest kept for hit-testing, not painted), and
+/// mark per glyph width, and
 /// every mark is clipped to the strip so nothing hangs under or beside it.
 #[test]
 fn summary_marks_are_drawn_inside_their_strip_and_clipped_to_it() {
@@ -792,6 +792,7 @@ fn summary_marks_are_drawn_inside_their_strip_and_clipped_to_it() {
         let mut keys = vec![key("before", 1.2), key("in", 2.)];
         keys.extend((0..40).map(|i| key(&format!("dense{i}"), 2.3 + i as f64 * 0.005)));
         keys.extend([key("out", 3.), key("after", 4.5)]);
+        keys[1].selected = true;
         let s = Scene::new(
             vec![row(
                 "short",
@@ -807,7 +808,7 @@ fn summary_marks_are_drawn_inside_their_strip_and_clipped_to_it() {
         .unwrap();
         let f = s.prepare(viewport(&t), &t).unwrap();
         let strip = f.ops.iter().find(|o| o.id == "clip:short").unwrap().bounds;
-        let marks: Vec<_> = f.ops.iter().filter(|o| o.id.starts_with("key:")).collect();
+        let marks: Vec<_> = f.ops.iter().filter(|o| o.decorative).collect();
         let named = |name: &str| marks.iter().any(|o| o.id.contains(&format!("\"{name}\"")));
         assert!(
             !named("before") && !named("after"),
@@ -816,6 +817,12 @@ fn summary_marks_are_drawn_inside_their_strip_and_clipped_to_it() {
         assert!(named("in") && named("out") && named("dense0"));
         for o in &marks {
             let b = o.bounds;
+            let (x, y) = (b.x + b.width / 2., b.y + b.height / 2.);
+            assert!(f.hit_key(x, y, 6.).is_none());
+            assert!(f.hit_key_across(x, y, 10., height as f64).is_none());
+            assert_eq!(f.hit_clip(x, y).map(|(id, _)| id), Some("short"));
+            assert!(o.detail["keyline"].is_null());
+            assert_eq!(o.opacity, 0.8);
             // Inside the strip, clear of its rounded ends.
             assert!(
                 b.x >= strip.x && b.x + b.width <= strip.x + strip.width,

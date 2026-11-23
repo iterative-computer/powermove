@@ -516,14 +516,24 @@ fn duplicate_precomp_source(
 /// Trim only the requested layers at this time, skipping locked layers.
 fn trim(cx: &mut Cx<'_>, layer_ids: &[String], time: f64, start: bool) -> Result<(), CommandError> {
     let time = values::finite(time, "time")?;
+    let mut targets = Vec::new();
     for id in layer_ids {
         let (loc, layer) = cx.layer(id)?;
         if cx.check_lock(&loc, id).is_err() {
             continue;
         }
-        let fps = cx.fps(loc.comp_id.as_deref());
         let from = values::num(&layer, "from").unwrap_or(0.0);
         let dur = values::num(&layer, "dur").unwrap_or(0.0);
+        let (from, dur) = if values::text(&layer, "type") == Some("group") && dur <= 0. {
+            let comp = loc.comp_id.as_deref();
+            span(&cx.layers(comp), &layer, cx.duration(comp))
+        } else {
+            (from, dur)
+        };
+        targets.push((loc, layer, from, dur));
+    }
+    for (loc, layer, from, dur) in targets {
+        let fps = cx.fps(loc.comp_id.as_deref());
         if (start && time >= from + dur) || (!start && time <= from) {
             return Err(CommandError::Invalid(
                 "Trim refused: the playhead must leave at least one frame in the clip.".into(),
@@ -536,11 +546,17 @@ fn trim(cx: &mut Cx<'_>, layer_ids: &[String], time: f64, start: bool) -> Result
                 nf = nf.max(earliest_start(&layer));
             }
             next = cut_head(&layer, next, nf);
+            values::obj(&mut next).insert("dur", Value::Number(from + dur - nf));
             preserve_source_time(cx, loc.comp_id.as_deref(), &layer, &mut next, nf)?;
         } else {
             // Never past the media's end at the clip's speed.
             let longest = media_limit(cx, &layer).unwrap_or(f64::INFINITY);
             let dur = (time - from).min(longest).max(1.0 / fps);
+            if values::text(&layer, "type") == Some("group")
+                && values::num(&layer, "dur").unwrap_or(0.) <= 0.
+            {
+                next = cut_head(&layer, next, from);
+            }
             values::obj(&mut next).insert("dur", Value::Number(dur));
         }
         cx.put_layer(&loc, next)?;

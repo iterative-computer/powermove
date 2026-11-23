@@ -320,6 +320,22 @@ fn size(v: Option<&Value>) -> Option<f32> {
         .map(|n| n as f32)
 }
 
+/// Explicitly dismissed extension panels belong to the saved workspace.
+pub(crate) fn dismissed_panels(record: &Value) -> BTreeSet<String> {
+    record["dismissedPanels"].as_array().into_iter().flatten()
+        .filter_map(Value::as_str).map(str::to_owned).collect()
+}
+
+pub(crate) fn write_dismissed_panels(record: &mut Value, dismissed: &BTreeSet<String>) {
+    if let Some(record) = record.as_object_mut() {
+        if dismissed.is_empty() {
+            record.remove("dismissedPanels");
+        } else {
+            record.insert("dismissedPanels".into(), serde_json::json!(dismissed));
+        }
+    }
+}
+
 /// The window layout `record` describes. Never fails: v1's normalisation
 /// rules apply (retired and duplicate panels dropped, the viewer always
 /// present), and a record without docks shows the viewer alone. Panels no one

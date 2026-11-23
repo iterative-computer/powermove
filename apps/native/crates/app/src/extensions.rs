@@ -2395,41 +2395,12 @@ impl Controller {
                     .iter()
                     .map(|(id, rect)| ((*id).clone(), *rect, clipped(id, *rect)))
                     .collect();
-                // The realm's stage page still measures the original shared
-                // virtual document. Its AppKit aperture exposes only the stage.
-                let _ = host.place_panels(
-                    placements
-                        .iter()
-                        .map(|(id, body, _)| (id.clone(), *body))
-                        .collect(),
-                    &BTreeSet::new(),
+                let stage: Vec<_> = stage.as_ref().map(to_rect).into_iter().collect();
+                let _ = host.set_regions_with_transparent_overlays(Vec::new(), stage.clone());
+                let _ = host.set_content_regions(Some(stage));
+                dirty |= host.present_dock_panel_renderers(
+                    &placements, &fades.borrow(), Some(fill.get()), corner,
                 );
-                let stage = stage.as_ref().map(to_rect);
-                let stage_regions = stage.map_or_else(Vec::new, |rect| host.panel_safe_stage(rect));
-                let _ = host.set_regions_with_transparent_overlays(
-                    placements.iter().map(|(_, _, clip)| *clip).collect(),
-                    stage.into_iter().collect(),
-                );
-                let _ = host.set_content_regions(Some(stage_regions));
-                host.set_corner_radius(corner);
-                let fades = fades.borrow();
-                host.set_body_fades(
-                    placements
-                        .iter()
-                        .filter_map(|(id, _, clip)| {
-                            let (_, fade) = fades.iter().find(|(key, _)| key == id)?;
-                            Some((*clip, *fade))
-                        })
-                        .collect(),
-                );
-                host.set_bodies(
-                    placements
-                        .iter()
-                        .map(|(id, _, clip)| (id.clone(), *clip))
-                        .collect(),
-                );
-                host.set_fill(Some(fill.get()));
-                dirty |= host.present_panel_renderers(&placements);
                 let _ = host.attach(
                     PAGE_PANEL,
                     PanelSlot {
@@ -2442,8 +2413,7 @@ impl Controller {
                     let _ = host.present(viewport);
                 }
             }
-            // The two-view budget belongs to the window, not each Store
-            // extension's separate trust domain.
+            // Keep recently scrolled-off renderers warm across extension realms.
             let views = views.borrow();
             let mut warm = Vec::new();
             for (key, page) in views.iter() {
@@ -2455,7 +2425,7 @@ impl Controller {
                 );
             }
             warm.sort_unstable();
-            let excess = warm.len().saturating_sub(2);
+            let excess = warm.len().saturating_sub(pm_compat_host::WARM_PANEL_LIMIT);
             for (_, realm, id) in warm.into_iter().take(excess) {
                 views[realm].borrow_mut().evict_warm_panel(&id);
             }

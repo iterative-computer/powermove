@@ -11,7 +11,7 @@ use gpui::{prelude::*, *};
 use pm_design::Tokens;
 use std::{
     cell::{OnceCell, RefCell},
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     io::Write as _,
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
@@ -129,6 +129,7 @@ pub struct Editor {
     /// Panels asked back before their extension had registered them (at
     /// launch): restored once the extensions are ready, never an error.
     pending_restores: Vec<String>,
+    dismissed_panels: BTreeSet<String>,
     /// Docking area of the last render, in window points.
     dock_bounds: Rect,
     gesture: Option<Gesture>,
@@ -305,6 +306,7 @@ impl Editor {
             awaiting_panels: true,
             absent: Default::default(),
             pending_restores: Vec::new(),
+            dismissed_panels: workspace::dismissed_panels(&record),
             dock_bounds: Rect::default(),
             gesture: None,
             panel_undo: Vec::new(),
@@ -489,6 +491,7 @@ impl Editor {
     }
     pub fn bind_project(&mut self, project: String) {
         self.parked.clear();
+        self.pending_restores.clear();
         self.panel_undo.clear();
         self.panel_redo.clear();
         self.project = project;
@@ -581,23 +584,41 @@ impl Editor {
         true
     }
 
-    fn dock_body_fade(&self, dock: usize, body: Rect) -> (f32, f32) {
-        let Some(viewport) = self.geometry.side_docks.get(&dock) else {
-            return (0., 0.);
-        };
+    fn dock_fade(&self, dock: usize) -> (f32, f32) {
         let id = &self.layout.docks[dock].id;
-        let (top, bottom) = pm_design::dock_scroll_edges(
-            self.dock_scroll.get(id).copied().unwrap_or(0.),
-            self.dock_scroll_max.get(id).copied().unwrap_or(0.),
-        );
+        let offset = self.dock_scroll.get(id).copied().unwrap_or(0.);
+        let maximum = self.dock_scroll_max.get(id).copied().unwrap_or(0.);
         let depth = pm_design::DOCK_SCROLL_FADE;
-        let top = top && body.y <= viewport.y + self.tokens.metrics.header;
-        let bottom = bottom && body.y + body.h >= viewport.y + viewport.h;
-        (if top { depth } else { 0. }, if bottom { depth } else { 0. })
+        (
+            if offset > 0. { depth } else { 0. },
+            if offset < maximum { depth } else { 0. },
+        )
+    }
+
+    fn dock_body_fade(&self, dock: usize, clip: Rect) -> [f64; 2] {
+        let Some(viewport) = self.geometry.side_docks.get(&dock) else {
+            return [0., 0.];
+        };
+        let (top, bottom) = self.dock_fade(dock);
+        [
+            f64::from((top - (clip.y - viewport.y).max(0.)).max(0.)),
+            f64::from((bottom - (viewport.y + viewport.h - clip.y - clip.h).max(0.)).max(0.)),
+        ]
+    }
+
+    fn dock_fade_edges(&self, dock: usize) -> Edges<AbsoluteLength> {
+        let (top, bottom) = self.dock_fade(dock);
+        Edges {
+            top: px(top).into(),
+            bottom: px(bottom).into(),
+            left: px(0.).into(),
+            right: px(0.).into(),
+        }
     }
 
     /// Save the layout in its workspace record and session.
     pub fn save(&mut self) {
+        self.dismissed_panels.retain(|id| self.layout.find(id).is_none());
         let after = self.workspace_with_layout(&self.layout);
         if after != self.record {
             self.commit(after);
@@ -624,7 +645,9 @@ impl Editor {
                 written.docks[dock].groups[group].active = tab;
             }
         }
-        workspace::write(&written, &self.record)
+        let mut record = workspace::write(&written, &self.record);
+        workspace::write_dismissed_panels(&mut record, &self.dismissed_panels);
+        record
     }
     /// The window now shows `after`: the store learns it on the next frame.
     fn commit(&mut self, after: serde_json::Value) {
@@ -664,6 +687,7 @@ impl Editor {
             self.parked.remove(&id);
         }
         self.layout = workspace::layout(&record);
+        self.dismissed_panels = workspace::dismissed_panels(&record);
         self.parked.retain(|id, _| self.layout.find(id).is_some());
         self.record = record;
     }
@@ -1054,6 +1078,9 @@ impl Editor {
             self.deferred_panel_commands.push(name.to_owned());
             return true;
         }
+        if (kind, verb) == ("panel", "restore") && self.dismissed_panels.contains(rest) {
+            return true;
+        }
         // A command that rearranges the docks moves panels to their new places.
         self.slides.armed = true;
         if kind == "panels" && matches!(verb, "waiting" | "ready") {
@@ -1098,7 +1125,7 @@ impl Editor {
         let result = match (kind, verb) {
             ("panel", "toggle") => {
                 if self.layout.open_panels().contains(&rest) && layout::closable(rest) {
-                    self.layout.close_panel(rest)
+                    return self.shell_command(&format!("panel:close:{rest}"), cx);
                 } else {
                     if let Err(error) = self.show_library_panel(rest, cx) {
                         self.status = error;
@@ -1187,15 +1214,21 @@ impl Editor {
                 if let Some((dock, group, tab)) = self.layout.find(rest)
                     && self.layout.docks[dock].groups[group].active != tab
                 {
-                    return self.shell_command(&format!("panel:close:{rest}"), cx);
+                    self.parked.remove(rest);
+                    self.layout.close_panel(rest)
+                } else {
+                    Ok(())
                 }
-                Ok(())
             }
             ("panel", "close") => {
                 // The frame that shows it closed: its feel line (`PM_FEEL_TRACE`).
                 gpui_macos::feel::note_now("panel.close");
-                self.parked.remove(rest);
-                self.layout.close_panel(rest)
+                self.layout.close_panel(rest).map(|_| {
+                    self.parked.remove(rest);
+                    if !layout::PANELS.contains(&rest) {
+                        self.dismissed_panels.insert(rest.to_owned());
+                    }
+                })
             }
             // panel:park:<id> — closed, but a later show puts it back in place.
             ("panel", "park") => match self.layout.find(rest) {
@@ -1267,8 +1300,11 @@ impl Editor {
             ("panel", "closeothers") => {
                 if let Some((d, g, _)) = self.layout.find(rest) {
                     for t in self.layout.docks[d].groups[g].tabs.clone() {
-                        if t != rest {
+                        if t != rest && layout::closable(&t) {
                             self.parked.remove(&t);
+                            if !layout::PANELS.contains(&t.as_str()) {
+                                self.dismissed_panels.insert(t);
+                            }
                         }
                     }
                 }
@@ -3713,9 +3749,8 @@ impl Editor {
                     clip.h = (bottom - clip.y).max(0.);
                     clip
                 });
-                let (top, bottom) = self.dock_body_fade(p.dock, body);
                 native_panels.clips.push((native_id.clone(), clip));
-                native_panels.fades.push((native_id.clone(), [f64::from(top), f64::from(bottom)]));
+                native_panels.fades.push((native_id.clone(), self.dock_body_fade(p.dock, clip)));
                 native_panels.bodies.push((native_id, body));
                 // The panel's material everywhere around the page (its header
                 // and the edge it leaves the dividers), and in the corners the
@@ -4261,7 +4296,7 @@ impl Editor {
                     local.x -= bounds.x;
                     local.y -= bounds.y;
                     panel = panel.left(px(local.x)).top(px(local.y));
-                    root = root.child(positioned(*bounds).overflow_hidden().child(panel));
+                    root = root.child(positioned(*bounds).overflow_hidden().overflow_fade(self.dock_fade_edges(p.dock)).child(panel));
                 } else {
                     root = root.child(panel);
                 }
@@ -4281,7 +4316,6 @@ impl Editor {
                     let y = p.rect.y + m.header;
                     let clip_start = header_offset.max(viewport.y - y);
                     let clip_end = height.min(viewport.y + viewport.h - y);
-                    let (top, bottom) = self.dock_body_fade(p.dock, Rect { y, h: height, ..p.rect });
                     // Keep the body's layout origin while the sticky header
                     // occludes its first rows. AppKit slots also read this mask.
                     panel = panel.child(
@@ -4297,12 +4331,6 @@ impl Editor {
                                     .w_full()
                                     .h(px((clip_end - clip_start).max(0.)))
                                     .overflow_hidden()
-                                    .overflow_fade(Edges::<AbsoluteLength> {
-                                        top: px(top).into(),
-                                        right: px(0.).into(),
-                                        bottom: px(bottom).into(),
-                                        left: px(0.).into(),
-                                    })
                                     .child(
                                         div()
                                             .absolute()
@@ -4391,7 +4419,7 @@ impl Editor {
                 local.x -= bounds.x;
                 local.y -= bounds.y;
                 panel = panel.left(px(local.x)).top(px(local.y));
-                root = root.child(positioned(*bounds).overflow_hidden().child(panel));
+                root = root.child(positioned(*bounds).overflow_hidden().overflow_fade(self.dock_fade_edges(p.dock)).child(panel));
             } else {
                 root = root.child(panel);
             }
@@ -5424,6 +5452,67 @@ mod keyboard_tests {
             assert!(v.layout.find("ext.one").is_none());
             assert!(workspace::layout(&v.record).find("ext.one").is_none(),
                 "a suspended panel from another project cannot enter this workspace");
+        }).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn native_dock_bodies_fade_from_the_visible_aperture_edges() {
+        let mut cx = app();
+        let window = cx.open_window(size(px(1000.), px(800.)), |_, cx| {
+            cx.new(|cx| Editor::new(Tokens::new(pm_design::Scheme::Dark, Default::default()), None, cx))
+        }).unwrap();
+        window.update(&mut cx, |v, _, _| {
+            let dock = v.layout.docks.iter().position(|dock| dock.id == "right").unwrap();
+            let viewport = Rect { x: 0., y: 10., w: 100., h: 100. };
+            v.geometry.side_docks.insert(dock, viewport);
+            v.dock_scroll_max.insert("right".into(), 80.);
+            let clip = Rect { y: 15., h: 90., ..viewport };
+            for (offset, expected) in [(0., [0., 23.]), (0.25, [23., 23.]), (80., [23., 0.])] {
+                v.dock_scroll.insert("right".into(), offset);
+                assert_eq!(v.dock_body_fade(dock, clip), expected);
+                let middle = Rect { y: 40., h: 20., ..viewport };
+                assert_eq!(v.dock_body_fade(dock, middle), [0., 0.]);
+            }
+        }).unwrap();
+    }
+
+    #[::core::prelude::v1::test]
+    fn dismissed_extension_panels_survive_workspace_reload_until_explicitly_opened() {
+        let mut cx = app();
+        let window = cx.open_window(size(px(1000.), px(800.)), |_, cx| {
+            cx.new(|cx| Editor::new(Tokens::new(pm_design::Scheme::Dark, Default::default()), None, cx))
+        }).unwrap();
+        window.update(&mut cx, |v, _, cx| {
+            let contributions = Rc::new(Contributions(vec![
+                ("ext.one".into(), "One".into()),
+                ("ext.two".into(), "Two".into()),
+            ]));
+            v.integration = Some(contributions.clone());
+            assert!(v.shell_command("panel:restore:ext.one", cx));
+            assert!(v.shell_command("panel:tabwith:ext.one:ext.two", cx));
+            assert!(v.shell_command("panel:closeothers:ext.two", cx));
+            assert!(v.shell_command("panel:close:ext.two", cx));
+            let saved = serde_json::to_vec(&v.record).unwrap();
+            v.integration = None;
+            v.show_record(serde_json::from_slice(&saved).unwrap());
+            assert!(v.shell_command("panel:restore:ext.one", cx));
+            v.integration = Some(contributions);
+            assert!(v.shell_command("panel:registered:ext.one", cx));
+            assert!(v.shell_command("panels:ready", cx));
+            for id in ["ext.one", "ext.two"] {
+                assert!(v.shell_command(&format!("panel:restore:{id}"), cx));
+                assert!(v.layout.find(id).is_none(), "{id} stayed dismissed");
+            }
+            assert!(v.shell_command("panel:activate:ext.one", cx));
+            assert!(v.shell_command("panel:show:ext.two", cx));
+            let saved = v.record.clone();
+            assert!(workspace::dismissed_panels(&saved).is_empty());
+            v.show_record(saved);
+            let opened = v.layout.clone();
+            assert!(v.shell_command("panel:park:ext.one", cx));
+            assert!(v.shell_command("panel:restore:ext.one", cx));
+            assert_eq!(v.layout, opened);
+            assert!(v.layout.find("ext.two").is_some());
         }).unwrap();
     }
 

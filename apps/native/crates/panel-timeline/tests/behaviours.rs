@@ -3115,29 +3115,29 @@ fn group_trim_drag_batches_matching_edges_and_preserves_offsets() {
     }
 }
 
+use render::{Label, Media, ModelPresenter, Scene, Viewport};
+
+struct GroupStripPresenter;
+impl ModelPresenter for GroupStripPresenter {
+    fn accessibility_label(&self, row: &RowId) -> String {
+        format!("{row:?}")
+    }
+    fn layer_label(&self, layer: &Layer) -> Label {
+        Label::for_kind(&layer.kind)
+    }
+    fn media(&self, _: &Layer) -> Media {
+        Media::Ready
+    }
+    fn interpolation(&self, _: &Key) -> render::Interpolation {
+        render::Interpolation::Linear
+    }
+    fn track_accessibility_label(&self, _: tracks::Area, lane: usize) -> Option<String> {
+        Some(format!("Track {}", lane + 1))
+    }
+}
+
 #[test]
 fn group_strip_uses_its_trimmed_edge_for_hit_testing_in_both_modes() {
-    use render::{Interpolation, Label, Media, ModelPresenter, Scene, Viewport};
-
-    struct Presenter;
-    impl ModelPresenter for Presenter {
-        fn accessibility_label(&self, row: &RowId) -> String {
-            format!("{row:?}")
-        }
-        fn layer_label(&self, layer: &Layer) -> Label {
-            Label::for_kind(&layer.kind)
-        }
-        fn media(&self, _: &Layer) -> Media {
-            Media::Ready
-        }
-        fn interpolation(&self, _: &Key) -> Interpolation {
-            Interpolation::Linear
-        }
-        fn track_accessibility_label(&self, _: tracks::Area, lane: usize) -> Option<String> {
-            Some(format!("Track {}", lane + 1))
-        }
-    }
-
     let tokens = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
     let viewport = Viewport {
         width: 1100.,
@@ -3152,7 +3152,7 @@ fn group_strip_uses_its_trimmed_edge_for_hit_testing_in_both_modes() {
         c.model.mode = mode;
         select(&mut c, &["g"]);
         command(&mut c, "trimOut", 5.);
-        let frame = Scene::from_model(&c.model, &Presenter, &tokens, 0.)
+        let frame = Scene::from_model(&c.model, &GroupStripPresenter, &tokens, 0.)
             .unwrap()
             .prepare(viewport, &tokens)
             .unwrap();
@@ -5065,4 +5065,86 @@ fn adding_a_key_replaces_the_static_reveal_with_keyframed_rows() {
     assert!(has_property(&c, "a", "opacity"));
     assert!(has_property(&c, "a", "position.x"));
     assert!(c.model.reveal.layers["a"].paths.is_none());
+}
+
+#[test]
+fn group_strips_track_live_edits_even_when_a_child_stays_put() {
+    let tokens = pm_design::Tokens::new(pm_design::Scheme::Dark, Default::default());
+    let viewport = Viewport {
+        width: 1600.,
+        height: 800.,
+        scroll_y: 0.,
+        scroll_time: 0.,
+        pps: 60.,
+        layer_column: 200.,
+    };
+    for mode in [TimelineMode::Layers, TimelineMode::Tracks] {
+        for locked in [false, true] {
+            for collapsed in [false, true] {
+                for duration in [0, 8] {
+                    let mut fixture = group_trim_fixture();
+                    layer_mut(&mut fixture, 0).insert("from", Value::from(if duration == 0 { 0 } else { 1 }));
+                    layer_mut(&mut fixture, 0).insert("dur", Value::from(duration));
+                    layer_mut(&mut fixture, 0).insert("groupCollapsed", Value::from(collapsed));
+                    layer_mut(&mut fixture, 3).insert("lock", Value::from(locked));
+                    let (_a, mut c) = client_with(fixture);
+                    c.model.mode = mode;
+                    c.model.track_snap_disabled = true;
+                    let build = |c: &TimelineClient| {
+                        Scene::from_model(&c.model, &GroupStripPresenter, &tokens, 0.).unwrap()
+                    };
+                    let span = |scene: &Scene| {
+                        let clip = scene.prepare(viewport, &tokens).unwrap().clip_nodes()
+                            .into_iter().find(|clip| clip.id == "g").unwrap();
+                        (clip.from, clip.duration)
+                    };
+                    let mut scene = build(&c);
+                    assert_eq!(span(&scene), (1., 8.), "{mode:?} {locked} {collapsed}");
+                    let kind = DragKind::Layers { ids: strings(&["g"]) };
+                    if mode == TimelineMode::Layers {
+                        c.begin_preview_drag(kind).unwrap();
+                    } else {
+                        block_on(c.begin_drag(kind)).unwrap();
+                    }
+                    block_on(c.drag(sample(-1.))).unwrap();
+                    if let Some(preview) = c.layer_preview() {
+                        scene.preview_times(&c.model, &preview.starts);
+                    } else {
+                        scene = build(&c);
+                    }
+                    assert_eq!(span(&scene), (0., 8.));
+                    block_on(c.drag(sample(2.))).unwrap();
+                    if let Some(preview) = c.layer_preview() {
+                        scene.preview_times(&c.model, &preview.starts);
+                    } else {
+                        scene = build(&c);
+                    }
+                    assert_eq!(span(&scene), (3., 8.));
+                    block_on(c.finish_drag(true)).unwrap();
+                    assert_eq!(span(&build(&c)), (3., 8.));
+                    assert_eq!(trim_spans(&c, &["locked"])[0].0, if locked { 1. } else { 3. });
+                    undo(&mut c);
+
+                    block_on(c.begin_drag(DragKind::TrimIn { ids: strings(&["g"]) })).unwrap();
+                    block_on(c.drag(sample(0.5))).unwrap();
+                    assert_eq!(span(&build(&c)), (1.5, 7.5));
+                    block_on(c.finish_drag(true)).unwrap();
+                    undo(&mut c);
+
+                    block_on(c.begin_drag(DragKind::TrimOut { ids: strings(&["g"]) })).unwrap();
+                    block_on(c.drag(sample(-2.))).unwrap();
+                    assert_eq!(span(&build(&c)), (1., 6.));
+                    block_on(c.finish_drag(true)).unwrap();
+                    undo(&mut c);
+
+                    select(&mut c, &["g"]);
+                    command(&mut c, "trimOut", 5.);
+                    assert_eq!(span(&build(&c)), (1., 4.));
+                    undo(&mut c);
+                    command(&mut c, "trimIn", 4.);
+                    assert_eq!(span(&build(&c)), (4., 5.));
+                }
+            }
+        }
+    }
 }

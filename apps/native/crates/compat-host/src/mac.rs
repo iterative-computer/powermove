@@ -246,6 +246,9 @@ impl Shared {
         Ok(())
     }
     fn queue_document(&self) -> Result<()> {
+        if self.panel_feedback.borrow().is_some() {
+            self.send(json!({"kind": "panel_stage", "panel": 0}))?;
+        }
         let slots: Vec<_> = self
             .panels
             .borrow()
@@ -934,19 +937,34 @@ define_class!(
         fn hit(&self, _point: NSPoint) -> Option<Retained<NSView>> { None }
     }
 );
+use objc2_quartz_core::{CAGradientLayer, CALayer, CAShapeLayer, CATransaction};
+
+#[derive(Default)]
+struct SlotClip {
+    rects: Vec<Rect>,
+    mask: Option<SlotMask>,
+}
+
+struct SlotMask {
+    group: Retained<CALayer>,
+    solid: Retained<CAShapeLayer>,
+    gradients: Vec<(Retained<CAGradientLayer>, Retained<CAShapeLayer>)>,
+}
+
 // A shared full-window page with an exact mask and identical native hit geometry.
 define_class!(
     #[unsafe(super(NSView))]
     #[thread_kind=MainThreadOnly]
     #[name="PMCompatSlotView"]
-    #[ivars=RefCell<Vec<Rect>>]
+    #[ivars=RefCell<SlotClip>]
     struct SlotView;
     impl SlotView {
         #[unsafe(method_id(hitTest:))]
         fn hit(&self,point:NSPoint)->Option<Retained<NSView>>{
             let local=self.convertPoint_fromView(point,unsafe{self.superview()}.as_deref());
             let y=self.bounds().size.height-local.y;
-            if self.ivars().borrow().iter().any(|r|r.contains(local.x,y)){unsafe{msg_send![super(self),hitTest:point]}}else{None}
+            let inside = self.ivars().borrow().rects.iter().any(|r|r.contains(local.x,y));
+            if inside {unsafe{msg_send![super(self),hitTest:point]}}else{None}
         }
         /// S5: a key the page leaves (WebKit hands it on up the responder
         /// chain: no field took it, no page script stopped it) goes back to
@@ -975,72 +993,81 @@ impl SlotView {
     }
     fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         unsafe {
-            msg_send![super(Self::alloc(mtm).set_ivars(RefCell::new(vec![]))),initWithFrame:frame]
+            msg_send![super(Self::alloc(mtm).set_ivars(RefCell::new(SlotClip::default()))),initWithFrame:frame]
         }
     }
     /// Shows the page only within `rects` (window points from the top), each
     /// with continuous bottom corners of `radius` (a panel body's corners).
     fn clip(&self, rects: Vec<Rect>, radius: f64, fades: &[(Rect, [f64; 2])]) {
-        use objc2_quartz_core::{CAGradientLayer, CALayer, CAShapeLayer};
+        self.setWantsLayer(true);
+        let Some(layer) = self.layer() else { return };
+        let bounds = self.bounds();
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+
+        let mut state = self.ivars().borrow_mut();
+        let mask = state.mask.get_or_insert_with(|| {
+            let group = CALayer::new();
+            let solid = CAShapeLayer::new();
+            group.addSublayer(&solid);
+            unsafe { layer.setMask(Some(&group)) };
+            SlotMask { group, solid, gradients: Vec::new() }
+        });
+        mask.group.setFrame(bounds);
+        mask.solid.setFrame(bounds);
         let path = CGMutablePath::new();
-        let group = CALayer::new();
-        group.setFrame(self.bounds());
-        let h = self.bounds().size.height;
+        let mut used = 0;
         for r in &rects {
-            let frame = NSRect::new(NSPoint::new(r.x, h - r.y - r.h), NSSize::new(r.w, r.h));
-            let fade = fades
-                .iter()
-                .find(|(rect, distances)| rect == r && *distances != [0., 0.]);
-            if let Some((_, [top, bottom])) = fade {
-                if r.h <= 0. || r.w <= 0. {
-                    continue;
-                }
+            if r.w <= 0. || r.h <= 0. {
+                continue;
+            }
+            let frame = NSRect::new(NSPoint::new(r.x, bounds.size.height - r.y - r.h), NSSize::new(r.w, r.h));
+            let Some((_, [top, bottom])) = fades.iter().find(|(rect, fade)| rect == r && *fade != [0., 0.]) else {
+                add_bottom_rounded(&path, frame, radius);
+                continue;
+            };
+            if used == mask.gradients.len() {
                 let gradient = CAGradientLayer::new();
-                let stop = |alpha: f64| {
-                    let color =
-                        NSColor::colorWithSRGBRed_green_blue_alpha(0., 0., 0., alpha).CGColor();
-                    unsafe { Retained::retain(&*color as *const _ as *mut AnyObject).unwrap() }
-                };
-                let top_edge = (*top / r.h).min(1.);
-                let bottom_edge = (1. - *bottom / r.h).max(top_edge);
-                let colors = [
-                    if *top > 0. { 0. } else { 1. },
-                    1.,
-                    1.,
-                    if *bottom > 0. { 0. } else { 1. },
-                ]
-                .map(stop);
-                unsafe {
-                    gradient.setColors(Some(&NSArray::from_retained_slice(&colors)));
-                }
-                gradient.setLocations(Some(&NSArray::from_retained_slice(
-                    &[0., top_edge, bottom_edge, 1.].map(NSNumber::new_f64),
-                )));
+                let shape = CAShapeLayer::new();
                 gradient.setStartPoint(NSPoint::new(0.5, 1.));
                 gradient.setEndPoint(NSPoint::new(0.5, 0.));
-                gradient.setFrame(frame);
-                let shape = CAShapeLayer::new();
-                shape.setFrame(gradient.bounds());
-                let rounded = CGMutablePath::new();
-                add_bottom_rounded(&rounded, gradient.bounds(), radius);
-                shape.setPath(Some(&rounded));
-                unsafe {
-                    gradient.setMask(Some(&shape));
-                }
-                group.addSublayer(&gradient);
-            } else {
-                add_bottom_rounded(&path, frame, radius);
+                unsafe { gradient.setMask(Some(&shape)) };
+                mask.group.addSublayer(&gradient);
+                mask.gradients.push((gradient, shape));
             }
+            let (gradient, shape) = &mask.gradients[used];
+            used += 1;
+            let depth = f64::from(pm_design::DOCK_SCROLL_FADE);
+            let mut stops = [
+                0.,
+                (top / r.h).clamp(0., 1.),
+                (1. - bottom / r.h).clamp(0., 1.),
+                ((r.h + top - bottom) / (2. * r.h)).clamp(0., 1.),
+                1.,
+            ];
+            stops.sort_by(f64::total_cmp);
+            let colors = stops.map(|t| {
+                let alpha = (1. + (t * r.h - top) / depth)
+                    .min(1. + ((1. - t) * r.h - bottom) / depth).clamp(0., 1.);
+                let color = NSColor::colorWithWhite_alpha(0., alpha).CGColor();
+                unsafe { Retained::retain(&*color as *const _ as *mut AnyObject).unwrap() }
+            });
+            unsafe { gradient.setColors(Some(&NSArray::from_retained_slice(&colors))) };
+            gradient.setLocations(Some(&NSArray::from_retained_slice(&stops.map(NSNumber::new_f64))));
+            gradient.setFrame(frame);
+            gradient.setHidden(false);
+            shape.setFrame(gradient.bounds());
+            let rounded = CGMutablePath::new();
+            add_bottom_rounded(&rounded, gradient.bounds(), radius);
+            shape.setPath(Some(&rounded));
         }
-        *self.ivars().borrow_mut() = rects;
-        self.setWantsLayer(true);
-        let mask = CAShapeLayer::new();
-        mask.setFrame(self.bounds());
-        mask.setPath(Some(&path));
-        group.addSublayer(&mask);
-        if let Some(layer) = self.layer() {
-            unsafe { layer.setMask(Some(&group)) }
+        for (gradient, _) in &mask.gradients[used..] {
+            gradient.setHidden(true);
         }
+        mask.solid.setPath(Some(&path));
+        state.rects = rects;
+        drop(state);
+        CATransaction::commit();
     }
 }
 
@@ -1324,12 +1351,22 @@ impl ColdPanelOverlay {
         if placed && let Some(frame) = self.attachment.place(body, clip) {
             self.view.setFrame(frame);
             self.picture.setFrame(self.view.bounds());
-            let viewport = Rect::new(0., 0., body.w, body.h);
-            self.view.clip(vec![viewport], radius, &[(viewport, fade)]);
+            let aperture = panel_aperture(body, clip);
+            let radius = aperture_radius(body.h, aperture, radius);
+            self.view.clip(vec![aperture], radius, &[(aperture, fade)]);
             self.geometry = Some(geometry);
         }
         placed || image_changed
     }
+}
+
+fn panel_aperture(body: Rect, clip: Rect) -> Rect {
+    let clip = clip.intersection(body);
+    Rect::new(clip.x - body.x, clip.y - body.y, clip.w, clip.h)
+}
+
+fn aperture_radius(height: f64, aperture: Rect, radius: f64) -> f64 {
+    if aperture.y + aperture.h >= height { radius } else { 0. }
 }
 
 struct PanelRenderers {
@@ -1833,6 +1870,9 @@ impl MacDomHost {
     ) {
         let feedback = Rc::new(PanelFeedback::new(self.shared.handler.clone()));
         self.shared.panel_feedback.replace(Some(feedback.clone()));
+        if self.shared.ready.get() {
+            let _ = self.shared.send(json!({"kind": "panel_stage", "panel": 0}));
+        }
         self.renderers = Some(PanelRenderers {
             parent: parent.retain(),
             editor: editor.retain(),
@@ -1861,6 +1901,16 @@ impl MacDomHost {
     }
 
     pub fn present_panel_renderers(&mut self, placements: &[(String, Rect, Rect)]) -> bool {
+        self.present_dock_panel_renderers(placements, &[], self.fill, self.corner_radius)
+    }
+
+    pub fn present_dock_panel_renderers(
+        &mut self,
+        placements: &[(String, Rect, Rect)],
+        fades: &[(String, [f64; 2])],
+        fill: Option<[f64; 4]>,
+        radius: f64,
+    ) -> bool {
         let Some(renderers) = self.renderers.as_mut() else {
             return false;
         };
@@ -1912,15 +1962,15 @@ impl MacDomHost {
             }
             let mut live = false;
             let key = renderers.snapshots.key(id, *body);
-            let fade = self.body_fades.iter().find(|(rect, _)| rect == clip);
+            let fade = fades.iter().find(|(owner, _)| owner == id)
+                .map_or([0., 0.], |(_, fade)| *fade);
             if let Some(mirror) = renderers.views.get_mut(id) {
                 mirror.page.set_body_fades(
-                    fade.into_iter()
-                        .map(|(_, distances)| (Rect::new(0., 0., body.w, body.h), *distances))
-                        .collect(),
+                    (fade != [0., 0.]).then(|| (panel_aperture(*body, *clip), fade))
+                        .into_iter().collect(),
                 );
-                mirror.page.set_fill(self.fill);
-                mirror.page.set_corner_radius(self.corner_radius);
+                mirror.page.set_fill(fill);
+                mirror.page.set_corner_radius(radius);
                 if changed || mirror.page.composition_dirty() {
                     let attached = mirror.page.panel_is_attached();
                     if mirror.page.present_panel_view(id, *body, *clip).is_ok() {
@@ -1952,8 +2002,7 @@ impl MacDomHost {
                     ColdPanelOverlay::new(mtm, &renderers.parent, &renderers.editor)
                 });
                 presented |= shown.present(
-                    image, *body, *clip, self.corner_radius,
-                    fade.map_or([0.; 2], |(_, fade)| *fade),
+                    image, *body, *clip, radius, fade,
                 );
             } else {
                 presented |= overlays.remove(id).is_some();
@@ -2283,7 +2332,7 @@ impl MacDomHost {
         drop(layouts);
         self.set_regions_with_transparent_overlays(vec![viewport], Vec::new())?;
         self.set_content_regions(None)?;
-        self.present(viewport)
+        self.present_in_clip(viewport, Some(panel_aperture(body, clip)))
     }
 
     /// The continuous radius of every region's bottom corners: a panel's body
@@ -2894,6 +2943,10 @@ impl MacDomHost {
         }
     }
     pub fn present(&mut self, viewport: Rect) -> Result<()> {
+        self.present_in_clip(viewport, None)
+    }
+
+    fn present_in_clip(&mut self, viewport: Rect, aperture: Option<Rect>) -> Result<()> {
         if !viewport.valid() || viewport.x != 0. || viewport.y != 0. {
             return Err(Error::InvalidGeometry);
         }
@@ -2918,15 +2971,15 @@ impl MacDomHost {
             NSPoint::ZERO,
             NSSize::new(viewport.w, viewport.h),
         ));
-        self.slot.clip(
-            self.shared.panels.borrow().visible(),
-            self.corner_radius,
-            &self.body_fades,
-        );
+        let (regions, radius) = if let Some(aperture) = aperture {
+            (vec![aperture], aperture_radius(viewport.h, aperture, self.corner_radius))
+        } else {
+            (self.shared.panels.borrow().visible(), self.corner_radius)
+        };
+        self.slot.clip(regions, radius, &self.body_fades);
         if self.renderers.is_some() {
-            // Body grounds are painted here. Only the stage's live drawing
-            // may receive input in this full-window page.
-            *self.slot.ivars().borrow_mut() = self.content.clone().unwrap_or_default();
+            // The full-window page receives input only within the stage.
+            self.slot.ivars().borrow_mut().rects = self.content.clone().unwrap_or_default();
         }
         // The panel the page's caret is in stopped showing (another tab,
         // closed, a layout without it): the editor takes the keyboard back,

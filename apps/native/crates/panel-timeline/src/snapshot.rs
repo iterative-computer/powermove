@@ -768,6 +768,23 @@ impl TimelineIndex {
         }
         roots
     }
+    /// Imported groups without saved timing display the extent of their members.
+    pub fn strip_span(&self, layer: &Layer) -> (f64, f64) {
+        if layer.kind != "group" || layer.duration > 0. {
+            return (layer.from, layer.duration);
+        }
+        let mut extent: Option<(f64, f64)> = None;
+        for id in self.expanded_ids(std::slice::from_ref(&layer.id)) {
+            let member = self.layer(&id).unwrap();
+            if member.kind != "group" {
+                let end = member.from + member.duration;
+                extent = Some(extent.map_or((member.from, end), |(start, stop)| {
+                    (start.min(member.from), stop.max(end))
+                }));
+            }
+        }
+        extent.map_or((0., self.duration), |(start, end)| (start, end - start))
+    }
     pub fn expanded_ids(&self, roots: &[String]) -> Vec<String> {
         let children = self.children();
         let mut seen = HashSet::new();

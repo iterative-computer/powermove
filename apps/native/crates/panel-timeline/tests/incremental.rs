@@ -265,7 +265,7 @@ impl pm_panel_timeline::render::ModelPresenter for Presenter {
 }
 
 #[test]
-fn collapsed_rows_share_their_key_marks_until_a_key_of_theirs_is_selected() {
+fn collapsed_rows_share_their_key_marks_even_when_a_key_is_selected_elsewhere() {
     use pm_panel_timeline::render::{RowContent, Scene};
     std::thread::spawn(|| {
         let actor = KernelActor::spawn(KernelConfig::default());
@@ -312,9 +312,9 @@ fn collapsed_rows_share_their_key_marks_until_a_key_of_theirs_is_selected() {
         client.sync().unwrap();
         let after = Scene::from_model(&client.model, &Presenter, &tokens, 0.).unwrap();
         let marks = summary(&after, "L5");
-        assert!(marks.iter().any(|k| k.id == key && k.selected));
-        assert_eq!(marks.iter().filter(|k| k.selected).count(), 1);
-        assert!(!summary(&before, "L5").iter().any(|k| k.selected));
+        assert!(marks.iter().any(|k| k.id == key));
+        assert!(marks.iter().all(|k| !k.selected));
+        assert!(Arc::ptr_eq(&summary(&before, "L5"), &marks));
         assert!(Arc::ptr_eq(&summary(&before, "L6"), &summary(&after, "L6")));
         actor.shutdown();
     })
@@ -323,8 +323,8 @@ fn collapsed_rows_share_their_key_marks_until_a_key_of_theirs_is_selected() {
 }
 
 /// Key ids may repeat across layers: a key picked on the earlier layer is
-/// selected there (summary and index), never on the later layer holding the
-/// same id.
+/// selected on its property row and in the index, even when another layer
+/// holds the same id.
 #[test]
 fn a_key_id_two_layers_share_is_selected_on_the_layer_it_was_picked_on() {
     use pm_panel_timeline::render::{RowContent, Scene};
@@ -360,14 +360,19 @@ fn a_key_id_two_layers_share_is_selected_on_the_layer_it_was_picked_on() {
                 .unwrap();
         }
         client.sync().unwrap();
+        for id in ["first", "second"] {
+            client.model.reveal_paths(id, &["opacity".into()]).unwrap();
+        }
         let scene = Scene::from_model(&client.model, &Presenter, &tokens, 0.).unwrap();
         let selected = |layer: &str| {
             let row = scene.row(&pm_panel_timeline::v4::row_id(
-                &pm_panel_timeline::RowId::Layer(layer.into()),
+                &pm_panel_timeline::RowId::Property {
+                    layer_id: layer.into(), channel: "opacity".into(),
+                },
             ));
-            match &row.expect("layer row").content {
-                RowContent::Layer { summary, .. } => summary.iter().any(|k| k.selected),
-                _ => panic!("layer row"),
+            match &row.expect("property row").content {
+                RowContent::Property { keys, .. } => keys.iter().any(|k| k.selected),
+                _ => panic!("property row"),
             }
         };
         assert!(selected("first"), "the picked layer shows its key selected");
