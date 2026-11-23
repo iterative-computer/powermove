@@ -19,7 +19,8 @@
 //!   neighbour's reference than its own, while its own distance stands out
 //!   against the export's typical one (stale, repeated, swapped frames);
 //! * a frame, or a part of one, that is not the picture: its distance, or
-//!   one cell's, many times the export's typical one;
+//!   one cell's, many times the export's typical one. For predicted codecs
+//!   at least one cell must also differ by more than the codec's flat noise;
 //! * a channel lost across a frame: the frame keeps under a quarter of the
 //!   picture its luma, colour or alpha grid carries;
 //! * a level, range or matrix mistake: a shift of most of the picture that
@@ -850,6 +851,8 @@ struct Measured {
     spread: [f64; 4],
     /// The largest cell difference beyond its channel's shift, normalized.
     cell: f64,
+    /// Largest absolute grid-cell error in that channel's code values.
+    peak_cv: f64,
     /// Distance from its own reference, normalized.
     own: f64,
     /// The nearest neighbour's reference and its distance.
@@ -879,6 +882,7 @@ fn measure(
     let mut shift = [0.0; 4];
     let mut spread = [0.0; 4];
     let mut cell = 0.0f64;
+    let mut peak_cv = 0.0f64;
     let mut kept = [(1.0, 0.0, 0.0); 4];
     for k in 0..4 {
         let d: Vec<f64> = got.cells[k]
@@ -888,7 +892,11 @@ fn measure(
             .collect();
         shift[k] = median(d.clone()).unwrap_or(0.0);
         spread[k] = rms(d.iter().map(|v| v - shift[k]));
-        cell = d.iter().map(|v| (v - shift[k]).abs()).fold(cell, f64::max);
+        let scale = channel_scale(codec, k);
+        for &error in &d {
+            cell = cell.max((error - shift[k]).abs());
+            peak_cv = peak_cv.max(error.abs() * scale);
+        }
         let (nw, ng) = (neutral(&want.cells[k], k), neutral(&got.cells[k], k));
         let (mut rr, mut gr, mut gg) = (0.0, 0.0, 0.0);
         for (g, w) in got.cells[k].iter().zip(&want.cells[k]) {
@@ -911,6 +919,7 @@ fn measure(
         shift,
         spread,
         cell,
+        peak_cv,
         own: distance(got, want),
         nearest: neighbours.min_by(|a, b| a.1.total_cmp(&b.1)),
         kept,
@@ -978,6 +987,14 @@ pub fn check_frames<'a>(
         median(measured.iter().map(|m| m.spread[k]).collect()).unwrap_or(0.0)
     });
     picture.typical_cv = typical * luma;
+    // The flat allowance is 6 codes for 8-bit predicted codecs and 24 for
+    // 10-bit HEVC. The reported dense-pattern export peaked at 3.39
+    // codes per cell, within normal 8-bit codec noise.
+    let codec_noise = if codes_blocks_alone(codec) {
+        0.0
+    } else {
+        pixel_tolerance(codec)
+    };
     let mut found: Vec<String> = vec![];
     for m in &measured {
         let n = m.n;
@@ -1023,6 +1040,11 @@ pub fn check_frames<'a>(
         }
         if !lost.is_empty() {
             found.push(format!("frame {n} lost {}", lost.join(" and ")));
+            continue;
+        }
+        // Easy frames can encode nearly exactly. On inter-frame codecs,
+        // ordinary quantisation in a busier frame then looks like an outlier.
+        if m.peak_cv <= codec_noise {
             continue;
         }
         if m.own > FOREIGN * typical + FOREIGN_FLOOR {
@@ -1233,6 +1255,38 @@ mod tests {
             [
                 "frame 3 shows the picture of frame 4",
                 "frame 4 shows the picture of frame 3"
+            ]
+        );
+    }
+
+    #[test]
+    fn small_long_gop_outliers_do_not_refuse_a_correct_picture() {
+        // Most of the clip encodes exactly. A detailed frame has a two-code
+        // luma error and another has a small error in one grid cell.
+        let want: Vec<_> = (0..8).map(|n| signature(400.0, 9 + n, 120.0)).collect();
+        let mut coded = want.clone();
+        let set_cell_error = |s: &mut FrameSignature, codes: f32| {
+            s.cells[0][49] += codes / 219.0;
+            s.mean[0] += codes / (219.0 * CELLS as f32);
+        };
+        for cell in &mut coded[2].cells[0] {
+            *cell += 2.0 / 219.0;
+        }
+        coded[2].mean[0] += 2.0 / 219.0;
+        set_cell_error(&mut coded[5], 3.5);
+        let found = frame_problems(H264, &want, &coded);
+        assert!(found.is_empty(), "{found:?}");
+
+        // The same near-exact clip still detects a real local error and a
+        // stale frame.
+        coded[5] = want[5].clone();
+        set_cell_error(&mut coded[5], 6.5);
+        coded[6] = want[7].clone();
+        assert_eq!(
+            frame_problems(H264, &want, &coded),
+            [
+                "part of frame 5 is not the picture that was rendered",
+                "frame 6 shows the picture of frame 7",
             ]
         );
     }
