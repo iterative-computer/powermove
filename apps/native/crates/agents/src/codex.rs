@@ -1,11 +1,13 @@
 //! Multiplexed App Server state machine. No IO, clocks or UI dependencies.
 use crate::{
     Access, Effects, Event, RunResult,
+    approvals::{Approvals, question_card},
     protocol::{initialize, method_is, normalized_type},
     text,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub const CONTEXT_EXHAUSTED: &str = "This conversation is too long for the model, even after compacting it. Start a new thread to continue.";
@@ -24,6 +26,48 @@ pub struct Run {
     pub config: Value,
     /// Explicit resume is for a caller which has NOT already supplied history.
     pub resume_thread: Option<String>,
+    /// Project / Full access: the autonomous sandbox and approval policy.
+    /// `None` is the read-only Composition editor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<Project>,
+}
+/// How an autonomous (Project or Full access) run is sandboxed and approved.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub access: Access,
+    /// Supervised: sandbox escapes ask the user. Auto: the reviewer settles them.
+    pub supervised: bool,
+}
+const PROJECT_PERMISSIONS: &str = "powermove";
+impl Project {
+    fn computer(&self) -> bool {
+        self.access == Access::Computer
+    }
+    fn approval_policy(&self) -> &'static str {
+        if self.computer() {
+            "never"
+        } else {
+            "on-request"
+        }
+    }
+    fn reviewer(&self) -> &'static str {
+        if self.computer() || self.supervised {
+            "user"
+        } else {
+            "auto_review"
+        }
+    }
+    /// Project access layers the workspace sandbox (with network) as config.
+    fn config(&self, base: &Value) -> Value {
+        let mut config = base.clone();
+        config["web_search"] = json!("live");
+        if !self.computer() {
+            config["default_permissions"] = json!(PROJECT_PERMISSIONS);
+            config["permissions"] = json!({ (PROJECT_PERMISSIONS): {"extends":":workspace","network":{"enabled":true}} });
+        }
+        config
+    }
 }
 fn empty_config() -> Value {
     json!({"mcp_servers":{}})
@@ -40,10 +84,18 @@ struct Turn {
     questions: BTreeMap<String, Value>,
     question_order: VecDeque<String>,
     queued: VecDeque<Value>,
+    approvals: BTreeMap<String, Approval>,
     reconnecting: bool,
     cancelled: bool,
     reported: bool,
     deadline: u64,
+}
+/// A sandbox-escape request held for the user's decision.
+#[derive(Clone)]
+struct Approval {
+    rpc: Value,
+    permissions: bool,
+    granted: Value,
 }
 #[derive(Clone, Debug)]
 enum Purpose {
@@ -66,6 +118,7 @@ pub struct Client {
     pending: BTreeMap<u64, Pending>,
     turns: BTreeMap<String, Turn>,
     admission: VecDeque<String>,
+    approvals: Approvals,
 }
 impl Client {
     pub fn start(&mut self, now: u64) -> Effects {
@@ -117,6 +170,7 @@ impl Client {
                 questions: BTreeMap::new(),
                 question_order: VecDeque::new(),
                 queued: VecDeque::new(),
+                approvals: BTreeMap::new(),
                 reconnecting: false,
                 cancelled: false,
                 reported: false,
@@ -133,6 +187,17 @@ impl Client {
     fn start_thread(&mut self, id: &str, now: u64, e: &mut Effects) {
         let run = &self.turns[id].run;
         let mut p = json!({"cwd":run.cwd,"approvalPolicy":"never","sandbox":"read-only","ephemeral":true,"config":run.config,"serviceName":"powermove"});
+        if let Some(project) = &run.project {
+            p["approvalPolicy"] = json!(project.approval_policy());
+            p["approvalsReviewer"] = json!(project.reviewer());
+            p["config"] = project.config(&run.config);
+            if project.computer() {
+                p["sandbox"] = json!("danger-full-access");
+            } else {
+                p.as_object_mut().unwrap().remove("sandbox");
+                p["permissions"] = json!(PROJECT_PERMISSIONS);
+            }
+        }
         if let Some(m) = &run.model {
             p["model"] = json!(m);
         }
@@ -152,6 +217,16 @@ impl Client {
     fn start_turn(&mut self, id: &str, now: u64, e: &mut Effects) {
         let t = &self.turns[id];
         let mut p = json!({"threadId":t.thread,"input":Self::input(&t.run.prompt,&t.run.image_paths),"cwd":t.run.cwd,"approvalPolicy":"never","sandboxPolicy":{"type":"readOnly"}});
+        if let Some(project) = &t.run.project {
+            p["approvalPolicy"] = json!(project.approval_policy());
+            p["approvalsReviewer"] = json!(project.reviewer());
+            if project.computer() {
+                p["sandboxPolicy"] = json!({"type":"dangerFullAccess"});
+            } else {
+                p.as_object_mut().unwrap().remove("sandboxPolicy");
+                p["permissions"] = json!(PROJECT_PERMISSIONS);
+            }
+        }
         // Only a real schema: the API refuses an object schema without
         // `properties`, and agent replies are read as plain text.
         if let Some(schema) = &t.run.schema {
@@ -196,6 +271,16 @@ impl Client {
         if t.cancelled {
             return None;
         }
+        if let Some(held) = t.approvals.remove(item) {
+            let (allowed, _) = self.approvals.decide(
+                id,
+                answers.get("decision").map(Vec::as_slice).unwrap_or(&[]),
+            );
+            return Some(Effects {
+                outgoing: vec![approval_response(&held, allowed)],
+                ..Effects::default()
+            });
+        }
         let rpc = t.questions.remove(item)?;
         t.question_order.retain(|id| id != item);
         let answers: serde_json::Map<_, _> = answers
@@ -215,6 +300,8 @@ impl Client {
         t.cancelled = true;
         t.queued.clear();
         let mut e = Effects::default();
+        // A held approval would keep the turn from reaching its interruption.
+        e.outgoing.extend(drain_approvals(t));
         if t.turn.is_some() {
             // Cancellation is complete when interruption settles, not when the
             // request enters our writer queue. No UI thread waits for that RPC.
@@ -233,6 +320,7 @@ impl Client {
             for rpc in drain_questions(t) {
                 e.outgoing.push(json!({"id":rpc,"result":{"answers":{}}}));
             }
+            e.outgoing.extend(drain_approvals(t));
             e.events.push(Event::Completed {
                 run: id.into(),
                 result: cancelled(),
@@ -248,6 +336,8 @@ impl Client {
             for rpc in drain_questions(&mut t) {
                 e.outgoing.push(json!({"id":rpc,"result":{"answers":{}}}));
             }
+            e.outgoing.extend(drain_approvals(&mut t));
+            self.approvals.close(id);
             if !t.reported {
                 e.events.push(Event::Completed {
                     run: id.into(),
@@ -451,12 +541,60 @@ impl Client {
             } else {
                 e.outgoing.push(json!({"id":rpc,"result":{"answers":{}}}));
             }
+        } else if method_is(m, "item/commandExecution/requestApproval")
+            || method_is(m, "item/fileChange/requestApproval")
+            || method_is(m, "item/permissions/requestApproval")
+        {
+            self.approval_request(m, p, rpc, e);
         } else if method_is(m, "mcpServer/elicitation/request") {
             e.outgoing
                 .push(json!({"id":rpc,"result":{"action":"decline","content":null,"_meta":null}}));
         } else {
             e.outgoing.push(json!({"id":rpc,"error":{"code":-32601,"message":format!("Powermove does not handle {m}.")}}));
         }
+    }
+    /// Sandbox escapes ask the user (project runs only); everything else is denied.
+    fn approval_request(&mut self, m: &str, p: &Value, rpc: &Value, e: &mut Effects) {
+        let permissions = method_is(m, "item/permissions/requestApproval");
+        let held = Approval {
+            rpc: rpc.clone(),
+            permissions,
+            granted: granted_permissions(&p["permissions"]),
+        };
+        let run = self.find(p).filter(|r| {
+            let t = &self.turns[r];
+            !t.cancelled && t.run.project.as_ref().is_some_and(|p| !p.computer())
+        });
+        let Some(run) = run else {
+            e.outgoing.push(approval_response(&held, false));
+            return;
+        };
+        if self.approvals.allowed(&run) {
+            e.outgoing.push(approval_response(&held, true));
+            return;
+        }
+        let command = method_is(m, "item/commandExecution/requestApproval");
+        let title = if command {
+            "Run a command outside the project sandbox?"
+        } else {
+            "Allow access outside the project sandbox?"
+        };
+        let detail = if p["command"].is_string() {
+            text(p, "command")
+        } else if p["grantRoot"].is_string() {
+            text(p, "grantRoot")
+        } else {
+            p["permissions"].to_string()
+        };
+        let item = format!("approval-{:x}", Sha256::digest(rpc.to_string().as_bytes()));
+        let t = self.turns.get_mut(&run).unwrap();
+        if let Some(old) = t.approvals.insert(item.clone(), held) {
+            e.outgoing.push(approval_response(&old, false));
+        }
+        e.trace(
+            &run,
+            question_card(&item, title, &detail, &clip(&p["reason"], 600)),
+        );
     }
     fn notification(&mut self, msg: &Value, e: &mut Effects) {
         let m = msg["method"].as_str().unwrap_or("");
@@ -499,6 +637,16 @@ impl Client {
                 .filter(|id| t.questions.get(*id) == Some(&p["requestId"]))
                 .cloned()
                 .collect::<Vec<_>>();
+            let closed = t
+                .approvals
+                .iter()
+                .filter(|(_, a)| a.rpc == p["requestId"])
+                .map(|(item, _)| item.clone())
+                .collect::<Vec<_>>();
+            for item in closed {
+                t.approvals.remove(&item);
+                e.trace(&id, json!({"kind":"question-closed","itemId":item}));
+            }
             for item in items {
                 t.questions.remove(&item);
                 t.question_order.retain(|id| id != &item);
@@ -600,7 +748,10 @@ impl Client {
         }
         if method_is(m, "turn/completed") {
             let result = match p["turn"]["status"].as_str() {
-                Some("completed") => RunResult::success(t.final_text.clone(), Access::Editor),
+                Some("completed") => RunResult::success(
+                    t.final_text.clone(),
+                    t.run.project.as_ref().map_or(Access::Editor, |p| p.access),
+                ),
                 Some("interrupted") => RunResult::failure("The Codex run was cancelled.", true),
                 _ => RunResult::failure(app_error(&p["turn"], "ChatGPT generation failed."), false),
             };
@@ -795,4 +946,30 @@ fn drain_questions(t: &mut Turn) -> Vec<Value> {
         .drain(..)
         .filter_map(|id| t.questions.remove(&id))
         .collect()
+}
+
+fn drain_approvals(t: &mut Turn) -> Vec<Value> {
+    std::mem::take(&mut t.approvals)
+        .into_values()
+        .map(|a| approval_response(&a, false))
+        .collect()
+}
+/// Granted permissions must omit absent fields; the request profile has nulls.
+fn granted_permissions(v: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    for key in ["network", "fileSystem"] {
+        if v[key].is_object() {
+            out.insert(key.into(), v[key].clone());
+        }
+    }
+    Value::Object(out)
+}
+fn approval_response(a: &Approval, allowed: bool) -> Value {
+    let result = match (a.permissions, allowed) {
+        (true, true) => json!({"permissions":a.granted,"scope":"turn"}),
+        (true, false) => json!({"permissions":{},"scope":"turn"}),
+        (false, true) => json!({"decision":"accept"}),
+        (false, false) => json!({"decision":"decline"}),
+    };
+    json!({"id":a.rpc,"result":result})
 }

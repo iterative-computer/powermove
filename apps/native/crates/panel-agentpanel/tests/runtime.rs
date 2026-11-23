@@ -8,7 +8,7 @@ use pm_agents::{
 };
 use pm_panel_agentpanel::{
     Error,
-    model::{CHECKPOINT_MS, Effect, Panel},
+    model::{CHECKPOINT_MS, Effect, EffectKind, Panel},
     runtime::ProviderRuns,
 };
 use serde_json::{Value, json};
@@ -790,10 +790,10 @@ fn rejected_steer_restarts_with_original_and_directions() {
         thread::sleep(Duration::from_millis(2));
     }
     assert!(restarted.load(Ordering::SeqCst));
-    // The fallback says so in the trail, once.
+    // No visible restart wording: the fallback is silent.
     runs.poll(&mut panel, &mut store, 14, 256).unwrap();
     let trail = format!("{:?}", panel.session("t").unwrap().trace.rows);
-    assert_eq!(trail.matches("Restarted with your new direction").count(), 1, "{trail}");
+    assert!(!trail.contains("Restarted"), "{trail}");
     let next = runs.continued_request("run", "Keep it short").unwrap();
     assert!(next.contains("Original brief"));
     assert!(next.contains("Make it blue\n\nKeep it short"));
@@ -894,10 +894,7 @@ fn exec_steer_restarts_and_preserves_attachment_metadata() {
     assert!(restarted.load(Ordering::SeqCst));
     assert!(runs.steerable("run"));
     runs.poll(&mut panel, &mut store, 14, 256).unwrap();
-    assert!(
-        format!("{:?}", panel.session("t").unwrap().trace.rows)
-            .contains("Restarted with your new direction")
-    );
+    assert!(!format!("{:?}", panel.session("t").unwrap().trace.rows).contains("Restarted"));
     // Same turn: the run, its start time and the steering message are kept.
     let session = panel.session("t").unwrap();
     assert_eq!(session.run.as_ref().unwrap().started_at, 10);
@@ -912,6 +909,13 @@ fn claude_queued_steer_publishes_last_result_after_stdin_closes() {
         Ok(peer(&temp, "claude-steer"))
     })
     .unwrap();
+    drain(&mut runs, &mut panel, &mut store, |p| {
+        p.session("t").unwrap().trace.rows.values().any(|row| {
+            row["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("First answer"))
+        })
+    });
     panel
         .draft_mut("t")
         .unwrap()
@@ -927,6 +931,10 @@ fn claude_queued_steer_publishes_last_result_after_stdin_closes() {
         Box::new(|| panic!("live stdin must accept the steer")),
     )
     .unwrap();
+    assert_eq!(
+        panel.session("t").unwrap().run.as_ref().unwrap().started_at,
+        10
+    );
     drain(&mut runs, &mut panel, &mut store, |p| {
         p.session("t").unwrap().run.is_none()
     });
@@ -935,6 +943,110 @@ fn claude_queued_steer_publishes_last_result_after_stdin_closes() {
     assert_eq!(
         settled[0].1,
         RunResult::success("Blue answer".into(), Access::Editor)
+    );
+}
+
+#[test]
+fn claude_steer_mid_tool_call_reaches_the_cli_in_the_same_run() {
+    let temp = Temp::new();
+    let (mut store, mut panel, effect) = setup();
+    let mut runs = ProviderRuns::default();
+    runs.start(&mut panel, &mut store, &effect, 10, || {
+        Ok(peer(&temp, "claude-tool-steer"))
+    })
+    .unwrap();
+    drain(&mut runs, &mut panel, &mut store, |p| {
+        p.session("t")
+            .unwrap()
+            .trace
+            .rows
+            .values()
+            .any(|row| row["kind"] == "tool")
+    });
+    panel
+        .draft_mut("t")
+        .unwrap()
+        .insert_text("Make it blue", 11, false);
+    let steer = panel.submit("t", "run", "direction", 12).unwrap();
+    runs.steer(
+        &mut panel,
+        &mut store,
+        &steer,
+        12,
+        "Make it blue".into(),
+        vec![],
+        Box::new(|| panic!("a live steer must not restart the run")),
+    )
+    .unwrap();
+    drain(&mut runs, &mut panel, &mut store, |p| {
+        p.session("t").unwrap().run.is_none()
+    });
+    let trail = format!("{:?}", panel.session("t").unwrap().trace.rows);
+    assert!(!trail.contains("Restarted"), "{trail}");
+    let settled = runs.take_settled();
+    assert_eq!(settled.len(), 1);
+    assert_eq!(
+        settled[0].1,
+        RunResult::success("Blue answer".into(), Access::Editor)
+    );
+}
+
+#[test]
+fn claude_rapid_steers_reach_the_same_run_in_order() {
+    let temp = Temp::new();
+    let (mut store, mut panel, effect) = setup();
+    let mut runs = ProviderRuns::default();
+    runs.start(&mut panel, &mut store, &effect, 10, || {
+        Ok(peer(&temp, "claude-double-steer"))
+    })
+    .unwrap();
+    for (direction, request, now) in [
+        ("Make it blue", "first", 11),
+        ("Keep it short", "second", 12),
+    ] {
+        panel
+            .draft_mut("t")
+            .unwrap()
+            .insert_text(direction, now, false);
+        let steer = panel.submit("t", "run", request, now).unwrap();
+        runs.steer(
+            &mut panel,
+            &mut store,
+            &steer,
+            now,
+            direction.into(),
+            vec![],
+            Box::new(|| panic!("live stdin must accept both directions")),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        panel.session("t").unwrap().run.as_ref().unwrap().started_at,
+        10
+    );
+    drain(&mut runs, &mut panel, &mut store, |p| {
+        p.session("t").unwrap().run.is_none()
+    });
+    assert_eq!(
+        runs.take_settled(),
+        vec![(
+            "run".to_owned(),
+            RunResult::success("Short blue answer".into(), Access::Editor)
+        )]
+    );
+    panel
+        .draft_mut("t")
+        .unwrap()
+        .insert_text("Now center it", 101, false);
+    let follow_up = panel.submit("t", "next-run", "follow-up", 102).unwrap();
+    assert!(matches!(
+        follow_up.kind,
+        EffectKind::Send { steer: false, .. }
+    ));
+    assert_eq!(follow_up.target.run.as_deref(), Some("next-run"));
+    assert_eq!(
+        panel.session("t").unwrap().run.as_ref().unwrap().started_at,
+        102
     );
 }
 

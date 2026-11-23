@@ -15,10 +15,24 @@ elif mode == 'claude-steer':
     emit({'type':'assistant','message':{'content':[{'type':'text','text':'First answer'}]}})
     direction = json.loads(sys.stdin.readline())
     assert direction['type'] == 'user'
+    assert direction['message']['content'][0]['text'] == 'Make it blue'
     emit({'type':'result','result':'First answer'})
     assert sys.stdin.read() == ''
     time.sleep(2.2)  # A queued turn outlives the ordinary two-second reap grace.
     emit({'type':'result','result':'Blue answer'})
+elif mode == 'claude-tool-steer':
+    emit({'type':'assistant','message':{'content':[{'type':'tool_use','id':'tool','name':'Read','input':{}}]}})
+    direction = json.loads(sys.stdin.readline())
+    assert direction['type'] == 'user'
+    assert 'Make it blue' in json.dumps(direction)
+    emit({'type':'result','result':'Blue answer'})
+elif mode == 'claude-double-steer':
+    for expected in ['Make it blue', 'Keep it short']:
+        direction = json.loads(sys.stdin.readline())
+        assert direction['type'] == 'user'
+        assert direction['message']['content'][0]['text'] == expected
+    emit({'type':'result','result':'Short blue answer'})
+    assert sys.stdin.read() == ''
 elif mode == 'claude':
     emit({'type': 'control_request', 'request_id': 'control', 'request': {
         'subtype': 'can_use_tool', 'tool_name': 'AskUserQuestion', 'tool_use_id': 'question',
