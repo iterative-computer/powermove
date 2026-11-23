@@ -225,6 +225,8 @@ pub enum Error {
     Io(String),
     #[error("encoder: {0}")]
     Encode(String),
+    #[error("encoder: {0}")]
+    EncoderBackpressure(String),
     #[error("muxer: {0}")]
     Mux(String),
     /// The written file failed its check (section 17): what was found,

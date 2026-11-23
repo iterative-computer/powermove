@@ -78,6 +78,10 @@ impl VideoToolboxSink {
         })
     }
 
+    pub(crate) fn set_backpressure(&mut self) {
+        self.encoder.set_backpressure();
+    }
+
     fn writer(&mut self) -> &mut writer::Writer {
         self.writer.as_mut().expect("writer lives until finish")
     }
@@ -299,6 +303,47 @@ mod tests {
     use crate::settings::{
         AlphaOutput, Codec, ColorTags, Container, Dither, ProResProfile, WorkingEncoding,
     };
+
+    #[test]
+    fn encoder_backpressure_writes_each_frame_at_its_original_time() {
+        let directory = std::env::temp_dir().join(format!("pm-export-paced-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let spec = ExportSpec {
+            width: 160,
+            height: 96,
+            rate: pm_time::Rate::FPS_23_976,
+            frames: 5,
+            codec: Codec::H264 { bitrate_bps: 2_000_000 },
+            container: Container::Mp4,
+            tags: ColorTags::Rec709QuickTime,
+            alpha: AlphaOutput::None,
+            working: WorkingEncoding::Standard,
+            dither: Dither::Off,
+            audio: None,
+            timecode: None,
+            destination: directory.join("paced.mp4"),
+            overwrite: Overwrite::Replace,
+            mode: None,
+        };
+        let mut sink = VideoToolboxSink::new(&spec).unwrap();
+        sink.set_backpressure();
+        let rgba = [0.4, 0.3, 0.5, 1.].repeat((spec.width * spec.height) as usize);
+        let input = convert(
+            &WorkingFrame { width: spec.width, height: spec.height, rgba: &rgba },
+            spec.input_format(),
+            &ConvertParams {
+                working: spec.working, alpha: spec.alpha, tags: spec.tags,
+                dither: false, frame: 0,
+            },
+        ).unwrap();
+        for index in 0..spec.frames {
+            sink.video(index, &input).unwrap();
+            assert!(!sink.encoder.holds_frames());
+        }
+        let delivered = sink.finish().unwrap();
+        assert!(delivered.path.is_file());
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 
     /// A file that fails its check is not kept, the person is told in one
     /// sentence what was found first, and nothing is tried again.

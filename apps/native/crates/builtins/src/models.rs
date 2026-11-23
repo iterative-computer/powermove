@@ -1808,7 +1808,14 @@ impl Backend {
                     .push((command.into(), self.native.export["options"].clone()));
                 self.native.export["sequence"] =
                     json!(self.native.export["sequence"].as_u64().unwrap_or(0) + 1);
-                self.export_snapshot()
+                // The sheet already has a plan for the settings it sent.
+                // Acknowledge startup without planning the same project
+                // again on the path to delivering the platform request.
+                if self.native.export["project"].is_null() {
+                    self.export_snapshot()
+                } else {
+                    Ok(self.native.export.clone())
+                }
             }
             c if c.starts_with("export.") => {
                 self.native.export["sequence"] =

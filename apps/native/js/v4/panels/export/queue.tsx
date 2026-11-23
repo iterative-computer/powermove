@@ -19,7 +19,8 @@ const caption = { color: t("colors.muted"), fontSize: t("typography.minimum") };
 const actionsByStatus = {
   Pending: ["moveUp", "moveDown", "cancel"],
   Rendering: ["cancel"],
-  Failed: ["retry", "remove"],
+  Interrupted: ["retry", "remove"],
+  Failed: ["remove"],
   Done: ["finder", "remove"],
   Cancelled: ["remove"],
 } as const;
@@ -84,6 +85,7 @@ function JobRow({
   const symbol = {
     Pending: "clock",
     Rendering: "",
+    Interrupted: "pause.circle",
     Done: "checkmark.circle.fill",
     Failed: "exclamationmark.triangle.fill",
     Cancelled: "xmark.circle",
@@ -95,6 +97,10 @@ function JobRow({
         ? "colors.warning"
         : "colors.muted";
   const filename = job.path.split(/[\\/]/).filter(Boolean).at(-1) ?? job.path;
+  const details = [jobFormat(job), filename].filter(Boolean).join(" · ");
+  const actions = jobActions(job.status).filter(
+    (action) => action !== "finder" || Boolean(job.path),
+  );
   return (
     <div
       id={`queue.job.${job.id}`}
@@ -106,7 +112,7 @@ function JobRow({
       onFocus={() => setFocus(true)}
       onBlur={(event) =>
         setFocus(
-          jobActions(job.status).some(
+          actions.some(
             (action) => event.value === `queue.${action}.${job.id}`,
           ),
         )
@@ -171,7 +177,7 @@ function JobRow({
             overflow: "hidden",
             textOverflow: "ellipsis",
           }}
-        >{`${jobFormat(job)} · ${filename}`}</text>
+        >{job.status === "Interrupted" ? "Interrupted" : details || job.status}</text>
       </div>
       {rendering ? (
         <div style={{ ...row, gap: t("space.sm"), flexShrink: 0 }}>
@@ -202,8 +208,8 @@ function JobRow({
           {jobTime(job.finishedAt)}
         </text>
       )}
-      <div style={{ ...row, flexShrink: 0, opacity: hover || focus ? 1 : 0 }}>
-        {jobActions(job.status).map((action) => {
+      <div style={{ ...row, flexShrink: 0, opacity: hover || focus || job.status === "Interrupted" ? 1 : 0 }}>
+        {actions.map((action) => {
           const [symbol, label] = icons[action];
           return (
             <UI.ToolbarItem
@@ -249,7 +255,7 @@ export function RenderQueue({
   const firstWaiting = waiting[0]?.id;
   const lastWaiting = waiting.at(-1)?.id;
   const history = jobs
-    .filter((j) => j.status !== "Pending" && j.status !== "Rendering")
+    .filter((j) => j.status === "Done" || j.status === "Failed" || j.status === "Cancelled")
     .sort(
       (a, b) => (b.finishedAt ?? b.id) - (a.finishedAt ?? a.id) || b.id - a.id,
     );

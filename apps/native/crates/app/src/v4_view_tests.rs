@@ -2173,12 +2173,12 @@ fn render_queue_keyboard_focus_reveals_inline_actions(cx: &mut TestAppContext) {
     let (view, mut vcx) = window(cx, &rig, publication(&rig), Default::default());
     vcx.run_until_parked();
     vcx.update(|window, _| window.activate());
-    vcx.update(|window, cx| view.update(cx, |v, cx| v.focus_semantic("queue.retry.4", window, cx)));
+    vcx.update(|window, cx| view.update(cx, |v, cx| v.focus_semantic("queue.remove.4", window, cx)));
     let revealed = std::cell::Cell::new(false);
     settle(&mut vcx, |cx| {
         for publication in rig.runtime.take_publications() {
             let surface = &publication.surface;
-            if let Some(button) = surface.nodes().values().find(|n|n.props.get("id").and_then(Value::as_str) == Some("queue.retry.4")) {
+            if let Some(button) = surface.nodes().values().find(|n|n.props.get("id").and_then(Value::as_str) == Some("queue.remove.4")) {
                 if button.parent.and_then(|id|surface.node(id)).and_then(|n|n.props.get("style")).and_then(|s|s.get("opacity")).and_then(Value::as_f64) == Some(1.0) { revealed.set(true); }
             }
             view.update(cx, |v,cx|v.publish(publication,cx));

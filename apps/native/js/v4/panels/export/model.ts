@@ -106,7 +106,7 @@ export type QueueJob = {
   profile?: string;
   finishedAt?: number;
   path: string;
-  status: "Pending" | "Rendering" | "Done" | "Failed" | "Cancelled";
+  status: "Pending" | "Rendering" | "Interrupted" | "Done" | "Failed" | "Cancelled";
   progress: number;
   error: string;
 };
@@ -450,7 +450,7 @@ export class ExportModel {
   }
   get activeQueueJobs() {
     return (this.current.queue ?? []).filter(
-      (job) => job.status === "Pending" || job.status === "Rendering",
+      (job) => job.status === "Pending" || job.status === "Rendering" || job.status === "Interrupted",
     );
   }
   get locked() {

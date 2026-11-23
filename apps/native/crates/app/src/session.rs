@@ -1122,6 +1122,9 @@ impl Controller {
         if let Some(note) = &self.closing_note {
             return note.clone();
         }
+        if let Some(progress) = self.builtins.export_job.as_ref().and_then(|run| run.status()) {
+            return progress;
+        }
         let preview_pause = self
             .session
             .as_ref()
