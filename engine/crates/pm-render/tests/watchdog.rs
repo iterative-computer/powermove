@@ -421,7 +421,8 @@ fn without_timestamps_a_program_is_turned_off_after_two_frames_that_did_not_fini
     r.effects_mut()
         .watchdog
         .set_timing_source(Some(source.clone()));
-    let doc = document(vec![solid_with(&["acme.invert"])]);
+    // Multiple instances share a subject. One frame supplies one strike.
+    let doc = document(vec![solid_with(&["acme.invert", "acme.invert"])]);
     // Each frame is judged (with the source's times as they are now)
     // before the source changes.
     let step = |r: &mut Renderer| {

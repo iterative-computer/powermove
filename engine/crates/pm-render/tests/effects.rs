@@ -1414,6 +1414,25 @@ fn an_enforced_watchdog_budget_disables_an_overrunning_user_effect_from_the_next
 }
 
 #[test]
+fn a_recording_frame_measures_at_most_two_effect_spans() {
+    let _gpu = gpu();
+    let mut r = builtins();
+    let steps = (0..6)
+        .map(|i| {
+            fx(
+                &format!("blur-{i}"),
+                "blur",
+                json!({"amount": ch(json!(2))}),
+            )
+        })
+        .collect();
+    let (doc, res) = document(steps, None);
+    render(&mut r, &doc, &res, 0.5, &request()).unwrap();
+    assert!(r.watchdog_reports(true).is_empty());
+    assert!(r.effects().watchdog.measurements() <= 2);
+}
+
+#[test]
 fn the_watchdog_judges_every_timed_frame_not_only_the_first() {
     // Resolved in the frame's own command buffer, Metal returned the
     // previous frame's end sample: only a renderer's first timed frame read
