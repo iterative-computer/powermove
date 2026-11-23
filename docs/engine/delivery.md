@@ -122,8 +122,9 @@ Fails the export:
   an eighth of the frame each way, which every codec keeps at every rate. A frame three
   times nearer a neighbour's reference than its own, while its own distance is three
   times the export's typical one, shows that neighbour's picture (stale, repeated,
-  swapped); a frame eight times the typical distance, or one cell eight times the
-  typical largest cell, is not its picture.
+  swapped). A frame eight times the typical distance, or one cell eight times the
+  typical largest cell, is also rejected if at least one grid cell exceeds the
+  codec's flat noise allowance. ProRes and PNG use the relative thresholds alone.
 - A channel lost across a frame: the frame keeps under a quarter of the picture its
   luma, colour or alpha grid carries, and little of any other.
 - A level, range or matrix mistake: a shift of most of the picture (the median cell)
