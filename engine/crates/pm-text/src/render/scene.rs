@@ -1115,6 +1115,44 @@ fn image_bounds(transform: Affine, width: u32, height: u32) -> Rect {
     transform.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(width), f64::from(height)))
 }
 
+/// A CoreGraphics glyph mask as an image item: coverage through the paint
+/// luminance's mask `table`, premultiplied RGBA8, at the pen `(x, y)`.
+#[cfg(all(target_os = "macos", feature = "canvas2d"))]
+fn canvas_mask_item(
+    mask: &super::canvas2d::GlyphMask,
+    table: &[u8; 256],
+    x: f64,
+    y: f64,
+    color: Rgba,
+    opacity: f64,
+    blur: f64,
+) -> Item {
+    let mut data = Vec::with_capacity(mask.coverage.len() * 4);
+    for &coverage in &mask.coverage {
+        let alpha = table[usize::from(coverage)];
+        data.extend(
+            color[..3]
+                .iter()
+                .map(|c| (c * f64::from(alpha)).round() as u8),
+        );
+        data.push(alpha);
+    }
+    let image = ImagePixels::Rgba8(Arc::new(Rgba8 {
+        width: mask.width,
+        height: mask.height,
+        data,
+    }));
+    let transform = Affine::translate((x.floor() + f64::from(mask.left), y + f64::from(mask.top)));
+    Item {
+        bounds: image_bounds(transform, mask.width, mask.height),
+        content: ItemContent::Image { image, transform },
+        color,
+        opacity,
+        blur,
+        curve: super::smoothing::IDENTITY,
+    }
+}
+
 impl Painter<'_> {
     #[allow(clippy::too_many_arguments)]
     fn draw(
@@ -1133,6 +1171,19 @@ impl Painter<'_> {
             return;
         }
         let residual = device_residual(m, scale);
+        // CoreGraphics masks missing from the cache are collected while the
+        // items are laid out and drawn together after the loop, in parallel
+        // when there are enough. Each such glyph first gets the item it
+        // would get without a mask (its outline coverage), at its final
+        // index, and the mask's item replaces it once drawn; a glyph whose
+        // mask cannot be drawn keeps it, as before.
+        #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+        let mut pending = super::canvas2d::PendingMasks::default();
+        // (item index, job, pen x, pen y)
+        #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+        let mut deferred: Vec<(usize, usize, f64, f64)> = Vec::new();
+        #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+        let table = super::canvas2d::mask_table([color[0], color[1], color[2]]);
         for run in runs {
             let device_size = f64::from(run.size) * scale;
             let [a, b, c, d, _, _] = m.as_coeffs();
@@ -1247,6 +1298,8 @@ impl Painter<'_> {
                     continue;
                 };
                 #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+                let mut defer = None;
+                #[cfg(all(target_os = "macos", feature = "canvas2d"))]
                 {
                     if canvas_mask
                         && let super::outline::Coords::User(coords) = run.coords
@@ -1255,7 +1308,8 @@ impl Painter<'_> {
                         let (x, y) = weight.place(glyph_origin.x, glyph_origin.y);
                         let quarter = ((x - x.floor()) * 4.0).round() as u8;
                         let bounds = Affine::scale(scale).transform_rect_bbox(outline.bounds);
-                        if let Some(mask) = self.bitmaps.canvas.get(
+                        match self.bitmaps.canvas.lookup(
+                            &mut pending,
                             run.face,
                             coords,
                             id,
@@ -1265,35 +1319,14 @@ impl Painter<'_> {
                             bounds,
                             run.synthetic_bold.then_some((&outline.path, scale)),
                         ) {
-                            let table = super::canvas2d::mask_table([color[0], color[1], color[2]]);
-                            let mut data = Vec::with_capacity(mask.coverage.len() * 4);
-                            for &coverage in &mask.coverage {
-                                let alpha = table[usize::from(coverage)];
-                                data.extend(
-                                    color[..3]
-                                        .iter()
-                                        .map(|c| (c * f64::from(alpha)).round() as u8),
-                                );
-                                data.push(alpha);
+                            super::canvas2d::MaskLookup::Ready(Some(mask)) => {
+                                out.push(canvas_mask_item(
+                                    &mask, table, x, y, color, opacity, blur,
+                                ));
+                                continue;
                             }
-                            let image = ImagePixels::Rgba8(Arc::new(Rgba8 {
-                                width: mask.width,
-                                height: mask.height,
-                                data,
-                            }));
-                            let transform = Affine::translate((
-                                x.floor() + f64::from(mask.left),
-                                y + f64::from(mask.top),
-                            ));
-                            out.push(Item {
-                                bounds: image_bounds(transform, mask.width, mask.height),
-                                content: ItemContent::Image { image, transform },
-                                color,
-                                opacity,
-                                blur,
-                                curve: super::smoothing::IDENTITY,
-                            });
-                            continue;
+                            super::canvas2d::MaskLookup::Ready(None) => {}
+                            super::canvas2d::MaskLookup::Pending(job) => defer = Some((job, x, y)),
                         }
                     }
                 }
@@ -1319,6 +1352,10 @@ impl Painter<'_> {
                 if let Some(width) = stroke {
                     b = b.inflate(width * scale / 2.0, width * scale / 2.0);
                 }
+                #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+                if let Some((job, x, y)) = defer {
+                    deferred.push((out.len(), job, x, y));
+                }
                 out.push(Item {
                     content: ItemContent::Coverage {
                         paths: vec![PlacedPath {
@@ -1333,6 +1370,15 @@ impl Painter<'_> {
                     bounds: b,
                     curve,
                 });
+            }
+        }
+        #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+        if !pending.is_empty() {
+            let masks = self.bitmaps.canvas.resolve(pending);
+            for (slot, job, x, y) in deferred {
+                if let Some(mask) = &masks[job] {
+                    out[slot] = canvas_mask_item(mask, table, x, y, color, opacity, blur);
+                }
             }
         }
     }
@@ -1423,6 +1469,130 @@ pub fn rounded_rect(x: f64, y: f64, w: f64, h: f64, r: f64) -> BezPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every field of two item lists, as bits.
+    #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+    fn assert_same_items(a: &[Item], b: &[Item], what: &str) {
+        let rect = |r: Rect| [r.x0, r.y0, r.x1, r.y1].map(f64::to_bits);
+        let affine = |m: &Affine| m.as_coeffs().map(f64::to_bits);
+        assert_eq!(a.len(), b.len(), "{what}: item count");
+        for (i, (x, y)) in a.iter().zip(b).enumerate() {
+            let what = format!("{what}: item {i}");
+            assert_eq!(
+                x.color.map(f64::to_bits),
+                y.color.map(f64::to_bits),
+                "{what}"
+            );
+            assert_eq!(x.opacity.to_bits(), y.opacity.to_bits(), "{what}");
+            assert_eq!(x.blur.to_bits(), y.blur.to_bits(), "{what}");
+            assert_eq!(
+                x.curve.map(f32::to_bits),
+                y.curve.map(f32::to_bits),
+                "{what}"
+            );
+            assert_eq!(rect(x.bounds), rect(y.bounds), "{what}");
+            match (&x.content, &y.content) {
+                (
+                    ItemContent::Image {
+                        image: ImagePixels::Rgba8(p),
+                        transform: t,
+                    },
+                    ItemContent::Image {
+                        image: ImagePixels::Rgba8(q),
+                        transform: u,
+                    },
+                ) => {
+                    assert_eq!(affine(t), affine(u), "{what}");
+                    assert_eq!((p.width, p.height), (q.width, q.height), "{what}");
+                    assert!(p.data == q.data, "{what}: pixels");
+                }
+                (ItemContent::Coverage { paths: p }, ItemContent::Coverage { paths: q }) => {
+                    assert_eq!(p.len(), q.len(), "{what}");
+                    for (p, q) in p.iter().zip(q) {
+                        assert_eq!(affine(&p.transform), affine(&q.transform), "{what}");
+                        assert!(p.path.elements() == q.path.elements(), "{what}: path");
+                    }
+                }
+                _ => panic!("{what}: different item kinds"),
+            }
+        }
+    }
+
+    /// Level 1 text under an animated scale, painted the way the fixture's
+    /// `Powermove UI 3` text is: CoreGraphics masks collected during the
+    /// paint and drawn together (by the mask workers) give the items, in
+    /// order, that a warm paint (every mask a cache hit, the old path) and
+    /// a paint drawing every mask on this thread give.
+    #[cfg(all(target_os = "macos", feature = "canvas2d"))]
+    #[test]
+    fn collected_canvas_masks_paint_the_items_warm_and_serial_paints_make() {
+        use crate::render::smoothing::Smoothing;
+        use read_fonts::TableProvider;
+        let data = std::fs::read("/System/Library/Fonts/SFNS.ttf").expect("SF Pro");
+        let cmap = read_fonts::FontRef::new(&data).unwrap().cmap().unwrap();
+        let glyphs: Vec<PlacedGlyph> = "Powermove GOOD TIMES, Text edit"
+            .chars()
+            .filter_map(|c| cmap.map_codepoint(c as u32))
+            .enumerate()
+            .map(|(i, g)| PlacedGlyph {
+                id: g.to_u32(),
+                x: i as f64 * 27.37,
+                y: 0.0,
+            })
+            .collect();
+        let coords = [(u32::from_be_bytes(*b"wght"), 590.0f32)];
+        let face = FaceRef {
+            data: &data,
+            index: 0,
+            id: 7,
+        };
+        let run = |synthetic_italic: bool| Run {
+            face,
+            size: 51.8,
+            coords: Coords::User(&coords),
+            synthetic_bold: false,
+            synthetic_italic,
+            oblique: 0.0,
+            glyphs: &glyphs,
+            bitmap_size: None,
+        };
+        let runs = [run(false), run(true), run(false)];
+        let paint = |outlines: &mut Outlines, bitmaps: &mut Bitmaps, scale: f64| {
+            let mut painter = Painter {
+                outlines,
+                bitmaps,
+                unsupported: Vec::new(),
+                smoothing: Smoothing::Canvas2d,
+            };
+            let mut out = Vec::new();
+            painter.fill_text(
+                &mut out,
+                &runs,
+                (3.3, 40.0),
+                Affine::scale(scale),
+                [0.2, 0.4, 0.9, 1.0],
+                1.0,
+                0.0,
+            );
+            out
+        };
+        for k in 0..8 {
+            let scale = 0.25 * (1.05 - 0.12 * k as f64 / 7.0) * 1.5;
+            let (mut outlines, mut bitmaps) = (Outlines::new(), Bitmaps::new());
+            let cold = paint(&mut outlines, &mut bitmaps, scale);
+            let warm = paint(&mut outlines, &mut bitmaps, scale);
+            super::super::canvas2d::SERIAL.with(|s| s.set(true));
+            let serial = paint(&mut Outlines::new(), &mut Bitmaps::new(), scale);
+            super::super::canvas2d::SERIAL.with(|s| s.set(false));
+            let images = cold
+                .iter()
+                .filter(|i| matches!(i.content, ItemContent::Image { .. }))
+                .count();
+            assert!(images > 20, "the mask path was taken ({images})");
+            assert_same_items(&cold, &warm, &format!("scale {scale} cold vs warm"));
+            assert_same_items(&cold, &serial, &format!("scale {scale} cold vs serial"));
+        }
+    }
     use i_overlay::float::simplify::SimplifyShape;
 
     fn fresh_union(contours: &[Vec<[f64; 2]>]) -> BezPath {

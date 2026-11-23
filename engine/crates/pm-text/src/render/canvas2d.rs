@@ -10,7 +10,16 @@ use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, CGImageByteOrderInfo,
 };
 use objc2_core_text::CTFont;
-use std::{collections::HashMap, ptr::NonNull, sync::Arc};
+use std::{
+    collections::HashMap,
+    panic::{AssertUnwindSafe, catch_unwind},
+    ptr::NonNull,
+    sync::{
+        Arc, Mutex, OnceLock, PoisonError,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
+};
 
 #[derive(Clone, Copy)]
 struct MaskStyle {
@@ -25,6 +34,10 @@ pub(crate) struct GlyphMask {
     pub coverage: Vec<u8>,
 }
 type Key = (u64, u32, u16, u32, Vec<(u32, u32)>, u8, u32, Option<u64>);
+/// Glyph masks kept between paints. Masks are small and evicted together;
+/// the fonts they are drawn with are bounded on their own
+/// (`CoreTextReference`) and survive mask eviction.
+const MASK_BYTES: usize = 8 << 20;
 #[derive(Default)]
 pub(crate) struct CanvasMasks {
     fonts: CoreTextReference,
@@ -34,12 +47,97 @@ pub(crate) struct CanvasMasks {
 // SAFETY: immutable CTFont/CGFont objects are thread-safe; contexts are created and
 // destroyed within one call. The cache moves with its owning render thread.
 unsafe impl Send for CanvasMasks {}
+
+/// A CTFont shared with the mask workers.
+struct SharedFont(CFRetained<CTFont>);
+// SAFETY: objc2 leaves CTFont !Send/!Sync because it is toll-free bridged
+// with NSFont, which may be subclassed. These fonts are made here by
+// CoreText (`CoreTextReference`), never by AppKit, and are immutable. Core
+// Text Programming Guide, "Common Operations" / thread safety: "Font objects
+// (CTFont, CTFontDescriptor, and associated objects) can be used
+// simultaneously by multiple operations, work queues, or threads."
+// CFRetain/CFRelease are atomic, so clones and drops may happen on any
+// thread.
+unsafe impl Send for SharedFont {}
+unsafe impl Sync for SharedFont {}
+
+/// One CoreGraphics mask to draw: a pure function of these fields.
+struct MaskJob {
+    font: SharedFont,
+    glyph: u16,
+    style: MaskStyle,
+    bounds: kurbo::Rect,
+}
+impl MaskJob {
+    fn run(&self) -> Option<GlyphMask> {
+        draw(&self.font.0, self.glyph, self.style, self.bounds)
+    }
+}
+
+/// Masks a paint still has to draw, deduplicated by key; drawn together
+/// (in parallel when there are enough) by [`CanvasMasks::resolve`].
+#[derive(Default)]
+pub(crate) struct PendingMasks {
+    jobs: Vec<MaskJob>,
+    keys: Vec<Key>,
+    index: HashMap<Key, usize>,
+}
+impl PendingMasks {
+    pub fn is_empty(&self) -> bool {
+        self.jobs.is_empty()
+    }
+}
+
+/// A mask lookup: drawn or known, or the index of a pending job.
+pub(crate) enum MaskLookup {
+    Ready(Option<Arc<GlyphMask>>),
+    Pending(usize),
+}
+
 impl CanvasMasks {
+    /// Drops every mask and font (idle `forget_glyphs`, critical memory).
     pub fn clear(&mut self) {
-        self.masks.clear();
+        self.evict_masks();
         self.fonts = CoreTextReference::default();
+    }
+    /// Drops the masks only: a full mask cache keeps its fonts and their
+    /// providers, so the next misses do not copy and parse fonts again.
+    fn evict_masks(&mut self) {
+        self.masks.clear();
         self.bytes = 0;
     }
+    fn keep(&mut self, key: Key, mask: Arc<GlyphMask>) {
+        if self.bytes >= MASK_BYTES {
+            self.evict_masks();
+        }
+        self.bytes += mask.coverage.len();
+        self.masks.insert(key, mask);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn key(
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        size: f32,
+        quarter: u8,
+        skew: f32,
+        bold_path: Option<(&kurbo::BezPath, f64)>,
+    ) -> Key {
+        (
+            face.id,
+            face.index,
+            glyph,
+            size.to_bits(),
+            coords.iter().map(|(t, v)| (*t, v.to_bits())).collect(),
+            quarter,
+            skew.to_bits(),
+            // Fake-bold stroke width depends on the source font size before
+            // its device transform; equal strike sizes can have other widths.
+            bold_path.map(|(_, scale)| scale.to_bits()),
+        )
+    }
+    /// The mask, drawing it now (one-glyph [`Self::lookup`] + [`Self::resolve`]).
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn get(
         &mut self,
@@ -52,43 +150,230 @@ impl CanvasMasks {
         bounds: kurbo::Rect,
         bold_path: Option<(&kurbo::BezPath, f64)>,
     ) -> Option<Arc<GlyphMask>> {
-        let key = (
-            face.id,
-            face.index,
-            glyph,
-            size.to_bits(),
-            coords.iter().map(|(t, v)| (*t, v.to_bits())).collect(),
-            quarter,
-            skew.to_bits(),
-            // Fake-bold stroke width depends on the source font size before
-            // its device transform; equal strike sizes can have other widths.
-            bold_path.map(|(_, scale)| scale.to_bits()),
-        );
-        if let Some(mask) = self.masks.get(&key) {
-            return Some(mask.clone());
-        }
-        if self.bytes >= 8 << 20 {
-            self.clear();
-        }
-        let run = RefRun {
-            data: face.data,
-            index: face.index,
-            size,
+        let mut pending = PendingMasks::default();
+        match self.lookup(
+            &mut pending,
+            face,
             coords,
-            glyphs: vec![],
-            color: [0., 0., 0., 1.],
-        };
-        let mask = Arc::new(match bold_path {
-            Some((path, scale)) => draw_path(path, scale, quarter, bounds)?,
+            glyph,
+            size,
+            quarter,
+            skew,
+            bounds,
+            bold_path,
+        ) {
+            MaskLookup::Ready(mask) => mask,
+            MaskLookup::Pending(job) => self.resolve(pending).swap_remove(job),
+        }
+    }
+    /// The cached mask, or a job in `pending` that [`Self::resolve`] draws.
+    /// Fake-bold path masks are drawn at once. A key already pending in
+    /// this batch gets its job: equal keys are equal masks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn lookup(
+        &mut self,
+        pending: &mut PendingMasks,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        size: f32,
+        quarter: u8,
+        skew: f32,
+        bounds: kurbo::Rect,
+        bold_path: Option<(&kurbo::BezPath, f64)>,
+    ) -> MaskLookup {
+        let key = Self::key(face, coords, glyph, size, quarter, skew, bold_path);
+        if let Some(mask) = self.masks.get(&key) {
+            return MaskLookup::Ready(Some(mask.clone()));
+        }
+        if let Some(&job) = pending.index.get(&key) {
+            return MaskLookup::Pending(job);
+        }
+        match bold_path {
+            Some((path, scale)) => {
+                let mask = draw_path(path, scale, quarter, bounds).map(Arc::new);
+                if let Some(mask) = &mask {
+                    self.keep(key, mask.clone());
+                }
+                MaskLookup::Ready(mask)
+            }
             None => {
-                let font = self.fonts.font_of(face.id, &run)?;
-                draw(&font, glyph, MaskStyle { quarter, skew }, bounds)?
+                let run = RefRun {
+                    data: face.data,
+                    index: face.index,
+                    size,
+                    coords,
+                    glyphs: vec![],
+                    color: [0., 0., 0., 1.],
+                };
+                // Fonts resolve here, on the caller's thread, in paint order.
+                let Some(font) = self.fonts.font_of(face.id, &run) else {
+                    return MaskLookup::Ready(None);
+                };
+                let job = pending.jobs.len();
+                pending.jobs.push(MaskJob {
+                    font: SharedFont(font),
+                    glyph,
+                    style: MaskStyle { quarter, skew },
+                    bounds,
+                });
+                pending.keys.push(key.clone());
+                pending.index.insert(key, job);
+                MaskLookup::Pending(job)
+            }
+        }
+    }
+    /// Draws the pending masks, keeps the drawn ones, and returns them by
+    /// job index (`None` where CoreGraphics could not draw).
+    pub fn resolve(&mut self, pending: PendingMasks) -> Vec<Option<Arc<GlyphMask>>> {
+        let PendingMasks { jobs, keys, .. } = pending;
+        rasterize(jobs)
+            .into_iter()
+            .zip(keys)
+            .map(|(mask, key)| {
+                let mask = mask.map(Arc::new);
+                if let Some(mask) = &mask {
+                    self.keep(key, mask.clone());
+                }
+                mask
+            })
+            .collect()
+    }
+}
+
+/// Fewer jobs than this draw on the caller's thread: waking a worker costs
+/// about as much as one small mask.
+const PARALLEL_JOBS: usize = 3;
+/// Mask workers besides the caller. The render thread draws too, and other
+/// engine threads (decode, GPU submission) need cores.
+const MAX_HELPERS: usize = 3;
+
+/// One batch of jobs shared by the caller and the workers. Each claims the
+/// next job index and reports exactly one result for it.
+struct Batch {
+    jobs: Vec<MaskJob>,
+    next: AtomicUsize,
+    done: mpsc::Sender<(usize, std::thread::Result<Option<GlyphMask>>)>,
+}
+impl Batch {
+    fn work(&self) {
+        // Workers have no pool of their own; anything CoreText autoreleases
+        // is drained per batch.
+        objc2::rc::autoreleasepool(|_| {
+            loop {
+                let i = self.next.fetch_add(1, Ordering::Relaxed);
+                let Some(job) = self.jobs.get(i) else { break };
+                let mask = catch_unwind(AssertUnwindSafe(|| job.run()));
+                // The caller holds the receiver until every job reported.
+                let _ = self.done.send((i, mask));
             }
         });
-        self.bytes += mask.coverage.len();
-        self.masks.insert(key, mask.clone());
-        Some(mask)
     }
+}
+
+struct MaskPool {
+    tickets: Mutex<mpsc::Sender<Arc<Batch>>>,
+    helpers: usize,
+}
+
+/// The process's mask workers, started on first use; `None` on one core or
+/// when no thread could start. They block on the ticket queue when idle.
+fn mask_pool() -> Option<&'static MaskPool> {
+    static POOL: OnceLock<Option<MaskPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let helpers = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .saturating_sub(1)
+            .min(MAX_HELPERS);
+        let (tickets, queue) = mpsc::channel::<Arc<Batch>>();
+        let queue = Arc::new(Mutex::new(queue));
+        let mut started = 0;
+        for i in 0..helpers {
+            let queue = queue.clone();
+            let worker = std::thread::Builder::new()
+                .name(format!("pm-text-masks-{i}"))
+                .spawn(move || {
+                    loop {
+                        // The guard is released at the end of this statement,
+                        // before the batch runs.
+                        let batch =
+                            match queue.lock().unwrap_or_else(PoisonError::into_inner).recv() {
+                                Ok(batch) => batch,
+                                Err(_) => return,
+                            };
+                        batch.work();
+                    }
+                });
+            if worker.is_ok() {
+                started += 1;
+            }
+        }
+        (started > 0).then(|| MaskPool {
+            tickets: Mutex::new(tickets),
+            helpers: started,
+        })
+    })
+    .as_ref()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: draw every batch on the caller's thread.
+    pub(super) static SERIAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[cfg(test)]
+static PARALLEL_BATCHES: AtomicUsize = AtomicUsize::new(0);
+
+/// Draws `jobs`, returning their masks in job order. Each mask is drawn in
+/// its own bitmap context by one thread, so the masks do not depend on how
+/// the jobs are spread over threads.
+fn rasterize(jobs: Vec<MaskJob>) -> Vec<Option<GlyphMask>> {
+    #[cfg(test)]
+    let serial = SERIAL.with(|s| s.get());
+    #[cfg(not(test))]
+    let serial = false;
+    let pool = if serial || jobs.len() < PARALLEL_JOBS {
+        None
+    } else {
+        mask_pool()
+    };
+    let Some(pool) = pool else {
+        return objc2::rc::autoreleasepool(|_| jobs.iter().map(MaskJob::run).collect());
+    };
+    #[cfg(test)]
+    PARALLEL_BATCHES.fetch_add(1, Ordering::Relaxed);
+    let n = jobs.len();
+    let (done, results) = mpsc::channel();
+    let batch = Arc::new(Batch {
+        jobs,
+        next: AtomicUsize::new(0),
+        done,
+    });
+    {
+        let tickets = pool.tickets.lock().unwrap_or_else(PoisonError::into_inner);
+        for _ in 0..pool.helpers.min(n - 1) {
+            if tickets.send(batch.clone()).is_err() {
+                break;
+            }
+        }
+    }
+    // The caller draws too, so a batch never waits on a busy worker.
+    batch.work();
+    let mut out: Vec<Option<GlyphMask>> = (0..n).map(|_| None).collect();
+    let mut panicked = None;
+    for _ in 0..n {
+        // `batch` keeps a sender alive, and every claimed job reports once.
+        let (i, mask) = results.recv().expect("every mask job reports");
+        match mask {
+            Ok(mask) => out[i] = mask,
+            Err(payload) => panicked = Some(payload),
+        }
+    }
+    if let Some(payload) = panicked {
+        // As if drawn on this thread.
+        std::panic::resume_unwind(payload);
+    }
+    out
 }
 const PAD: i32 = 4;
 /// SkTypeface_Mac::onFilterRec uses useStrokeForFakeBold. Such strikes go
@@ -350,6 +635,382 @@ mod tests {
             first.as_ref(),
             "idle must preserve pixels"
         );
+    }
+
+    const WGHT: u32 = u32::from_be_bytes(*b"wght");
+    const OPSZ: u32 = u32::from_be_bytes(*b"opsz");
+    /// The fixture's text: SF Pro (hidden `.SFNS`, the CGFont variation
+    /// path) and a visible variable face (the descriptor path).
+    fn sf() -> Vec<u8> {
+        std::fs::read("/System/Library/Fonts/SFNS.ttf").expect("SF Pro system font")
+    }
+    fn geist() -> Vec<u8> {
+        include_bytes!("../../tests/fixtures/Geist-Variable.ttf").to_vec()
+    }
+    fn gids(data: &[u8], text: &str) -> Vec<u16> {
+        use read_fonts::TableProvider;
+        let cmap = read_fonts::FontRef::new(data).unwrap().cmap().unwrap();
+        let mut out: Vec<u16> = text
+            .chars()
+            .filter_map(|c| cmap.map_codepoint(c as u32))
+            .map(|g| g.to_u32() as u16)
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        assert!(out.len() > 8, "fixture glyphs map");
+        out
+    }
+    /// Device sizes under `Powermove UI 3`: layer pt × 25 % × (1.05 → 0.93)
+    /// × the viewer's 1.5, as f32 like the painter's strike size.
+    fn animated_sizes(steps: usize) -> Vec<f32> {
+        let mut out = Vec::new();
+        for pt in [25.9f64, 43.2, 62.9] {
+            for k in 0..steps {
+                let t = k as f64 / (steps - 1) as f64;
+                let scale = 0.25 * (1.05 + (0.93 - 1.05) * t) * 1.5;
+                out.push((pt * scale) as f32);
+            }
+        }
+        out
+    }
+    fn glyph_bounds(size: f32) -> kurbo::Rect {
+        let s = f64::from(size);
+        kurbo::Rect::new(-0.25 * s, -1.15 * s, 1.3 * s, 0.45 * s)
+    }
+    /// The uncached, single-threaded reference: new font objects from a new
+    /// CoreTextReference, drawn on this thread.
+    fn fresh(
+        fonts: &mut CoreTextReference,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        size: f32,
+        style: MaskStyle,
+    ) -> Option<GlyphMask> {
+        let run = RefRun {
+            data: face.data,
+            index: face.index,
+            size,
+            coords,
+            glyphs: vec![],
+            color: [0., 0., 0., 1.],
+        };
+        let font = fonts.font_of(face.id, &run)?;
+        draw(&font, glyph, style, glyph_bounds(size))
+    }
+    fn assert_same(a: &GlyphMask, b: &GlyphMask, what: &str) {
+        assert_eq!(
+            (a.width, a.height, a.left, a.top),
+            (b.width, b.height, b.left, b.top),
+            "{what}: mask box"
+        );
+        assert!(a.coverage == b.coverage, "{what}: mask bytes");
+    }
+    /// One strike's masks as one batch: every glyph at every quarter, each
+    /// asked twice (the second is the first's job).
+    fn batch(
+        cache: &mut CanvasMasks,
+        face: FaceRef<'_>,
+        coords: &[(u32, f32)],
+        glyphs: &[u16],
+        size: f32,
+        skew: f32,
+    ) -> Vec<(u16, u8, Option<Arc<GlyphMask>>)> {
+        let mut pending = PendingMasks::default();
+        let mut asked = Vec::new();
+        for &glyph in glyphs {
+            for quarter in 0..4u8 {
+                let mut ask = || {
+                    cache.lookup(
+                        &mut pending,
+                        face,
+                        coords,
+                        glyph,
+                        size,
+                        quarter,
+                        skew,
+                        glyph_bounds(size),
+                        None,
+                    )
+                };
+                let first = ask();
+                let again = ask();
+                if let (MaskLookup::Pending(a), MaskLookup::Pending(b)) = (&first, &again) {
+                    assert_eq!(a, b, "equal keys share one job");
+                }
+                asked.push((glyph, quarter, first));
+            }
+        }
+        let drawn = if pending.is_empty() {
+            Vec::new()
+        } else {
+            cache.resolve(pending)
+        };
+        asked
+            .into_iter()
+            .map(|(glyph, quarter, l)| {
+                let mask = match l {
+                    MaskLookup::Ready(mask) => mask,
+                    MaskLookup::Pending(job) => drawn[job].clone(),
+                };
+                (glyph, quarter, mask)
+            })
+            .collect()
+    }
+
+    /// The cached fonts, the per-coordinates variation instances and the
+    /// parallel batch draw the exact masks an uncached, single-threaded
+    /// CoreText draw makes: every weight, the optical size axis, both
+    /// variation paths, animated fractional sizes, all quarters, italic.
+    #[test]
+    fn batched_parallel_masks_match_fresh_serial_masks() {
+        let (sf, geist) = (sf(), geist());
+        let text = "Powermove GOOD TIMES Text edit 0:11 Adjustment";
+        let faces: Vec<(FaceRef<'_>, Vec<u16>, Vec<Vec<(u32, f32)>>)> = vec![
+            (
+                FaceRef {
+                    data: &sf,
+                    index: 0,
+                    id: 1,
+                },
+                gids(&sf, text),
+                [400f32, 450., 500., 550., 600., 650.]
+                    .map(|w| vec![(WGHT, w)])
+                    .into_iter()
+                    .chain([vec![(WGHT, 500.), (OPSZ, 17.)], vec![]])
+                    .collect(),
+            ),
+            (
+                FaceRef {
+                    data: &geist,
+                    index: 0,
+                    id: 2,
+                },
+                gids(&geist, text),
+                [300f32, 500., 700.]
+                    .map(|w| vec![(WGHT, w)])
+                    .into_iter()
+                    .collect(),
+            ),
+        ];
+        let before = PARALLEL_BATCHES.load(Ordering::Relaxed);
+        let mut cache = CanvasMasks::default();
+        let mut strikes = 0;
+        for (face, glyphs, weights) in &faces {
+            for coords in weights {
+                for (k, size) in animated_sizes(6).into_iter().enumerate() {
+                    let skew = if k % 3 == 2 { -0.2 } else { 0.0 };
+                    let masks = batch(&mut cache, *face, coords, glyphs, size, skew);
+                    // Fresh font objects per strike: no instance is shared.
+                    let mut reference = CoreTextReference::default();
+                    for (glyph, quarter, mask) in &masks {
+                        let want = fresh(
+                            &mut reference,
+                            *face,
+                            coords,
+                            *glyph,
+                            size,
+                            MaskStyle {
+                                quarter: *quarter,
+                                skew,
+                            },
+                        );
+                        let what =
+                            format!("face {} {coords:?} {size} g{glyph} q{quarter}", face.id);
+                        match (mask, &want) {
+                            (Some(got), Some(want)) => assert_same(got, want, &what),
+                            (None, None) => {}
+                            _ => panic!("{what}: drawn on one side only"),
+                        }
+                    }
+                    // A second paint hits the cache with the same masks.
+                    let again = batch(&mut cache, *face, coords, glyphs, size, skew);
+                    for ((_, _, a), (_, _, b)) in masks.iter().zip(&again) {
+                        assert!(match (a, b) {
+                            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                            (None, None) => true,
+                            _ => false,
+                        });
+                    }
+                    strikes += 1;
+                }
+            }
+        }
+        assert!(strikes > 150);
+        if mask_pool().is_some() {
+            assert!(
+                PARALLEL_BATCHES.load(Ordering::Relaxed) - before >= strikes,
+                "the batches went through the workers"
+            );
+        }
+    }
+
+    /// The same batch drawn by the workers and on the caller's thread alone.
+    #[test]
+    fn worker_and_caller_thread_batches_draw_the_same_masks() {
+        let sf = sf();
+        let face = FaceRef {
+            data: &sf,
+            index: 0,
+            id: 1,
+        };
+        let glyphs = gids(&sf, "Powermove UI GOOD TIMES 0123456789");
+        for size in animated_sizes(4) {
+            let coords = [(WGHT, 550.)];
+            let parallel = batch(
+                &mut CanvasMasks::default(),
+                face,
+                &coords,
+                &glyphs,
+                size,
+                0.,
+            );
+            SERIAL.with(|s| s.set(true));
+            let serial = batch(
+                &mut CanvasMasks::default(),
+                face,
+                &coords,
+                &glyphs,
+                size,
+                0.,
+            );
+            SERIAL.with(|s| s.set(false));
+            assert_eq!(parallel.len(), serial.len());
+            for ((g, q, a), (_, _, b)) in parallel.iter().zip(&serial) {
+                let what = format!("{size} g{g} q{q}");
+                assert_same(a.as_ref().unwrap(), b.as_ref().unwrap(), &what);
+            }
+        }
+    }
+
+    /// Several painters on their own threads share the mask workers at once,
+    /// over and over: every mask is the single-threaded one.
+    #[test]
+    fn concurrent_painters_share_the_workers_deterministically() {
+        let (sf, geist) = (sf(), geist());
+        let faces = [
+            (
+                FaceRef {
+                    data: &sf,
+                    index: 0,
+                    id: 1,
+                },
+                gids(&sf, "Powermove GOOD TIMES"),
+            ),
+            (
+                FaceRef {
+                    data: &geist,
+                    index: 0,
+                    id: 2,
+                },
+                gids(&geist, "Powermove GOOD TIMES"),
+            ),
+        ];
+        let sizes = animated_sizes(3);
+        let coords = [(WGHT, 600.)];
+        SERIAL.with(|s| s.set(true));
+        let mut reference = CanvasMasks::default();
+        let want: Vec<_> = faces
+            .iter()
+            .flat_map(|(face, glyphs)| {
+                sizes
+                    .iter()
+                    .map(|&size| batch(&mut reference, *face, &coords, glyphs, size, 0.))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        SERIAL.with(|s| s.set(false));
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    let mut cache = CanvasMasks::default();
+                    for round in 0..8 {
+                        let mut i = 0;
+                        for (face, glyphs) in &faces {
+                            for &size in &sizes {
+                                let got = batch(&mut cache, *face, &coords, glyphs, size, 0.);
+                                for ((g, q, a), (_, _, b)) in got.iter().zip(&want[i]) {
+                                    let what =
+                                        format!("round {round} face {} {size} g{g} q{q}", face.id);
+                                    assert_same(a.as_ref().unwrap(), b.as_ref().unwrap(), &what);
+                                }
+                                i += 1;
+                            }
+                        }
+                        // Draw everything again next round.
+                        cache.evict_masks();
+                    }
+                });
+            }
+        });
+    }
+
+    /// Thousands of fractional strike sizes: masks stay within their budget,
+    /// strikes stay bounded, one variation instance per weight, and mask
+    /// eviction keeps the font provider (no 7.9 MB SF copy per eviction).
+    #[test]
+    fn fractional_sizes_stay_bounded_and_keep_fonts_across_mask_eviction() {
+        let sf = sf();
+        let face = FaceRef {
+            data: &sf,
+            index: 0,
+            id: 1,
+        };
+        let glyphs = gids(&sf, "Powermove UI");
+        let mut cache = CanvasMasks::default();
+        let mut providers = None;
+        let mut evictions = 0;
+        for i in 0..1000 {
+            let size = 12.0 + i as f32 * 0.006;
+            for w in [450., 600.] {
+                let before = cache.bytes;
+                for (_, _, mask) in batch(&mut cache, face, &[(WGHT, w)], &glyphs, size, 0.) {
+                    assert!(mask.is_some());
+                }
+                if cache.bytes < before {
+                    evictions += 1;
+                }
+                assert!(cache.bytes < MASK_BYTES + (64 << 10), "mask budget");
+                let (bytes, strikes) = cache.fonts.retained_for_test();
+                assert_eq!(bytes, sf.len(), "one provider");
+                assert!(strikes <= 128, "strikes stay bounded");
+                assert!(
+                    cache.fonts.variants_for_test() <= 2,
+                    "one instance per weight"
+                );
+                let now = cache.fonts.providers_for_test();
+                assert_eq!(
+                    *providers.get_or_insert_with(|| now.clone()),
+                    now,
+                    "provider kept"
+                );
+            }
+        }
+        assert!(
+            evictions >= 2,
+            "the mask cache filled and evicted ({evictions})"
+        );
+        assert_eq!(cache.fonts.variants_for_test(), 2);
+        // Many distinct weights at one size: instances stay bounded too.
+        for i in 0..1000 {
+            let w = 100. + i as f32 * 0.8;
+            assert!(
+                cache
+                    .get(
+                        face,
+                        &[(WGHT, w)],
+                        glyphs[0],
+                        20.,
+                        0,
+                        0.,
+                        glyph_bounds(20.),
+                        None
+                    )
+                    .is_some()
+            );
+            assert!(cache.fonts.variants_for_test() <= 64);
+            assert!(cache.fonts.retained_for_test().1 <= 128);
+        }
     }
 
     #[test]
