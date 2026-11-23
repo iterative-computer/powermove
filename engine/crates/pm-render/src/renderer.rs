@@ -992,6 +992,7 @@ impl Renderer {
                     linear: &self.pipelines.linear,
                     unsupported: &mut unsupported,
                     content: None,
+                    output_bounds: None,
                 }),
             };
             let mut gpu = crate::effects::exec::Gpu::of(&mut cx).expect("native context");
@@ -999,10 +1000,7 @@ impl Renderer {
         };
         self.effects.uniforms.flush(&self.queue);
         self.queue.submit([encoder.finish()]);
-        for t in taken {
-            self.pool.give(t);
-        }
-        self.pool.end_frame();
+        self.pool.end_submitted_frame(&self.queue, taken);
         (out, unsupported)
     }
 
@@ -1452,18 +1450,45 @@ impl Renderer {
         self.media.trim_frames(bytes);
     }
     pub fn set_target_pool_budget(&mut self, bytes: u64) {
-        // PM_FIX_POOL_KEEP: between frames, keep up to the pool's default
-        // free budget (a frame's intermediates are taken again next frame);
-        // idle release still trims to zero.
-        let floor = if pm_media::decode::diag::knob("PM_FIX_POOL_KEEP") == Some(1) {
-            pm_gpu::target::TargetPool::FREE_BUDGET
-        } else {
-            0
-        };
-        self.pool.set_free_budget(bytes.max(floor));
+        self.pool.set_free_budget(bytes);
         self.pyramids.set_budget(bytes);
         self.binds.set_budget(bytes);
     }
+
+    /// Visible play shares a 128 MiB ceiling across both kinds of retention.
+    /// Charge the whole playback pool, even if the ordinary pool was empty.
+    pub fn set_playback_retention(&mut self, pool: u64, shader: u64) {
+        if (pool > 0) != self.pool.playback_retention() {
+            // Pooled views sampled before the switch can still have a
+            // persistent binding or pyramid under the previous policy.
+            self.binds.clear();
+            self.pyramids.clear();
+        }
+        let shader = shader.min(crate::shader_layers::exec::OUTPUT_CACHE_CAP);
+        self.shaders.output.set_budget(shader);
+        // Reserve all 32 MiB for shader generations, including retired ones
+        // after a grant change. Pool generations have their own fence ledger.
+        self.pool.set_playback_budget(pool.min(96 << 20));
+    }
+
+    pub fn shader_output_cache_bytes(&self) -> u64 {
+        self.shaders.output.bytes()
+    }
+
+    /// Hits, admissions, skipped admissions and evictions.
+    pub fn shader_output_cache_stats(&self) -> (u64, u64, u64, u64) {
+        self.shaders.output.stats()
+    }
+
+    /// Assigned, charged, high-water, evicted and aged-out pool bytes.
+    pub fn playback_pool_stats(&self) -> (u64, u64, u64, u64, u64) {
+        self.pool.playback_stats()
+    }
+
+    pub fn retired_playback_target_bytes(&self) -> u64 {
+        self.pool.retired_bytes()
+    }
+
     pub fn binding_cache_bytes(&self) -> u64 {
         self.binds.retained_bytes()
     }
@@ -1562,6 +1587,23 @@ impl Renderer {
     #[doc(hidden)]
     pub fn set_effect_scissor(&mut self, on: bool) {
         self.effects.scissor_passes = on;
+    }
+
+    /// A/B diagnostic for the zero-source bounds shader.
+    pub fn set_effect_output_bounds(&mut self, enabled: bool) {
+        self.pipelines.effect_output_bounds = enabled;
+    }
+
+    /// A/B diagnostic for the experimental group-wrapper elision.
+    pub fn set_direct_group_target(&mut self, enabled: bool) {
+        self.pipelines.direct_group_target = enabled;
+    }
+
+    /// Group content targets rendered without the experimental wrapper.
+    pub fn direct_group_target_draws(&self) -> u64 {
+        self.pipelines
+            .direct_group_draws
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Tests and benches: whether a frame's node, group, and effect targets
@@ -1664,6 +1706,7 @@ impl Renderer {
         // Ordinary GPU grant changes must keep the warm glyph caches.
         if bytes == 0 {
             self.text.forget_glyphs();
+            self.set_playback_retention(0, 0);
         }
         self.material.trim(bytes.min(128 * 1024 * 1024));
         let bytes = bytes.saturating_sub(self.material.stats.retained_bytes);
@@ -1674,12 +1717,18 @@ impl Renderer {
         self.release_frame_reuse();
         self.source_reuse.trim(bytes);
         let bytes = bytes.saturating_sub(self.source_reuse.bytes());
-        self.pool.trim(bytes);
-        if self.pool.bytes() + self.pyramids.bytes() > bytes {
+        // Playback's pool/cache grant was funded separately by the governor.
+        let pool_bytes = if self.pool.playback_retention() {
+            0
+        } else {
+            self.pool.trim(bytes);
+            self.pool.bytes()
+        };
+        if pool_bytes + self.pyramids.bytes() > bytes {
             self.pyramids.clear();
         }
         self.vector
-            .trim(bytes.saturating_sub(self.pool.bytes() + self.pyramids.bytes()));
+            .trim(bytes.saturating_sub(pool_bytes + self.pyramids.bytes()));
         self.text_gpu.trim(bytes);
     }
 
@@ -1742,7 +1791,9 @@ impl Renderer {
         self.text = crate::text::TextContext::default();
         self.text_gpu.clear();
         let runner = self.shaders.fallback_runner;
+        let output = std::mem::take(&mut self.shaders.output);
         self.shaders = Default::default();
+        self.shaders.output = output;
         self.shaders.fallback_runner = runner;
         self.effects.fallback = Default::default();
         self.effects.fallback.runner = runner;
@@ -2345,6 +2396,11 @@ impl Renderer {
         if let Some(slices) = &mut self.effects.slices {
             slices.begin_frame();
         }
+        self.shaders.output.begin_frame(
+            !request.export
+                && self.effects.slices.is_none()
+                && std::env::var_os("PM_SHADER_OUTPUT_CACHE").is_none_or(|v| v != "0"),
+        );
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.effects.uniforms.reset();
             self.binds.begin_frame();
@@ -2528,13 +2584,17 @@ impl Renderer {
         } else {
             false
         };
+        self.shaders.output.submitted(
+            &self.queue,
+            !abandoned
+                && !held
+                && pending.is_empty()
+                && unsupported.is_empty()
+                && !self.media.still_pending
+                && self.effects.fallback.fatal.is_none(),
+        );
         self.binds.end_frame();
-        for t in taken {
-            self.pool.give(t);
-        }
-        // Targets the frame gave back while it was recorded were kept for
-        // its later passes past the free budget; idle, they go down to it.
-        self.pool.end_frame();
+        self.pool.end_submitted_frame(&self.queue, taken);
         let mut scene3d_meta = crate::scene3d::metadata::collect(&plan, &self.scene3d);
         if prefix {
             if unsupported.is_empty()
@@ -2807,9 +2867,7 @@ impl Renderer {
             )
             .map_err(RenderError::Media)?;
         self.queue.submit([encoder.finish()]);
-        for t in taken {
-            self.pool.give(t);
-        }
+        self.pool.end_submitted_frame(&self.queue, taken);
         let pixels = pm_gpu::readback::read_f32(&self.device, &self.queue, view.texture())?;
         Ok(Some(TextRaster {
             pixels,
@@ -2850,9 +2908,7 @@ impl Renderer {
             )
             .map_err(RenderError::Media)?;
         self.queue.submit([encoder.finish()]);
-        for t in taken {
-            self.pool.give(t);
-        }
+        self.pool.end_submitted_frame(&self.queue, taken);
         Ok(pm_gpu::readback::read_f32(
             &self.device,
             &self.queue,

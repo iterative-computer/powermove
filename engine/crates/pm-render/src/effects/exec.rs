@@ -348,6 +348,10 @@ fn span_scope(span: &Span) -> ErrorScope {
     }
 }
 
+/// The final writer cleared to +0 and only drew within this rectangle.
+#[derive(Clone, Copy)]
+pub(crate) struct EffectOutputBounds(pub (u32, u32, u32, u32));
+
 /// The renderer's own effect state, lent to the chains it prepared.
 pub(crate) struct Native<'a> {
     pub inputs: &'a [super::resources::Ready],
@@ -361,6 +365,7 @@ pub(crate) struct Native<'a> {
     /// Zero-preserving steps then shade only what they can change
     /// ([`super::bounds`]). `None`: anywhere.
     pub content: Option<(u32, u32, u32, u32)>,
+    pub output_bounds: Option<EffectOutputBounds>,
 }
 
 /// Everything a chain records with.
@@ -385,6 +390,7 @@ pub(crate) struct Gpu<'c> {
     /// A step of the running chain was drawn by the fallback runner: its
     /// output is not known to keep the chain's bounds.
     unbounded: bool,
+    output_bounds: Option<EffectOutputBounds>,
 }
 
 impl<'c> Gpu<'c> {
@@ -405,6 +411,7 @@ impl<'c> Gpu<'c> {
             unsupported: &mut *native.unsupported,
             content: native.content,
             unbounded: false,
+            output_bounds: None,
         })
     }
 
@@ -507,35 +514,42 @@ impl<'c> Gpu<'c> {
         let size = (input.width(), input.height());
         let mut bounds = self.content.filter(|_| self.effects.scissor_passes);
         self.unbounded = false;
+        let mut output_bounds = None;
         for step in steps {
             bounds = bounds.and_then(|b| {
                 let definition = self.effects.get(DefinitionKind::Effect, &step.definition)?;
                 Some(super::bounds::grow(b, super::bounds::reach(step, definition)?, size))
             });
             let from = current.as_ref().unwrap_or(&input).clone();
-            if let Some(next) =
-                self.run_effect(layer, step, &from, backdrop.as_ref(), time, coordinates, bounds)
-                && let Some(previous) = current.replace(next)
-            {
-                // The previous step's output was this step's input (and
-                // `u_orig`): its passes are recorded, and no later step
-                // reads it. The chain's own input, prepared inputs, and
-                // backdrop are never `current`; they stay to the end.
-                let same = |t: &Target| t.texture == previous.texture;
-                let kept = same(&input)
-                    || backdrop.as_ref().is_some_and(same)
-                    || current.as_ref().is_some_and(same)
-                    || self.inputs.iter().any(|r| same(&r.target));
-                // (A step handing back a target it did not take would be
-                // kept.)
-                if !kept {
-                    self.retire(previous);
+            self.output_bounds = None;
+            if let Some(next) = self.run_effect(
+                layer,
+                step,
+                &from,
+                backdrop.as_ref(),
+                time,
+                coordinates,
+                bounds,
+            ) {
+                output_bounds = self.output_bounds;
+                if let Some(previous) = current.replace(next) {
+                    // A later step no longer reads this intermediate.
+                    let same = |t: &Target| t.texture == previous.texture;
+                    let kept = same(&input)
+                        || backdrop.as_ref().is_some_and(same)
+                        || current.as_ref().is_some_and(same)
+                        || self.inputs.iter().any(|r| same(&r.target));
+                    if !kept {
+                        self.retire(previous);
+                    }
                 }
             }
             if std::mem::take(&mut self.unbounded) {
                 bounds = None;
             }
         }
+        // DecodeE is a same-coordinate textureLoad and maps +0 to +0.
+        self.output_bounds = output_bounds;
         current.map(|r| self.decode_e(r, working))
     }
 
@@ -854,6 +868,9 @@ impl<'c> Gpu<'c> {
                 (Some(a), Some(b)) => Some(super::bounds::intersect(a, b)),
                 (a, b) => a.or(b),
             };
+            // Only inherit a certificate from the actual last full-size
+            // reviewed writer, with its actual clip (including any intersection).
+            self.output_bounds = bounds.and(clip).map(EffectOutputBounds);
             self.legacy_pass_clipped(
                 DefinitionKind::Effect,
                 &step.definition,
@@ -1606,6 +1623,10 @@ impl EffectPasses for Chain {
         );
         if let Some(t) = &out {
             gpu.taken.push(t.clone());
+        }
+        let output_bounds = gpu.output_bounds;
+        if let Some(native) = &mut cx.native {
+            native.output_bounds = output_bounds;
         }
         Ok(out)
     }

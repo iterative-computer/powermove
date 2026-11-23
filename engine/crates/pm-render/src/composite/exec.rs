@@ -37,6 +37,37 @@ use crate::error::LayerFailure;
 use crate::exec::{Exec, Resolved};
 use crate::plan::{CompPlan, Content};
 
+use crate::effects::exec::EffectOutputBounds;
+
+struct EffectOutput {
+    target: Target,
+    bounds: Option<EffectOutputBounds>,
+}
+
+/// The physical attachment rows covered by a two-texel reconstruction halo.
+fn sample_bounds(
+    bounds: EffectOutputBounds,
+    covered: Region,
+    rect: Region,
+    full: (u32, u32),
+) -> Option<[f32; 4]> {
+    // Bound the coordinate error of the full-quad normalized mapping.
+    if full.0.max(full.1) > 16_384 {
+        return None;
+    }
+    let (x, y, w, h) = bounds.0;
+    if w == 0 || h == 0 {
+        return Some([0.0; 4]);
+    }
+    let (dx, dy) = covered.texel_offset(rect, full.1);
+    Some([
+        (x.saturating_sub(2) as i32 + dx).clamp(0, rect.width as i32) as f32,
+        (y.saturating_sub(2) as i32 + dy).clamp(0, rect.height as i32) as f32,
+        ((x + w + 2).min(covered.width) as i32 + dx).clamp(0, rect.width as i32) as f32,
+        ((y + h + 2).min(covered.height) as i32 + dy).clamp(0, rect.height as i32) as f32,
+    ])
+}
+
 /// The grid a padded pass aligns to (`Region::align`): an effect's
 /// reduced-resolution passes down to 1/16 keep the whole frame's texels.
 const EFFECT_GRID: u32 = 16;
@@ -625,7 +656,7 @@ impl Exec<'_> {
                     // reads no backdrop (`draws_over_the_stack`), and the
                     // stack beneath it is not drawn yet.
                     let backdrop = (!deferred).then_some(&acc);
-                    let Some((res, depth, res_owned)) =
+                    let Some((res, depth, res_owned, output_bounds)) =
                         self.layer_node(encoder, plan, n, covered, backdrop)
                     else {
                         continue;
@@ -652,6 +683,18 @@ impl Exec<'_> {
                         plane: None,
                         level2: None,
                         pyramid: None,
+                        transient_source: self.pool.playback_retention(),
+                        sample_bounds: output_bounds
+                            .filter(|_| {
+                                n.blend == BlendMode::Normal
+                                    && n.transition.is_none()
+                                    && !self.depth_id
+                                    && res.format() == wgpu::TextureFormat::Rgba16Float
+                                    && (n.alpha as f32).is_finite()
+                                    && (n.alpha as f32).is_sign_positive()
+                                    && self.pipelines.effect_output_bounds
+                            })
+                            .and_then(|bounds| sample_bounds(bounds, covered, rect, full)),
                     };
                     if let Some(transition) = &n.transition {
                         // `withLayer`: the stack with the layer, then the
@@ -1006,7 +1049,7 @@ impl Exec<'_> {
         full: (u32, u32),
         view: Option<crate::plan::OutputView>,
         content: Option<(u32, u32, u32, u32)>,
-    ) -> Result<Option<Target>, String> {
+    ) -> Result<Option<EffectOutput>, String> {
         let mut ready = vec![];
         for producer in effects.passes.input_plans() {
             if ready
@@ -1081,9 +1124,10 @@ impl Exec<'_> {
                     linear: &self.pipelines.linear,
                     unsupported: &mut self.unsupported,
                     content,
+                    output_bounds: None,
                 }),
             };
-            effects.passes.record(
+            let result = effects.passes.record(
                 &mut cx,
                 Covered {
                     target: input,
@@ -1092,7 +1136,9 @@ impl Exec<'_> {
                 backdrop
                     .filter(|_| effects.backdrop)
                     .map(|t| Covered { target: t, rect }),
-            )
+            );
+            let bounds = cx.native.and_then(|native| native.output_bounds);
+            result.map(|target| target.map(|target| EffectOutput { target, bounds }))
         };
         // The chain's targets, the returned one included, are in `taken`.
         self.taken.extend(taken);
@@ -1131,6 +1177,7 @@ impl Exec<'_> {
                     linear: &self.pipelines.linear,
                     unsupported: &mut self.unsupported,
                     content: None,
+                    output_bounds: None,
                 }),
             };
             transition.passes.record(
@@ -1165,7 +1212,12 @@ impl Exec<'_> {
         n: &LayerNode,
         rect: Region,
         backdrop: Option<&Target>,
-    ) -> Option<(Target, Option<wgpu::TextureView>, bool)> {
+    ) -> Option<(
+        Target,
+        Option<wgpu::TextureView>,
+        bool,
+        Option<EffectOutputBounds>,
+    )> {
         let full = (plan.width, plan.height);
         let pass_region = (rect != Region::full(full.0, full.1)).then_some(rect);
         // `owned`: `res` (here the content) is ours to release.
@@ -1176,34 +1228,60 @@ impl Exec<'_> {
         };
         // Scoped masks, mattes, and effect results (else in `taken`).
         let scoped = self.recycle;
-        let (resolved, groups) = self.resolve_draws_owned(encoder, plan, &n.content, pass_region);
-        // A 3D layer keeps its linear view depth in the depth and id
-        // surface. Its depth covers the full output, as the finished layer
-        // image does when the pass is not a region.
-        let depth = match resolved.as_slice() {
-            [only] if pass_region.is_none() => only.depth.clone(),
-            _ => None,
+        let depth = if self.pipelines.direct_group_target
+            && !self.depth_id
+            && pass_region.is_none()
+            && plan.view.is_none()
+            && n.blend == BlendMode::Normal
+            && n.alpha == 1.0
+            && let [draw] = n.content.as_slice()
+            && let crate::plan::Content::Texture {
+                source: crate::plan::Source::Comp(child),
+                uv,
+                alpha,
+            } = &draw.content
+            && child.group
+            && (child.width, child.height) == full
+            && child.view == plan.view
+            && *uv == [0.0, 0.0, 1.0, 1.0]
+            && *alpha == 1.0
+            && draw.matrix == [f64::from(full.0), 0.0, 0.0, f64::from(full.1), 0.0, 0.0]
+        {
+            self.pipelines
+                .direct_group_draws
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.render_comp(encoder, child, None, &content);
+            None
+        } else {
+            let (resolved, groups) =
+                self.resolve_draws_owned(encoder, plan, &n.content, pass_region);
+            // A 3D layer keeps its linear view depth over the whole output.
+            let depth = match resolved.as_slice() {
+                [only] if pass_region.is_none() => only.depth.clone(),
+                _ => None,
+            };
+            let layer_plan = CompPlan {
+                composition: plan.composition.clone(),
+                group: plan.group,
+                width: plan.width,
+                height: plan.height,
+                background: crate::plan::Background::Transparent,
+                draws: Vec::new(),
+                view: plan.view,
+            };
+            self.draw_pass(encoder, &layer_plan, &resolved, pass_region, &content, true);
+            for target in groups {
+                self.release(target);
+            }
+            depth
         };
-        let layer_plan = CompPlan {
-            composition: plan.composition.clone(),
-            group: plan.group,
-            width: plan.width,
-            height: plan.height,
-            background: crate::plan::Background::Transparent,
-            draws: Vec::new(),
-            view: plan.view,
-        };
-        self.draw_pass(encoder, &layer_plan, &resolved, pass_region, &content, true);
-        // The pass drawing the layer's group passes is recorded.
-        for t in groups {
-            self.release(t);
-        }
         let matte = n.matte.as_ref().map(|m| {
             let (t, _) = self.take_node(rect);
             self.render_comp(encoder, &m.source, pass_region, &t);
             (m, t)
         });
         let mut res = content;
+        let mut output_bounds = None;
         match &n.effects {
             None => {
                 if n.masks.is_some() || matte.is_some() {
@@ -1236,7 +1314,8 @@ impl Exec<'_> {
                 match self.run_effects(
                     encoder, effects, &res, backdrop, rect, full, plan.view, content,
                 ) {
-                    Ok(Some(t)) => {
+                    Ok(Some(EffectOutput { target: t, bounds })) => {
+                        output_bounds = bounds;
                         // The chain read its input (and `u_orig`, the same
                         // target) in passes recorded by now.
                         let adopted = self.adopt(&t);
@@ -1257,6 +1336,7 @@ impl Exec<'_> {
                     }
                 }
                 if let Some((m, t)) = &matte {
+                    output_bounds = None;
                     let matted =
                         self.mask_and_matte(encoder, &res, None, Some((m, t)), rect, full, scoped);
                     self.replace_res(&mut res, &mut owned, matted, scoped);
@@ -1269,7 +1349,7 @@ impl Exec<'_> {
         {
             self.release(t);
         }
-        Some((res, depth, owned))
+        Some((res, depth, owned, output_bounds))
     }
 
     /// `res` becomes `next` (whose ownership is `next_owned`); the old one,
@@ -1301,26 +1381,25 @@ impl Exec<'_> {
         acc: &Target,
     ) -> Option<(Target, bool)> {
         let full = (plan.width, plan.height);
-        let adjusted =
-            match self.run_effects(
-                encoder,
-                &n.effects,
-                acc,
-                Some(acc),
-                rect,
-                full,
-                plan.view,
-                None,
-            ) {
-                Ok(Some(t)) => t,
-                // A missing or failed effect program leaves the composition
-                // unchanged.
-                Ok(None) => return None,
-                Err(message) => {
-                    self.fail_layer(plan, &n.layer, message);
-                    return None;
-                }
-            };
+        let adjusted = match self.run_effects(
+            encoder,
+            &n.effects,
+            acc,
+            Some(acc),
+            rect,
+            full,
+            plan.view,
+            None,
+        ) {
+            Ok(Some(output)) => output.target,
+            // A missing or failed effect program leaves the composition
+            // unchanged.
+            Ok(None) => return None,
+            Err(message) => {
+                self.fail_layer(plan, &n.layer, message);
+                return None;
+            }
+        };
         let scoped = self.recycle;
         // The chain read the accumulator (input, `u_orig`, and backdrop) in
         // passes recorded by now; the accumulator stays the caller's.
@@ -1418,6 +1497,30 @@ mod tests {
     const W: u32 = 256;
     const H: u32 = 144;
     const FULL: [f64; 6] = [W as f64, 0.0, 0.0, H as f64, 0.0, 0.0];
+
+    #[test]
+    fn effect_sample_bounds_translate_gl_rows_and_preserve_empty_outputs() {
+        let covered = Region {
+            x: 30,
+            y: 50,
+            width: 40,
+            height: 20,
+        };
+        let acc = Region {
+            x: 20,
+            y: 40,
+            width: 100,
+            height: 80,
+        };
+        assert_eq!(
+            sample_bounds(EffectOutputBounds((3, 4, 10, 8)), covered, acc, (200, 200)),
+            Some([11.0, 52.0, 25.0, 64.0])
+        );
+        assert_eq!(
+            sample_bounds(EffectOutputBounds((0, 0, 0, 0)), covered, acc, (200, 200)),
+            Some([0.0; 4])
+        );
+    }
 
     fn solid(w: f64, h: f64, x: f64, y: f64) -> Draw {
         Draw {

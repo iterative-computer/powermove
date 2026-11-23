@@ -143,6 +143,9 @@ pub struct GpuProgram {
     pub vertex_index: HashMap<String, usize>,
     /// Sampler name and image binding, in binding order.
     pub samplers: Vec<(String, u32)>,
+    pub(crate) output_cache_safe: bool,
+    pub(crate) inactive_fragment: Vec<usize>,
+    pub(crate) inactive_vertex: Vec<usize>,
     pipelines: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
 }
 
@@ -294,6 +297,29 @@ impl GpuProgram {
                 binding: b.binding,
             })
             .collect();
+        let output_cache_safe = samplers.is_empty()
+            && [
+                (&program.fragment.module, fragment_block.as_ref()),
+                (&program.vertex.module, vertex_block.as_ref()),
+            ]
+            .into_iter()
+            .all(|(module, block)| {
+                use pm_gpu::glsl::naga::AddressSpace;
+                module
+                    .global_variables
+                    .iter()
+                    .all(|(_, global)| match global.space {
+                        AddressSpace::Private => true,
+                        AddressSpace::Uniform => block.is_some_and(|block| {
+                            global.binding.as_ref().is_some_and(|binding| {
+                                binding.group == block.set && binding.binding == block.binding
+                            })
+                        }),
+                        _ => false,
+                    })
+            });
+        let inactive_fragment = program.fragment.reflection.inactive_members;
+        let inactive_vertex = program.vertex.reflection.inactive_members;
         let scopes = push_scopes(device);
         let stages = crate::glsl::stage_module(
             device,
@@ -358,6 +384,9 @@ impl GpuProgram {
             fragment_block,
             vertex_block,
             samplers,
+            output_cache_safe,
+            inactive_fragment,
+            inactive_vertex,
             pipelines: HashMap::new(),
         })
     }

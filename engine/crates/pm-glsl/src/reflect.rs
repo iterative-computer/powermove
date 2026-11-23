@@ -68,6 +68,10 @@ pub struct Sampler {
 pub struct Reflection {
     pub block: Option<Block>,
     pub samplers: Vec<Sampler>,
+    /// Member indices proved inactive. Older prepared shaders and ambiguous
+    /// pointer uses leave this empty and keep their complete uniform bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inactive_members: Vec<usize>,
 }
 
 fn decorations(module: &Module, target: Word) -> HashMap<Decoration, Option<u32>> {
@@ -255,15 +259,27 @@ pub fn reflect(module: &Module, bool_names: &HashSet<String>) -> Reflection {
 
     // Block members statically used by access chains inside functions.
     let mut used_members: HashMap<Word, HashSet<u32>> = HashMap::new();
+    let mut ambiguous = HashSet::new();
     for function in &module.functions {
         for block in &function.blocks {
             for inst in &block.instructions {
-                if matches!(inst.class.opcode, Op::AccessChain | Op::InBoundsAccessChain)
-                    && let (Some(Operand::IdRef(base)), Some(Operand::IdRef(index))) =
-                        (inst.operands.first(), inst.operands.get(1))
-                    && let Some(&member) = types.constants.get(index)
-                {
-                    used_members.entry(*base).or_default().insert(member);
+                let member = match (&inst.class.opcode, inst.operands.as_slice()) {
+                    (
+                        Op::AccessChain | Op::InBoundsAccessChain,
+                        [Operand::IdRef(base), Operand::IdRef(index), ..],
+                    ) => types.constants.get(index).map(|&index| (*base, index)),
+                    _ => None,
+                };
+                for (position, operand) in inst.operands.iter().enumerate() {
+                    if let Operand::IdRef(id) = operand {
+                        if position == 0
+                            && let Some((base, index)) = member
+                        {
+                            used_members.entry(base).or_default().insert(index);
+                        } else {
+                            ambiguous.insert(*id);
+                        }
+                    }
                 }
             }
         }
@@ -330,6 +346,15 @@ pub fn reflect(module: &Module, bool_names: &HashSet<String>) -> Reflection {
                         active: used.contains(&index),
                     });
                 }
+                reflection.inactive_members = if ambiguous.contains(&id)
+                    || used.iter().any(|&index| index as usize >= members.len())
+                {
+                    Vec::new()
+                } else {
+                    (0..members.len())
+                        .filter(|&index| !used.contains(&(index as u32)))
+                        .collect()
+                };
                 reflection.block = Some(Block {
                     set,
                     binding,
@@ -509,6 +534,18 @@ mod tests {
         assert_eq!(get("u_other").ty, UniformType::Scalar(Scalar::Bool));
         assert!(get("u_flag").active);
         assert!(!get("u_unused").active);
+        assert!(
+            reflection
+                .inactive_members
+                .iter()
+                .any(|&i| block.members[i].name == "u_unused")
+        );
+        assert!(
+            !reflection
+                .inactive_members
+                .iter()
+                .any(|&i| block.members[i].name == "u_flag")
+        );
         assert_eq!(
             get("u_m").ty,
             UniformType::Matrix {
