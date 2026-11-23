@@ -7,6 +7,10 @@ use std::{collections::BTreeMap, io};
 pub const MAX_STORE_BYTES: usize = 32 * 1024 * 1024;
 pub trait Store {
     fn get(&mut self, key: &str) -> io::Result<Option<Value>>;
+    /// Runtime file-backed stores can load payloads on demand.
+    fn lazy_history_attachments(&self) -> bool {
+        false
+    }
     /// Must acknowledge durable publication, or return an error. Attachments are
     /// written before their referencing archive, so a crash cannot dangle them.
     fn set(&mut self, key: &str, value: &Value) -> io::Result<()>;
@@ -171,49 +175,29 @@ impl Threads {
     /// Hydration is a view. Missing payloads retain payloadStored and the exact
     /// metadata, allowing later media recovery instead of silently losing intent.
     pub fn hydrated(&self, store: &mut impl Store) -> io::Result<Value> {
-        let mut v = self.archive.clone();
-        visit_attachments(&mut v, &mut |item| {
-            if item["payloadStored"] == true
-                && let Some(id) = item["id"].as_str().filter(|s| valid_id(s, 120))
-                && let Some(payload) = store.get(&format!("agentAttachment.{id}"))?
-                && let Some(p) = payload.as_object()
-            {
-                for (k, v) in p {
-                    item[k] = v.clone();
-                }
-            }
-            Ok(())
-        })?;
-        Ok(v)
+        let mut archive = self.archive.clone();
+        if !store.lazy_history_attachments() {
+            visit_attachments(&mut archive, &mut |item| hydrate_attachment(store, item))?;
+        }
+        Ok(archive)
     }
     pub fn save(&self, store: &mut impl Store) -> io::Result<()> {
+        self.store_archive(store).map(drop)
+    }
+    pub fn save_without_payloads(&mut self, store: &mut impl Store) -> io::Result<()> {
+        self.archive = self.store_archive(store)?;
+        Ok(())
+    }
+    fn store_archive(&self, store: &mut impl Store) -> io::Result<Value> {
         validate(&self.archive)?;
         let mut archive = self.archive.clone();
         let mut payloads = BTreeMap::<String, Value>::new();
         visit_attachments(&mut archive, &mut |item| {
-            let Some(id) = item["id"]
-                .as_str()
-                .filter(|s| valid_id(s, 120))
-                .map(str::to_string)
-            else {
-                return Ok(());
-            };
-            let mut payload = serde_json::Map::new();
-            for key in ["dataUrl", "dataBase64", "content"] {
-                if let Some(v) = item.get(key).filter(|v| v.is_string()).cloned() {
-                    payload.insert(key.into(), v);
-                    item.as_object_mut().unwrap().remove(key);
-                }
-            }
-            if !payload.is_empty() {
-                let key = format!("agentAttachment.{id}");
-                let payload = Value::Object(payload);
-                check_size(&payload)?;
+            if let Some((key, payload)) = separate_attachment(item)? {
                 if payloads.get(&key).is_some_and(|p| p != &payload) {
                     return Err(error("Conflicting attachment payloads"));
                 }
                 payloads.insert(key, payload);
-                item["payloadStored"] = json!(true);
             }
             Ok(())
         })?;
@@ -233,9 +217,51 @@ impl Threads {
         for (key, value) in writes {
             store.set(&key, &value)?;
         }
-        store.set(&format!("agentThreads.{}", self.project), &archive)
+        store.set(&format!("agentThreads.{}", self.project), &archive)?;
+        Ok(archive)
     }
 }
+
+/// Move binary/text bodies out of a composer record, leaving a durable id
+/// reference. The caller must save the returned payload before publishing it.
+pub fn separate_attachment(item: &mut Value) -> io::Result<Option<(String, Value)>> {
+    let Some(id) = item["id"]
+        .as_str()
+        .filter(|s| valid_id(s, 120))
+        .map(str::to_owned)
+    else {
+        return Ok(None);
+    };
+    let fields = item
+        .as_object_mut()
+        .expect("Attachment with id is an object");
+    let mut payload = serde_json::Map::new();
+    for key in ["dataUrl", "dataBase64", "content"] {
+        if fields.get(key).is_some_and(Value::is_string) {
+            payload.insert(key.into(), fields.remove(key).expect("selected payload"));
+        }
+    }
+    if payload.is_empty() {
+        return Ok(None);
+    }
+    let payload = Value::Object(payload);
+    check_size(&payload)?;
+    item["payloadStored"] = json!(true);
+    Ok(Some((format!("agentAttachment.{id}"), payload)))
+}
+
+pub fn hydrate_attachment(store: &mut impl Store, item: &mut Value) -> io::Result<()> {
+    if item["payloadStored"] == true
+        && let Some(id) = item["id"].as_str().filter(|id| valid_id(id, 120))
+        && let Some(Value::Object(payload)) = store.get(&format!("agentAttachment.{id}"))?
+    {
+        for (key, value) in payload {
+            item[key] = value;
+        }
+    }
+    Ok(())
+}
+
 fn check_size(v: &Value) -> io::Result<()> {
     if serde_json::to_vec(v)?.len() > MAX_STORE_BYTES {
         Err(error(

@@ -421,7 +421,8 @@ fn without_timestamps_a_program_is_turned_off_after_two_frames_that_did_not_fini
     r.effects_mut()
         .watchdog
         .set_timing_source(Some(source.clone()));
-    let doc = document(vec![solid_with(&["acme.invert"])]);
+    // Multiple instances share a subject. One frame supplies one strike.
+    let doc = document(vec![solid_with(&["acme.invert", "acme.invert"])]);
     // Each frame is judged (with the source's times as they are now)
     // before the source changes.
     let step = |r: &mut Renderer| {
@@ -661,6 +662,9 @@ fn a_frame_seen_running_past_the_hang_budget_is_cleared_by_its_timestamps() {
     }
     let (offset, clock) = movable_clock();
     r.effects_mut().watchdog.set_clock(Some(clock));
+    // The suspected frame must carry timestamps: a recording viewer times
+    // one frame in 30 (`watchdog::SAMPLE_EVERY`).
+    r.effects_mut().watchdog.set_sample_every(1);
     let mut request = RenderRequest::sized(Size::new(1280, 720), Precision::Float16);
     request.background = false;
     let mut seen = false;

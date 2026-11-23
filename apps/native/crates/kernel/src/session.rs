@@ -763,57 +763,57 @@ impl Kernel {
                         self.state =
                             crate::state::StateSnapshot::load(writer.store()).map_err(failure)?;
                         let record = profile.join("kernel-state.json");
-                        // The record's settings are committed once. A record
-                        // kept for the Agent gate below is never replayed:
-                        // restoring it again would roll back every setting
-                        // changed since the commit. A record written after the
-                        // marker (a build that still uses it ran since) is a
-                        // new snapshot and is applied normally.
                         let applied = profile.join("kernel-state.applied");
-                        let already_applied = |record: &std::path::Path| -> std::io::Result<bool> {
-                            let (Ok(marker), Ok(record)) =
-                                (std::fs::metadata(&applied), std::fs::metadata(record))
-                            else {
-                                return Ok(false);
-                            };
-                            Ok(marker.modified()? >= record.modified()?)
-                        };
+                        let old = self.state.clone();
+                        let mut record_exists = false;
+                        let mut apply_record = false;
                         match std::fs::read_to_string(&record) {
-                            Ok(text) if !already_applied(&record).map_err(failure)? => {
-                                let value = pm_model::json::parse(&text).map_err(failure)?;
-                                let old = &self.state;
-                                let mut next = old.clone();
-                                next.restore_durable(&value).map_err(failure)?;
-                                let mut writes: Vec<_> = old
-                                    .settings
-                                    .keys()
-                                    .chain(next.settings.keys())
-                                    .collect::<std::collections::BTreeSet<_>>()
-                                    .into_iter()
-                                    .filter_map(|key| {
-                                        let after = next.settings.get(key);
-                                        (after != old.settings.get(key))
-                                            .then(|| (key.clone(), after.cloned()))
-                                    })
-                                    .collect();
-                                writes.extend(next.durable_extensions_since(old));
-                                writer.write_settings(writes).map_err(failure)?;
-                                crate::persistence::atomic_write(&applied, b"")
-                                    .map_err(failure)?;
-                                std::fs::File::open(&profile)
-                                    .and_then(|dir| dir.sync_all())
-                                    .map_err(failure)?;
-                                self.state = next;
+                            Ok(text) => {
+                                record_exists = true;
+                                let modified = std::fs::metadata(&record)
+                                    .and_then(|meta| meta.modified()).map_err(failure)?;
+                                apply_record = match std::fs::metadata(&applied) {
+                                    Ok(marker) => marker.modified().map_err(failure)? < modified,
+                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                                    Err(e) => return Err(failure(e)),
+                                };
+                                if apply_record {
+                                    let value = pm_model::json::parse(&text).map_err(failure)?;
+                                    self.state.restore_durable(&value).map_err(failure)?;
+                                } else if !profile.join("kernel-state.pre-agent-storage.json")
+                                    .try_exists().map_err(failure)?
+                                {
+                                    // Current library settings win. Only Agent keys can be
+                                    // recovered from the snapshot already applied in .23.
+                                    let value = pm_model::json::parse(&text).map_err(failure)?;
+                                    self.restore_legacy_agent_settings(&value);
+                                }
                             }
-                            Ok(_) => {}
                             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                             Err(e) => return Err(failure(e)),
                         }
-                        // Agent-send migrates agent threads and attachments out
-                        // of this same record; the backup it writes is the
-                        // durable sign its migration ran. Until the marker
-                        // exists — including on builds without that migration —
-                        // the record stays for it, intact.
+                        self.migrate_agent_storage(&profile, record_exists).map_err(failure)?;
+                        let next = &self.state;
+                        let mut writes: Vec<_> = old
+                            .settings
+                            .keys()
+                            .chain(next.settings.keys())
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .into_iter()
+                            .filter_map(|key| {
+                                let after = next.settings.get(key);
+                                (after != old.settings.get(key))
+                                    .then(|| (key.clone(), after.cloned()))
+                            })
+                            .collect();
+                        writes.extend(next.durable_extensions_since(&old));
+                        writer.write_settings(writes).map_err(failure)?;
+                        if apply_record {
+                            crate::persistence::atomic_write(&applied, b"").map_err(failure)?;
+                            std::fs::File::open(&profile)
+                                .and_then(|dir| dir.sync_all())
+                                .map_err(failure)?;
+                        }
                         if profile
                             .join("kernel-state.pre-agent-storage.json")
                             .try_exists()

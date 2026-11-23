@@ -202,6 +202,48 @@ struct Control {
     /// waiting its turn), and the signal when it is decided.
     admitted: Mutex<Option<Result<()>>>,
     decided: Condvar,
+    panel_memory: Option<PanelMemory>,
+}
+struct PanelMemory {
+    error: Mutex<Option<Error>>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+impl Control {
+    /// The owner tells the panel host even when the caller discarded the
+    /// evaluation ticket, or the failure came from a timer.
+    fn report_panel_memory(
+        &self,
+        error: &Error,
+        live: Option<&Live>,
+        name: &str,
+        limits: &Limits,
+    ) -> bool {
+        let Some(panel) = &self.panel_memory else {
+            return false;
+        };
+        if !error.is_memory() {
+            return false;
+        }
+        if let Some(live) = live {
+            let memory = live.vm.memory();
+            eprintln!(
+                "{name} ran out of memory ({error}): heap used {} bytes, reserved {} bytes, ceiling {} bytes; external {} bytes, ceiling {} bytes",
+                memory.used_heap_bytes,
+                memory.reserved_heap_bytes,
+                limits.heap_bytes,
+                memory.external_bytes,
+                limits.external_bytes,
+            );
+        } else {
+            eprintln!(
+                "{name} ran out of memory during startup ({error}): heap ceiling {} bytes",
+                limits.heap_bytes
+            );
+        }
+        *panel.error.lock().unwrap() = Some(error.clone());
+        (panel.wake)();
+        true
+    }
 }
 struct Inner {
     mailbox: Arc<Mailbox>,
@@ -260,6 +302,7 @@ enum Source {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateChannel {
     Publication,
+    TimelineOutline,
     ViewerFrame,
     ExportProgress,
     Pointer { panel: String, pointer: u64 },
@@ -559,6 +602,18 @@ mod mailbox_tests {
 }
 
 impl Realm {
+    /// A terminal heap or external memory failure of a shipped panel.
+    pub fn take_panel_memory_failure(&self) -> Option<Error> {
+        self.inner
+            .control
+            .panel_memory
+            .as_ref()?
+            .error
+            .lock()
+            .unwrap()
+            .take()
+    }
+
     /// Waits up to `within` for the isolate's turn in the heap account:
     /// `None` while it still waits (others hold the room), else whether it
     /// was admitted. A realm starts at once and queues its tasks; a caller
@@ -1044,7 +1099,26 @@ impl RuntimePool {
         }
         self.start_realm(kind)
     }
+    /// Shipped panel code gets a larger ceiling on the same shared account,
+    /// while the host remounts the panel after a terminal memory failure.
+    pub fn builtin_panel_realm(
+        &self,
+        panel: &str,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<Realm> {
+        let mut limits = self.config.limits.clone();
+        limits.heap_bytes = crate::host::builtin_heap_bytes(panel);
+        self.start_realm_with(RealmKind::V4Extension(panel.into()), limits, Some(wake))
+    }
     pub(crate) fn start_realm(&self, kind: RealmKind) -> Result<Realm> {
+        self.start_realm_with(kind, self.config.limits.clone(), None)
+    }
+    pub(crate) fn start_realm_with(
+        &self,
+        kind: RealmKind,
+        limits: Limits,
+        panel_wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Result<Realm> {
         let mut realms = self.realms.lock().unwrap();
         if let Some(inner) = realms
             .get(&kind)
@@ -1063,6 +1137,10 @@ impl RuntimePool {
             culprit: crate::vm::Culprit::default(),
             admitted: Mutex::new(None),
             decided: Condvar::new(),
+            panel_memory: panel_wake.map(|wake| PanelMemory {
+                error: Mutex::new(None),
+                wake,
+            }),
         });
         let inner = Arc::new(Inner {
             mailbox: mailbox.clone(),
@@ -1070,7 +1148,8 @@ impl RuntimePool {
             max_source: self.config.limits.max_source_bytes,
         });
         let name = format!("{}:{kind:?}", self.scope);
-        let config = self.config.clone();
+        let mut config = self.config.clone();
+        config.limits = limits;
         let worker_kind = kind.clone();
         thread::Builder::new()
             .name("pm-v8-owner".into())
@@ -1640,7 +1719,10 @@ fn worker(
                         .pump(&config)
                         .and_then(|_| live.commit(Some(&live.generation.clone()), &config, false));
                     drop(guard);
-                    if result.is_err() {
+                    if let Err(error) = result {
+                        if control.report_panel_memory(&error, Some(live), &name, &config.limits) {
+                            break;
+                        }
                         fail_generation(live, &config);
                         drop(std::mem::replace(&mut current, Err(Error::Closed)));
                         current = recover(&name, &kind, &config);
@@ -1739,6 +1821,12 @@ fn worker(
                     Ok(_) => Err(Error::StaleGeneration),
                     Err(error) => Err(error.clone()),
                 };
+                if result.as_ref().is_err_and(|error| {
+                    control.report_panel_memory(error, current.as_ref().ok(), &name, &config.limits)
+                }) {
+                    complete(reply, result);
+                    break;
+                }
                 if let Ok(live) = &mut current {
                     if matches!(
                         result,

@@ -508,6 +508,7 @@ fn codex_app(
         image_paths: request.images.clone(),
         config,
         resume_thread: None,
+        project: None,
     };
     let handle = transport::spawn(spec, Machine::Codex(codex::Client::default()), vec![]);
     handle
@@ -515,7 +516,125 @@ fn codex_app(
         .map_err(|_| "The agent runtime is not accepting work.".to_owned())?;
     Ok(handle)
 }
-/// Reply artifacts belong to one process, including overlapping restarts.
+/// Project and Full access run on the App Server too, so a steer reaches the
+/// running turn (`turn/steer`). The sandbox and reviewer are the turn's policy.
+fn codex_project(
+    env: &Environment,
+    request: Request,
+    authority: Authority,
+    token: &str,
+    user_mcp: &crate::user_mcp::Loaded,
+) -> Result<Handle, String> {
+    let executable = env
+        .binary(Runtime::Codex)
+        .ok_or_else(|| missing("ChatGPT"))?;
+    let (command, args) = env.mcp(token);
+    let instructions = format!("{INSTRUCTIONS}\n\n{}", request.additional());
+    let powermove = json!({
+        "command":command,"args":args,"required":true,"startup_timeout_sec":30,
+        "tool_timeout_sec":TOOL_TIMEOUT_SECONDS,"default_tools_approval_mode":"approve"
+    });
+    let mut servers = serde_json::Map::new();
+    servers.insert("powermove".into(), powermove.clone());
+    for (name, server) in &user_mcp.servers {
+        servers
+            .entry(name.clone())
+            .or_insert_with(|| server.clone());
+    }
+    let spec = ProcessSpec {
+        executable,
+        args: vec!["app-server".into()],
+        cwd: request.workspace.clone(),
+        env: env.codex_vars()?,
+    };
+    let run = codex::Run {
+        id: request.run.clone(),
+        cwd: request.workspace.to_string_lossy().into_owned(),
+        prompt: format!("{instructions}\n\nUSER REQUEST\n{}", request.prompt),
+        model: request.model.clone(),
+        reasoning_effort: request.effort.clone(),
+        schema: Some(reply_schema()),
+        image_paths: request.images.clone(),
+        config: json!({"mcp_servers":Value::Object(servers)}),
+        resume_thread: None,
+        project: Some(codex::Project {
+            access: authority.access,
+            supervised: authority.approval == ApprovalMode::Supervised,
+        }),
+    };
+    let mut mcp_config = powermove
+        .as_object()
+        .unwrap()
+        .iter()
+        .flat_map(|(key, value)| {
+            [
+                "--config".into(),
+                format!("mcp_servers.powermove.{key}={value}"),
+            ]
+        })
+        .collect::<Vec<_>>();
+    mcp_config.extend(user_mcp.codex_argv());
+    let exec_spec = spec.clone();
+    transport::spawn_project(spec, run, move |session, directions| {
+        let mut spec = exec_spec.clone();
+        let reply = reply_files(&spec.cwd).map_err(|e| e.to_string())?;
+        let schema = reply.0.join("reply-schema.json");
+        let output = reply.0.join("reply.json");
+        fs::write(&schema, reply_schema().to_string()).map_err(|e| e.to_string())?;
+        let (prompt, image_paths) = fallback_input(&request, session.is_some(), directions);
+        spec.args = codex_exec::Options {
+            authority: authority.clone(),
+            extensions: spec.cwd.to_string_lossy().into_owned(),
+            schema_path: schema.to_string_lossy().into_owned(),
+            output_path: output.to_string_lossy().into_owned(),
+            prompt,
+            instructions: instructions.clone(),
+            model: request.model.clone(),
+            effort: request.effort.clone(),
+            session,
+            image_paths,
+            shell_network: true,
+            mcp_config: mcp_config.clone(),
+        }
+        .argv()?;
+        Ok(transport::spawn(
+            spec,
+            Machine::CodexExec {
+                client: codex_exec::Client::new(request.run.clone(), authority.clone(), 0),
+                output,
+            },
+            vec![],
+        )
+        .hold(reply))
+    })
+}
+
+fn fallback_input(
+    request: &Request,
+    resuming: bool,
+    directions: Vec<transport::Direction>,
+) -> (String, Vec<String>) {
+    if directions.is_empty() {
+        return (request.prompt.clone(), request.images.clone());
+    }
+    let mut prompt = String::new();
+    let mut images = Vec::new();
+    if !resuming {
+        prompt.push_str(&format!("ORIGINAL REQUEST\n{}\n\n", request.prompt));
+        images.extend(request.images.iter().cloned());
+    }
+    prompt.push_str("NEW DIRECTION\n");
+    for (index, direction) in directions.into_iter().enumerate() {
+        if index > 0 {
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(&direction.prompt);
+        images.extend(direction.images);
+    }
+    (prompt, images)
+}
+
+/// Each fallback turn owns its reply files until the CLI has exited.
 struct ReplyFiles(PathBuf);
 impl Drop for ReplyFiles {
     fn drop(&mut self) {
@@ -537,65 +656,6 @@ fn reply_files(workspace: &Path) -> std::io::Result<ReplyFiles> {
             Err(error) => return Err(error),
         }
     }
-}
-/// Project access runs the autonomous CLI, which owns its sandbox and reviewer.
-fn codex_project(
-    env: &Environment,
-    request: Request,
-    authority: Authority,
-    token: &str,
-    user_mcp: &crate::user_mcp::Loaded,
-) -> Result<Handle, String> {
-    let executable = env
-        .binary(Runtime::Codex)
-        .ok_or_else(|| missing("ChatGPT"))?;
-    let reply = reply_files(&request.workspace).map_err(|e| e.to_string())?;
-    let schema = reply.0.join("reply-schema.json");
-    let output = reply.0.join("reply.json");
-    fs::write(&schema, reply_schema().to_string()).map_err(|e| e.to_string())?;
-    let (command, args) = env.mcp(token);
-    let instructions = format!("{INSTRUCTIONS}\n\n{}", request.additional());
-    let mut mcp_config: Vec<String> = [
-        format!("mcp_servers.powermove.command={}", json!(command)),
-        format!("mcp_servers.powermove.args={}", json!(args)),
-        "mcp_servers.powermove.required=true".into(),
-        "mcp_servers.powermove.default_tools_approval_mode=\"approve\"".into(),
-        "mcp_servers.powermove.startup_timeout_sec=30".into(),
-        format!("mcp_servers.powermove.tool_timeout_sec={TOOL_TIMEOUT_SECONDS}"),
-    ]
-    .into_iter()
-    .flat_map(|pair| ["--config".to_owned(), pair])
-    .collect();
-    mcp_config.extend(user_mcp.codex_argv());
-    let options = codex_exec::Options {
-        authority: authority.clone(),
-        extensions: request.workspace.to_string_lossy().into_owned(),
-        schema_path: schema.to_string_lossy().into_owned(),
-        output_path: output.to_string_lossy().into_owned(),
-        prompt: request.prompt,
-        instructions,
-        model: request.model,
-        effort: request.effort,
-        session: None,
-        image_paths: request.images.clone(),
-        shell_network: true,
-        mcp_config,
-    };
-    let spec = ProcessSpec {
-        executable,
-        args: options.argv()?,
-        cwd: request.workspace,
-        env: env.codex_vars()?,
-    };
-    Ok(transport::spawn(
-        spec,
-        Machine::CodexExec {
-            client: codex_exec::Client::new(request.run, authority, 0),
-            output,
-        },
-        vec![],
-    )
-    .hold(reply))
 }
 /// The user-visible text of a structured reply; other text passes unchanged.
 pub fn reply_text(text: &str) -> String {

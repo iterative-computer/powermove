@@ -81,12 +81,15 @@ export class HostAgentModel implements AgentModel {
     const operation = this.queue.then(async () => {
       if (this.error) throw this.error;
       if (this.retired) throw new Error("Agent publication unavailable");
-      await this.host.command(this.registration.dispatch, {
+      const ack = await this.host.command(this.registration.dispatch, {
         sequence,
         target,
         action: data,
       });
-      // Only native publications may change UI facts. An ack is not a snapshot.
+      // The built-in dispatch also returns the authoritative snapshot with
+      // its acknowledgement. Typing need not wait for a separate publication.
+      if (ack.value !== null && ack.value !== undefined)
+        this.publish(ack.value as unknown as Publication);
     });
     this.queue = operation.catch(() => undefined);
     return operation;

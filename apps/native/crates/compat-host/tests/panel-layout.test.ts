@@ -214,3 +214,33 @@ test("a delayed clear cannot remove another panel's prepared snapshot", async ()
     window.close();
   }
 }, 20000);
+
+test("a dedicated panel viewport scrolls long content inside its own bounds", async () => {
+  const { createRequire } = await import("node:module");
+  const require = createRequire(new URL("../../../js/remote-dom/package.json", import.meta.url));
+  const { JSDOM } = require("jsdom");
+  const ids = ["background-remover.panel", "pexels", "split-text.panel", "motion-notes"];
+  const html = ids.map(id =>
+    `<section data-pm-contribution="${id}" style="overflow:visible">${'<p>A list row</p>'.repeat(25)}</section>`
+  ).join("");
+  const { window } = new JSDOM(html, { runScripts: "outside-only" });
+  try {
+    const source = readFileSync(new URL("../src/remote-dom.js", import.meta.url), "utf8");
+    const geometry = source.slice(source.indexOf("  let slotOwner ="), source.indexOf("  const contributionBounds ="));
+    window.eval(geometry + "globalThis.showPanel = id => { slotOwner = id; refreshSlot(); };");
+    window.call = () => {};
+    for (const id of ids) {
+      window.showPanel(id);
+      const root = window.document.querySelector(`[data-pm-contribution="${id}"]`);
+      expect(root.style.height).toBe("100%");
+      expect(root.style.clipPath).toBe("inset(0)");
+      expect(root.style.overflowY).toBe("auto");
+      expect(root.style.overflowX).toBe("hidden");
+      const shown = [...window.document.querySelectorAll("section")]
+        .filter((node: any) => node.style.display !== "none");
+      expect(shown).toEqual([root]);
+    }
+  } finally {
+    window.close();
+  }
+});

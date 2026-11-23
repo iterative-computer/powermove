@@ -83,6 +83,10 @@ pub(crate) fn rig_source(panel: &str, source: OpenSource) -> Rig {
             .unwrap()
             .unwrap();
     }
+    rig_opened(panel, actor)
+}
+pub(crate) fn rig_opened(panel: &str, actor: KernelActor) -> Rig {
+    let kernel = actor.handle();
     let mut runtime = Builtins::new(kernel.clone(), PROJECT, || {}).unwrap();
     let ticket = runtime.mount(panel).unwrap();
     // A mount waits its turn in the process's shared heap account while
@@ -2169,12 +2173,12 @@ fn render_queue_keyboard_focus_reveals_inline_actions(cx: &mut TestAppContext) {
     let (view, mut vcx) = window(cx, &rig, publication(&rig), Default::default());
     vcx.run_until_parked();
     vcx.update(|window, _| window.activate());
-    vcx.update(|window, cx| view.update(cx, |v, cx| v.focus_semantic("queue.retry.4", window, cx)));
+    vcx.update(|window, cx| view.update(cx, |v, cx| v.focus_semantic("queue.remove.4", window, cx)));
     let revealed = std::cell::Cell::new(false);
     settle(&mut vcx, |cx| {
         for publication in rig.runtime.take_publications() {
             let surface = &publication.surface;
-            if let Some(button) = surface.nodes().values().find(|n|n.props.get("id").and_then(Value::as_str) == Some("queue.retry.4")) {
+            if let Some(button) = surface.nodes().values().find(|n|n.props.get("id").and_then(Value::as_str) == Some("queue.remove.4")) {
                 if button.parent.and_then(|id|surface.node(id)).and_then(|n|n.props.get("style")).and_then(|s|s.get("opacity")).and_then(Value::as_f64) == Some(1.0) { revealed.set(true); }
             }
             view.update(cx, |v,cx|v.publish(publication,cx));
@@ -3155,4 +3159,191 @@ fn user_transcript_ring_requires_keyboard_focus(cx: &mut TestAppContext) {
         Some(1)
     );
     assert!(!has_ring(&mut vcx), "clicking into the transcript leaves the ring hidden");
+}
+
+/// A running conversation republishes with the same surface generation.
+fn conversation_page(rig: &Rig, rows: usize, tick: usize) -> Publication {
+    let mut ops = node_ops(
+        1,
+        0,
+        "div",
+        json!({"id":"agent-panel","style":{"display":"flex","flexDirection":"column","flexGrow":1,"minHeight":0}}),
+        &[],
+    );
+    ops.extend(node_ops(
+        2, 1, "div",
+        json!({"id":"agent-conversation","metadata":{"count":rows,"scrollAnchor":"end","scrollToken":"thread"},"style":{"display":"flex","flexDirection":"column","overflow":"scroll","paddingLeft":12,"paddingRight":12,"background":"#181818"}}),
+        &[],
+    ));
+    ops.extend(node_ops(
+        3, 2, "div",
+        json!({"id":"agent-conversation-content","style":{"display":"flex","flexDirection":"column","flexShrink":0,"gap":16,"paddingTop":8,"paddingBottom":12}}),
+        &[],
+    ));
+    for (id, parent, name, label) in [
+        (4, 3, "working", format!("Working for {tick}s")),
+        (6, 1, "agent-composer", "Add direction…".into()),
+    ] {
+        ops.extend(node_ops(
+            id,
+            parent,
+            "div",
+            json!({"id":name,"style":{"height":32,"flexShrink":0,"paddingLeft":12,"background":"#181818"}}),
+            &[],
+        ));
+        ops.extend(node_ops(id + 1, id, "text", json!({}), &[]));
+        ops.push(Op::SetText {
+            id: id + 1,
+            text: label,
+        });
+    }
+    for i in 0..rows {
+        let row = 8 + 2 * i as u64;
+        ops.extend(node_ops(
+            row, 3, "div",
+            json!({"id":format!("msg-{i}"),"style":{"height":24 + (i * 37) % 48,"flexShrink":0,"background":"#36506a","paddingLeft":12,"paddingTop":4}}),
+            &[],
+        ));
+        ops.extend(node_ops(row + 1, row, "text", json!({}), &[]));
+        ops.push(Op::SetText {
+            id: row + 1,
+            text: format!("Agent message {}", i + 1),
+        });
+    }
+    let mut publication = synthetic(rig, ops);
+    publication.panel = "agent".into();
+    publication
+}
+
+/// Use the first frame drawn by each publication, before another layout can
+/// restore a row that was left out. The optional captures are those same frames.
+#[test]
+fn streaming_conversation_never_paints_empty() {
+    use gpui::HeadlessAppContext;
+
+    let capture = std::env::var_os("PM_AGENT_TRANSCRIPT_CAPTURE").map(std::path::PathBuf::from);
+    if let Some(dir) = &capture {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let screenshots = capture.is_some();
+    let rig = rig("viewer", 1);
+    let mut cx = HeadlessAppContext::with_platform(
+        Arc::new(
+            gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Load)
+                .with_automatic_optical_sizing(),
+        ),
+        Arc::new(()),
+        move || {
+            screenshots.then(|| {
+                Box::new(gpui_apple::metal_renderer::MetalHeadlessRenderer::new())
+                    as Box<dyn gpui::PlatformHeadlessRenderer>
+            })
+        },
+    );
+    cx.allow_parking();
+    let mut rows = 40;
+    let window = cx
+        .open_window(size(px(360.), px(340.)), |window, cx| {
+            cx.new(|cx| {
+                SurfaceView::new(
+                    rig.runtime.clone(),
+                    conversation_page(&rig, rows, 0),
+                    tokens(),
+                    Default::default(),
+                    window,
+                    cx,
+                )
+            })
+        })
+        .unwrap();
+    let view = window.update(&mut cx, |view, _, cx| cx.entity()).unwrap();
+    let window = gpui::AnyWindowHandle::from(window);
+    let scroll = |cx: &mut HeadlessAppContext| {
+        view.read_with(cx, |view, _| view.test_scroll_state(2).unwrap())
+    };
+    let mut failures = Vec::new();
+    let mut history = None;
+    for tick in 1..=48 {
+        if tick == 25 {
+            view.update(&mut cx, |view, cx| view.review_scroll_to(1500., cx));
+            let (offset, viewport, _) = scroll(&mut cx);
+            if offset.y != px(-1500.) {
+                failures.push(format!("could not scroll to history: {offset:?}"));
+            }
+            history = (0..rows).find_map(|i| {
+                let name = format!("msg-{i}");
+                let bounds = cx.debug_bounds(window, &name).unwrap()?;
+                (bounds.bottom() > viewport.top() && bounds.top() < viewport.bottom())
+                    .then_some((name, bounds.top()))
+            });
+            if history.is_none() {
+                failures.push("no visible history after scrolling up".into());
+            }
+        }
+        if tick % 2 == 0 {
+            rows += 1;
+        }
+        view.update(&mut cx, |view, cx| {
+            view.publish(conversation_page(&rig, rows, tick), cx);
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            if !view.read_with(&cx, |view, _| view.compiling()) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "update {tick} did not install");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let (offset, viewport, max) = scroll(&mut cx);
+        let visible: Vec<_> = (0..rows)
+            .filter(|i| {
+                cx.debug_bounds(window, &format!("msg-{i}"))
+                    .unwrap()
+                    .is_some_and(|b| b.bottom() > viewport.top() && b.top() < viewport.bottom())
+            })
+            .collect();
+        println!(
+            "update {tick:02}: model={rows}, visible={visible:?}, offset={}, max={}",
+            f32::from(offset.y),
+            f32::from(max.y),
+        );
+        if let Some(dir) = &capture {
+            cx.capture_screenshot(window)
+                .unwrap()
+                .save(dir.join(format!("update-{tick:02}.png")))
+                .unwrap();
+        }
+        if visible.is_empty() {
+            failures.push(format!(
+                "update {tick}: transcript of {rows} rows painted empty"
+            ));
+        }
+        if tick >= 25 {
+            if offset.y != px(-1500.) {
+                failures.push(format!("update {tick}: history scrolled to {offset:?}"));
+            }
+            if let Some((name, top)) = &history {
+                let position = cx.debug_bounds(window, name).unwrap().map(|b| b.top());
+                if position != Some(*top) {
+                    failures.push(format!(
+                        "update {tick}: history row at {position:?}, expected {top:?}"
+                    ));
+                }
+            }
+        } else {
+            if offset.y != -max.y {
+                failures.push(format!(
+                    "update {tick}: wrong scroll offset {offset:?}, max {max:?}"
+                ));
+            }
+            if visible.last() != Some(&(rows - 1)) {
+                failures.push(format!(
+                    "update {tick}: the newest message was outside the viewport"
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

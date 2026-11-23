@@ -1536,11 +1536,8 @@ fn workspace_menu(state: &MenuState) -> Vec<Retained<NSMenuItem>> {
     items.push(named_item(mtm, "Reset Workspace", "layout:reset"));
     items
 }
-const TOOLS: [(&str, &str, &str); 8] = [
+const TOOLS: [(&str, &str, &str); 5] = [
     ("toolSelect", "cursorarrow", "Select (V)"),
-    ("toolHand", "hand.raised.fill", "Hand (H)"),
-    ("toolZoom", "magnifyingglass", "Zoom (Z)"),
-    ("toolRotate", "crop.rotate", "Rotate (W)"),
     ("toolAnchor", "scope", "Anchor (Y)"),
     ("toolShape", "square.on.circle", "Shape (Q)"),
     ("toolPen", "pencil.tip", "Pen (G)"),
@@ -1554,7 +1551,7 @@ pub const SHAPES: [(&str, &str, &str); 5] = [
     ("polygon", "Polygon", "hexagon"),
     ("star", "Star", "star"),
 ];
-const SHAPE_SEGMENT: isize = 5;
+const SHAPE_SEGMENT: isize = 2;
 /// A toolbar tool segment's width, before its optional menu indicator.
 const TOOL_SEGMENT: f64 = 34.;
 /// The toolbar's symbol buttons: name (a `TOOLBAR` slot, whose index is the
@@ -1585,6 +1582,16 @@ mod strip_page_tests {
 }
 #[cfg(test)]
 mod toolbar_tag_tests {
+    #[test]
+    fn toolbar_tool_group_keeps_only_select_anchor_shape_pen_and_text() {
+        assert_eq!(
+            &super::TOOLS.map(|(command, _, _)| command)[..],
+            &["toolSelect", "toolAnchor", "toolShape", "toolPen", "toolText"],
+        );
+        assert_eq!(super::TOOLS[super::SHAPE_SEGMENT as usize].0, "toolShape");
+        assert!(super::TOOLBAR.contains(&"add"));
+    }
+
     /// Each button the toolbar builds has a tag (its `TOOLBAR` slot);
     /// one without would stop the window from opening.
     #[test]
@@ -2727,7 +2734,7 @@ const TAB_FADE: f64 = 14.;
 /// window buttons), the tools' width before they exist, and the clear space
 /// kept between the strip and the tools.
 const TAB_LEADING: f64 = 92.;
-const TAB_TOOLS: f64 = 300.;
+const TAB_TOOLS: f64 = TOOL_SEGMENT * TOOLS.len() as f64 + SEGMENT_MENU_INDICATOR;
 const TAB_CLEAR: f64 = 16.;
 /// How far the pointer travels on a tab before it is a drag, not a click.
 const TAB_DRAG_SLOP: f64 = 4.;
@@ -2860,11 +2867,8 @@ fn menu_symbol(s: &str, label: &str) -> Retained<NSImage> {
 /// vendored glyph reads as large at about 16 pt, so its square is this much
 /// larger. A glyph matched to its SF Symbol on its own (Home) keeps its size.
 const TOOLBAR_GLYPH: f64 = 1.4;
-/// Apple's own drawings stand in the toolbar where the vendored family has no
-/// good one: the filled hand for the Hand tool, and Export's box and arrow at
-/// semibold (its filled twin closes into a block on the accent button at 1x).
-/// At the toolbar's 14 pt an SF Symbol draws about 18 pt of ink; among the
-/// vendored glyphs (about 16 pt) these are drawn at this size instead.
+/// Export uses a smaller semibold SF Symbol to match the vendored glyphs.
+/// The filled version closes into a block on the accent button at 1x.
 const SF_AMONG_GLYPHS: f64 = 12.5;
 fn toolbar_symbol(s: &str, label: &str, t: &Tokens) -> Retained<NSImage> {
     if let Some(glyph) = crate::icons::glyph(s) {
@@ -2876,7 +2880,6 @@ fn toolbar_symbol(s: &str, label: &str, t: &Tokens) -> Retained<NSImage> {
     }
     let image = symbol(s, label);
     let (points, weight) = match s {
-        "hand.raised.fill" => (SF_AMONG_GLYPHS, unsafe { objc2_app_kit::NSFontWeightRegular }),
         "square.and.arrow.up" => (SF_AMONG_GLYPHS, unsafe { objc2_app_kit::NSFontWeightSemibold }),
         _ => (t.metrics.symbol_toolbar as f64, unsafe { objc2_app_kit::NSFontWeightRegular }),
     };
@@ -3059,6 +3062,7 @@ impl ToolbarDelegate {
             item.setView(Some(&button));
             item.setBordered(false);
             item.setLabel(&NSString::from_str("Agent"));
+            item.setHidden(true);
             return Some(item);
         }
         // Every other item is a plain bordered toolbar item (an image, or an
@@ -3087,19 +3091,39 @@ impl ToolbarDelegate {
 #[path = "agent_launcher_native.rs"]
 mod launcher_native;
 use launcher_native::AgentButton;
-fn agent_launcher_button(toolbar: &NSToolbar) -> Option<Retained<AgentButton>> {
+fn agent_launcher_item(toolbar: &NSToolbar) -> Option<Retained<NSToolbarItem>> {
     toolbar
         .items()
         .iter()
-        .find(|item| item.itemIdentifier().to_string() == "agent")?
-        .view()?
-        .downcast()
-        .ok()
+        .find(|item| item.itemIdentifier().to_string() == "agent")
 }
+
+fn agent_launcher_button(toolbar: &NSToolbar) -> Option<Retained<AgentButton>> {
+    agent_launcher_item(toolbar)?.view()?.downcast().ok()
+}
+
 impl Host {
     pub fn set_agent_launcher(&mut self, snapshot: crate::agent_launcher::Snapshot) {
         if let Some(button) = agent_launcher_button(&self._toolbar) {
             button.publish(snapshot, self.tokens.clone());
+        }
+    }
+
+    pub fn set_agent_button_context(&self, has_project: bool, panel_visible: bool) {
+        let context = (has_project, panel_visible);
+        if self.agent_button_context.replace(context) != context {
+            self.sync_agent_button();
+        }
+    }
+
+    fn sync_agent_button(&self) {
+        let (has_project, panel_visible) = self.agent_button_context.get();
+        let show = crate::agent_launcher::show_agent_button(
+            has_project && !self.aside(),
+            panel_visible,
+        );
+        if let Some(item) = agent_launcher_item(&self._toolbar) {
+            item.setHidden(!show);
         }
     }
 }
@@ -3691,6 +3715,13 @@ fn cached_zoom_frame(
         NSSize::new(frame.size.width * ratio, frame.size.height * ratio),
     )
 }
+#[derive(Clone, Default)]
+pub(crate) struct NativePanelGeometry {
+    pub bodies: Vec<(String, crate::layout::Rect)>,
+    pub clips: Vec<(String, crate::layout::Rect)>,
+    pub fades: Vec<(String, [f64; 2])>,
+}
+
 pub struct Host {
     pub window: Retained<NSWindow>,
     pub gpui: Retained<NSView>,
@@ -3769,6 +3800,7 @@ pub struct Host {
     pub native_panels: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
     pub native_panel_clips: Rc<RefCell<Vec<(String, crate::layout::Rect)>>>,
     pub native_panel_fades: Rc<RefCell<Vec<(String, [f64; 2])>>>,
+    staged_native_panels: RefCell<Option<NativePanelGeometry>>,
     /// Keeps web panels in sync with resolved appearance and accessibility.
     pub native_style: Option<Rc<dyn Fn(&Tokens)>>,
     /// Runs inside the composition transaction, with the window size.
@@ -3806,6 +3838,8 @@ pub struct Host {
     window_observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
     /// Home shows over the docks (`set_home`).
     home: Cell<bool>,
+    /// Whether a project is open and whether its Agent panel is in view.
+    agent_button_context: Cell<(bool, bool)>,
     /// The pages open in the strip (Settings, the Store: id and title) and
     /// the one showing over the project, if any (`set_pages`).
     pages: RefCell<(Vec<(String, String)>, Option<usize>)>,
@@ -3986,6 +4020,7 @@ impl Host {
             native_panels: Rc::default(),
             native_panel_clips: Rc::default(),
             native_panel_fades: Rc::default(),
+            staged_native_panels: RefCell::default(),
             native_style: None,
             native_present: None,
             native_accessibility: vec![],
@@ -4002,6 +4037,7 @@ impl Host {
             tabs_shown: RefCell::default(),
             window_observers: Vec::new(),
             home: Cell::new(false),
+            agent_button_context: Cell::default(),
             pages: RefCell::default(),
             sidebar: RefCell::new(None),
         }));
@@ -5630,6 +5666,7 @@ impl Host {
                 item.setHidden(aside);
             }
         }
+        self.sync_agent_button();
     }
     /// The width of the sidebar column under Home or the page showing.
     pub fn sidebar_width(&self) -> f32 {
@@ -6300,10 +6337,18 @@ impl Host {
             }
         })
     }
-    /// Whether `present` would move the viewer slot now (the window asks
-    /// before it moves anything; native panel bodies cannot say beforehand).
+    pub(crate) fn stage_native_panels(&self, geometry: &NativePanelGeometry) {
+        let changed = geometry.bodies != *self.native_panels.borrow()
+            || geometry.clips != *self.native_panel_clips.borrow()
+            || geometry.fades != *self.native_panel_fades.borrow();
+        self.staged_native_panels.replace(changed.then(|| geometry.clone()));
+    }
+
+    /// Tell the compositor before touching a slot so it can acquire a
+    /// drawable that will be presented with the same transaction.
     fn pending(&self) -> bool {
         self.last_geometry != Some(self.viewer_geometry())
+            || self.staged_native_panels.borrow().is_some()
     }
     fn present(&mut self) -> gpui_macos::composition::SlotChange {
         if let (Some((cover, cached, old_zoom, old_pan)), Some((_, Some(zoom), pan)), Some(r)) = (
@@ -6366,6 +6411,13 @@ impl Host {
             }
             self.last_geometry = Some(geometry);
         }
+        let panels = self.staged_native_panels.get_mut().take();
+        let panels_moved = panels.is_some();
+        if let Some(panels) = panels {
+            self.native_panels.replace(panels.bodies);
+            self.native_panel_clips.replace(panels.clips);
+            self.native_panel_fades.replace(panels.fades);
+        }
         let bounds = self.gpui.bounds().size;
         let native = self
             .native_present
@@ -6382,7 +6434,7 @@ impl Host {
                 .map(gpui_macos::composition::AccessibilityItem::Native),
         );
         gpui_macos::composition::publish_accessibility(&self.gpui, order);
-        (moved || native).into()
+        (moved || panels_moved || native).into()
     }
     /// Where the window stands. A tab the group is not showing keeps the
     /// frame it had when it was last shown: its group's frame is the shown
@@ -6570,16 +6622,19 @@ impl Host {
         }
     }
     pub fn select_tool(&self, command: &str) {
-        let Some(index) = TOOLS.iter().position(|(c, _, _)| *c == command) else {
-            return;
-        };
+        // Hand, Zoom and Rotate remain available from the menu and keys.
+        // Clear the highlight when the active tool has no visible segment.
+        let index = TOOLS
+            .iter()
+            .position(|(c, _, _)| *c == command)
+            .map_or(-1, |index| index as isize);
         for item in self._toolbar.items().to_vec() {
             if item.itemIdentifier().to_string() == "tools"
-                && let Some(v) = item.view()
+                && let Some(control) = item
+                    .view()
+                    .and_then(|view| view.downcast::<SegmentedControl>().ok())
             {
-                unsafe {
-                    let _: () = msg_send![&*v,setSelectedSegment:index as isize];
-                }
+                control.setSelectedSegment(index);
             }
         }
     }

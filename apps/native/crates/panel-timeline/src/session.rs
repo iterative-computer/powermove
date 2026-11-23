@@ -57,6 +57,37 @@ impl TimelineModel {
                 }
             }
         }
+        self.reveal.tracks.clear();
+        if let Some(comps) = value
+            .get("nativeModel")
+            .and_then(|v| v.get("trackDisclosure"))
+            .and_then(Value::as_object)
+        {
+            for (comp, tracks) in comps.iter() {
+                let (Some(comp), Some(tracks)) = (comp.as_str(), tracks.as_object()) else {
+                    continue;
+                };
+                let restored = self.reveal.tracks.entry(comp.into()).or_default();
+                for (key, collapsed) in tracks.iter() {
+                    let (Some(key), Some(collapsed)) = (key.as_str(), collapsed.as_bool()) else {
+                        continue;
+                    };
+                    let Some((area, lane)) = key.split_once(':') else {
+                        continue;
+                    };
+                    let area = match area {
+                        "Video" => crate::tracks::Area::Video,
+                        "Audio" => crate::tracks::Area::Audio,
+                        "Captions" => crate::tracks::Area::Captions,
+                        _ => continue,
+                    };
+                    let Ok(lane) = lane.parse::<usize>() else {
+                        continue;
+                    };
+                    restored.insert((area, lane), collapsed);
+                }
+            }
+        }
         self.rebuild_rows();
     }
     /// Patch only owned semantic members. pps, scroll, extension state, unknown
@@ -120,6 +151,25 @@ impl TimelineModel {
             layers.insert(id.as_str(), Value::Object(value));
         }
         native.insert("disclosure", Value::Object(layers));
+        let mut comps = native
+            .get("trackDisclosure")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        for (comp, disclosure) in &self.reveal.tracks {
+            let mut tracks = comps
+                .get(comp.as_str())
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            for ((area, lane), collapsed) in disclosure {
+                tracks.insert(format!("{area:?}:{lane}"), Value::Bool(*collapsed));
+            }
+            comps.insert(comp.as_str(), Value::Object(tracks));
+        }
+        if !comps.is_empty() {
+            native.insert("trackDisclosure", Value::Object(comps));
+        }
         timeline.insert("nativeModel", Value::Object(native));
         ui.timeline = Value::Object(timeline);
         ui

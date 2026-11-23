@@ -31,6 +31,16 @@ pub struct ExtensionSources {
 }
 #[derive(Clone, Debug)]
 pub enum ProfileCall {
+    AgentGet {
+        application: bool,
+        key: String,
+    },
+    AgentSet {
+        application: bool,
+        key: String,
+        expected: Option<Option<serde_json::Value>>,
+        value: serde_json::Value,
+    },
     LocalStorageGet {
         origin: String,
         key: String,
@@ -63,6 +73,7 @@ pub enum ProfileCall {
 }
 #[derive(Clone, Debug)]
 pub enum ProfileReply {
+    AgentValue(Option<serde_json::Value>),
     String(Option<String>),
     Secrets(Vec<SecretLocator>),
     Sources(ExtensionSources),
@@ -207,7 +218,11 @@ impl<'a> ProfileStorage<'a> {
     }
 }
 /// Reject traversal and linked ancestors in both read and write capabilities.
-fn safe_path(root: &Path, relative: &Path, parents: bool) -> Result<PathBuf, KernelFailure> {
+pub(crate) fn safe_path(
+    root: &Path,
+    relative: &Path,
+    parents: bool,
+) -> Result<PathBuf, KernelFailure> {
     if relative.as_os_str().is_empty()
         || relative
             .components()
@@ -274,13 +289,34 @@ pub fn registered_secrets(profile: &Path, id: &str) -> Result<Vec<SecretLocator>
     locators(&values, id)
 }
 impl Kernel {
-    pub fn profile(&self, call: ProfileCall) -> Result<ProfileReply, KernelFailure> {
+    pub fn profile(&mut self, call: ProfileCall) -> Result<ProfileReply, KernelFailure> {
+        match call {
+            ProfileCall::AgentGet { application, key } => {
+                return self
+                    .agent_get(application, &key)
+                    .map(ProfileReply::AgentValue);
+            }
+            ProfileCall::AgentSet {
+                application,
+                key,
+                expected,
+                value,
+            } => {
+                self.agent_set(application, &key, expected, value)?;
+                return Ok(ProfileReply::Changed);
+            }
+            call => self.profile_other(call),
+        }
+    }
+
+    fn profile_other(&self, call: ProfileCall) -> Result<ProfileReply, KernelFailure> {
         let writer = self
             .library
             .as_ref()
             .ok_or_else(|| err("Attach a native library first"))?;
         let storage = ProfileStorage::new(writer);
         match call {
+            ProfileCall::AgentGet { .. } | ProfileCall::AgentSet { .. } => unreachable!(),
             ProfileCall::LocalStorageGet { origin, key } => {
                 let values = storage.read("local-storage.json")?;
                 let value = values.iter().find(|v| {

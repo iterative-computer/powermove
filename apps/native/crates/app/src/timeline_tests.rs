@@ -55,6 +55,16 @@ impl Delegate for Recording {
             runtime.update_timeline_view(view);
         }
     }
+    fn timeline_outline(
+        &self,
+        view: std::sync::Arc<pm_panel_timeline::TimelineModel>,
+        refresh: bool,
+        _: &mut App,
+    ) {
+        if let Some(runtime) = self.0.runtime.borrow().as_ref() {
+            runtime.update_timeline_outline(view, refresh);
+        }
+    }
     // G3_VIEW_SNAPSHOT_END
     fn time(&self, _: &App) -> f64 {
         *self.0.time.borrow()
@@ -155,19 +165,55 @@ pub(crate) fn stage_project(cx: &mut TestAppContext, project: String) -> Stage {
 /// view replays the panel's last one.
 struct Docked {
     child: Entity<SurfaceView>,
+    focus: gpui::FocusHandle,
+    timeline: Entity<TimelineSurface>,
 }
 impl gpui::Render for Docked {
     fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
-        use gpui::{ParentElement, Styled};
-        gpui::div().size_full().child(
-            self.child
-                .clone()
-                .cached(gpui::StyleRefinement::default().size_full()),
-        )
+        use gpui::{InteractiveElement, ParentElement, Styled};
+        let timeline = self.timeline.clone();
+        gpui::div()
+            .size_full()
+            .track_focus(&self.focus)
+            // AppKit normally resolves editor shortcuts before delivering
+            // keys to GPUI. TestPlatform uses the same resolver here.
+            .capture_key_down(move |event, _, cx| {
+                let key = event.keystroke.key.as_str();
+                let chord = if key == "a" && event.keystroke.modifiers.platform {
+                    "cmd+a"
+                } else if matches!(key, "u" | "m") {
+                    key
+                } else {
+                    return;
+                };
+                let (command, args) = crate::layer_commands::commands_tests::dispatch(chord);
+                if command == "selectAll" {
+                    assert!(timeline.update(cx, |timeline, cx| timeline.select_all(cx)));
+                    cx.stop_propagation();
+                    return;
+                }
+                let Some(crate::layer_commands::Route::Timeline { frames, shift }) =
+                    crate::layer_commands::route(&command, &args)
+                else {
+                    panic!("{key} did not reach the timeline");
+                };
+                timeline.update(cx, |timeline, cx| {
+                    timeline.command(&command, 0., frames, shift, cx);
+                });
+                cx.stop_propagation();
+            })
+            .child(
+                self.child
+                    .clone()
+                    .cached(gpui::StyleRefinement::default().size_full()),
+            )
     }
 }
 fn stage_with(cx: &mut TestAppContext, project: String, docked: bool) -> Stage {
     let rig = crate::v4_view_tests::rig_project("timeline", &project);
+    stage_opened(cx, rig, docked)
+}
+fn stage_opened(cx: &mut TestAppContext, rig: Rig, docked: bool) -> Stage {
     let first = publication(&rig);
     let natives = Natives::default();
     let recorder = Rc::new(Recorder::default());
@@ -197,7 +243,13 @@ fn stage_with(cx: &mut TestAppContext, project: String, docked: bool) -> Stage {
         let (root, vcx) = cx.add_window_view(|window, cx| {
             let child =
                 cx.new(|cx| SurfaceView::new(runtime, first, tokens(), natives, window, cx));
-            Docked { child }
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
+            Docked {
+                child,
+                focus,
+                timeline: surface.clone(),
+            }
         });
         let vcx = vcx.clone();
         vcx.simulate_resize(gpui::size(px(1000.), px(600.)));
@@ -216,6 +268,9 @@ fn stage_with(cx: &mut TestAppContext, project: String, docked: bool) -> Stage {
     stage.idle(cx);
     stage
 }
+
+#[path = "timeline_mcp_tests.rs"]
+mod timeline_mcp_tests;
 impl Stage {
     /// Worker jobs and repaints quiesce, and JS publications reach the host.
     pub fn idle(&mut self, cx: &mut TestAppContext) {
@@ -274,6 +329,16 @@ impl Stage {
         let errors = self.rig.runtime.take_errors();
         assert!(errors.is_empty(), "{errors:?}");
         self.surface.update(&mut self.vcx, |_, cx| cx.notify());
+        self.vcx.run_until_parked();
+    }
+    fn settle_outline(&mut self, cx: &mut TestAppContext) {
+        settle(cx, |cx| {
+            for p in self.rig.runtime.take_publications() {
+                self.view.update(cx, |v, cx| v.publish(p, cx));
+            }
+            self.surface.read_with(cx, |s, _| s.outline_settled())
+        });
+        self.vcx.update(|window, cx| window.simulate_next_frame(cx));
         self.vcx.run_until_parked();
     }
     pub fn origin(&mut self) -> Point<Pixels> {
@@ -691,8 +756,9 @@ fn drag_layer(s: &mut Stage, cx: &mut TestAppContext, layer: &str, onto: &str, f
     let origin = s.origin();
     let (top, height) = layer_row(s, layer);
     let from = point(origin.x + px(120.), origin.y + px(top + height / 2.));
-    s.surface
-        .update(&mut s.vcx, |t, _| t.press_layer_row(layer.into(), from));
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.press_layer_row(layer.into(), from, cx)
+    });
     let x = s.at(0, 1.).x;
     s.vcx.simulate_mouse_move(
         point(x, from.y + px(8.)),
@@ -1551,8 +1617,8 @@ fn a_timeline_value_readout_scrubs_as_one_undo_step(cx: &mut TestAppContext) {
     };
     let before = value(&s);
     let at = s.at(0, 0.5);
-    s.surface.update(&mut s.vcx, |t, _| {
-        t.press_property("l0".into(), "opacity".into(), at)
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.press_property("l0".into(), "opacity".into(), at, cx)
     });
     s.vcx.simulate_mouse_move(
         at + point(px(-20.), px(0.)),
@@ -2143,9 +2209,8 @@ fn a_render_cache_report_that_moves_no_bar_draws_nothing(cx: &mut TestAppContext
     }
     assert_eq!(renders(&s), rendered);
 }
-/// PM-376: an edit moves the bars at once, and the outline's rows (the
-/// names) are published by the panel's script later. Until that lands each
-/// name stands on its own layer's bar, not after the row before it.
+/// PM-376: the canvas and outline publish independently. Each name stands
+/// on its own strip while the next set of rows is in flight and after it lands.
 #[gpui::test]
 fn names_stay_on_their_own_bars_until_the_rows_publication_lands(cx: &mut TestAppContext) {
     let mut s = stage(cx, 4);
@@ -2185,14 +2250,22 @@ fn names_stay_on_their_own_bars_until_the_rows_publication_lands(cx: &mut TestAp
     let surface = s.surface.clone();
     settle(cx, |cx| surface.read_with(cx, |t, _| t.idle()));
     s.vcx.run_until_parked();
-    // The bars moved; the rows' publication has not been applied yet.
+    // The rows' publication has not been applied yet.
     for id in ["l1", "l2", "l3"] {
         assert_eq!(name_y(&mut s, id).unwrap(), bar_top(&s, id) + offset, "{id}");
     }
-    // Then it lands: the names stay where they are.
-    let l2 = name_y(&mut s, "l2");
     s.idle(cx);
-    assert_eq!(name_y(&mut s, "l2"), l2);
+    s.settle_outline(cx);
+    assert!(s.surface.read_with(&s.vcx, |t, _| {
+        t.scene().unwrap().scroll_for(&row("l0")).is_none()
+    }));
+    for id in ["l1", "l2", "l3"] {
+        assert_eq!(
+            name_y(&mut s, id).unwrap(),
+            bar_top(&s, id) + offset,
+            "{id}"
+        );
+    }
 }
 #[gpui::test]
 fn all_rows_mount_and_the_outline_follows_native_scroll_past_the_old_32_row_cap(
@@ -3347,8 +3420,8 @@ fn joined_position_value_columns_scrub_one_axis_and_undo(cx: &mut TestAppContext
         };
         let before = values(&s);
         let at = s.at(0, 0.5);
-        s.surface.update(&mut s.vcx, |t, _| {
-            t.press_property("l0".into(), path.into(), at)
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.press_property("l0".into(), path.into(), at, cx)
         });
         s.vcx.simulate_mouse_move(
             at + point(px(20.), px(0.)),
@@ -3376,7 +3449,7 @@ fn parent_pick_links_the_target_row_and_undo_restores_it(cx: &mut TestAppContext
     let target = s.at(1, 1.);
     // Escape cancels the pick without changing either layer.
     s.surface
-        .update(&mut s.vcx, |t, _| t.press_parent("l0".into(), origin));
+        .update(&mut s.vcx, |t, cx| t.press_parent("l0".into(), origin, cx));
     s.vcx
         .simulate_mouse_move(target, MouseButton::Left, Modifiers::none());
     s.idle(cx);
@@ -3390,7 +3463,7 @@ fn parent_pick_links_the_target_row_and_undo_restores_it(cx: &mut TestAppContext
         t.model().index.layer("l0").unwrap().parent.is_none()
     }));
     s.surface
-        .update(&mut s.vcx, |t, _| t.press_parent("l0".into(), origin));
+        .update(&mut s.vcx, |t, cx| t.press_parent("l0".into(), origin, cx));
     s.vcx
         .simulate_mouse_move(target, MouseButton::Left, Modifiers::none());
     s.idle(cx);
@@ -3406,7 +3479,7 @@ fn parent_pick_links_the_target_row_and_undo_restores_it(cx: &mut TestAppContext
     assert!(s.recorder.reports.borrow().is_empty());
     // Parenting the parent to its child would make a cycle.
     s.surface
-        .update(&mut s.vcx, |t, _| t.press_parent("l1".into(), target));
+        .update(&mut s.vcx, |t, cx| t.press_parent("l1".into(), target, cx));
     s.vcx
         .simulate_mouse_move(origin, MouseButton::Left, Modifiers::none());
     s.idle(cx);
@@ -3422,8 +3495,8 @@ fn parent_pick_links_the_target_row_and_undo_restores_it(cx: &mut TestAppContext
 fn clicking_an_axis_value_opens_its_editor_without_an_edit(cx: &mut TestAppContext) {
     let mut s = stage_project(cx, axis_project());
     let at = s.at(0, 0.5);
-    s.surface.update(&mut s.vcx, |t, _| {
-        t.press_property("l0".into(), "position.y".into(), at)
+    s.surface.update(&mut s.vcx, |t, cx| {
+        t.press_property("l0".into(), "position.y".into(), at, cx)
     });
     s.vcx
         .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
@@ -3455,8 +3528,8 @@ fn scale_axis_columns_follow_the_linked_ratio_and_undo(cx: &mut TestAppContext) 
             })
         };
         let at = s.at(0, 0.5);
-        s.surface.update(&mut s.vcx, |t, _| {
-            t.press_property("l0".into(), "scale.x".into(), at)
+        s.surface.update(&mut s.vcx, |t, cx| {
+            t.press_property("l0".into(), "scale.x".into(), at, cx)
         });
         s.vcx.simulate_mouse_move(
             at + point(px(20.), px(0.)),
@@ -4681,22 +4754,45 @@ fn g6_pointer_split_in_both_modes_is_one_undo_and_stays_selected(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn g6_visible_tool_buttons_select_split_and_selection(cx: &mut TestAppContext) {
-    let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
-    let at = bounds(&mut s.vcx, "timeline.tool:split").center();
-    s.vcx.simulate_click(at, Modifiers::none());
-    s.idle(cx);
-    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Split);
-    let cancelled = s.surface.update(&mut s.vcx, |t, cx| t.cancel(cx));
-    assert!(cancelled, "Escape exits Split with no clip selected");
-    s.idle(cx);
-    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Selection);
-    s.vcx.simulate_click(at, Modifiers::none());
-    s.idle(cx);
-    let at = bounds(&mut s.vcx, "timeline.tool:selection").center();
-    s.vcx.simulate_click(at, Modifiers::none());
-    s.idle(cx);
-    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.edit_tool()), pm_panel_timeline::EditTool::Selection);
+fn timeline_header_starts_with_play_in_both_modes(cx: &mut TestAppContext) {
+    let mut stage = stage(cx, 2);
+    for mode in ["layers", "tracks"] {
+        stage.surface.update(&mut stage.vcx, |timeline, cx| {
+            timeline.command(&format!("timeline.mode:{mode}"), 0., None, false, cx);
+        });
+        stage.idle(cx);
+        assert_eq!(
+            stage.surface.read_with(&stage.vcx, |t, _| t.toggles().0),
+            mode == "tracks",
+        );
+        let origin = stage.origin();
+        let (inset, gap) = stage.view.read_with(&stage.vcx, |view, _| {
+            let m = &view.tokens().metrics;
+            (m.inset, m.gap)
+        });
+        let play = bounds(&mut stage.vcx, "timeline:play");
+        let time = bounds(&mut stage.vcx, "timeline:time");
+        assert_eq!(play.left(), origin.x + px(inset), "{mode}");
+        assert_eq!(time.left(), play.right() + px(gap), "{mode}");
+    }
+}
+
+#[gpui::test]
+fn timeline_header_has_no_edit_tool_buttons(cx: &mut TestAppContext) {
+    let mut stage = stage(cx, 2);
+    for mode in ["layers", "tracks"] {
+        stage.surface.update(&mut stage.vcx, |timeline, cx| {
+            timeline.command(&format!("timeline.mode:{mode}"), 0., None, false, cx);
+        });
+        stage.idle(cx);
+        assert_eq!(
+            stage.surface.read_with(&stage.vcx, |t, _| t.toggles().0),
+            mode == "tracks",
+        );
+        for id in ["timeline.tool:selection", "timeline.tool:roll", "timeline.tool:split"] {
+            assert!(stage.vcx.debug_bounds(id).is_none(), "{mode}: {id} is still visible");
+        }
+    }
 }
 
 #[gpui::test]
@@ -4967,19 +5063,16 @@ fn g2_g6_split_tool_keeps_the_pair_on_the_pieces_adjacent_to_the_cut(cx: &mut Te
     }
 }
 
-/// The native edit tools and the time editor share the same header band.
+/// The live timecode follows the time editor and clips with its transport.
 #[gpui::test]
-fn overlap_timeline_time_starts_after_edit_tools(cx: &mut TestAppContext) {
+fn overlap_timeline_time_follows_the_transport(cx: &mut TestAppContext) {
     let mut stage = stage(cx, 1);
     for width in [1000., 480., 320.] {
         stage.vcx.simulate_resize(gpui::size(px(width), px(420.)));
         stage.idle(cx);
-        let split = bounds(&mut stage.vcx, "timeline.tool:split");
+        let play = bounds(&mut stage.vcx, "timeline:play");
         let time = bounds(&mut stage.vcx, "timeline:time");
-        assert!(
-            split.right() <= time.left(),
-            "{width}: {split:?} and {time:?}"
-        );
+        assert!(play.right() <= time.left(), "{width}: {play:?} and {time:?}");
         let clock = stage.view.read_with(&stage.vcx, |view, _| {
             let slot = crate::playback::timecode_slot(view.tokens());
             view.timeline_timecode_bounds(px(width), px(slot.w))

@@ -55,7 +55,7 @@ pub fn catalog(composition: Value, layers: &[Value], request: &str, selected: &[
     result["indexedLayers"] = json!(indexed);
     result["truncated"] = json!(included < layers.len() || indexed < layers.len());
     result["note"] = json!(
-        "Included layers are editable source. Omitted layers are not missing capabilities. Use get_project_state {indexOnly:true,layerOffset:0,layerLimit:100}; follow pagination.nextLayerOffset or layerSearch. Read layerId and property/keyframe pages before editing omitted layers. Preserve locked layers and unrelated hand edits."
+        "Included layers are editable source. Omitted layers are not missing capabilities. Use get_project_state {indexOnly:true,layerOffset:0,layerLimit:100}; follow pagination.nextLayerOffset or layerSearch. Read layerId and property/keyframe pages before editing omitted layers. Preserve locked layers and unrelated hand edits. Never lock a layer (locked:true) unless the user asked you to; a locked layer cannot be dragged or trimmed and the user may not notice why."
     );
     result
 }

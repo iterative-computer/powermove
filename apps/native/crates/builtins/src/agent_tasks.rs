@@ -1932,9 +1932,9 @@ impl Tasks {
                 if let Err(error) = &result {
                     let _ = panel.observe_subthread(&child_thread(&task),run,pm_panel_agentpanel::model::Update::Trace(json!({"kind":"answer","text":format!("Your direction could not be delivered: {error}. Please send it again.")})),now_ms());
                 }
-                // Delivery refusals are ordinary quiet transcript notices, as
-                // for ProviderRuns steering; do not also open an error surface.
-                Some(Ok(()))
+                // Let the composer settle or restore its optimistic row.
+                // The transcript notice is already visible for a refusal.
+                Some(result)
             }
             EffectKind::Stop => {
                 let outcome =

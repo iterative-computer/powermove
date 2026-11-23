@@ -36,8 +36,14 @@ fn undo(s: &mut Stage, cx: &mut TestAppContext) {
 /// The first routed command a chord reaches; earlier bindings decline, as
 /// `blurField` does outside a text field.
 pub(crate) fn dispatch(chord: &str) -> (String, Vec<serde_json::Value>) {
-    // The keys the shell resolves: the keymap in use on this thread.
-    let mut resolver = Resolver::with(pm_shell::keymap::current());
+    dispatch_with_keymap(chord, pm_shell::keymap::current())
+}
+
+fn dispatch_with_keymap(
+    chord: &str,
+    keymap: Vec<pm_shell::keyboard::Binding>,
+) -> (String, Vec<serde_json::Value>) {
+    let mut resolver = Resolver::with(keymap);
     let mut effects = resolver.submit(Key {
         token: 1,
         chord: chord.into(),
@@ -693,6 +699,70 @@ fn view_menu_snapping_toggles_tracks_snapping(cx: &mut TestAppContext) {
     assert_eq!(toggles(&s), (true, false));
     run(&mut s, cx, &snapping.command, &snapping.args);
     assert_eq!(toggles(&s), (true, true));
+}
+
+#[gpui::test]
+fn timeline_tools_menu_and_shortcuts_switch_tools_in_both_modes(cx: &mut TestAppContext) {
+    use pm_panel_timeline::{EditTool, KeyInput, resolve_key};
+    use pm_shell::keymap::{Keymap, effective};
+
+    let mut s = stage_project(cx, crate::v4_view_tests::strips_json());
+    let active = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.edit_tool());
+    let menu = pm_shell::menu::timeline_tools();
+    let premiere = effective(&Keymap {
+        preset: "premiere-pro".into(),
+        bindings: vec![],
+    });
+    let (roll, roll_args) = dispatch_with_keymap("n", premiere);
+    assert_eq!(roll, EditTool::Roll.command());
+
+    for tracks in [false, true] {
+        if tracks {
+            run(&mut s, cx, "timeline.toggleMode", &[]);
+        }
+        assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.toggles().0), tracks);
+        let mode = if tracks { "Tracks" } else { "Layers" };
+        for tool in [EditTool::Roll, EditTool::Split, EditTool::Selection] {
+            let item = menu.iter().find(|i| i.command == tool.command()).unwrap();
+            run(&mut s, cx, &item.command, &item.args);
+            assert_eq!(active(&s), tool, "{mode}: {}", item.label);
+        }
+
+        run(&mut s, cx, &roll, &roll_args);
+        assert_eq!(active(&s), EditTool::Roll, "{mode}: Premiere Pro N");
+        press(&mut s, cx, "c");
+        assert_eq!(active(&s), EditTool::Split, "{mode}: C");
+
+        let origin = s.origin();
+        let at = s.surface.read_with(&s.vcx, |t, _| {
+            let frame = t.frame().unwrap();
+            let clip = frame.ops.iter().find(|op| op.id == "clip:a").unwrap().bounds;
+            origin + gpui::point(
+                gpui::px((clip.x + clip.width / 2.) as f32),
+                gpui::px((clip.y + clip.height / 2.) as f32),
+            )
+        });
+        s.vcx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+        s.idle(cx);
+        let cursor = |s: &Stage| s.surface.read_with(&s.vcx, |t, _| t.cursor_style());
+        assert_eq!(cursor(&s), gpui::CursorStyle::Split, "{mode}");
+
+        let select = resolve_key(&KeyInput {
+            key: "v",
+            modifiers: Default::default(),
+            repeat: false,
+            in_field: false,
+        })
+        .unwrap();
+        run(&mut s, cx, select.command, &[]);
+        assert_eq!(active(&s), EditTool::Selection, "{mode}: V");
+        assert_ne!(cursor(&s), gpui::CursorStyle::Split, "{mode}");
+
+        press(&mut s, cx, "c");
+        assert!(s.surface.update(&mut s.vcx, |t, cx| t.cancel(cx)));
+        s.idle(cx);
+        assert_eq!(active(&s), EditTool::Selection, "{mode}: Escape");
+    }
 }
 
 /// Option-Command-H (After Effects) holds the selected keyframes and lets

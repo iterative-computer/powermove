@@ -6,6 +6,7 @@ pub mod color;
 pub mod compat;
 pub mod export_estimate;
 pub use export_estimate::{ExportEstimate, ExportEstimateState, PresetEstimate};
+mod font_warm;
 pub mod frame_codec;
 mod frame_inputs;
 pub mod jobs;
@@ -3661,6 +3662,16 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             });
             break;
         }
+        // Only visible, running transport keeps the playback grant. Check
+        // every viewer even when the scheduler picked one and stopped scanning.
+        let visible_playback = state.views.iter().any(|(id, view)| {
+            !view.hidden
+                && runtime
+                    .get(id)
+                    .is_some_and(|r| r.transport.clock.is_playing())
+                && view.desired_rate != pm_protocol::common::PlaybackRate::STOPPED
+        });
+        engine.set_visible_playback(visible_playback);
         // A view waiting out a missing drawable can't draw: exports go ahead.
         let now = trace::now();
         // A picture wanted and not submitted yet: a viewer to draw, a
@@ -4185,8 +4196,11 @@ fn run(mut engine: render::Engine, shared: Arc<Shared>, wakes: &std::sync::mpsc:
             // A frame rendered on disk is read, not drawn: planning it and
             // opening its media ahead would only hold this thread (a quarter
             // of a second on a heavy project) while frames are due.
+            // A composition without stills or videos has none to open ahead.
             let mut prepared = None;
-            if let Some(at) = prepare_at.filter(|at| !shared.disk.rendered(&scene, *at)) {
+            if let Some(at) = prepare_at
+                .filter(|at| engine.has_visual_media(&scene) && !shared.disk.rendered(&scene, *at))
+            {
                 let videos = engine.prepare(&scene, at, spec);
                 if let Some(r) = runtime.get_mut(&id) {
                     r.lookahead.planned(at, videos, frame_ticks);

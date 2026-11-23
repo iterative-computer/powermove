@@ -176,8 +176,13 @@ pub struct EffectContext<'a> {
     /// origin.
     pub view: Option<crate::plan::OutputView>,
     /// Targets to return to the pool after the frame is submitted: every
-    /// target a chain takes from `pool`, the one it returns included.
+    /// target a chain takes from `pool`, the one it returns included
+    /// (with `recycle`, only the ones read after the chain returns).
     pub taken: &'a mut Vec<Target>,
+    /// Nothing reads the chain's intermediates once it returns (no depth
+    /// and id surface): each goes back to `pool` as soon as the last pass
+    /// reading it is recorded (`TargetPool::recycle`), not after the frame.
+    pub recycle: bool,
     /// The renderer's own effect state (`crate::effects`: programs, the
     /// watchdog's timestamps), for the chains it prepares itself.
     pub(crate) native: Option<crate::effects::exec::Native<'a>>,
@@ -216,6 +221,16 @@ pub trait EffectPasses: Send + Sync {
     /// Remove one refused input consumer, retaining the other effects.
     fn without_effect(&self, _instance: &str) -> Option<Arc<dyn EffectPasses>> {
         None
+    }
+
+    /// Whether the chain provably maps an input whose every texel is `+0`
+    /// to an output whose every texel is `+0` (or to no output), reading
+    /// nothing else: no backdrop, other layers, assets, or frames
+    /// (`crate::effects::bounds::chain_preserves_zero`). The plan then
+    /// leaves out a boundary group whose members draw nothing. `false`
+    /// unless the host proves it.
+    fn preserves_zero(&self) -> bool {
+        false
     }
 
     /// Identifies the chain and every input that changes its pixels (for

@@ -26,7 +26,7 @@ const PROPERTY_NOT_SUPPORTED: i32 = -12900;
 #[derive(Default)]
 struct Output {
     samples: VecDeque<CFRetained<CMSampleBuffer>>,
-    error: Option<String>,
+    error: Option<Error>,
 }
 
 /// A compression session for one export.
@@ -37,6 +37,7 @@ pub struct Encoder {
     invalidated: bool,
     /// Frames submitted since the last [`Encoder::complete`].
     held: bool,
+    backpressure: bool,
     /// Whether VideoToolbox reports a hardware encoder.
     pub hardware: Option<bool>,
 }
@@ -340,8 +341,13 @@ impl Encoder {
             timing,
             invalidated: false,
             held: false,
+            backpressure: false,
             hardware,
         })
+    }
+
+    pub fn set_backpressure(&mut self) {
+        self.backpressure = true;
     }
 
     /// Submits frame `index`; compressed samples arrive in decode order.
@@ -350,14 +356,21 @@ impl Encoder {
         let handler = RcBlock::new(
             move |status: i32, flags: VTEncodeInfoFlags, sb: *mut CMSampleBuffer| {
                 let mut o = out.lock().unwrap_or_else(|p| p.into_inner());
-                if status != 0 {
-                    o.error
-                        .get_or_insert(format!("VideoToolbox encode failed: OSStatus {status}"));
-                } else if sb.is_null() {
-                    if flags.contains(VTEncodeInfoFlags::FrameDropped) {
-                        o.error.get_or_insert("VideoToolbox dropped a frame".into());
-                    }
-                } else {
+                if status == kVTVideoEncoderNotAvailableNowErr {
+                    o.error.get_or_insert_with(|| {
+                        Error::EncoderBackpressure(format!(
+                            "VideoToolbox encode failed: OSStatus {status}"
+                        ))
+                    });
+                } else if status != 0 {
+                    o.error.get_or_insert_with(|| {
+                        Error::Encode(format!("VideoToolbox encode failed: OSStatus {status}"))
+                    });
+                } else if flags.contains(VTEncodeInfoFlags::FrameDropped) {
+                    o.error.get_or_insert_with(|| {
+                        Error::EncoderBackpressure("VideoToolbox dropped a frame".into())
+                    });
+                } else if !sb.is_null() {
                     o.samples
                         .push_back(unsafe { CFRetained::retain(NonNull::new_unchecked(sb)) });
                 }
@@ -365,38 +378,62 @@ impl Encoder {
         );
         let pts = unsafe { CMTime::new(self.timing.pts(index), self.timing.timescale) };
         let dur = unsafe { CMTime::new(self.timing.frame_duration, self.timing.timescale) };
+        let mut flags = VTEncodeInfoFlags::empty();
         let st = unsafe {
             self.session.encode_frame_with_output_handler(
                 buffer.as_cf(),
                 pts,
                 dur,
                 None,
-                std::ptr::null_mut(),
+                &mut flags,
                 &*handler as *const _ as *mut _,
             )
         };
-        cf::check(st, "VTCompressionSessionEncodeFrame")?;
-        self.held = true;
-        self.check()
-    }
-
-    fn check(&self) -> Result<(), Error> {
-        match &self.output.lock().unwrap_or_else(|p| p.into_inner()).error {
-            Some(e) => Err(Error::Encode(e.clone())),
-            None => Ok(()),
+        if st == kVTVideoEncoderNotAvailableNowErr {
+            return Err(Error::EncoderBackpressure(format!(
+                "VTCompressionSessionEncodeFrame failed: OSStatus {st}"
+            )));
         }
+        cf::check(st, "VTCompressionSessionEncodeFrame")?;
+        if flags.contains(VTEncodeInfoFlags::FrameDropped) {
+            return Err(Error::EncoderBackpressure(
+                "VideoToolbox dropped a frame".into(),
+            ));
+        }
+        self.held = true;
+        if self.backpressure {
+            // The retry emits this frame before accepting any more input.
+            // This prevents the encoder holding frames while the renderer,
+            // audio mixer or viewer is busy.
+            self.flush(pts)?;
+        }
+        Ok(())
     }
 
     /// Compressed samples produced so far, in decode order.
     pub fn take(&self) -> Result<Vec<CFRetained<CMSampleBuffer>>, Error> {
-        self.check()?;
-        Ok(self
-            .output
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .samples
-            .drain(..)
-            .collect())
+        let mut output = self.output.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(error) = output.error.take() {
+            return Err(error);
+        }
+        Ok(output.samples.drain(..).collect())
+    }
+
+    fn flush(&mut self, through: CMTime) -> Result<(), Error> {
+        let st = unsafe { self.session.complete_frames(through) };
+        self.held = false;
+        // A failed flush can report a more specific error on its callback.
+        if st != 0
+            && let Some(error) = self.output.lock().unwrap_or_else(|p| p.into_inner()).error.take()
+        {
+            return Err(error);
+        }
+        if st == kVTVideoEncoderNotAvailableNowErr {
+            return Err(Error::EncoderBackpressure(format!(
+                "VTCompressionSessionCompleteFrames failed: OSStatus {st}"
+            )));
+        }
+        cf::check(st, "VTCompressionSessionCompleteFrames")
     }
 
     /// Flushes every pending frame. Encoding may continue afterwards: the
@@ -404,9 +441,7 @@ impl Encoder {
     /// frames held for reordering when the next one is late by tens of
     /// seconds (AVE error -1004), so an export whose frames wait calls this.
     pub fn complete(&mut self) -> Result<Vec<CFRetained<CMSampleBuffer>>, Error> {
-        let st = unsafe { self.session.complete_frames(kCMTimeInvalid) };
-        cf::check(st, "VTCompressionSessionCompleteFrames")?;
-        self.held = false;
+        self.flush(unsafe { kCMTimeInvalid })?;
         self.take()
     }
 

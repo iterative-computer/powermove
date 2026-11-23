@@ -3,7 +3,7 @@
 //! Shell registration, workspace staging and consent remain host-owned.
 use crate::{
     Error, Result,
-    model::{Effect, EffectKind, Panel, Target},
+    model::{ComposerSubmission, Effect, EffectKind, Panel, Target},
 };
 use pm_agents::{
     Event, RunResult,
@@ -14,9 +14,12 @@ use pm_agents::{
 use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, TryRecvError, TrySendError};
 
+type ContinueRun = Box<dyn FnOnce() -> Result<Handle> + Send>;
+
 struct PendingAction {
     effect: Option<u64>,
-    restart: Option<Box<dyn FnOnce() -> Result<Handle> + Send>>,
+    restart: Option<ContinueRun>,
+    composer: Option<Effect>,
     pending: Receiver<bool>,
     result: Option<bool>,
 }
@@ -28,7 +31,9 @@ struct Running {
     handle: Handle,
     sequence: u64,
     pending: Option<Event>,
-    action: Option<PendingAction>,
+    actions: VecDeque<PendingAction>,
+    /// Keep the submitted draft until the provider replies or refuses it.
+    start_submission: Option<(Option<String>, ComposerSubmission)>,
     /// The run settled. Its process only has late cleanup left to report.
     finished: bool,
     /// The run delegated or watched: its turn's completion waits for the
@@ -40,6 +45,16 @@ struct Running {
     release: bool,
     /// Host events (task rows, progress) delivered before the provider's.
     injected: VecDeque<Event>,
+}
+impl Running {
+    fn continue_with(&mut self, continuation: ContinueRun) -> Result<()> {
+        self.handle = continuation()?;
+        self.actions.clear();
+        self.pending = None;
+        self.held = None;
+        self.release = false;
+        Ok(())
+    }
 }
 /// What the host may tell the person outside the app (S114): a run was
 /// sent, finished, or asked a question.
@@ -89,19 +104,7 @@ impl ProviderRuns {
         now: u64,
         launch: impl FnOnce() -> Result<Handle>,
     ) -> Result<()> {
-        let EffectKind::Send { steer: false, .. } = &effect.kind else {
-            return Err(Error::Invalid("provider start effect"));
-        };
-        Self::validate(panel, &effect.target)?;
-        if self.active() >= 8
-            || self.runs.iter().any(|r| {
-                !r.finished
-                    && r.target.thread == effect.target.thread
-                    && r.target.project == effect.target.project
-            })
-        {
-            return Err(Error::Busy);
-        }
+        self.validate_start(panel, effect)?;
         panel.save(store, now)?;
         let handle = match launch() {
             Ok(handle) => handle,
@@ -115,6 +118,46 @@ impl ProviderRuns {
                 return Err(error);
             }
         };
+        panel.provider_started(effect, now)?;
+        self.register_start(effect, handle);
+        Ok(())
+    }
+
+    /// The normal composer has already published the user's row. Start the
+    /// provider before checkpointing that row on the delivery worker.
+    pub fn start_admitted(
+        &mut self,
+        panel: &mut Panel,
+        effect: &Effect,
+        now: u64,
+        launch: impl FnOnce() -> Result<Handle>,
+    ) -> Result<()> {
+        self.validate_start(panel, effect)?;
+        let handle = launch()?;
+        panel.provider_started(effect, now)?;
+        self.register_start(effect, handle);
+        panel.defer_save(now);
+        Ok(())
+    }
+
+    fn validate_start(&self, panel: &Panel, effect: &Effect) -> Result<()> {
+        let EffectKind::Send { steer: false, .. } = &effect.kind else {
+            return Err(Error::Invalid("provider start effect"));
+        };
+        Self::validate(panel, &effect.target)?;
+        if self.active() >= 8
+            || self.runs.iter().any(|r| {
+                !r.finished
+                    && r.target.thread == effect.target.thread
+                    && r.target.project == effect.target.project
+            })
+        {
+            return Err(Error::Busy);
+        }
+        Ok(())
+    }
+
+    fn register_start(&mut self, effect: &Effect, handle: Handle) {
         self.runs.push(Running {
             target: effect.target.clone(),
             original: match &effect.kind {
@@ -129,7 +172,10 @@ impl ProviderRuns {
             handle,
             sequence: 0,
             pending: None,
-            action: None,
+            actions: VecDeque::new(),
+            start_submission: effect.composer_submission().map(|submission| {
+                (effect.message_id().map(str::to_owned), submission.clone())
+            }),
             finished: false,
             orchestrated: self.completion_gate,
             held: None,
@@ -139,7 +185,6 @@ impl ProviderRuns {
         self.notices.push(Notice::Sent {
             thread: effect.target.thread.clone(),
         });
-        Ok(())
     }
     /// Notices since the last call, oldest first.
     pub fn take_notices(&mut self) -> Vec<Notice> {
@@ -236,6 +281,7 @@ impl ProviderRuns {
         now: u64,
         error: &Error,
     ) -> Result<()> {
+        let restored = panel.refused_composer_send(effect)?;
         match &effect.kind {
             EffectKind::Send { steer: false, .. } => {
                 let run = effect.target.run.clone().ok_or(Error::Stale)?;
@@ -246,14 +292,20 @@ impl ProviderRuns {
                 {
                     return Ok(());
                 }
+                if effect.has_composer_submission() {
+                    return panel.refuse_admitted_run(effect, &error.to_string(), now);
+                }
                 let receipt = Receipt {
                     source: run,
                     sequence: 0,
                     event: Event::Stopped(error.to_string()),
                 };
-                panel
-                    .provider_event(store, &effect.target.thread, &receipt, now)
-                    .map(drop)
+                let persisted =
+                    panel.provider_event(store, &effect.target.thread, &receipt, now)?;
+                if restored && !persisted {
+                    panel.save(store, now)?;
+                }
+                Ok(())
             }
             EffectKind::Stop | EffectKind::Answer { .. } => {
                 match panel.acknowledge(effect.id, false) {
@@ -264,6 +316,9 @@ impl ProviderRuns {
             }
             EffectKind::Send { steer: true, .. } => {
                 self.inject(effect.target.run.as_deref().ok_or(Error::Stale)?, Event::Trace { run: effect.target.run.clone().ok_or(Error::Stale)?, value: serde_json::json!({"kind":"answer","text":format!("Your direction could not be delivered: {error}. Please send it again.")}) });
+                if restored {
+                    panel.save(store, now)?;
+                }
                 Ok(())
             }
             _ => Ok(()),
@@ -273,6 +328,7 @@ impl ProviderRuns {
     pub fn cancel_all(&mut self) {
         for running in self.runs.iter_mut().filter(|r| !r.finished) {
             if let Some(run) = running.target.run.clone() {
+                running.actions.retain(|action| action.restart.is_none());
                 if running.held.is_some() {
                     running.held = Some(Event::Completed {
                         run,
@@ -327,7 +383,7 @@ impl ProviderRuns {
         now: u64,
         prompt: String,
         images: Vec<String>,
-        restart: Box<dyn FnOnce() -> Result<Handle> + Send>,
+        restart: ContinueRun,
     ) -> Result<()> {
         Self::validate(panel, &effect.target)?;
         let running = self
@@ -335,7 +391,12 @@ impl ProviderRuns {
             .iter_mut()
             .find(|r| !r.finished && r.target == effect.target)
             .ok_or(Error::Stale)?;
-        if running.action.is_some() {
+        if running.actions.len() >= 128
+            || running
+                .actions
+                .front()
+                .is_some_and(|action| action.restart.is_none())
+        {
             return Err(Error::Busy);
         }
         panel.save(store, now)?;
@@ -344,29 +405,22 @@ impl ProviderRuns {
             _ => return Err(Error::Invalid("steering effect")),
         };
         if !running.handle.supports_live_steering() || running.held.is_some() {
-            running.handle = restart()?;
-            running.pending = None;
-            running.held = None;
-            running.release = false;
+            running.continue_with(restart)?;
         } else {
             match running.handle.send_checked(Action::Steer {
                 run: effect.target.run.clone().ok_or(Error::Stale)?,
                 prompt,
                 images,
             }) {
-                Ok(pending) => {
-                    running.action = Some(PendingAction {
-                        effect: None,
-                        pending,
-                        result: None,
-                        restart: Some(restart),
-                    })
-                }
+                Ok(pending) => running.actions.push_back(PendingAction {
+                    effect: None,
+                    pending,
+                    result: None,
+                    restart: Some(restart),
+                    composer: None,
+                }),
                 Err(TrySendError::Full(_)) => return Err(Error::Busy),
-                Err(TrySendError::Disconnected(_)) => {
-                    running.handle = restart()?;
-                    running.pending = None;
-                }
+                Err(TrySendError::Disconnected(_)) => running.continue_with(restart)?,
             }
         }
         if let EffectKind::Send { attachments, .. } = &effect.kind {
@@ -376,6 +430,50 @@ impl ProviderRuns {
         self.ended
             .retain(|(run, _)| Some(run) != effect.target.run.as_ref());
         Ok(())
+    }
+    /// A panel direction either reaches the live turn or becomes the next
+    /// queued turn. Unlike orchestration, it never restarts the active turn.
+    pub fn steer_live(
+        &mut self,
+        panel: &mut Panel,
+        effect: &Effect,
+        now: u64,
+        prompt: String,
+        images: Vec<String>,
+    ) -> Result<()> {
+        if let Some(run) = effect.target.run.as_deref()
+            && self.live_steerable(run)
+            && let Some(running) = self
+                .runs
+                .iter_mut()
+                .find(|running| running.target == effect.target)
+            && let Ok(pending) = running.handle.send_checked(Action::Steer {
+                run: run.into(),
+                prompt,
+                images,
+            })
+        {
+            running.actions.push_back(PendingAction {
+                effect: None,
+                restart: None,
+                composer: Some(effect.clone()),
+                pending,
+                result: None,
+            });
+            return Ok(());
+        }
+        panel.queue_direction(effect)?;
+        panel.defer_save(now);
+        Ok(())
+    }
+    pub fn live_steerable(&self, run: &str) -> bool {
+        self.runs.iter().any(|running| {
+            running.target.run.as_deref() == Some(run)
+                && !running.finished
+                && running.held.is_none()
+                && running.actions.is_empty()
+                && running.handle.supports_live_steering()
+        })
     }
     /// Whether this unfinished run can take direction.
     pub fn steerable(&self, run: &str) -> bool {
@@ -414,11 +512,11 @@ impl ProviderRuns {
         // Stop can queue behind a live steer without waiting for its receipt.
         // Once Cancel is queued, replace the pending steer so it cannot restart the run.
         let stop_supersedes_steer = matches!(effect.kind, EffectKind::Stop)
-            && running
-                .action
-                .as_ref()
-                .is_some_and(|action| action.restart.is_some());
-        if running.action.is_some() && !stop_supersedes_steer {
+            && running.actions.front().is_some_and(|action| {
+                action.restart.is_some()
+                    || action.composer.as_ref().is_some_and(Effect::live_or_queue)
+            });
+        if !running.actions.is_empty() && !stop_supersedes_steer {
             return Err(Error::Busy);
         }
         let run = effect.target.run.clone().ok_or(Error::Stale)?;
@@ -477,9 +575,13 @@ impl ProviderRuns {
         panel.save(store, now)?;
         match running.handle.send_checked(action) {
             Ok(pending) => {
-                running.action = Some(PendingAction {
+                if matches!(effect.kind, EffectKind::Stop) {
+                    running.actions.clear();
+                }
+                running.actions.push_back(PendingAction {
                     effect: ack.then_some(effect.id),
                     restart: None,
+                    composer: effect.has_composer_submission().then(|| effect.clone()),
                     pending,
                     result: None,
                 });
@@ -507,7 +609,7 @@ impl ProviderRuns {
         while delivered < budget.min(256) && !self.runs.is_empty() {
             self.cursor %= self.runs.len();
             let running = &mut self.runs[self.cursor];
-            if let Some(action) = &mut running.action {
+            while let Some(action) = running.actions.front_mut() {
                 if action.result.is_none() {
                     action.result = match action.pending.try_recv() {
                         Ok(value) => Some(value),
@@ -516,21 +618,53 @@ impl ProviderRuns {
                     };
                 }
                 if let Some(accepted) = action.result {
+                    let direction = action
+                        .composer
+                        .as_ref()
+                        .filter(|effect| effect.live_or_queue());
                     if let Some(effect) = action.effect {
                         let mut next = panel.clone();
                         next.acknowledge(effect, accepted)?;
+                        if !accepted && let Some(composer) = &action.composer {
+                            next.refused_composer_send(composer)?;
+                        }
                         next.save(store, now)?;
                         *panel = next;
                     }
-                    let restart = action.restart.take();
-                    running.action = None;
+                    if let Some(effect) = direction {
+                        if accepted {
+                            if let EffectKind::Send {
+                                text, attachments, ..
+                            } = &effect.kind
+                            {
+                                running.directions.push(text.clone());
+                                running.attachments.extend(attachments.clone());
+                            }
+                            panel.settle_direction(effect, now)?;
+                        } else {
+                            panel.queue_direction(effect)?;
+                            panel.defer_save(now);
+                        }
+                    }
+                    let handled_direction = direction.is_some();
+                    let restart = running
+                        .actions
+                        .pop_front()
+                        .and_then(|action| action.restart);
+                    if handled_direction {
+                        delivered += 1;
+                        continue;
+                    }
                     if !accepted && let Some(restart) = restart {
-                        match restart() {
-                            Ok(handle) => { running.handle = handle; running.pending = None; }
-                            Err(error) => running.injected.push_back(Event::Trace {
+                        // A later rejected steer's continuation already includes
+                        // all previous directions. Launch only the latest one.
+                        if running.actions.is_empty()
+                            && let Err(error) = running.continue_with(restart)
+                        {
+                            running.injected.push_back(Event::Trace {
                                 run: running.target.run.clone().ok_or(Error::Stale)?,
                                 value: serde_json::json!({"kind":"answer","text":format!("Your direction could not be delivered: {error}. Please send it again.")}),
-                            }),
+                            });
                         }
                         continue;
                     }
@@ -538,13 +672,16 @@ impl ProviderRuns {
                         return Err(Error::Host("provider rejected action".into()));
                     }
                 } else {
-                    self.cursor += 1;
-                    empty += 1;
-                    if empty >= self.runs.len() {
-                        break;
-                    }
-                    continue;
+                    break;
                 }
+            }
+            if !running.actions.is_empty() {
+                self.cursor += 1;
+                empty += 1;
+                if empty >= self.runs.len() {
+                    break;
+                }
+                continue;
             }
             let mut releasing = false;
             if running.pending.is_none() {
@@ -633,7 +770,40 @@ impl ProviderRuns {
                     sequence: running.sequence,
                     event: event.clone(),
                 };
-                panel.provider_event(store, &running.target.thread, &receipt, now)?;
+                let failed_before_reply = matches!(
+                    event,
+                    Event::Stopped(_)
+                        | Event::Completed {
+                            result: RunResult::Failure { cancelled: false, .. },
+                            ..
+                        }
+                ) && !running.finished
+                    && panel.session(&running.target.thread).is_ok_and(|session| {
+                        session.run.as_ref().is_some_and(|run| !run.stopping)
+                    });
+                if let Some((message, draft)) = running
+                    .start_submission
+                    .as_ref()
+                    .filter(|_| failed_before_reply)
+                {
+                    let mut next = panel.clone();
+                    next.restore_failed_send(
+                        &running.target.thread, message.as_deref(), Some(draft),
+                    )?;
+                    next.provider_event(store, &running.target.thread, &receipt, now)?;
+                    *panel = next;
+                } else {
+                    panel.provider_event(store, &running.target.thread, &receipt, now)?;
+                }
+                if matches!(
+                    event,
+                    Event::Trace { .. }
+                        | Event::Progress { .. }
+                        | Event::Completed { .. }
+                        | Event::Stopped(_)
+                ) {
+                    running.start_submission = None;
+                }
                 running.pending = None;
                 running.sequence += 1;
                 delivered += 1;

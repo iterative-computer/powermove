@@ -522,7 +522,7 @@ impl Layout {
                 out.side_docks.insert(di, rect);
                 side_group_heights(
                     &d.groups,
-                    space,
+                    rect.h,
                     bounds.h + t.metrics.toolbar + t.metrics.status + t.metrics.dock_gap,
                     t,
                     natural.unwrap(),
@@ -2010,7 +2010,7 @@ pub fn side_group_floor(g: &Group, window_height: f32, t: &Tokens, natural: Opti
 
 fn side_group_heights(
     groups: &[Group],
-    space: f32,
+    viewport_height: f32,
     window_height: f32,
     t: &Tokens,
     natural: &BTreeMap<String, f32>,
@@ -2033,13 +2033,22 @@ fn side_group_heights(
         .iter()
         .filter(|g| !g.collapsed && g.size.is_none())
         .count();
-    let extra = (space - heights.iter().sum::<f32>()).max(0.);
+    let gaps = t.metrics.dock_gap * groups.len().saturating_sub(1) as f32;
     if flex > 0 {
+        let extra = (viewport_height - gaps - heights.iter().sum::<f32>()).max(0.);
+        let each = extra / flex as f32;
         for (g, h) in groups.iter().zip(&mut heights) {
             if !g.collapsed && g.size.is_none() {
-                *h += extra / flex as f32;
+                *h += each;
             }
         }
+    }
+    // An oversized saved height would hide the panel's own bottom and
+    // leave its list fighting the column for scroll. Give each group at
+    // most the viewport while respecting minimums such as Agent's composer.
+    for (group, height) in groups.iter().zip(&mut heights) {
+        let minimum = side_group_minimum(group, t, natural.get(group.active()).copied());
+        *height = height.min(viewport_height).max(minimum);
     }
     heights
 }

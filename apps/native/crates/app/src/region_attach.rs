@@ -7,6 +7,16 @@
 //! picture) or the whole window.
 use crate::session::Controller;
 use gpui::*;
+use serde_json::{Value, json};
+
+const MAX_CAPTURE_EDGE: u32 = 2048;
+type CapturePixels = (String, u32, u32, Vec<u8>);
+
+fn viewer_readback_width([w, h]: [f64; 2]) -> u32 {
+    (w * (f64::from(MAX_CAPTURE_EDGE) / w.max(h)).min(1.))
+        .floor()
+        .clamp(1., 1280.) as u32
+}
 
 /// The composition's region, in its pixels, under a box in window points
 /// (`x, y, w, h`), for a frame drawn at `origin` and `scale` with `size`;
@@ -74,6 +84,57 @@ pub(crate) fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     Ok((info.width, info.height, buf))
 }
 
+/// Build the single durable attachment record directly from the capture.
+fn region_record(
+    (name, width, height, pixels): CapturePixels,
+    target_context: Value,
+    caption: &str,
+) -> Result<Value, String> {
+    use base64::Engine;
+    if width == 0 || height == 0 {
+        return Err("The selected region is outside the picture.".into());
+    }
+    let pixels = image::RgbaImage::from_raw(width, height, pixels)
+        .ok_or("The selected region could not be read.")?;
+    let edge = width.max(height);
+    let pixels = if edge > MAX_CAPTURE_EDGE {
+        let scaled = |value: u32| {
+            ((u64::from(value) * u64::from(MAX_CAPTURE_EDGE)) / u64::from(edge)).max(1) as u32
+        };
+        image::imageops::resize(
+            &pixels,
+            scaled(width),
+            scaled(height),
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        pixels
+    };
+    let (width, height) = pixels.dimensions();
+    let png = encode_png(width, height, pixels.as_raw())?;
+    let thumbnail = crate::media_thumbs::capture_thumbnail(&png, width, height, pixels.as_raw());
+    let data = base64::engine::general_purpose::STANDARD.encode(&png);
+    Ok(json!({
+        "id": pm_kernel::new_id("attachment"),
+        "name": name,
+        "size": png.len(),
+        "type": "image/png",
+        "dataUrl": format!("data:image/png;base64,{data}"),
+        "thumbnail": thumbnail,
+        "targetContext": target_context,
+        "screenPick": true,
+        "caption": caption,
+        "promptNote": format!("Screen selection: {caption}"),
+    }))
+}
+
+fn run_capture(
+    executor: &BackgroundExecutor,
+    work: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Task<Result<(), String>> {
+    executor.spawn(async move { work() })
+}
+
 fn clock(seconds: f64) -> String {
     let s = seconds.max(0.);
     format!("{}:{:05.2}", (s / 60.).floor() as u64, s % 60.)
@@ -84,32 +145,26 @@ fn region_panels(
     bounds: (f64, f64, f64, f64),
     cx: &App,
 ) -> Vec<serde_json::Value> {
-    use serde_json::json;
     let mut panels = vec![];
     if let Some(shell) = shell {
-        let digest = shell.layout_digest(cx);
-        if let Some(docks) = digest["docks"].as_array() {
-            for panel in docks
-                .iter()
-                .filter_map(|d| d["panels"].as_array())
-                .flatten()
+        let known = shell.panels(cx);
+        for id in shell
+            .layout
+            .docks
+            .iter()
+            .flat_map(|dock| &dock.groups)
+            .filter_map(|group| group.tabs.get(group.active))
+        {
+            let Some(b) = shell.panel_rect(id) else {
+                continue;
+            };
+            let (x, y, w, h) = bounds;
+            if x <= (b.x + b.w) as f64
+                && x + w >= b.x as f64
+                && y <= (b.y + b.h) as f64
+                && y + h >= b.y as f64
             {
-                let Some(id) = panel["id"].as_str() else {
-                    continue;
-                };
-                let Some(b) = shell.panel_rect(id) else {
-                    continue;
-                };
-                let (x, y, w, h) = bounds;
-                if x <= (b.x + b.w) as f64
-                    && x + w >= b.x as f64
-                    && y <= (b.y + b.h) as f64
-                    && y + h >= b.y as f64
-                {
-                    panels.push(
-                        json!({"panelId":id,"title":panel["title"],"area":[b.x,b.y,b.w,b.h]}),
-                    );
-                }
+                panels.push(json!({"panelId":id,"title":known.title(id),"area":[b.x,b.y,b.w,b.h]}));
             }
         }
     }
@@ -143,25 +198,26 @@ fn with_region_panels(
     });
 }
 
+/// Read the viewer's settled picture on the capture worker. Fetching its status
+/// can wait for the engine mutex, even when a completed frame is available.
+fn shown_picture(
+    viewer: &pm_engine_service::Viewer,
+    doc: u64,
+    revision: u64,
+    time: f64,
+) -> Option<pm_engine_service::Picture> {
+    let status = viewer.status();
+    let (frame, picture) = (status.frame?, status.settled_picture?);
+    let at = picture.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
+    (picture.stamp.doc_id == doc
+        && picture.stamp.revision == revision
+        && picture.stamp.revision == frame.stamp.revision
+        && picture.time == frame.time
+        && (at - time).abs() < 1e-3)
+        .then_some(picture)
+}
+
 impl Controller {
-    /// The picture the viewer presented of this project at `time`, settled
-    /// and with every effect in it; `None` otherwise (a render is needed).
-    fn shown_picture(&self, time: f64) -> Option<pm_engine_service::Picture> {
-        if self.settling.is_some() || self.awaiting_extension_effects() {
-            return None;
-        }
-        let doc = self.published.as_ref()?.snapshot.doc_id;
-        // The viewer's settled picture, copied when it came to rest, if it
-        // is the frame shown now.
-        let status = self.viewer.as_ref()?.status();
-        let (frame, picture) = (status.frame?, status.settled_picture?);
-        let at = picture.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64;
-        (picture.stamp.doc_id == doc
-            && picture.stamp.revision == frame.stamp.revision
-            && picture.time == frame.time
-            && (at - time).abs() < 1e-3)
-            .then_some(picture)
-    }
     /// Where the composition is drawn in the window, at what scale (the
     /// viewer's frame; `None` while it shows nothing).
     pub(crate) fn composition_frame(&self) -> Option<crate::gizmo::ViewFrame> {
@@ -184,14 +240,15 @@ impl Controller {
         region: Option<(u32, u32, u32, u32)>,
         captured_time: f64,
     ) -> serde_json::Value {
-        use serde_json::json;
-        json!({"projectId":self.session.as_ref().map(|s| &s.project),"documentId":self.published.as_ref().map(|p| p.snapshot.doc_id),"revision":self.published.as_ref().map(|p|p.revision()),"windowId":self.window_key,"compositionId":self.published.as_ref().map(|p|p.snapshot.render_comp().as_str().to_owned()),"time":captured_time,"compositionTime":captured_time,"panelId":if region.is_some(){Some("viewer")}else{None},"coordinateSpace":if region.is_some(){"composition-pixels"}else{"window-points"},"area":region.map(|(x,y,w,h)|[x,y,w,h]),"windowArea":[rect.0,rect.1,rect.2,rect.3],"selection":self.published.as_ref().map(|p|p.selection.layers()),"layersUnderBox":[],"layerHitMethod":"transformed-bounds intersection","unavailableLayerBounds":[]})
+        json!({"projectId":self.session.as_ref().map(|s| &s.project),"documentId":self.published.as_ref().map(|p| p.snapshot.doc_id),"revision":self.published.as_ref().map(|p|p.revision()),"windowId":self.window_key,"compositionId":self.published.as_ref().map(|p|p.snapshot.render_comp().as_str().to_owned()),"time":captured_time,"compositionTime":captured_time,"panelId":if region.is_some(){Some("viewer")}else{None},"coordinateSpace":if region.is_some(){"composition-pixels"}else{"window-points"},"area":region.map(|(x,y,w,h)|[x,y,w,h]),"windowArea":[rect.0,rect.1,rect.2,rect.3],"selection":null,"layersUnderBox":[],"layerHitMethod":"transformed-bounds intersection","unavailableLayerBounds":[]})
     }
     /// The box the person selected, captured and attached to the visible
     /// thread (errors are told in the Agent's own place).
     pub(crate) fn attach_region(
         &mut self,
         rect: (f64, f64, f64, f64),
+        agent_project: String,
+        agent_thread: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -207,13 +264,6 @@ impl Controller {
         let mut target_context = self.region_target_context(rect, region, captured_time);
         let captured_publication = self.published.clone();
         let capture_kernel = self.kernel.clone();
-        // Repeated picks at one playhead can share a visible filename. Keep
-        // their bytes immutable until attachment_records pairs them with metadata.
-        let folder = self
-            .profile
-            .join("caches")
-            .join("agent-picks")
-            .join(pm_kernel::new_id("pick"));
         let caption = if region.is_some() {
             format!("Viewer · {}", clock(captured_time))
         } else {
@@ -222,7 +272,16 @@ impl Controller {
         let runtime = self.builtins.runtime.clone();
         let dimensions = self.dimensions;
         let project = self.session.as_ref().map(|s| s.project.clone());
-        let shown = region.and_then(|_| self.shown_picture(captured_time));
+        let viewer =
+            if region.is_some() && self.settling.is_none() && !self.awaiting_extension_effects() {
+                self.viewer.clone().zip(
+                    self.published
+                        .as_ref()
+                        .map(|p| (p.snapshot.doc_id, p.revision())),
+                )
+            } else {
+                None
+            };
         let this = cx.weak_entity();
         with_region_panels(
             self.shell.clone(),
@@ -232,123 +291,110 @@ impl Controller {
             region.is_none(),
             move |panels, window, cx| {
                 target_context["panels"] = serde_json::json!(panels);
-                let job: Box<dyn FnOnce() -> Result<(String, Vec<u8>), String> + Send> =
-                    match region {
-                        Some(region) => {
-                            let Some(project) = project else { return };
-                            let (time, size) = (captured_time, dimensions);
-                            Box::new(move || {
-                                // At most 1280 wide; the region scales with it. The
-                                // picture the viewer shows at the playhead when it has
-                                // settled (read back, no render: the chip is there at
-                                // once), else the agent's own still, rendered.
-                                let width = size[0].round().clamp(160., 1280.) as u32;
-                                let (w, h, rgba) = match shown.and_then(|p| p.srgb8(width)) {
-                                    Some(read) => read,
-                                    None => decode_png(&crate::mcp::still(&project, time, width)?)?,
-                                };
-                                let k = w as f64 / size[0];
-                                let at = |v: u32| (v as f64 * k).round() as u32;
-                                let whole = region
-                                    == (0, 0, size[0].round() as u32, size[1].round() as u32);
-                                let (cw, ch, cut) = crop(
-                                    &rgba,
-                                    w,
-                                    h,
-                                    (
-                                        at(region.0),
-                                        at(region.1),
-                                        at(region.2).max(1),
-                                        at(region.3).max(1),
-                                    ),
-                                );
-                                let name = if whole {
-                                    format!("Frame {}.png", clock(time))
-                                } else {
-                                    format!("Frame {} selection.png", clock(time))
-                                };
-                                Ok((name, encode_png(cw, ch, &cut)?))
-                            })
-                        }
-                        None => {
-                            let frame = window.render_to_image();
-                            window.refresh();
-                            let Ok(frame) = frame else { return };
-                            let scale = window.scale_factor() as f64;
-                            let (fw, fh) = (frame.width(), frame.height());
-                            let (x, y, w, h) = rect;
-                            let region = if w == 0. && h == 0. {
-                                (0, 0, fw, fh)
+                let job: Box<dyn FnOnce() -> Result<CapturePixels, String> + Send> = match region {
+                    Some(region) => {
+                        let Some(project) = project else { return };
+                        let (time, size) = (captured_time, dimensions);
+                        Box::new(move || {
+                            // At most 1280 wide; the region scales with it. The
+                            // picture the viewer shows at the playhead when it has
+                            // settled (read back, no render: the chip is there at
+                            // once), else the agent's own still, rendered.
+                            let width = viewer_readback_width(size);
+                            let shown = viewer.and_then(|(viewer, (doc, revision))| {
+                                shown_picture(&viewer, doc, revision, time)
+                            });
+                            let (w, h, rgba) = match shown.and_then(|p| p.srgb8(width)) {
+                                Some(read) => read,
+                                None => decode_png(&crate::mcp::still(&project, time, width)?)?,
+                            };
+                            let at_x = |v: u32| (v as f64 * f64::from(w) / size[0]).round() as u32;
+                            let at_y = |v: u32| (v as f64 * f64::from(h) / size[1]).round() as u32;
+                            let whole =
+                                region == (0, 0, size[0].round() as u32, size[1].round() as u32);
+                            let (cw, ch, cut) = crop(
+                                &rgba,
+                                w,
+                                h,
+                                (
+                                    at_x(region.0).min(w.saturating_sub(1)),
+                                    at_y(region.1).min(h.saturating_sub(1)),
+                                    at_x(region.2).max(1),
+                                    at_y(region.3).max(1),
+                                ),
+                            );
+                            let name = if whole {
+                                format!("Frame {}.png", clock(time))
                             } else {
-                                let s = |v: f64| (v * scale).round().max(0.) as u32;
-                                (s(x), s(y), s(w).max(1), s(h).max(1))
+                                format!("Frame {} selection.png", clock(time))
                             };
-                            target_context["area"] = serde_json::json!([
-                                region.0.min(fw) as f64 / scale,
-                                region.1.min(fh) as f64 / scale,
-                                region.2.min(fw.saturating_sub(region.0)) as f64 / scale,
-                                region.3.min(fh.saturating_sub(region.1)) as f64 / scale,
-                            ]);
-                            let rgba = frame.into_raw();
-                            Box::new(move || {
-                                let (cw, ch, cut) = crop(&rgba, fw, fh, region);
-                                Ok(("Powermove selection.png".into(), encode_png(cw, ch, &cut)?))
-                            })
-                        }
-                    };
+                            Ok((name, cw, ch, cut))
+                        })
+                    }
+                    None => {
+                        let frame = window.render_to_image();
+                        window.refresh();
+                        let Ok(frame) = frame else { return };
+                        let scale = window.scale_factor() as f64;
+                        let (fw, fh) = (frame.width(), frame.height());
+                        let (x, y, w, h) = rect;
+                        let region = if w == 0. && h == 0. {
+                            (0, 0, fw, fh)
+                        } else {
+                            let s = |v: f64| (v * scale).round().max(0.) as u32;
+                            (s(x), s(y), s(w).max(1), s(h).max(1))
+                        };
+                        target_context["area"] = serde_json::json!([
+                            region.0.min(fw) as f64 / scale,
+                            region.1.min(fh) as f64 / scale,
+                            region.2.min(fw.saturating_sub(region.0)) as f64 / scale,
+                            region.3.min(fh.saturating_sub(region.1)) as f64 / scale,
+                        ]);
+                        let rgba = frame.into_raw();
+                        Box::new(move || {
+                            let (cw, ch, cut) = crop(&rgba, fw, fh, region);
+                            Ok(("Powermove selection.png".into(), cw, ch, cut))
+                        })
+                    }
+                };
                 cx.spawn(async move |cx| {
-                    let outcome = cx
-                        .background_executor()
-                        .spawn(async move {
-                            let current_capture = || {
-                                captured_publication.as_ref().is_none_or(|p| {
-                                    capture_kernel.published(&p.project).is_some_and(|now| {
-                                        now.snapshot.doc_id == p.snapshot.doc_id
-                                            && now.revision() == p.revision()
-                                            && now.snapshot.open_comp() == p.snapshot.open_comp()
-                                    })
+                    let outcome = run_capture(cx.background_executor(), move || {
+                        let current_capture = || {
+                            captured_publication.as_ref().is_none_or(|p| {
+                                capture_kernel.published(&p.project).is_some_and(|now| {
+                                    now.snapshot.doc_id == p.snapshot.doc_id
+                                        && now.revision() == p.revision()
+                                        && now.snapshot.open_comp() == p.snapshot.open_comp()
                                 })
-                            };
-                            if !current_capture() {
-                                return Err(
+                            })
+                        };
+                        if !current_capture() {
+                            return Err(
                             "The document changed before region capture. Select the region again."
                                 .into(),
                         );
-                            }
-                            if let Some(p) = &captured_publication {
-                                let (layers, unavailable) =
-                                    region_layers(&p, region, captured_time);
-                                target_context["layersUnderBox"] = serde_json::json!(layers);
-                                target_context["unavailableLayerBounds"] =
-                                    serde_json::json!(unavailable);
-                            }
-                            let (name, png) = job()?;
-                            if !current_capture() {
-                                return Err(
+                        }
+                        if let Some(p) = &captured_publication {
+                            let (layers, unavailable) = region_layers(p, region, captured_time);
+                            target_context["selection"] = json!(p.selection.layers());
+                            target_context["layersUnderBox"] = serde_json::json!(layers);
+                            target_context["unavailableLayerBounds"] =
+                                serde_json::json!(unavailable);
+                        }
+                        let record = region_record(job()?, target_context, &caption)?;
+                        if !current_capture() {
+                            return Err(
                             "The document changed during region capture. Select the region again."
                                 .into(),
                         );
-                            }
-                            std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-                            let path = folder.join(&name);
-                            std::fs::write(&path, png).map_err(|e| e.to_string())?;
-                            let mut records = crate::media::attachment_records(&[path])?;
-                            for record in &mut records {
-                                record["targetContext"] = target_context.clone();
-                                record["screenPick"] = true.into();
-                                record["caption"] = caption.clone().into();
-                                record["promptNote"] = format!(
-                                    "Screen selection: {}",
-                                    record["caption"].as_str().unwrap_or(&name)
-                                )
-                                .into();
-                            }
-                            match runtime {
-                                Some(runtime) => runtime.agent_attach(records),
-                                None => Err("The Agent panel closed.".into()),
-                            }
-                        })
-                        .await;
+                        }
+                        runtime.ok_or("The Agent panel closed.")?.agent_attach_for(
+                            &agent_project,
+                            &agent_thread,
+                            vec![record],
+                        )
+                    })
+                    .await;
                     if let Err(message) = outcome {
                         let _ = this.update(cx, |v, cx| {
                             v.errors.borrow_mut().tell("Agent", &message);
@@ -370,6 +416,137 @@ mod tests {
     use pm_shell::{integration::Integration, view::Editor};
     use serde_json::json;
     use std::{cell::RefCell, rc::Rc};
+
+    #[gpui::test]
+    fn viewer_capture_at_289_percent_schedules_work_before_the_watchdog(cx: &mut TestAppContext) {
+        use base64::Engine;
+        use pm_agents::persistence::Store;
+        use pm_kernel::{KernelActor, KernelConfig, persistence::DiskFormat, session::ShellCall};
+        use pm_panel_agentpanel::{model::Panel, store::KernelStore};
+        use std::{
+            fs,
+            time::{Duration, Instant},
+        };
+
+        let profile = tempfile::tempdir().unwrap();
+        let root = profile.path().canonicalize().unwrap();
+        let legacy = root.join("kernel-state.json");
+        let payload = "QUJD".repeat(24 * 1024 * 1024 / 4);
+        let settings = json!({
+            "extensions": [],
+            "settings": {
+                "theme": "dark",
+                "agentThreads.pick":{"version":1,"activeId":"t","threads":[{
+                    "id":"t","composerDraft":"Keep both pictures","conversation":[],
+                    "attachments":[{"id":"legacy-0","name":"Existing.png","payloadStored":true}]
+                }]},
+                "agentAttachment.legacy-0":{"dataBase64": &payload},
+                "agentAttachment.legacy-1":{"dataBase64": &payload},
+                "agentAttachment.legacy-2":{"dataBase64": &payload},
+                "agentAttachment.legacy-3":{"dataBase64": &payload}
+            }
+        });
+        fs::write(&legacy, settings.to_string()).unwrap();
+        drop((payload, settings));
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        // Kernel replies are blocking and must never be awaited on AppKit.
+        let (settings_path, settings, mut store, mut panel) = std::thread::spawn(move || {
+            kernel
+                .shell(ShellCall::AttachLibrary {
+                    profile: root.clone(),
+                    format: DiskFormat::V1_2,
+                    electron_profile: None,
+                })
+                .wait()
+                .unwrap()
+                .unwrap();
+            let mut store = KernelStore::bind(kernel.clone()).unwrap();
+            let panel = Panel::load(&mut store, "pick", "fallback", 0).unwrap();
+            assert!(!root.join("kernel-state.json").exists());
+            let settings_path = root.join("store/theme.json");
+            let settings = fs::read(&settings_path).unwrap();
+            assert_eq!(serde_json::from_slice::<String>(&settings).unwrap(), "dark");
+            (settings_path, settings, store, panel)
+        })
+        .join()
+        .unwrap();
+        let zoom = 2.89;
+        let size = [1080., 3840.];
+        let region = composition_region(
+            (0., 0., size[0] * zoom, size[1] * zoom),
+            (0., 0.),
+            zoom,
+            size,
+        );
+        assert_eq!(region, Some((0, 0, 1080, 3840)));
+        let width = super::viewer_readback_width(size);
+        assert!(
+            (f64::from(width) * size[1] / size[0]).ceil() <= f64::from(super::MAX_CAPTURE_EDGE)
+        );
+        let start = Instant::now();
+        let task = super::run_capture(&cx.background_executor, move || {
+            // This synthetic stall stands in for a GPU fence that may take
+            // longer than a frame. The capture event must already have returned.
+            std::thread::sleep(Duration::from_millis(275));
+            let record = super::region_record(
+                ("Viewer.png".into(), 1080, 3840, vec![127; 1080 * 3840 * 4]),
+                json!({"area":region}),
+                "Viewer",
+            )?;
+            let data = record["dataUrl"]
+                .as_str()
+                .unwrap()
+                .split_once(',')
+                .unwrap()
+                .1;
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .unwrap();
+            let (w, h, _) = decode_png(&png)?;
+            assert_eq!((w, h), (576, super::MAX_CAPTURE_EDGE));
+            let id = record["id"].as_str().unwrap().to_owned();
+            // This harness uses a deterministic GPUI executor. Kernel IO still
+            // obeys the thread restriction on a real worker.
+            std::thread::spawn(move || {
+                panel
+                    .attach_records("t", vec![record], &mut store, 1)
+                    .unwrap();
+                panel.save(&mut store, 1).unwrap();
+                assert!(
+                    store
+                        .get(&format!("agentAttachment.{id}"))
+                        .unwrap()
+                        .is_some()
+                );
+                assert_eq!(
+                    panel.inspect("t").unwrap()["attachments"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    2
+                );
+                let saved = store.get("agentThreads.pick").unwrap().unwrap();
+                let capture = &saved["threads"][0]["attachments"][1];
+                assert_eq!(capture["id"], id);
+                assert_eq!(capture["payloadStored"], true);
+                assert!(capture.get("dataUrl").is_none());
+            })
+            .join()
+            .unwrap();
+            Ok(())
+        });
+        let main = start.elapsed();
+        assert!(
+            main < Duration::from_millis(250),
+            "region capture blocked the event thread for {main:?}"
+        );
+        println!("viewer selection at 289%: queued in {main:?}");
+        cx.foreground_executor().block_test(task).unwrap();
+        assert!(!legacy.exists());
+        assert_eq!(fs::read(settings_path).unwrap(), settings);
+        actor.shutdown();
+    }
 
     // The native Controller requires an AppKit window. Reproduce its lease
     // with a headless entity and the real editor's panel lookup.

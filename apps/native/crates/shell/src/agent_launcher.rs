@@ -31,6 +31,11 @@ impl Snapshot {
     }
 }
 
+/// Show the launcher in a project workspace when the Agent panel is out of view.
+pub(crate) fn show_agent_button(has_project: bool, panel_visible: bool) -> bool {
+    has_project && !panel_visible
+}
+
 pub(crate) fn fit_presence_title(text: &str, width: f64, measure: impl Fn(&str) -> f64) -> String {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if measure(&text) <= width {
@@ -202,6 +207,15 @@ mod tests {
             ..Default::default()
         }
     }
+
+    #[test]
+    fn the_agent_button_is_scoped_to_where_it_adds_a_way_in() {
+        assert!(!show_agent_button(false, false), "Home or an empty window");
+        assert!(!show_agent_button(false, true), "Home with an Agent popover");
+        assert!(show_agent_button(true, false), "closed or hidden Agent tab");
+        assert!(!show_agent_button(true, true), "visible Agent tab or popover");
+    }
+
     #[test]
     fn pm546_launcher_stays_a_glyph_during_the_run_and_undo_window() {
         let mut launcher = Launcher::default();

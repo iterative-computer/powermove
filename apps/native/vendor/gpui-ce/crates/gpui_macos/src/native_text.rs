@@ -284,6 +284,19 @@ define_class!(
     struct ComposerTextView;
     unsafe impl NSObjectProtocol for ComposerTextView {}
     impl ComposerTextView {
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            self.submit_command_return(event)
+                || unsafe { msg_send![super(self), performKeyEquivalent: event] }
+        }
+
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            if !self.submit_command_return(event) {
+                unsafe { let _: () = msg_send![super(self), keyDown: event]; }
+            }
+        }
+
         #[unsafe(method(paste:))]
         fn paste(&self, sender: Option<&AnyObject>) {
             let claimed = self.ivars().borrow().upgrade().is_some_and(|s| {
@@ -302,6 +315,30 @@ define_class!(
     }
 );
 impl ComposerTextView {
+    fn submit_command_return(&self, event: &NSEvent) -> bool {
+        use NSEventModifierFlags as Flags;
+        if event.r#type() != NSEventType::KeyDown || !matches!(event.keyCode(), 36 | 76) {
+            return false;
+        }
+        let flags = event.modifierFlags();
+        if !flags.contains(Flags::Command)
+            || flags.intersects(Flags::Shift | Flags::Option | Flags::Control)
+        {
+            return false;
+        }
+        let me = self as *const Self as *const AnyObject;
+        let first = self.window().and_then(|window| window.firstResponder())
+            .is_some_and(|responder| std::ptr::eq(Retained::as_ptr(&responder).cast::<AnyObject>(), me));
+        let marked: bool = unsafe { msg_send![self, hasMarkedText] };
+        let Some(state) = self.ivars().borrow().upgrade().filter(|_| first && !marked) else {
+            return false;
+        };
+        if !event.isARepeat() {
+            state.emit(TextEvent::Submitted(state.editor.value()));
+        }
+        true
+    }
+
     /// The person's press on it or Tab to it (the event AppKit is handling
     /// now), or the host's own `begin_editing`.
     fn wanted(&self) -> bool {

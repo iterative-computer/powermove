@@ -635,6 +635,20 @@ pub struct StateAck {
 }
 
 impl StateSnapshot {
+    /// Serialize a rollback record when Agent storage migrates from the library
+    /// and there is no legacy snapshot to preserve.
+    pub(crate) fn legacy_rollback_snapshot(&self) -> Value {
+        use pm_model::json::Map;
+        let settings = self.settings.iter()
+            .map(|(key, value)| (key.clone().into(), value.clone()))
+            .collect();
+        let extensions = self.extensions.values().map(extension_value).collect();
+        let mut record = Map::new();
+        record.insert("settings", Value::Object(settings));
+        record.insert("extensions", Value::Array(extensions));
+        Value::Object(record)
+    }
+
     /// Native metadata is stored one record per extension, with the file name
     /// independent of punctuation in the extension id.
     pub(crate) fn durable_extensions_since(&self, old: &Self) -> Vec<(String, Option<Value>)> {

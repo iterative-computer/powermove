@@ -178,7 +178,7 @@ fn film_sample(pixel:u32,index:u32)->vec2f {
 
 struct Hit { t: f32, tri: i32, b: vec2f, inst: u32 }
 
-fn hit_tri(ro: vec3f, rd: vec3f, i: u32, best: f32) -> vec3f {
+fn hit_tri(ro: vec3f, rd: vec3f, i: u32, minimum: f32, best: f32) -> vec3f {
   let p0 = pos[3u * i].xyz;
   let e1 = pos[3u * i + 1u].xyz - p0;
   let e2 = pos[3u * i + 2u].xyz - p0;
@@ -193,7 +193,7 @@ fn hit_tri(ro: vec3f, rd: vec3f, i: u32, best: f32) -> vec3f {
   let v = dot(rd, qv) * inv;
   if (v < 0.0 || u + v > 1.0) { return vec3f(BIG, 0.0, 0.0); }
   let d = dot(e2, qv) * inv;
-  if (d <= ray_epsilon() || d >= best) { return vec3f(BIG, 0.0, 0.0); }
+  if (d <= minimum || d >= best) { return vec3f(BIG, 0.0, 0.0); }
   return vec3f(d, u, v);
 }
 
@@ -206,9 +206,9 @@ fn box_t(ro: vec3f, inv: vec3f, mn: vec3f, mx: vec3f, best: f32) -> f32 {
   return BIG;
 }
 
-fn leaf(ro: vec3f, rd: vec3f, first: u32, count: u32, h: ptr<function, Hit>, any: bool) -> bool {
+fn leaf(ro: vec3f, rd: vec3f, first: u32, count: u32, minimum: f32, h: ptr<function, Hit>, any: bool) -> bool {
   for (var k = 0u; k < count; k++) {
-    let r = hit_tri(ro, rd, first + k, (*h).t);
+    let r = hit_tri(ro, rd, first + k, minimum, (*h).t);
     if (r.x < (*h).t) {
       *h = Hit(r.x, i32(first + k), r.yz, (*h).inst);
       if (any) { return true; }
@@ -218,7 +218,7 @@ fn leaf(ro: vec3f, rd: vec3f, first: u32, count: u32, h: ptr<function, Hit>, any
 }
 
 // One model's BVH (its own space), from `root`.
-fn intersect_blas(ro: vec3f, rd: vec3f, root: u32, h: ptr<function, Hit>, any: bool) -> bool {
+fn intersect_blas(ro: vec3f, rd: vec3f, root: u32, minimum: f32, h: ptr<function, Hit>, any: bool) -> bool {
   let inv = 1.0 / rd;
   var stack: array<u32, 40>;
   var sp = 1;
@@ -232,11 +232,11 @@ fn intersect_blas(ro: vec3f, rd: vec3f, root: u32, h: ptr<function, Hit>, any: b
     if (n.rcount != 0xffffffffu) { tr = box_t(ro, inv, n.rmin, n.rmax, (*h).t); }
     // Leaves are intersected at once; interior children are pushed far-first.
     if (tl < BIG && n.lcount > 0u) {
-      if (leaf(ro, rd, n.left, n.lcount, h, any)) { return true; }
+      if (leaf(ro, rd, n.left, n.lcount, minimum, h, any)) { return true; }
       tl = BIG;
     }
     if (tr < BIG && n.rcount > 0u) {
-      if (leaf(ro, rd, n.right, n.rcount, h, any)) { return true; }
+      if (leaf(ro, rd, n.right, n.rcount, minimum, h, any)) { return true; }
       tr = BIG;
     }
     if (tl < BIG && tr < BIG) {
@@ -250,7 +250,7 @@ fn intersect_blas(ro: vec3f, rd: vec3f, root: u32, h: ptr<function, Hit>, any: b
 // Two levels: the top-level BVH (node 0) over the instances' world bounds;
 // each instance's ray is moved into its model's space (t is unchanged
 // because the direction is not renormalised) and walks that model's BVH.
-fn intersect(ro: vec3f, rd: vec3f, tmax: f32, any: bool) -> Hit {
+fn intersect_from(ro: vec3f, rd: vec3f, minimum: f32, tmax: f32, any: bool) -> Hit {
   var h = Hit(tmax, -1, vec2f(0.0), 0u);
   if (arrayLength(&pos) < 3u || P.opts.z == 0u) { return h; }
   let inv = 1.0 / rd;
@@ -272,13 +272,25 @@ fn intersect(ro: vec3f, rd: vec3f, tmax: f32, any: bool) -> Hit {
         let oro = to_object(i, ro, 1.0);
         let ord = to_object(i, rd, 0.0);
         var hi = Hit(h.t, -1, vec2f(0.0), i);
-        let done = intersect_blas(oro, ord, u32(sdata[inst_base(i) + 3u].w), &hi, any);
+        let done = intersect_blas(oro, ord, u32(sdata[inst_base(i) + 3u].w), minimum, &hi, any);
         if (hi.tri >= 0) { h = hi; }
         if (done) { return h; }
       }
     }
   }
   return h;
+}
+
+fn intersect(ro: vec3f, rd: vec3f, tmax: f32, any: bool) -> Hit {
+  return intersect_from(ro, rd, ray_epsilon(), tmax, any);
+}
+
+// A coverage rejection keeps the ray's direction. Use a floating-point
+// tolerance at that surface so a thin gap can contain the next visible hit.
+fn coverage_minimum(point: vec3f, distance: f32) -> f32 {
+  let coordinate = max(abs(point.x), max(abs(point.y), abs(point.z)));
+  let tolerance = max(coordinate, distance) * 4.7683716e-7;
+  return clamp(tolerance, 1e-6, ray_epsilon());
 }
 
 fn tri_material(tri: i32) -> Material { return materials[u32(tris[u32(tri)].uv2m.z)].base; }
@@ -288,10 +300,12 @@ fn tri_material(tri: i32) -> Material { return materials[u32(tris[u32(tri)].uv2m
 // Separate layer effects/opacity/masks are composited by the host. Other
 // such layers remain visible to shadow and reflection rays, while a layer's
 // own primary image includes the geometry that will show behind those masks.
-fn primary_intersect(ro:vec3f,rd:vec3f,tmax:f32) -> Hit {
+fn primary_intersect_from(ro:vec3f,rd:vec3f,tmin:f32,tmax:f32) -> Hit {
   var origin=ro;var offset=0.0;var left=tmax;
+  var minimum = tmin;
   for(var i=0;i<1024;i++){
-    var hit=intersect(origin,rd,left,false);
+    var hit=intersect_from(origin,rd,minimum,left,false);
+    minimum = ray_epsilon();
     if(hit.tri<0){return Hit(tmax,-1,vec2f(0.0),0u);}
     if(sdata[P.counts.x*4u+hit.inst*9u+5u].w<0.5){hit.t+=offset;return hit;}
     let step=hit.t+ray_epsilon();origin+=rd*step;offset+=step;left-=step;
@@ -300,18 +314,28 @@ fn primary_intersect(ro:vec3f,rd:vec3f,tmax:f32) -> Hit {
   return Hit(tmax,-1,vec2f(0.0),0u);
 }
 
+fn primary_intersect(ro:vec3f,rd:vec3f,tmax:f32) -> Hit {
+  return primary_intersect_from(ro,rd,ray_epsilon(),tmax);
+}
+
 // Material Options visibility applies to secondary camera paths only. Shadow
 // rays keep their independent casts-shadows policy.
-fn secondary_intersect(ro:vec3f,rd:vec3f,tmax:f32) -> Hit {
+fn secondary_intersect_from(ro:vec3f,rd:vec3f,tmin:f32,tmax:f32) -> Hit {
   var origin=ro;var offset=0.0;var left=tmax;
+  var minimum = tmin;
   for(var i=0;i<1024;i++){
-    var hit=intersect(origin,rd,left,false);
+    var hit=intersect_from(origin,rd,minimum,left,false);
+    minimum = ray_epsilon();
     if(hit.tri<0){return Hit(tmax,-1,vec2f(0.0),0u);}
     if((u32(tri_material(hit.tri).policy.y)&32u)==0u){hit.t+=offset;return hit;}
     let step=hit.t+ray_epsilon();origin+=rd*step;offset+=step;left-=step;
     if(left<=0.0){break;}
   }
   return Hit(tmax,-1,vec2f(0.0),0u);
+}
+
+fn secondary_intersect(ro:vec3f,rd:vec3f,tmax:f32) -> Hit {
+  return secondary_intersect_from(ro,rd,ray_epsilon(),tmax);
 }
 
 // Coverage is known without a shading frame only for unmapped, fully opaque
@@ -1619,11 +1643,17 @@ fn path(px: vec2f)->Sample {
   let policy=u32(P.ambient.w);
   let limits=vec3u((policy>>4u)&63u,(policy>>10u)&63u,(policy>>16u)&63u);
   var used=vec3u(0u);
+  var minimum = ray_epsilon();
   for (var b = 0u; b <= max_b + 2u; b++) {
     if (b > max_b && !primary) { break; }
     sampling_lobes=vec2f(select(1.,0.,limits.x>0u && used.x>=limits.x),select(1.,0.,limits.y>0u && used.y>=limits.y));
     var h:Hit;
-    if(primary){h=primary_intersect(ro,rd,camera_limit(ro,rd));}else{h=secondary_intersect(ro,rd,BIG);}
+    if (primary) {
+      h = primary_intersect_from(ro, rd, minimum, camera_limit(ro, rd));
+    } else {
+      h = secondary_intersect_from(ro, rd, minimum, BIG);
+    }
+    minimum = ray_epsilon();
     let tf = floor_t(ro, rd);
     // Finite emitters terminate a secondary segment at the closest light.
     var light_distance=BIG;var seen_light=0u;
@@ -1705,12 +1735,12 @@ fn path(px: vec2f)->Sample {
     var m = sf.m;
     shading.tangent=tangent;
     // Partly transparent surfaces: pass straight through with 1 − opacity.
-    if (m.extra.z < 0.999 && rnd() >= m.extra.z) {
-      ro = sf.p + rd * ray_epsilon();
+    let front = dot(rd, sf.ng) < 0.0;
+    if ((m.extra.z < 0.999 && rnd() >= m.extra.z) || (!front && (u32(m.policy.y) & 4u) == 0u)) {
+      minimum = coverage_minimum(sf.p, h.t);
+      ro = sf.p;
       continue;
     }
-    let front = dot(rd, sf.ng) < 0.0;
-    if (!front && (u32(m.policy.y) & 4u) == 0u) { ro = sf.p + rd * ray_epsilon(); continue; }
     ambient_response = m.policy.x;
     var n = sf.n;
     var ng = sf.ng;

@@ -286,7 +286,10 @@
       visibility: 'visible', position: 'fixed', inset: '0',
       width: '100%', height: '100%', 'box-sizing': 'border-box',
       'min-width': '0', 'min-height': '0', 'max-width': '100%', 'max-height': '100%',
-      'clip-path': 'inset(0)', overflow: 'clip',
+      // Some extensions put their rows directly in the contribution. Give
+      // those rows a scroll viewport; the wheel listener still gives a
+      // nested list first refusal and forwards the remainder to the dock.
+      'clip-path': 'inset(0)', 'overflow-x': 'hidden', 'overflow-y': 'auto',
     };
     for (const [key, value] of Object.entries(bounds))
       root.style.setProperty(key, value, 'important');

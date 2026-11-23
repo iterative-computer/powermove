@@ -1,4 +1,4 @@
-//! Frozen autonomous Codex CLI contract. App Server remains the editor transport.
+//! Autonomous Codex CLI contract used when the App Server cannot initialize.
 use crate::{
     Access, ApprovalMode, Effects, Event, RunResult, approvals::Authority, codex::tool_trace, text,
 };

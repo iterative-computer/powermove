@@ -18,6 +18,9 @@ pub struct EventDetail {
     pub repeat: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<Value>,
+    /// The draft generation when the native Agent editor sampled its text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub composer_epoch: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shift_key: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -222,6 +225,7 @@ mod tests {
             composing: Some(true),
             composition: Some((1, 3)),
             meta_key: Some(true),
+            composer_epoch: Some(1),
             ..Default::default()
         };
         let event = interaction

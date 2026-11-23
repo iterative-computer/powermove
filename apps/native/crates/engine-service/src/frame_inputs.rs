@@ -496,6 +496,126 @@ fn string(node: &Node) -> Option<String> {
     }
 }
 
+/// Layer types `pm_render`'s plan never draws from a still, video or
+/// image-sequence file: their draws are vectors, text, solids, shaders, 3D
+/// objects or nothing. (`precomp` is followed into its composition.)
+const NO_FILE_MEDIA: [&str; 10] = [
+    "shape",
+    "solid",
+    "text",
+    "captions",
+    "null",
+    "audio",
+    "group",
+    "adjustment",
+    "shader",
+    "extension",
+];
+
+/// Whether `comp`, or a composition it nests (a precomp layer's, transitively),
+/// has a layer drawn from a still, a video or an image sequence: the only
+/// sources `pm_render::Renderer::prepare_media` warms ahead of the playhead
+/// (its plan's `Source::Image` and `Source::Video` draws, which only `image`
+/// and `video` layers make). Without one, that look-ahead builds a whole
+/// plan to find nothing.
+///
+/// Conservative: the composition's layers are looked at whatever their span
+/// or visibility, the project's media table is not (an asset no layer draws
+/// is never prepared), and a layer of any type not known to draw no file, or
+/// a composition that does not resolve, counts as media.
+pub fn draws_visual_media(doc: &pm_model::Document, comp: &str) -> bool {
+    use pm_eval::node::{array, member};
+    let Ok(resolved) = pm_eval::Comp::resolve(doc, comp) else {
+        return true;
+    };
+    let comps = resolved.root().get("comps");
+    // A precomp's composition as the plan finds it (`comps[id]`), or, failing
+    // that, however the document resolves the id.
+    let layers_of = |id: &str| {
+        comps
+            .and_then(|comps| comps.get(id))
+            .and_then(|nested| array(member(Some(nested), "layers")))
+            .or_else(|| pm_eval::Comp::resolve(doc, id).ok().map(|c| c.layers()))
+    };
+    let first = resolved.layers();
+    // Layer arrays already queued: a precomp cycle is walked once.
+    let mut seen: Vec<*const Node> = vec![first.as_ptr()];
+    let mut stack = vec![first];
+    while let Some(layers) = stack.pop() {
+        for layer in layers {
+            let ty = member(Some(layer), "type").and_then(string);
+            match ty.as_deref() {
+                Some(kind) if NO_FILE_MEDIA.contains(&kind) => {}
+                Some("precomp") => {
+                    if let Some(nested) = member(member(Some(layer), "d"), "comp")
+                        .and_then(string)
+                        .and_then(|id| layers_of(id.as_str()))
+                        && !seen.contains(&nested.as_ptr())
+                    {
+                        seen.push(nested.as_ptr());
+                        stack.push(nested);
+                    }
+                }
+                // `image` and `video` (an image sequence is either), and
+                // any type this does not know.
+                _ => return true,
+            }
+        }
+    }
+    false
+}
+
+/// [`draws_visual_media`] for the scene last asked about: the frame loop asks
+/// on every look-ahead (four times a second while playing), the answer
+/// changes only with the document, its content identity or the composition.
+#[derive(Default)]
+pub(crate) struct VisualMediaCache {
+    /// The document (held weakly: its allocation, never its tree, so no other
+    /// document can take its address while this is kept), its revision, the
+    /// scene's content identity, the composition, and the answer.
+    known: Option<(
+        std::sync::Weak<pm_model::Document>,
+        u64,
+        u64,
+        String,
+        bool,
+    )>,
+    /// Walks made (tests).
+    #[cfg(test)]
+    pub(crate) walks: u32,
+}
+
+impl VisualMediaCache {
+    pub(crate) fn get(
+        &mut self,
+        doc: &std::sync::Arc<pm_model::Document>,
+        content: u64,
+        comp: &str,
+    ) -> bool {
+        if let Some((known, revision, known_content, known_comp, media)) = &self.known
+            && std::ptr::eq(known.as_ptr(), std::sync::Arc::as_ptr(doc))
+            && *revision == doc.revision()
+            && *known_content == content
+            && known_comp == comp
+        {
+            return *media;
+        }
+        let media = draws_visual_media(doc, comp);
+        #[cfg(test)]
+        {
+            self.walks += 1;
+        }
+        self.known = Some((
+            std::sync::Arc::downgrade(doc),
+            doc.revision(),
+            content,
+            comp.to_owned(),
+            media,
+        ));
+        media
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,5 +864,201 @@ mod tests {
         let mut b = a.clone();
         b["layers"][1]["p"]["opacity"]["v"] = 50.into();
         assert_eq!(changed(&a, &b), frames(57..93));
+    }
+}
+
+#[cfg(test)]
+mod visual_media_tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+
+    const ROOT: &str = "Proot";
+
+    fn layer(id: &str, ty: &str) -> Value {
+        json!({"id": id, "type": ty, "name": id, "from": 0, "dur": 4, "d": {}})
+    }
+    fn media(id: &str, ty: &str, asset: &str) -> Value {
+        json!({"id": id, "type": ty, "name": id, "from": 0, "dur": 4, "d": {"asset": asset}})
+    }
+    fn precomp(id: &str, comp: &str) -> Value {
+        json!({"id": id, "type": "precomp", "name": id, "from": 0, "dur": 4, "d": {"comp": comp}})
+    }
+    fn comp(id: &str, layers: Value) -> Value {
+        json!({"id": id, "name": id, "w": 100, "h": 100, "fps": 30, "dur": 4, "layers": layers})
+    }
+    /// Every layer type that draws no file, as `launch.pmv`'s `Main` has them.
+    fn no_media_layers() -> Value {
+        let mut group = layer("Lgroup", "group");
+        group["d"] = json!({});
+        let mut member = layer("Lmember", "text");
+        member["group"] = json!("Lgroup");
+        let mut hidden = layer("Lhidden", "shape");
+        hidden["on"] = json!(false);
+        json!([
+            layer("Ltext", "text"),
+            layer("Lcaptions", "captions"),
+            layer("Lshape", "shape"),
+            layer("Lsolid", "solid"),
+            layer("Lshader", "shader"),
+            media("Laudio", "audio", "Aaudio"),
+            group,
+            member,
+            hidden,
+            layer("Ladjust", "adjustment"),
+            layer("Lnull", "null"),
+            layer("Lext", "extension"),
+        ])
+    }
+    /// A project whose media table holds a still, a video and an audio file,
+    /// and whose `comps` hold one composition with a still, one with a video,
+    /// and `extra`.
+    fn project(layers: Value, extra: &[(&str, Value)]) -> Value {
+        let mut comps = serde_json::Map::new();
+        comps.insert(
+            "Cimg".into(),
+            comp("Cimg", json!([media("Limg", "image", "Aimg")])),
+        );
+        comps.insert(
+            "Cvid".into(),
+            comp("Cvid", json!([media("Lvid", "video", "Avid")])),
+        );
+        for (id, c) in extra {
+            comps.insert((*id).into(), c.clone());
+        }
+        json!({
+            "id": ROOT, "name": "p", "w": 640, "h": 360, "fps": 30, "dur": 4,
+            "bg": "#000000", "revision": 1, "work": [0, 4], "markers": [],
+            "assets": {
+                "Aimg": {"name": "Pasted Image.png", "type": "image", "w": 10, "h": 10},
+                "Avid": {"name": "clip.mov", "type": "video", "w": 10, "h": 10},
+                "Aaudio": {"name": "GOOD TIMES.mp3", "type": "audio"},
+            },
+            "comps": comps,
+            "layers": layers,
+        })
+    }
+    fn doc(project: &Value, revision: u64) -> pm_model::Document {
+        let parsed = pm_model::json::parse(&project.to_string()).unwrap();
+        pm_model::Document::new(Some(parsed), revision)
+    }
+    fn visual(project: &Value, comp: &str) -> bool {
+        draws_visual_media(&doc(project, 1), comp)
+    }
+
+    #[test]
+    fn a_composition_without_stills_or_videos_has_none_whatever_the_media_table_holds() {
+        let p = project(no_media_layers(), &[]);
+        // The media table holds a still and a video, and other compositions
+        // draw them; this one does not.
+        assert!(!visual(&p, ROOT));
+        // `launch.pmv`: Main is not the open composition and has no file
+        // media layer, while the open one does.
+        let main = comp("Cmain", no_media_layers());
+        let p = project(json!([media("Limg", "image", "Aimg")]), &[("Cmain", main)]);
+        assert!(!visual(&p, "Cmain"));
+        assert!(visual(&p, ROOT));
+        // Nothing at all.
+        assert!(!visual(&project(json!([]), &[]), ROOT));
+    }
+
+    #[test]
+    fn a_still_video_or_sequence_layer_is_found() {
+        for (ty, asset) in [("image", "Aimg"), ("video", "Avid")] {
+            let mut layers = no_media_layers();
+            layers
+                .as_array_mut()
+                .unwrap()
+                .push(media("Lfile", ty, asset));
+            assert!(visual(&project(layers.clone(), &[]), ROOT), "{ty}");
+            // Hidden, or outside the composition's time: still found.
+            let last = layers.as_array().unwrap().len() - 1;
+            layers[last]["on"] = json!(false);
+            layers[last]["from"] = json!(100);
+            assert!(visual(&project(layers, &[]), ROOT), "{ty} hidden");
+        }
+        // An image sequence is a video (or image) layer of a sequence asset.
+        let mut p = project(json!([media("Lseq", "video", "Aseq")]), &[]);
+        p["assets"]["Aseq"] = json!({"name": "seq_0001.png", "type": "video",
+            "sequence": {"pattern": "seq_####.png", "first": 1, "last": 10}});
+        assert!(visual(&p, ROOT));
+        // The other compositions directly.
+        let p = project(json!([]), &[]);
+        assert!(visual(&p, "Cimg"));
+        assert!(visual(&p, "Cvid"));
+    }
+
+    #[test]
+    fn a_type_it_does_not_know_or_a_composition_that_does_not_resolve_counts_as_media() {
+        assert!(visual(&project(json!([layer("Lnew", "hologram")]), &[]), ROOT));
+        let mut untyped = layer("Lnone", "text");
+        untyped.as_object_mut().unwrap().remove("type");
+        assert!(visual(&project(json!([untyped]), &[]), ROOT));
+        assert!(visual(&project(json!([]), &[]), "Cmissing"));
+    }
+
+    #[test]
+    fn nested_compositions_are_followed_and_a_cycle_ends() {
+        // Root → A → B → the still.
+        let a = comp("Ca", json!([layer("Lshape", "shape"), precomp("Lb", "Cb")]));
+        let b = comp("Cb", json!([precomp("Limg", "Cimg")]));
+        let p = project(json!([precomp("La", "Ca")]), &[("Ca", a), ("Cb", b)]);
+        assert!(visual(&p, ROOT));
+        // A ↔ B with nothing drawn from a file: the walk ends, none.
+        let a = comp("Ca", json!([layer("Ltext", "text"), precomp("Lb", "Cb")]));
+        let b = comp("Cb", json!([precomp("La", "Ca"), precomp("Lself", "Cb")]));
+        let p = project(
+            json!([precomp("La", "Ca"), precomp("Lroot", ROOT)]),
+            &[("Ca", a.clone()), ("Cb", b.clone())],
+        );
+        assert!(!visual(&p, ROOT));
+        assert!(!visual(&p, "Ca"));
+        // The same cycle with a video behind it.
+        let mut b = b;
+        b["layers"]
+            .as_array_mut()
+            .unwrap()
+            .push(precomp("Lvid", "Cvid"));
+        let p = project(json!([precomp("La", "Ca")]), &[("Ca", a), ("Cb", b)]);
+        assert!(visual(&p, ROOT));
+        // A precomp of a composition that does not exist draws nothing.
+        assert!(!visual(&project(json!([precomp("Lx", "Cgone")]), &[]), ROOT));
+    }
+
+    #[test]
+    fn the_answer_is_kept_per_document_revision_content_and_composition() {
+        let main = comp("Cmain", no_media_layers());
+        let without = project(json!([media("Limg", "image", "Aimg")]), &[("Cmain", main)]);
+        let mut cache = VisualMediaCache::default();
+        let one = Arc::new(doc(&without, 1));
+        assert!(!cache.get(&one, 7, "Cmain"));
+        assert!(!cache.get(&one, 7, "Cmain"));
+        assert_eq!(cache.walks, 1, "asked again, walked once");
+        // Another composition of the same document.
+        assert!(cache.get(&one, 7, ROOT));
+        assert_eq!(cache.walks, 2);
+        assert!(!cache.get(&one, 7, "Cmain"));
+        assert_eq!(cache.walks, 3);
+        // Another content identity.
+        assert!(!cache.get(&one, 8, "Cmain"));
+        assert_eq!(cache.walks, 4);
+        // An edit: a video added to Main, at the next revision.
+        let mut with = without.clone();
+        with["comps"]["Cmain"]["layers"]
+            .as_array_mut()
+            .unwrap()
+            .push(media("Lvid", "video", "Avid"));
+        let two = Arc::new(doc(&with, 2));
+        assert!(cache.get(&two, 8, "Cmain"));
+        assert_eq!(cache.walks, 5);
+        assert!(cache.get(&two, 8, "Cmain"));
+        assert_eq!(cache.walks, 5);
+        // Another document of the same revision and content (the old one
+        // gone) is looked at again, never taken for the one before.
+        drop(one);
+        drop(two);
+        let three = Arc::new(doc(&without, 2));
+        assert!(!cache.get(&three, 8, "Cmain"));
+        assert_eq!(cache.walks, 6);
     }
 }

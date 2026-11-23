@@ -322,6 +322,8 @@ pub struct Build<'r> {
     pub(crate) sampling: crate::sampling::Sampling,
     /// A playing viewer frame ([`BuildOptions::read_ahead`]).
     read_ahead: bool,
+    /// [`BuildOptions::keep_empty_groups`].
+    keep_empty_groups: bool,
     /// The output origin of the level being built (the request's at the
     /// top level, in its groups, mattes, and motion-blur samples; `(0, 0)`
     /// inside a precomp, which renders its own target).
@@ -447,6 +449,11 @@ pub struct BuildOptions {
     /// A playing viewer frame ([`RenderRequest::read_ahead`](crate::RenderRequest::read_ahead)):
     /// image sequences name the files their next frames show.
     pub read_ahead: bool,
+    /// Keep boundary groups whose members draw nothing at this time
+    /// (frames with the depth and id surface: its legend lists every
+    /// top-level draw). Otherwise such a group is left out of the plan when
+    /// leaving it out cannot change a pixel ([`draw_layer`]).
+    pub keep_empty_groups: bool,
 }
 
 /// A bounded source-local material canvas, without its receiving model.
@@ -618,6 +625,7 @@ pub(crate) fn build_reusing<'r>(
         windowed: options.origin.is_some(),
         final_output: options.final_output,
         read_ahead: options.read_ahead,
+        keep_empty_groups: options.keep_empty_groups,
         passes: Vec::new(),
         compat,
         compat_missing: Vec::new(),
@@ -651,6 +659,60 @@ fn layer_failure(b: &mut Build<'_>, comp: &Comp<'_>, layer: &Node, message: Stri
         layer: js::layer_id(layer),
         message,
     });
+}
+
+#[derive(Default)]
+struct TextDrawRun {
+    paint: crate::text::Level1PaintRun,
+    draws: Vec<TextDrawSlot>,
+    pending: Option<(String, f64)>,
+}
+
+enum TextDrawSlot {
+    Ready(Vec<Draw>),
+    Pending { layer: String, alpha: f64 },
+}
+
+impl TextDrawRun {
+    fn flush(&mut self, b: &mut Build<'_>, out: &mut Vec<Draw>) {
+        if self.draws.is_empty() {
+            return;
+        }
+        self.paint
+            .flush(b.text.as_deref_mut().expect("configured fonts"));
+        let mut ready = self.paint.completed.drain(..).peekable();
+        for (slot, draw) in self.draws.drain(..).enumerate() {
+            let painted = ready
+                .next_if(|(index, _)| *index == slot)
+                .and_then(|(_, p)| p);
+            match draw {
+                TextDrawSlot::Ready(draws) => out.extend(draws),
+                TextDrawSlot::Pending { layer, alpha } => {
+                    if let Some(p) = painted {
+                        let [x0, y0, x1, y1] = p.crop.map(f64::from);
+                        out.push(device_draw(
+                            layer,
+                            Source::Text(Box::new(p)),
+                            [x0, y0, x1 - x0, y1 - y0],
+                            alpha,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn device_draw(layer: String, source: Source, rect: [f64; 4], alpha: f64) -> Draw {
+    Draw {
+        layer,
+        matrix: [rect[2], 0.0, 0.0, rect[3], rect[0], rect[1]],
+        content: Content::Texture {
+            source,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            alpha,
+        },
+    }
 }
 
 /// `renderProject(proj, T, W, H, opt)` for one pass.
@@ -763,7 +825,9 @@ pub(crate) fn comp_pass<'d>(
         && let Some(material) = b.material.filter(|m| m.in_comp(scope.comp))
     {
         if let Some(layer) = all.iter().copied().find(|l| material.owns(l)) {
-            match draw_layer(scope, b, layer, time, width, height, scale, false, &all) {
+            match draw_layer(
+                scope, b, layer, time, width, height, scale, false, &all, None,
+            ) {
                 Ok(Some(draws)) => plan.draws = draws,
                 Ok(None) => {}
                 Err(error) => {
@@ -858,17 +922,70 @@ pub(crate) fn comp_pass<'d>(
         }
     }
     let solo = facts.solo;
+    let mut text_run = TextDrawRun::default();
+    let batch_text = pm_text::render::scene::CanvasRows::available()
+        && b.text.as_deref().is_some_and(|text| text.has_fonts())
+        && b.material.is_none()
+        && b.source_raster.is_none()
+        && b.forced_on.is_none()
+        && b.options3d.studio.is_none()
+        && b.video_center.is_none()
+        && b.matte_depth == 0
+        && !b
+            .compat
+            .is_some_and(|compat| compat.producing(crate::compat::CompatSource::RasterOverride));
     // Bottom (last) to top (first).
     for &layer in pass.iter().rev() {
         let id = node::get(layer, b"id").to_js();
         if facts.matte_sources.contains(&id) {
+            text_run.flush(b, &mut plan.draws);
             continue;
+        }
+        let candidate = batch_text
+            && js::layer_type(layer) == "text"
+            && !pm_eval::text_level2::is_level2(layer)
+            && ["fx", "masks"].into_iter().all(|key| {
+                node::array(node::member(Some(layer), key)).is_none_or(|v| v.is_empty())
+            })
+            && ["matteSource", "transitionIn", "transitionOut"]
+                .into_iter()
+                .all(|key| !node::truthy(node::member(Some(layer), key)));
+        if !candidate {
+            text_run.flush(b, &mut plan.draws);
         }
         let drawn =
             crate::reuse::draw(scope, b, layer, time, width, height, scale, solo, |s, b| {
                 pm_perf::bump(pm_perf::Counter::LayersPlanned);
-                draw_layer(s, b, layer, time, width, height, scale, solo, &all)
+                draw_layer(
+                    s,
+                    b,
+                    layer,
+                    time,
+                    width,
+                    height,
+                    scale,
+                    solo,
+                    &all,
+                    candidate.then_some(&mut text_run),
+                )
             });
+        if candidate {
+            let draws = match drawn {
+                Ok(draws) => draws.unwrap_or_default(),
+                Err(e) => {
+                    let comp = scope.comp.clone();
+                    layer_failure(b, &comp, layer, e.to_string());
+                    Vec::new()
+                }
+            };
+            let slot = if let Some((layer, alpha)) = text_run.pending.take() {
+                TextDrawSlot::Pending { layer, alpha }
+            } else {
+                TextDrawSlot::Ready(draws)
+            };
+            text_run.draws.push(slot);
+            continue;
+        }
         match drawn {
             Ok(Some(draws)) => plan.draws.extend(draws),
             Ok(None) => {}
@@ -878,6 +995,7 @@ pub(crate) fn comp_pass<'d>(
             }
         }
     }
+    text_run.flush(b, &mut plan.draws);
     b.pass3d.pop();
     plan
 }
@@ -917,6 +1035,7 @@ fn draw_layer<'d>(
     scale: (f64, f64),
     solo: bool,
     all: &[&'d Node],
+    mut text_run: Option<&mut TextDrawRun>,
 ) -> JsResult<Option<Vec<Draw>>> {
     let ty = js::layer_type(layer);
     if solo && !js::flag(layer, "solo") {
@@ -957,6 +1076,12 @@ fn draw_layer<'d>(
     let source_owner = has_fx && node::is_str(node::member(Some(layer), "effectSpace"), "source");
     let has_masks = composite::build::has_masks(scope, layer, time)?;
     let blend = composite::build::blend_mode(scope, layer, time)?;
+    if (has_fx || has_masks || blend != BlendMode::Normal)
+        && let Some(run) = text_run.take()
+    {
+        run.paint
+            .flush(b.text.as_deref_mut().expect("configured fonts"));
+    }
     // Effects prepared by the host (the effects lane); without one, a layer
     // with renderable effects is routed.
     let effects = if has_fx && !source_owner {
@@ -1080,6 +1205,12 @@ fn draw_layer<'d>(
     // Today's fast path draws straight into the accumulator; anything else
     // goes through the layer's own target.
     let slow = has_masks || has_fx || blend != BlendMode::Normal || matted || transition.is_some();
+    if (slow || blur.is_some())
+        && let Some(run) = text_run.take()
+    {
+        run.paint
+            .flush(b.text.as_deref_mut().expect("configured fonts"));
+    }
     // Motion blur samples draw straight into their accumulation. A blurred
     // layer that also needs its own target (masks, effects, matte, blend
     // mode, transition) takes the accumulation as its layer target, as
@@ -1216,6 +1347,40 @@ fn draw_layer<'d>(
         // A boundary group: its members composite into their own target,
         // drawn with the group's opacity.
         let inner = comp_pass(scope, b, time, width, height, scale, true, Some(layer));
+        // Members that draw nothing at this time (a group is active at any
+        // time, `Evaluator::active_base`; only its members' spans gate
+        // drawing): the group's target stays its clear, all `+0`. When the
+        // group's own stages keep it so and its composite cannot change the
+        // stack beneath, the group is left out, and with it two working
+        // targets and their passes. Bit-identical:
+        // - no masks or track matte (their passes, and what planning them
+        //   reports, stay as they were); every effect a reviewed program
+        //   that maps all `+0` to all `+0` reading nothing else
+        //   (`EffectPasses::preserves_zero`; generators such as `gradient`,
+        //   unreviewed or changed extension sources, and backdrop or
+        //   reference reads keep the group); no transition;
+        // - a normal blend: `src + dst·(1 − src.a)` with `src = +0` is `dst`
+        //   (`dst·1 = dst`, `dst + (+0) = dst`; only a `−0` texel of the
+        //   stack would become `+0`, and an encoded export cannot tell
+        //   them apart);
+        // - everything the group's planning reports (its effects, inputs,
+        //   transition, and its members' failures) is recorded above, as
+        //   before.
+        // Not with the depth and id surface (its legend indexes every
+        // top-level draw) or a material capture.
+        if inner.draws.is_empty()
+            && !b.keep_empty_groups
+            && b.material.is_none()
+            && !has_masks
+            && !matted
+            && transition.is_none()
+            && blend == BlendMode::Normal
+            && effects
+                .as_ref()
+                .is_none_or(|e| !e.backdrop && e.passes.preserves_zero())
+        {
+            return Ok(None);
+        }
         let draw = |alpha: f64| Draw {
             layer: id.clone(),
             matrix: full,
@@ -1243,9 +1408,30 @@ fn draw_layer<'d>(
     let padding = effects
         .as_ref()
         .map_or(composite::effects::Padding::NONE, |e| e.padding);
-    let Some(draw) =
-        layer_draw_with_padding(scope, b, layer, time, width, height, scale, alpha, padding)?
-    else {
+    let draw = if let Some(run) = text_run {
+        let slot = run.draws.len();
+        let result = layer_draw_with_padding(
+            scope,
+            b,
+            layer,
+            time,
+            width,
+            height,
+            scale,
+            alpha,
+            padding,
+            Some((&mut run.paint, slot)),
+        )?;
+        if run.paint.is_queued(slot) {
+            run.pending = Some((id.clone(), alpha));
+        }
+        result
+    } else {
+        layer_draw_with_padding(
+            scope, b, layer, time, width, height, scale, alpha, padding, None,
+        )?
+    };
+    let Some(draw) = draw else {
         return Ok(None);
     };
     if slow {
@@ -1275,7 +1461,9 @@ pub(crate) fn layer_draw<'d>(
     } else {
         composite::effects::Padding::NONE
     };
-    layer_draw_with_padding(scope, b, layer, time, width, height, scale, alpha, padding)
+    layer_draw_with_padding(
+        scope, b, layer, time, width, height, scale, alpha, padding, None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1289,8 +1477,9 @@ fn layer_draw_with_padding<'d>(
     scale: (f64, f64),
     alpha: f64,
     padding: composite::effects::Padding,
+    text: Option<(&mut crate::text::Level1PaintRun, usize)>,
 ) -> JsResult<Option<Draw>> {
-    let Some(mut quad) = content_quad(scope, b, layer, time, width, height, scale)? else {
+    let Some(mut quad) = content_quad(scope, b, layer, time, width, height, scale, text)? else {
         return Ok(None);
     };
     if matches!(quad, Quad::Screen { .. })
@@ -1433,15 +1622,7 @@ fn layer_draw_with_padding<'d>(
                 alpha,
             },
         },
-        Quad::Device { source, rect } => Draw {
-            layer: id.clone(),
-            matrix: [rect[2], 0.0, 0.0, rect[3], rect[0], rect[1]],
-            content: Content::Texture {
-                source,
-                uv: [0.0, 0.0, 1.0, 1.0],
-                alpha,
-            },
-        },
+        Quad::Device { source, rect } => device_draw(id, source, rect, alpha),
     };
     Ok(Some(draw))
 }
@@ -1596,7 +1777,9 @@ fn matte_pass<'d>(
     };
     let all = [source];
     let solo = js::flag(source, "solo");
-    match draw_layer(scope, b, source, time, width, height, scale, solo, &all) {
+    match draw_layer(
+        scope, b, source, time, width, height, scale, solo, &all, None,
+    ) {
         Ok(Some(draws)) => plan.draws.extend(draws),
         Ok(None) => {}
         Err(e) => {
@@ -1657,6 +1840,7 @@ enum Quad {
 }
 
 /// `contentQuad(L, T, W, H)`: `nativeContentQuad` plus the size anchor.
+#[allow(clippy::too_many_arguments)]
 fn content_quad<'d>(
     scope: &mut Scope<'_, 'd>,
     b: &mut Build<'_>,
@@ -1665,8 +1849,9 @@ fn content_quad<'d>(
     width: u32,
     height: u32,
     scale: (f64, f64),
+    text: Option<(&mut crate::text::Level1PaintRun, usize)>,
 ) -> JsResult<Option<Quad>> {
-    let quad = native_content_quad(scope, b, layer, time, width, height, scale)?;
+    let quad = native_content_quad(scope, b, layer, time, width, height, scale, text)?;
     let Some(mut quad) = quad else {
         return Ok(None);
     };
@@ -1695,6 +1880,7 @@ fn native_content_quad<'d>(
     width: u32,
     height: u32,
     scale: (f64, f64),
+    text: Option<(&mut crate::text::Level1PaintRun, usize)>,
 ) -> JsResult<Option<Quad>> {
     let ty = js::layer_type(layer);
     let comp_id = scope.comp.id().to_string_lossy();
@@ -1724,7 +1910,10 @@ fn native_content_quad<'d>(
             }));
         }
     }
-    if let Some(quad) = compat_quad(scope, b, layer, &ty, time, scale)? {
+    // What today's preview crop measured of a plain text layer, handed to
+    // its native draw below instead of measured again.
+    let mut measured = None;
+    if let Some(quad) = compat_quad(scope, b, layer, &ty, time, scale, &mut measured)? {
         return Ok(quad);
     }
     let (wf, hf) = b
@@ -2207,7 +2396,17 @@ fn native_content_quad<'d>(
                 },
             }
         }
-        "text" | "captions" => text_quad(scope, b, layer, &ty, time, (width, height), scale),
+        "text" | "captions" => text_quad(
+            scope,
+            b,
+            layer,
+            &ty,
+            time,
+            (width, height),
+            scale,
+            measured,
+            text,
+        ),
         "null" | "audio" | "group" => Ok(None),
         other => {
             b.unsupported.push(Unsupported::layer(
@@ -2226,6 +2425,7 @@ fn native_content_quad<'d>(
 /// session has a `raster` override. `None`: drawn natively. `Some(None)`:
 /// nothing is drawn (between caption cues, or still missing: the frame
 /// then needs it).
+#[allow(clippy::too_many_arguments)]
 fn compat_quad<'d>(
     scope: &mut Scope<'_, 'd>,
     b: &mut Build<'_>,
@@ -2233,6 +2433,7 @@ fn compat_quad<'d>(
     ty: &str,
     time: f64,
     scale: (f64, f64),
+    measured: &mut Option<crate::text::Level1Measured>,
 ) -> JsResult<Option<Option<Quad>>> {
     use crate::compat::{CompatAnswer, CompatSource};
     let Some(compat) = b.compat else {
@@ -2256,9 +2457,13 @@ fn compat_quad<'d>(
     let raster_scale = crate::text::continuous_raster_scale(&world);
     // Today's preview source clipping: the window the compositor passes to
     // `PM.raster` in a viewer frame, or no raster call at all.
-    let crop = match preview_crop(scope, b, layer, ty, time, scale, raster_scale)? {
+    let (crop, text) = preview_crop(scope, b, layer, ty, time, scale, raster_scale)?;
+    let crop = match crop {
         crate::compat_crop::CropPlan::Outside => return Ok(Some(None)),
-        crate::compat_crop::CropPlan::Solid => return Ok(None),
+        crate::compat_crop::CropPlan::Solid => {
+            *measured = text;
+            return Ok(None);
+        }
         crate::compat_crop::CropPlan::Full => None,
         crate::compat_crop::CropPlan::Crop(window) => Some(window),
     };
@@ -2272,7 +2477,10 @@ fn compat_quad<'d>(
         CompatSource::RasterOverride,
         crop,
     ) {
-        CompatAnswer::Native => Ok(None),
+        CompatAnswer::Native => {
+            *measured = text;
+            Ok(None)
+        }
         CompatAnswer::Raster(raster) => {
             let [w, h] = raster.size;
             // Today's compositor centres a plain shape's raster on the layer
@@ -2326,7 +2534,9 @@ fn compat_quad<'d>(
 /// of the open root composition, for a plain 2D text or shape layer (no
 /// paths, renderable effects, masks, track matte, or transitions; text
 /// without animators, styles, or typography anchoring). Anything else is
-/// drawn from the whole raster, as today.
+/// drawn from the whole raster, as today. With it, what was measured of a
+/// plain text layer ([`crate::text::TextContext::level1_raster`]), for the
+/// layer's native draw.
 #[allow(clippy::too_many_arguments)]
 fn preview_crop<'d>(
     scope: &mut Scope<'_, 'd>,
@@ -2336,16 +2546,19 @@ fn preview_crop<'d>(
     time: f64,
     scale: (f64, f64),
     raster_scale: f64,
-) -> JsResult<crate::compat_crop::CropPlan> {
+) -> JsResult<(
+    crate::compat_crop::CropPlan,
+    Option<crate::text::Level1Measured>,
+)> {
     use crate::compat_crop::{CropPlan, ShapeFacts, TextGeometry};
     let Some(window) = b.preview else {
-        return Ok(CropPlan::Full);
+        return Ok((CropPlan::Full, None));
     };
     if !matches!(ty, "text" | "shape")
         || !(scope.comp.at_root() || scope.comp.is_open_canonical())
         || b.precomp_depth > 0
     {
-        return Ok(CropPlan::Full);
+        return Ok((CropPlan::Full, None));
     }
     let d = node::member(Some(layer), "d");
     let listed = |n: Option<&Node>, key: &str| {
@@ -2361,12 +2574,12 @@ fn preview_crop<'d>(
         || node::truthy(node::member(Some(layer), "transitionOut"))
         || scope.has_renderable_effects(layer, time)?
     {
-        return Ok(CropPlan::Full);
+        return Ok((CropPlan::Full, None));
     }
     // A 3D layer's plane: drawn from the whole raster here (see
     // docs/engine/extensions-compat.md, "Crop").
     if scope.is_3d_layer(layer)? {
-        return Ok(CropPlan::Full);
+        return Ok((CropPlan::Full, None));
     }
     let mut visible = vector_world(scope, b, layer, time, scale)?;
     visible[4] -= window.x;
@@ -2387,24 +2600,27 @@ fn preview_crop<'d>(
             plain_rect,
             corner_inset: pm_vector::corner::corner_inset(&shape.corners()),
         };
-        return Ok(crate::compat_crop::shape_plan(
+        let plan = crate::compat_crop::shape_plan(
             &facts,
             raster_scale,
             &visible,
             window.width,
             window.height,
-        ));
+        );
+        return Ok((plan, None));
     }
     if listed(d, "animators")
         || listed(d, "styles")
         || node::truthy(node::member(d, "fontAnchorBounds"))
     {
-        return Ok(CropPlan::Full);
+        return Ok((CropPlan::Full, None));
     }
-    let Some(fonts) = b.text.as_deref_mut().and_then(|t| t.fonts.as_deref_mut()) else {
-        return Ok(CropPlan::Full);
+    let Some(text) = b.text.as_deref_mut().filter(|t| t.has_fonts()) else {
+        return Ok((CropPlan::Full, None));
     };
-    let placed = scope.text_raster(layer, time, fonts.measure())?;
+    // `scope.text_raster` with the fonts as they stand (not synced here),
+    // and what it was measured from.
+    let (placed, measured) = text.level1_raster(scope, layer, time)?;
     let g = TextGeometry::at(
         placed.w,
         placed.h,
@@ -2412,12 +2628,8 @@ fn preview_crop<'d>(
         placed.anchor_y,
         raster_scale,
     );
-    Ok(crate::compat_crop::text_plan(
-        &g,
-        &visible,
-        window.width,
-        window.height,
-    ))
+    let plan = crate::compat_crop::text_plan(&g, &visible, window.width, window.height);
+    Ok((plan, measured))
 }
 
 /// The quad of a planned shader or extension fragment layer: `{tex, w, h,
@@ -2710,7 +2922,10 @@ fn device_quad(q: crate::vector::VectorQuad) -> Quad {
 }
 
 /// A text or captions layer's raster quad (`crate::text`), at the density
-/// `continuousRasterScale(scaledWorld(L, T, W, H))` asks for.
+/// `continuousRasterScale(scaledWorld(L, T, W, H))` asks for. `measured`:
+/// what the layer's preview crop measured of it this frame, if anything
+/// (used only while it still holds, see `TextContext::level1_raster`).
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn text_quad<'d>(
     scope: &mut Scope<'_, 'd>,
@@ -2720,6 +2935,8 @@ fn text_quad<'d>(
     time: f64,
     target: (u32, u32),
     scale: (f64, f64),
+    measured: Option<crate::text::Level1Measured>,
+    mut deferred: Option<(&mut crate::text::Level1PaintRun, usize)>,
 ) -> JsResult<Option<Quad>> {
     let comp_id = scope.comp.id().to_string_lossy();
     let world = b.world(scope, layer, time, scale)?;
@@ -2735,6 +2952,9 @@ fn text_quad<'d>(
         return Ok(None);
     }
     let level2 = node::to_number(node::member(Some(layer), "compat")) >= 2.0;
+    if level2 && let Some((run, _)) = deferred.take() {
+        run.flush(text);
+    }
     if level2 && scope.is_3d_layer(layer)? {
         return local_text(scope, b, layer, ty, time, scale);
     }
@@ -2777,7 +2997,7 @@ fn text_quad<'d>(
     if let Some(m) = device_world.filter(|m| !crate::raster_roi::at_rest(m)) {
         let m = kurbo::Affine::new(m);
         let plan = if ty == "text" {
-            text.text_layer_level1_device(scope, layer, time, m, target)?
+            text.level1_device(scope, layer, time, m, target, measured, deferred)?
         } else {
             text.captions_layer_level1_device(scope, layer, time, m, target)?
         };
@@ -2793,9 +3013,12 @@ fn text_quad<'d>(
             }
         }));
     }
+    if let Some((run, _)) = deferred {
+        run.flush(text);
+    }
     let density = crate::text::continuous_raster_scale(&world);
     let quad = if ty == "text" {
-        text.text_layer(scope, layer, time, density)?
+        text.text_layer_measured(scope, layer, time, density, measured)?
     } else {
         text.captions_layer(scope, layer, time, density)?
     };
@@ -3581,6 +3804,223 @@ mod tests {
 
     fn parse(s: &str) -> Node {
         Node::from_value(pm_model::json::parse(s).unwrap(), 0)
+    }
+
+    /// Empty boundary groups (`draw_layer`): a group with effects whose
+    /// one member is outside its span at the frame's time.
+    mod empty_groups {
+        use super::*;
+        use crate::effects::bounds::tests::{DOT_MATRIX, dot_matrix_definition};
+        use pm_protocol::definitions::DefinitionKind;
+        use serde_json::{Value, json};
+
+        fn ch(v: Value) -> Value {
+            json!({"v": v, "kf": [], "expr": null})
+        }
+
+        fn transform() -> Value {
+            let mut p = serde_json::Map::new();
+            for (key, value) in [
+                ("position.x", 160.),
+                ("position.y", 90.),
+                ("position.z", 0.),
+                ("anchor.x", 0.),
+                ("anchor.y", 0.),
+                ("anchor.z", 0.),
+                ("scale.x", 100.),
+                ("scale.y", 100.),
+                ("scale.z", 100.),
+                ("rotation", 0.),
+                ("rotation.x", 0.),
+                ("rotation.y", 0.),
+                ("orientation.x", 0.),
+                ("orientation.y", 0.),
+                ("orientation.z", 0.),
+                ("opacity", 100.),
+                ("skew", 0.),
+                ("perspective", 50.),
+            ] {
+                p.insert(key.into(), ch(json!(value)));
+            }
+            Value::Object(p)
+        }
+
+        fn layer(id: &str, ty: &str, d: Value, from: f64, group: Option<&str>, fx: Value) -> Value {
+            json!({
+                "id": id, "type": ty, "name": id, "from": from, "dur": 1, "on": true,
+                "lock": false, "shy": false, "threeD": false, "solo": false, "blend": "normal",
+                "mblur": false, "parent": null, "group": group, "matteSource": null,
+                "p": transform(), "fx": fx, "transitionIn": null, "transitionOut": null,
+                "masks": [], "d": d
+            })
+        }
+
+        /// A group `g` with `fx` (and `edit` applied to it) holding one solid
+        /// that starts at `member_from` (seconds; the frame is at 0.5 s).
+        fn document(fx: Value, member_from: f64, edit: impl Fn(&mut Value)) -> pm_model::Document {
+            let mut group = layer("g", "group", json!({}), 0., None, fx);
+            group["dur"] = json!(10);
+            edit(&mut group);
+            let member = layer(
+                "s",
+                "solid",
+                json!({"w": 100, "h": 50, "color": "#F0C040"}),
+                member_from,
+                Some("g"),
+                json!([]),
+            );
+            let root = pm_model::json::parse(
+                &json!({
+                    "id": "p", "compId": "c", "w": 320, "h": 180, "fps": 30, "dur": 10,
+                    "comps": {}, "layers": [group, member]
+                })
+                .to_string(),
+            )
+            .unwrap();
+            pm_model::Document::new(Some(pm_model::canonical::canonical_project(root)), 1)
+        }
+
+        /// The built-ins and `dot-matrix-resolve` with `source`, translated.
+        fn host(source: &str) -> crate::effects::Effects {
+            let mut effects = crate::effects::Effects::new("test");
+            let mut set = crate::effects::builtin_definitions();
+            set.definitions.push(dot_matrix_definition(source));
+            effects.set_snapshot(&set).unwrap();
+            for id in ["blur", "gradient", "dot-matrix-resolve"] {
+                assert!(
+                    matches!(
+                        effects.status(DefinitionKind::Effect, id),
+                        Some(crate::effects::Status::Ready)
+                    ),
+                    "{id} translates"
+                );
+            }
+            effects
+        }
+
+        /// The top level's draws at 0.5 s (every build reports nothing).
+        fn draws(
+            effects: &crate::effects::Effects,
+            doc: &pm_model::Document,
+            options: BuildOptions,
+        ) -> usize {
+            let comp = Comp::resolve(doc, "c").unwrap();
+            let mut ev = Evaluator::new();
+            let assets = crate::MapResolver::default();
+            let (plan, b) = build_with(
+                &mut ev,
+                &comp,
+                &comp,
+                0.5,
+                320,
+                180,
+                (1., 1.),
+                &assets,
+                Some(effects),
+                crate::scene3d::Options3d::default(),
+                None,
+                options,
+                None,
+            );
+            assert!(b.failures.is_empty(), "{:?}", b.failures);
+            assert!(b.unsupported.is_empty(), "{:?}", b.unsupported);
+            plan.draws.len()
+        }
+
+        fn dots() -> Value {
+            json!({"id": "dm", "type": "dot-matrix-resolve", "on": true,
+                "p": {"resolve": ch(json!(40)), "detail": ch(json!(2.5)), "pitch": ch(json!(10))}})
+        }
+        fn blur() -> Value {
+            json!({"id": "b", "type": "blur", "on": true, "p": {"amount": ch(json!(6))}})
+        }
+        fn gradient() -> Value {
+            json!({"id": "gr", "type": "gradient", "on": true, "p": {}})
+        }
+
+        #[test]
+        fn a_group_that_draws_nothing_through_zero_preserving_effects_is_left_out() {
+            let effects = host(DOT_MATRIX);
+            let none = |_: &mut Value| {};
+            let half = |g: &mut Value| g["p"]["opacity"] = ch(json!(50));
+            let o = BuildOptions::default();
+            for fx in [
+                json!([]),
+                json!([dots()]),
+                json!([blur()]),
+                json!([blur(), dots()]),
+            ] {
+                // A member that draws: the group draws.
+                assert_eq!(
+                    draws(&effects, &document(fx.clone(), 0., none), o),
+                    1,
+                    "{fx}"
+                );
+                // None does: left out.
+                assert_eq!(
+                    draws(&effects, &document(fx.clone(), 5., none), o),
+                    0,
+                    "{fx}"
+                );
+                // Kept for the depth and id surface.
+                let keep = BuildOptions {
+                    keep_empty_groups: true,
+                    ..o
+                };
+                assert_eq!(
+                    draws(&effects, &document(fx.clone(), 5., half), keep),
+                    1,
+                    "{fx}"
+                );
+                // At half opacity (a boundary for that alone without
+                // effects): left out the same way.
+                assert_eq!(draws(&effects, &document(fx, 5., half), o), 0);
+            }
+            // An effect switched off is not a stage.
+            let mut off = gradient();
+            off["on"] = json!(false);
+            assert_eq!(draws(&effects, &document(json!([off]), 5., half), o), 0);
+        }
+
+        #[test]
+        fn a_group_whose_stages_can_draw_from_nothing_is_kept() {
+            let effects = host(DOT_MATRIX);
+            let none = |_: &mut Value| {};
+            let o = BuildOptions::default();
+            // A generator draws from a transparent input.
+            assert_eq!(
+                draws(&effects, &document(json!([gradient()]), 5., none), o),
+                1
+            );
+            assert_eq!(
+                draws(
+                    &effects,
+                    &document(json!([dots(), gradient()]), 5., none),
+                    o
+                ),
+                1
+            );
+            // A non-normal blend.
+            let multiply = |g: &mut Value| g["blend"] = json!("multiply");
+            assert_eq!(
+                draws(&effects, &document(json!([dots()]), 5., multiply), o),
+                1
+            );
+            // `dot-matrix-resolve` from another source (one byte changed):
+            // not the reviewed program.
+            let at = DOT_MATRIX.find("* 0.5").unwrap() + "* 0.".len();
+            let mut changed = DOT_MATRIX.to_owned();
+            changed.replace_range(at..at + 1, "6");
+            let unreviewed = host(&changed);
+            assert_eq!(
+                draws(&unreviewed, &document(json!([dots()]), 5., none), o),
+                1
+            );
+            assert_eq!(
+                draws(&unreviewed, &document(json!([dots()]), 0., none), o),
+                1
+            );
+        }
     }
 
     #[test]

@@ -52,6 +52,7 @@ pub struct QuadUniform {
     pub res: [f32; 4],
     pub uv: [f32; 4],
     pub color: [f32; 4],
+    // Scene parameters, or physical source bounds in fs_draw_bounded.
     pub scene: [f32; 4],
 }
 
@@ -102,6 +103,9 @@ pub enum PassBlend {
 
 /// Every 2D pipeline, for both working formats.
 pub struct Pipelines {
+    pub(crate) direct_group_target: bool,
+    pub(crate) direct_group_draws: std::sync::atomic::AtomicU64,
+    pub(crate) effect_output_bounds: bool,
     pub quad_layout: wgpu::BindGroupLayout,
     pub texture_layout: wgpu::BindGroupLayout,
     pub fill_layout: wgpu::BindGroupLayout,
@@ -114,6 +118,7 @@ pub struct Pipelines {
     /// The compositing passes (`crate::composite`).
     pub(crate) ops: crate::composite::gpu::OpPipelines,
     draw: [LazyRenderPipeline; 3],
+    draw_bounded: [LazyRenderPipeline; 3],
     scene: [LazyRenderPipeline; 3],
     scene_add: [LazyRenderPipeline; 3],
     rect: [LazyRenderPipeline; 3],
@@ -399,6 +404,7 @@ impl Pipelines {
                 blended(layout, entry, format, over)
             };
         let draw = TARGET_FORMATS.map(|f| pipeline(&draw_layout, "fs_draw", f));
+        let draw_bounded = TARGET_FORMATS.map(|f| pipeline(&draw_layout, "fs_draw_bounded", f));
         let scene = TARGET_FORMATS.map(|f| pipeline(&draw_layout, "fs_scene", f));
         let scene_add = TARGET_FORMATS.map(|f| blended(&draw_layout, "fs_scene", f, add));
         let rect = TARGET_FORMATS.map(|f| pipeline(&solid_layout, "fs_rect", f));
@@ -598,6 +604,12 @@ impl Pipelines {
             source_layout,
             linear,
             draw,
+            direct_group_target: std::env::var_os("PM_DIRECT_GROUP_TARGET")
+                .is_none_or(|v| v != "0"),
+            direct_group_draws: Default::default(),
+            effect_output_bounds: std::env::var_os("PM_EFFECT_OUTPUT_BOUNDS")
+                .is_none_or(|v| v != "0"),
+            draw_bounded,
             scene,
             scene_add,
             rect,
@@ -613,6 +625,10 @@ impl Pipelines {
 
     pub fn draw(&self, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
         self.draw[format_index(format)].get()
+    }
+
+    pub fn draw_bounded(&self, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
+        self.draw_bounded[format_index(format)].get()
     }
 
     pub fn solid(&self, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
@@ -748,7 +764,7 @@ impl HalfModules {
                     crate::nearest_half::NEAREST_HALF_WGSL,
                     source
                 );
-                for name in ["fs_draw", "fs_background", "fs_solid", "fs_rect"] {
+                for name in ["fs_draw", "fs_draw_bounded", "fs_background", "fs_solid", "fs_rect"] {
                     let entry = format!("@fragment\nfn {name}(in: VsOut) -> @location(0) vec4<f32> {{");
                     if wgsl.contains(&entry) {
                         wgsl = wgsl.replace(&entry, &format!("fn {name}_value(in: VsOut) -> vec4<f32> {{"));

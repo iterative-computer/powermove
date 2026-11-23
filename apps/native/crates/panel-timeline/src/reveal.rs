@@ -40,6 +40,10 @@ pub struct RevealState {
     /// a clip that never had a lane, or an edited one whose lane is taken,
     /// is packed (PM-477, PM-485).
     pub held: HashMap<String, Held>,
+    /// Tracks mode: collapsed state per composition and track (area, lane).
+    /// The empty composition key identifies the project's root-level tracks.
+    /// An unrecorded track is open, matching the original track view.
+    pub(crate) tracks: HashMap<String, HashMap<(crate::tracks::Area, usize), bool>>,
 }
 /// A clip's lane as the Tracks timeline last showed it.
 #[derive(Clone, Copy, Debug, PartialEq)]

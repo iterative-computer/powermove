@@ -29,7 +29,8 @@ pub struct Raster {
     device: wgpu::Device,
     queue: wgpu::Queue,
     color: wgpu::RenderPipeline,
-    depth: wgpu::RenderPipeline,
+    perspective_depth: wgpu::RenderPipeline,
+    orthographic_depth: wgpu::RenderPipeline,
     background: wgpu::RenderPipeline,
     flip: wgpu::RenderPipeline,
     meshes: Vec<Mesh>,
@@ -50,7 +51,9 @@ impl Raster {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Studio Fast forward"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("fast.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}\n{}", pm_studio::gpu::DISPLAY_TONE_WGSL, include_str!("fast.wgsl")).into(),
+            ),
         });
         let entries = [
             wgpu::BindGroupLayoutEntry {
@@ -93,7 +96,7 @@ impl Raster {
             immediate_size: 0,
         });
         let attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x2,3=>Float32x2,4=>Float32x4,5=>Uint32];
-        let make = |depth| {
+        let make = |depth, depth_compare| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Studio Fast"),
                 layout: Some(&layout),
@@ -128,11 +131,7 @@ impl Raster {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: Some(depth),
-                    depth_compare: Some(if depth {
-                        wgpu::CompareFunction::LessEqual
-                    } else {
-                        wgpu::CompareFunction::Equal
-                    }),
+                    depth_compare: Some(depth_compare),
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
@@ -205,8 +204,9 @@ impl Raster {
             multiview_mask: None,
             cache: None,
         });
-        let color = make(false);
-        let depth = make(true);
+        let color = make(false, wgpu::CompareFunction::Equal);
+        let perspective_depth = make(true, wgpu::CompareFunction::GreaterEqual);
+        let orthographic_depth = make(true, wgpu::CompareFunction::LessEqual);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Studio Fast maps"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -217,7 +217,8 @@ impl Raster {
             device,
             queue,
             color,
-            depth,
+            perspective_depth,
+            orthographic_depth,
             background,
             flip,
             meshes: vec![],
@@ -506,6 +507,11 @@ impl Raster {
         });
         let depth_texture = self.target(request, wgpu::TextureFormat::Depth32Float);
         let depth = depth_texture.create_view(&Default::default());
+        let (depth_pipeline, depth_clear) = if input.view.orthographic_span.is_some() {
+            (&self.orthographic_depth, 1.)
+        } else {
+            (&self.perspective_depth, 0.)
+        };
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -514,14 +520,14 @@ impl Raster {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &depth,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.),
+                        load: wgpu::LoadOp::Clear(depth_clear),
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
                 }),
                 ..Default::default()
             });
-            pass.set_pipeline(&self.depth);
+            pass.set_pipeline(depth_pipeline);
             pass.set_bind_group(0, &group, &[]);
             for (_, mesh, instance) in &draws {
                 let m = &self.meshes[*mesh];
@@ -832,13 +838,8 @@ mod tests {
             .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
             .collect()
     }
-    #[test]
-    fn fast_depth_and_clip_planes_match_full_surface_queries() {
-        let gpu = pm_gpu::Gpu::new("Fast depth regression").unwrap();
-        let mut full =
-            StudioService::with_device(gpu.device.clone(), gpu.queue.clone(), 64, 48).unwrap();
-        let mut fast = Raster::new(gpu.device.clone(), gpu.queue.clone());
-        let mesh = Arc::new(crate::mesh::Mesh {
+    fn plane_mesh() -> Arc<crate::mesh::Mesh> {
+        Arc::new(crate::mesh::Mesh {
             positions: vec![
                 v3(-1., -1., 0.),
                 v3(1., -1., 0.),
@@ -849,14 +850,58 @@ mod tests {
             uvs: vec![[0.; 2]; 4],
             indices: vec![[0, 1, 2], [0, 2, 3]],
             ..Default::default()
-        });
-        let request = SceneRequest {
+        })
+    }
+    fn depth_request() -> SceneRequest {
+        SceneRequest {
             composition: "depth".into(),
             revision: 1,
             ticks: 0,
             width: 64,
             height: 48,
+        }
+    }
+    #[test]
+    fn fast_depth_keeps_close_surfaces_in_front_of_other_layers() {
+        let gpu = pm_gpu::Gpu::new("Fast close surfaces").unwrap();
+        let mut fast = Raster::new(gpu.device.clone(), gpu.queue.clone());
+        let request = depth_request();
+        let source = Planes {
+            mesh: plane_mesh(),
+            clip: [0.01, 1000.],
+            mirrored: false,
         };
+        let mut input = source.scene(&request).unwrap();
+        input.instances[1].world.0[14] = -0.00002;
+        let center_alpha = |layer: &LayerTexture| {
+            let rgba =
+                pm_gpu::readback::read_raw(&gpu.device, &gpu.queue, &layer.texture).unwrap();
+            rgba[(24 * 64 + 32) * 4 + 3]
+        };
+        for orthographic in [true, false] {
+            input.view.orthographic_span = orthographic.then_some(1.);
+            // Exercise the default far plane as well as the camera's authored
+            // perspective range. Linear depth retains precision close to the
+            // camera in the orthographic view even with the wide default.
+            input.view.clip_planes = (!orthographic).then_some(source.clip);
+            let frame = fast.render(&input, &request).unwrap();
+            assert_eq!(frame.layers[0].layer, "front");
+            assert_eq!(frame.layers[1].layer, "rear");
+            assert_eq!(
+                [center_alpha(&frame.layers[0]), center_alpha(&frame.layers[1])],
+                [255, 0],
+                "two close surfaces must have a single front layer, orthographic={orthographic}"
+            );
+        }
+    }
+    #[test]
+    fn fast_depth_and_clip_planes_match_full_surface_queries() {
+        let gpu = pm_gpu::Gpu::new("Fast depth regression").unwrap();
+        let mut full =
+            StudioService::with_device(gpu.device.clone(), gpu.queue.clone(), 64, 48).unwrap();
+        let mut fast = Raster::new(gpu.device.clone(), gpu.queue.clone());
+        let mesh = plane_mesh();
+        let request = depth_request();
         for (clip, mirrored) in [[0.1, 100.], [0.1, 5.5], [5.5, 100.]]
             .into_iter()
             .flat_map(|clip| [false, true].map(|mirrored| (clip, mirrored)))
@@ -879,9 +924,9 @@ mod tests {
                         24.5 / 48.,
                     )
                     .unwrap();
-                let expected = hit.as_ref().map_or(1., |h| {
+                let expected = hit.as_ref().map_or(0., |h| {
                     let z = 5. - h.point[2];
-                    clip[1] * (z - clip[0]) / ((clip[1] - clip[0]) * z)
+                    clip[0] * (clip[1] - z) / ((clip[1] - clip[0]) * z)
                 });
                 assert!(
                     (depth[index] - expected).abs() < 1e-5,

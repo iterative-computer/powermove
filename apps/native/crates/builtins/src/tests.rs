@@ -2821,6 +2821,89 @@ fn project_rows_follow_a_media_observation_that_lands_without_an_edit() {
     panels.close();
 }
 
+#[test]
+fn timeline_expanded_properties_use_a_scroll_window() {
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    let layers: Vec<_> = (0..180)
+        .map(|i| {
+            json!({
+                "id": format!("layer-{i}"),
+                "name": format!("Layer {i}"),
+                "type": "shape",
+                "from": 0,
+                "dur": 2,
+                "p": {"opacity": {"v": 100, "kf": [{"t": 0, "v": 50}]}},
+                "d": {"w": 10, "h": 10}
+            })
+        })
+        .collect();
+    let source = json!({
+        "id": "outline", "name": "Outline", "w": 32, "h": 18, "fps": 30,
+        "dur": 2, "assets": {}, "comps": {}, "layers": layers
+    });
+    let project = pm_model::json::parse(&source.to_string()).unwrap();
+    kernel
+        .open("outline", OpenSource::Untitled(project))
+        .wait()
+        .unwrap()
+        .unwrap();
+    let identity = pm_surface::host_api::Identity {
+        realm: "outline-timeline".into(),
+        generation: 1,
+        project: "outline".into(),
+    };
+    let mut backend = data::Backend::new(kernel, identity, "timeline", false).unwrap();
+    let request = json!({"first": 80, "visible": 20});
+    let collapsed = backend.timeline_frame(&request).unwrap();
+    assert_eq!(collapsed["window"]["retained"], true);
+    assert_eq!(collapsed["window"]["total"], 180);
+    assert_eq!(collapsed["window"]["rows"].as_array().unwrap().len(), 180);
+
+    // U with no selection opens animated properties on all the layers.
+    backend
+        .native
+        .timeline
+        .as_mut()
+        .unwrap()
+        .model
+        .reveal_property('u', false, 0, &pm_panel_timeline::PropertyFacts::default())
+        .unwrap();
+    let expanded = backend.timeline_frame(&request).unwrap();
+    let window = &expanded["window"];
+    let rows = window["rows"].as_array().unwrap();
+    assert_eq!(expanded["hasComposition"], true);
+    assert_eq!(window["total"], 360);
+    assert_eq!(window["retained"], false);
+    assert_eq!(window["first"], 60);
+    assert_eq!(rows.len(), 60);
+    assert!(rows.iter().any(|row| row["kind"] == "property"));
+    actor.shutdown();
+}
+
+#[test]
+fn builtin_panels_restart_publishes_a_new_timeline_generation() {
+    let actor = actor();
+    let mut panels = Builtins::new(actor.handle(), "synthetic", || {}).unwrap();
+    let first = finish(panels.mount("timeline").unwrap()).generation.number;
+    panels.take_publications();
+    let old_realm = panels.realm_of("timeline").unwrap();
+
+    let next = finish(panels.restart("timeline").unwrap())
+        .generation
+        .number;
+    assert!(old_realm.is_disposed());
+    assert_ne!(first, next);
+    assert!(
+        panels
+            .take_publications()
+            .iter()
+            .any(|p| p.panel == "timeline" && p.generation == next)
+    );
+    panels.close();
+    actor.shutdown();
+}
+
 /// Projects whose layers sit at the root (no `compId`) are the composition
 /// the shipped app calls `root`: the timeline shows it and names its tab.
 #[test]

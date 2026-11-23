@@ -623,7 +623,7 @@ test("the dynamic range opens on what the host chose: the project's Output", asy
   await f.root.dispose();
 });
 
-test("queue shows progress, pending controls, failed retry and completed Finder action", async () => {
+test("queue shows progress, pending controls, failed history and completed Finder action", async () => {
   const seed = initial();
   seed.queue = [
     {
@@ -667,7 +667,8 @@ test("queue shows progress, pending controls, failed retry and completed Finder 
   expect(named(f.root, "queue.cancel.1")).toBeDefined();
   expect(named(f.root, "queue.cancel.2")).toBeDefined();
   expect(named(f.root, "queue.finder.3")).toBeDefined();
-  expect(named(f.root, "queue.retry.4")).toBeDefined();
+  expect(named(f.root, "queue.remove.4")).toBeDefined();
+  expect([...f.root.host.nodes.values()].some((n) => n.props.id === "queue.retry.4")).toBe(false);
   expect(
     [...f.root.host.nodes.values()].some(
       (n) => n.props.id === "queue.remove.1",
@@ -701,7 +702,7 @@ test("each queue status has exactly its inline actions, revealed on hover and ke
     ["moveUp", "moveDown", "cancel"],
     ["cancel"],
     ["finder", "remove"],
-    ["retry", "remove"],
+    ["remove"],
     ["remove"],
   ];
   for (const [index, actions] of expected.entries()) {
@@ -1017,5 +1018,24 @@ test("Work area says what it exports: the whole composition until it is narrowed
     "Work area · whole composition",
     "Full composition",
   ]);
+  await f.root.dispose();
+});
+
+test("interrupted exports offer Retry and Remove without enabling Render Pending", async () => {
+  const seed = initial();
+  seed.queue = [{
+    id: 12,
+    name: "Recovered export",
+    format: "",
+    path: "",
+    status: "Interrupted",
+    progress: 0,
+    error: "",
+  }];
+  const f = await mounted(seed, true);
+  expect(named(f.root, "queue.job.12").props.label).toContain("Interrupted");
+  expect(named(f.root, "queue.retry.12")).toBeDefined();
+  expect(named(f.root, "queue.remove.12")).toBeDefined();
+  expect(named(f.root, "export.queue.render").props.disabled).toBe(true);
   await f.root.dispose();
 });

@@ -506,7 +506,10 @@ enum WireAnswer {
     },
 }
 fn send(out: &mut impl Write, message: &impl Serialize) -> std::io::Result<()> {
-    serde_json::to_writer(&mut *out, message)?;
+    // A start message can contain an entire document. Batch its JSON
+    // fragments before writing to the worker's pipe.
+    let mut out = std::io::BufWriter::new(out);
+    serde_json::to_writer(&mut out, message)?;
     out.write_all(b"\n")?;
     out.flush()
 }
@@ -621,13 +624,13 @@ impl ExportRequest {
     ) -> Result<Self> {
         let document = snapshot
             .document
-            .to_value()
+            .root()
             .ok_or_else(|| anyhow::anyhow!("missing document"))?;
         Ok(Self {
             job,
             spec,
             revision: snapshot.revision,
-            document: pm_model::json::to_canonical_string(&document),
+            document: pm_model::json::to_canonical_string(document),
             originals: media.originals,
             proxies: media.proxies,
             copies_of: Default::default(),
@@ -1459,38 +1462,43 @@ pub fn run_child() -> Result<()> {
             mode: Some(0o600),
             seed: 1,
         };
-        let plan = pm_export::render::plan_export_for(&job, &renderer)?;
-        let sink = FencedSink {
-            inner: pm_export::render::sink_for(&plan)?,
-            fonts: job_fonts,
-        };
-        let delivered = pm_export::render::run_export_into(
-            &mut renderer,
-            &job,
-            plan,
-            sink,
-            &gate,
-            &cancel,
-            &mut |p| {
-                let _ = emit(JobStatus {
-                    checking: p
-                        .checked
-                        .map(|c| (c as f64 / p.frames.max(1) as f64).min(1.0)),
-                    // Only when a new one was made (at most every 250 ms):
-                    // the parent keeps the last one between them.
-                    preview: p
-                        .preview
-                        .as_ref()
-                        .map(|frame| pm_protocol::priority::JobPreview {
-                            frame: u32::try_from(frame.frame).unwrap_or(u32::MAX),
-                            width: frame.width,
-                            height: frame.height,
-                            jpeg: pm_protocol::common::Bytes(frame.jpeg.clone()),
-                        }),
-                    ..status(&request.job, JobState::Running, p.fraction(), None, None)
-                });
-            },
-        )
+        let delivered = pm_export::render::with_encoder_retry(&cancel, |pacing| {
+            if pacing == pm_export::render::EncoderPacing::Backpressure {
+                let _ = emit(status(&request.job, JobState::Running, 0., None, None));
+            }
+            let plan = pm_export::render::plan_export_for(&job, &renderer)?;
+            let sink = FencedSink {
+                inner: pm_export::render::sink_for_with_pacing(&plan, pacing)?,
+                fonts: job_fonts.clone(),
+            };
+            pm_export::render::run_export_into(
+                &mut renderer,
+                &job,
+                plan,
+                sink,
+                &gate,
+                &cancel,
+                &mut |p| {
+                    let _ = emit(JobStatus {
+                        checking: p
+                            .checked
+                            .map(|c| (c as f64 / p.frames.max(1) as f64).min(1.0)),
+                        // Only when a new one was made (at most every 250 ms):
+                        // the parent keeps the last one between them.
+                        preview: p
+                            .preview
+                            .as_ref()
+                            .map(|frame| pm_protocol::priority::JobPreview {
+                                frame: u32::try_from(frame.frame).unwrap_or(u32::MAX),
+                                width: frame.width,
+                                height: frame.height,
+                                jpeg: pm_protocol::common::Bytes(frame.jpeg.clone()),
+                            }),
+                        ..status(&request.job, JobState::Running, p.fraction(), None, None)
+                    });
+                },
+            )
+        })
         .map_err(missing_frame)?;
         // What the person is told with the file: sound over full scale,
         // then what the file check noted.

@@ -7,7 +7,7 @@ use crate::{
 };
 use pm_kernel::*;
 use pm_panel_media::{Catalog, readiness::ObservedRuntime, v4::ProjectBridge};
-use pm_panel_timeline::{PropertyFacts, TimelineClient};
+use pm_panel_timeline::{PropertyFacts, Row, RowId, TimelineClient};
 use pm_surface::host_api::Query;
 use serde_json::{Value, json};
 
@@ -34,6 +34,8 @@ pub(crate) struct Models {
     pub properties: Properties,
     pub timeline: Option<TimelineClient>,
     pub(crate) timeline_view:
+        std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<pm_panel_timeline::TimelineModel>>>>,
+    pub(crate) timeline_outline:
         std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<pm_panel_timeline::TimelineModel>>>>,
     /// Where the timeline client comes from, until a panel first asks for it:
     /// indexing every channel of a large project costs seconds, and only the
@@ -99,6 +101,26 @@ pub(crate) struct Models {
     pub(crate) timeline_effect_result: Option<Result<(), String>>,
     timeline_editor: Option<TimelineEditor>,
 }
+/// Keep small outlines mounted so their wheel steps need no JS publication.
+fn retained_outline(rows: &[Row]) -> bool {
+    const BUDGET: usize = 512;
+    if rows.len() > BUDGET {
+        return false;
+    }
+    // A property can carry several values, editors and keyframe controls.
+    // Count those rows more heavily than layer rows and section headings.
+    let mut cost = rows.len();
+    for row in rows {
+        if matches!(row.id, RowId::Property { .. }) {
+            cost += 3;
+            if cost > BUDGET {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 impl Models {
     /// The timeline client, made on first use ([`Models::timeline_source`]).
     pub(crate) fn ensure_timeline(&mut self) -> Result<(), String> {
@@ -137,6 +159,7 @@ impl Models {
             properties: Properties::default(),
             timeline: None,
             timeline_view: Default::default(),
+            timeline_outline: Default::default(),
             timeline_source,
             viewer: Default::default(),
             composition_tabs: vec![],
@@ -172,10 +195,7 @@ impl Models {
         })
     }
 }
-// A disjoint actor setting namespace avoids treating any real project ID as
-// reserved. Unknown application fields are retained; concurrent writes refuse.
-/// Where the application Agent panel (no project) keeps its archives.
-pub const APPLICATION_AGENT_STORE: &str = "ext.builtin-application-agent";
+pub use pm_kernel::agent_storage::APPLICATION_STORE as APPLICATION_AGENT_STORE;
 pub(crate) struct KernelStore {
     kernel: KernelHandle,
     application: bool,
@@ -189,49 +209,42 @@ impl KernelStore {
     }
 }
 impl pm_agents::persistence::Store for KernelStore {
-    fn get(&mut self, key: &str) -> std::io::Result<Option<Value>> {
-        let state = self.kernel.state();
-        if !self.application {
-            return Ok(state.settings.get(key).map(wire));
-        }
-        match state.settings.get(APPLICATION_AGENT_STORE).map(wire) {
-            None => Ok(None),
-            Some(Value::Object(fields)) => Ok(fields.get(key).cloned()),
-            Some(_) => Err(std::io::Error::other(
-                "Unknown application Agent archive shape",
-            )),
-        }
+    fn lazy_history_attachments(&self) -> bool {
+        true
     }
-    fn set(&mut self, key: &str, value: &Value) -> std::io::Result<()> {
-        let state = self.kernel.state();
-        let (key, value) = if self.application {
-            let mut fields = match state.settings.get(APPLICATION_AGENT_STORE).map(wire) {
-                None => serde_json::Map::new(),
-                Some(Value::Object(fields)) => fields,
-                Some(_) => {
-                    return Err(std::io::Error::other(
-                        "Unknown application Agent archive shape",
-                    ));
-                }
-            };
-            fields.insert(key.into(), value.clone());
-            (APPLICATION_AGENT_STORE, Value::Object(fields))
-        } else {
-            (key, value.clone())
-        };
-        let value = model(&value).map_err(std::io::Error::other)?;
-        self.kernel
-            .state_transaction(state::StateTransaction {
-                expected_revision: Some(state.revision),
-                ops: vec![state::StateOp::Setting {
-                    key: key.into(),
-                    value: Some(value),
-                }],
+
+    fn get(&mut self, key: &str) -> std::io::Result<Option<Value>> {
+        use pm_kernel::profile::{ProfileCall, ProfileReply};
+        match self
+            .kernel
+            .profile(ProfileCall::AgentGet {
+                application: self.application,
+                key: key.into(),
             })
             .wait()
-            .ok_or_else(|| std::io::Error::other("kernel closed"))?
-            .map_err(std::io::Error::other)?;
-        Ok(())
+        {
+            Some(Ok(ProfileReply::AgentValue(value))) => Ok(value),
+            Some(Err(error)) => Err(std::io::Error::other(error)),
+            _ => Err(std::io::Error::other("Agent storage is unavailable")),
+        }
+    }
+
+    fn set(&mut self, key: &str, value: &Value) -> std::io::Result<()> {
+        use pm_kernel::profile::{ProfileCall, ProfileReply};
+        match self
+            .kernel
+            .profile(ProfileCall::AgentSet {
+                application: self.application,
+                key: key.into(),
+                expected: None,
+                value: value.clone(),
+            })
+            .wait()
+        {
+            Some(Ok(ProfileReply::Changed)) => Ok(()),
+            Some(Err(error)) => Err(std::io::Error::other(error)),
+            _ => Err(std::io::Error::other("Agent storage is unavailable")),
+        }
     }
 }
 
@@ -282,6 +295,7 @@ impl Backend {
         let time = self.time();
         let playing = self.native.facts["playing"].as_bool().unwrap_or(false);
         let p = self.published().ok_or("closed")?;
+        let outline = self.native.timeline_outline.shared().clone();
         let client = self
             .native
             .timeline
@@ -305,17 +319,27 @@ impl Backend {
             client.model.editing_property = editing;
             client.model.rebuild_rows();
         }
+        // A hosted outline decorates the same immutable model the canvas
+        // drew. A standalone panel has its own client for the same API.
+        let timeline = outline
+            .as_deref()
+            .filter(|model| model.follows_publication(&p))
+            .unwrap_or(&client.model);
         // Retain modest outlines across scrolls. Only the native host mounts rows;
-        // wheel input must never wait for another JS publication.
-        let retained = client.model.rows().len() <= 1536;
+        // wheel input must never wait for another JS publication. Property
+        // rows carry more controls and readouts than ordinary layer rows.
+        let rows = timeline.rows();
+        let retained = timeline.mode == pm_panel_timeline::TimelineMode::Layers
+            && retained_outline(rows);
         let (first, visible) = if retained {
-            (0, client.model.rows().len().max(1))
+            (0, rows.len().max(1))
         } else {
             (first, visible)
         };
-        let mut frame = pm_panel_timeline::v4::project_window(&client.model, first, visible)
+        let mut frame = pm_panel_timeline::v4::project_window(timeline, first, visible)
             .map_err(|e| e.to_string())?;
-        let fps = client.model.index.fps;
+        frame["composition"] = json!(timeline.index.comp_id);
+        let fps = timeline.index.fps;
         let numbers = layer_numbers(&p);
         let mut display = vec![];
         let editor_field = format!(
@@ -336,15 +360,15 @@ impl Backend {
                 if !numbers {
                     row["index"] = Value::Null;
                 }
-                let l = client.model.index.layer(&layer).ok_or("layer")?;
+                let l = timeline.index.layer(&layer).ok_or("layer")?;
                 row["accessibilityLabel"] = json!(format!(
                     "{}, {}",
                     l.name.to_string_lossy(),
                     super::data::kind_label(&l.kind)
                 ));
-                row["canOpen"] = json!(client.model.layer_disclosable(&layer));
+                row["canOpen"] = json!(timeline.layer_disclosable(&layer));
                 row["transformable"] = json!(l.kind != "audio");
-                row["parent"] = json!({"name":l.parent.as_deref().and_then(|p|client.model.index.layer(p)).map(|p|p.name.to_string_lossy()).unwrap_or_default(),"set":l.parent.is_some()});
+                row["parent"] = json!({"name":l.parent.as_deref().and_then(|p|timeline.index.layer(p)).map(|p|p.name.to_string_lossy()).unwrap_or_default(),"set":l.parent.is_some()});
                 if self.native.timeline_editor == Some(TimelineEditor::Name(layer.clone())) {
                     row["nameEditor"] = json!({
                         "value": l.name.to_string_lossy(),
@@ -359,7 +383,7 @@ impl Backend {
             } else {
                 let path = row["path"].as_str().ok_or("property path")?.to_owned();
                 let label = row["label"].as_str().ok_or("property label")?.to_owned();
-                let channels = client.model.track_channels(&layer, &path);
+                let channels = timeline.track_channels(&layer, &path);
                 let mut values = Vec::new();
                 let mut numeric = Vec::new();
                 let mut animated = false;
@@ -455,14 +479,12 @@ impl Backend {
                 row["animated"] = json!(animated);
                 row["keyAtPlayhead"] = json!(at_key);
                 row["previous"] = json!(
-                    client
-                        .model
+                    timeline
                         .adjacent_key(-1, time, Some((&layer, &path)))
                         .is_some()
                 );
                 row["next"] = json!(
-                    client
-                        .model
+                    timeline
                         .adjacent_key(1, time, Some((&layer, &path)))
                         .is_some()
                 );
@@ -485,8 +507,7 @@ impl Backend {
         frame["frameRate"] = json!(format!("{fps} fps"));
 
         let root = p.snapshot.root().ok_or("closed")?;
-        let active = client
-            .model
+        let active = timeline
             .index
             .comp_id
             .as_deref()
@@ -1119,6 +1140,7 @@ impl Backend {
             use pm_panel_timeline::HostEffect;
             let action = match effect {
                 HostEffect::Seek(time) => json!({"kind":"seek","time":time}),
+                HostEffect::Status(message) => json!({"kind":"status","message":message}),
                 HostEffect::TogglePlayback => json!({"kind":"command","name":"play"}),
                 HostEffect::FrameComposition => json!({"kind":"command","name":"viewer.fit"}),
                 // The editor's own timeline fits its view to the curves.
@@ -1786,7 +1808,14 @@ impl Backend {
                     .push((command.into(), self.native.export["options"].clone()));
                 self.native.export["sequence"] =
                     json!(self.native.export["sequence"].as_u64().unwrap_or(0) + 1);
-                self.export_snapshot()
+                // The sheet already has a plan for the settings it sent.
+                // Acknowledge startup without planning the same project
+                // again on the path to delivering the platform request.
+                if self.native.export["project"].is_null() {
+                    self.export_snapshot()
+                } else {
+                    Ok(self.native.export.clone())
+                }
             }
             c if c.starts_with("export.") => {
                 self.native.export["sequence"] =
@@ -2089,11 +2118,17 @@ impl Backend {
                     }
                     if action["type"] == "pickRegion" {
                         // The window shows a crosshair over the editor; what
-                        // is selected comes back through `agent_attach`.
+                        // is selected belongs to the thread that opened it.
+                        if args["target"]["project"].as_str() != Some(state.panel.project())
+                            || args["target"]["thread"].as_str() != Some(&thread)
+                        {
+                            return Err("The attachment's thread changed.".into());
+                        }
+                        let input = json!({"project":state.panel.project(), "thread":thread});
                         drop(state);
                         self.native
                             .platform
-                            .push(("agent.pickRegion".into(), Value::Null));
+                            .push(("agent.pickRegion".into(), input));
                         link.touch();
                         return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
@@ -2230,13 +2265,24 @@ impl Backend {
                     } else {
                         provider
                     };
-                    crate::agent_host::admit(action, link.available(admission_provider), live)?;
-                    if crate::agent_host::sends(action) {
-                        crate::agent_host::admit_send(&state, &thread)?;
+                    if let Some(epoch) = action["composerEpoch"].as_u64()
+                        && epoch != session.composer_epoch()
+                        && args["target"]["project"].as_str() == Some(state.panel.project())
+                        && args["target"]["thread"].as_str() == Some(&thread)
+                    {
+                        drop(state);
+                        return Ok(NativeCommand::Value(self.agent_snapshot()?));
                     }
-                    // A fresh run, or, while the thread runs, the current
-                    // one: a message sent then steers it (PM-506: a fresh id
-                    // there was refused as stale, and the steer was lost).
+                    crate::agent_host::admit(action, link.available(admission_provider), live)?;
+                    let sending = crate::agent_host::sends(action);
+                    let queue = sending && crate::agent_host::queue_composer_send(&state, &thread)?;
+                    if sending && !queue && !live && state.panel.active_runs() >= 8 {
+                        return Err(
+                            "Eight agents are already running. Wait for one to finish.".into()
+                        );
+                    }
+                    // A new turn gets a fresh run id. A live direction
+                    // reaches the running turn; queued messages reserve no run.
                     let run = state
                         .panel
                         .session(&thread)
@@ -2248,9 +2294,9 @@ impl Backend {
                     let request = new_id("request");
                     let new_thread = new_id("thread");
                     let catalogs = |provider| link.catalog(provider);
-                    let recovery_before =
+                    let admission_before =
                         (action["type"] == "resumeInterrupted").then(|| state.panel.clone());
-                    let effect = pm_panel_agentpanel::v4::dispatch_at(
+                    let effect = pm_panel_agentpanel::v4::dispatch_at_with_queue(
                         &mut state.panel,
                         sequence,
                         args,
@@ -2264,6 +2310,7 @@ impl Backend {
                             popover_open: self.native.facts["agentPopover"] == true,
                             catalogs: &catalogs,
                         },
+                        queue,
                     )
                     .map_err(|e| format!("{e:?}"))?;
                     if action["type"] == "draft"
@@ -2272,11 +2319,14 @@ impl Backend {
                         link.typed(&thread, text);
                     }
                     let now = crate::agent_host::now_ms();
-                    // Typing reaches the archive at the next checkpoint, not per key.
-                    if effect.is_none() && matches!(action["type"].as_str(), Some("draft" | "key"))
+                    // A composer send publishes its row before the provider worker
+                    // sets up the request or writes the archive.
+                    if sending
+                        || effect.is_none()
+                            && matches!(action["type"].as_str(), Some("draft" | "key"))
                     {
                         state.panel.defer_save(now);
-                    } else if let Some(before) = recovery_before {
+                    } else if let Some(before) = admission_before {
                         state
                             .panel
                             .save_recovery_admission(
@@ -2284,7 +2334,7 @@ impl Backend {
                                 before,
                                 now,
                             )
-                            .map_err(|e| format!("{e:?}"))?;
+                            .map_err(|error| error.to_string())?;
                     } else {
                         state
                             .panel
@@ -2292,14 +2342,28 @@ impl Backend {
                                 &mut KernelStore::new(self.kernel.clone(), self.application),
                                 now,
                             )
-                            .map_err(|e| format!("{e:?}"))?;
+                            .map_err(|error| format!("{error:?}"))?;
                     }
                     if let Some(run) = kept_run {
                         crate::agent_completion::keep(&link, state.panel.project(), &run);
                     }
-                    effect
+                    use pm_panel_agentpanel::model::EffectKind;
+                    match effect {
+                        Some(effect)
+                            if matches!(
+                                effect.kind,
+                                EffectKind::Send { .. }
+                                    | EffectKind::Stop
+                                    | EffectKind::Answer { .. }
+                            ) =>
+                        {
+                            state.sends.push_back(effect);
+                            None
+                        }
+                        Some(effect) if matches!(effect.kind, EffectKind::Queued) => None,
+                        effect => effect,
+                    }
                 };
-                crate::agent_host::ensure_worker(&agent, &link, &self.kernel, self.application);
                 if let Some(effect) = effect {
                     use pm_panel_agentpanel::model::{EffectKind, ShellAction};
                     let now = crate::agent_host::now_ms();
@@ -2315,12 +2379,21 @@ impl Backend {
                         EffectKind::Shell(ShellAction::Pin) => Some(("agent.pin", Value::Null)),
                         EffectKind::ChooseFiles => Some(("agent.attach", Value::Null)),
                         EffectKind::OpenAttachment { attachment, .. } => {
-                            Some(("agent.previewAttachment", attachment.clone()))
+                            let mut attachment = attachment.clone();
+                            if attachment["payloadStored"] == true
+                                && !["dataUrl", "dataBase64", "content"]
+                                    .iter()
+                                    .any(|key| attachment[*key].is_string())
+                            {
+                                pm_agents::persistence::hydrate_attachment(
+                                    &mut store,
+                                    &mut attachment,
+                                )
+                                .map_err(|error| error.to_string())?;
+                            }
+                            Some(("agent.previewAttachment", attachment))
                         }
-                        EffectKind::Send { .. }
-                        | EffectKind::Stop
-                        | EffectKind::Answer { .. }
-                        | EffectKind::StopTask { .. } => {
+                        EffectKind::StopTask { .. } => {
                             crate::agent_host::run_effect(
                                 &agent,
                                 &link,
@@ -2426,7 +2499,9 @@ impl Backend {
                 if !matches!(args["action"]["type"].as_str(), Some("draft" | "focus")) {
                     link.publish_now();
                 }
-                self.agent_snapshot()?
+                let snapshot = self.agent_snapshot()?;
+                crate::agent_host::ensure_worker(&agent, &link, &self.kernel, self.application);
+                snapshot
             }
             "profile.get" => {
                 let key = args["key"].as_str().ok_or("profile key")?;

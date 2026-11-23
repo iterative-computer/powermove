@@ -132,12 +132,39 @@ struct Key {
     usage: wgpu::TextureUsages,
 }
 
+#[derive(Default)]
+struct KeyUse {
+    frame: u64,
+    frames: u32,
+    takes: u64,
+    misses: u64,
+    outstanding: usize,
+    peak: usize,
+}
+
+type Fence = std::sync::Arc<std::sync::atomic::AtomicBool>;
+
+fn complete(fence: &Option<Fence>) -> bool {
+    fence
+        .as_ref()
+        .is_some_and(|done| done.load(std::sync::atomic::Ordering::Acquire))
+}
+
 /// Reusable targets.
 pub struct TargetPool {
     free: Vec<(Key, Target, u64)>,
     free_bytes: u64,
     frame: u64,
     free_budget: u64,
+    playback_budget: u64,
+    usage: std::collections::HashMap<Key, KeyUse>,
+    // Loan-backed storage that moved out of the idle list can still be
+    // sampled by the submitted frame. A new generation still charges it.
+    retained: std::collections::HashMap<wgpu::Texture, (u64, Option<Fence>)>,
+    retired: Vec<(u64, Option<Fence>)>,
+    eviction_bytes: u64,
+    aged_out_bytes: u64,
+    playback_high_water: u64,
     /// Bytes held by targets in the pool and taken from it.
     live_bytes: u64,
     created: u64,
@@ -150,6 +177,13 @@ impl Default for TargetPool {
             free_bytes: 0,
             frame: 0,
             free_budget: Self::FREE_BUDGET,
+            playback_budget: 0,
+            usage: Default::default(),
+            retained: Default::default(),
+            retired: Vec::new(),
+            eviction_bytes: 0,
+            aged_out_bytes: 0,
+            playback_high_water: 0,
             live_bytes: 0,
             created: 0,
         }
@@ -159,24 +193,57 @@ impl Default for TargetPool {
 impl TargetPool {
     pub fn set_free_budget(&mut self, bytes: u64) {
         self.free_budget = bytes.min(Self::FREE_BUDGET);
-        self.trim(self.live_bytes.saturating_sub(self.free_bytes) + self.free_budget);
+        self.evict_over(self.retention_budget());
     }
+    /// The total pool ceiling for visible playback, including the base pool.
+    pub fn set_playback_budget(&mut self, bytes: u64) {
+        self.playback_budget = bytes;
+        self.evict_over(self.retention_budget());
+    }
+
+    pub fn playback_retention(&self) -> bool {
+        self.playback_budget > 0
+    }
+
+    fn retention_budget(&self) -> u64 {
+        if !self.playback_retention() {
+            return self.free_budget;
+        }
+        let retired = self
+            .retired
+            .iter()
+            .filter(|(_, done)| !complete(done))
+            .map(|(bytes, _)| *bytes)
+            .sum::<u64>();
+        let checked_out = self
+            .retained
+            .iter()
+            .filter(|(texture, _)| !self.free.iter().any(|(_, t, _)| &t.texture == *texture))
+            .map(|(_, (bytes, _))| *bytes)
+            .sum::<u64>();
+        self.playback_budget.saturating_sub(retired + checked_out)
+    }
+
     pub const FREE_BUDGET: u64 = 48 << 20;
     const MAX_IDLE_FRAMES: u64 = 30;
+    /// Idle targets kept at most, at any time.
+    const MAX_FREE: usize = 128;
 
     /// Retire sizes animation has stopped using. Exact dimensions preserve
     /// textureDimensions/UV semantics in every existing shader and export.
     pub fn begin_frame(&mut self) {
+        // A frame that never reached [`Self::end_frame`] (an early return)
+        // still starts within the free budget.
+        self.retired.retain(|(_, done)| !complete(done));
+        self.evict_over(self.retention_budget());
         self.frame = self.frame.wrapping_add(1);
+        self.usage
+            .retain(|_, usage| self.frame.wrapping_sub(usage.frame) <= Self::MAX_IDLE_FRAMES);
         let mut i = 0;
         while i < self.free.len() {
             if self.frame.wrapping_sub(self.free[i].2) > Self::MAX_IDLE_FRAMES {
-                pm_perf::bump(pm_perf::Counter::TargetPoolEvictions);
-                let (_, target, _) = self.free.swap_remove(i);
-                self.free_bytes -= target.bytes();
-                self.live_bytes -= target.bytes();
-                // A submitted command may still hold a view. Do not destroy it.
-                drop(target);
+                self.aged_out_bytes += self.free[i].1.bytes();
+                self.evict(i);
             } else {
                 i += 1;
             }
@@ -201,10 +268,28 @@ impl TargetPool {
             format,
             usage,
         };
-        if let Some(i) = self.free.iter().position(|(k, _, _)| *k == key) {
+        let found = self.free.iter().position(|(k, _, _)| *k == key);
+        if self.playback_retention()
+            && (self.usage.len() < Self::MAX_FREE || self.usage.contains_key(&key))
+        {
+            let usage = self.usage.entry(key).or_default();
+            if usage.frames == 0 || usage.frame != self.frame {
+                usage.frame = self.frame;
+                usage.frames += 1;
+                usage.outstanding = 0;
+            }
+            usage.takes += 1;
+            usage.misses += u64::from(found.is_none());
+            usage.outstanding += 1;
+            usage.peak = usage.peak.max(usage.outstanding);
+        }
+        if let Some(i) = found {
             pm_perf::bump(pm_perf::Counter::TargetPoolHits);
             let target = self.free.swap_remove(i).1;
             self.free_bytes -= target.bytes();
+            if let Some((_, done)) = self.retained.get_mut(&target.texture) {
+                *done = None;
+            }
             return target;
         }
         pm_perf::bump(pm_perf::Counter::TargetPoolMisses);
@@ -235,27 +320,156 @@ impl TargetPool {
     /// except through commands already recorded (GPU order keeps those
     /// correct).
     pub fn give(&mut self, target: Target) {
+        self.push_free(target);
+        self.evict_over(self.retention_budget());
+    }
+
+    /// Returns a target whose last read in the frame being recorded is
+    /// recorded, for that frame's later takes. Unlike [`Self::give`], the
+    /// free budget waits for [`Self::end_frame`]: one full-frame working
+    /// target can exceed the whole budget (37.3 MB at 2880×1620 in half
+    /// float, against at most 48 MiB), so `give` would destroy the second
+    /// target a frame returns, and every later node would create its targets
+    /// again. Keeping it costs no memory: a dropped target that recorded
+    /// commands still use stays alive until they finish, so the frame held
+    /// it anyway. The caller must not use it afterwards except through
+    /// commands already recorded, and every later use must overwrite what it
+    /// reads (commands run in the order they are recorded).
+    pub fn recycle(&mut self, target: Target) {
+        self.push_free(target);
+        self.evict_over(u64::MAX);
+    }
+
+    /// The frame's commands are submitted: idle targets go down to the free
+    /// budget (what [`Self::recycle`] kept for the frame included).
+    pub fn end_frame(&mut self) {
+        self.evict_over(self.retention_budget());
+    }
+
+    /// Batches returned targets and fences the identities kept for future frames.
+    pub fn end_submitted_frame(
+        &mut self,
+        queue: &wgpu::Queue,
+        returned: impl IntoIterator<Item = Target>,
+    ) {
+        for target in returned {
+            self.push_free(target);
+        }
+        self.end_frame();
+        if self.playback_retention() {
+            for (_, target, _) in &self.free {
+                self.retained
+                    .entry(target.texture.clone())
+                    .or_insert_with(|| (target.bytes(), None));
+            }
+        }
+        self.playback_high_water = self.playback_high_water.max(self.playback_charged());
+        if self.retained.is_empty() && self.retired.iter().all(|(_, done)| done.is_some()) {
+            return;
+        }
+        let done = Fence::default();
+        let signal = done.clone();
+        queue.on_submitted_work_done(move || {
+            signal.store(true, std::sync::atomic::Ordering::Release)
+        });
+        // A checked-out target may be read from a kept prefix without
+        // another pool take. Fence it with every submission until returned.
+        for (_, fence) in self.retained.values_mut() {
+            *fence = Some(done.clone());
+        }
+        for (_, fence) in &mut self.retired {
+            if fence.is_none() {
+                *fence = Some(done.clone());
+            }
+        }
+    }
+
+    pub fn retired_bytes(&self) -> u64 {
+        self.retired
+            .iter()
+            .filter(|(_, done)| !complete(done))
+            .map(|(bytes, _)| *bytes)
+            .sum()
+    }
+
+    fn playback_charged(&self) -> u64 {
+        self.retained.values().map(|(bytes, _)| *bytes).sum::<u64>() + self.retired_bytes()
+    }
+
+    /// Assigned, charged, high-water, evicted and aged-out nominal pool bytes.
+    pub fn playback_stats(&self) -> (u64, u64, u64, u64, u64) {
+        (
+            self.playback_budget,
+            self.playback_charged(),
+            self.playback_high_water,
+            self.eviction_bytes,
+            self.aged_out_bytes,
+        )
+    }
+
+    fn push_free(&mut self, target: Target) {
         let key = Key {
             width: target.width(),
             height: target.height(),
             format: target.format(),
             usage: target.texture.usage(),
         };
+        if let Some(usage) = self.usage.get_mut(&key) {
+            usage.outstanding = usage.outstanding.saturating_sub(1);
+        }
         self.free_bytes += target.bytes();
         self.free.push((key, target, self.frame));
-        while self.free_bytes > self.free_budget || self.free.len() > 128 {
+    }
+
+    /// Frees the idle targets unused longest until at most `budget` bytes
+    /// and [`Self::MAX_FREE`] targets are idle.
+    fn evict_over(&mut self, budget: u64) {
+        // Retaining one more old generation can lower the remaining budget.
+        while self.free_bytes > budget.min(self.retention_budget_or_unbounded(budget))
+            || self.free.len() > Self::MAX_FREE
+        {
             let oldest = self
                 .free
                 .iter()
                 .enumerate()
-                .max_by_key(|(_, (_, _, at))| self.frame.wrapping_sub(*at))
-                .map(|(i, _)| i)
-                .unwrap();
-            pm_perf::bump(pm_perf::Counter::TargetPoolEvictions);
-            let (_, target, _) = self.free.swap_remove(oldest);
-            self.free_bytes -= target.bytes();
-            self.live_bytes -= target.bytes();
-            drop(target);
+                .min_by_key(|(_, (key, _, at))| {
+                    let heat = self
+                        .playback_retention()
+                        .then(|| self.usage.get(key))
+                        .flatten()
+                        .filter(|use_| use_.frames >= 2 && self.frame.wrapping_sub(use_.frame) <= 1)
+                        .map_or((0, 0), |use_| (use_.peak.min(4), use_.takes));
+                    (heat, *at)
+                })
+                .map(|(index, _)| index)
+                .expect("over budget");
+            self.evict(oldest);
+        }
+    }
+
+    fn retention_budget_or_unbounded(&self, budget: u64) -> u64 {
+        if budget == u64::MAX {
+            budget
+        } else {
+            self.retention_budget()
+        }
+    }
+
+    fn evict(&mut self, index: usize) {
+        pm_perf::bump(pm_perf::Counter::TargetPoolEvictions);
+        let (_, target, _) = self.free.swap_remove(index);
+        let bytes = target.bytes();
+        self.free_bytes -= bytes;
+        self.live_bytes -= bytes;
+        self.eviction_bytes += bytes;
+        self.retire_loan(&target);
+    }
+
+    fn retire_loan(&mut self, target: &Target) {
+        if let Some((bytes, done)) = self.retained.remove(&target.texture)
+            && !complete(&done)
+        {
+            self.retired.push((bytes, done));
         }
     }
 
@@ -267,20 +481,13 @@ impl TargetPool {
             .live_bytes
             .checked_sub(target.bytes())
             .expect("released target was not accounted for by this pool");
-        drop(target);
+        self.retire_loan(&target);
     }
 
     /// Frees idle targets until the pool holds at most `bytes`.
     pub fn trim(&mut self, bytes: u64) {
-        while self.live_bytes > bytes {
-            let Some((_, t, _)) = self.free.pop() else {
-                break;
-            };
-            pm_perf::bump(pm_perf::Counter::TargetPoolEvictions);
-            self.live_bytes = self.live_bytes.saturating_sub(t.bytes());
-            self.free_bytes -= t.bytes();
-            drop(t);
-        }
+        let taken = self.live_bytes.saturating_sub(self.free_bytes);
+        self.evict_over(bytes.saturating_sub(taken));
     }
 
     /// Bytes of every target this pool created and has not freed.
@@ -320,6 +527,133 @@ mod tests {
         }
         assert_eq!(pool.bytes(), 0);
         assert_eq!(pool.idle(), 0);
+    }
+
+    /// One working target's bytes at `side`² in half float.
+    fn half_bytes(side: u32) -> u64 {
+        u64::from(side) * u64::from(side) * 8
+    }
+
+    #[test]
+    fn a_target_given_back_mid_frame_is_reused_even_past_the_free_budget() {
+        let gpu = crate::device::Gpu::new("target recycle test").unwrap();
+        let side = 256;
+        // Room for one idle target, as 48 MiB is for one 2880×1620 target.
+        let budget = half_bytes(side) + half_bytes(side) / 2;
+        let take =
+            |pool: &mut TargetPool| pool.take_working(&gpu.device, side, side, Precision::Float16);
+
+        // `give` keeps the free budget: the second target is destroyed.
+        let mut given = TargetPool::new();
+        given.set_free_budget(budget);
+        given.begin_frame();
+        let (a, b) = (take(&mut given), take(&mut given));
+        given.give(a);
+        given.give(b);
+        assert_eq!(given.idle(), 1);
+        let _ = (take(&mut given), take(&mut given));
+        assert_eq!(
+            given.created(),
+            3,
+            "a given target past the budget is made again"
+        );
+
+        // `recycle` keeps both for the frame's later takes.
+        let mut pool = TargetPool::new();
+        pool.set_free_budget(budget);
+        pool.begin_frame();
+        let (a, b) = (take(&mut pool), take(&mut pool));
+        pool.recycle(a);
+        pool.recycle(b);
+        assert_eq!(pool.idle(), 2);
+        let (c, d) = (take(&mut pool), take(&mut pool));
+        assert_eq!(pool.created(), 2, "both came back from the pool");
+        assert_eq!(
+            (c.width(), c.height(), d.format()),
+            (side, side, wgpu::TextureFormat::Rgba16Float)
+        );
+        assert_ne!(c.texture, d.texture, "two live takes never share a texture");
+        pool.recycle(c);
+        pool.recycle(d);
+        // After the frame, idle memory is back within the free budget.
+        pool.end_frame();
+        assert_eq!(pool.idle(), 1);
+        assert!(pool.bytes() <= budget);
+    }
+
+    #[test]
+    fn a_frame_of_many_nodes_creates_only_its_working_set() {
+        let gpu = crate::device::Gpu::new("target working set test").unwrap();
+        let side = 128;
+        let budget = half_bytes(side);
+        let mut pool = TargetPool::new();
+        pool.set_free_budget(budget);
+        for frame in 0..3 {
+            pool.begin_frame();
+            let accumulator = pool.take_working(&gpu.device, side, side, Precision::Float16);
+            // ~170 nodes: content, a two-pass effect, and the image, each
+            // given back once the pass reading it is recorded.
+            for _ in 0..170 {
+                let content = pool.take_working(&gpu.device, side, side, Precision::Float16);
+                let pass0 = pool.take_working(&gpu.device, side, side, Precision::Float16);
+                let pass1 = pool.take_working(&gpu.device, side, side, Precision::Float16);
+                pool.recycle(pass0);
+                pool.recycle(content);
+                // The image (pass1) is drawn into the accumulator, then given back.
+                pool.recycle(pass1);
+            }
+            pool.recycle(accumulator);
+            pool.end_frame();
+            assert!(
+                pool.bytes() <= budget,
+                "frame {frame}: idle within the budget"
+            );
+        }
+        // The first frame creates its 4 live targets; each later frame
+        // creates again only what the budget did not keep (3).
+        assert_eq!(pool.created(), 4 + 3 + 3);
+    }
+
+    #[test]
+    fn a_frame_that_skipped_end_frame_starts_within_the_budget() {
+        let gpu = crate::device::Gpu::new("target begin trim test").unwrap();
+        let mut pool = TargetPool::new();
+        pool.set_free_budget(half_bytes(64));
+        pool.begin_frame();
+        let targets: Vec<_> = (0..4)
+            .map(|_| pool.take_working(&gpu.device, 64, 64, Precision::Float16))
+            .collect();
+        for t in targets {
+            pool.recycle(t);
+        }
+        assert_eq!(pool.idle(), 4);
+        pool.begin_frame();
+        assert_eq!(pool.idle(), 1);
+        assert!(pool.bytes() <= half_bytes(64));
+    }
+
+    #[test]
+    fn playback_batch_prefers_the_recurring_targets_and_shrinks_on_pause() {
+        let gpu = crate::device::Gpu::new("playback retention test").unwrap();
+        let mut pool = TargetPool::new();
+        let bytes = half_bytes(64);
+        pool.set_free_budget(bytes);
+        pool.set_playback_budget(bytes * 3);
+        let take = |pool: &mut TargetPool, side| {
+            pool.take_working(&gpu.device, side, side, Precision::Float16)
+        };
+        for frame in 0..3 {
+            pool.begin_frame();
+            let hot = (0..3).map(|_| take(&mut pool, 64)).collect::<Vec<_>>();
+            let cold = (frame == 2).then(|| take(&mut pool, 65));
+            gpu.queue.submit([]);
+            pool.end_submitted_frame(&gpu.queue, hot.into_iter().chain(cold));
+            assert_eq!(pool.idle(), 3);
+            assert_eq!(pool.created(), if frame == 2 { 4 } else { 3 });
+        }
+        pool.set_playback_budget(0);
+        assert_eq!(pool.idle(), 1);
+        assert_eq!(pool.bytes(), bytes);
     }
 
     #[test]

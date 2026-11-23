@@ -136,6 +136,7 @@ impl SurfaceView {
                 .find(|(_, handle)| handle.is_focused(window))
                 .map(|(id, _)| *id);
             let extents = self.cull.extents.borrow().clone();
+            let agent_panel = self.publication.panel == "agent";
             let scrollers: Vec<(Id, ScrollHandle)> = self
                 .prepared
                 .nodes
@@ -143,7 +144,15 @@ impl SurfaceView {
                 // A virtual list's visible window and its spacers already
                 // decide which rows exist. Starting its rows at zero here
                 // would ignore the leading spacer after a publication.
-                .filter(|n| n.scroll_y && !n.hidden && n.virtual_window.is_none())
+                .filter(|n| {
+                    // The Agent model already bounds the transcript window.
+                    // Lay it out in full so bottom follow uses real row positions
+                    // even when a streaming update invalidates the old measurements.
+                    n.scroll_y
+                        && !n.hidden
+                        && n.virtual_window.is_none()
+                        && !(agent_panel && n.semantic.as_deref() == Some("agent-conversation"))
+                })
                 .filter_map(|n| self.scrolls.get(&n.id).map(|h| (n.id, h.clone())))
                 .collect();
             let window_height = f32::from(window.viewport_size().height);

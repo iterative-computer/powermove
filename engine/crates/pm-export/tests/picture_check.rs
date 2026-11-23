@@ -331,6 +331,57 @@ fn foreign_block(frames: &mut [Vec<f32>]) {
     }
 }
 
+#[test]
+fn h264_refuses_a_shifted_layer_and_a_wrong_colour_region() {
+    let dir = scratch("h264-layer-and-colour");
+    let format = formats()
+        .into_iter()
+        .find(|f| matches!(f.codec, Codec::H264 { .. }))
+        .unwrap();
+    // A bright layer covers the right half of a dark background. Its edge
+    // crosses the three centre regions used for pixel registration.
+    let frame: Vec<_> = (0..H)
+        .flat_map(|_| {
+            (0..W).flat_map(|x| {
+                let value = if x < W / 2 { 0.1 } else { 0.9 };
+                [value, value, value, 1.0]
+            })
+        })
+        .collect();
+    let mut altered = vec![frame; FRAMES as usize];
+    let evidence = evidence(format, &altered);
+    let first_frame = altered[0].clone();
+    for y in 0..H {
+        for x in W / 2..W / 2 + 2 {
+            pixel(&mut altered[0], x, y).fill(0.1);
+        }
+    }
+    let path = write(format, &altered, &dir, "shifted-layer");
+    let (_, shifted) = examine(format, &path, &evidence);
+    assert!(
+        shifted
+            .iter()
+            .any(|problem| problem.contains("frame 0: the picture is displaced")),
+        "{shifted:?}"
+    );
+
+    altered[0] = first_frame;
+    for y in 180..244 {
+        for x in 800..864 {
+            pixel(&mut altered[3], x, y).copy_from_slice(&[0.0, 0.8, 0.0]);
+        }
+    }
+    let path = write(format, &altered, &dir, "wrong-colour");
+    let (_, wrong_colour) = examine(format, &path, &evidence);
+    assert!(
+        wrong_colour
+            .iter()
+            .any(|problem| problem.contains("frame 3 is not the picture that was rendered")),
+        "{wrong_colour:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 type Tamper = fn(&mut [Vec<f32>]);
 
 /// A wrong picture, and what the check says of it. `local` cases damage one

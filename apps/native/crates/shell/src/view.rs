@@ -1,7 +1,7 @@
 use crate::kit::Recipes as _;
 use crate::{
     layout::{self, Divider, DropPreview, DropTarget, Edge, Geometry, Layout, Rect},
-    native::{Command, Host, MenuEntry, MenuState},
+    native::{Command, Host, MenuEntry, MenuState, NativePanelGeometry},
     session::WindowState,
     workspace,
 };
@@ -10,7 +10,7 @@ use ::core::prelude::v1::test;
 use gpui::{prelude::*, *};
 use pm_design::Tokens;
 use std::{
-    cell::RefCell,
+    cell::{OnceCell, RefCell},
     collections::{BTreeMap, HashMap},
     io::Write as _,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -104,6 +104,13 @@ pub struct Editor {
     /// Where each extension body was placed this frame (its panel's
     /// animated rect, less the header and the dividers' grab).
     native_body_rects: Vec<(String, Rect)>,
+    /// The aperture clip each native body was published with (the dock
+    /// viewport and the travelling sticky header). Test mirror of
+    /// `Host::native_panel_clips` for hosts that cannot exist headless.
+    #[cfg(test)]
+    native_clip_rects: Vec<(String, Rect)>,
+    #[cfg(test)]
+    native_ground_holes: Rc<RefCell<Vec<Rect>>>,
     maximized_panel: Option<String>,
     /// Tabs of panels whose owner went away for a moment (an extension
     /// reloading), and where they were: the panel returns there.
@@ -289,6 +296,10 @@ impl Editor {
             slides: PanelSlides::default(),
             tab_slides: Default::default(),
             native_body_rects: Vec::new(),
+            #[cfg(test)]
+            native_clip_rects: Vec::new(),
+            #[cfg(test)]
+            native_ground_holes: Rc::default(),
             maximized_panel: None,
             parked: HashMap::new(),
             awaiting_panels: true,
@@ -3006,10 +3017,7 @@ impl Editor {
                     |_, _, _| (),
                     move |bounds, _, window, _| {
                         if let Some(host) = host {
-                            let host = host.borrow();
-                            host.native_panel_clips.borrow_mut().clear();
-                            host.native_panel_fades.borrow_mut().clear();
-                            host.native_panels.borrow_mut().clear();
+                            host.borrow().stage_native_panels(&NativePanelGeometry::default());
                         }
                         window.paint_quad(
                             PaintQuad::new(Bounds::new(
@@ -3353,9 +3361,13 @@ impl Editor {
         let viewer_radius = (m.panel_radius - m.border).max(0.);
         let body_radius = (m.panel_radius - m.border.max(m.splitter_reach)).max(0.);
         let (line, line_alpha) = t.line();
-        // Extension pages sit below GPUI too; their bodies are read at paint
-        // time, after this frame's layout has recorded them.
-        let native_bodies = self.host.as_ref().map(|h| h.borrow().native_panels.clone());
+        // This paint and AppKit share one placement. The background canvas
+        // paints first, after the render below has resolved the panel rects.
+        let native_geometry = Rc::new(OnceCell::<NativePanelGeometry>::new());
+        let paint_geometry = native_geometry.clone();
+        let host = self.host.clone();
+        #[cfg(test)]
+        let native_ground_holes = self.native_ground_holes.clone();
         // A resize keeps its cursor wherever the pointer goes until release.
         let resizing = match &self.gesture {
             Some(Gesture::Resize(d, ..)) if d.horizontal => Some(CursorStyle::ResizeUpDown),
@@ -3392,9 +3404,14 @@ impl Editor {
                         let (width, height) = (f32::from(b.size.width), f32::from(b.size.height));
                         let mut holes: Vec<Rect> =
                             canvas_viewer.filter(|_| native).into_iter().collect();
-                        if let Some(bodies) = &native_bodies {
-                            holes.extend(bodies.borrow().iter().map(|(_, r)| *r));
-                        }
+                        let panels = paint_geometry.get().expect("panel layout before paint");
+                        holes.extend(
+                            panels.clips.iter().filter_map(|(_, clip)| {
+                                (clip.w > 0. && clip.h > 0.).then_some(*clip)
+                            }),
+                        );
+                        #[cfg(test)]
+                        native_ground_holes.replace(holes.clone());
                         let rects = layout::outside(
                             Rect {
                                 x: 0.,
@@ -3418,10 +3435,11 @@ impl Editor {
                         if let Some(r) = canvas_viewer.filter(|_| native) {
                             fill_rounded_off(window, r, viewer_radius, viewer_corners, fill);
                         }
-                        if let Some(bodies) = &native_bodies {
-                            for (_, r) in bodies.borrow().iter() {
-                                fill_rounded_off(window, *r, body_radius, [true, true], fill);
-                            }
+                        for (_, body) in &panels.bodies {
+                            fill_rounded_off(window, *body, body_radius, [true, true], fill);
+                        }
+                        if let Some(host) = &host {
+                            host.borrow().stage_native_panels(panels);
                         }
                     },
                 )
@@ -3617,9 +3635,13 @@ impl Editor {
         if let Some(integration) = &self.integration {
             integration.open_panels(&self.open_panels(), cx);
         }
-        let mut native_bodies = vec![];
-        let mut native_clips = vec![];
-        let mut native_fades = vec![];
+        let mut native_panels = NativePanelGeometry::default();
+        let above_status = Rect {
+            x: 0.,
+            y: 0.,
+            w: f32::from(viewport.width),
+            h: (f32::from(viewport.height) - m.status - m.inset).max(0.),
+        };
         // Where each header's tabs are drawn, for drops over a header.
         let mut tab_spans: HashMap<(usize, usize), Vec<(usize, f32, f32)>> = HashMap::new();
         #[cfg(test)]
@@ -3635,7 +3657,7 @@ impl Editor {
                 .map(|i| i.native_panel_id(&id, cx))
                 .filter(|surface| {
                     (surface == &id || !self.panel_order.contains(surface))
-                        && !native_bodies.iter().any(|(key, _)| key == surface)
+                        && !native_panels.bodies.iter().any(|(key, _)| key == surface)
                 });
             let tabs = group.tabs.clone();
             let active = group.active.min(tabs.len() - 1);
@@ -3682,8 +3704,9 @@ impl Editor {
                 // The slot already includes the dock scroll. Place the body
                 // at the animated position, then clip it to the viewport
                 // and the travelling sticky header.
-                let clip = self.geometry.side_docks.get(&p.dock).map_or(body, |bounds| {
-                    let mut clip = body.intersection(*bounds);
+                let clip = body.intersection(above_status);
+                let clip = self.geometry.side_docks.get(&p.dock).map_or(clip, |bounds| {
+                    let mut clip = clip.intersection(*bounds);
                     let bottom = clip.y + clip.h;
                     let header_bottom = header_rect.y + header_rect.h + shown.y - p.rect.y;
                     clip.y = clip.y.max(header_bottom);
@@ -3691,9 +3714,9 @@ impl Editor {
                     clip
                 });
                 let (top, bottom) = self.dock_body_fade(p.dock, body);
-                native_clips.push((native_id.clone(), clip));
-                native_fades.push((native_id.clone(), [f64::from(top), f64::from(bottom)]));
-                native_bodies.push((native_id, body));
+                native_panels.clips.push((native_id.clone(), clip));
+                native_panels.fades.push((native_id.clone(), [f64::from(top), f64::from(bottom)]));
+                native_panels.bodies.push((native_id, body));
                 // The panel's material everywhere around the page (its header
                 // and the edge it leaves the dividers), and in the corners the
                 // page rounds off: one surface, as every other panel.
@@ -4386,24 +4409,12 @@ impl Editor {
             let shown: Vec<&str> = self.panel_order.iter().map(String::as_str).collect();
             integration.shown_panels(&shown, cx);
         }
-        self.native_body_rects = native_bodies.clone();
-        if let Some(host) = self.host.clone() {
-            // Publish the layout that actually painted its headers. A
-            // compositor retry of the preceding scene keeps its own slots.
-            root = root.child(
-                canvas(
-                    |_, _, _| (),
-                    move |_, _, _, _| {
-                        let host = host.borrow();
-                        *host.native_panel_clips.borrow_mut() = native_clips;
-                        *host.native_panel_fades.borrow_mut() = native_fades;
-                        *host.native_panels.borrow_mut() = native_bodies;
-                    },
-                )
-                .absolute()
-                .size_full(),
-            );
+        self.native_body_rects = native_panels.bodies.clone();
+        #[cfg(test)]
+        {
+            self.native_clip_rects = native_panels.clips.clone();
         }
+        let _ = native_geometry.set(native_panels);
         for (i, d) in self.geometry.dividers.clone().into_iter().enumerate() {
             let divd = d.clone();
             let key_divider = d.clone();
@@ -5618,8 +5629,9 @@ mod keyboard_tests {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     // Not a glob: gpui's own `test` attribute would shadow the standard one.
-    use super::{Editor, Layout, Rc, Tokens, workspace};
-    use gpui::{AnyElement, App, TestAppContext, Window};
+    use super::{Editor, Layout, Rc, Tokens, layout, native_body, workspace};
+    use crate::layout::Rect;
+    use gpui::{AnyElement, App, Context, IntoElement, ParentElement, Styled, TestAppContext, Window, div, px};
     use std::cell::RefCell;
 
     /// The kernel's store as a window reads it, and what the window writes.
@@ -7352,6 +7364,44 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(last(), [other]);
     }
+    #[gpui::test]
+    fn the_agent_launcher_follows_the_active_workspace_tab(cx: &mut TestAppContext) {
+        let frames = Rc::new(RefCell::new(vec![]));
+        let record = frames.clone();
+        let tokens = Tokens::new(pm_design::Scheme::Dark, Default::default());
+        let window = cx.add_window(|_, cx| {
+            let mut editor = Editor::new(tokens, None, cx);
+            editor.integration = Some(Rc::new(Shown(record)));
+            editor
+        });
+        let launcher_shown = || {
+            let frames = frames.borrow();
+            let shown = frames.last().expect("a frame");
+            crate::agent_launcher::show_agent_button(true, shown.iter().any(|id| id == "agent"))
+        };
+
+        window
+            .update(cx, |editor, _, cx| {
+                assert!(editor.run_shell_command("panel:tabwith:inspector:agent", cx));
+                assert!(editor.run_shell_command("panel:activate:inspector", cx));
+                let (dock, group, _) = editor.layout.find("agent").expect("Agent is docked");
+                let (inspector_dock, inspector_group, _) =
+                    editor.layout.find("inspector").expect("Properties is docked");
+                assert_eq!((dock, group), (inspector_dock, inspector_group));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(launcher_shown(), "Agent is behind Properties");
+
+        window
+            .update(cx, |editor, _, cx| {
+                assert!(editor.run_shell_command("panel:activate:agent", cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(!launcher_shown(), "Agent is the active tab");
+    }
+
     // Panel dragging (DESIGN: what shows while dragging is what a release gives).
     fn drag_none() -> gpui::Modifiers {
         gpui::Modifiers::none()
@@ -7775,6 +7825,264 @@ mod tests {
             });
             crate::drag::set_frame_time(None);
         }
+    }
+
+    /// The aperture a native body shows through stays inside its side dock's
+    /// viewport: an extension's page can never reach the window's status bar,
+    /// even when the column's groups stand taller than it and the panel's own
+    /// bottom is below the fold.
+    #[gpui::test]
+    fn native_body_clip_stays_above_the_status_bar(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            let mut e = Editor::new(
+                Tokens::new(pm_design::Scheme::Dark, Default::default()),
+                None,
+                cx,
+            );
+            e.integration = Some(Rc::new(NativeBody { aliases: false }));
+            e
+        });
+        // The column outgrows its viewport: a saved group height taller than
+        // the dock makes it scroll, like the list that painted under the
+        // status bar.
+        view.update(cx, |v, cx| {
+            let right = v
+                .layout
+                .docks
+                .iter_mut()
+                .find(|dock| dock.id == "right")
+                .unwrap();
+            right.groups = vec![layout::Group {
+                tabs: vec!["inspector".to_owned()],
+                active: 0,
+                size: Some(2400.),
+                collapsed: false,
+            }];
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for scroll in [0., 220., 900.] {
+            view.update(cx, |v, cx| {
+                v.dock_scroll.insert("right".into(), scroll);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            view.read_with(cx, |v, _| {
+                let m = v.tokens.metrics;
+                let status_top = v.dock_bounds.y + v.dock_bounds.h + m.dock_gap;
+                let (dock, _, _) = v.layout.find("inspector").unwrap();
+                let viewport = v.geometry.side_docks[&dock];
+                let panel = v
+                    .geometry
+                    .panels
+                    .iter()
+                    .find(|p| p.dock == dock)
+                    .expect("the panel is placed");
+                assert!(
+                    panel.rect.y + panel.rect.h <= viewport.y + viewport.h + 0.01,
+                    "scroll {scroll}: panel bottom {} is below the column viewport {}",
+                    panel.rect.y + panel.rect.h,
+                    viewport.y + viewport.h,
+                );
+                let (_, body) = v
+                    .native_body_rects
+                    .iter()
+                    .find(|(id, _)| id == "inspector")
+                    .expect("the native body is placed");
+                assert!(
+                    body.y + body.h <= status_top - m.inset + 0.01,
+                    "scroll {scroll}: content bottom {} reached the status bar inset {}",
+                    body.y + body.h,
+                    status_top - m.inset,
+                );
+                let (_, clip) = v
+                    .native_clip_rects
+                    .iter()
+                    .find(|(id, _)| id == "inspector")
+                    .expect("the native body publishes a clip");
+                assert!(
+                    clip.y + clip.h <= viewport.y + viewport.h + 0.01,
+                    "scroll {scroll}: clip bottom {} passed the column viewport {}",
+                    clip.y + clip.h,
+                    viewport.y + viewport.h,
+                );
+            });
+        }
+    }
+
+    /// Paint the editor in the same headless compositor used for dock
+    /// captures and check the aperture on every frame of a column scroll.
+    struct ScrollingDockFixture;
+    impl crate::integration::Integration for ScrollingDockFixture {
+        fn observe(&self, _: &mut Context<Editor>) {}
+        fn command(&self, _: &crate::native::Command, _: &mut Window, _: &mut App) -> bool {
+            false
+        }
+        fn panel(&self, id: &str, rect: Rect, _: &mut Window, _: &mut App) -> Option<AnyElement> {
+            let label = match id {
+                "inspector" => "Property",
+                "easing" => "Easing preset",
+                "fxbrowser" => "Effect",
+                "fixture.anchor-point" => "Anchor layer",
+                _ => return None,
+            };
+            Some(
+                div()
+                    .h(px(rect.h))
+                    .flex()
+                    .flex_col()
+                    .children((1..=14).map(|row| {
+                        div()
+                            .h(px(24.))
+                            .flex_none()
+                            .px(px(12.))
+                            .child(format!("{label} · row {row}"))
+                    }))
+                    .into_any_element(),
+            )
+        }
+        fn native_panel(&self, id: &str, _: &App) -> bool {
+            matches!(id, "easing" | "fixture.anchor-point")
+        }
+        fn native_panel_id(&self, id: &str, _: &App) -> String {
+            id.into()
+        }
+        fn contributed_panels(&self, _: &App) -> Vec<(String, String)> {
+            vec![("fixture.anchor-point".into(), "Anchor Point".into())]
+        }
+        fn project_id(&self, _: &App) -> Option<String> {
+            None
+        }
+        fn status(&self, _: &App) -> String {
+            "Playback paused".into()
+        }
+        fn drop_paths(&self, _: Vec<std::path::PathBuf>, _: &mut App) {}
+    }
+
+    #[::core::prelude::v1::test]
+    fn scrolled_extension_bodies_stay_inside_their_panels() {
+        use gpui::AppContext;
+        use std::{path::PathBuf, sync::Arc};
+
+        let mut failures = Vec::new();
+        for (theme, scheme) in [
+            ("dark", pm_design::Scheme::Dark),
+            ("light", pm_design::Scheme::Light),
+        ] {
+            let mut cx = gpui::HeadlessAppContext::with_platform(
+                Arc::new(gpui_parley::ParleyTextSystem::new(
+                    gpui_parley::SystemFonts::Load,
+                )),
+                Arc::new(()),
+                || {
+                    Some(Box::new(
+                        gpui_apple::metal_renderer::MetalHeadlessRenderer::new(),
+                    ))
+                },
+            );
+            let window = cx
+                .open_window(gpui::size(px(1000.), px(660.)), |_, cx| {
+                    cx.new(|cx| {
+                        let mut editor =
+                            Editor::new(Tokens::new(scheme, Default::default()), None, cx);
+                        editor.integration = Some(Rc::new(ScrollingDockFixture));
+                        let right = editor
+                            .layout
+                            .docks
+                            .iter_mut()
+                            .find(|d| d.id == "right")
+                            .unwrap();
+                        right.groups = [
+                            "inspector",
+                            "easing",
+                            "fxbrowser",
+                            "fixture.anchor-point",
+                        ]
+                        .into_iter()
+                        .map(|id| layout::Group {
+                            tabs: vec![id.into()],
+                            active: 0,
+                            size: Some(420.),
+                            collapsed: false,
+                        })
+                        .collect();
+                        editor
+                    })
+                })
+                .unwrap();
+            cx.run_until_parked();
+            let maximum = window
+                .update(&mut cx, |v, _, _| v.dock_scroll_max["right"])
+                .unwrap();
+            assert!(maximum > 100., "the stack must scroll: max {maximum}");
+            let mut saw_visible = [false; 2];
+            let mut saw_hidden = [false; 2];
+            for step in 0..=20 {
+                let scroll = maximum * step as f32 / 20.;
+                window
+                    .update(&mut cx, |v, _, cx| {
+                        v.dock_scroll.insert("right".into(), scroll);
+                        cx.notify();
+                    })
+                    .unwrap();
+                cx.run_until_parked();
+                if matches!(step, 0 | 5 | 10 | 15 | 20)
+                    && let Some(dir) = std::env::var_os("PM_DOCK_RENDER_CAPTURE")
+                {
+                    let image = cx.capture_screenshot(window.into()).unwrap();
+                    let dir = PathBuf::from(dir);
+                    std::fs::create_dir_all(&dir).unwrap();
+                    image
+                        .save(dir.join(format!("{theme}-extension-scroll-{step:02}.png")))
+                        .unwrap();
+                }
+                window.update(&mut cx, |v, _, _| {
+                    let m = v.tokens.metrics;
+                    let status_inset = v.dock_bounds.y + v.dock_bounds.h + m.dock_gap - m.inset;
+                    let dock = v.layout.find("inspector").unwrap().0;
+                    let viewport = v.geometry.side_docks[&dock];
+                    let holes = v.native_ground_holes.borrow();
+                    let mut visible = Vec::new();
+                    for (index, id) in ["easing", "fixture.anchor-point"].into_iter().enumerate() {
+                        let (dock, group, _) = v.layout.find(id).unwrap();
+                        let panel = v.geometry.panels.iter()
+                            .find(|p| (p.dock, p.group) == (dock, group))
+                            .unwrap_or_else(|| panic!("{id} placed"))
+                            .rect;
+                        let (_, clip) = *v.native_clip_rects.iter()
+                            .find(|(key, _)| key == id)
+                            .unwrap_or_else(|| panic!("{id} clip published"));
+                        let content = native_body(panel, m.border.max(m.splitter_reach), m.header)
+                            .intersection(viewport);
+                        let offscreen = content.w <= 0. || content.h <= 0.;
+                        saw_hidden[index] |= offscreen;
+                        if clip.w > 0. && clip.h > 0. {
+                            saw_visible[index] = true;
+                            visible.push(clip);
+                            if offscreen
+                                || clip.x < content.x - 0.01
+                                || clip.y < content.y - 0.01
+                                || clip.x + clip.w > content.x + content.w + 0.01
+                                || clip.y + clip.h > content.y + content.h + 0.01
+                                || clip.y + clip.h > status_inset + 0.01
+                            {
+                                failures.push(format!(
+                                    "{theme}/{step} {id}: clip {clip:?} outside panel content {content:?}"
+                                ));
+                            }
+                        }
+                    }
+                    if *holes != visible {
+                        failures.push(format!(
+                            "{theme}/{step}: GPUI opened {holes:?} for WebKit's {visible:?}"
+                        ));
+                    }
+                }).unwrap();
+            }
+            assert_eq!(saw_visible, [true; 2]);
+            assert_eq!(saw_hidden, [true; 2]);
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
 

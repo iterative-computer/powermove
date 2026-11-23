@@ -464,7 +464,7 @@ export interface Message {
   live: boolean;
 }
 export type Entry =
-  | { kind: "message"; key: string; message: Message }
+  | { kind: "message"; key: string; message: Message; pending?: boolean }
   | { kind: "work"; key: string; label: string; items: Message[] }
   | { kind: "working"; key: string; label: string };
 
@@ -629,10 +629,26 @@ function fold(
  * did folds behind that row. The running turn stays open with its timer.
  */
 export function entries(s: Snapshot, list = messages(s)): Entry[] {
+  const queued = list.filter((message) => message.value.delivery === "queued");
+  if (queued.length) list = list.filter((message) => message.value.delivery !== "queued");
   const out: Entry[] = [];
   const running = s.runId !== null;
+  // A direction sent mid-run reads "Steering" until the agent shows anything
+  // after it: the trailing steering messages with nothing following them.
+  const unanswered = new Set<string>();
+  if (running)
+    for (let k = list.length - 1; k >= 0; k--) {
+      const m = list[k]!;
+      if (m.role !== "user" || !m.steering) break;
+      unanswered.add(m.key);
+    }
   const plain = (m: Message) =>
-    out.push({ kind: "message", key: m.key, message: m });
+    out.push({
+      kind: "message",
+      key: m.key,
+      message: m,
+      ...(unanswered.has(m.key) ? { pending: true } : {}),
+    });
   let i = 0;
   while (i < list.length && !isPrompt(list[i]!)) plain(list[i++]!);
   let lastPrompt = -1;
@@ -669,6 +685,7 @@ export function entries(s: Snapshot, list = messages(s)): Entry[] {
     const at = lastPrompt >= 0 ? lastPrompt + 1 : out.length;
     out.splice(at, 0, { kind: "working", key: "working", label });
   }
+  queued.forEach(plain);
   return out;
 }
 

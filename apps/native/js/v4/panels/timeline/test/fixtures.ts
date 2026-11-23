@@ -165,6 +165,7 @@ export const states: Record<string, () => TimelineFrame> = {
         locked: false,
         audio: true,
         enabled: true,
+        canOpen: false,
         expanded: false,
       }),
     }),

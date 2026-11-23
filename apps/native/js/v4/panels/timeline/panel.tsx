@@ -10,6 +10,7 @@ import type {
   PropertyRow,
   Row,
   TimelineFrame,
+  TrackRow,
 } from "./model";
 import { announcementText, type Announcement } from "./model";
 import { nativeEvent, type TimelineSession } from "./session";
@@ -113,6 +114,40 @@ function Icon(props: {
     >
       {props.children}
     </UI.ToolbarItem>
+  );
+}
+function Disclosure({
+  row,
+  send,
+  lit,
+}: {
+  row: LayerRow | TrackRow;
+  send: Send;
+  lit?: boolean;
+}) {
+  if (!row.canOpen)
+    return (
+      <div
+        role="presentation"
+        style={{
+          width: t("metrics.hit"),
+          minWidth: t("metrics.hit"),
+          height: t("metrics.hit"),
+          flexShrink: 0,
+        }}
+      />
+    );
+  return (
+    <Icon
+      id={`timeline:disclosure:${row.id}`}
+      label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
+      symbol={row.expanded ? "chevron.down" : "chevron.right"}
+      quiet
+      tint={lit ? "colors.accent_text" : undefined}
+      tabIndex={-1}
+      send={send}
+      intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
+    />
   );
 }
 /** Refused edits need visible feedback; confirmations do not. */
@@ -480,7 +515,7 @@ function Layer({
     {
       name: "lock" as const,
       on: row.locked,
-      label: "Toggle Lock",
+      label: row.lockRow ? "Unlock Layer" : "Toggle Lock",
       symbol: row.locked ? "lock" : "lock.open",
       active: undefined,
       always: false,
@@ -538,29 +573,7 @@ function Layer({
               style={{ width: t("metrics.timeline_indent"), flexShrink: 0 }}
             />
           ))}
-          {row.canOpen ? (
-            <Icon
-              id={`timeline:disclosure:${row.id}`}
-              label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
-              symbol={row.expanded ? "chevron.down" : "chevron.right"}
-              quiet
-              tint={lit ? "colors.accent_text" : undefined}
-              tabIndex={-1}
-              send={send}
-              intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
-            />
-          ) : (
-            // The disclosure column stays reserved so badges and names align.
-            <div
-              role="presentation"
-              style={{
-                width: t("metrics.hit"),
-                minWidth: t("metrics.hit"),
-                flexShrink: 0,
-                height: t("metrics.hit"),
-              }}
-            />
-          )}
+          <Disclosure row={row} send={send} lit={lit} />
         </div>
         <div
           role="presentation"
@@ -632,7 +645,26 @@ function Layer({
       </div>
       <div style={{ ...line, flexShrink: 0 }}>
         {switches.map((item) =>
-          item.on || item.always || show ? (
+          item.name === "lock" && row.containsLockedLayers ? (
+            <div
+              key={item.name}
+              id={`timeline:locked-children:${row.id}`}
+              role="img"
+              label="Contains locked layers"
+              title="Contains locked layers"
+              attr={{ symbol: "lock" }}
+              style={{
+                ...line,
+                justifyContent: "center",
+                width: t("metrics.hit"),
+                minWidth: t("metrics.hit"),
+                height: t("metrics.hit"),
+                flexShrink: 0,
+                color: t("colors.muted"),
+                symbolSize: t("metrics.symbol_inline"),
+              }}
+            />
+          ) : item.on || item.always || show ? (
             <Icon
               key={item.name}
               parentPick={item.name === "parent" ? row.layer : undefined}
@@ -655,7 +687,11 @@ function Layer({
               active={item.active}
               tabIndex={-1}
               send={send}
-              intent={{ type: "switch", id: row.id, name: item.name }}
+              intent={{
+                type: "switch",
+                id: item.name === "lock" ? row.lockRow ?? row.id : row.id,
+                name: item.name,
+              }}
             />
           ) : (
             // An unset switch keeps its column, so the name never reflows.
@@ -867,6 +903,7 @@ const TimelineRow = memo(
           id={`timeline:heading:${published.id}`}
           role="row"
           label={published.label}
+          metadata={{ nativeRow: published.id }}
           style={{
             ...line,
             height: t("metrics.property_row"),
@@ -891,7 +928,11 @@ const TimelineRow = memo(
         label={row.accessibilityLabel}
         selected={row.selected}
         tabIndex={-1}
-        expanded={row.kind === "property" ? undefined : row.expanded}
+        expanded={
+          row.kind === "layer" || (row.kind === "track" && row.canOpen)
+            ? row.expanded
+            : undefined
+        }
         state={{
           locked: row.locked,
           focused: row.focused,
@@ -956,9 +997,10 @@ const TimelineRow = memo(
                 flexGrow: 1,
                 flexShrink: 1,
                 overflow: "hidden",
-                paddingLeft: t("metrics.inset"),
+                paddingLeft: t("metrics.gap"),
               }}
             >
+              <Disclosure row={row} send={send} />
               <text
                 style={{
                   ...text,
@@ -1050,6 +1092,7 @@ export function TimelinePanel({
       role="group"
       metadata={{
         document: f.document,
+        ...(f.composition !== undefined ? { composition: f.composition } : {}),
         revision: f.revision,
         feedback: f.feedback,
       }}

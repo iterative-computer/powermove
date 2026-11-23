@@ -65,6 +65,8 @@ interface RowBase {
 }
 export interface LayerRow extends RowBase {
   kind: "layer";
+  lockRow?: string;
+  containsLockedLayers?: boolean;
   layerKind?: string;
   labelColor?:
     | "blue"
@@ -114,6 +116,8 @@ export interface TrackRow extends RowBase {
   summary?: string;
   audio: boolean;
   enabled: boolean;
+  /** The lane has property rows to show; without it no chevron is drawn. */
+  canOpen: boolean;
   expanded: boolean;
 }
 export interface HeadingRow extends RowBase {
@@ -124,6 +128,8 @@ export type Row = LayerRow | PropertyRow | TrackRow | HeadingRow;
 export interface TimelineFrame {
   /** Decimal native u64s: never round document/revision identities in JS. */
   document: string | null;
+  /** Desktop's active composition. Null for a composition stored at the root. */
+  composition?: string | null;
   revision: string;
   hasComposition: boolean;
   /** The timeline panel holds the keyboard; absent counts as yes. */

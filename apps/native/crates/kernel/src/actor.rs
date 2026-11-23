@@ -1378,7 +1378,14 @@ fn step(kernel: &mut Kernel, shared: &Arc<Shared>, turns: &mut Turns, msg: Msg) 
     };
     match msg {
         Msg::ProEditing { .. } | Msg::ProClock { .. } => unreachable!("prepared above"),
-        Msg::Profile { call, reply } => reply(kernel.profile(call)),
+        Msg::Profile { call, reply } => {
+            let revision = kernel.state().revision;
+            let result = kernel.profile(call);
+            if kernel.state().revision != revision {
+                *shared.state.lock().expect("state") = Arc::new(kernel.state().clone());
+            }
+            reply(result);
+        }
         Msg::PrepareExport {
             session,
             document,

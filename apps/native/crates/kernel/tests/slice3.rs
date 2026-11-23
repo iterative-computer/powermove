@@ -561,7 +561,7 @@ fn defer_close_does_not_save_and_quit_leaves_its_work_for_the_recover_question()
 fn local_storage_exact_strings_origin_isolation_delete_and_restart() {
     let root = common::TempDir::new("local-storage");
     fs::write(root.path("local-storage.json"), r#"[{"origin":"a","key":"k","value":"  null 🦀 ","json":null},{"origin":"b","key":"k","value":""}]"#).unwrap();
-    let k = kernel(&root.0);
+    let mut k = kernel(&root.0);
     match k
         .profile(ProfileCall::LocalStorageGet {
             origin: "a".into(),
@@ -579,7 +579,7 @@ fn local_storage_exact_strings_origin_isolation_delete_and_restart() {
     })
     .unwrap();
     drop(k);
-    let k = kernel(&root.0);
+    let mut k = kernel(&root.0);
     assert!(matches!(
         k.profile(ProfileCall::LocalStorageGet {
             origin: "a".into(),
@@ -602,7 +602,7 @@ fn local_storage_exact_strings_origin_isolation_delete_and_restart() {
 #[test]
 fn secret_locators_preserve_versions_refuse_conflicts_and_never_read_keychain() {
     let root = common::TempDir::new("locators");
-    let k = kernel(&root.0);
+    let mut k = kernel(&root.0);
     let locator = SecretLocator {
         id: "env/synthetic".into(),
         version: "v1".into(),
@@ -620,7 +620,7 @@ fn secret_locators_preserve_versions_refuse_conflicts_and_never_read_keychain() 
     conflict.account = "different".into();
     assert!(k.profile(ProfileCall::RegisterSecret(conflict)).is_err());
     drop(k);
-    let k = kernel(&root.0);
+    let mut k = kernel(&root.0);
     match k
         .profile(ProfileCall::SecretLocators {
             id: "env/synthetic".into(),
@@ -634,7 +634,7 @@ fn secret_locators_preserve_versions_refuse_conflicts_and_never_read_keychain() 
 #[test]
 fn extension_writes_use_overlay_shared_stays_read_only_and_traversal_is_refused() {
     let root = common::TempDir::new("overlay");
-    let k = kernel(&root.0);
+    let mut k = kernel(&root.0);
     fs::create_dir_all(root.path("extensions-shared/ext")).unwrap();
     fs::write(root.path("extensions-shared/ext/main.ts"), b"shared").unwrap();
     let read = || ProfileCall::ReadExtension {
@@ -685,7 +685,7 @@ fn extension_writes_use_overlay_shared_stays_read_only_and_traversal_is_refused(
 #[test]
 fn external_media_read_capability_never_locks_source_and_checks_changed_bytes() {
     let root = common::TempDir::new("external-media");
-    let k = kernel(&root.0);
+    let mut k = kernel(&root.0);
     let source = root.path("external.pmv");
     fs::copy(common::ts_fixture("fresh.pmv"), &source).unwrap();
     let before = fs::read(&source).unwrap();

@@ -38,6 +38,18 @@ impl Panel {
         ids: Submission<'_>,
         now: u64,
     ) -> Result<KeyOutcome> {
+        self.route_composer_key(thread, key, popover_open, ids, now, false)
+    }
+
+    pub(crate) fn route_composer_key(
+        &mut self,
+        thread: &str,
+        key: &Key,
+        popover_open: bool,
+        ids: Submission<'_>,
+        now: u64,
+        queue: bool,
+    ) -> Result<KeyOutcome> {
         let choices = self.slash_choices(thread)?;
         let s = self.session(thread)?;
         let text = s.draft.legacy().0;
@@ -45,15 +57,17 @@ impl Panel {
         let mut route = input::composer(
             key,
             ComposerContext {
-                disabled: s.applying,
+                disabled: s.composer_disabled(),
                 menu_open,
                 popover_open,
             },
         );
         let effect = match &route.intent {
-            Intent::Submit if s.draft.sendable() => {
-                Some(self.submit(thread, ids.run, ids.request, now)?)
-            }
+            Intent::Submit if s.draft.sendable() => Some(if queue {
+                self.queue_composer(thread, now)?
+            } else {
+                self.submit(thread, ids.run, ids.request, now)?
+            }),
             Intent::Newline => {
                 self.draft_mut(thread)?.insert_text("\n", now, false);
                 None

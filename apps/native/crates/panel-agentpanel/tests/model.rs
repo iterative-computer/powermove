@@ -564,6 +564,72 @@ fn six_attachment_limit_does_not_reject_existing_larger_archives() {
     ));
     assert_eq!(p.session("t").unwrap().draft.attachments().count(), 1);
 }
+
+#[test]
+fn draft_attachment_add_and_undo_use_ids_without_reloading_existing_bodies() {
+    #[derive(Default)]
+    struct References {
+        memory: Memory,
+        reads: Vec<String>,
+    }
+    impl Store for References {
+        fn lazy_history_attachments(&self) -> bool {
+            true
+        }
+        fn get(&mut self, key: &str) -> io::Result<Option<Value>> {
+            self.reads.push(key.into());
+            self.memory.get(key)
+        }
+        fn set(&mut self, key: &str, value: &Value) -> io::Result<()> {
+            self.memory.set(key, value)
+        }
+    }
+    let mut store = References::default();
+    let mut panel = Panel::load(&mut store, "p", "t", 0).unwrap();
+    for (i, id) in ["first", "second", "third"].into_iter().enumerate() {
+        store.reads.clear();
+        store.memory.writes.clear();
+        panel
+            .attach_records(
+                "t",
+                vec![json!({
+                    "id": id, "name": format!("{id}.png"), "type": "image/png",
+                    "dataUrl": "data:image/png;base64,AA=="
+                })],
+                &mut store,
+                i as u64 + 1,
+            )
+            .unwrap();
+        panel.save(&mut store, i as u64 + 1).unwrap();
+        let key = format!("agentAttachment.{id}");
+        assert_eq!(store.reads, [key.clone()]);
+        assert_eq!(store.memory.writes, [key, "agentThreads.p".into()]);
+    }
+    panel
+        .draft_mut("t")
+        .unwrap()
+        .remove_file("first", 6)
+        .unwrap();
+    panel.save(&mut store, 6).unwrap();
+    assert!(
+        panel.raw_archive()["threads"][0]["nativeDraftAttachmentIds"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("first"))
+    );
+    assert!(panel.draft_mut("t").unwrap().undo(false));
+    let effect = panel.submit("t", "run", "request", 7).unwrap();
+    let EffectKind::Send { attachments, .. } = effect.kind else {
+        panic!("expected send")
+    };
+    assert_eq!(attachments.len(), 3);
+    assert!(
+        attachments
+            .iter()
+            .all(|a| a["payloadStored"] == true && a.get("dataUrl").is_none())
+    );
+}
+
 #[test]
 fn retry_uses_stable_message_id_and_leaves_transcript_intact() {
     let mut p = panel();

@@ -126,7 +126,7 @@ pub const SUBMENUS: [&str; 9] = [
 pub fn new_file() -> Vec<Item> {
     vec![Item::command("Extension…", "newExtension", "")]
 }
-/// Items of the View ▸ Tools submenu, in toolbar order (registry chords).
+/// The View ▸ Tools submenu, with shortcuts from the active keymap.
 pub fn tools() -> Vec<Item> {
     let keymap = crate::keymap::current();
     [

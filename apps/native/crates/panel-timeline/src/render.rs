@@ -705,7 +705,9 @@ impl Scene {
                         clips: clips.remove(&(area, lane)).unwrap_or_default(),
                     },
                 });
-                tracks.extend(properties.remove(&(area, lane)).unwrap_or_default());
+                if !model.track_collapsed(area, lane) {
+                    tracks.extend(properties.remove(&(area, lane)).unwrap_or_default());
+                }
             }
             tracks
         } else {
@@ -2145,6 +2147,20 @@ fn paint_clip(
             "stripes-45",
             body,
             colors.danger,
+        );
+        o.opacity = t.translucency.offline_hatch as f64 * strength;
+        o.radius = radius;
+        o.detail = json!({"period": (h * 0.45).max(6.), "stripe": (h * 0.18).max(2.)});
+        ops.push(o);
+    }
+    // A locked layer's strip wears the same 45° hatch in a quiet colour, so a
+    // strip that will not move reads as locked, not as a frozen timeline.
+    if c.locked && !offline {
+        let mut o = Op::new(
+            format!("clip-lock-hatch:{}", c.id),
+            "stripes-45",
+            body,
+            colors.muted,
         );
         o.opacity = t.translucency.offline_hatch as f64 * strength;
         o.radius = radius;

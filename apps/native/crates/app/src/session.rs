@@ -201,7 +201,7 @@ pub struct Controller {
     pub message: String,
     /// The revision [`RAW_ERROR_NOTE`] was shown at ([`Self::settle_message`]).
     raw_note_at: Option<u64>,
-    pub(crate) delete_toast: Option<Entity<crate::action_toast::ToastView>>,
+    pub(crate) action_toast: Option<Entity<crate::action_toast::ToastView>>,
     pub path: Option<PathBuf>,
     pub recent: Vec<(String, String)>,
     /// What the shell reads from the project on every frame, kept per
@@ -590,7 +590,11 @@ impl pm_shell::integration::Integration for Bridge {
         })
     }
     fn action_toast(&self, cx: &mut App) -> Option<AnyElement> {
-        self.0.read(cx).delete_toast.clone().map(|v| v.into_any_element())
+        self.0
+            .read(cx)
+            .action_toast
+            .clone()
+            .map(|v| v.into_any_element())
     }
     fn paints_own_ground(&self, id: &str, cx: &App) -> bool {
         id == "timeline" && !self.0.read(cx).extensions.owns_panel(id)
@@ -736,6 +740,7 @@ impl pm_shell::integration::Integration for Bridge {
                     let _ = this.update(cx, |v, cx| v.update_builtins(cx));
                 }).detach();
             }
+            v.sync_agent_button(cx);
             let mut effective: Vec<String> = shown.iter().map(|id| (*id).to_owned()).collect();
             for id in shown {
                 if let Some(target) = v.agent_panel_builds.get(*id).and_then(|b| b.target.clone()) {
@@ -1117,6 +1122,9 @@ impl Controller {
         if let Some(note) = &self.closing_note {
             return note.clone();
         }
+        if let Some(progress) = self.builtins.export_job.as_ref().and_then(|run| run.status()) {
+            return progress;
+        }
         let preview_pause = self
             .session
             .as_ref()
@@ -1355,7 +1363,7 @@ impl Controller {
             // The status bar holds facts, not instructions (review shell 2 #11).
             message: "No project".into(),
             raw_note_at: None,
-            delete_toast: None,
+            action_toast: None,
             path: None,
             recent: vec![],
             frame_facts: Default::default(),
@@ -4464,6 +4472,12 @@ impl Controller {
             self.pick_models(cx);
             return true;
         }
+        if matches!(cmd.name.as_str(), "selectAll" | "contextSelectAll")
+            && let Some(timeline) = self.builtins.timeline.clone()
+            && timeline.update(cx, |timeline, cx| timeline.select_all(cx))
+        {
+            return true;
+        }
         use crate::layer_commands::Route;
         match crate::layer_commands::route(&cmd.name, &cmd.args) {
             Some(Route::Plan(name)) => return self.run_plan(name, &cmd.args, cx),
@@ -4556,12 +4570,13 @@ impl Controller {
             // ⌘, with Settings in front closes it.
             "settings" if self.settings_in_front(cx) => self.close_settings(cx),
             "settings" => self.show_builtin(&cmd.name, window, cx),
+            "agent.launcher.open" => self.open_agent_from_launcher(window, cx),
             "agent.launcher.task" => {
                 if let Some(id) = cmd.args.first().and_then(|v| v.as_str()) {
                     if let Some(runtime) = &self.builtins.runtime {
                         let _ = runtime.agent_launcher_switch(id);
                     }
-                    self.show_builtin("agent", window, cx);
+                    self.open_agent_from_launcher(window, cx);
                 }
             }
             "agent.stop" => {

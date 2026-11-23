@@ -42,6 +42,7 @@ pub(crate) struct Form {
     publication: Option<Publication>,
     reveal: Option<String>,
     recorder: Option<Id>,
+    memory_reload: Option<FormControl>,
     app_icon: agent_app_icons::AppIcon,
 }
 
@@ -91,6 +92,7 @@ impl Form {
             publication: None,
             reveal: None,
             recorder: None,
+            memory_reload: None,
             app_icon: agent_app_icons::installed_app_icon,
         }
     }
@@ -101,6 +103,56 @@ impl Form {
         self.widgets.clear();
         self.publication = None;
         self.recorder = None;
+        self.memory_reload = None;
+    }
+
+    pub(crate) fn show_memory_status(
+        &mut self,
+        message: &str,
+        retry: bool,
+        tokens: &pm_design::Tokens,
+        cx: &mut Context<Controller>,
+    ) {
+        self.reset();
+        let label = NSTextField::labelWithString(&NSString::from_str(message), self.scroll.mtm());
+        label.setTranslatesAutoresizingMaskIntoConstraints(false);
+        let label: &NSView = &label;
+        let label = label.retain();
+        if !retry {
+            self.document.set(&[label]);
+            return;
+        }
+        let (tx, rx) = async_channel::bounded(1);
+        let reload = FormControl::new(
+            &ControlSpec {
+                kind: Kind::Push,
+                label: "Reload",
+                identifier: "reload-settings",
+                value: &Value::Null,
+                options: vec![],
+                disabled: false,
+                default: false,
+                destructive: false,
+                inline: false,
+                quiet: false,
+                pull: false,
+                tint: None,
+                symbol: None,
+                glass: false,
+                well: false,
+            },
+            tokens,
+            tx,
+        );
+        reload.view().setTranslatesAutoresizingMaskIntoConstraints(false);
+        self.document.set(&[label, reload.view().retain()]);
+        self.memory_reload = Some(reload);
+        cx.spawn(async move |owner, cx| {
+            if rx.recv().await.is_ok() {
+                let _ = owner.update(cx, |owner, cx| owner.reload_builtin("settings", cx));
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn take_publication(&mut self) -> Option<Publication> {
@@ -122,6 +174,7 @@ impl Form {
         {
             self.reset();
         }
+        self.memory_reload = None;
         let recorder = self.layout(&publication, tokens, Some(cx));
         self.publication = Some(publication);
         self.apply_reveal();

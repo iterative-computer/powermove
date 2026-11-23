@@ -72,3 +72,14 @@ harness = false
 [[test]]
 name = "playback_start"
 harness = false
+
+# The screen artwork contains text. The headless font service runs on main.
+[[test]]
+name = "switch2_screen_export"
+harness = false
+required-features = ["kernel"]
+
+[[test]]
+name = "switch2_preview"
+harness = false
+required-features = ["kernel"]

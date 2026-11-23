@@ -22,6 +22,21 @@ fn original_brief_remains_with_decisions_after_long_conversation() {
     assert_eq!(messages[0]["text"], "Authored original direction");
 }
 #[test]
+fn omitted_messages_do_not_change_thread_read_offsets() {
+    let archive = [
+        json!({"role":"user","text":"Original request"}),
+        json!({"role":"user","text":"Unsent direction","delivery":"queued"}),
+        json!({"role":"assistant","text":"Original reply"}),
+        json!({"role":"user","text":"Current request"}),
+    ];
+    let history = [(0, &archive[0]), (2, &archive[2])];
+    let context = conversation::indexed_context(history.into_iter(), archive.len(), "thread");
+    assert_eq!(context["messageCount"], archive.len());
+    assert_eq!(context["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(context["messages"][1]["position"], 2);
+    assert_eq!(context["messages"][1]["text"], "Original reply");
+}
+#[test]
 fn question_decisions_and_visual_artifacts_are_readable_by_id() {
     let q = json!({"role":"trace","steps":[{"kind":"question","status":"closed","questions":[{"id":"q","question":"Continue?"}]}]});
     assert_eq!(

@@ -457,6 +457,34 @@ fn steering_a_held_run_reaches_the_provider_and_the_conversation() {
     assert!(session.run.is_some(), "the run goes on");
     assert!(session.draft.legacy().0.is_empty(), "the composer is empty after the send");
     drop(state);
+    panel.wait(|state| {
+        state
+            .panel
+            .session(&thread)
+            .unwrap()
+            .conversation
+            .values()
+            .any(|row| row["text"] == "Steer: use blue instead" && row["delivery"].is_null())
+    });
+    let direction = "Steer: keep the logo";
+    assert!(!panel.panels.agent_quick_prompt(&thread, direction).unwrap());
+    panel.wait(|state| {
+        let session = state.panel.session(&thread).unwrap();
+        assert!(session.run.is_some());
+        let mut rows = session
+            .conversation
+            .values()
+            .filter(|row| row["text"] == direction);
+        rows.next().is_some_and(|row| row["delivery"].is_null()) && rows.next().is_none()
+    });
+    let wrote = format!("steer {direction}");
+    assert_eq!(
+        std::fs::read_to_string(log)
+            .unwrap()
+            .matches(wrote.as_str())
+            .count(),
+        1
+    );
     panel.click("agent-stop");
     panel.wait(idle);
     panel.panels.close();
@@ -1192,9 +1220,9 @@ fn full_access_runs_once_the_person_consents_and_asks_again_otherwise() {
 fn an_auto_run_reaches_the_provider_and_shows_what_it_did() {
     let root = tempfile::tempdir().unwrap();
     let actor = actor();
-    let mut panel = Agent::mount(&actor, environment(root.path(), "reply"));
+    let mut panel = Agent::mount(&actor, environment(root.path(), "reply_with_work"));
     panel.connected(Provider::Chatgpt);
-    // Auto runs the autonomous CLI (`codex exec`), not the App Server.
+    // Project Auto uses the App Server and still shows the work it performed.
     panel.choose("agent-access", "auto");
     {
         let agent = panel.agent();
@@ -1497,6 +1525,12 @@ fn select_part_of_the_screen_asks_the_window_for_a_pick() {
         "{:?}",
         requests.iter().map(|r| &r.operation).collect::<Vec<_>>()
     );
+    let pick = requests
+        .iter()
+        .find(|r| r.operation == "agent.pickRegion")
+        .unwrap();
+    assert_eq!(pick.input["project"], "synthetic");
+    assert_eq!(pick.input["thread"], thread_id(&panel.agent()));
     panel.panels.close();
 }
 #[test]

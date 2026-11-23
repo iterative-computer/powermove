@@ -841,3 +841,56 @@ fn fast_preserves_framing_depth_and_final_bytes() {
         assert_eq!(source.0.changed.load(Ordering::SeqCst), 0);
     }
 }
+
+#[test]
+fn fast_matches_full_sun_exposure() {
+    struct Sun(Source);
+    impl SceneSource for Sun {
+        fn scene(&self, request: &SceneRequest) -> Result<SceneInput, String> {
+            let mut input = self.0.scene(request)?;
+            input.instances.truncate(1);
+            input.instances[0].world = Transform::default();
+            input.scene.world = Default::default();
+            input.scene.materials = vec![Material::dielectric(Vec3::splat(0.32), 0.8)];
+            input.scene.lights.clear();
+            input.scene.environment = (Vec3::ZERO, Vec3::ZERO);
+            let solar_radius = 1.5_f32.to_radians();
+            let solid_angle = std::f32::consts::TAU * (1. - solar_radius.cos());
+            input.scene.extra_lights = vec![pm_studio3d_engine::scene::GpuLight::sun(
+                v3(0., 0., 1.),
+                solar_radius,
+                Vec3::splat(2. / solid_angle),
+            )];
+            Ok(input)
+        }
+    }
+    let source = Sun(Source::new());
+    let mut service = StudioService::default();
+    let render = |service: &mut StudioService, tier| {
+        let frame = service.render(&source, request(), tier).unwrap();
+        let layer = &frame.layers[0];
+        let width = layer.texture.width() as usize;
+        let height = layer.texture.height() as usize;
+        let image = pixels(service, &frame);
+        let center = &image[0][((height / 2) * width + width / 2) * 4..][..4];
+        assert_eq!(center[3], 255, "the center of the lit sphere is opaque");
+        center[0]
+    };
+    let full = render(
+        &mut service,
+        Tier::Final {
+            samples: 16,
+            salt: 17,
+            denoise: Denoise::None,
+        },
+    );
+    let fast = render(&mut service, Tier::Fast);
+    assert!(
+        (40..220).contains(&full),
+        "full reference has midtones: {full}"
+    );
+    assert!(
+        fast.abs_diff(full) < 26,
+        "sunlit display codes: Fast={fast}, Full={full}"
+    );
+}

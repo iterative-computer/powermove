@@ -277,6 +277,18 @@ pub async fn dispatch(
             }
         }
 
+        // A track header's chevron is the layer rows' disclosure on a lane.
+        "disclosure" if track_row(intent).is_some() => {
+            let (area, lane) = track_row(intent).expect("checked");
+            let open = boolean(intent, "open")?;
+            if intent.get("all").and_then(Value::as_bool) == Some(true) {
+                client.model.disclose_all_tracks(open);
+            } else {
+                client.model.disclose_track(area, lane, open);
+            }
+            persist = true;
+            Plan::default()
+        }
         "disclosure" => {
             let id = layer_row(intent)?;
             let open = boolean(intent, "open")?;
@@ -638,6 +650,19 @@ pub fn project_window(
                     } else {
                         disclosure.map(|d| d.collapsed).unwrap_or(layer.collapsed)
                     });
+                    if layer.effectively_locked {
+                        value["lockRow"] = json!(
+                            model
+                                .index
+                                .locking_layer(id)
+                                .map(|owner| row_id(&RowId::Layer(owner.id.clone())))
+                        );
+                    } else if layer.kind == "group"
+                        && value["expanded"] == false
+                        && model.index.has_locked_descendant(id)
+                    {
+                        value["containsLockedLayers"] = json!(true);
+                    }
                     // Keep authored timing exact. Never convert these to frames on read.
                     value["from"] = json!(layer.from);
                     value["duration"] = json!(layer.duration);
@@ -722,33 +747,45 @@ fn track_window(
             [one] => one.name.to_string_lossy(),
             many => format!("{} clips", many.len()),
         };
+        let collapsed = model.track_collapsed(area, lane);
+        let mut lane_rows = vec![];
+        let mut can_open = false;
+        for row in model.rows() {
+            let layer = match &row.id {
+                RowId::Path { layer_id, .. } | RowId::Property { layer_id, .. } => layer_id,
+                _ => continue,
+            };
+            if !clips.iter().any(|clip| clip.id == *layer) {
+                continue;
+            }
+            can_open = true;
+            if collapsed {
+                break;
+            }
+            match &row.id {
+                RowId::Path { path, .. } => lane_rows.push(path_heading(model, row, layer, path)?),
+                RowId::Property { channel, .. } => lane_rows.push(json!({
+                    "id": row_id(&row.id), "depth": row.depth, "kind": "property",
+                    "layer": layer, "path": channel, "selected": false,
+                    "label": model.channel_label(layer, channel),
+                    "locked": model.index.layer(layer).is_none_or(|l| l.effectively_locked),
+                    "channels": model.track_channels(layer, channel).iter()
+                        .map(|c| c.path.as_str()).collect::<Vec<_>>(),
+                })),
+                _ => unreachable!(),
+            }
+        }
         rows.push(json!({
             "id": json!(["track", format!("{area:?}"), lane]).to_string(),
             "kind": "track", "depth": 0, "track": label, "label": label, "audio": audio,
             "summary": summary,
-            "enabled": enabled, "expanded": false, "selected": false,
+            "enabled": enabled, "selected": false,
+            // A lane with nothing to show gets no chevron, only the column's
+            // blank space, so every track's label stays on the same inset.
+            "canOpen": can_open, "expanded": !collapsed,
             "locked": clips.iter().all(|l| l.effectively_locked) && !clips.is_empty(),
         }));
-        for row in model.rows() {
-            if let RowId::Path { layer_id, path } = &row.id
-                && clips.iter().any(|l| l.id == *layer_id)
-            {
-                rows.push(path_heading(model, row, layer_id, path)?);
-            }
-            let RowId::Property { layer_id, channel } = &row.id else {
-                continue;
-            };
-            if clips.iter().any(|l| l.id == *layer_id) {
-                rows.push(json!({
-                    "id": row_id(&row.id), "depth": row.depth, "kind": "property",
-                    "layer": layer_id, "path": channel, "selected": false,
-                    "label": model.channel_label(layer_id, channel),
-                    "locked": model.index.layer(layer_id).is_none_or(|l| l.effectively_locked),
-                    "channels": model.track_channels(layer_id, channel).iter()
-                        .map(|c| c.path.as_str()).collect::<Vec<_>>(),
-                }));
-            }
-        }
+        rows.extend(lane_rows);
     }
     let total = rows.len();
     let start = first.min(total).saturating_sub(visible);

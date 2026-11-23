@@ -591,7 +591,8 @@ impl TimelineSurface {
             }
         }
         // The meter stays between the transport controls and the column's
-        // routing button. Give the clock its full width when space is tight.
+        // routing button. Preserve the column width at which the meter
+        // appears, even though Play and Time now sit farther to the left.
         let m = &self.tokens.metrics;
         let size = self.tokens.typography.timecode;
         if self.audio.clock_width.is_none_or(|(previous, _)| previous != size) {
@@ -599,9 +600,9 @@ impl TimelineSurface {
             self.audio.clock_width = Some((size, slot.w - m.border));
         }
         let clock_width = self.audio.clock_width.unwrap().1 + m.border;
-        let transport_end = m.inset + super::edit_tools_width(m) + m.hit + 2. * m.gap + clock_width;
+        let minimum_meter_left = m.inset + 3. * m.control + m.hit + 3. * m.gap + clock_width;
         let x = frame.viewport.layer_column - 120.;
-        if x - 4. >= f64::from(transport_end + m.gap) {
+        if x - 4. >= f64::from(minimum_meter_left) {
             let top = (self.tokens.metrics.ruler as f64 - 8.) / 2.;
             frame.ops.push(op(
                 "audio-meter-panel".into(),

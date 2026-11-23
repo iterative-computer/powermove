@@ -145,6 +145,11 @@ def codex():
                         time.sleep(float(os.environ.get('PM_FAKE_DELAY', '0.4')))
                 elif last.startswith('Slow:'):
                     time.sleep(12)
+                if mode == 'reply_with_work':
+                    command = {'id': 'cmd', 'type': 'commandExecution', 'command': 'ls -la'}
+                    emit({'method': 'item/started', 'params': {**turn, 'item': {**command, 'status': 'inProgress'}}})
+                    emit({'method': 'item/completed', 'params': {**turn, 'item': {
+                        **command, 'status': 'completed', 'aggregatedOutput': 'project.pmv', 'exitCode': 0}}})
                 text = 'Saw: ' + request['params']['input'][0]['text'].split('\n')[-1]
                 emit({'method': 'item/agentMessage/delta', 'params': {**turn, 'itemId': 'answer', 'delta': text}})
                 emit({'method': 'item/completed', 'params': {**turn, 'item': {'id': 'answer', 'type': 'agentMessage', 'text': text}}})
