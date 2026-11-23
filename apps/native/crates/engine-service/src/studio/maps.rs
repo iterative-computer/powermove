@@ -48,6 +48,12 @@ pub(super) fn screen(
     material.emission = Vec3::splat(intensity);
     gpu.emit[..3].fill(intensity);
 }
+#[derive(Default)]
+pub(super) struct BoundMaps {
+    pub color: bool,
+    pub emissive: bool,
+}
+
 impl DocumentSource {
     fn material_image(&self, source: &Value) -> Result<Arc<Vec<u8>>, String> {
         let id = source
@@ -91,7 +97,8 @@ impl DocumentSource {
         gpu: &mut GpuMaterial,
         layers: &mut Vec<Arc<Vec<u8>>>,
         indices: &mut HashMap<(String, usize), usize>,
-    ) -> Result<(), String> {
+    ) -> Result<BoundMaps, String> {
+        let mut bound = BoundMaps::default();
         for (slot, source) in material["maps"]
             .as_object()
             .into_iter()
@@ -100,27 +107,31 @@ impl DocumentSource {
             if source.is_null() {
                 continue;
             }
-            let key = (
-                if let Some(id) = source.as_str() {
-                    format!("image:{id}")
-                } else {
-                    if !matches!(slot.as_str(), "color" | "emissive") {
-                        return Err("Live material sources support color and emissive maps".into());
-                    }
-                    self.captured_material(request, owner, source)?.0
-                },
-                0,
-            );
+            let (key, captured) = if let Some(id) = source.as_str() {
+                ((format!("image:{id}"), 0), None)
+            } else {
+                if !matches!(slot.as_str(), "color" | "emissive") {
+                    return Err("Live material sources support color and emissive maps".into());
+                }
+                let Some((key, pixels)) = self.captured_material(request, owner, source)? else {
+                    // Pending or unreadable live footage leaves the original
+                    // material slot intact, including its imported texture.
+                    continue;
+                };
+                ((key, 0), Some(pixels))
+            };
             let index = if let Some(index) = indices.get(&key) {
                 *index
             } else {
                 if layers.len() >= 256 {
+                    if captured.is_some() {
+                        continue;
+                    }
                     return Err("Studio map array exceeds 256 layers".into());
                 }
-                let pixels = if source.is_string() {
-                    self.material_image(source)?
-                } else {
-                    self.captured_material(request, owner, source)?.1
+                let pixels = match captured {
+                    Some(pixels) => pixels,
+                    None => self.material_image(source)?,
                 };
                 let index = layers.len();
                 layers.push(pixels);
@@ -128,8 +139,14 @@ impl DocumentSource {
                 index
             } as f32;
             match slot.as_str() {
-                "color" => gpu.maps[0] = index,
-                "emissive" => gpu.maps[1] = index,
+                "color" => {
+                    bound.color = true;
+                    gpu.maps[0] = index;
+                }
+                "emissive" => {
+                    bound.emissive = true;
+                    gpu.maps[1] = index;
+                }
                 "normal" => gpu.maps[3] = index,
                 "roughness" => gpu.maps2[0] = index,
                 "metalness" => gpu.maps2[1] = index,
@@ -160,6 +177,6 @@ impl DocumentSource {
                 gpu.physical_maps[slot] = map;
             }
         }
-        Ok(())
+        Ok(bound)
     }
 }

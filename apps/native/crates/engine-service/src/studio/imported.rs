@@ -19,7 +19,29 @@ pub(super) fn image(
         .images
         .get(texture.image)
         .ok_or("Missing imported image")?;
-    pm_scene3d::render::texture_rgba(&image.bytes).map_err(|e| e.to_string())
+    // Only a loaded resource has a content identity.
+    if resource.key.is_empty() {
+        return pm_scene3d::render::texture_rgba(&image.bytes).map_err(|e| e.to_string());
+    }
+    type Images = HashMap<(String, usize), std::sync::Weak<Vec<u8>>>;
+    static CACHE: std::sync::OnceLock<Mutex<Images>> = std::sync::OnceLock::new();
+    let key = (resource.key.clone(), texture.image);
+    let mut cache = CACHE
+        .get_or_init(Mutex::default)
+        .lock()
+        .map_err(|_| "Studio imported image cache poisoned")?;
+    if let Some(pixels) = cache.get(&key).and_then(std::sync::Weak::upgrade) {
+        return Ok(pixels);
+    }
+
+    let pixels = pm_scene3d::render::texture_rgba(&image.bytes).map_err(|e| e.to_string())?;
+    if cache.len() >= 1024 {
+        cache.retain(|_, pixels| pixels.strong_count() > 0);
+    }
+    if cache.len() < 1024 {
+        cache.insert(key, Arc::downgrade(&pixels));
+    }
+    Ok(pixels)
 }
 
 pub(super) fn pack(

@@ -47,9 +47,22 @@ pub fn shuttle(key: ShuttleKey, rate: PlaybackRate, from_pause: bool) -> Option<
     })
 }
 
+/// Publish a stopped clock as soon as Pause is accepted by the viewer.
+pub(crate) fn freeze_sample(sample: &mut ClockSample, at: i64, frame_ticks: i64) {
+    use pm_protocol::common::{HostMicros, Ticks};
+    let at = HostMicros::new(at.max(0) as u64).unwrap_or(sample.host_time);
+    let media = sample.media_time_at(at.max(sample.host_time)).get().max(0);
+    let snap = media / frame_ticks * frame_ticks;
+    sample.media_time = Ticks::new(snap).unwrap_or(sample.media_time);
+    sample.host_time = at;
+    sample.rate = PlaybackRate::STOPPED;
+    sample.state = TransportState::Stopped;
+    sample.loop_range = None;
+}
+
 pub struct Transport {
     pub clock: TransportClock,
-    pub audio: Option<AudioLink>,
+    pub audio: Option<std::sync::Arc<AudioLink>>,
     // Deadline, previous device epoch, requested rate, requested media start.
     awaiting: Option<(i64, Option<u32>, PlaybackRate, i64)>,
     /// The last wait for the audio clock that ended: how long it took (µs)
@@ -112,7 +125,7 @@ impl Transport {
         if self.solo.is_some() {
             link.send(AudioCtl::Solo(self.solo.clone()));
         }
-        self.audio = Some(link);
+        self.audio = Some(std::sync::Arc::new(link));
         Ok(audible?)
     }
     pub fn update(
@@ -156,7 +169,19 @@ impl Transport {
             a.send(AudioCtl::Solo(self.solo.clone()));
         }
     }
+    pub(crate) fn pause_at(&mut self, at: i64) {
+        self.clock.apply(TransportCommand::Pause, at);
+        self.awaiting = None;
+        if let Some(audio) = &self.audio {
+            audio.send(AudioCtl::Pause);
+        }
+    }
+
     pub fn command(&mut self, cmd: TransportCommand, now: i64) {
+        if cmd == TransportCommand::Pause {
+            self.pause_at(now);
+            return;
+        }
         let before = self
             .audio
             .as_ref()
@@ -251,7 +276,7 @@ impl Transport {
             }
             _ => {
                 self.clock.apply(cmd, now);
-                if matches!(cmd, TransportCommand::Pause | TransportCommand::Step { .. }) {
+                if matches!(cmd, TransportCommand::Step { .. }) {
                     self.awaiting = None;
                 }
                 if let Some(a) = &self.audio {
@@ -368,14 +393,36 @@ impl AvMeasurements {
 mod start_wait_tests {
     use super::*;
 
+    #[test]
+    fn a_delayed_pause_keeps_the_frame_at_the_request_time() {
+        use pm_protocol::common::TICKS_PER_SECOND as S;
+
+        let mut transport = Transport::new(S / 30);
+        transport.command(
+            TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            },
+            0,
+        );
+        let pause = PREROLL_US + 1_045_000;
+        let mut public = transport.clock.sample(pause - 20_000);
+        freeze_sample(&mut public, pause, S / 30);
+        transport.pause_at(pause);
+        let stopped = transport.poll(pause + 500_000);
+        assert_eq!(public.media_time, stopped.media_time);
+        assert_eq!(stopped.media_time.get(), S + S / 30);
+        assert_eq!(stopped.state, TransportState::Stopped);
+    }
+
     /// A start that gives up on the audio clock says how long it waited and
     /// that it fell back to the host clock; the trace takes it once.
     #[test]
     fn a_start_that_falls_back_reports_its_wait_once() {
         let doc = pm_model::Document::new(None, 1);
         let mut transport = Transport::new(1);
-        transport.audio =
-            Some(AudioLink::start(doc, "C".into(), Default::default(), Box::new(|_| {})).unwrap());
+        transport.audio = Some(std::sync::Arc::new(
+            AudioLink::start(doc, "C".into(), Default::default(), Box::new(|_| {})).unwrap(),
+        ));
         let asked = 100;
         transport.awaiting = Some((
             asked + crate::clock::AUDIO_START_TIMEOUT_US,

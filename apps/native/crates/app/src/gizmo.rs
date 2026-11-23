@@ -463,6 +463,9 @@ pub struct GizmoSurface {
     rulers: viewer_rulers::Rulers,
     snapping_enabled: bool,
     cursor: CursorStyle,
+    fly_capture: Option<Rc<std::cell::Cell<bool>>>,
+    part_assets_revision: Option<(u64, u64)>,
+    part_assets: Option<Arc<dyn pm_scene3d::geometry::AssetGeometry>>,
     /// Holds the keyboard while flying, so held keys report their release.
     focus: Option<FocusHandle>,
     refreshing: bool,
@@ -546,7 +549,7 @@ fn parent_inverse(world: &[f64; 6], local: &[f64; 6]) -> Option<[f64; 4]> {
 /// take the click never turns the view into 3D and orbits it (PM-480). The
 /// menu items (no key) and Fly Navigation's key always act.
 pub(crate) fn studio_key(group: &str, focused: bool, active: bool, free_look: bool) -> bool {
-    focused && active && (group == "fly" || free_look)
+    active && (group == "fly" || focused && free_look)
 }
 fn round(value: f64, digits: i32) -> f64 {
     let unit = 10f64.powi(digits);
@@ -751,6 +754,9 @@ impl GizmoSurface {
             completed_read: 0,
             picking: None,
             picks: 0,
+            fly_capture: None,
+            part_assets_revision: None,
+            part_assets: None,
             controls: true,
             panning: None,
             space_hand: false,
@@ -811,6 +817,17 @@ impl GizmoSurface {
         }
         self.latest += 1;
         let ticket = self.latest;
+        let assets = self.kernel.published(&self.project)
+            .filter(|p| pm_panel_studio3d::properties::active_part(&p.selection).is_some())
+            .and_then(|p| {
+                let revision = p.snapshot.root()?.get("assets")?.rev();
+                let source = (p.snapshot.doc_id, revision);
+                if self.part_assets_revision != Some(source) {
+                    self.part_assets = self.host.scene3d_assets(cx);
+                    self.part_assets_revision = Some(source);
+                }
+                self.part_assets.clone()
+            });
         let (kernel, project, time) = (
             self.kernel.clone(),
             self.project.clone(),
@@ -851,6 +868,20 @@ impl GizmoSurface {
                         .filter(|id| three_d.contains(id))
                         .cloned()
                         .collect::<Vec<_>>();
+                    let part = pm_panel_studio3d::properties::active_part(&p.selection).and_then(
+                        |(layer, key)| {
+                            pm_panel_studio3d::viewport::model_part(
+                                &p.snapshot,
+                                time,
+                                layer,
+                                Some(key),
+                                None,
+                                assets.as_deref()?,
+                            )
+                            .ok()
+                            .flatten()
+                        },
+                    );
                     let ui = |k: &str| {
                         p.ui_state
                             .viewer
@@ -862,6 +893,7 @@ impl GizmoSurface {
                         poses,
                         scene,
                         selected,
+                        part,
                         ui("studioTool"),
                         ui("studioLook"),
                         ui("studioAxes"),
@@ -883,17 +915,27 @@ impl GizmoSurface {
                 .await;
             let _ = this.update(cx, |s, cx| {
                 if s.latest == ticket {
-                    let (poses, scene, selected, tool, look, axes, (kind, add, aim), (comp, kept)) =
-                        read.unwrap_or((
-                            vec![],
-                            None,
-                            vec![],
-                            None,
-                            None,
-                            None,
-                            (None, None, None),
-                            (String::new(), None),
-                        ));
+                    let (
+                        poses,
+                        scene,
+                        selected,
+                        part,
+                        tool,
+                        look,
+                        axes,
+                        (kind, add, aim),
+                        (comp, kept),
+                    ) = read.unwrap_or((
+                        vec![],
+                        None,
+                        vec![],
+                        None,
+                        None,
+                        None,
+                        None,
+                        (None, None, None),
+                        (String::new(), None),
+                    ));
                     s.studio.light_aim = aim.unwrap_or_else(|| "reflect".into());
                     s.studio.object_axes = axes.as_deref() == Some("object");
                     s.studio.light_kind = kind.unwrap_or_default();
@@ -953,6 +995,7 @@ impl GizmoSurface {
                         s.studio_ui("studioLook", if want { "free" } else { "camera" }, cx);
                     }
                     s.studio.selected = selected;
+                    s.studio.part = part;
                     s.studio.tool = studio3d::Tool::parse(tool.as_deref());
                     if !s.studio.busy() {
                         s.studio.free_look = free_look;
@@ -1695,11 +1738,11 @@ impl GizmoSurface {
         }
     }
     fn on_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        if self.effects_move(event, cx) { return; }
         if self.studio_flying() {
             self.studio_fly_pointer(event.position);
             return;
         }
+        if self.effects_move(event, cx) { return; }
         if self.rulers.dragging.is_some()
             && let Some(frame) = self.host.frame(self.bounds, cx)
             && self.rulers_move(event.position, frame)
@@ -3048,9 +3091,7 @@ impl Render for GizmoSurface {
         let this = cx.entity().downgrade();
         let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
         // Flying holds the keyboard so a released key stops its move.
-        if self.studio_flying() && !focus.is_focused(window) {
-            window.focus(&focus, cx);
-        }
+        self.studio_focus_fly(window, cx);
         // Media held over the viewer: an accent ring where it will land.
         let accent = rgb(self.tokens.colors.accent);
         let ring = px(self.tokens.metrics.border * 2.);

@@ -66,7 +66,9 @@ pub mod workspace;
 pub use macos::open_editor_tab;
 pub use native::{front_restoring, restore_arranging, set_front_restoring, window_shown};
 #[cfg(target_os = "macos")]
-pub use native::{bring_forward, install_menus, quit_blocker_window, set_quit_hook};
+pub use native::{
+    bring_forward, install_menus, quit_blocker_window, set_quit_hook, show_in_tab_group,
+};
 pub(crate) use macos::open_settings;
 #[cfg(target_os = "macos")]
 pub use macos::{

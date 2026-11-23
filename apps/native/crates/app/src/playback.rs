@@ -401,7 +401,7 @@ pub fn install(entity: &Entity<Controller>, cx: &mut App) {
                 v.sync_studio_panes(cx);
                 if let Some(clock)=status.clock {
                     // Shuttling is a run too: the live timecode shows at every speed.
-                    let playing=clock.state!=pm_protocol::clock::TransportState::Stopped;
+                    let playing=status.wants_display && clock.state!=pm_protocol::clock::TransportState::Stopped;
                     // Playing, the head and timecode show the time at the vsync this
                     // tick lands on. A sample's own time only moves when a new one
                     // arrives, so a late sample held the head a frame, then jumped two.

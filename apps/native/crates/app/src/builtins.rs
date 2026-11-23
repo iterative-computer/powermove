@@ -2252,12 +2252,6 @@ impl Controller {
         } else {
             editor.origin + point(px(m.toolbar), px(m.toolbar))
         };
-        let title: SharedString = match id {
-            "agent" => "Agent",
-            "settings" => "Settings",
-            _ => "Export",
-        }
-        .into();
         // Settings opens on the page asked for, else the one it was left on.
         let page = (id == "settings")
             .then(|| {
@@ -2328,6 +2322,7 @@ impl Controller {
             if !current {
                 return;
             }
+            let dialog = kind == WindowKind::Dialog;
             let mut options = WindowOptions::new().kind(kind);
             options.parent = parent;
             if popover.is_some() {
@@ -2339,15 +2334,18 @@ impl Controller {
                 // Clear GPUI content over the native material (language §12).
                 options = options.macos_window_background(gpui::MacosWindowBackground::Transparent);
             }
+            if dialog {
+                options.is_resizable = false;
+                options.is_minimizable = false;
+                options.is_movable = false;
+            }
             let settings = panel == "settings";
             let result = cx.open_window(
                 options
-                    // A popover has no title bar; other panel windows get a
-                    // seamless transparent one over their own material
-                    // (Settings: AppKit's own, under its toolbar).
-                    .titlebar(popover.is_none().then(|| TitlebarOptions {
-                        title: Some(title),
-                        appears_transparent: !settings,
+                    // Settings uses AppKit chrome under its toolbar.
+                    .titlebar(settings.then(|| TitlebarOptions {
+                        title: Some("Settings".into()),
+                        appears_transparent: false,
                         ..Default::default()
                     }))
                     .window_bounds(Some(WindowBounds::Windowed(Bounds::new(

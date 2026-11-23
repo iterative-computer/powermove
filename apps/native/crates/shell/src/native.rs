@@ -887,13 +887,18 @@ define_class!(
         fn close_page(&self, sender: &AnyObject) {
             let tag: isize = unsafe { msg_send![sender, tag] };
             match foreign_page(tag) {
-                Some((number, index)) => route(number, format!("closePage:{index}")),
+                Some((number, index)) => {
+                    route(number, format!("closePage:{index}"));
+                }
                 None => self.send(Command { name: format!("closePage:{tag}"), args: vec![], token: None }),
             }
         }
         #[unsafe(method(closeTab:))]
         fn close_tab(&self, sender: &AnyObject) {
             let number: isize = unsafe { msg_send![sender, tag] };
+            if route(number, "closeTab".into()) {
+                return;
+            }
             let app = NSApplication::sharedApplication(self.mtm());
             if let Some(window) = app.windowWithWindowNumber(number) {
                 request_close(&window);
@@ -2284,7 +2289,7 @@ const TAB_SHOWN: &str = "PMShellTabShown";
 /// Brings `window` forward in its tab group and tells it so. A window shown
 /// this way while the app is inactive gets no activation, so nothing else
 /// makes it hide AppKit's tab row or draw its own strip for the new state.
-fn show_in_tab_group(window: &NSWindow) {
+pub fn show_in_tab_group(window: &NSWindow) {
     if gpui_macos::child_window::app_hidden() {
         let window = objc2::rc::Weak::from(window);
         gpui_macos::child_window::when_shown(move || {
@@ -2400,7 +2405,7 @@ fn foreign_page(tag: isize) -> Option<(isize, usize)> {
     })
 }
 /// A command to the editor window `number` (its own command queue).
-fn route(number: isize, name: String) {
+fn route(number: isize, name: String) -> bool {
     ROUTES.with(|r| {
         if let Some(tx) = r.borrow().get(&number) {
             let _ = tx.try_send(Command {
@@ -2408,8 +2413,11 @@ fn route(number: isize, name: String) {
                 args: vec![],
                 token: None,
             });
+            true
+        } else {
+            false
         }
-    });
+    })
 }
 /// After a relaunch: the window with session id `id` (the one that was in
 /// front) comes forward, its tab the one its group shows.
@@ -3714,6 +3722,7 @@ pub struct Host {
     /// is the editor's (play), as in Electron.
     pub keyboard_navigated: Cell<bool>,
     pub canvas_focus: Cell<bool>,
+    pub studio_flying: Rc<Cell<bool>>,
     flowchart: Option<flowchart::Popover>,
     layer: metal::MetalLayer,
     viewer_transform: Option<([f64; 2], Option<f64>, [f64; 2])>,
@@ -3949,6 +3958,7 @@ impl Host {
             keyboard_control_focus: Cell::new(false),
             keyboard_navigated: Cell::new(false),
             canvas_focus: Cell::new(false),
+            studio_flying: Rc::new(Cell::new(false)),
             flowchart: None,
             layer,
             viewer_transform: None,
@@ -4262,6 +4272,9 @@ impl Host {
                         return std::ptr::null_mut();
                     }
                     if e.windowNumber() != window.windowNumber() {
+                        return event.as_ptr();
+                    }
+                    if host.borrow().studio_flying.get() {
                         return event.as_ptr();
                     }
                     let mut responder = window.firstResponder();
@@ -9719,7 +9732,7 @@ pub fn project_menu_entries(current: &str, recent: &[(String, String)]) -> Vec<M
         MenuEntry::item("Rename Project…", "renameProject"),
         MenuEntry::item("Show in Finder", "revealProject"),
         MenuEntry::separator(),
-        MenuEntry::item("Close Project", "closeTab"),
+        MenuEntry::item("Close Project", "closeProject"),
     ]);
     items
 }
@@ -9732,7 +9745,7 @@ fn project_menu_chord(command: &str) -> Option<&'static str> {
         "open" => "Command+O",
         "newProject" => "Command+Alt+N",
         "newWindow" => "Command+Shift+N",
-        "closeTab" => "Command+W",
+        "closeTab" | "closeProject" => "Command+W",
         _ => return None,
     })
 }

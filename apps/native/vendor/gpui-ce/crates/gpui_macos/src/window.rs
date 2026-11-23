@@ -942,8 +942,8 @@ struct MacWindowState {
     last_draw: Option<std::time::Instant>,
     closed: Arc<AtomicBool>,
     accesskit_adapter: Option<crate::composition_accessibility::Adapter>,
-    // The parent window if this window is a sheet (Dialog kind)
-    sheet_parent: Option<ObjcId>,
+    // AppKit owns presentation for an attached Dialog.
+    is_sheet: bool,
 }
 
 impl MacWindowState {
@@ -1545,7 +1545,7 @@ impl MacWindow {
                 last_draw: None,
                 closed: Arc::new(AtomicBool::new(false)),
                 accesskit_adapter: None,
-                sheet_parent: None,
+                is_sheet: false,
             }));
             let mut window = Self(state, marker);
 
@@ -1591,8 +1591,7 @@ impl MacWindow {
 
             let app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let main_window: ObjcId = msg_send![app, mainWindow];
-            let mut sheet_parent = None;
-            let mut held_sheet = false;
+            let mut is_sheet = false;
             // Powermove P-SHEET/P-CHILD: the window that asked, if it named one.
             let requested: ObjcId = match requested_parent {
                 Some(rwh::RawWindowHandle::AppKit(handle)) => {
@@ -1662,13 +1661,13 @@ impl MacWindow {
                         let sheet = Retained::retain(native_window as *mut objc2_app_kit::NSWindow)
                             .expect("the sheet window");
                         let (asked_on, asked) = (on.clone(), sheet.clone());
-                        held_sheet = !crate::child_window::sheet(
+                        crate::child_window::sheet(
                             &asked_on,
                             &asked,
                             move || on.beginSheet_completionHandler(&sheet, None),
                             || {},
                         );
-                        sheet_parent = Some(parent);
+                        is_sheet = true;
                     }
                 }
             }
@@ -1727,20 +1726,21 @@ impl MacWindow {
                 }
             }
 
-            // A sheet waiting for the app to become active shows when it begins.
-            if show && !held_sheet {
-                present(native_window, focus);
+            // AppKit presents and positions attached sheets, including sheets
+            // waiting for activation. Ordering or moving them independently
+            // interferes with the sheet transition and its input routing.
+            if !is_sheet {
+                if show {
+                    present(native_window, focus);
+                }
+                // The initializer can offset standalone windows when the main
+                // and primary screens differ.
+                let _: () = msg_send![native_window, setFrameTopLeftPoint: window_rect.origin];
             }
-
-            // Set the initial position of the window to the specified origin.
-            // Although we already specified the position using `initWithContentRect_styleMask_backing_defer_screen_`,
-            // the window position might be incorrect if the main screen (the screen that contains the window that has focus)
-            //  is different from the primary screen.
-            let _: () = msg_send![native_window, setFrameTopLeftPoint: window_rect.origin];
             {
                 let mut window_state = window.0.lock();
                 window_state.move_traffic_light();
-                window_state.sheet_parent = sheet_parent;
+                window_state.is_sheet = is_sheet;
             }
 
             pool.drain();
@@ -1832,7 +1832,7 @@ impl Drop for MacWindow {
         let accessibility = this.accesskit_adapter.take();
         this.renderer.destroy();
         let window = this.native_window;
-        let sheet_parent = this.sheet_parent.take();
+        let is_sheet = this.is_sheet;
         // A child window queued to show on activation never shows once closed.
         unsafe { crate::child_window::forget(&*(window as *const objc2_app_kit::NSWindow)) };
         // Nor does a sheet that waited for it, and sheets waiting to go on
@@ -1856,8 +1856,11 @@ impl Drop for MacWindow {
         this.foreground_executor
             .spawn(async move {
                 unsafe {
-                    if let Some(parent) = sheet_parent {
-                        let _: () = msg_send![parent, endSheet: window];
+                    if is_sheet {
+                        let parent: ObjcId = msg_send![window, sheetParent];
+                        if !parent.is_null() {
+                            let _: () = msg_send![parent, endSheet: window];
+                        }
                     }
                     window.close();
                     window.autorelease();
@@ -2144,6 +2147,10 @@ impl PlatformWindow for MacWindow {
             return false;
         }
         let lock = self.0.lock();
+        if lock.is_sheet {
+            // AppKit directs focus to the sheet when its parent is activated.
+            return true;
+        }
         let window = lock.native_window;
         let closed = lock.closed.clone();
         let executor = lock.foreground_executor.clone();

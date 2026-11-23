@@ -480,7 +480,7 @@ fn the_project_menu_holds_every_project_job_and_names_recent_projects() {
     );
     assert!(!entries[5].enabled, "Recent is a heading");
     assert_eq!(entries[7].command, "openRecentProject:id2");
-    assert_eq!(entries.last().unwrap().command, "closeTab");
+    assert_eq!(entries.last().unwrap().command, "closeProject");
     // No recent projects: no Recent heading.
     let bare = pm_shell::project_menu_entries("Film", &[]);
     assert!(bare.iter().all(|e| e.label != "Recent"));

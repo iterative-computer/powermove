@@ -106,12 +106,12 @@ fn kind(path: &Path) -> Option<&'static str> {
     ]
     .into_iter()
     .find_map(|(list, kind)| has(list).then_some(kind))
+    .or_else(|| pm_scene3d::import::path::supports_extension(&extension).then_some("model"))
 }
 fn mime(path: &Path, kind: &str) -> String {
     let extension = extension(path);
     match (kind, extension.as_str()) {
-        ("model", "glb") => "model/gltf-binary".into(),
-        ("model", "gltf") => "model/gltf+json".into(),
+        ("model", _) => pm_scene3d::import::path::mime(&extension).into(),
         ("image", "jpg" | "jpeg") => "image/jpeg".into(),
         ("image", "svg") => "image/svg+xml".into(),
         ("image", "tif") => "image/tiff".into(),
@@ -304,7 +304,7 @@ pub struct ImportRequest {
     /// Where the placed layers join the stack (0: the top, the default),
     /// each next file below the one before (a drop between timeline rows).
     pub place_index: Option<usize>,
-    /// An extension's `assets.import`: 3D models (glb, glTF, OBJ) are media too.
+    /// An explicit model import controls when its 3D layer is placed.
     pub models: bool,
     /// The layer definition an extension asked its asset to place as.
     pub layer_definition: Option<String>,
@@ -427,9 +427,9 @@ pub(crate) struct Facts {
     pub fingerprint: String,
 }
 /// `None` for what is not a plain media file (a folder, an unknown kind).
-fn file_facts(path: &Path, models: bool) -> Option<Facts> {
+fn file_facts(path: &Path) -> Option<Facts> {
     let meta = std::fs::metadata(path).ok().filter(std::fs::Metadata::is_file)?;
-    let kind = kind(path).or((models && model_mime(path).is_some()).then_some("model"))?;
+    let kind = kind(path)?;
     Some(Facts {
         name: path.file_name()?.to_string_lossy().into_owned(),
         kind,
@@ -760,15 +760,9 @@ fn relinked_sequence(
 }
 /// A 3D model's type, for imports that take models.
 fn model_mime(path: &Path) -> Option<&'static str> {
-    match extension(path).as_str() {
-        "glb" => Some("model/gltf-binary"),
-        "gltf" => Some("model/gltf+json"),
-        "obj" => Some("model/obj"),
-        "fbx" => Some("model/fbx"),
-        "ply" => Some("model/ply"),
-        "splat" => Some("model/splat"),
-        _ => None,
-    }
+    let extension = extension(path);
+    pm_scene3d::import::path::supports_extension(&extension)
+        .then(|| pm_scene3d::import::path::mime(&extension))
 }
 #[derive(Debug, Default, PartialEq)]
 pub struct Outcome {
@@ -857,7 +851,7 @@ impl Builtins {
             // (it is a Replace then), and said.
             let differs = request.sequence.is_none()
                 && !originals.contains_key(&replaced)
-                && chosen.as_deref().and_then(|p| file_facts(p, true)).is_some_and(|facts| {
+                && chosen.as_deref().and_then(file_facts).is_some_and(|facts| {
                     assets().ok().is_some_and(|a| {
                         a.get(&replaced)
                             .and_then(|r| r.get("fingerprint"))
@@ -912,7 +906,7 @@ impl Builtins {
         let (mut relink, mut reuse) = (vec![], vec![]);
         let mut fresh = vec![];
         for path in std::mem::take(&mut request.paths) {
-            match file_facts(&path, request.models)
+            match file_facts(&path)
                 .and_then(|facts| known(&known_now, &originals, &facts).map(|k| (k, facts.name)))
             {
                 Some((Known::Missing(id), name)) => relink.push((id, path, name)),
@@ -1132,7 +1126,7 @@ impl Builtins {
                 outcome.failed.push((name, error));
                 continue;
             }
-            let prepared = if request.models && model_mime(&path).is_some() {
+            let prepared = if kind(&path) == Some("model") {
                 match pm_scene3d::import::path::prepare(&path) {
                     Ok(model) => Some(model),
                     Err(error) => {
@@ -1155,7 +1149,7 @@ impl Builtins {
             let retained_path = staged_model
                 .as_ref()
                 .map_or(path.as_path(), |(_, p)| p.as_path());
-            let model = request.models.then(|| model_mime(retained_path)).flatten();
+            let model = prepared.as_ref().and_then(|_| model_mime(retained_path));
             let kind = match &sequence {
                 Some(_) => Some("video"),
                 None => kind(&path).or(model.map(|_| "model")),
@@ -1187,7 +1181,7 @@ impl Builtins {
                         // A model has no media facts; the scene system reads its bytes.
                         Some(_) => (
                             json!({"name":name,"kind":"model","format":extension(retained_path),"size":size,"persisted":true,
-                            "sourcePath":path.to_string_lossy()}),
+                            "native3dSourceFormat":extension(&path),"sourcePath":path.to_string_lossy()}),
                             vec![],
                         ),
                         None => {
@@ -1703,15 +1697,22 @@ mod tests {
             "cube.fbx",
             include_bytes!("../../../../../engine/crates/pm-import-fbx/fixtures/tiny-static.fbx"),
         );
+        let stl = write(
+            &f.root,
+            "triangle.stl",
+            b"solid triangle\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid triangle\n",
+        );
         for path in [
             glb_path,
             gltf,
             obj,
             fbx,
+            stl,
             f.root.join("points.ply"),
             f.root.join("points.splat"),
         ] {
             assert_eq!(classify(&path).unwrap().0, "model");
+            let models = extension(&path) != "stl";
             let result = f
                 .runtime
                 .import_media(
@@ -1719,8 +1720,8 @@ mod tests {
                     &f.root,
                     ImportRequest {
                         paths: vec![path],
-                        place_at: Some(1.),
-                        models: true,
+                        place_at: models.then_some(1.),
+                        models,
                         ..Default::default()
                     },
                     &AtomicBool::new(false),
@@ -1730,7 +1731,12 @@ mod tests {
             assert_eq!(result.assets.len(), 1);
             let published = f.actor.handle().published("p").unwrap();
             let root = crate::data::wire(&published.snapshot.root().unwrap().to_value());
-            assert_eq!(root["assets"][&result.assets[0]]["kind"], "model");
+            let asset = &root["assets"][&result.assets[0]];
+            assert_eq!(asset["kind"], "model");
+            if !models {
+                assert_eq!(asset["format"], "glb");
+                assert_eq!(asset["native3dSourceFormat"], "stl");
+            }
             let comp = pm_kernel::model::comp_node(
                 published.snapshot.root().unwrap(),
                 published.snapshot.open_comp().as_deref(),
@@ -1758,7 +1764,7 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::write(root.join("legacy.usdz"), b"unsupported").unwrap();
+        std::fs::write(root.join("legacy.blend"), b"unsupported").unwrap();
         let (_, failed) = f
             .runtime
             .link_folders(document(&f), &[root.clone()], None, &AtomicBool::new(false))
@@ -1779,7 +1785,7 @@ mod tests {
             .keys()
             .next()
             .unwrap();
-        std::fs::write(root.join("new.stl"), b"unsupported").unwrap();
+        std::fs::write(root.join("new.blend"), b"unsupported").unwrap();
         let tree = crate::linked_folders::Tree::scan(&root).unwrap();
         let done = f
             .runtime
@@ -1788,7 +1794,7 @@ mod tests {
         assert!(
             done.failed
                 .iter()
-                .any(|(file, error)| file == "new.stl" && error.contains("Export as glTF (.glb)"))
+                .any(|(file, error)| file == "new.blend" && error.contains("Export as glTF (.glb)"))
         );
     }
     #[test]
@@ -1813,7 +1819,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(message.contains("missing.bin"), "{message}");
-        let unsupported = write(&f.root, "model.usdz", b"unsupported");
+        let unsupported = write(&f.root, "model.blend", b"unsupported");
         let result = f
             .runtime
             .import_media(
@@ -3797,7 +3803,8 @@ pub fn probe(path: &Path) -> Result<serde_json::Value, String> {
         let prepared = pm_scene3d::import::path::prepare(path).map_err(|e| e.to_string())?;
         return Ok(
             json!({"name":path.file_name().unwrap_or_default().to_string_lossy(),
-            "kind":"model","format":extension(Path::new(&prepared.name)),"size":size,"sourcePath":path,"persisted":true}),
+            "kind":"model","format":extension(Path::new(&prepared.name)),
+            "native3dSourceFormat":extension(path),"size":size,"sourcePath":path,"persisted":true}),
         );
     }
     let (record, _) = metadata(path, kind, size, Default::default())?;

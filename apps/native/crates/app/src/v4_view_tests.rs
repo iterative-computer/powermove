@@ -140,7 +140,8 @@ pub(crate) fn window(
     let (view, vcx) = cx.add_window_view(|window, cx| {
         SurfaceView::new(runtime, first, tokens(), natives, window, cx)
     });
-    let owned = vcx.clone();
+    let mut owned = vcx.clone();
+    owned.update(|window, _| window.activate());
     owned.simulate_resize(size(px(1000.), px(600.)));
     (view, owned)
 }
@@ -963,6 +964,14 @@ fn wheel_scrub_scenario(cx: &mut TestAppContext, animated: bool) {
             ..Default::default()
         });
     };
+    vcx.deactivate_window();
+    vcx.run_until_parked();
+    wheel(&mut vcx, 24., 0., gpui::TouchPhase::Started);
+    wheel(&mut vcx, 24., 0., gpui::TouchPhase::Moved);
+    assert_eq!(view.read_with(&vcx, |v, _| v.wheel_reading()), None);
+    vcx.update(|window, _| window.activate());
+    vcx.run_until_parked();
+
     wheel(&mut vcx, 0., 24., gpui::TouchPhase::Started);
     assert!(!rig.kernel.published(PROJECT).unwrap().history.can_undo);
     wheel(&mut vcx, 24., 0., gpui::TouchPhase::Started);

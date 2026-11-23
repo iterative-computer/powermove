@@ -4061,7 +4061,12 @@ impl TimelineSurface {
         let (x, y) = self.local(event.position);
         // A scroll starts no skim (the pointer did not move); a skim showing
         // stays under the pointer as the time moves beneath it.
-        self.pointer = Some(event.position);
+        if window.is_window_active() {
+            self.pointer = Some(event.position);
+        } else {
+            self.pointer = None;
+            self.set_skimmer(None, cx);
+        }
         // ⌘, ⌥ or Control with the wheel zooms the time (v1, as a trackpad
         // pinch reads).
         if event.modifiers.alt || event.modifiers.platform || event.modifiers.control {
@@ -5691,6 +5696,7 @@ impl Render for TimelineSurface {
             self.activation = Some(cx.observe_window_activation(window, |s, window, cx| {
                 if !window.is_window_active() {
                     s.cancel_pointer_gesture(cx);
+                    s.pointer = None;
                     s.set_skimmer(None, cx);
                 }
             }));
@@ -6441,8 +6447,10 @@ impl Render for TimelineSurface {
                                         cx.stop_propagation();
                                         return;
                                     }
-                                    let over = s.over_bar(e.position, cx);
-                                    if s.bounds.contains(&e.position) && !over {
+                                    if !window.is_window_active() {
+                                        s.pointer = None;
+                                        s.set_skimmer(None, cx);
+                                    } else if s.bounds.contains(&e.position) && !s.over_bar(e.position, cx) {
                                         s.hover(e.position, cx);
                                     } else {
                                         if s.model.edit_tool == EditTool::Split { s.pointer = None; cx.notify(); }

@@ -27,7 +27,54 @@ pub const PROPERTIES: &[&str] = &[
 ];
 /// Map slots a part takes; `color` and `emissive` also take live sources
 /// (a 2D layer, group or composition: "use a layer as the material").
-pub const MAP_SLOTS: &[&str] = &["color", "normal", "roughness", "metalness", "emissive", "ao"];
+pub const MAP_SLOTS: &[&str] = &[
+    "color",
+    "normal",
+    "roughness",
+    "metalness",
+    "emissive",
+    "ao",
+];
+
+pub const TRANSFORM_FIELDS: &[(&str, &str)] = &[
+    ("x", "Position X"),
+    ("y", "Position Y"),
+    ("z", "Position Z"),
+    ("rx", "Rotation X"),
+    ("ry", "Rotation Y"),
+    ("rz", "Rotation Z"),
+    ("scale", "Scale"),
+    ("visible", "Visible"),
+];
+
+pub fn valid_part_key(key: &str) -> bool {
+    let mut steps = key.split('_');
+    let valid = |step: &str| {
+        step.parse::<u32>()
+            .is_ok_and(|index| index <= 9999 && index.to_string() == step)
+    };
+    steps.clone().count() <= 64 && steps.all(valid)
+}
+
+/// Install neutral channels once, leaving an existing part's keys intact.
+pub fn install_part(layer: &Value, key: &str, name: &str) -> Result<Option<Value>> {
+    if !is_model(layer) || !valid_part_key(key) {
+        return fail("Choose a model part");
+    }
+    if layer["lock"] == true {
+        return fail("Layer is locked");
+    }
+    let mut data = layer["d"]["data"].clone();
+    if data["object"]["parts"].get(key).is_some() {
+        return Ok(None);
+    }
+    let name: String = name.trim().chars().take(40).collect();
+    data["object"]["parts"][key] = json!({
+        "name": if name.is_empty() { format!("Part {}", key.replace('_', ".")).chars().take(160).collect::<String>() } else { name },
+        "p": schema::properties("part", None)?,
+    });
+    Ok(Some(data))
+}
 
 /// An imported model (not a primitive, terrain or nature object).
 pub fn is_model(layer: &Value) -> bool {
@@ -76,7 +123,7 @@ pub fn plan(comp: &Value, args: &Value, selection: &[String]) -> Result<Option<P
     let mut data = layer["d"]["data"].clone();
     let object = &mut data["object"];
     // Slot overrides apply on top of the model's own materials.
-    if index.is_some() {
+    if index.is_some() && args["preserveMaterialMode"] != true {
         object["useSourceMaterials"] = json!(true);
     }
     let mut actions = vec![];

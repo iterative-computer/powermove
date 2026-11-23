@@ -701,14 +701,6 @@ impl SceneSource for DocumentSource {
                 if object.get("scatter").is_some() {
                     return Ok(());
                 }
-                if object
-                    .get("parts")
-                    .and_then(Value::as_object)
-                    .is_some_and(|p| !p.is_empty())
-                {
-                    return Err("Studio part-offset document adapter is not connected yet".into());
-                }
-
                 if !object["slots"].as_array().is_none_or(Vec::is_empty) {
                     return Err("Studio material slots require their native slot adapter".into());
                 }
@@ -744,7 +736,7 @@ impl SceneSource for DocumentSource {
                     for (slot, mut material) in palette.into_iter().enumerate() {
                         let mut gpu = material.gpu();
                         gpu.extra[2] = n(p, "opacity", 1.);
-                        self.bind_material_maps(
+                        let bound = self.bind_material_maps(
                             request,
                             id,
                             &maps::overrides(object, Some(0), false),
@@ -764,7 +756,9 @@ impl SceneSource for DocumentSource {
                                 false,
                             );
                         }
-                        maps::screen(object, Some(0), &mut material, &mut gpu, false);
+                        if bound.emissive {
+                            maps::screen(object, Some(0), &mut material, &mut gpu, false);
+                        }
                         materials.push(gpu);
                         scene.materials.push(material);
                     }
@@ -784,7 +778,10 @@ impl SceneSource for DocumentSource {
                         return Ok(());
                     }
                     for part in resource
-                        .parts(request.ticks as f64 / pm_protocol::common::TICKS_PER_SECOND as f64)
+                        .parts_with_overrides(
+                            request.ticks as f64 / pm_protocol::common::TICKS_PER_SECOND as f64,
+                            &object["parts"],
+                        )
                         .map_err(|e| e.to_string())?
                     {
                         let source_material = (object["useSourceMaterials"] == true)
@@ -833,13 +830,9 @@ impl SceneSource for DocumentSource {
                         let basic = source_material.is_some_and(|m| {
                             m.kind == pm_scene3d::render::gltf::MaterialType::Basic
                         });
-                        let index = if source_material.is_some() {
-                            part.source_material
-                        } else {
-                            Some(0)
-                        };
+                        let index = part.source_material.or((source_material.is_none()).then_some(0));
                         let overrides = maps::overrides(object, index, basic);
-                        self.bind_material_maps(
+                        let bound = self.bind_material_maps(
                             request,
                             id,
                             &overrides,
@@ -862,11 +855,11 @@ impl SceneSource for DocumentSource {
                                 m.emissive_intensity as f32
                             });
                         if source_material.is_some() {
-                            if overrides["maps"].get("color").is_some() {
+                            if bound.color {
                                 selected.base = Vec3::splat(1.);
                                 gpu.base[..3].fill(1.);
                             }
-                            if overrides["maps"].get("emissive").is_some() {
+                            if bound.emissive {
                                 emission_color = Vec3::splat(1.);
                                 emission_intensity = emission_intensity.max(1.);
                                 selected.emission = emission_color * emission_intensity;
@@ -882,7 +875,9 @@ impl SceneSource for DocumentSource {
                             emission_intensity,
                             basic,
                         );
-                        maps::screen(object, index, &mut selected, &mut gpu, basic);
+                        if bound.emissive {
+                            maps::screen(object, index, &mut selected, &mut gpu, basic);
+                        }
                         scene.materials.push(selected);
                         materials.push(gpu);
                         let mesh = self.imported_mesh(&part.geometry)?;
@@ -938,7 +933,7 @@ impl SceneSource for DocumentSource {
                     if object["material"]["doubleSided"] == false {
                         gpu.policy[1] = (gpu.policy[1] as u32 & !4) as f32;
                     }
-                    self.bind_material_maps(
+                    let bound = self.bind_material_maps(
                         request,
                         id,
                         &maps::overrides(object, Some(0), false),
@@ -955,7 +950,9 @@ impl SceneSource for DocumentSource {
                         n(p, "emissiveIntensity", 1.),
                         false,
                     );
-                    maps::screen(object, Some(0), &mut material, &mut gpu, false);
+                    if bound.emissive {
+                        maps::screen(object, Some(0), &mut material, &mut gpu, false);
+                    }
                     scene.materials.push(material);
                     materials.push(gpu);
                     instances.push(MeshInstance {
@@ -1284,6 +1281,52 @@ fn imported_material(m: &pm_scene3d::render::gltf::Material) -> Material {
 #[cfg(test)]
 mod immutable_mesh_cache_tests {
     use super::*;
+    #[test]
+    fn unavailable_live_video_keeps_the_receiving_model() {
+        use pm_studio3d_engine::compositor::Source;
+        use serde_json::json;
+
+        let mut comp = json!({"id":"test","w":64,"h":64,"fps":30,"dur":1,"layers":[]});
+        let object = pm_scene3d::service::new_layer(
+            &comp, "object", "Object", pm_scene3d::schema::Role::Object,
+            json!({"object":{"source":{"primitive":"box"},"material":{"maps":{
+                "color":{"layerId":"video"}, "emissive":{"layerId":"video"}
+            }}}}), json!({}), true, None, 0.,
+        ).unwrap();
+        let video = json!({
+            "id":"video","name":"Hidden video","type":"video","on":false,"from":0,"dur":1,
+            "d":{"asset":"clip","w":6048,"h":3928,"trim":0,"speed":1}
+        });
+        comp["layers"] = json!([object, video]);
+        let project = json!({
+            "id":"project","compId":"test","comps":{"test":comp},
+            "assets":{"clip":{"id":"clip","kind":"video","w":6048,"h":3928,"fps":60,"dur":1}}
+        });
+        let doc = pm_kernel::DocumentStore::new_untitled(pm_scene3d::to_model(&project))
+            .snapshot().document;
+        let request = SceneRequest {
+            composition: "test".into(), revision: doc.revision(), ticks: 0, width: 64, height: 64,
+        };
+
+        let mut pending = pm_export::render::MediaPaths::default();
+        pending.resolving.insert("clip".into());
+        let mut broken = pm_export::render::MediaPaths::default();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.mp4");
+        std::fs::write(&path, b"unreadable video").unwrap();
+        broken.insert("clip", path);
+
+        let mut renderer = pm_render::Renderer::headless().unwrap();
+        for media in [pending, broken] {
+            let source = DocumentSource::new(doc.clone(), media);
+            source.prepare_materials(&mut renderer, &request, Tier::Fast).unwrap();
+            assert!(source.captured_material(&request, "object", &json!({"layerId":"video"})).unwrap().is_none());
+            let scene = source.scene(&request).unwrap();
+            assert_eq!(scene.instances.len(), 1);
+            assert!(scene.maps.is_none());
+        }
+    }
+
     #[test]
     fn retained_mesh_reuses_storage_and_detects_copy_on_write_edits() {
         let source = DocumentSource::new(Arc::new(pm_model::Document::new(None, 0)), Default::default());

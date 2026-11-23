@@ -69,13 +69,16 @@ fn extension(media_type: &str, asset: Option<&pm_model::Node>) -> String {
         .map(str::to_ascii_lowercase)
         .into_iter()
         .chain(name_extension)
-        .find(|e| KNOWN_EXTENSIONS.contains(&e.as_str()))
+        .find(|e| {
+            KNOWN_EXTENSIONS.contains(&e.as_str())
+                || pm_scene3d::import::path::supports_extension(e)
+        })
         .unwrap_or_else(|| "bin".into())
 }
 
-const KNOWN_EXTENSIONS: [&str; 22] = [
+const KNOWN_EXTENSIONS: [&str; 21] = [
     "mp4", "mov", "m4v", "webm", "mkv", "png", "jpg", "jpeg", "gif", "tif", "tiff", "heic", "avif",
-    "webp", "svg", "wav", "mp3", "ogg", "flac", "aac", "m4a", "glb",
+    "webp", "svg", "wav", "mp3", "ogg", "flac", "aac", "m4a",
 ];
 
 fn mime_extension(media_type: &str) -> &'static str {
@@ -101,7 +104,8 @@ fn mime_extension(media_type: &str) -> &'static str {
         "model/gltf-binary" => "glb",
         "model/gltf+json" => "gltf",
         "model/obj" => "obj",
-        "model/ply" => "ply",
+        "model/fbx" => "fbx",
+        "model/ply" | "application/x-ply" => "ply",
         "model/splat" => "splat",
         _ => "bin",
     }
@@ -334,8 +338,13 @@ fn for_session_within(
                                         .unwrap_or_default()
                                         .to_string_lossy();
                                     let cached = objects.join(format!("{hash}.{ext}"));
-                                    if !cached.exists() {
-                                        fs::write(&cached, &model.bytes)?;
+                                    if !fs::metadata(&cached).is_ok_and(|m| {
+                                        m.is_file() && m.len() == model.bytes.len() as u64
+                                    }) {
+                                        use std::io::Write;
+                                        let mut partial = tempfile::NamedTempFile::new_in(&objects)?;
+                                        partial.write_all(&model.bytes)?;
+                                        partial.persist(&cached)?;
                                     }
                                     catalog.originals.insert(id, cached);
                                 }

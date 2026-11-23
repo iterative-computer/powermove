@@ -256,18 +256,100 @@ fn sync_directory(_: &Path) -> Result<()> {
     Ok(())
 }
 fn mime(name: &str) -> String {
-    match name
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "glb" => "model/gltf-binary",
-        "gltf" => "model/gltf+json",
-        "obj" => "model/obj",
-        "ply" => "application/x-ply",
-        _ => "application/octet-stream",
+    super::path::mime(&super::ext(name)).into()
+}
+
+/// Inspect member names and read only the selected entries. No extraction.
+pub(super) struct Zip<'a>(zip::ZipArchive<std::io::Cursor<&'a [u8]>>);
+
+impl<'a> Zip<'a> {
+    pub fn open(bytes: &'a [u8]) -> Result<Self> {
+        let zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+            .map_err(|e| Error(format!("Cannot open model ZIP: {e}")))?;
+        if zip.len() > 4096 {
+            return fail("Model ZIP contains too many entries");
+        }
+        Ok(Self(zip))
     }
-    .into()
+
+    pub fn read_named(&mut self, name: &str, limit: usize) -> Result<Vec<u8>> {
+        let file = self
+            .0
+            .by_name(name)
+            .map_err(|_| Error(format!("Model ZIP is missing {name}")))?;
+        if file.enclosed_name().is_none()
+            || !file.is_file()
+            || file.is_symlink()
+            || file.size() > limit as u64
+        {
+            return fail("Invalid or oversized model ZIP entry");
+        }
+        let size = file.size();
+        let mut bytes = Vec::new();
+        file.take(size + 1).read_to_end(&mut bytes).map_err(io)?;
+        if bytes.len() as u64 != size {
+            return fail("Invalid model ZIP entry length");
+        }
+        Ok(bytes)
+    }
+}
+
+pub(super) fn prepare_zip(
+    bytes: &[u8],
+    cad: Option<&dyn super::cad::Tessellator>,
+) -> Result<Prepared> {
+    use super::{ImportFile, MAX_BYTES, ext, path};
+    let mut zip = Zip::open(bytes)?;
+    let mut models = Vec::new();
+    for i in 0..zip.0.len() {
+        let file = zip
+            .0
+            .by_index_raw(i)
+            .map_err(|e| Error(format!("Invalid model ZIP entry: {e}")))?;
+        if !file.is_file()
+            || file.is_symlink()
+            || file.enclosed_name().is_none()
+            || file.name().contains(['\\', ':'])
+            || file.name().starts_with("__MACOSX/")
+        {
+            continue;
+        }
+        let extension = ext(file.name());
+        if extension != "zip" && path::supports_extension(&extension) {
+            models.push(file.name().to_owned());
+        }
+    }
+    let [name] = models.as_slice() else {
+        return fail("Model ZIP must contain one model");
+    };
+    let extension = ext(name);
+    let mut model = zip.read_named(name, MAX_BYTES)?;
+    let (directory, leaf) = name.rsplit_once('/').unwrap_or(("", name));
+    let mut total = model.len();
+    let mut read = |uri: &str| {
+        let uri = path::relative_reference(uri)?;
+        let name = if directory.is_empty() {
+            uri
+        } else {
+            format!("{directory}/{uri}")
+        };
+        let bytes = zip.read_named(&name, MAX_BYTES - total)?;
+        total += bytes.len();
+        Ok(bytes)
+    };
+    let mut companions = Vec::new();
+    if extension == "gltf" || (extension == "vrm" && !model.starts_with(b"glTF")) {
+        model = path::embed_gltf(&model, &mut read)?;
+    } else if extension == "obj" {
+        companions = path::obj_companions(&model, &mut read)?;
+    }
+    companions.insert(
+        0,
+        ImportFile {
+            name: leaf.into(),
+            mime: path::mime(&extension).into(),
+            bytes: model,
+        },
+    );
+    super::prepare(companions, cad)
 }

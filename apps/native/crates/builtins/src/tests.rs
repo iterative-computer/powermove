@@ -4389,9 +4389,7 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
         [
             "Model",
             "Material",
-            "Coat and Glass",
-            "Surface",
-            "Emission",
+            "Material Details",
             "Texture Maps",
             "Material Options"
         ]
@@ -4646,7 +4644,7 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     // surfaces, the composition already being lit.
     write(&presenter, &mut model, &on, json!(true));
     let p = presenter.snapshot(&mut model, 0., false).unwrap();
-    assert_eq!(titles(&p), ["Extrude", "Front", "Bevel", "Side", "Back"]);
+    assert_eq!(titles(&p), ["Extrude", "Surface Material"]);
     assert_eq!(
         row(&p, "geo.depth").unwrap()["control"]["axes"][0]["value"],
         32.
@@ -4657,6 +4655,13 @@ fn properties_show_the_3d_section_for_models_lights_and_cameras() {
     );
     // The face is a stored channel now, keyframeable like any property.
     assert!(row(&p, "ms.front.roughness").is_some());
+    let surface = row(&p, "3d.extrude.surface").unwrap();
+    assert_eq!(surface["control"]["value"], "front");
+    assert_eq!(surface["control"]["options"].as_array().unwrap().len(), 4);
+    write(&presenter, &mut model, &surface, json!("side"));
+    let p = presenter.snapshot(&mut model, 0., false).unwrap();
+    assert_eq!(row(&p, "3d.extrude.surface").unwrap()["control"]["value"], "side");
+    assert!(row(&p, "ms.front.roughness").is_none());
 }
 
 #[test]
@@ -5811,55 +5816,55 @@ fn the_shortcuts_page_publishes_the_apps_page_and_hands_its_actions_to_the_app()
     );
 }
 
-/// Round 7: an imported model's material slots are Properties sections with
-/// the file's own values; an edit becomes a keyframeable `mi.<slot>.<key>`.
 #[test]
-fn properties_list_an_imported_models_parts_with_their_own_values() {
+fn properties_select_model_nodes_and_keyframe_their_transform() {
     let actor = actor();
     let kernel = actor.handle();
-    let run = |args: Value| {
-        let call = pm_kernel::Call::Transact {
+    let run = |request| {
+        let ack = kernel.call("synthetic", request).wait().unwrap().unwrap();
+        assert!(
+            !matches!(ack.reply, pm_kernel::Reply::Throw(_)),
+            "{:?}",
+            ack.reply
+        );
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("Product.glb");
+    let corners = [[-1., -1., 0.], [1., -1., 0.], [1., 1., 0.], [-1., 1., 0.]];
+    std::fs::write(
+        &file,
+        pm_scene3d::import::quads_glb(&[("Aluminium", corners)]),
+    )
+    .unwrap();
+    let native = Caller::native();
+    run(Request::new(
+        native,
+        pm_kernel::Call::Transact {
             label: None,
             expected_revision: None,
             body: pm_kernel::WriteBody::Commands(vec![
                 pm_kernel::Scene3dCommand::Apply {
                     comp: None,
-                    args: data::model(&args).unwrap(),
+                    args: data::model(&json!({"operation":"add_object","id":"model",
+                "object":{"source":{"assetId":"a1"},"useSourceMaterials":false}}))
+                    .unwrap(),
                     selection: vec![],
                     time: 0.,
                     autokey: false,
                 }
                 .into(),
             ]),
-        };
-        let ack = kernel
-            .call("synthetic", Request::new(Caller::native(), call))
-            .wait()
-            .unwrap()
-            .unwrap();
-        if let pm_kernel::Reply::Throw(e) = &ack.reply {
-            panic!("{args}: {e}");
-        }
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("Product.gltf");
-    std::fs::write(
-        &file,
-        r#"{"asset":{"version":"2.0"},"materials":[{"name":"Aluminium","pbrMetallicRoughness":{"metallicFactor":1,"roughnessFactor":0.4}},{"name":"Glass"}]}"#,
-    )
-    .unwrap();
-    run(
-        json!({"operation":"add_object","id":"model","object":{"source":{"assetId":"a1"},"useSourceMaterials":true}}),
-    );
+        },
+    ));
+    select_layer(&kernel, "model");
+
     let mut presenter = properties::Properties::default();
     presenter.originals.insert("a1".into(), file);
-    let publish = |presenter: &mut properties::Properties| {
-        select_layer(&kernel, "model");
-        let mut model = pm_panel_inspector::Inspector::new(
+    let inspector = || {
+        pm_panel_inspector::Inspector::new(
             kernel.published("synthetic").unwrap(),
             Default::default(),
-        );
-        presenter.snapshot(&mut model, 0., false).unwrap()
+        )
     };
     let row = |p: &Value, id: &str| {
         p["sections"]
@@ -5869,77 +5874,61 @@ fn properties_list_an_imported_models_parts_with_their_own_values() {
             .flat_map(|s| s["rows"].as_array().unwrap())
             .find(|r| r["id"] == id)
             .cloned()
-    };
-    let p = publish(&mut presenter);
-    let titles: Vec<_> = p["sections"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|s| s["id"].as_str().unwrap().starts_with("3d.part."))
-        .map(|s| s["title"].as_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(titles, ["Aluminium", "Glass"]);
-    let rough = row(&p, "3d.part.0.roughness").expect("the file's roughness");
-    assert_eq!(rough["control"]["axes"][0]["value"], 0.4);
-    assert!(
-        row(&p, "3d.part.1.map.color").is_some(),
-        "a layer can be the part's colour"
-    );
-    run(
-        json!({"operation":"set_material_properties","target":"model","materialIndex":0,"patch":{"roughness":0.1}}),
-    );
-    let p = publish(&mut presenter);
-    let rough = row(&p, "mi.0.roughness").expect("an override is a channel row");
-    assert_eq!(rough["control"]["axes"][0]["value"], 0.1);
-    assert_eq!(rough["animation"], "static");
-    assert!(row(&p, "3d.part.0.roughness").is_none());
-    // A viewer double-click on the glass part opens and marks its section;
-    // the same request doesn't reopen it after the user closes it.
-    let section = |p: &Value, id: &str| {
-        p["sections"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|s| s["id"] == id)
-            .cloned()
             .unwrap()
     };
-    assert_eq!(section(&p, "3d.part.1")["collapsed"], true);
-    presenter.focus_part(&json!({"layer":"model","slot":1,"seq":1}));
-    let p = publish(&mut presenter);
-    assert_eq!(section(&p, "3d.part.1")["collapsed"], false);
-    assert_eq!(section(&p, "3d.part.1")["focused"], true);
-    assert_eq!(section(&p, "3d.part.0")["focused"], false);
-    presenter
-        .intent(
-            &mut pm_panel_inspector::Inspector::new(
-                kernel.published("synthetic").unwrap(),
-                Default::default(),
-            ),
-            Caller::native(),
-            &json!({"type":"collapse","section":"3d.part.1","collapsed":true}),
+    let p = presenter.snapshot(&mut inspector(), 0., false).unwrap();
+    let selector = row(&p, "3d.part.select");
+    assert_eq!(selector["control"]["options"][0]["label"], "Whole Model");
+    assert_eq!(selector["control"]["options"][1]["v"], "0");
+    let handle = selector["control"]["binding"]["handle"].as_str().unwrap();
+    run(presenter
+        .write(
+            &mut inspector(),
+            native,
+            handle,
+            data::model(&json!("0")).unwrap(),
             0.,
         )
-        .unwrap();
-    presenter.focus_part(&json!({"layer":"model","slot":1,"seq":1}));
-    let p = publish(&mut presenter);
-    assert_eq!(section(&p, "3d.part.1")["collapsed"], true);
-    // Leaving the model leaves its part.
-    kernel
-        .call(
-            "synthetic",
-            Request::new(Caller::native(), pm_kernel::SelectionCall::Clear),
-        )
-        .wait()
-        .unwrap()
-        .unwrap();
-    let mut model = pm_panel_inspector::Inspector::new(
-        kernel.published("synthetic").unwrap(),
-        Default::default(),
+        .unwrap());
+
+    let p = presenter.snapshot(&mut inspector(), 0., false).unwrap();
+    assert_eq!(row(&p, "3d.part.select")["control"]["value"], "0");
+    assert_eq!(
+        row(&p, "3d.part.0.scale")["control"]["axes"][0]["value"],
+        100.
     );
-    presenter.snapshot(&mut model, 0., false).unwrap();
-    let p = publish(&mut presenter);
-    assert_eq!(section(&p, "3d.part.1")["focused"], false);
+    assert!(row(&p, "3d.part.0.roughness")["control"].is_object());
+    run(presenter
+        .intent(
+            &mut inspector(),
+            native,
+            &json!({"type":"key","row":"3d.part.0.x"}),
+            0.,
+        )
+        .unwrap()
+        .unwrap());
+    let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
+    let x = row(&p, "3d.part.0.x");
+    assert_eq!(x["animation"], "animated");
+    let handle = x["control"]["axes"][0]["binding"]["handle"]
+        .as_str()
+        .unwrap();
+    run(presenter
+        .write(
+            &mut inspector(),
+            native,
+            handle,
+            data::model(&json!(2)).unwrap(),
+            1.,
+        )
+        .unwrap());
+    let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
+    assert_eq!(row(&p, "3d.part.0.x")["control"]["axes"][0]["value"], 2.);
+    assert_eq!(row(&p, "3d.part.0.x")["animation"], "key-at-playhead");
+    let history = pm_kernel::HistoryCall::Undo;
+    run(Request::new(native, history));
+    let p = presenter.snapshot(&mut inspector(), 1., false).unwrap();
+    assert_eq!(row(&p, "3d.part.0.x")["control"]["axes"][0]["value"], 0.);
 }
 
 /// Playing, Properties shows a keyframed value at the playhead: the time the

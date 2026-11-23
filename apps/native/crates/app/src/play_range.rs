@@ -199,6 +199,11 @@ impl Controller {
             }
             return;
         }
+        // Pause can already have frozen the public clock while the worker
+        // finishes its frame. The loop is cleared by the accepted command.
+        if clock.state == pm_protocol::clock::TransportState::Stopped {
+            return;
+        }
         let seconds = clock.media_time.get() as f64 / TICKS_PER_SECOND as f64;
         if let Some(stop) = self.playback.stop
             && clock.rate.num > 0

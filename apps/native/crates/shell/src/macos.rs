@@ -70,6 +70,15 @@ fn launch(
     app.on_open_urls(move |urls| {
         let _ = urls_tx.try_send(urls);
     });
+    let ready = Rc::new(std::cell::Cell::new(false));
+    if !smoke {
+        let ready = ready.clone();
+        app.on_reopen(move |cx| {
+            if ready.get() {
+                reopen_editor(cx);
+            }
+        });
+    }
     app.with_accessibility_forced().run(move |cx| {
         cx.set_global(SharedMetalDevice(device));
         if let Some(open_urls) = open_urls {
@@ -92,9 +101,16 @@ fn launch(
         if smoke {
             open_editor_window(cx, false, None, None);
         } else if let Some(gate) = gate {
-            gate(Rc::new(restore_session), cx);
+            gate(
+                Rc::new(move |cx| {
+                    restore_session(cx);
+                    ready.set(true);
+                }),
+                cx,
+            );
         } else {
             restore_session(cx);
+            ready.set(true);
         }
         if smoke {
             cx.quit();
@@ -223,6 +239,26 @@ fn restore_session(cx: &mut App) {
 /// back the front window alone (tests, reviews).
 fn keeps_windows() -> bool {
     std::env::var("PM_NATIVE_RESTORE").as_deref() != Ok("one")
+}
+/// AppKit calls this when the Dock icon is clicked with no visible windows.
+fn reopen_editor(cx: &mut App) {
+    let existing = cx
+        .windows()
+        .into_iter()
+        .find_map(|handle| handle.downcast::<view::Editor>());
+    if let Some(existing) = existing {
+        let _ = existing.update(cx, |editor, window, _| {
+            // AppKit restores minimized windows as part of its default reopen.
+            if let Some(host) = &editor.host {
+                let host = host.borrow();
+                if !host.window.isMiniaturized() && !host.window.isVisible() {
+                    window.activate();
+                }
+            }
+        });
+    } else {
+        open_editor(cx);
+    }
 }
 /// A new editor window, cascaded from the key one (File ▸ New Window).
 pub fn open_editor(cx: &mut App) {

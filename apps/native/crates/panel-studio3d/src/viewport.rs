@@ -326,6 +326,47 @@ pub fn pick_part(
         .map_err(|e| invalid(e.to_string()))
 }
 /// The composition camera's eye (the shot), as `scene` sees it.
+/// Evaluate the same model sample for Properties selection and viewport picking.
+pub fn model_part(
+    snapshot: &pm_kernel::Snapshot,
+    time: f64,
+    layer: &str,
+    key: Option<&str>,
+    ray: Option<&Ray>,
+    assets: &dyn AssetGeometry,
+) -> Result<Option<pm_scene3d::geometry::PartPlacement>> {
+    let comp = snapshot.open_comp();
+    let root = snapshot.root().ok_or_else(|| invalid("No project"))?;
+    let r = pm_kernel::commands::scene3d::resolve_scene(snapshot, comp.as_deref(), time)
+        .map_err(|e| invalid(e.to_string()))?;
+    let Some(world) = r.model_worlds.get(layer) else {
+        return Ok(None);
+    };
+    let Some(object) = r.scene["objects"]
+        .as_array()
+        .and_then(|objects| objects.iter().find(|object| object["id"] == layer))
+    else {
+        return Ok(None);
+    };
+    let Some(asset) = object["source"]["assetId"].as_str() else {
+        return Ok(None);
+    };
+    let Some(record) = root.get("assets").and_then(|assets| assets.get(asset)) else {
+        return Ok(None);
+    };
+    let record = from_model(&record.to_value())?;
+    // Native Studio samples the import mixer at composition time.
+    let parts = &object["parts"];
+    let result = if let Some(ray) = ray {
+        assets.pick_model_part(asset, &record, *world, time, parts, ray.origin, ray.dir)
+    } else if let Some(key) = key {
+        assets.model_part(asset, &record, *world, time, parts, key)
+    } else {
+        Ok(None)
+    };
+    result.map_err(Into::into)
+}
+
 fn eye_of(r: &pm_scene3d::service::ResolvedScene, comp: &serde_json::Value) -> Eye {
     let cam = &r.scene["camera"];
     let n = |k: &str, d: f64| cam["p"][k]["v"].as_f64().unwrap_or(d);

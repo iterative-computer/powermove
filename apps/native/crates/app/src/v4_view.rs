@@ -3320,6 +3320,9 @@ impl SurfaceView {
         cx: &mut Context<Self>,
     ) {
         use pm_surface::kit::{HORIZONTAL_SCRUB_REST, HorizontalScrub};
+        if !window.is_window_active() {
+            return;
+        }
         if event.touch_phase == TouchPhase::Started {
             self.wheel_lifted = false;
         }

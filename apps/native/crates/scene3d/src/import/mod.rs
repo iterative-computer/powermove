@@ -1,9 +1,21 @@
-//! Bounded imports of explicitly supplied bytes. No URL or sibling-file reads.
+//! Bounded model admission. Rust decoders resolve only explicitly supplied bytes.
 pub mod archive;
-pub mod path;
 pub mod cad;
+mod collada;
+#[cfg(test)]
+mod format_tests;
+mod mesh;
+#[cfg(target_os = "macos")]
+mod modelio;
 mod obj;
+mod off;
+pub mod path;
+mod ply;
 pub mod splats;
+mod stl;
+mod three_ds;
+mod three_mf;
+mod xml;
 use crate::{Error, Result, fail};
 pub use obj::ImportFile;
 use pm_geom3d::{gltf, model_import::glb::GlbWriter};
@@ -23,13 +35,31 @@ pub enum Model {
     Splats(splats::Data),
 }
 fn ext(name: &str) -> String {
-    name.rsplit('.').next().unwrap_or("").to_ascii_lowercase()
+    name.rsplit_once('.')
+        .map_or("", |(_, ext)| ext)
+        .to_ascii_lowercase()
 }
 pub fn load(name: &str, bytes: &[u8]) -> Result<Model> {
+    load_with_cad(name, bytes, None)
+}
+
+pub fn load_with_cad(
+    name: &str,
+    bytes: &[u8],
+    cad: Option<&dyn cad::Tessellator>,
+) -> Result<Model> {
     if bytes.len() > MAX_BYTES {
         return fail("Model exceeds 512 MB");
     }
-    match ext(name).as_str() {
+    let extension = ext(name);
+    if extension == "zip" {
+        let prepared = archive::prepare_zip(bytes, cad)?;
+        return load(&prepared.name, &prepared.bytes);
+    }
+    if let Some(converted) = convert(&extension, bytes, cad)? {
+        return load("converted.glb", &converted);
+    }
+    match extension.as_str() {
         "glb" | "gltf" => gltf::load_with(
             bytes,
             gltf::Limits {
@@ -59,7 +89,6 @@ pub fn load(name: &str, bytes: &[u8]) -> Result<Model> {
                 .map(Model::Obj)
                 .map_err(Error)
         }
-        "fbx" => load("converted.glb", &convert_fbx(bytes)?),
         "splat" => splats::parse_splat(bytes).map(Model::Splats),
         "ply" => splats::parse_ply(bytes).map(Model::Splats),
         "blend" => fail("Blender files are not supported"),
@@ -87,39 +116,20 @@ pub fn prepare(files: Vec<ImportFile>, cad: Option<&dyn cad::Tessellator>) -> Re
             return fail("Duplicate selected file name");
         }
     }
-    let models = files
+    let mut models = files
         .iter()
-        .enumerate()
-        .filter(|(_, f)| {
-            matches!(
-                ext(&f.name).as_str(),
-                "obj"
-                    | "glb"
-                    | "gltf"
-                    | "fbx"
-                    | "ply"
-                    | "splat"
-                    | "step"
-                    | "stp"
-                    | "iges"
-                    | "igs"
-                    | "brep"
-            )
-        })
-        .collect::<Vec<_>>();
-    if models.len() != 1 {
-        return fail("Choose one model at a time with its material and texture files");
-    }
-    let (index, f) = models[0];
+        .filter(|f| path::supports_extension(&ext(&f.name)));
+    let f = models
+        .next()
+        .filter(|_| models.next().is_none())
+        .ok_or_else(|| {
+            Error("Choose one model at a time with its material and texture files".into())
+        })?;
     let e = ext(&f.name);
-    let (name, bytes) = if let Some(format) = cad::Format::from_extension(&e) {
-        let converter =
-            cad.ok_or_else(|| Error("Native OpenCascade CAD worker is not installed".into()))?;
-        let bytes = converter.convert(format, &f.bytes, cad::Settings::default())?;
-        load("converted.glb", &bytes)?;
-        (replace_ext(&f.name, "glb"), bytes)
-    } else if e == "fbx" {
-        let converted = convert_fbx(&f.bytes)?;
+    let (name, bytes) = if e == "zip" {
+        let prepared = archive::prepare_zip(&f.bytes, cad)?;
+        (prepared.name, prepared.bytes)
+    } else if let Some(converted) = convert(&e, &f.bytes, cad)? {
         load("converted.glb", &converted)?;
         (replace_ext(&f.name, "glb"), converted)
     } else if e == "obj" && files.len() > 1 {
@@ -134,13 +144,49 @@ pub fn prepare(files: Vec<ImportFile>, cad: Option<&dyn cad::Tessellator>) -> Re
         load(&f.name, &f.bytes)?;
         (f.name.clone(), f.bytes.clone())
     };
-    let _ = index;
     Ok(Prepared {
         name,
         bytes,
         original: files,
     })
 }
+fn convert(
+    extension: &str,
+    bytes: &[u8],
+    cad: Option<&dyn cad::Tessellator>,
+) -> Result<Option<Vec<u8>>> {
+    let result = match extension {
+        "fbx" => convert_fbx(bytes),
+        "stl" => stl::convert(bytes),
+        "off" => off::convert(bytes),
+        "ply" if splats::is_mesh_ply(bytes) => ply::convert(bytes),
+        "3mf" => three_mf::convert(bytes),
+        "dae" => collada::convert(bytes),
+        "3ds" => three_ds::convert(bytes),
+        "vrm" if bytes.starts_with(b"glTF") => Ok(bytes.to_vec()),
+        "vrm" => {
+            let document =
+                serde_json::from_slice(bytes).map_err(|e| Error(format!("Invalid VRM: {e}")))?;
+            Ok(GlbWriter::default().finish(document))
+        }
+        _ => {
+            if let Some(format) = cad::Format::from_extension(extension) {
+                return cad::convert(format, bytes, cad).map(Some);
+            }
+            #[cfg(target_os = "macos")]
+            if !matches!(
+                extension,
+                "glb" | "gltf" | "obj" | "ply" | "splat" | "blend"
+            ) && modelio::supports(extension)
+            {
+                return modelio::convert(extension, bytes).map(Some);
+            }
+            return Ok(None);
+        }
+    };
+    result.map(Some)
+}
+
 /// The shared importer never opens sibling files. Match its Electron host's
 /// stack allowance; source admission and rendering call this on workers.
 fn convert_fbx(bytes: &[u8]) -> Result<Vec<u8>> {
@@ -238,11 +284,16 @@ pub fn material_slots_from_file(name: &str, bytes: &[u8]) -> Vec<(usize, String)
             .enumerate()
             .map(|(i, m)| {
                 let name = m["name"].as_str().map(str::trim).filter(|n| !n.is_empty());
-                (i, name.map_or_else(|| format!("Material {}", i + 1), str::to_owned))
+                (
+                    i,
+                    name.map_or_else(|| format!("Material {}", i + 1), str::to_owned),
+                )
             })
             .collect();
     }
-    load(name, bytes).map(|m| material_slots(&m)).unwrap_or_default()
+    load(name, bytes)
+        .map(|m| material_slots(&m))
+        .unwrap_or_default()
 }
 
 /// A GLB's or glTF's material slots with the values Properties shows before a
@@ -269,7 +320,11 @@ pub fn material_slot_values_from_file(name: &str, bytes: &[u8]) -> Vec<serde_jso
     let hex = |c: &serde_json::Value| {
         let channel = |i: usize| {
             let l = c[i].as_f64().unwrap_or(1.).clamp(0., 1.);
-            let s = if l <= 0.0031308 { 12.92 * l } else { 1.055 * l.powf(1. / 2.4) - 0.055 };
+            let s = if l <= 0.0031308 {
+                12.92 * l
+            } else {
+                1.055 * l.powf(1. / 2.4) - 0.055
+            };
             (s * 255.).round().clamp(0., 255.) as u8
         };
         format!("#{:02X}{:02X}{:02X}", channel(0), channel(1), channel(2))

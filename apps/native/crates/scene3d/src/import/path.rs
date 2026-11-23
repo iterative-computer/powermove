@@ -5,8 +5,82 @@ use crate::{Error, Result};
 use base64::Engine;
 use std::path::Path;
 
-pub const EXTENSIONS: &[&str] = &["glb", "gltf", "obj", "fbx", "ply", "splat"];
-pub const UNSUPPORTED: &[&str] = &["usdz", "usd", "usda", "usdc", "stl", "blend"];
+pub const EXTENSIONS: &[&str] = &[
+    "glb",
+    "gltf",
+    "obj",
+    "fbx",
+    "ply",
+    "splat",
+    "zip",
+    "stl",
+    "off",
+    "3mf",
+    "dae",
+    "3ds",
+    "vrm",
+    "step",
+    "stp",
+    "iges",
+    "igs",
+    "brep",
+    #[cfg(target_os = "macos")]
+    "usd",
+    #[cfg(target_os = "macos")]
+    "usda",
+    #[cfg(target_os = "macos")]
+    "usdc",
+    #[cfg(target_os = "macos")]
+    "usdz",
+    #[cfg(target_os = "macos")]
+    "abc",
+];
+#[cfg(target_os = "macos")]
+pub const UNSUPPORTED: &[&str] = &["blend"];
+#[cfg(not(target_os = "macos"))]
+pub const UNSUPPORTED: &[&str] = &["blend", "usd", "usda", "usdc", "usdz", "abc"];
+
+pub fn supports_extension(extension: &str) -> bool {
+    if EXTENSIONS.contains(&extension) {
+        return true;
+    }
+    #[cfg(target_os = "macos")]
+    if !UNSUPPORTED.contains(&extension) {
+        return super::modelio::supports(extension);
+    }
+    false
+}
+
+/// The source's coordinates are in metres after canonical conversion.
+pub fn has_metre_units(extension: &str) -> bool {
+    matches!(
+        extension,
+        "glb" | "gltf" | "fbx" | "vrm" | "3mf" | "dae" | "step" | "stp" | "iges" | "igs" | "brep"
+    )
+}
+
+pub fn mime(extension: &str) -> &'static str {
+    match extension {
+        "glb" => "model/gltf-binary",
+        "vrm" => "model/vrm",
+        "gltf" => "model/gltf+json",
+        "obj" => "model/obj",
+        "fbx" => "model/fbx",
+        "ply" => "model/ply",
+        "splat" => "model/splat",
+        "stl" => "model/stl",
+        "3mf" => "model/3mf",
+        "dae" => "model/vnd.collada+xml",
+        "3ds" => "image/x-3ds",
+        "usd" | "usda" | "usdc" => "model/vnd.usd",
+        "usdz" => "model/vnd.usdz+zip",
+        "step" | "stp" => "model/step",
+        "iges" | "igs" => "model/iges",
+        "zip" => "application/zip",
+        _ => "application/octet-stream",
+    }
+}
+
 pub fn unsupported(path: &Path) -> Option<String> {
     let e = path.extension()?.to_str()?.to_ascii_lowercase();
     UNSUPPORTED.contains(&e.as_str()).then(|| {
@@ -32,6 +106,10 @@ fn read(path: &Path, total: &mut usize) -> Result<Vec<u8>> {
     std::fs::read(path).map_err(|e| Error(format!("Cannot read model file: {e}")))
 }
 fn companion(root: &Path, uri: &str) -> Result<std::path::PathBuf> {
+    Ok(root.join(relative_reference(uri)?))
+}
+
+pub(super) fn relative_reference(uri: &str) -> Result<String> {
     // Local references only; never fetch URLs or open absolute paths from a model.
     let mut decoded = Vec::new();
     let mut bytes = uri.bytes();
@@ -60,7 +138,7 @@ fn companion(root: &Path, uri: &str) -> Result<std::path::PathBuf> {
             "Model companions must be relative files beside the model".into(),
         ));
     }
-    Ok(root.join(p))
+    Ok(name)
 }
 pub fn prepare(path: &Path) -> Result<Prepared> {
     if let Some(message) = unsupported(path) {
@@ -79,88 +157,108 @@ pub fn prepare(path: &Path) -> Result<Prepared> {
     let root = path.parent().unwrap_or(Path::new("."));
     let mut total = 0;
     let bytes = read(path, &mut total)?;
-    if ext == "gltf" {
-        let mut doc: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|e| Error(format!("Cannot read glTF: {e}")))?;
-        for key in ["buffers", "images"] {
-            if let Some(list) = doc[key].as_array_mut() {
-                for item in list {
-                    if let Some(uri) = item["uri"].as_str().filter(|u| !u.starts_with("data:")) {
-                        let resource = companion(root, uri)?;
-                        let data = read(&resource, &mut total)?;
-                        let mime = if key == "images" {
-                            match resource
-                                .extension()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .to_ascii_lowercase()
-                                .as_str()
-                            {
-                                "png" => "image/png",
-                                "jpg" | "jpeg" => "image/jpeg",
-                                "webp" => "image/webp",
-                                _ => "application/octet-stream",
-                            }
-                        } else {
-                            "application/octet-stream"
-                        };
-                        item["uri"] = serde_json::Value::String(format!(
-                            "data:{mime};base64,{}",
-                            base64::engine::general_purpose::STANDARD.encode(data)
-                        ));
-                    }
-                }
-            }
-        }
+    if ext == "gltf" || (ext == "vrm" && !bytes.starts_with(b"glTF")) {
+        let bytes = embed_gltf(&bytes, |uri| read(&companion(root, uri)?, &mut total))?;
         return super::prepare(
             vec![ImportFile {
                 name,
-                mime: "model/gltf+json".into(),
-                bytes: serde_json::to_vec(&doc).map_err(|e| Error(e.to_string()))?,
+                mime: mime(&ext).into(),
+                bytes,
             }],
             None,
         );
     }
     let mut files = vec![ImportFile {
         name,
-        mime: String::new(),
+        mime: mime(&ext).into(),
         bytes,
     }];
     if ext == "obj" {
-        let text = String::from_utf8_lossy(&files[0].bytes).into_owned();
-        for line in text
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix("mtllib "))
-        {
-            for mtl in line.split_whitespace() {
-                let p = companion(root, mtl)?;
-                let data = read(&p, &mut total)?;
-                let text = String::from_utf8_lossy(&data).into_owned();
-                files.push(ImportFile {
-                    name: mtl.into(),
-                    mime: String::new(),
-                    bytes: data,
-                });
-                for line in text.lines() {
-                    let mut words = line.split_whitespace();
-                    if words
-                        .next()
-                        .is_some_and(|w| w.starts_with("map_") || matches!(w, "bump" | "norm"))
-                    {
-                        if let Some(uri) = words.last() {
-                            let texture = companion(p.parent().unwrap_or(root), uri)?;
-                            if !files.iter().any(|f| f.name == uri) {
-                                files.push(ImportFile {
-                                    name: uri.into(),
-                                    mime: String::new(),
-                                    bytes: read(&texture, &mut total)?,
-                                });
-                            }
-                        }
+        let companions = obj_companions(&files[0].bytes, |uri| {
+            read(&companion(root, uri)?, &mut total)
+        })?;
+        files.extend(companions);
+    }
+    super::prepare(files, None)
+}
+
+pub(super) fn embed_gltf(
+    bytes: &[u8],
+    mut resolve: impl FnMut(&str) -> Result<Vec<u8>>,
+) -> Result<Vec<u8>> {
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| Error(format!("Cannot read glTF: {e}")))?;
+    let mut total = bytes.len();
+    for key in ["buffers", "images"] {
+        if let Some(list) = doc[key].as_array_mut() {
+            for item in list {
+                if let Some(uri) = item["uri"].as_str().filter(|u| !u.starts_with("data:")) {
+                    let data = resolve(uri)?;
+                    total = total.saturating_add(data.len().div_ceil(3) * 4);
+                    if total > MAX_BYTES {
+                        return Err(Error("Embedded glTF exceeds 512 MB".into()));
                     }
+                    let mime = if key == "images" {
+                        match super::ext(uri).as_str() {
+                            "png" => "image/png",
+                            "jpg" | "jpeg" => "image/jpeg",
+                            "webp" => "image/webp",
+                            _ => "application/octet-stream",
+                        }
+                    } else {
+                        "application/octet-stream"
+                    };
+                    item["uri"] = serde_json::Value::String(format!(
+                        "data:{mime};base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(data)
+                    ));
                 }
             }
         }
     }
-    super::prepare(files, None)
+    serde_json::to_vec(&doc).map_err(|e| Error(e.to_string()))
+}
+
+pub(super) fn obj_companions(
+    bytes: &[u8],
+    mut read: impl FnMut(&str) -> Result<Vec<u8>>,
+) -> Result<Vec<ImportFile>> {
+    let mut files: Vec<ImportFile> = Vec::new();
+    let text = String::from_utf8_lossy(bytes);
+    for line in text
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("mtllib "))
+    {
+        for mtl in line.split_whitespace() {
+            let data = read(mtl)?;
+            let text = String::from_utf8_lossy(&data);
+            for line in text.lines() {
+                let mut words = line.split_whitespace();
+                if words
+                    .next()
+                    .is_some_and(|w| w.starts_with("map_") || matches!(w, "bump" | "norm"))
+                    && let Some(uri) = words.last()
+                    && !files.iter().any(|f| f.name == uri)
+                {
+                    let base = mtl.rsplit_once(['/', '\\']).map(|(base, _)| base);
+                    let relative =
+                        base.map_or_else(|| uri.to_owned(), |base| format!("{base}/{uri}"));
+                    files.push(ImportFile {
+                        name: uri.into(),
+                        mime: String::new(),
+                        bytes: read(&relative)?,
+                    });
+                }
+            }
+            files.push(ImportFile {
+                name: mtl.into(),
+                mime: String::new(),
+                bytes: data,
+            });
+            if files.len() >= 128 {
+                return Err(Error("Choose at most 128 model files".into()));
+            }
+        }
+    }
+    Ok(files)
 }

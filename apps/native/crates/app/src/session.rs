@@ -3727,6 +3727,9 @@ impl Controller {
     pub fn save(&mut self, as_path: Option<PathBuf>, cx: &mut Context<Self>) {
         if self.recovery_pending || self.save_pending {
             self.message = "Finish the recovery decision or current save first".into();
+            if self.close_after_save.take().is_some() {
+                self.cancel_close(cx);
+            }
             return;
         }
         // An edit left open (its owner never ended it: no button is held,
@@ -3747,6 +3750,9 @@ impl Controller {
             return;
         }
         let Some(session) = self.session.clone() else {
+            if self.close_after_save.take().is_some() {
+                self.cancel_close(cx);
+            }
             return;
         };
         self.save_pending = true;
@@ -4078,6 +4084,9 @@ impl Controller {
     }
     pub fn save_dialog(&mut self, cx: &mut Context<Self>) {
         if self.recovery_pending || self.save_pending || self.session.is_none() {
+            if self.close_after_save.take().is_some() {
+                self.cancel_close(cx);
+            }
             return;
         }
         self.save_pending = true;
@@ -4111,13 +4120,25 @@ impl Controller {
                     Some(&folder),
                 ))
                 .ok();
-            let Some(rx) = rx else { return };
+            let Some(rx) = rx else {
+                let _ = this.update(cx, |v, cx| {
+                    v.save_pending = false;
+                    v.choosing_save_path = false;
+                    if v.close_after_save.take().is_some() {
+                        v.cancel_close(cx);
+                    }
+                });
+                return;
+            };
             let path = rx.recv().await.ok().flatten();
             let _ = this.update(cx, |v, cx| {
                 v.save_pending = false;
                 v.choosing_save_path = false;
                 cx.notify();
                 if v.session != session {
+                    if v.close_after_save.take().is_some() {
+                        v.cancel_close(cx);
+                    }
                     return;
                 }
                 if let Some(path) = path {
@@ -4424,7 +4445,19 @@ impl Controller {
                     }
                 }
                 if let Some(g) = self.builtins.gizmos.clone() {
-                    cx.defer(move |cx| g.update(cx, |g, cx| g.studio_setting(&group, &value, cx)));
+                    cx.defer_in(window, move |s, window, cx| {
+                        let capture = s.host.borrow().studio_flying.clone();
+                        g.update(cx, |g, cx| {
+                            if group == "fly" {
+                                g.set_fly_capture(capture);
+                            }
+                            g.studio_setting(&group, &value, cx);
+                            if group == "fly" && g.studio_flying() {
+                                s.host.borrow_mut().focus_canvas();
+                                g.studio_focus_fly(window, cx);
+                            }
+                        });
+                    });
                 }
                 return true;
             }
@@ -4613,21 +4646,32 @@ impl Controller {
             "agent" => self.toggle_agent(window, cx),
             "bringWorkspace" => self.bring_workspace(window, cx),
             "quit" => cx.defer(crate::lifecycle::begin_quit),
+            // Close Project always closes the open project and returns this
+            // window to Home (even if a page like Settings is showing). On
+            // Home, keep the editor open.
+            "closeProject" => {
+                if self.session.is_some() {
+                    gpui_macos::feel::note_now("tab.close");
+                    self.request_close(crate::lifecycle::Intent::Project, cx);
+                }
+            }
             // ⌘W: a page showing (Settings, the Store) closes back to the
-            // project; else the project closes and the window shows Home;
-            // with no project the window closes.
-            "closeTab" | "closeProject" if self.pages.shown.is_some() => {
+            // project; else in separate-windows mode (or the last editor tab)
+            // the project closes and the window shows Home; otherwise the
+            // tab/window closes.
+            "closeTab" if self.pages.shown.is_some() => {
                 if let Some(id) = self.pages.shown.clone() {
                     self.close_tab_page(&id, cx);
                 }
             }
-            // Tabs mode: the tab closes (its window; the last one stays on
-            // Home). Separate windows: the project closes, the window stays.
-            "closeTab" | "closeProject" if self.session.is_some() && !pm_shell::tabs_mode() => {
+            "closeTab"
+                if self.session.is_some()
+                    && (!pm_shell::tabs_mode() || crate::entry::editors(cx).len() <= 1) =>
+            {
                 gpui_macos::feel::note_now("tab.close");
                 self.request_close(crate::lifecycle::Intent::Project, cx)
             }
-            "closeWindow" | "closeTab" | "closeProject" => {
+            "closeWindow" | "closeTab" => {
                 gpui_macos::feel::note_now("tab.close");
                 self.request_close(crate::lifecycle::Intent::Window, cx)
             }
@@ -5136,10 +5180,12 @@ impl Controller {
             {
                 return false;
             }
-            // Space held over the viewer is the hand: Play waits for the key
-            // to come up (no drag) instead of starting on the way down.
+            // Space held over the viewer is the hand when paused: Play waits for
+            // the key to come up (no drag) instead of starting on the way down.
+            // While playing, Space pauses immediately without arming the hand.
             "play"
-                if cmd.token.is_some()
+                if !self.running()
+                    && cmd.token.is_some()
                     && self.viewer.is_some()
                     && self
                         .builtins
@@ -5172,6 +5218,7 @@ impl Controller {
                     }
                 }
                 if cmd.name == "play"
+                    && !self.running()
                     && over
                     && let Some(at) = self.skimming.at
                     && self.viewer.as_ref().is_some_and(|v| {

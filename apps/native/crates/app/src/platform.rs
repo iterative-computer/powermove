@@ -494,7 +494,7 @@ mod open_panel_tests {
     fn model_extensions_reach_the_native_open_panel() {
         let extensions = pm_builtins::media_import::extensions();
         let types = content_types(&extensions, false);
-        for extension in ["glb", "gltf", "obj", "fbx", "ply", "usdz", "stl"] {
+        for &extension in pm_scene3d::import::path::EXTENSIONS {
             assert!(types.contains(&ContentType::Extension(extension)));
         }
     }

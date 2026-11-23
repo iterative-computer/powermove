@@ -368,12 +368,72 @@ fn scene(p: &Published, time: f64, args: Value) -> Command {
     }
     .into()
 }
+pub fn active_part(selection: &pm_kernel::Selection) -> Option<(&str, &str)> {
+    let [layer] = selection.layers() else {
+        return None;
+    };
+    let (key, owner) = selection.channel()?.strip_prefix("studioPart:")?.split_once(':')?;
+    (owner == layer && pm_scene3d::part_material::valid_part_key(key))
+        .then_some((layer.as_str(), key))
+}
+
+pub fn part_commands(
+    p: &Published,
+    time: f64,
+    layer: &str,
+    key: &str,
+    name: &str,
+    values: &Value,
+) -> Result<Vec<Command>> {
+    let record = composition(p)?["layers"]
+        .as_array()
+        .and_then(|layers| layers.iter().find(|l| l["id"] == layer))
+        .cloned()
+        .ok_or_else(|| invalid("Model disappeared"))?;
+    let mut out = vec![];
+    if let Some(data) = pm_scene3d::part_material::install_part(&record, key, name)? {
+        out.push(
+            Scene3dCommand::SetData {
+                layer_id: layer.into(),
+                data: to_model(&data),
+            }
+            .into(),
+        );
+    }
+    for (field, value) in values
+        .as_object()
+        .ok_or_else(|| invalid("Invalid part transform"))?
+    {
+        let validated = schema::validate_channel("part", field, value.clone())?;
+        let mut set = pm_kernel::commands::properties::SetProperty::new(
+            layer,
+            format!("pt.{key}.{field}"),
+            to_model(&validated["v"]),
+            time,
+        );
+        set.preserve_hand_edits = false;
+        set.mark_intent = true;
+        out.push(pm_kernel::PropertyCommand::Set(set).into());
+    }
+    Ok(out)
+}
+
+pub fn select_part(layer: &str, key: Option<&str>) -> Result<pm_kernel::SelectionCall> {
+    if key.is_some_and(|key| !pm_scene3d::part_material::valid_part_key(key)) {
+        return Err(invalid("Choose a model part"));
+    }
+    Ok(pm_kernel::SelectionCall::Channel(
+        key.map(|key| format!("studioPart:{key}:{layer}")),
+    ))
+}
+
 pub(crate) fn commands(
     p: &Published,
     time: f64,
     id: &str,
     arg: Value,
 ) -> Result<(String, Vec<Command>)> {
+    let id = id.strip_prefix("3d.").unwrap_or(id);
     // The Light panel's presets, colour temperature and Aim At.
     if let Some(key) = id.strip_prefix("light.adjust.")
         && matches!(key, "preset" | "temperature" | "aimAt")
@@ -488,6 +548,23 @@ pub(crate) fn commands(
         return crate::extrude::commands(p, time, control, arg, &artwork_lights);
     }
     if let Some(control) = id.strip_prefix("part.") {
+        if let Some((key, field)) = control.split_once('.')
+            && let Some((_, label)) = pm_scene3d::part_material::TRANSFORM_FIELDS
+                .iter()
+                .find(|(property, _)| *property == field)
+        {
+            let record = selected(p)?;
+            let layer = record["id"]
+                .as_str()
+                .ok_or_else(|| invalid("Missing layer ID"))?;
+            let name = record["d"]["data"]["object"]["parts"][key]["name"]
+                .as_str()
+                .unwrap_or("");
+            return Ok((
+                format!("Part {label}"),
+                part_commands(p, time, layer, key, name, &json!({(field):arg}))?,
+            ));
+        }
         return crate::extrude::part_commands(p, time, control, arg);
     }
     let l = selected(p)?;
@@ -1645,4 +1722,69 @@ mod landscape_fog_tests {
         let sky = landscape_sky(&[], "t1").unwrap();
         assert_eq!(sky["world"]["p"]["fogHeightFalloff"], 0.06);
     }
+}
+
+#[cfg(test)]
+mod model_part_tests {
+    use super::*;
+
+    #[test]
+    fn an_active_part_belongs_to_its_layer() {
+        let pm_kernel::SelectionCall::Channel(channel) = select_part("chair", Some("0_1")).unwrap()
+        else {
+            panic!("part selection channel");
+        };
+        let selection = |layer: &str| pm_kernel::Selection::from_parts(
+            vec![layer.into()], vec![], channel.clone(),
+        );
+        assert_eq!(active_part(&selection("chair")), Some(("chair", "0_1")));
+        assert_eq!(active_part(&selection("desk")), None);
+        assert!(select_part("chair", Some("0_01")).is_err());
+    }
+
+    #[test]
+    fn a_part_command_can_be_keyframed_and_undone() {
+        use pm_kernel::{Call, Caller, KernelActor, KernelConfig, OpenSource, Reply, Request, WriteBody};
+        let actor = KernelActor::spawn(KernelConfig::default());
+        let kernel = actor.handle();
+        let project = "part-test";
+        let root = json!({"id":project,"name":"Part test","compId":"c","w":640,"h":360,
+            "fps":30,"dur":5,"assets":{},"comps":{},"layers":[]});
+        kernel.open(project, OpenSource::Untitled(to_model(&root))).wait().unwrap().unwrap();
+        let call = |call: Call| {
+            let ack = kernel.call(project, Request::new(Caller::native(), call)).wait().unwrap().unwrap();
+            assert!(!matches!(ack.reply, Reply::Throw(_)), "{:?}", ack.reply);
+        };
+        let transact = |commands| call(Call::Transact { label: None, expected_revision: None,
+            body: WriteBody::Commands(commands) });
+        let read = || kernel.published(project).unwrap();
+        transact(vec![scene(&read(), 0., json!({
+            "operation":"add_object","id":"chair","object":{"source":{"assetId":"asset"}}
+        }))]);
+        call(pm_kernel::SelectionCall::Layers { ids:vec!["chair".into()], add:false }.into());
+
+        let mut edits = part_commands(&read(), 0., "chair", "0_1", "Seat", &json!({"x":2})).unwrap();
+        edits.push(pm_kernel::KeyframeCommand::Toggle {
+            layer_id: "chair".into(), channel: "pt.0_1.x".into(), time: 0.,
+            key_id: pm_kernel::new_id("kf"), value: None,
+        }.into());
+        transact(edits);
+        transact(commands(&read(), 1., "3d.part.0_1.x", json!(6)).unwrap().1);
+
+        let x = |time| {
+            let p = read();
+            let scene = pm_kernel::commands::scene3d::resolve_scene(
+                &p.snapshot, p.snapshot.open_comp().as_deref(), time,
+            ).unwrap();
+            scene.scene["objects"].as_array().unwrap().iter()
+                .find(|object| object["id"] == "chair").unwrap()["parts"]["0_1"]["p"]["x"]["v"]
+                .as_f64().unwrap()
+        };
+        assert_eq!(x(0.), 2.);
+        assert_eq!(x(0.5), 4.);
+        assert_eq!(x(1.), 6.);
+        call(pm_kernel::HistoryCall::Undo.into());
+        assert_eq!(x(1.), 2.);
+    }
+
 }

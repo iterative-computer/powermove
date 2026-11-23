@@ -173,7 +173,7 @@ pub struct MeshInstance {
 }
 
 /// Equal-sized sRGB RGBA8 map-array layers, already oriented to mesh UVs.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct TextureMaps {
     pub width: u32,
     pub height: u32,
@@ -181,6 +181,25 @@ pub struct TextureMaps {
     /// still compares bytes when the allocations differ.
     pub layers: Vec<Arc<Vec<u8>>>,
 }
+
+impl TextureMaps {
+    pub(crate) fn same_layout(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && self.layers.len() == other.layers.len()
+    }
+
+    pub(crate) fn same_layer(&self, other: &Self, index: usize) -> bool {
+        let (a, b) = (&self.layers[index], &other.layers[index]);
+        Arc::ptr_eq(a, b) || a == b
+    }
+}
+impl PartialEq for TextureMaps {
+    fn eq(&self, other: &Self) -> bool {
+        self.same_layout(other) && (0..self.layers.len()).all(|i| self.same_layer(other, i))
+    }
+}
+impl Eq for TextureMaps {}
 
 /// Evaluated view values the original Rust prototype did not carry.
 #[derive(Clone, Copy, Debug)]

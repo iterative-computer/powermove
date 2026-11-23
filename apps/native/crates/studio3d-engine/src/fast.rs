@@ -24,19 +24,25 @@ struct Mesh {
     identity: MeshInstance,
     buffer: wgpu::Buffer,
     count: u32,
+    last_used: u64,
 }
 pub struct Raster {
     device: wgpu::Device,
     queue: wgpu::Queue,
     color: wgpu::RenderPipeline,
+    perspective_color_depth: wgpu::RenderPipeline,
+    orthographic_color_depth: wgpu::RenderPipeline,
     perspective_depth: wgpu::RenderPipeline,
     orthographic_depth: wgpu::RenderPipeline,
     background: wgpu::RenderPipeline,
     flip: wgpu::RenderPipeline,
     meshes: Vec<Mesh>,
+    mesh_frame: u64,
     maps: Option<TextureMaps>,
     texture: Option<wgpu::Texture>,
     sampler: wgpu::Sampler,
+    depth_target: Option<wgpu::Texture>,
+    flip_target: Option<wgpu::Texture>,
     #[cfg(test)]
     test_depth: Option<wgpu::Texture>,
 }
@@ -96,7 +102,7 @@ impl Raster {
             immediate_size: 0,
         });
         let attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x2,3=>Float32x2,4=>Float32x4,5=>Uint32];
-        let make = |depth, depth_compare| {
+        let make = |depth_only, depth_write, depth_compare| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("Studio Fast"),
                 layout: Some(&layout),
@@ -112,9 +118,9 @@ impl Raster {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some(if depth { "depth" } else { "fs" }),
+                    entry_point: Some(if depth_only { "depth" } else { "fs" }),
                     compilation_options: Default::default(),
-                    targets: if depth {
+                    targets: if depth_only {
                         &[]
                     } else {
                         &[Some(wgpu::ColorTargetState {
@@ -130,7 +136,7 @@ impl Raster {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(depth),
+                    depth_write_enabled: Some(depth_write),
                     depth_compare: Some(depth_compare),
                     stencil: Default::default(),
                     bias: Default::default(),
@@ -204,9 +210,11 @@ impl Raster {
             multiview_mask: None,
             cache: None,
         });
-        let color = make(false, wgpu::CompareFunction::Equal);
-        let perspective_depth = make(true, wgpu::CompareFunction::GreaterEqual);
-        let orthographic_depth = make(true, wgpu::CompareFunction::LessEqual);
+        let color = make(false, false, wgpu::CompareFunction::Equal);
+        let perspective_color_depth = make(false, true, wgpu::CompareFunction::GreaterEqual);
+        let orthographic_color_depth = make(false, true, wgpu::CompareFunction::LessEqual);
+        let perspective_depth = make(true, true, wgpu::CompareFunction::GreaterEqual);
+        let orthographic_depth = make(true, true, wgpu::CompareFunction::LessEqual);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Studio Fast maps"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -217,14 +225,19 @@ impl Raster {
             device,
             queue,
             color,
+            perspective_color_depth,
+            orthographic_color_depth,
             perspective_depth,
             orthographic_depth,
             background,
             flip,
             meshes: vec![],
+            mesh_frame: 0,
             maps: None,
             texture: None,
             sampler,
+            depth_target: None,
+            flip_target: None,
             #[cfg(test)]
             test_depth: None,
         }
@@ -240,6 +253,7 @@ impl Raster {
                     _ => false,
                 }
         }) {
+            self.meshes[index].last_used = self.mesh_frame;
             return Ok(index);
         }
         crate::extract::validate_mesh(&i.mesh, i.attributes.as_deref())?;
@@ -290,6 +304,7 @@ impl Raster {
                 wgpu::BufferUsages::VERTEX,
             ),
             count: vertices.len() as u32,
+            last_used: self.mesh_frame,
         });
         Ok(index)
     }
@@ -302,7 +317,7 @@ impl Raster {
             .as_ref()
             .map_or((1, 1, 1), |m| (m.width, m.height, m.layers.len() as u32));
         let reuse = self.texture.as_ref().is_some_and(|t| {
-            t.width() == width && t.height() == height && t.depth_or_array_layers() == layers
+            t.width() == width && t.height() == height && t.depth_or_array_layers() >= layers
         });
         if !reuse {
             self.texture = Some(self.device.create_texture(&wgpu::TextureDescriptor {
@@ -310,7 +325,8 @@ impl Raster {
                 size: wgpu::Extent3d {
                     width,
                     height,
-                    depth_or_array_layers: layers,
+                    // Leave room for a live map arriving on the next frame.
+                    depth_or_array_layers: layers + u32::from(layers < 256),
                 },
                 mip_level_count: 1,
                 sample_count: 1,
@@ -328,7 +344,7 @@ impl Raster {
                     .as_ref()
                     .zip(input.maps.as_ref())
                     .is_some_and(|(old, new)| {
-                        old.layers[layer as usize] == new.layers[layer as usize]
+                        (layer as usize) < old.layers.len() && old.same_layer(new, layer as usize)
                     })
             {
                 continue;
@@ -391,6 +407,7 @@ impl Raster {
         let mut draws = Vec::new();
         let mut layers = Vec::new();
         let mut instances = Vec::<[[f32; 4]; 8]>::new();
+        self.mesh_frame = self.mesh_frame.wrapping_add(1);
         for i in &input.instances {
             if !i.primary_visible || i.mesh.indices.is_empty() {
                 continue;
@@ -505,15 +522,26 @@ impl Raster {
                 },
             ],
         });
-        let depth_texture = self.target(request, wgpu::TextureFormat::Depth32Float);
+        let fits = |texture: &wgpu::Texture| {
+            texture.width() == request.width && texture.height() == request.height
+        };
+        let depth_texture = self.depth_target.take().filter(fits)
+            .unwrap_or_else(|| self.target(request, wgpu::TextureFormat::Depth32Float));
+        let scratch = flip_y.then(|| {
+            self.flip_target.take().filter(fits)
+                .unwrap_or_else(|| self.target(request, wgpu::TextureFormat::Rgba8Unorm))
+        });
         let depth = depth_texture.create_view(&Default::default());
-        let (depth_pipeline, depth_clear) = if input.view.orthographic_span.is_some() {
-            (&self.orthographic_depth, 1.)
+        let (depth_pipeline, color_depth_pipeline, depth_clear) = if input.view.orthographic_span.is_some() {
+            (&self.orthographic_depth, &self.orthographic_color_depth, 1.)
         } else {
-            (&self.perspective_depth, 0.)
+            (&self.perspective_depth, &self.perspective_color_depth, 0.)
         };
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
+        // Only separate compositing layers need a shared visibility pass.
+        // A single output can resolve its own color and depth together.
+        let shared_depth = layers.len() > 1;
+        if shared_depth {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Studio Fast shared depth"),
                 color_attachments: &[],
@@ -535,7 +563,6 @@ impl Raster {
                 pass.draw(0..m.count, *instance..*instance + 1);
             }
         }
-        let scratch = flip_y.then(|| self.target(request, wgpu::TextureFormat::Rgba8Unorm));
         let mut outputs = Vec::new();
         for layer in layers {
             let texture = self.target(request, wgpu::TextureFormat::Rgba8Unorm);
@@ -558,7 +585,11 @@ impl Raster {
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &depth,
                         depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
+                            load: if shared_depth {
+                                wgpu::LoadOp::Load
+                            } else {
+                                wgpu::LoadOp::Clear(depth_clear)
+                            },
                             store: wgpu::StoreOp::Store,
                         }),
                         stencil_ops: None,
@@ -570,7 +601,7 @@ impl Raster {
                     pass.set_bind_group(0, &group, &[]);
                     pass.draw(0..3, 0..1);
                 }
-                pass.set_pipeline(&self.color);
+                pass.set_pipeline(if shared_depth { &self.color } else { color_depth_pipeline });
                 pass.set_bind_group(0, &group, &[]);
                 for (id, mesh, instance) in &draws {
                     if id == &layer {
@@ -612,16 +643,15 @@ impl Raster {
         self.queue.submit([encoder.finish()]);
         #[cfg(test)]
         {
-            self.test_depth = Some(depth_texture);
+            self.test_depth = Some(depth_texture.clone());
         }
-        // Keep only geometry used by the current immutable scene.
-        let used: std::collections::HashSet<_> = draws.iter().map(|(_, m, _)| *m).collect();
-        let mut index = 0;
-        self.meshes.retain(|_| {
-            let keep = used.contains(&index);
-            index += 1;
-            keep
-        });
+        self.depth_target = Some(depth_texture);
+        if scratch.is_some() {
+            self.flip_target = scratch;
+        }
+        // Keep the previous frame's buffers through a cut. The same geometry
+        // can return immediately with its previous material indices.
+        self.meshes.retain(|mesh| self.mesh_frame.wrapping_sub(mesh.last_used) <= 1);
         Ok(RenderedScene {
             request: request.clone(),
             layers: outputs,

@@ -14,7 +14,7 @@ pub fn equivalents() -> Vec<Equivalent> {
 /// A command whose key the menu bar itself matches (Save, Undo). A key the
 /// person records for it becomes the menu item's own (`menus`).
 pub fn is_equivalent(command: &str) -> bool {
-    equivalents().iter().any(|e| e.command == command)
+    equivalent_accelerator(command).is_some()
 }
 /// The system's own items (Hide, Hide Others, Quit): their keys are macOS's
 /// and are never changed.
@@ -23,6 +23,7 @@ pub fn is_fixed(command: &str) -> bool {
 }
 /// The key a menu-bar command has when the person has not changed it.
 pub fn equivalent_accelerator(command: &str) -> Option<String> {
+    let command = if command == "closeProject" { "closeTab" } else { command };
     equivalents()
         .into_iter()
         .find(|e| e.command == command)
@@ -322,8 +323,13 @@ pub fn menus() -> Vec<(&'static str, Vec<Item>)> {
                 if crate::tabs_mode() {
                     m("closeTab")
                 } else {
-                    let e = eq.iter().find(|e| e.command == "closeTab").unwrap();
-                    Item::command("Close Project", "closeTab", &e.accelerator)
+                    let default = equivalent_accelerator("closeProject").unwrap();
+                    let keys = crate::keymap::user_keys("closeProject");
+                    let chord = match &keys {
+                        Some(keys) => keys.first().map_or("", String::as_str),
+                        None => &default,
+                    };
+                    Item::command("Close Project", "closeProject", chord)
                 },
                 sep(),
                 m("save"),
@@ -845,6 +851,7 @@ mod sheet_tests {
             "open",
             "openRecent",
             "closeTab",
+            "closeProject",
             "closeWindow",
             "newLayers",
             "panels",

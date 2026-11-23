@@ -999,8 +999,12 @@ fn digits_reach_the_3d_view_only_while_it_has_the_keyboard_in_free_view() {
     assert!(!crate::gizmo::studio_key("look", true, true, false), "0 never turns 3D on by key");
     assert!(!crate::gizmo::studio_key("nav", false, true, true), "the 3D view has no keyboard");
     assert!(crate::gizmo::studio_key("nav", true, true, true));
-    assert!(crate::gizmo::studio_key("look", true, true, true), "0 leaves Free View");
-    assert!(crate::gizmo::studio_key("fly", true, true, false));
+    assert!(
+        crate::gizmo::studio_key("look", true, true, true),
+        "0 leaves Free View"
+    );
+    assert!(crate::gizmo::studio_key("fly", false, true, false));
+    assert!(!crate::gizmo::studio_key("fly", false, false, false));
 }
 #[gpui::test]
 fn refreshing_during_the_owners_update_never_reads_it_while_leased(cx: &mut TestAppContext) {
@@ -2769,7 +2773,8 @@ fn a_double_click_on_an_imported_model_focuses_the_part_under_the_pointer(cx: &m
     assert_eq!(*s.recorder.parts.borrow(), [("model".to_string(), Some(0))]);
     let kernel = s.rig.kernel.clone();
     settle(cx, move |_| {
-        kernel.published(PROJECT).unwrap().selection.layers() == ["model".to_string()]
+        let p = kernel.published(PROJECT).unwrap();
+        p.selection.layers() == ["model".to_string()] && p.selection.channel() == Some("studioPart:0_0:model")
     });
     // Further right along the middle, the lens answers with its own slot.
     for x in (330..640).step_by(10) {

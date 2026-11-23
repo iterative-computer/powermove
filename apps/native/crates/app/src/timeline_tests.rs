@@ -251,7 +251,8 @@ fn stage_opened(cx: &mut TestAppContext, rig: Rig, docked: bool) -> Stage {
                 timeline: surface.clone(),
             }
         });
-        let vcx = vcx.clone();
+        let mut vcx = vcx.clone();
+        vcx.update(|window, _| window.activate());
         vcx.simulate_resize(gpui::size(px(1000.), px(600.)));
         (root.read_with(&vcx, |r, _| r.child.clone()), vcx)
     } else {
@@ -3271,6 +3272,20 @@ fn deactivating_the_window_clears_the_skimmer(cx: &mut TestAppContext) {
     assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()), None);
     assert_eq!(*s.recorder.skims.borrow().last().unwrap(), None);
     assert!(!over(&mut s), "Space plays from the playhead");
+
+    // macOS can still deliver moves and wheel events to an inactive window.
+    s.vcx
+        .simulate_mouse_move(at + point(px(4.), px(0.)), None, Modifiers::none());
+    s.vcx
+        .simulate_mouse_move(at + point(px(8.), px(0.)), None, Modifiers::none());
+    s.vcx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(-20.), px(0.))),
+        ..Default::default()
+    });
+    s.idle(cx);
+    assert_eq!(s.surface.read_with(&s.vcx, |t, _| t.skimmer()), None);
+    assert_eq!(*s.recorder.skims.borrow().last().unwrap(), None);
 }
 /// Option-drag (Premiere, Final Cut, Resolve): the clip stays and a copy
 /// goes where the pointer lets go, selected; one Undo step removes it.

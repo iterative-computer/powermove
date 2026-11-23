@@ -116,3 +116,27 @@ impl Tessellator for OpenCascade {
         Ok(bytes)
     }
 }
+
+pub(super) fn convert(
+    format: Format,
+    bytes: &[u8],
+    converter: Option<&dyn Tessellator>,
+) -> Result<Vec<u8>> {
+    let helper = std::env::var_os("PM_SCENE3D_CAD_HELPER")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let helper = std::env::current_exe()
+                .ok()?
+                .parent()?
+                .join("pm-scene3d-cad");
+            helper.is_file().then_some(helper)
+        });
+    let installed = helper.map(|helper| OpenCascade {
+        helper,
+        scratch_root: std::env::temp_dir(),
+    });
+    let converter = converter
+        .or(installed.as_ref().map(|helper| helper as &dyn Tessellator))
+        .ok_or_else(|| Error("Native OpenCascade CAD worker is not installed".into()))?;
+    converter.convert(format, bytes, Settings::default())
+}
