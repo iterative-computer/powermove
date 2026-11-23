@@ -1,9 +1,16 @@
+// An image's texels are a region of an atlas page: `it.map.xy` is the
+// region's origin and `it.map.zw` its size, in whole texels (exact in f32).
+// Texels outside the region read as zero, as outside an image's own texture.
+fn image_size() -> vec2<i32> {
+    return vec2<i32>(it.map.zw);
+}
+
 fn image_texel(p: vec2<i32>) -> vec4<f32> {
-    let size = textureDimensions(src, 0);
-    if (p.x < 0 || p.y < 0 || p.x >= i32(size.x) || p.y >= i32(size.y)) {
+    let size = image_size();
+    if (p.x < 0 || p.y < 0 || p.x >= size.x || p.y >= size.y) {
         return vec4<f32>(0.0);
     }
-    return textureLoad(src, p, 0);
+    return textureLoad(src, vec2<i32>(it.map.xy) + p, 0);
 }
 fn image_bilinear(u: vec2<f32>) -> vec4<f32> {
     let p = u - vec2<f32>(0.5);
@@ -80,7 +87,7 @@ fn image_area(pixel: vec2<f32>) -> vec4<f32> {
         lo = min(lo, quad.vertices[i]);
         hi = max(hi, quad.vertices[i]);
     }
-    let size = vec2<i32>(textureDimensions(src, 0));
+    let size = image_size();
     let begin = max(vec2<i32>(floor(lo)), vec2<i32>(0));
     let end = min(vec2<i32>(ceil(hi)), size);
     var sum = vec4<f32>(0.0);
