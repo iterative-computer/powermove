@@ -22,6 +22,9 @@ impl Attachment {
     pub fn record(&self) -> &Value {
         &self.0
     }
+    pub(crate) fn stored(&self) -> bool {
+        self.0["payloadStored"] == true
+    }
     pub fn previewable(&self) -> bool {
         let mime = self.0["type"]
             .as_str()
@@ -36,7 +39,7 @@ impl Attachment {
                 | "image/svg+xml"
                 | "image/avif"
                 | "image/bmp"
-        ) && self.0["dataUrl"].is_string()
+        ) && (self.0["dataUrl"].is_string() || self.stored())
     }
     pub fn payload_available(&self) -> bool {
         ["dataUrl", "dataBase64", "content"]
@@ -179,6 +182,47 @@ impl Draft {
             }
         }
         (text, files)
+    }
+    /// A file cut or removed from the prompt can still be pasted or undone.
+    pub(crate) fn stored_ids(&self) -> Vec<&str> {
+        let mut ids: Vec<_> = self
+            .catalog
+            .values()
+            .filter(|file| file.stored())
+            .map(Attachment::id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+    /// Replace legacy inline bytes after their corresponding files are durable.
+    /// Undo and clipboard entries share the same lightweight attachment now.
+    pub(crate) fn release_saved_payloads(&mut self, saved: &[Value]) {
+        let replacements: HashMap<_, _> = saved
+            .iter()
+            .filter(|record| record["payloadStored"] == true)
+            .filter_map(|record| {
+                let id = record["id"].as_str()?;
+                self.catalog
+                    .get(id)
+                    .filter(|file| file.payload_available())?;
+                Some((id, Attachment::from_record(record.clone()).ok()?))
+            })
+            .collect();
+        if replacements.is_empty() {
+            return;
+        }
+        for (id, file) in &replacements {
+            self.catalog.insert((*id).into(), file.clone());
+        }
+        for state in std::iter::once(&mut self.state).chain(&mut self.history) {
+            for unit in &mut state.units {
+                if let Unit::File(file) = unit
+                    && let Some(stored) = replacements.get(file.id())
+                {
+                    *file = stored.clone();
+                }
+            }
+        }
     }
     pub fn citations(&self) -> &[Value] {
         &self.citations

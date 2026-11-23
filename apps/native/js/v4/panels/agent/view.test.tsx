@@ -167,6 +167,7 @@ test("new thread, send and stop use the model's commands; Send hides while worki
   const { root, commits } = mount();
   const actions: Action[] = [];
   const p = fixture();
+  p.snapshot.draft.text = "A new request";
   p.snapshot.sendable = true;
   const render = () =>
     root.render(<AgentView publication={p} send={(a) => actions.push(a)} />);
@@ -174,6 +175,7 @@ test("new thread, send and stop use the model's commands; Send hides while worki
   await root.drive(byId(root, "agent-new").id, "click");
   await root.drive(byId(root, "agent-send").id, "click");
   p.snapshot.runId = "run";
+  p.snapshot.draft.text = "";
   p.snapshot.sendable = false;
   await render();
   expect(root.inspect().nodes.some((n) => n.props.id === "agent-send")).toBe(
@@ -1713,4 +1715,173 @@ test("a real provider timeout keeps the failure card and its details", async () 
   } finally {
     root.dispose();
   }
+});
+
+test("dragging an attachment keeps the same focused composer editor", async () => {
+  const root = createRoot(async (commit) => ({
+    accepted: true,
+    revision: commit.baseRevision + 1,
+  }));
+  const p = fixture();
+  await root.render(<AgentView publication={p} send={() => {}} />);
+  const editor = byId(root, "agent-composer-text").id;
+  await root.drive(byId(root, "agent-composer").id, "dragover", {});
+  expect(byId(root, "agent-composer-text").id).toBe(editor);
+  await root.drive(byId(root, "agent-composer").id, "dragleave", {});
+  expect(byId(root, "agent-composer-text").id).toBe(editor);
+  await root.dispose();
+});
+
+for (const method of ["Return", "Send"] as const) {
+test(`${method} paints the user bubble and Stop in the first frame`, async () => {
+  const { root, commits } = mount();
+  const p = fixture();
+  p.snapshot.draft.text = "Older draft";
+  p.snapshot.draft.sent = 0;
+  p.snapshot.sendable = true;
+  const actions: Action[] = [];
+  let finish!: () => void;
+  const pending = new Promise<void>((resolve) => { finish = resolve; });
+  const send = (action: Action) => {
+    actions.push(action);
+    return pending;
+  };
+  const render = () => root.render(<AgentView publication={p} send={send} />);
+  await render();
+  const editor = byId(root, "agent-composer-text").id;
+  const firstFrame = commits.length;
+  const detail = { value: "First message", composerEpoch: 0 };
+  if (method === "Return") await root.drive(editor, "keydown", { key: "Enter", ...detail });
+  else await root.drive(byId(root, "agent-send").id, "click", detail);
+  const nodes = Object.values(replay(commits)[firstFrame].nodes) as any[];
+  expect(nodes.filter((n) => n.props.label === "You said: First message")).toHaveLength(1);
+  expect(nodes.some((n) => n.props.id === "agent-stop")).toBe(true);
+  expect(nodes.some((n) => n.props.id === "agent-send")).toBe(false);
+  expect(nodes.some((n) => n.text === "Make your next move")).toBe(false);
+  expect(nodes.find((n) => n.props.id === "agent-composer-text")?.props.value).toBe("");
+  p.sequence++;
+  await render();
+  expect(byId(root, "agent-composer-text").id).toBe(editor);
+  await root.drive(editor, "keydown", { key: "Enter" });
+  expect(actions).toHaveLength(1);
+  expect(actions[0]).toMatchObject(method === "Return"
+    ? { type: "key", composerEpoch: 0, key: { key: "Enter", value: "First message" } }
+    : { type: "submit", composerEpoch: 0, text: "First message" });
+  const bubble = byLabel(root, "You said: First message").id;
+  p.snapshot.draft.text = "";
+  p.snapshot.draft.sent = 1;
+  p.snapshot.sendable = false;
+  p.snapshot.runId = "run";
+  p.snapshot.rows = { count: 1, range: [0, 1], items: [{
+    id: "history:message-0", commandId: "history:message-0", chosen: {}, open: false,
+    value: { role: "user", text: "First message" },
+  }] };
+  finish();
+  await pending;
+  await render();
+  expect(byLabel(root, "You said: First message").id).toBe(bubble);
+  expect(has(root, "Working for 0s")).toBe(true);
+  await root.dispose();
+});
+}
+
+test("a host refusal keeps the first bubble, restores the draft and offers Retry", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.draft.text = "Keep these words";
+  p.snapshot.sendable = true;
+  let refuse!: (reason: Error) => void;
+  const pending = new Promise<void>((_, reject) => { refuse = reject; });
+  const actions: Action[] = [];
+  await root.render(<AgentView publication={p} send={(action) => {
+    actions.push(action);
+    return actions.length === 1 ? pending : undefined;
+  }} />);
+  await root.drive(byId(root, "agent-send").id, "click");
+  refuse(new Error("Provider disconnected"));
+  await pending.catch(() => {});
+  await root.flush();
+  expect(has(root, "You said: Keep these words (Couldn’t send)")).toBe(true);
+  expect(byId(root, "agent-composer-text").props.value).toBe("Keep these words");
+  await root.drive(byLabel(root, "Retry").id, "click");
+  expect(actions).toHaveLength(2);
+  await root.dispose();
+});
+
+test("a slow start keeps one timer row and can be stopped before host acceptance", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.draft.text = "Start slowly";
+  p.snapshot.sendable = true;
+  const actions: Action[] = [];
+  let accept!: () => void;
+  const pending = new Promise<void>((resolve) => { accept = resolve; });
+  const render = () => root.render(<AgentView publication={p} send={(action) => {
+    actions.push(action);
+    return actions.length === 1 ? pending : undefined;
+  }} />);
+  await render();
+  await root.drive(byId(root, "agent-send").id, "click");
+  expect(has(root, "Starting…")).toBe(false);
+  expect(has(root, "Working for 0s")).toBe(false);
+  await root.drive(byId(root, "agent-stop").id, "click");
+  expect(actions).toHaveLength(1);
+  await new Promise((resolve) => setTimeout(resolve, 330));
+  await root.flush();
+  expect(has(root, "Starting…")).toBe(true);
+  p.snapshot.draft.text = "";
+  p.snapshot.sendable = false;
+  p.snapshot.runId = "run";
+  p.snapshot.starting = true;
+  p.snapshot.rows = { count: 1, range: [0, 1], items: [{
+    id: "history:message-0", commandId: "history:message-0", chosen: {}, open: false,
+    value: { role: "user", text: "Start slowly" },
+  }] };
+  accept();
+  await pending;
+  await render();
+  expect(actions.at(-1)).toEqual({ type: "stop" });
+  const timer = byLabel(root, "Starting…").id;
+  p.snapshot.starting = false;
+  p.snapshot.elapsedMs = 0;
+  await render();
+  expect(byLabel(root, "Working for 0s").id).toBe(timer);
+  await root.dispose();
+});
+
+test("a new user message jumps to the end but streaming updates retain position", async () => {
+  const { root } = mount();
+  const p = fixture();
+  const render = () => root.render(<AgentView publication={p} send={() => {}} />);
+  const getToken = () =>
+    (byId(root, "agent-conversation").props.metadata as { scrollToken: string }).scrollToken;
+  await render();
+  const start = getToken();
+  p.snapshot.runId = "run";
+  p.snapshot.rows = { count: 1, range: [0, 1], items: [
+    { id: "user-1", commandId: "", chosen: {}, open: false, value: { role: "user", text: "Direction" } },
+  ] };
+  await render();
+  const sent = getToken();
+  expect(sent).not.toBe(start);
+  p.snapshot.rows = { count: 2, range: [0, 2], items: [
+    ...p.snapshot.rows.items,
+    { id: "live-1", commandId: "", chosen: {}, open: false, value: { kind: "text", text: "Working…" } },
+  ] };
+  await render();
+  expect(getToken()).toBe(sent);
+  await root.dispose();
+});
+
+test("queued directions are marked on the user bubble", async () => {
+  const { root } = mount();
+  const p = fixture();
+  p.snapshot.runId = "run";
+  p.snapshot.rows = { count: 1, range: [0, 1], items: [
+    { id: "user-1", commandId: "", chosen: {}, open: false, value: { role: "user", text: "Keep the logo.", delivery: "queued" } },
+  ] };
+  await root.render(<AgentView publication={p} send={() => {}} />);
+  expect(root.inspect().nodes.filter((node) => node.text === "Queued for next step")).toHaveLength(1);
+  expect(has(root, "You said: Keep the logo. (Queued for next step)")).toBe(true);
+  await root.dispose();
 });

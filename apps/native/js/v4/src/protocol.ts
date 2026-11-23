@@ -73,6 +73,8 @@ export interface EventDetail {
   code?: string;
   repeat?: boolean;
   value?: Json;
+  /** The draft generation when the native Agent editor sampled its text. */
+  composerEpoch?: number;
   shiftKey?: boolean;
   altKey?: boolean;
   metaKey?: boolean;
@@ -184,7 +186,7 @@ export function eventDetail(value: EventDetail): EventDetail {
   for (const key of ["x", "y", "deltaX", "deltaY"] as const)
     if (detail[key] !== undefined && typeof detail[key] !== "number")
       throw new TypeError(`Invalid event ${key}`);
-  for (const key of ["button", "buttons", "clickCount", "pointerId"] as const)
+  for (const key of ["button", "buttons", "clickCount", "pointerId", "composerEpoch"] as const)
     if (
       detail[key] !== undefined &&
       (!Number.isSafeInteger(detail[key]) || detail[key]! < 0)

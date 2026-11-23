@@ -9,7 +9,7 @@ use crate::{
 };
 use pm_agents::{Access, ApprovalMode, Provider};
 use serde_json::{Value, json};
-use std::ops::Range;
+use std::{borrow::Cow, ops::Range};
 
 /// Native coordinator supplies fresh ids and time, never extension-authored ids.
 pub struct Context<'a> {
@@ -21,6 +21,46 @@ pub struct Context<'a> {
     /// The choices of a provider the thread switches to.
     pub catalogs: &'a dyn Fn(Provider) -> crate::input::Catalog,
 }
+/// The provider and Quick Look own the attachment payload. The panel
+/// only needs the card, especially when republishing it on every typed key.
+fn wire_row(value: &Value) -> Cow<'_, Value> {
+    let Some(files) = value.get("attachments").and_then(Value::as_array) else {
+        return Cow::Borrowed(value);
+    };
+    if value["role"] != "user" || files.is_empty() {
+        return Cow::Borrowed(value);
+    }
+    let mut row = value
+        .as_object()
+        .expect("attachment property on object")
+        .iter()
+        .filter(|(name, _)| *name != "attachments")
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    let cards = files
+        .iter()
+        .map(|file| {
+            let fields = [
+                "id",
+                "name",
+                "type",
+                "thumbnail",
+                "duration",
+                "screenPick",
+                "caption",
+            ];
+            Value::Object(
+                fields
+                    .into_iter()
+                    .filter_map(|name| file.get(name).map(|value| (name.into(), value.clone())))
+                    .collect(),
+            )
+        })
+        .collect();
+    row.insert("attachments".into(), Value::Array(cards));
+    Cow::Owned(Value::Object(row))
+}
+
 /// Keep a matching immutable archive/index together. Refresh after structural
 /// archive changes, on a worker; streaming live rows need no archive rebuild.
 pub struct Window {
@@ -89,7 +129,7 @@ impl Window {
                 .questions
                 .get(command_id)
                 .map_or_else(Default::default, |draft| draft.chosen().clone());
-            let mut item = json!({"id":id,"commandId":id,"value":value,"chosen":chosen,
+            let mut item = json!({"id":id,"commandId":id,"value":wire_row(value),"chosen":chosen,
                 "open":session.disclosures.get(&id).copied().unwrap_or_else(||session.disclosure_open(command_id, false))});
             if !trace.is_null() {
                 item["trace"] = trace;
@@ -99,7 +139,9 @@ impl Window {
         let mut value = panel.inspect(&self.thread)?;
         let text = session.draft.text();
         let selection = session.draft.text_selection();
-        value["draft"] = json!({"citations":session.draft.citations(),"text":text,"selection":[selection.start,selection.end],"armed":session.draft.armed()});
+        value["draft"] = json!({"sent":session.composer_epoch,"citations":session.draft.citations(),"text":text,"selection":[selection.start,selection.end],"armed":session.draft.armed()});
+        value["nextMessageId"] = json!(format!("history:message-{}", session.next_message));
+        value["starting"] = json!(session.starting);
         value["rows"] = json!({"count":count,"range":[range.start,range.end],"items":items});
         let mut threads = panel.summaries();
         value["threadTitle"] = json!(
@@ -198,26 +240,47 @@ pub fn dispatch_at(
     envelope: &Value,
     context: Context<'_>,
 ) -> Result<Option<Effect>> {
+    dispatch_at_with_queue(panel, sequence, envelope, context, false)
+}
+pub fn dispatch_at_with_queue(
+    panel: &mut Panel,
+    sequence: u64,
+    envelope: &Value,
+    context: Context<'_>,
+    queue: bool,
+) -> Result<Option<Effect>> {
     let thread = panel.active_id().to_owned();
-    let run = panel.session(&thread)?.run.as_ref().map(|r| &r.id);
+    let session = panel.session(&thread)?;
+    let run = session.run.as_ref().map(|r| &r.id);
     let target = envelope
         .get("target")
         .and_then(Value::as_object)
         .ok_or(Error::Stale)?;
-    // A streaming run republishes constantly, so input can't wait for the latest
-    // publication. Only a whole-text draft replaces what the user last saw.
-    let kind = envelope["action"]["type"].as_str().unwrap_or_default();
-    let ordered = kind == "draft";
+    let action = &envelope["action"];
+    let kind = action["type"].as_str().unwrap_or_default();
+    let epoch = action
+        .get("composerEpoch")
+        .map(|epoch| epoch.as_u64().ok_or(Error::Invalid("composer epoch")))
+        .transpose()?;
+    let composer = epoch.is_some() && matches!(kind, "draft" | "key" | "submit");
     if sequence == 0
-        || ordered && envelope["sequence"].as_u64() != Some(sequence)
         || target.get("project") != Some(&json!(panel.project()))
         || target.get("thread") != Some(&json!(thread))
-        || kind != "key" && target.get("run") != Some(&json!(run))
+        || !composer && kind != "key" && target.get("run") != Some(&json!(run))
     {
         return Err(Error::Stale);
     }
-    dispatch(panel, &thread, &envelope["action"], context)
+    // An input sampled before Send still belongs to the consumed draft,
+    // even if a newer publication set the field to that same text later.
+    if composer && epoch != Some(session.composer_epoch) {
+        return Ok(None);
+    }
+    if kind == "draft" && envelope["sequence"].as_u64() != Some(sequence) {
+        return Err(Error::Stale);
+    }
+    dispatch_composer(panel, &thread, action, context, composer, queue)
 }
+
 fn control_id(panel: &Panel, thread: &str, id: &str) -> Result<String> {
     let s = panel.session(thread)?;
     if let Some(raw) = id.strip_prefix("live:") {
@@ -276,10 +339,10 @@ fn retry_turn(
             .ok_or_else(|| Error::UnknownId(id.into()))?,
         None => rows.len(),
     };
-    let user = rows[..end]
-        .iter()
-        .rev()
-        .find(|r| r.value["role"] == "user")
+    let user = rows
+        .get(end)
+        .filter(|row| row.value["role"] == "user" && row.value["delivery"] == "failed")
+        .or_else(|| rows[..end].iter().rev().find(|r| r.value["role"] == "user"))
         .ok_or(Error::Invalid("retry has no user turn"))?;
     let text = user.value["text"].as_str().unwrap_or_default().to_owned();
     let files = user.value["attachments"]
@@ -305,11 +368,38 @@ fn optional_boolean(value: &Value, name: &str) -> Result<bool> {
 /// Native worker must admit the project/thread/run against its latest publication
 /// before calling. Effects are returned intact to the existing host coordinator;
 /// no successful provider, consent, archive, shell or file result is fabricated.
+fn set_submission_text(
+    panel: &mut Panel,
+    thread: &str,
+    text: Option<&str>,
+    now: u64,
+) -> Result<crate::composer::Draft> {
+    let draft = panel.draft_mut(thread)?;
+    if let Some(text) = text
+        && draft.text() != text
+    {
+        draft.set_text(text, now)?;
+        let end = text.encode_utf16().count();
+        draft.select_text(end..end)?;
+    }
+    Ok(draft.clone())
+}
+
 pub fn dispatch(
     panel: &mut Panel,
     thread: &str,
     action: &Value,
     context: Context<'_>,
+) -> Result<Option<Effect>> {
+    dispatch_composer(panel, thread, action, context, false, false)
+}
+fn dispatch_composer(
+    panel: &mut Panel,
+    thread: &str,
+    action: &Value,
+    context: Context<'_>,
+    composer: bool,
+    queue: bool,
 ) -> Result<Option<Effect>> {
     if panel.active_id() != thread {
         return Err(Error::Stale);
@@ -344,6 +434,7 @@ pub fn dispatch(
         }
         "key" => {
             let key = &action["key"];
+            let text = key["value"].as_str();
             let key = Key {
                 name: string(key, "key")?.into(),
                 meta: optional_boolean(key, "metaKey")?,
@@ -354,7 +445,13 @@ pub fn dispatch(
                 composing: optional_boolean(key, "composing")?,
                 code_229: false,
             };
-            let outcome = panel.composer_key(
+            let draft =
+                if composer && key.name == "Enter" && !key.shift && !key.repeat && !key.composing {
+                    Some(set_submission_text(panel, thread, text, now)?)
+                } else {
+                    None
+                };
+            let outcome = panel.route_composer_key(
                 thread,
                 &key,
                 context.popover_open,
@@ -363,6 +460,7 @@ pub fn dispatch(
                     request: context.request,
                 },
                 now,
+                queue,
             )?;
             if outcome.route.intent == input::Intent::NativeText {
                 let (backward, name) = (key.name == "Backspace", key.name.as_str());
@@ -372,10 +470,34 @@ pub fn dispatch(
                     panel.draft_mut(thread)?.insert_text(&text, now, true);
                 }
             }
-            outcome.effect
+            let mut effect = outcome.effect;
+            if let (Some(effect), Some(draft)) = (&mut effect, draft) {
+                panel.track_composer_send(effect, draft)?;
+            }
+            effect
         }
         "openSettings" => Some(panel.host_settings(thread)?),
-        "submit" => Some(panel.submit(thread, context.run, context.request, now)?),
+        "submit" => {
+            let draft = if composer {
+                Some(set_submission_text(
+                    panel,
+                    thread,
+                    action["text"].as_str(),
+                    now,
+                )?)
+            } else {
+                None
+            };
+            let mut effect = if queue {
+                panel.queue_composer(thread, now)?
+            } else {
+                panel.submit(thread, context.run, context.request, now)?
+            };
+            if let Some(draft) = draft {
+                panel.track_composer_send(&mut effect, draft)?;
+            }
+            Some(effect)
+        }
         "stop" => Some(panel.stop(thread)?),
         "newThread" => {
             panel.new_thread(context.new_thread, now)?;
@@ -1195,6 +1317,7 @@ mod tests {
 #[cfg(test)]
 mod admission_tests {
     use super::*;
+    use crate::model::EffectKind;
     use pm_agents::persistence::Store;
     use std::io;
     struct Empty;
@@ -1249,6 +1372,169 @@ mod admission_tests {
             dispatch_at(&mut panel, 9, &key("other"), context()),
             Err(Error::Stale)
         ));
+    }
+    #[test]
+    fn composer_send_uses_editor_text_even_when_the_last_input_is_still_pending() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let submit = json!({"sequence":1,"target":{"project":"p","thread":"t","run":null},
+            "action":{"type":"key","composerEpoch":0,"key":{"key":"Enter","metaKey":true,"value":"Latest text"}}});
+        let effect = dispatch_at(&mut panel, 1, &submit, context()).unwrap();
+        assert!(matches!(
+            effect.unwrap().kind,
+            EffectKind::Send { text, .. } if text == "Latest text"
+        ));
+        assert_eq!(panel.session("t").unwrap().conversation.len(), 1);
+    }
+    #[test]
+    fn late_input_and_duplicate_return_cannot_resend_a_consumed_draft() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let envelope = |run: Value, action: Value| json!({"sequence":1,"target":{"project":"p","thread":"t","run":run},"action":action});
+        let draft = json!({"type":"draft","text":"First","selection":[5,5],"composerEpoch":0});
+        let enter = json!({"type":"key","composerEpoch":0,"key":{"key":"Enter","value":"First"}});
+        dispatch_at(
+            &mut panel,
+            1,
+            &envelope(Value::Null, draft.clone()),
+            context(),
+        )
+        .unwrap();
+        dispatch_at(
+            &mut panel,
+            1,
+            &envelope(Value::Null, enter.clone()),
+            context(),
+        )
+        .unwrap();
+        dispatch_at(&mut panel, 1, &envelope(json!("run"), draft), context()).unwrap();
+        assert!(
+            dispatch_at(&mut panel, 1, &envelope(json!("run"), enter), context())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(panel.session("t").unwrap().draft.text(), "");
+        assert_eq!(panel.session("t").unwrap().conversation.len(), 1);
+    }
+    #[test]
+    fn composer_send_launch_refusal_restores_the_thread_draft() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        panel
+            .draft_mut("t")
+            .unwrap()
+            .insert_text("Keep this", 0, false);
+        let submit = json!({"sequence":1,"target":{"project":"p","thread":"t","run":null},
+            "action":{"type":"submit","composerEpoch":0}});
+        let effect = dispatch_at(&mut panel, 1, &submit, context())
+            .unwrap()
+            .unwrap();
+        let starting = Window::new(&panel, "t").unwrap()
+            .snapshot(&panel, 0..1, 1).unwrap();
+        assert_eq!(starting["starting"], true);
+        assert_eq!(starting["rows"]["items"][0]["id"], "history:message-0");
+        crate::runtime::ProviderRuns::default()
+            .refuse(
+                &mut panel,
+                &mut Empty,
+                &effect,
+                1,
+                &Error::Host("Synthetic launch refusal".into()),
+            )
+            .unwrap();
+        let session = panel.session("t").unwrap();
+        assert_eq!(session.draft.text(), "Keep this");
+        assert!(session.run.is_none());
+        assert!(!session.starting);
+        assert_eq!(session.conversation.at(0).unwrap().value["delivery"], "failed");
+        let retried = retry_turn(&mut panel, "t", Some("message-0"), "retry", "request", 2)
+            .unwrap();
+        assert!(matches!(retried.kind, EffectKind::Send { text, .. } if text == "Keep this"));
+    }
+    #[test]
+    fn composer_timer_starts_when_the_provider_worker_accepts_the_run() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let submit = json!({"sequence":1,"target":{"project":"p","thread":"t","run":null},
+            "action":{"type":"submit","text":"Start a run","composerEpoch":0}});
+        let effect = dispatch_at(&mut panel, 1, &submit, context())
+            .unwrap()
+            .unwrap();
+        let window = Window::new(&panel, "t").unwrap();
+        assert_eq!(window.snapshot(&panel, 0..1, 301).unwrap()["starting"], true);
+        panel.provider_started(&effect, 301).unwrap();
+        let active = window.snapshot(&panel, 0..1, 301).unwrap();
+        assert_eq!(active["starting"], false);
+        assert_eq!(active["elapsedMs"], 0);
+    }
+    #[test]
+    fn a_provider_worker_that_cannot_start_restores_the_composer_draft() {
+        use pm_agents::{approvals::Authority, claude, transport};
+        use std::time::{Duration, Instant};
+
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let submit = json!({"sequence":1,"target":{"project":"p","thread":"t","run":null},
+            "action":{"type":"submit","text":"Keep the original draft","composerEpoch":0}});
+        let effect = dispatch_at(&mut panel, 1, &submit, context())
+            .unwrap()
+            .unwrap();
+        let mut runs = crate::runtime::ProviderRuns::default();
+        runs.start_admitted(&mut panel, &effect, 0, || {
+            Ok(transport::spawn(
+                transport::ProcessSpec {
+                    executable: "/dev/null".into(),
+                    args: vec![],
+                    cwd: std::env::temp_dir(),
+                    env: Default::default(),
+                },
+                transport::Machine::Claude(claude::Client::new(
+                    "run".into(),
+                    Authority::new(Access::Editor, ApprovalMode::Auto, false).unwrap(),
+                    0,
+                )),
+                vec![],
+            ))
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !runs.is_empty() {
+            runs.poll(&mut panel, &mut Empty, 1, 64).unwrap();
+            assert!(Instant::now() < deadline, "startup error was not delivered");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let session = panel.session("t").unwrap();
+        assert!(session.run.is_none());
+        assert_eq!(session.draft.text(), "Keep the original draft");
+        assert_eq!(session.conversation.at(0).unwrap().value["delivery"], "failed");
+    }
+    #[test]
+    fn the_sent_attachment_is_previewable_without_republishing_its_full_payload() {
+        let mut panel = Panel::load(&mut Empty, "p", "t", 0).unwrap();
+        let attachment = crate::composer::Attachment::from_record(json!({
+            "id":"image","name":"reference.png","type":"image/png",
+            "dataUrl":"data:image/png;base64,c3ludGhldGlj","thumbnail":"synthetic-thumbnail",
+        }))
+        .unwrap();
+        panel.add_attachments("t", vec![attachment], 0).unwrap();
+        let effect = panel.submit("t", "run", "request", 1).unwrap();
+        let EffectKind::Send { attachments, .. } = effect.kind else {
+            panic!("expected send");
+        };
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(
+            attachments[0]["dataUrl"],
+            "data:image/png;base64,c3ludGhldGlj"
+        );
+        let view = Window::new(&panel, "t")
+            .unwrap()
+            .snapshot(&panel, 0..1, 1)
+            .unwrap();
+        assert_eq!(view["attachments"], json!([]));
+        let sent = &view["rows"]["items"][0]["value"]["attachments"][0];
+        assert_eq!(sent["thumbnail"], "synthetic-thumbnail");
+        assert_eq!(sent["id"], "image");
+        assert!(sent.get("dataUrl").is_none());
+        let preview = panel.open_attachment("t", "image").unwrap();
+        assert!(
+            matches!(preview.kind, EffectKind::OpenAttachment { attachment, .. }
+            if attachment["dataUrl"] == "data:image/png;base64,c3ludGhldGlj")
+        );
     }
     #[test]
     fn malformed_ime_flags_cannot_turn_into_a_submit() {

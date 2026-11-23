@@ -38,6 +38,8 @@ export function publication(
     typeof s.threadId !== "string" ||
     !s.threadId ||
     !nullableString(s.runId) ||
+    (s.starting !== undefined && typeof s.starting !== "boolean") ||
+    (s.nextMessageId !== undefined && typeof s.nextMessageId !== "string") ||
     typeof s.phase !== "string" ||
     !["sendable", "composerDisabled", "stopping", "showJump"].every(
       (k) => typeof s[k] === "boolean",
@@ -70,6 +72,7 @@ export function publication(
       r.items.length ||
     !record(d) ||
     typeof d.text !== "string" ||
+    (d.sent !== undefined && !count(d.sent)) ||
     (d.citations !== undefined &&
       (!Array.isArray(d.citations) || !d.citations.every(isCitation))) ||
     !nullableString(d.armed) ||

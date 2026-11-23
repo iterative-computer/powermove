@@ -56,12 +56,14 @@ fn agent_cached_file(root: &Path, key: &str) -> Option<PathBuf> {
         .then(|| root.join(format!("{digest}.png")))
 }
 /// Square, aspect-fill attachment pictures. Project tiles keep their own 16:9 recipe.
+const ATTACHMENT_THUMB_EDGE: usize = 112; // 56pt at 2x.
+
 pub fn make_attachment(
     path: &Path,
     video: bool,
     ffmpeg: Option<&Path>,
 ) -> Option<(String, PathBuf)> {
-    const EDGE: usize = 112; // 56pt at 2x.
+    const EDGE: usize = ATTACHMENT_THUMB_EDGE;
     let meta = std::fs::metadata(path).ok()?;
     let mut hash = blake3::Hasher::new_derive_key("powermove attachment thumbnail 1");
     hash.update(path.as_os_str().as_encoded_bytes());
@@ -128,17 +130,53 @@ pub fn make_attachment(
         }
         rgba
     };
-    std::fs::create_dir_all(&root).ok()?;
+    save_attachment_thumbnail(&root, &file, &rgba)?;
+    Some((key, file))
+}
+
+/// Captures already have pixels. Build their preview without staging or decoding
+/// another copy of the full image.
+pub(crate) fn capture_thumbnail(
+    png: &[u8],
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> Option<String> {
+    const EDGE: usize = ATTACHMENT_THUMB_EDGE;
+    let digest = blake3::hash(png).to_hex();
+    let key = format!("agent-thumb/{}", &digest[..32]);
+    let root = agent_cache()?;
+    let file = agent_cached_file(&root, &key)?;
+    if !file.is_file() {
+        let (width, height) = (width as usize, height as usize);
+        let side = width.min(height);
+        let (ox, oy) = ((width - side) / 2, (height - side) / 2);
+        let mut rgba = Vec::with_capacity(EDGE * EDGE * 4);
+        for y in 0..EDGE {
+            for x in 0..EDGE {
+                let at = ((oy + y * side / EDGE) * width + ox + x * side / EDGE) * 4;
+                rgba.extend_from_slice(&pixels[at..at + 4]);
+            }
+        }
+        save_attachment_thumbnail(&root, &file, &rgba)?;
+    }
+    register(&key, file);
+    Some(key)
+}
+
+fn save_attachment_thumbnail(root: &Path, file: &Path, rgba: &[u8]) -> Option<()> {
+    const EDGE: usize = ATTACHMENT_THUMB_EDGE;
+    std::fs::create_dir_all(root).ok()?;
     let staged = tempfile::NamedTempFile::new_in(&root).ok()?;
     let writer = std::io::BufWriter::new(staged.reopen().ok()?);
     let mut encoder = png::Encoder::new(writer, EDGE as u32, EDGE as u32);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header().ok()?;
-    writer.write_image_data(&rgba).ok()?;
+    writer.write_image_data(rgba).ok()?;
     writer.finish().ok()?;
-    staged.persist(&file).ok()?;
-    Some((key, file))
+    staged.persist(file).ok()?;
+    Some(())
 }
 
 /// The cached picture behind a key the panel drew (`thumb/<digest>`).

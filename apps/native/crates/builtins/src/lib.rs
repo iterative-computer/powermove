@@ -962,11 +962,6 @@ impl Builtins {
                 backend.native.agent_link.clone(),
             )
         };
-        let files = records
-            .into_iter()
-            .map(pm_panel_agentpanel::composer::Attachment::from_record)
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| format!("{e:?}"))?;
         {
             let mut state = agent.shared();
             let thread = match target {
@@ -974,9 +969,12 @@ impl Builtins {
                 Some(_) => return Err("The attachment's project is no longer open.".into()),
                 None => state.panel.active_id().to_owned(),
             };
+            let mut store =
+                models::KernelStore::new(self.broker.kernel.clone(), self.broker.application);
+            let now = agent_host::now_ms();
             state
                 .panel
-                .add_attachments(&thread, files, agent_host::now_ms())
+                .attach_records(&thread, records, &mut store, now)
                 .map_err(|e| match e {
                     pm_panel_agentpanel::Error::Invalid("six attachments per message") => {
                         "A message can carry six attachments.".to_owned()
@@ -986,13 +984,7 @@ impl Builtins {
             // Called off the main thread: the archive write happens here.
             state
                 .panel
-                .save(
-                    &mut models::KernelStore::new(
-                        self.broker.kernel.clone(),
-                        self.broker.application,
-                    ),
-                    agent_host::now_ms(),
-                )
+                .save(&mut store, now)
                 .map_err(|e| format!("{e:?}"))?;
         }
         link.touch();
@@ -1211,6 +1203,56 @@ impl Builtins {
         self.agent_status();
         let id = self.agent_status_cache.lock().unwrap_or_else(|e| e.into_inner()).4.2.clone();
         (!id.is_empty()).then_some(id)
+    }
+    /// Admit one toolbar direction on the same worker as the composer.
+    /// Returns whether it was queued for the thread’s next turn.
+    pub fn agent_quick_prompt(
+        &self,
+        thread: &str,
+        text: &str,
+    ) -> std::result::Result<bool, String> {
+        let (agent, link) = self.agent_state()?;
+        let queued = {
+            let mut state = agent.shared();
+            let session = state.panel.session(thread).map_err(|e| e.to_string())?;
+            if session.composer_disabled() {
+                return Err("Wait for the agent to finish applying its change.".into());
+            }
+            let current_run = session
+                .run
+                .as_ref()
+                .ok_or("This turn has already finished.")?
+                .id
+                .clone();
+            let queued = agent_host::queue_composer_send(&state, thread)?;
+            let now = agent_host::now_ms();
+            let mut effect = if queued {
+                state.panel.queue_text(thread, text, now)
+            } else {
+                state.panel.send_message(
+                    thread,
+                    text,
+                    &[],
+                    &current_run,
+                    &pm_kernel::new_id("request"),
+                    now,
+                )
+            }
+            .map_err(|e| e.to_string())?;
+            state
+                .panel
+                .track_live_direction(&mut effect)
+                .map_err(|e| e.to_string())?;
+            state.panel.defer_save(now);
+            if !queued {
+                state.sends.push_back(effect);
+            }
+            queued
+        };
+        link.touch();
+        link.publish_now();
+        agent_host::ensure_worker(&agent, &link, &self.broker.kernel, self.broker.application);
+        Ok(queued)
     }
     /// The agent panel's state and link, for an answer the window gives.
     fn agent_state(
