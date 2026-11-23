@@ -9,6 +9,15 @@
 //! (`FRAG_COMPOSITE`). An adjustment node runs its effects on the
 //! accumulator and composites the masked result over it.
 //!
+//! A node that reads nothing of the stack beneath it (normal blending, no
+//! transition, no effect reading the backdrop: [`draws_over_the_stack`])
+//! does not split the pass: its own passes are recorded first and its image
+//! joins the accumulator pass after it, so several such nodes and the plain
+//! draws between them go into the accumulator in one pass, in plan order
+//! ([`DEFERRED_IMAGES`], [`DEFERRED_BYTES`]). The accumulator receives the
+//! same draws in the same order with the same blending; a pass split or
+//! joined over the same attachment stores the same bits.
+//!
 //! A pass runs over the plan's region grown by the largest effect padding
 //! of its nodes (clamped to the frame); the region is cut from it at the
 //! end. A node that fails is reported and leaves the accumulator as it was
@@ -31,6 +40,74 @@ use crate::plan::{CompPlan, Content};
 /// The grid a padded pass aligns to (`Region::align`): an effect's
 /// reduced-resolution passes down to 1/16 keep the whole frame's texels.
 const EFFECT_GRID: u32 = 16;
+
+/// Layer images one accumulator pass draws at most: past it the pass is
+/// recorded before the next node ([`Exec::render_comp_nodes`]).
+const DEFERRED_IMAGES: usize = 8;
+
+/// The bytes of layer images and group passes held for accumulator passes
+/// not yet recorded, at every level of the frame together (a nested
+/// composition's nodes defer too): the scrub-borrow bound, 128 MiB. Three
+/// 2880 × 1620 half-float images (37.3 MB each), eight at 1920 × 1080.
+const DEFERRED_BYTES: u64 = 128 * 1024 * 1024;
+
+thread_local! {
+    /// [`DEFERRED_BYTES`]'s count: what every [`Pending`] being recorded on
+    /// this thread holds (a frame records on one thread; nested levels
+    /// recurse on it).
+    static DEFERRED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// What the next accumulator pass of a node loop draws.
+#[derive(Default)]
+struct Pending {
+    /// Plain draws and normal-blend layer images, in plan order.
+    draws: Vec<Resolved>,
+    /// The pool targets those draws read (scoped layer images and group
+    /// passes), given back once the pass is recorded.
+    targets: Vec<Target>,
+    /// Their bytes, counted in [`DEFERRED`].
+    bytes: u64,
+    /// Layer images among `draws`.
+    images: usize,
+}
+
+impl Pending {
+    fn hold(&mut self, target: Target) {
+        let bytes = target.bytes();
+        self.bytes += bytes;
+        DEFERRED.with(|d| d.set(d.get() + bytes));
+        self.targets.push(target);
+    }
+
+    /// The targets, no longer counted (the pass reading them is recorded).
+    fn take_targets(&mut self) -> Vec<Target> {
+        let bytes = std::mem::take(&mut self.bytes);
+        DEFERRED.with(|d| d.set(d.get().saturating_sub(bytes)));
+        std::mem::take(&mut self.targets)
+    }
+}
+
+impl Drop for Pending {
+    /// A loop left early (a panic) stops counting what it held.
+    fn drop(&mut self) {
+        let bytes = std::mem::take(&mut self.bytes);
+        DEFERRED.with(|d| d.set(d.get().saturating_sub(bytes)));
+    }
+}
+
+/// Whether a layer node reads nothing of the stack beneath it: its image
+/// goes over the stack with a plain premultiplied source-over draw
+/// (`drawFbo`), it has no transition (which reads the stack and the stack
+/// with the layer), and no effect of it reads the backdrop. Its content,
+/// masks, matte (the matte source renders alone), and effects read its own
+/// targets only. Its passes can then be recorded before the stack beneath
+/// it is drawn into the accumulator, and its image drawn by the same pass.
+fn draws_over_the_stack(n: &LayerNode) -> bool {
+    n.blend == BlendMode::Normal
+        && n.transition.is_none()
+        && !n.effects.as_ref().is_some_and(|e| e.backdrop)
+}
 
 /// The padding a node's effects need around the region. In a final frame
 /// an effect draws over the whole frame: a program's pixels follow its
@@ -448,6 +525,14 @@ impl Exec<'_> {
             rect = rect.align(EFFECT_GRID, full);
         }
         let pass_region = (rect != Region::full(full.0, full.1)).then_some(rect);
+        // A layer image's bytes at most (it covers `rect` at most).
+        let image_bytes = u64::from(rect.width)
+            * u64::from(rect.height)
+            * u64::from(
+                pm_gpu::working_format(self.precision)
+                    .block_copy_size(None)
+                    .unwrap_or(16),
+            );
         // The accumulator: the caller's target until a node writes a new one.
         // `owned`: the loop took it (`take_scoped`) and gives it back once a
         // node replaced it, as today's compositor frees an accumulator after
@@ -461,8 +546,7 @@ impl Exec<'_> {
         } else {
             self.take_scoped(rect)
         };
-        let mut pending: Vec<Resolved> = Vec::new();
-        let mut pending_targets: Vec<Target> = Vec::new();
+        let mut pending = Pending::default();
         let mut cleared = false;
         let mut ids: Vec<Resolved> = Vec::new();
         for draw in &plan.draws {
@@ -475,8 +559,10 @@ impl Exec<'_> {
                     std::slice::from_ref(draw),
                     pass_region,
                 );
-                pending.extend(r);
-                pending_targets.extend(groups);
+                pending.draws.extend(r);
+                for t in groups {
+                    pending.hold(t);
+                }
                 continue;
             };
             // A frame drawn in slices that is giving way records no further
@@ -484,12 +570,28 @@ impl Exec<'_> {
             if self.effects.slices.as_ref().is_some_and(|s| s.stopped()) {
                 break;
             }
-            // Everything beneath the node goes into the accumulator first.
-            self.draw_pass(encoder, plan, &pending, pass_region, &acc, !cleared);
-            cleared = true;
-            ids.append(&mut pending);
-            for t in pending_targets.drain(..) {
-                self.release(t);
+            // Everything beneath the node goes into the accumulator first,
+            // unless nothing in the node reads it: its passes are then
+            // recorded first, its image joins `pending` after the draws
+            // beneath it, and one later pass draws them all in plan order.
+            // Never with the depth and id surface or in a reference render
+            // (`Exec::recycle`): one pass per node, as before. Held images
+            // stay within `DEFERRED_IMAGES` and, at every level together,
+            // `DEFERRED_BYTES`.
+            let deferred = self.recycle
+                && matches!(node.as_ref(), Node::Layer(n) if draws_over_the_stack(n))
+                && pending.images < DEFERRED_IMAGES
+                && DEFERRED.with(|d| d.get()) + image_bytes <= DEFERRED_BYTES;
+            if !deferred {
+                self.flush_pending(
+                    encoder,
+                    plan,
+                    &mut pending,
+                    pass_region,
+                    &acc,
+                    &mut cleared,
+                    &mut ids,
+                );
             }
             match node.as_ref() {
                 Node::Layer(n) => {
@@ -519,8 +621,12 @@ impl Exec<'_> {
                     }
                     // `res_owned`: the image is ours to give back once the
                     // pass reading it is recorded (else it is in `taken`).
+                    // A deferred node is never given the accumulator: it
+                    // reads no backdrop (`draws_over_the_stack`), and the
+                    // stack beneath it is not drawn yet.
+                    let backdrop = (!deferred).then_some(&acc);
                     let Some((res, depth, res_owned)) =
-                        self.layer_node(encoder, plan, n, covered, &acc)
+                        self.layer_node(encoder, plan, n, covered, backdrop)
                     else {
                         continue;
                     };
@@ -614,9 +720,10 @@ impl Exec<'_> {
                     } else if n.blend == BlendMode::Normal {
                         // `drawFbo(res, W, H, compositeAlpha)`: given back
                         // after the flush that draws it, masked or not.
-                        pending.push(image);
+                        pending.draws.push(image);
+                        pending.images += 1;
                         if res_owned {
-                            pending_targets.push(res);
+                            pending.hold(res);
                         }
                     } else {
                         self.blend_region(
@@ -643,11 +750,15 @@ impl Exec<'_> {
                 }
             }
         }
-        self.draw_pass(encoder, plan, &pending, pass_region, &acc, !cleared);
-        ids.append(&mut pending);
-        for t in pending_targets {
-            self.release(t);
-        }
+        self.flush_pending(
+            encoder,
+            plan,
+            &mut pending,
+            pass_region,
+            &acc,
+            &mut cleared,
+            &mut ids,
+        );
         // The pass ran over `rect` in `acc`; the caller's target is `want`.
         if !in_target {
             let mut u = self.op_uniform(full);
@@ -659,6 +770,29 @@ impl Exec<'_> {
             self.release(acc);
         }
         ids
+    }
+
+    /// Draws `pending` into the accumulator in one pass (cleared to the
+    /// plan's background first when nothing was drawn into it yet), then
+    /// gives back the layer images and group passes it read.
+    #[allow(clippy::too_many_arguments)]
+    fn flush_pending(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &CompPlan,
+        pending: &mut Pending,
+        pass_region: Option<Region>,
+        acc: &Target,
+        cleared: &mut bool,
+        ids: &mut Vec<Resolved>,
+    ) {
+        self.draw_pass(encoder, plan, &pending.draws, pass_region, acc, !*cleared);
+        *cleared = true;
+        ids.append(&mut pending.draws);
+        pending.images = 0;
+        for t in pending.take_targets() {
+            self.release(t);
+        }
     }
 
     /// Snapshot only the destination pixels read by the blend, then write
@@ -1015,10 +1149,13 @@ impl Exec<'_> {
         result
     }
 
-    /// A layer node: content, masks, effects, matte. `None` when the layer
-    /// failed (reported) and draws nothing. The finished layer image, its
-    /// depth, and whether the image is the caller's to [`Self::release`]
-    /// once its last read is recorded (else it is in `taken`). Every target
+    /// A layer node: content, masks, effects, matte. `backdrop`: the stack
+    /// beneath it, for effects reading it (`None` for a node whose passes
+    /// are recorded before that stack is drawn, which reads none). `None`
+    /// when the layer failed (reported) and draws nothing. The finished
+    /// layer image, its depth, and whether the image is the caller's to
+    /// [`Self::release`] once its last read is recorded (else it is in
+    /// `taken`). Every target
     /// before it goes back as soon as the pass reading it is recorded
     /// ([`Exec::recycle`]).
     fn layer_node(
@@ -1027,7 +1164,7 @@ impl Exec<'_> {
         plan: &CompPlan,
         n: &LayerNode,
         rect: Region,
-        acc: &Target,
+        backdrop: Option<&Target>,
     ) -> Option<(Target, Option<wgpu::TextureView>, bool)> {
         let full = (plan.width, plan.height);
         let pass_region = (rect != Region::full(full.0, full.1)).then_some(rect);
@@ -1097,14 +1234,7 @@ impl Exec<'_> {
                 }
                 let content = effect_input_bounds(n, rect);
                 match self.run_effects(
-                    encoder,
-                    effects,
-                    &res,
-                    Some(acc),
-                    rect,
-                    full,
-                    plan.view,
-                    content,
+                    encoder, effects, &res, backdrop, rect, full, plan.view, content,
                 ) {
                     Ok(Some(t)) => {
                         // The chain read its input (and `u_orig`, the same
@@ -1641,5 +1771,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Only a normal-blend node without a transition (or an effect reading
+    /// the backdrop, `tests/composite_batch.rs`) is batched; masks and a
+    /// matte read the node's own targets.
+    #[test]
+    fn only_nodes_reading_nothing_beneath_them_are_batched() {
+        let mut n = node(vec![solid(20., 10., 30., 40.)]);
+        assert!(draws_over_the_stack(&n));
+        for blend in [BlendMode::Screen, BlendMode::Multiply, BlendMode::Add] {
+            n.blend = blend;
+            assert!(!draws_over_the_stack(&n), "{blend:?} reads the stack");
+        }
+    }
+
+    /// Three 2880 × 1620 half-float images fit the bound and a fourth does
+    /// not; eight 1920 × 1080 ones fit.
+    #[test]
+    fn the_byte_bound_holds_three_retina_images_and_eight_hd_ones() {
+        let image = |w: u64, h: u64| w * h * 8;
+        assert!(3 * image(2880, 1620) <= DEFERRED_BYTES);
+        assert!(4 * image(2880, 1620) > DEFERRED_BYTES);
+        assert!(8 * image(1920, 1080) <= DEFERRED_BYTES);
+        assert_eq!(DEFERRED_IMAGES, 8);
+    }
+
+    /// What every node loop on the thread holds is counted together (a
+    /// nested loop sees the bytes of the one around it), and stops being
+    /// counted once its pass is recorded or the loop is left.
+    #[test]
+    fn deferred_bytes_count_every_level_and_go_back() {
+        let gpu = pm_gpu::Gpu::new("deferred bytes test").unwrap();
+        let target = |w: u32, h: u32| {
+            Target::wrap(gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("deferred bytes test"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            }))
+        };
+        let held = || DEFERRED.with(|d| d.get());
+        let before = held();
+        let mut outer = Pending::default();
+        outer.hold(target(64, 32));
+        assert_eq!(held() - before, 64 * 32 * 8);
+        {
+            let mut inner = Pending::default();
+            inner.hold(target(32, 32));
+            assert_eq!(held() - before, (64 * 32 + 32 * 32) * 8, "both levels");
+            let given = inner.take_targets();
+            assert_eq!(given.len(), 1);
+            assert_eq!(held() - before, 64 * 32 * 8, "the inner pass is recorded");
+            // Left while holding one (a panic unwinding the loop).
+            inner.hold(target(16, 16));
+        }
+        assert_eq!(held() - before, 64 * 32 * 8);
+        assert_eq!(outer.take_targets().len(), 1);
+        outer.hold(target(8, 8));
+        drop(outer);
+        assert_eq!(held(), before);
     }
 }
