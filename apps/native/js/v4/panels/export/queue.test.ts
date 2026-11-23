@@ -4,7 +4,8 @@ import type { QueueJob } from "./model";
 test("queue action policy follows each status", () => {
   expect(jobActions("Pending")).toEqual(["moveUp", "moveDown", "cancel"]);
   expect(jobActions("Rendering")).toEqual(["cancel"]);
-  expect(jobActions("Failed")).toEqual(["retry", "remove"]);
+  expect(jobActions("Interrupted")).toEqual(["retry", "remove"]);
+  expect(jobActions("Failed")).toEqual(["remove"]);
   expect(jobActions("Done")).toEqual(["finder", "remove"]);
   expect(jobActions("Cancelled")).toEqual(["remove"]);
 });

@@ -2138,8 +2138,7 @@ impl Controller {
         })
         .detach();
     }
-    /// The Export sheet ends (Cancel, or the export finished or was cancelled);
-    /// a failure keeps it, showing why. A sheet has no close button.
+    /// Closes the Export sheet. The sheet has no close button of its own.
     pub(crate) fn close_export_sheet(&mut self, cx: &mut Context<Self>) {
         if let Some(handle) = self.builtins.windows.remove("export") {
             let _ = handle.update(cx, |_, w, _| w.remove_window());
@@ -2426,16 +2425,34 @@ impl Controller {
                 "export.queue.render" => { self.render_pending(cx); Ok(Value::Null) }
                 "export.queue.action" => {
                     let id = request.input["id"].as_u64().unwrap_or(0);
-                    let action = request.input["action"].as_str().unwrap_or("");
-                    let result = crate::render_queue::store(&self.profile).lock().unwrap().action(id, action);
-                    self.publish_render_queue();
-                    result.map(|_|Value::Null)
+                    let action = request.input["action"].as_str().unwrap_or("").to_owned();
+                    let retry = action == "retry";
+                    let store = crate::render_queue::store(&self.profile);
+                    let runtime = runtime.clone();
+                    let queue_runtime = runtime.clone();
+                    let reply = store.submit(move |queue| {
+                        let result = queue.action(id, &action);
+                        let _ = queue_runtime.observe_render_queue(queue.projection());
+                        result
+                    });
+                    cx.spawn(async move |this, cx| {
+                        let result = reply.recv().await
+                            .unwrap_or_else(|_| Err("Render queue worker stopped".into()));
+                        if retry && result.is_ok() {
+                            let _ = this.update(cx, |v, cx| v.render_pending(cx));
+                        }
+                        runtime.platform_reply(request.id, result.map(|_| Value::Null));
+                    }).detach();
+                    continue;
                 }
                 "export.queue.finder" => {
-                    let rows = crate::render_queue::store(&self.profile).lock().unwrap().projection();
-                    if let Some(path) = rows.as_array().and_then(|rows| rows.iter().find(|r|r["id"] == request.input["id"] && r["status"] == "Done")).and_then(|r|r["path"].as_str()) {
-                        crate::platform::reveal(std::path::Path::new(path));
-                    }
+                    let id = request.input["id"].as_u64().unwrap_or(0);
+                    let store = crate::render_queue::store(&self.profile);
+                    cx.spawn(async move |_, _| {
+                        if let Ok(Some(path)) = store.run(move |queue| Ok(queue.completed_path(id))).await {
+                            crate::platform::reveal(&path);
+                        }
+                    }).detach();
                     Ok(Value::Null)
                 }
                 "export.cancel" => {

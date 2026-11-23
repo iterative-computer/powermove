@@ -2146,10 +2146,129 @@ fn finish_whole(
 /// arrive within this keep their B-frame structure.
 const ENCODER_IDLE: Duration = Duration::from_secs(5);
 
+/// Pacing used by an encoder attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncoderPacing {
+    Normal,
+    Backpressure,
+}
+
+/// Retries one transient encoder drop with a fresh sink. A VideoToolbox
+/// session requires increasing timestamps, so it cannot accept a dropped
+/// frame's original timestamp again. A clean attempt preserves its timing
+/// and starts with an empty output file. If retrying fails, keep the first
+/// encoder diagnostic unless the person cancelled the export.
+pub fn with_encoder_retry<T>(
+    cancel: &AtomicBool,
+    mut attempt: impl FnMut(EncoderPacing) -> Result<T, JobError>,
+) -> Result<T, JobError> {
+    if cancel.load(Ordering::Acquire) {
+        return Err(JobError::Cancelled);
+    }
+    match attempt(EncoderPacing::Normal) {
+        Err(original @ JobError::Export(Error::EncoderBackpressure(_))) => {
+            if cancel.load(Ordering::Acquire) {
+                return Err(JobError::Cancelled);
+            }
+            match attempt(EncoderPacing::Backpressure) {
+                Err(JobError::Cancelled) => Err(JobError::Cancelled),
+                Err(_) if cancel.load(Ordering::Acquire) => Err(JobError::Cancelled),
+                Err(_) => Err(original),
+                result => result,
+            }
+        }
+        result => result,
+    }
+}
+
+#[cfg(test)]
+mod encoder_retry_tests {
+    use super::*;
+
+    fn dropped_frame() -> JobError {
+        Error::EncoderBackpressure("VideoToolbox dropped a frame".into()).into()
+    }
+
+    #[test]
+    fn retries_an_encoder_drop_once_with_backpressure() {
+        let mut calls = Vec::new();
+        let delivered = with_encoder_retry(&AtomicBool::new(false), |pacing| {
+            calls.push(pacing);
+            match pacing {
+                EncoderPacing::Normal => Err(dropped_frame()),
+                EncoderPacing::Backpressure => Ok(42),
+            }
+        });
+        assert_eq!(delivered.unwrap(), 42);
+        assert_eq!(calls, [EncoderPacing::Normal, EncoderPacing::Backpressure]);
+    }
+
+    #[test]
+    fn persistent_encoder_backpressure_does_not_loop() {
+        let mut calls = 0;
+        let failure = with_encoder_retry(&AtomicBool::new(false), |_| {
+            calls += 1;
+            Err::<(), _>(dropped_frame())
+        });
+        assert!(matches!(
+            failure,
+            Err(JobError::Export(Error::EncoderBackpressure(_)))
+        ));
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn a_failed_retry_keeps_the_original_encoder_error() {
+        let failure = with_encoder_retry(&AtomicBool::new(false), |pacing| match pacing {
+            EncoderPacing::Normal => Err::<(), _>(dropped_frame()),
+            EncoderPacing::Backpressure => {
+                Err(Error::Verify("retry output failed verification".into()).into())
+            }
+        });
+        assert_eq!(
+            failure.unwrap_err().to_string(),
+            "encoder: VideoToolbox dropped a frame"
+        );
+    }
+
+    #[test]
+    fn does_not_retry_a_verified_failure_or_a_cancelled_export() {
+        let cancel = AtomicBool::new(false);
+        let mut calls = 0;
+        let failure = with_encoder_retry(&cancel, |_| {
+            calls += 1;
+            Err::<(), _>(Error::Verify("bad file".into()).into())
+        });
+        assert!(matches!(failure, Err(JobError::Export(Error::Verify(_)))));
+        assert_eq!(calls, 1);
+
+        let failure = with_encoder_retry(&cancel, |_| {
+            calls += 1;
+            cancel.store(true, Ordering::Release);
+            Err::<(), _>(dropped_frame())
+        });
+        assert!(matches!(failure, Err(JobError::Cancelled)));
+        assert_eq!(calls, 2);
+    }
+}
+
 /// The sink for a planned export: VideoToolbox and AVAssetWriter (MOV, MP4),
 /// libvpx and libopus (WebM), or the engine's PNG writer.
 pub fn sink_for(plan: &ExportPlan) -> Result<crate::OutputSink, JobError> {
+    sink_for_with_pacing(plan, EncoderPacing::Normal)
+}
+
+pub fn sink_for_with_pacing(
+    plan: &ExportPlan,
+    _pacing: EncoderPacing,
+) -> Result<crate::OutputSink, JobError> {
     let mut sink = crate::OutputSink::new(&plan.spec)?;
+    #[cfg(all(feature = "engine", target_os = "macos"))]
+    if _pacing == EncoderPacing::Backpressure
+        && let crate::OutputSink::VideoToolbox(vt) = &mut sink
+    {
+        vt.set_backpressure();
+    }
     if let (crate::OutputSink::Png(png), Some(name)) = (&mut sink, &plan.sequence_name) {
         png.set_stem(name);
     }
@@ -2165,9 +2284,11 @@ pub fn run_export(
     cancel: &AtomicBool,
     progress: &mut (dyn FnMut(Progress) + Send),
 ) -> Result<crate::Delivered, JobError> {
-    let plan = plan_export(job)?;
-    let sink = sink_for(&plan)?;
-    run_export_into(renderer, job, plan, sink, gate, cancel, progress)
+    with_encoder_retry(cancel, |pacing| {
+        let plan = plan_export(job)?;
+        let sink = sink_for_with_pacing(&plan, pacing)?;
+        run_export_into(renderer, job, plan, sink, gate, cancel, progress)
+    })
 }
 
 // ---------------------------------------------------------------------------

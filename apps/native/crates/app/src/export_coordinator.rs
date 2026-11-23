@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
 };
 /// A draft destination belongs to one document and format. NSSavePanel's
@@ -43,11 +43,46 @@ pub struct Frozen {
     /// The person chose Export Without Them: offline clips are left out.
     without_offline: bool,
 }
+#[derive(Default)]
 pub struct Run {
     pub handle: Mutex<Option<pm_engine_service::jobs::ExportHandle>>,
     pub cancel: AtomicBool,
+    progress: AtomicU8,
+    #[cfg(test)]
+    child_started: OnceLock<std::time::Instant>,
 }
 pub type Job = Arc<Run>;
+
+impl Run {
+    pub fn status(&self) -> Option<String> {
+        match self.progress.load(Ordering::Acquire) {
+            0 => None,
+            1 => Some("Preparing export…".into()),
+            percent => Some(format!("Exporting · {}%", percent - 2)),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct QueuedRun {
+    store: crate::render_queue::Store,
+    id: Arc<OnceLock<u64>>,
+}
+
+impl QueuedRun {
+    async fn check_cancel(&self, job: &Run) {
+        if let Some(&id) = self.id.get()
+            && self.store.run(move |queue| Ok(queue.cancelled(id))).await == Ok(true)
+        {
+            job.cancel.store(true, Ordering::Release);
+        }
+    }
+}
+
+fn publish_queue(queue: &crate::render_queue::Queue, runtime: &pm_builtins::Builtins) {
+    let _ = runtime.observe_render_queue(queue.projection());
+}
+
 /// Every export of this process, the person's and agents', in one list: every
 /// window's Background Tasks shows them all.
 pub fn tasks() -> Arc<Mutex<BackgroundTasks>> {
@@ -284,38 +319,39 @@ impl Controller {
         let profile = self.profile.clone();
         let project_path = self.path.clone();
         let last_export = crate::platform::last_export_folder();
-        let job = Arc::new(Run {
-            handle: Mutex::new(None),
-            cancel: AtomicBool::new(false),
-        });
+        let job = Arc::new(Run::default());
         self.builtins.export_job = Some(job.clone());
         let activity = self.engine.export_activity();
         let tasks = self.builtins.export_tasks.clone();
-        let resources = self.extensions.resources.clone();
+        let resources = saved.as_ref().map_or_else(
+            || self.extensions.resources.clone(),
+            |frozen| frozen.resources.clone(),
+        );
         let retry_extensions = saved.as_ref().map(|frozen| frozen.extensions.clone());
         cx.spawn(async move |this, cx| {
-            let folder_profile = profile.clone();
-            let id = p.project.clone();
-            let (folder, export_key) = cx
-                .background_executor()
-                .spawn(async move {
-                    let key = crate::document_paths::export_key(&id, project_path.as_deref());
-                    let folder = crate::document_paths::export_folder(
-                        &folder_profile,
-                        &key,
-                        project_path.as_deref(),
-                        last_export.as_deref(),
-                    );
-                    (folder, key)
-                })
-                .await;
-            let picker = if saved.is_none() && chosen.is_none() && !job.cancel.load(Ordering::Acquire) {
+            let needs_picker = saved.is_none() && chosen.is_none();
+            let (folder, export_key) = if saved.is_none() {
+                let folder_profile = profile.clone();
+                let id = p.project.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        let key = crate::document_paths::export_key(&id, project_path.as_deref());
+                        let folder = needs_picker.then(|| crate::document_paths::export_folder(
+                            &folder_profile, &key, project_path.as_deref(), last_export.as_deref(),
+                        ));
+                        (folder, key)
+                    })
+                    .await
+            } else {
+                (None, String::new())
+            };
+            let picker = if needs_picker && !job.cancel.load(Ordering::Acquire) {
                 this.update(cx, |v, _| {
                     crate::platform::export_destination_in(
                         &v.host.borrow().window,
                         typed.format == Format::Png,
                         &filename,
-                        Some(&folder),
+                        folder.as_deref(),
                     )
                 })
                 .ok()
@@ -332,18 +368,24 @@ impl Controller {
                 let profile = profile.clone();
                 let id = export_key;
                 let chosen = destination.clone();
-                cx.background_executor()
+                let publication = p.clone();
+                let options = typed.clone();
+                // The save panel only confirms replacing the video. Check
+                // it and the captions together before asking about any others.
+                let existing = cx.background_executor()
                     .spawn(async move {
-                        crate::document_paths::remember(&profile, Some(&id), &chosen);
+                        let files = sidecar_format(&options)
+                            .map(|format| sidecar_files(&publication, &options.range, format, &chosen))
+                            .unwrap_or_default();
+                        existing_outputs(&chosen, &files)
                     })
                     .await;
-                // What the export would replace is one decision: the save
-                // panel's Replace answers for the video alone; caption files
-                // (or no panel) take one question listing every file.
-                let files = sidecar_format(&typed)
-                    .map(|format| sidecar_files(&p, &typed.range, format, &destination))
-                    .unwrap_or_default();
-                let existing = existing_outputs(&destination, &files);
+                let remembered = destination.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        crate::document_paths::remember(&profile, Some(&id), &remembered);
+                    })
+                    .detach();
                 if existing.is_empty() {
                     Some((destination, false))
                 } else if existing == [destination.clone()] && panel_asks {
@@ -381,6 +423,38 @@ impl Controller {
                 });
                 return;
             };
+            if !enqueue {
+                job.progress.store(1, Ordering::Release);
+                let _ = this.update(cx, |v, cx| {
+                    if v.builtins.export_job.as_ref().is_some_and(|j| Arc::ptr_eq(j, &job)) {
+                        if queue_id.is_none() {
+                            v.close_export_sheet(cx);
+                        }
+                        cx.notify();
+                    }
+                });
+                let _ = runtime.observe_export(json!({"phase":"preparing"}));
+                let owner = this.clone();
+                let watched = job.clone();
+                cx.spawn(async move |cx| {
+                    let mut last = 1;
+                    loop {
+                        cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+                        let progress = watched.progress.load(Ordering::Acquire);
+                        let current = owner.update(cx, |v, cx| {
+                            let running = v.builtins.export_job.as_ref().is_some_and(|j| Arc::ptr_eq(j, &watched));
+                            if running && progress != last {
+                                cx.notify();
+                            }
+                            running
+                        });
+                        if !matches!(current, Ok(true)) {
+                            break;
+                        }
+                        last = progress;
+                    }
+                }).detach();
+            }
             if remember_destination {
                 let _ = this.update(cx, |v, _| {
                     if v.published.as_ref().is_some_and(|now| now.snapshot.doc_id == p.snapshot.doc_id)
@@ -398,7 +472,7 @@ impl Controller {
             // The status line says who it waits for; Cancel still cancels.
             let mut resources = resources;
             let mut shown = String::new();
-            if resources.pending {
+            if enqueue && resources.pending {
                 // The destination is chosen: the panel shows the export as
                 // preparing, the phase whose Cancel it sends (while it chose
                 // the destination its Cancel was off, and a wait left in
@@ -406,7 +480,9 @@ impl Controller {
                 observe(&runtime, json!({"phase":"preparing"})).await;
             }
             while resources.pending && !job.cancel.load(Ordering::Acquire) {
-                if queue_id.is_some_and(|id| queue_store.lock().unwrap().cancelled(id)) {
+                if let Some(id) = queue_id
+                    && queue_store.run(move |queue| Ok(queue.cancelled(id))).await == Ok(true)
+                {
                     job.cancel.store(true, Ordering::Release);
                     break;
                 }
@@ -469,12 +545,18 @@ impl Controller {
                 without_offline,
             };
             if enqueue {
-                let added = queue_store.lock().unwrap().add(frozen.record());
+                let queue_runtime = runtime.clone();
+                let added = queue_store.run(move |queue| {
+                    let result = frozen.record().and_then(|input| queue.add(input));
+                    publish_queue(queue, &queue_runtime);
+                    result
+                }).await;
                 let _ = this.update(cx, |v, cx| {
-                    v.builtins.export_job = None;
-                    if let Err(error) = added { v.message = error; }
-                    v.publish_render_queue();
-                    cx.notify();
+                    if v.builtins.export_job.as_ref().is_some_and(|j| Arc::ptr_eq(j, &job)) {
+                        v.builtins.export_job = None;
+                        if let Err(error) = added { v.message = error; }
+                        cx.notify();
+                    }
                 });
                 observe(&runtime, json!({"phase":"idle"})).await;
                 return;
@@ -488,7 +570,9 @@ impl Controller {
                         .as_ref()
                         .is_some_and(|r| Arc::ptr_eq(r, &runtime));
                     if current {
-                        v.builtins.export_retry = Some(frozen.clone());
+                        let mut retry = frozen.clone();
+                        retry.queue = None;
+                        v.builtins.export_retry = Some(retry);
                     }
                     (current, v.extensions.overrides.as_ref().map(|o| o.jobs()))
                 })
@@ -496,34 +580,36 @@ impl Controller {
             if !current {
                 job.cancel.store(true, Ordering::Release);
             }
-            let history_id = if let Some(id) = queue_id { Some(id) } else {
-                let mut queue = queue_store.lock().unwrap();
-                match queue.add(frozen.record()).and_then(|id| queue.finish(id, "Rendering", String::new()).map(|_|id)) {
-                    Ok(id) => Some(id),
-                    Err(error) => { let _ = this.update(cx, |v,_|v.message = error); None }
-                }
-            };
-            let worker_job = job.clone();
-            let worker_queue = queue_store.clone();
-            let executor = cx.background_executor().clone();
             let began = std::time::Instant::now();
-            let result = cx.background_executor().spawn(async move {
-                execute(
-                    frozen,
-                    worker_job,
-                    EngineJob {
-                        activity,
-                        overrides,
-                    },
-                    runtime.clone(),
-                    executor,
-                    tasks,
-                    history_id.map(|id| (worker_queue, id)),
-                )
-                .await
-            });
-            // Retain a separate runtime reference for terminal publication.
+            let (result, history) = start_tracked_export(
+                cx.background_executor(), frozen, job.clone(),
+                EngineJob {
+                    activity,
+                    overrides,
+                    #[cfg(test)]
+                    executable: None,
+                }, runtime.clone(), tasks, queue_store.clone(),
+            );
             let result = result.await;
+            let history_id = match history {
+                Some(receipt) => receipt.recv().await.unwrap_or_else(|_| Err("Render queue worker stopped".into())).map(Some),
+                None => Ok(queue_id),
+            };
+            let settled = match history_id {
+                Ok(Some(id)) => {
+                    let outcome = if job.cancel.load(Ordering::Acquire) { "Cancelled" }
+                        else if result.is_ok() { "Done" } else { "Failed" };
+                    let error = result.as_ref().err().cloned().unwrap_or_default();
+                    let queue_runtime = runtime.clone();
+                    queue_store.run(move |queue| {
+                        let result = queue.finish(id, outcome, error);
+                        publish_queue(queue, &queue_runtime);
+                        result
+                    }).await
+                }
+                Ok(None) => Ok(()),
+                Err(error) => Err(error),
+            };
             let _ = this.update(cx, |v, cx| {
                 if v.builtins
                     .export_job
@@ -531,6 +617,9 @@ impl Controller {
                     .is_some_and(|j| Arc::ptr_eq(j, &job))
                 {
                     v.builtins.export_job = None;
+                    if result.is_ok() || job.cancel.load(Ordering::Acquire) {
+                        v.builtins.export_retry = None;
+                    }
                     match &result {
                         Err(error)
                             if !(job.cancel.load(Ordering::Acquire) && error == "cancelled") =>
@@ -563,13 +652,13 @@ impl Controller {
                         Err(_) => {},
                     }
                 }
-                if let Some(id) = history_id {
-                    let outcome = if job.cancel.load(Ordering::Acquire) { "Cancelled" }
-                        else if result.is_ok() { "Done" } else { "Failed" };
-                    let error = result.as_ref().err().cloned().unwrap_or_default();
-                    if let Err(e) = queue_store.lock().unwrap().finish(id, outcome, error) { v.message = e; }
-                    v.publish_render_queue();
-                    if queue_id.is_some() { v.render_pending(cx); }
+                if let Err(error) = settled {
+                    if result.is_ok() {
+                        v.message = error;
+                    }
+                }
+                if queue_id.is_some() {
+                    v.render_pending(cx);
                 }
                 cx.notify();
             });
@@ -582,6 +671,39 @@ async fn observe(runtime: &pm_builtins::Builtins, run: Value) {
         let _ = ticket.await;
     }
 }
+fn start_tracked_export(
+    executor: &gpui::BackgroundExecutor,
+    frozen: Frozen,
+    job: Job,
+    engine: EngineJob,
+    runtime: Arc<pm_builtins::Builtins>,
+    tasks: Arc<Mutex<BackgroundTasks>>,
+    store: crate::render_queue::Store,
+) -> (gpui::Task<Result<Finished, String>>, Option<crate::render_queue::Reply<u64>>) {
+    let running = QueuedRun {
+        store: store.clone(),
+        id: Arc::new(frozen.queue.map_or_else(OnceLock::new, OnceLock::from)),
+    };
+    // Submit the frozen input to the queue worker without waiting for it
+    // before scheduling the delivery task.
+    let history = frozen.queue.is_none().then(|| {
+        let frozen = frozen.clone();
+        let id = running.id.clone();
+        let runtime = runtime.clone();
+        store.submit(move |queue| {
+            let result = frozen.record().and_then(|input| queue.add_rendering(input));
+            if let Ok(value) = result.as_ref() {
+                let _ = id.set(*value);
+            }
+            publish_queue(queue, &runtime);
+            result
+        })
+    });
+    let worker = executor.clone();
+    let task = executor.spawn(execute(frozen, job, engine, runtime, worker, tasks, running));
+    (task, history)
+}
+
 async fn execute(
     frozen: Frozen,
     job: Job,
@@ -589,7 +711,7 @@ async fn execute(
     runtime: Arc<pm_builtins::Builtins>,
     executor: gpui::BackgroundExecutor,
     tasks: Arc<Mutex<BackgroundTasks>>,
-    queue: Option<(crate::render_queue::Store, u64)>,
+    queue: QueuedRun,
 ) -> Result<Finished, String> {
     let planned = pm_builtins::delivery::plan(
         &frozen.publication.snapshot,
@@ -647,7 +769,7 @@ async fn execute(
                             ticket: started,
                         },
                         &planned,
-                        queue.as_ref(),
+                        &queue,
                     )
                     .await
                 }
@@ -769,6 +891,8 @@ impl From<pm_protocol::error::EngineError> for Failure {
 struct EngineJob {
     activity: pm_engine_service::jobs::Activity,
     overrides: Option<crate::raster_overrides::JobOverrides>,
+    #[cfg(test)]
+    executable: Option<PathBuf>,
 }
 struct TaskAdmission<'a> {
     tasks: &'a Arc<Mutex<BackgroundTasks>>,
@@ -891,14 +1015,14 @@ async fn execute_inner(
     frozen: &Frozen,
     job: &Job,
     engine: EngineJob,
-    runtime: &pm_builtins::Builtins,
+    runtime: &Arc<pm_builtins::Builtins>,
     executor: &gpui::BackgroundExecutor,
     task: TaskAdmission<'_>,
     planned: &pm_builtins::delivery::Plan,
-    queue: Option<&(crate::render_queue::Store, u64)>,
+    queue: &QueuedRun,
 ) -> Result<Finished, Failure> {
     let TaskAdmission { tasks, ticket } = task;
-    if queue.is_some_and(|(store,id)|store.lock().unwrap().cancelled(*id)) { job.cancel.store(true, Ordering::Release); }
+    queue.check_cancel(job).await;
     if job.cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
     }
@@ -908,7 +1032,9 @@ async fn execute_inner(
         "vtt" => Some(pm_captions::CaptionFormat::Vtt),
         _ => None,
     };
-    observe(runtime, json!({"phase":"preparing"})).await;
+    // Progress publication may rebuild the Export panel for a large project.
+    // The delivery worker can start while that update is in flight.
+    let _ = runtime.observe_export(json!({"phase":"preparing"}));
     if frozen.options.format == Format::Json {
         let path = pm_builtins::delivery::portable_with_extensions(
             &frozen.publication.snapshot,
@@ -924,6 +1050,8 @@ async fn execute_inner(
         });
     }
     let document = frozen.publication.snapshot.doc_id;
+    #[cfg(test)]
+    let request_began = std::time::Instant::now();
     let mut request = pm_engine_service::jobs::ExportRequest::new(
         pm_kernel::new_id("export").as_str().into(),
         &frozen.publication.snapshot,
@@ -936,6 +1064,8 @@ async fn execute_inner(
         frozen.destination.clone(),
     )
     .map_err(|e| e.to_string())?;
+    #[cfg(test)]
+    let request_took = request_began.elapsed();
     request.resources = (*frozen.resources).clone();
     request.without_offline = frozen.without_offline;
     // Going without offline clips is said only while there are some (a
@@ -971,13 +1101,24 @@ async fn execute_inner(
     let waiting = engine
         .overrides
         .map(|overrides| overrides.pin(&mut session, &frozen.publication, false));
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    #[cfg(test)]
+    let test_engine = engine.executable.is_some();
+    #[cfg(test)]
+    let executable = engine.executable.unwrap_or(executable);
+    #[cfg(test)]
+    let start_began = std::time::Instant::now();
     let handle = pm_engine_service::jobs::ExportHandle::start_scheduled(
-        &std::env::current_exe().map_err(|e| e.to_string())?,
-        session,
-        engine.activity,
+        &executable, session, engine.activity,
     )
     .map_err(|e| e.to_string())?;
     *job.handle.lock().unwrap() = Some(handle);
+    #[cfg(test)]
+    let _ = job.child_started.set(std::time::Instant::now());
+    #[cfg(test)]
+    if test_engine {
+        eprintln!("Export request built in {request_took:?}, engine start took {:?}", start_began.elapsed());
+    }
     let started = std::time::Instant::now();
     let mut pace = Pace::default();
     let mut shown = Preview::default();
@@ -991,7 +1132,7 @@ async fn execute_inner(
                 queue_foreground = Some(foreground);
             }
         }
-        if queue.is_some_and(|(store,id)|store.lock().unwrap().cancelled(*id)) { job.cancel.store(true, Ordering::Release); }
+        queue.check_cancel(job).await;
         if job.cancel.load(Ordering::Acquire) && !cancellation_sent {
             cancellation_sent = true;
             job.handle
@@ -1093,13 +1234,16 @@ async fn execute_inner(
         } else {
             json!({"phase":"preparing"})
         };
-        if let Some((store, id)) = queue {
-            let projection = {
-                let mut queue = store.lock().unwrap();
-                queue.progress(*id, status.progress);
-                queue.projection()
-            };
-            let _ = runtime.observe_render_queue(projection);
+        let percent = (status.progress.clamp(0., 1.) * 100.).round() as u8;
+        job.progress.store(percent + 2, Ordering::Release);
+        if let Some(&id) = queue.id.get() {
+            let progress = status.progress;
+            let queue_runtime = runtime.clone();
+            let _ = queue.store.run(move |queue| {
+                queue.progress(id, progress);
+                publish_queue(queue, &queue_runtime);
+                Ok(())
+            }).await;
         }
         observe(runtime, run).await;
         executor.timer(std::time::Duration::from_millis(50)).await;
@@ -1152,12 +1296,17 @@ impl Drop for Preview {
 struct Pace {
     /// When the first frame was seen done, and how many were.
     first: Option<(std::time::Instant, u64)>,
+    last: u64,
 }
 /// Frames measured before the pace is trusted, and for at least this long.
 const PACE_FRAMES: u64 = 8;
 const PACE_TIME: std::time::Duration = std::time::Duration::from_millis(500);
 impl Pace {
     fn left(&mut self, frame: u64, total: u64, now: std::time::Instant) -> Option<f64> {
+        if frame < self.last {
+            self.first = None;
+        }
+        self.last = frame;
         if frame == 0 || frame >= total {
             return None;
         }
@@ -1311,12 +1460,7 @@ mod agent_tests {
     /// Two windows' exports run at once: Cancel on one row stops that export only.
     #[test]
     fn cancel_reaches_exactly_the_export_on_its_row() {
-        let run = || {
-            Arc::new(Run {
-                handle: Mutex::new(None),
-                cancel: AtomicBool::new(false),
-            })
-        };
+        let run = || Arc::new(Run::default());
         let (first, second) = (run(), run());
         for (id, job) in [(9_001, &first), (9_002, &second)] {
             cancellers()
@@ -1379,16 +1523,16 @@ fn plain_failure(message: &str) -> String {
 }
 
 impl Frozen {
-    fn record(&self) -> Value {
-        let root = self.publication.snapshot.root();
-        let comp = root.and_then(|r| pm_kernel::model::comp_node(r, self.publication.snapshot.open_comp().as_deref()));
-        let name = comp.and_then(|c| c.get("name")).or_else(||root.and_then(|r| r.get("name"))).and_then(crate::node_string).unwrap_or("Untitled");
-        json!({"name":name,
-            "project": self.publication.project, "document": pm_model::json::to_canonical_string(&self.publication.snapshot.document.to_value().unwrap()),
+    fn record(&self) -> Result<Value, String> {
+        let root = self.publication.snapshot.root().ok_or("Missing queued composition")?;
+        let comp = pm_kernel::model::comp_node(root, self.publication.snapshot.open_comp().as_deref());
+        let name = comp.and_then(|c| c.get("name")).or_else(|| root.get("name")).and_then(crate::node_string).unwrap_or("Untitled");
+        Ok(json!({"name":name,
+            "project": self.publication.project, "document": pm_model::json::to_canonical_string(root),
             "options": self.options, "originals": self.media.originals, "proxies":self.media.proxies,
             "resources":self.resources, "extensionBundle":self.extensions.queued(),
             "playhead":self.playhead, "destination":self.destination,
-            "replace": self.replace, "withoutOffline":self.without_offline})
+            "replace": self.replace, "withoutOffline":self.without_offline}))
     }
     fn restore(record: &Value, template: &pm_kernel::Published, id: u64) -> Result<Self, String> {
         let mut publication = template.clone();
@@ -1408,36 +1552,231 @@ impl Frozen {
 }
 impl Controller {
     pub fn publish_render_queue(&self) {
-        if let Some(runtime) = &self.builtins.runtime {
-            let _ = runtime.observe_render_queue(crate::render_queue::store(&self.profile).lock().unwrap().projection());
+        if let Some(runtime) = self.builtins.runtime.clone() {
+            let store = crate::render_queue::store(&self.profile);
+            store.submit(move |queue| {
+                publish_queue(queue, &runtime);
+                Ok(())
+            });
         }
     }
+
     pub fn render_pending(&mut self, cx: &mut Context<Self>) {
-        if self.builtins.export_job.is_some() { return; }
-        let Some(template) = self.published.clone() else { return; };
-        let store = crate::render_queue::store(&self.profile);
-        let taken = store.lock().unwrap().take_pending();
-        match taken {
-            Ok(Some((id, record))) => match Frozen::restore(&record, &template, id) {
-                Ok(frozen) => {
-                    self.builtins.export_retry = Some(frozen);
-                    self.begin_builtin_export(Value::Null, true, false, cx);
-                }
-                Err(error) => {
-                    let _ = store.lock().unwrap().finish(id, "Failed", error.clone());
-                    self.message = error;
-                }
-            },
-            Err(error) => self.message = error,
-            _ => {}
+        if self.builtins.export_job.is_some() {
+            return;
         }
-        self.publish_render_queue();
+        let (Some(template), Some(runtime)) = (self.published.clone(), self.builtins.runtime.clone()) else {
+            return;
+        };
+        let reservation = Arc::new(Run::default());
+        self.builtins.export_job = Some(reservation.clone());
+        let store = crate::render_queue::store(&self.profile);
+        cx.spawn(async move |this, cx| {
+            let queue_runtime = runtime.clone();
+            let taken = store.run(move |queue| {
+                let result = (|| {
+                    let Some((id, record)) = queue.take_pending()? else {
+                        return Ok(None);
+                    };
+                    match Frozen::restore(&record, &template, id) {
+                        Ok(frozen) => Ok(Some((id, frozen))),
+                        Err(error) => {
+                            queue.finish(id, "Failed", error.clone())?;
+                            Err(error)
+                        }
+                    }
+                })();
+                publish_queue(queue, &queue_runtime);
+                result
+            }).await;
+            let id = taken.as_ref().ok().and_then(|job| job.as_ref().map(|(id, _)| *id));
+            let started = this.update(cx, |v, cx| {
+                if !v.builtins.export_job.as_ref().is_some_and(|job| Arc::ptr_eq(job, &reservation)) {
+                    return false;
+                }
+                v.builtins.export_job = None;
+                match taken {
+                    Ok(Some((_, frozen))) if !reservation.cancel.load(Ordering::Acquire) => {
+                        v.builtins.export_retry = Some(frozen);
+                        v.begin_builtin_export(Value::Null, true, false, cx);
+                        return true;
+                    }
+                    Err(error) => v.message = error,
+                    _ => {}
+                }
+                cx.notify();
+                false
+            }).unwrap_or(false);
+            if !started && let Some(id) = id {
+                let _ = store.run(move |queue| {
+                    let result = queue.finish(id, "Cancelled", String::new());
+                    publish_queue(queue, &runtime);
+                    result
+                }).await;
+            }
+        }).detach();
     }
 }
 
 #[cfg(test)]
 mod frozen_queue_tests {
     use super::*;
+    #[gpui::test]
+    #[ignore = "requires a launch-video copy and the headless engine executable"]
+    fn export_launch_video_starts_while_the_queue_worker_is_busy(cx: &mut gpui::TestAppContext) {
+        use crate::v4_view_tests::{PROJECT, publication, rig_source, window};
+        use gpui::{Modifiers, px, size};
+        use std::time::{Duration, Instant};
+
+        let project = PathBuf::from(std::env::var_os("PM_EXPORT_HANG_FIXTURE").unwrap());
+        let engine = PathBuf::from(std::env::var_os("PM_EXPORT_HANG_ENGINE").unwrap());
+        let opened = pm_kernel::open_project(&project, Default::default()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut media = pm_engine_service::MediaCatalog::default();
+        for (index, item) in opened.file.media.iter().enumerate() {
+            if matches!(&item.source, pm_kernel::project_io::MediaSource::Embedded { .. }) {
+                let path = directory.path().join(format!("launch-audio-{index}.mp3"));
+                item.copy_to(&path).unwrap();
+                media.originals.insert(item.id.to_string(), path);
+            }
+        }
+        assert!(!media.originals.is_empty(), "Launch fixture lost its embedded audio");
+        let rig = rig_source("export", pm_kernel::OpenSource::File(opened));
+        rig.runtime.update_media(media.originals.clone(), Default::default());
+        let wait = |ticket: pm_runtime_v8::Ticket<pm_runtime_v8::Evaluation>| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                if let Some(result) = ticket.try_take() {
+                    result.unwrap();
+                    break;
+                }
+                assert!(Instant::now() < deadline, "Export panel did not respond");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        wait(rig.runtime.show("export").unwrap());
+        let (view, mut visual) = window(cx, &rig, publication(&rig), Default::default());
+        visual.simulate_resize(size(px(600.), px(640.)));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(Ok(ticket)) = rig.runtime.publish_finished_checks() {
+                wait(ticket);
+            }
+            for publication in rig.runtime.take_publications() {
+                view.update(&mut visual, |view, cx| view.publish(publication, cx));
+            }
+            visual.run_until_parked();
+            for request in rig.runtime.take_platform_requests() {
+                rig.runtime.platform_reply(request.id, Ok(Value::Null));
+            }
+            // Add to Queue shares Export's readiness, including the finished
+            // plan. Time the click after the sheet is ready for either action.
+            let (ready, summary) = view.read_with(&visual, |view, _| {
+                let nodes = view.publication.surface.nodes();
+                let find = |id| {
+                    nodes.values().find(|node| node.props.get("id").and_then(Value::as_str) == Some(id))
+                };
+                let ready = find("export.queue.add").is_some_and(|node| {
+                    node.props.get("disabled").and_then(Value::as_bool) != Some(true)
+                });
+                let summary = find("export.summary").and_then(|node| node.props.get("label").cloned());
+                (ready, summary)
+            });
+            if ready {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Export did not become ready: {summary:?}; errors: {:?}",
+                rig.runtime.take_errors()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let store = crate::render_queue::store(directory.path());
+        let (entered, blocked) = std::sync::mpsc::channel();
+        let (release, barrier) = std::sync::mpsc::channel();
+        let queue_guard = store.submit(move |_| {
+            entered.send(()).unwrap();
+            let _ = barrier.recv_timeout(Duration::from_secs(10));
+            Ok(())
+        });
+        blocked.recv_timeout(Duration::from_secs(3)).unwrap();
+        let button = crate::v4_view_tests::bounds(&mut visual, "export.start");
+        let clicked = Instant::now();
+        visual.simulate_click(button.center(), Modifiers::none());
+        let request = 'click: loop {
+            for publication in rig.runtime.take_publications() {
+                view.update(&mut visual, |view, cx| view.publish(publication, cx));
+            }
+            visual.run_until_parked();
+            for request in rig.runtime.take_platform_requests() {
+                rig.runtime.platform_reply(request.id, Ok(Value::Null));
+                if request.operation == "export.begin" {
+                    break 'click request;
+                }
+            }
+            assert!(
+                clicked.elapsed() < Duration::from_secs(1),
+                "Export click was not handled: {:?}",
+                rig.runtime.take_errors()
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let request_time = clicked.elapsed();
+
+        let frozen = Frozen {
+            publication: rig.kernel.published(PROJECT).unwrap(),
+            queue: None,
+            options: pm_builtins::delivery::options(&request.input).unwrap(),
+            media,
+            resources: Arc::default(),
+            extensions: Arc::default(),
+            playhead: 0.,
+            destination: directory.path().join("launch-video.mp4"),
+            replace: false,
+            without_offline: false,
+        };
+        let run = Arc::new(Run::default());
+        let (result, history) = start_tracked_export(
+            &cx.executor(), frozen, run.clone(),
+            EngineJob { activity: Default::default(), overrides: None, executable: Some(engine) },
+            rig.runtime.clone(), Arc::default(), store.clone(),
+        );
+        // An independent UI action must complete while the disk worker is
+        // still held behind the watchdog barrier.
+        let resized = size(px(610.), px(640.));
+        visual.simulate_resize(resized);
+        visual.run_until_parked();
+        assert_eq!(visual.update(|window, _| window.viewport_size()), resized);
+        while run.child_started.get().is_none() && clicked.elapsed() < Duration::from_secs(1) {
+            visual.run_until_parked();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let handoff = run.child_started.get().map(|started| started.duration_since(clicked));
+        let history = history.unwrap();
+        assert!(history.is_empty(), "Queue write finished before release");
+        run.cancel.store(true, Ordering::Release);
+        release.send(()).unwrap();
+        queue_guard.recv_blocking().unwrap().unwrap();
+        let history_id = history.recv_blocking().unwrap().unwrap();
+        let stop = Instant::now() + Duration::from_secs(10);
+        while !result.is_ready() && Instant::now() < stop {
+            cx.executor().advance_clock(Duration::from_millis(50));
+            visual.run_until_parked();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(result.is_ready(), "The headless export did not stop");
+        let outcome = cx.foreground_executor().block_on(result);
+        store.submit(move |queue| queue.finish(history_id, "Cancelled", String::new()))
+            .recv_blocking().unwrap().unwrap();
+        assert!(
+            handoff.is_some_and(|elapsed| elapsed < Duration::from_secs(1)),
+            "Delivery worker did not start within one second (command {request_time:?}, handoff {handoff:?}, error {:?})",
+            outcome.err()
+        );
+        eprintln!("Launch video: Export click to headless engine handoff {:?} (command {request_time:?})", handoff.unwrap());
+    }
+
     #[test]
     fn queued_input_restores_its_own_composition_options_media_and_destination() {
         let rig = crate::v4_view_tests::rig("export", 2);
@@ -1463,7 +1802,7 @@ mod frozen_queue_tests {
             media, resources:Arc::default(), extensions:Arc::new(extensions),
             playhead:1.25, destination:PathBuf::from("/exports/Film.pmv"),
             replace:false, without_offline:false };
-        let record = frozen.record();
+        let record = frozen.record().unwrap();
         let mut changed = (*publication).clone();
         changed.snapshot.document = Arc::new(pm_model::Document::new(Some(pm_model::json::parse(r#"{"name":"Other project","layers":[]}"#).unwrap()), 99));
         let restored = Frozen::restore(&record, &changed, 42).unwrap();
