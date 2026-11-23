@@ -11,7 +11,36 @@ use pm_protocol::{
     common::{PlaybackRate, TICKS_PER_SECOND, Ticks},
 };
 use pm_shell::{Command as ShellCommand, Host};
-use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    path::PathBuf,
+    rc::Rc,
+    sync::Arc,
+};
+
+pub(crate) fn defer_studio_view(
+    gizmos: Entity<crate::gizmo::GizmoSurface>,
+    group: String,
+    value: String,
+    capture: Rc<Cell<bool>>,
+    focus_canvas: impl FnOnce() + 'static,
+    window: &Window,
+    cx: &mut App,
+) {
+    // The gizmo's delegate reads the controller while applying the setting.
+    window.defer(cx, move |window, cx| {
+        gizmos.update(cx, |gizmos, cx| {
+            if group == "fly" {
+                gizmos.set_fly_capture(capture);
+            }
+            gizmos.studio_setting(&group, &value, cx);
+            if group == "fly" && gizmos.studio_flying() {
+                focus_canvas();
+                gizmos.studio_focus_fly(window, cx);
+            }
+        });
+    });
+}
 
 /// Cancellation wins even if the sheet's abort callback also sent an answer.
 /// Poll both channels so Quit wakes a wait whose sheet was never visible.
@@ -4448,20 +4477,18 @@ impl Controller {
                         return false;
                     }
                 }
-                if let Some(g) = self.builtins.gizmos.clone() {
-                    cx.defer_in(window, move |s, window, cx| {
-                        let capture = s.host.borrow().studio_flying.clone();
-                        g.update(cx, |g, cx| {
-                            if group == "fly" {
-                                g.set_fly_capture(capture);
-                            }
-                            g.studio_setting(&group, &value, cx);
-                            if group == "fly" && g.studio_flying() {
-                                s.host.borrow_mut().focus_canvas();
-                                g.studio_focus_fly(window, cx);
-                            }
-                        });
-                    });
+                if let Some(gizmos) = self.builtins.gizmos.clone() {
+                    let host = self.host.clone();
+                    let capture = host.borrow().studio_flying.clone();
+                    defer_studio_view(
+                        gizmos,
+                        group,
+                        value,
+                        capture,
+                        move || host.borrow_mut().focus_canvas(),
+                        window,
+                        cx,
+                    );
                 }
                 return true;
             }

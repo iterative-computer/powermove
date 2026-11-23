@@ -1965,7 +1965,14 @@ impl Render for ProjectLibrary {
             .clone()
             .map_or_else(
                 || kit.search(None, Some("⌘F")),
-                |field| kit.header_well(field),
+                |field| {
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .h(px(m.control))
+                        .child(field)
+                },
             )
             .w(px(search_width));
         let side = || div().flex().flex_1().min_w(px(0.)).items_center();
