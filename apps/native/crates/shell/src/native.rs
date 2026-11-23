@@ -179,6 +179,17 @@ fn editor_window_number() -> Option<isize> {
             .find(|n| r.contains_key(n))
     })
 }
+/// The key window when it is a window of its own rather than an editor's
+/// (`menu::closes_in_front`).
+fn front_window_of_its_own(app: &NSApplication) -> Option<Retained<NSWindow>> {
+    app.keyWindow().filter(|w| {
+        menu::closes_in_front(
+            ROUTES.with(|r| r.borrow().contains_key(&w.windowNumber())),
+            w.parentWindow().is_some() || w.sheetParent().is_some(),
+            w.styleMask().contains(NSWindowStyleMask::Closable),
+        )
+    })
+}
 /// Whether a sheet is up where the menu's commands would act: the key
 /// window is a sheet or has one (New Project over Home), the main window
 /// has one, or the window commands go to has one.
@@ -788,20 +799,21 @@ define_class!(
         fn act(&self, sender: &AnyObject) {
             let tag: isize = unsafe { msg_send![sender, tag] };
             if let Some((name, args)) = self.ivars().commands.get(tag as usize) {
-                // ⌘, or ⌘W with Settings in front closes Settings, never
-                // the project behind it (it is known by its identifier: its
-                // title is the section's name).
-                if matches!(
-                    name.as_str(),
-                    "settings" | "closeTab" | "closeWindow" | "closeProject"
-                ) {
-                    let app = NSApplication::sharedApplication(self.mtm());
-                    if let Some(w) = app.keyWindow()
-                        && crate::settings_window::is_settings(&w)
-                    {
-                        w.performClose(None);
-                        return;
-                    }
+                // ⌘, with Settings in front closes Settings (it is known by
+                // its identifier: its title is the section's name), and ⌘W
+                // closes the window in front (Settings, Error Log, the
+                // library, a popped-out viewer), never the project behind it.
+                let app = NSApplication::sharedApplication(self.mtm());
+                let front = match name.as_str() {
+                    "settings" => app
+                        .keyWindow()
+                        .filter(|w| crate::settings_window::is_settings(w)),
+                    n if menu::CLOSES.contains(&n) => front_window_of_its_own(&app),
+                    _ => None,
+                };
+                if let Some(w) = front {
+                    w.performClose(None);
+                    return;
                 }
                 self.send(Command { name: name.clone(), args: args.clone(), token: None });
             }
@@ -6678,6 +6690,10 @@ impl Host {
     /// Return = Save (the accent default button), Esc = Cancel. Save sends
     /// `layout:save:<name>`.
     pub fn prompt_workspace_name(&self, workspace: &str) {
+        // No project (Home alone): there is no layout to save.
+        if HOME_WINDOWS.with(|h| h.borrow().contains(&self.window.windowNumber())) {
+            return;
+        }
         if self.window.attachedSheet().is_some()
             || gpui_macos::child_window::sheet_pending(&self.window)
         {
