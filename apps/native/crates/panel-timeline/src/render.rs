@@ -705,7 +705,9 @@ impl Scene {
                         clips: clips.remove(&(area, lane)).unwrap_or_default(),
                     },
                 });
-                tracks.extend(properties.remove(&(area, lane)).unwrap_or_default());
+                if !model.track_collapsed(area, lane) {
+                    tracks.extend(properties.remove(&(area, lane)).unwrap_or_default());
+                }
             }
             tracks
         } else {

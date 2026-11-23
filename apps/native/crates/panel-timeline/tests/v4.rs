@@ -1195,3 +1195,175 @@ fn tracks_outline_and_painted_rows_agree_with_properties_revealed() {
         .collect();
     assert_eq!(ids, painted);
 }
+
+/// Three overlapping clips. The preferred lane leaves V1 empty.
+fn tracks_client() -> (KernelActor, TimelineClient) {
+    let keyed = |id: &str, name: &str, from: f64| {
+        format!(
+            r##"{{"id":"{id}","name":"{name}","type":"shape","from":{from},"dur":6,"on":true,"p":{{"opacity":{{"v":10,"kf":[{{"i":"original","t":0.5,"v":10,"ei":[1,1],"eo":[0,0]}}]}}}}}}"##
+        )
+    };
+    let value = parse(&format!(
+        r#"{{"id":"P","compId":"C","w":100,"h":100,"fps":30,"dur":10,"work":[0,10],"comps":{{}},"assets":{{}},"layers":[{},{},{{"id":"c","name":"Upper","type":"shape","from":2,"dur":6,"track":1,"on":true,"p":{{}}}}]}}"#,
+        keyed("a", "Lower", 0.),
+        keyed("b", "Middle", 1.),
+    ))
+    .unwrap();
+    let actor = KernelActor::spawn(KernelConfig::default());
+    let kernel = actor.handle();
+    block_on(kernel.open("P", OpenSource::Untitled(value)))
+        .unwrap()
+        .unwrap();
+    let client = TimelineClient::new(kernel, "P", Caller::native()).unwrap();
+    (actor, client)
+}
+fn track_row_id(lane: usize) -> String {
+    json!(["track", "Video", lane]).to_string()
+}
+fn frame_rows(c: &mut TimelineClient) -> Vec<Value> {
+    v4::window(c, 0, 500).unwrap()["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+fn lane_of(c: &TimelineClient, layer: &str) -> usize {
+    tracks::layout(&c.model.index, &c.model.reveal)
+        .item(layer)
+        .unwrap()
+        .lane
+}
+
+#[test]
+fn track_disclosure_hides_and_restores_the_lanes_property_rows() {
+    let (_actor, mut c) = tracks_client();
+    dispatch(&mut c, json!({"type":"mode","mode":"Tracks"})).unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":id("a"),"open":true}),
+    )
+    .unwrap();
+    let lane = lane_of(&c, "a");
+    let header = track_row_id(lane);
+    let open_rows = frame_rows(&mut c);
+    let header_row = open_rows.iter().find(|r| r["id"] == header).unwrap();
+    assert_eq!(header_row["expanded"], true);
+    assert_eq!(header_row["canOpen"], true);
+    assert!(open_rows.iter().any(|r| r["kind"] == "property"));
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":header,"open":false}),
+    )
+    .unwrap();
+    let closed_rows = frame_rows(&mut c);
+    assert!(closed_rows.iter().all(|r| r["kind"] == "track"));
+    let header_row = closed_rows.iter().find(|r| r["id"] == header).unwrap();
+    assert_eq!(header_row["expanded"], false);
+    assert_eq!(header_row["canOpen"], true);
+    // The painted rows drop the lane's property rows with the outline.
+    let tokens = Tokens::new(Scheme::Dark, Accessibility::default());
+    let scene = paint::Scene::from_model(&c.model, &Presentation, &tokens, 0.).unwrap();
+    assert_eq!(scene.total(), closed_rows.len());
+    dispatch(&mut c, json!({"type":"disclosure","id":header,"open":true})).unwrap();
+    assert_eq!(frame_rows(&mut c), open_rows);
+}
+
+#[test]
+fn a_track_with_nothing_to_show_draws_no_chevron() {
+    let (_actor, mut c) = tracks_client();
+    dispatch(&mut c, json!({"type":"mode","mode":"Tracks"})).unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":id("a"),"open":true}),
+    )
+    .unwrap();
+    let a_lane = lane_of(&c, "a");
+    let rows = frame_rows(&mut c);
+    let empty = rows.iter().find(|r| r["id"] == track_row_id(0)).unwrap();
+    assert_eq!(empty["summary"], "");
+    assert_eq!(empty["canOpen"], false);
+    for row in rows.iter().filter(|r| r["kind"] == "track") {
+        let parts: Vec<Value> = serde_json::from_str(row["id"].as_str().unwrap()).unwrap();
+        let lane = parts[2].as_u64().unwrap() as usize;
+        assert_eq!(row["canOpen"], lane == a_lane, "{row:?}");
+    }
+}
+
+#[test]
+fn track_disclosure_persists_in_the_projects_ui_state() {
+    let (_actor, mut c) = tracks_client();
+    dispatch(&mut c, json!({"type":"mode","mode":"Tracks"})).unwrap();
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":id("a"),"open":true}),
+    )
+    .unwrap();
+    let lane = lane_of(&c, "a");
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":track_row_id(lane),"open":false}),
+    )
+    .unwrap();
+    let state = c.kernel.state();
+    let stored = state.ui["P"]
+        .timeline
+        .get("nativeModel")
+        .and_then(|v| v.get("trackDisclosure"))
+        .and_then(|v| v.get("C"))
+        .and_then(|v| v.get(&format!("Video:{lane}")))
+        .and_then(pm_model::Value::as_bool);
+    assert_eq!(stored, Some(true));
+    let mut reopened = TimelineClient::new(c.kernel.clone(), "P", Caller::native()).unwrap();
+    let rows = frame_rows(&mut reopened);
+    let header = rows
+        .iter()
+        .find(|r| r["id"] == track_row_id(lane))
+        .expect("the clip's lane header");
+    assert_eq!(header["expanded"], false);
+    assert!(
+        rows.iter()
+            .all(|r| r["kind"] != "property" || r["layer"] != "a")
+    );
+    // A track with the same number in another composition stays open.
+    let mut other = reopened.model.clone();
+    Arc::make_mut(&mut other.index).comp_id = Some("other".into());
+    let frame = v4::project_window(&other, 0, 500).unwrap();
+    let header = frame["window"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == track_row_id(lane))
+        .unwrap();
+    assert_eq!(header["expanded"], true);
+}
+
+#[test]
+fn option_track_disclosure_closes_and_opens_every_track() {
+    let (_actor, mut c) = tracks_client();
+    dispatch(&mut c, json!({"type":"mode","mode":"Tracks"})).unwrap();
+    for layer in ["a", "b"] {
+        dispatch(
+            &mut c,
+            json!({"type":"disclosure","id":id(layer),"open":true}),
+        )
+        .unwrap();
+    }
+    let header = track_row_id(lane_of(&c, "a"));
+    let open_rows = frame_rows(&mut c);
+    for layer in ["a", "b"] {
+        assert!(open_rows.iter().any(|row| row["kind"] == "property" && row["layer"] == layer));
+    }
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":header,"open":false,"all":true}),
+    )
+    .unwrap();
+    let rows = frame_rows(&mut c);
+    assert!(rows.iter().all(|r| r["kind"] == "track"));
+    assert!(rows.iter().all(|r| r["expanded"] == false));
+    dispatch(
+        &mut c,
+        json!({"type":"disclosure","id":header,"open":true,"all":true}),
+    )
+    .unwrap();
+    assert_eq!(frame_rows(&mut c), open_rows);
+}

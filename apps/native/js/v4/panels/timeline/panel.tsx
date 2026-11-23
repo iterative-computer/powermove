@@ -10,6 +10,7 @@ import type {
   PropertyRow,
   Row,
   TimelineFrame,
+  TrackRow,
 } from "./model";
 import { announcementText, type Announcement } from "./model";
 import { nativeEvent, type TimelineSession } from "./session";
@@ -113,6 +114,40 @@ function Icon(props: {
     >
       {props.children}
     </UI.ToolbarItem>
+  );
+}
+function Disclosure({
+  row,
+  send,
+  lit,
+}: {
+  row: LayerRow | TrackRow;
+  send: Send;
+  lit?: boolean;
+}) {
+  if (!row.canOpen)
+    return (
+      <div
+        role="presentation"
+        style={{
+          width: t("metrics.hit"),
+          minWidth: t("metrics.hit"),
+          height: t("metrics.hit"),
+          flexShrink: 0,
+        }}
+      />
+    );
+  return (
+    <Icon
+      id={`timeline:disclosure:${row.id}`}
+      label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
+      symbol={row.expanded ? "chevron.down" : "chevron.right"}
+      quiet
+      tint={lit ? "colors.accent_text" : undefined}
+      tabIndex={-1}
+      send={send}
+      intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
+    />
   );
 }
 /** Refused edits need visible feedback; confirmations do not. */
@@ -538,29 +573,7 @@ function Layer({
               style={{ width: t("metrics.timeline_indent"), flexShrink: 0 }}
             />
           ))}
-          {row.canOpen ? (
-            <Icon
-              id={`timeline:disclosure:${row.id}`}
-              label={`${row.expanded ? "Collapse" : "Expand"} ${row.label}`}
-              symbol={row.expanded ? "chevron.down" : "chevron.right"}
-              quiet
-              tint={lit ? "colors.accent_text" : undefined}
-              tabIndex={-1}
-              send={send}
-              intent={{ type: "disclosure", id: row.id, open: !row.expanded }}
-            />
-          ) : (
-            // The disclosure column stays reserved so badges and names align.
-            <div
-              role="presentation"
-              style={{
-                width: t("metrics.hit"),
-                minWidth: t("metrics.hit"),
-                flexShrink: 0,
-                height: t("metrics.hit"),
-              }}
-            />
-          )}
+          <Disclosure row={row} send={send} lit={lit} />
         </div>
         <div
           role="presentation"
@@ -915,7 +928,11 @@ const TimelineRow = memo(
         label={row.accessibilityLabel}
         selected={row.selected}
         tabIndex={-1}
-        expanded={row.kind === "property" ? undefined : row.expanded}
+        expanded={
+          row.kind === "layer" || (row.kind === "track" && row.canOpen)
+            ? row.expanded
+            : undefined
+        }
         state={{
           locked: row.locked,
           focused: row.focused,
@@ -980,9 +997,10 @@ const TimelineRow = memo(
                 flexGrow: 1,
                 flexShrink: 1,
                 overflow: "hidden",
-                paddingLeft: t("metrics.inset"),
+                paddingLeft: t("metrics.gap"),
               }}
             >
+              <Disclosure row={row} send={send} />
               <text
                 style={{
                   ...text,
