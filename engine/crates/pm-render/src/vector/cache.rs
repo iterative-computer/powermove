@@ -1203,12 +1203,13 @@ impl VectorCache {
         }
         // The missing scenes, each once, in draw order.
         let mut missing: Vec<MissingScene<'_>> = Vec::new();
+        let mut seen = HashSet::with_capacity(sources.len());
         for source in sources {
             let VectorSource::Scene { scene, rect } = source else {
                 continue;
             };
             let key = (source.key(), precision as u8);
-            if self.entries.contains_key(&key) || missing.iter().any(|(k, _, _)| *k == key) {
+            if self.entries.contains_key(&key) || !seen.insert(key) {
                 continue;
             }
             missing.push((key, scene, *rect));
@@ -1310,6 +1311,15 @@ impl VectorCache {
             (missing.len() - chosen.len()) as u64,
         );
         if chosen.len() < 2 {
+            // The two atlases can pack different subsets. If neither
+            // intersection can be painted as a batch, retry shorter
+            // draw-order runs before leaving every scene to resolve alone.
+            if layouts.len() >= 4 {
+                pm_perf::bump(pm_perf::Counter::VectorBatchSplits);
+                let (first, second) = missing.split_at(missing.len() / 2);
+                return self.batch_missing(device, queue, encoder, first, precision)
+                    + self.batch_missing(device, queue, encoder, second, precision);
+            }
             pm_perf::add(pm_perf::Counter::VectorBatchUnplaced, chosen.len() as u64);
             return 0;
         }
@@ -1975,6 +1985,33 @@ mod scene_pool_tests {
                 color: [0.8, 0.3, 0.2, 0.7],
             }],
         }
+    }
+
+    #[test]
+    fn repeated_vector_sources_prepare_once_by_content_key() {
+        let gpu = pm_gpu::Gpu::new("vector batch dedup test").unwrap();
+        let mut cache = VectorCache::new();
+        let rect = PixelRect::new(0, 0, 32, 32);
+        let first = VectorSource::Scene {
+            scene: scene(1.5, 2.25, 10.0),
+            rect,
+        };
+        let second = VectorSource::Scene {
+            scene: scene(3.75, 4.5, 12.0),
+            rect,
+        };
+        let duplicate = first.clone();
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let made = cache.prepare_scenes_in(
+            &gpu.device,
+            &gpu.queue,
+            &mut encoder,
+            &[&first, &duplicate, &second, &first, &second],
+            Precision::Float16,
+        );
+        assert_eq!(made, 2);
+        assert_eq!(cache.len(), 2);
+        gpu.queue.submit([encoder.finish()]);
     }
 
     #[test]
