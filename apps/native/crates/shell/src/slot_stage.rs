@@ -31,29 +31,9 @@ pub fn place(bounds: Bounds<Pixels>, mask: ContentMask<Pixels>, window: &Window)
             fade: [mask.fade_out.top, mask.fade_out.bottom].map(|v| f64::from(f32::from(v))),
         };
     };
-    // Only clip edges inside the region's are the slot's own (a card inside
-    // the scroll content); the rest are the region's, or a scroll layer's
-    // recording past it.
-    let (m, r) = (mask.bounds, region.clip);
-    let edge = |own: Pixels, region: Pixels, inside: bool| {
-        if inside {
-            f32::from(own)
-        } else if own <= region {
-            -OPEN
-        } else {
-            OPEN
-        }
-    };
-    let left = edge(m.left(), r.left(), m.left() > r.left());
-    let top = edge(m.top(), r.top(), m.top() > r.top());
-    let right = edge(m.right(), r.right(), m.right() < r.right());
-    let bottom = edge(m.bottom(), r.bottom(), m.bottom() < r.bottom());
     let o = region.content_origin;
-    let (ox, oy) = (f32::from(o.x), f32::from(o.y));
-    let clip = Bounds::from_corners(
-        gpui::point(gpui::px(left - ox), gpui::px(top - oy)),
-        gpui::point(gpui::px(right - ox), gpui::px(bottom - oy)),
-    );
+    let clip = open_clip(mask.bounds, region.clip);
+    let clip = Bounds::new(clip.origin - o, clip.size);
     Place::Region {
         id: region.id,
         bounds: rect(Bounds::new(bounds.origin - o, bounds.size)),
@@ -71,5 +51,57 @@ pub fn stage_text(
     match place(bounds, mask, window) {
         Place::Window { bounds, clip, fade } => slot.stage_with_scroll_fade(bounds, clip, fade),
         Place::Region { id, bounds, clip } => slot.stage_in_region(id, bounds, clip),
+    }
+}
+
+/// A slot's clip inside its region: only edges strictly inside the region's
+/// are the slot's own (a card inside the scroll content); an edge at or past
+/// the region's (the region's own, or a scroll layer's recording past it) is
+/// opened outwards on its side, as the region's container clips there.
+fn open_clip(mask: Bounds<Pixels>, region: Bounds<Pixels>) -> Bounds<Pixels> {
+    let open = gpui::px(OPEN);
+    let left = if mask.left() > region.left() {
+        mask.left()
+    } else {
+        -open
+    };
+    let top = if mask.top() > region.top() {
+        mask.top()
+    } else {
+        -open
+    };
+    let right = if mask.right() < region.right() {
+        mask.right()
+    } else {
+        open
+    };
+    let bottom = if mask.bottom() < region.bottom() {
+        mask.bottom()
+    } else {
+        open
+    };
+    Bounds::from_corners(gpui::point(left, top), gpui::point(right, bottom))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{point, px, size};
+    /// PM-696: a control as wide as its region (a section header's
+    /// checkbox row) kept its right edge at the region's and was opened to
+    /// the wrong side: its clip was empty and the control never showed.
+    #[test]
+    fn a_clip_edge_on_the_region_edge_opens_outwards_on_its_side() {
+        let region = Bounds::new(point(px(1092.), px(90.)), size(px(340.), px(500.)));
+        let same = open_clip(region, region);
+        assert!(same.left() < px(-1e5) && same.top() < px(-1e5));
+        assert!(same.right() > px(1e5) && same.bottom() > px(1e5));
+        // A card inside the content keeps its own edges.
+        let card = Bounds::new(point(px(1100.), px(120.)), size(px(200.), px(40.)));
+        assert_eq!(open_clip(card, region), card);
+        // A scroll layer's recording past the region opens too.
+        let recording = Bounds::new(point(px(1092.), px(-410.)), size(px(340.), px(1500.)));
+        let r = open_clip(recording, region);
+        assert!(r.top() < px(-1e5) && r.bottom() > px(1e5));
     }
 }
