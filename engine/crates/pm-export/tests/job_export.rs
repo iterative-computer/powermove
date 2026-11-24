@@ -1563,3 +1563,168 @@ fn stateful_frame_handlers_keep_overlapping_exports_serial() {
         "an overlapping export reordered the handler"
     );
 }
+
+/// A stateful raster override that answers out of process: what it draws
+/// for a layer counts every layer it was asked for before, and probed needs
+/// are asked in one batch by `ask_ahead`, as the export job's host does.
+#[derive(Default)]
+struct AheadRaster {
+    asked: std::sync::Mutex<Vec<(String, u64)>>,
+    probed: std::sync::Mutex<Vec<(String, u64)>>,
+    answered: std::sync::Mutex<std::collections::HashMap<(String, u64), u8>>,
+}
+
+impl AheadRaster {
+    fn draw(&self, layer: &str, time: f64) -> u8 {
+        let key = (layer.to_owned(), time.to_bits());
+        let mut asked = self.asked.lock().unwrap();
+        asked.push(key.clone());
+        let level = (asked.len() * 13 % 256) as u8;
+        self.answered.lock().unwrap().insert(key, level);
+        level
+    }
+    fn raster(level: u8) -> pm_render::compat::CompatAnswer {
+        pm_render::compat::CompatAnswer::Raster(Arc::new(pm_render::compat::CompatRaster {
+            width: 4,
+            height: 4,
+            format: pm_render::compat::CompatFormat::Rgba8Premultiplied,
+            anchor: [2.0, 2.0],
+            size: [40.0, 40.0],
+            uv: [0.0, 0.0, 1.0, 1.0],
+            data: Arc::new([level, level, level, 255].repeat(16)),
+            window: None,
+        }))
+    }
+}
+
+impl pm_render::compat::CompatRasters for AheadRaster {
+    fn producing(&self, source: pm_render::compat::CompatSource) -> bool {
+        source == pm_render::compat::CompatSource::RasterOverride
+    }
+    fn answer(
+        &self,
+        _: &str,
+        layer: &str,
+        time: f64,
+        _: f64,
+        _: pm_render::compat::CompatSource,
+        _: Option<pm_protocol::common::PixelRect>,
+    ) -> pm_render::compat::CompatAnswer {
+        let known = self
+            .answered
+            .lock()
+            .unwrap()
+            .get(&(layer.to_owned(), time.to_bits()))
+            .copied();
+        Self::raster(known.unwrap_or_else(|| self.draw(layer, time)))
+    }
+    fn answer_probed(
+        &self,
+        _: &str,
+        layer: &str,
+        time: f64,
+        _: f64,
+        _: pm_render::compat::CompatSource,
+        _: Option<pm_protocol::common::PixelRect>,
+    ) -> pm_render::compat::CompatAnswer {
+        let key = (layer.to_owned(), time.to_bits());
+        if let Some(level) = self.answered.lock().unwrap().get(&key) {
+            return Self::raster(*level);
+        }
+        self.probed.lock().unwrap().push(key);
+        pm_render::compat::CompatAnswer::Missing
+    }
+    fn ask_ahead(&self) {
+        let probed = std::mem::take(&mut *self.probed.lock().unwrap());
+        for (layer, time) in probed {
+            self.draw(&layer, f64::from_bits(time));
+        }
+    }
+}
+
+/// An export with raster overrides and no `frame:rendered` pass overlaps
+/// its frames and asks each frame's layers a frame ahead: the producer is
+/// asked for the same layers in the same order as serial frames ask them,
+/// once each, and the frames are the serial ones.
+#[test]
+fn raster_overrides_asked_ahead_keep_the_serial_order_and_frames() {
+    let dur = 0.25;
+    let doc = project(
+        W,
+        H,
+        dur,
+        no_fill(),
+        vec![
+            layer(
+                "a",
+                "shape",
+                json!({ "shape": "rect", "w": 100, "h": 60, "color": "#FFFFFF", "stroke": 0 }),
+                100.0,
+                90.0,
+                dur,
+            ),
+            layer(
+                "b",
+                "shape",
+                json!({ "shape": "rect", "w": 60, "h": 60, "color": "#FFFFFF", "stroke": 0 }),
+                220.0,
+                90.0,
+                dur,
+            ),
+        ],
+    );
+    let media = MediaPaths::default();
+    let encode = |gate: &dyn GpuGate| {
+        let producer = Arc::new(AheadRaster::default());
+        let mut renderer = Renderer::headless().unwrap();
+        renderer.set_compat_rasters(Some(producer.clone()));
+        let mut s = settings(
+            ExportFormat::ProRes {
+                profile: WireProRes::P4444Xq,
+            },
+            WireAlpha::Straight,
+            dur,
+        );
+        s.audio = false;
+        s.delivery
+            .compat
+            .push(pm_protocol::snapshot::CompatSource::RasterOverride);
+        let job = job(&doc, media.clone(), s, PathBuf::from("/unused.mov"));
+        let plan = plan_export_for(&job, &renderer).unwrap();
+        let out = run_export_into(
+            &mut renderer,
+            &job,
+            plan,
+            MemorySink::default(),
+            gate,
+            &AtomicBool::new(false),
+            &mut no_progress(),
+        )
+        .unwrap();
+        let asked = producer.asked.lock().unwrap().clone();
+        (out, asked)
+    };
+    let (serial, serial_asks) = encode(&Overlap::new(false, 0));
+    let (ahead, ahead_asks) = encode(&Overlap::new(true, 0));
+    let (banded, banded_asks) = encode(&Overlap::new(true, 2));
+    assert!(serial.frames.len() > 2);
+    assert_eq!(
+        serial_asks.len(),
+        2 * serial.frames.len(),
+        "two layers a frame"
+    );
+    assert!(
+        serial.frames.windows(2).all(|w| w[0] != w[1]),
+        "the producer's state reaches every frame"
+    );
+    assert_eq!(serial_asks, ahead_asks, "asked ahead in another order");
+    assert_eq!(
+        serial_asks, banded_asks,
+        "asked around a banded frame in another order"
+    );
+    assert!(serial.frames == ahead.frames, "frames asked ahead differ");
+    assert!(
+        serial.frames == banded.frames,
+        "frames around a banded one differ"
+    );
+}

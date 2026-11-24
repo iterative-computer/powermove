@@ -99,6 +99,25 @@ pub trait CompatRasters: Send + Sync {
         source: CompatSource,
         crop: Option<pm_protocol::common::PixelRect>,
     ) -> CompatAnswer;
+    /// [`Self::answer`] while a frame ahead is probed
+    /// (`Renderer::compat_missing`): what the producer already answered,
+    /// `Missing` otherwise. A producer that waits for its answers records
+    /// the need for [`Self::ask_ahead`] instead of asking.
+    fn answer_probed(
+        &self,
+        composition: &str,
+        layer: &str,
+        time: f64,
+        scale: f64,
+        source: CompatSource,
+        crop: Option<pm_protocol::common::PixelRect>,
+    ) -> CompatAnswer {
+        self.answer(composition, layer, time, scale, source, crop)
+    }
+    /// Asks the producer, in one batch and without waiting, for what the
+    /// probes since the last call recorded: their frames then find their
+    /// answers in `answer`.
+    fn ask_ahead(&self) {}
 }
 
 /// The protocol's time of a composition time in seconds (1/705,600,000 s;
